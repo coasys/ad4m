@@ -11,6 +11,7 @@ pub use types::*;
 
 use crate::graphql::graphql_types::*;
 use crate::pubsub::{get_global_pubsub, APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC};
+use crate::utils::constant_time_eq;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,6 +33,16 @@ lazy_static! {
 }
 
 const CACHE_TTL_SECONDS: i64 = 300; // 5 minutes cache TTL
+
+/// Returns true if the given token is the admin_credential that grants launcher-level access.
+/// When admin_credential is Some, the token must match it exactly (constant-time).
+/// When admin_credential is None (legacy single-user mode), an empty token is treated as admin.
+pub fn is_admin_credential_token(token: &str, admin_credential: &Option<String>) -> bool {
+    match admin_credential {
+        Some(cred) => constant_time_eq(token, cred),
+        None => token.is_empty(),
+    }
+}
 
 pub fn check_capability(
     capabilities: &Result<Vec<Capability>, String>,
@@ -76,7 +87,11 @@ pub fn check_capability(
 }
 
 pub fn check_token_revoked(token: &String) -> Result<(), String> {
-    if let Some(app) = apps_map::get_apps().iter().find(|app| app.token == *token) {
+    // Use constant-time comparison to prevent timing attacks
+    if let Some(app) = apps_map::get_apps()
+        .iter()
+        .find(|app| constant_time_eq(&app.token, token))
+    {
         if app.revoked.unwrap_or(false) {
             return Err("Unauthorized access".to_string());
         }
@@ -248,7 +263,8 @@ pub fn capabilities_from_token(
 ) -> Result<Vec<Capability>, String> {
     match admin_credential {
         Some(admin_credential) => {
-            if token == admin_credential {
+            // Use constant-time comparison to prevent timing attacks
+            if constant_time_eq(&token, &admin_credential) {
                 return Ok(vec![ALL_CAPABILITY.clone()]);
             }
         }
@@ -272,6 +288,7 @@ pub fn capabilities_from_token(
                 AGENT_AUTH_CAPABILITY.clone(),
                 RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY.clone(),
                 RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY.clone(),
+                RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY.clone(),
                 RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
             ]);
         }

@@ -27,7 +27,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 let link = new LinkExpression()
                 link.author = "did:test";
                 link.timestamp = new Date().toISOString();
-                link.data = new Link({source: "src", target: "target", predicate: "pred"});
+                link.data = new Link({source: "ad4m://src", target: "test://target", predicate: "ad4m://pred"});
                 link.proof = new ExpressionProof("sig", "key");
                 const publishPerspective = await ad4mClient.neighbourhood.publishFromPerspective(create.uuid, socialContext.address,
                     new Perspective(
@@ -93,17 +93,17 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 await sleep(1000)
 
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
                 await sleep(1000)
 
-                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                 let tries = 1
 
-                while(bobLinks.length < 1 && tries < 20) {
+                while(bobLinks.length < 1 && tries < 60) {
                     console.log("Bob retrying getting links...");
                     await sleep(1000)
-                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                     tries++
                 }
 
@@ -127,17 +127,17 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 await sleep(1000)
 
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'}, 'local')
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'}, 'local')
 
                 await sleep(1000)
 
-                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                 let tries = 1
 
                 while(bobLinks.length < 1 && tries < 5) {
                     console.log("Bob retrying getting NOT received links...");
                     await sleep(1000)
-                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                     tries++
                 }
 
@@ -162,7 +162,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 //const linkPromises = []
                 for(let i = 0; i < 1500; i++) {
                     console.log("Alice adding link ", i)
-                    const link = await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: `test://test/${i}`})
+                    const link = await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: `test://test/${i}`})
                     console.log("Link expression:", link)
                 }
                 //await Promise.all(linkPromises)
@@ -170,14 +170,14 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 console.log("wait 15s for initial sync")
                 await sleep(15000)
 
-                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                 let tries = 1
                 const maxTries = 180 // 3 minutes with 1 second sleep (increased for fallback sync)
 
                 while(bobLinks.length < 1500 && tries < maxTries) {
                     console.log(`Bob retrying getting links... Got ${bobLinks.length}/1500`);
                     await sleep(1000)
-                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                     tries++
                 }
 
@@ -195,19 +195,19 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 // Alice creates some links
                 console.log("Alice creating links...")
-                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'alice', target: 'test://alice/1'})
-                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'alice', target: 'test://alice/2'})
-                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'alice', target: 'test://alice/3'})
+                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://alice', target: 'test://alice/1'})
+                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://alice', target: 'test://alice/2'})
+                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://alice', target: 'test://alice/3'})
 
                 // Wait for sync with retry loop
-                bobLinks = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'alice'}))
+                bobLinks = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'ad4m://alice'}))
                 let bobTries = 1
                 const maxTriesBob = 20 // 20 tries with 2 second sleep = 40 seconds max
 
                 while(bobLinks.length < 3 && bobTries < maxTriesBob) {
                     console.log(`Bob retrying getting Alice's links... Got ${bobLinks.length}/3`);
                     await sleep(2000)
-                    bobLinks = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'alice'}))
+                    bobLinks = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'ad4m://alice'}))
                     bobTries++
                 }
 
@@ -219,19 +219,19 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 // Bob creates some links
                 console.log("Bob creating links...")
-                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'bob', target: 'test://bob/1'})
-                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'bob', target: 'test://bob/2'}) 
-                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'bob', target: 'test://bob/3'})
+                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'ad4m://bob', target: 'test://bob/1'})
+                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'ad4m://bob', target: 'test://bob/2'})
+                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'ad4m://bob', target: 'test://bob/3'})
 
                 // Wait for sync with retry loop
-                let aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'bob'}))
+                let aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'ad4m://bob'}))
                 tries = 1
                 const maxTriesAlice = 20 // 2 minutes with 1 second sleep
 
                 while(aliceLinks.length < 3 && tries < maxTriesAlice) {
                     console.log(`Alice retrying getting links... Got ${aliceLinks.length}/3`);
                     await sleep(2000)
-                    aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'bob'}))
+                    aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'ad4m://bob'}))
                     tries++
                 }
 
@@ -275,7 +275,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
             //     aliceP1.addSyncStateChangeListener(aliceSyncChangeHandler);
 
-            //     await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
+            //     await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
             //     let bobSyncChangeCalls = 0;
             //     let bobSyncChangeData = null;
@@ -295,12 +295,12 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
             //     //These next assertions are flaky since they depend on holochain not syncing right away, which most of the time is the case
 
-            //     let bobLinks = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+            //     let bobLinks = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
             //     let tries = 1
 
             //     while(bobLinks.length < 1 && tries < 300) {
             //         await sleep(1000)
-            //         bobLinks = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+            //         bobLinks = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
             //         tries++
             //     }
 
@@ -346,7 +346,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     let aliceAgents = await aliceNH!.otherAgents()
                     let bobAgents = await bobNH!.otherAgents()
                     let tries = 1
-                    const maxTries = 20 // 20 tries with 1 second sleep = 20 seconds max
+                    const maxTries = 60 // 60 tries with 1 second sleep = 1 minute max
 
                     while ((aliceAgents.length < 1 || bobAgents.length < 1) && tries < maxTries) {
                         console.log(`Waiting for agents to discover each other... Alice: ${aliceAgents.length}, Bob: ${bobAgents.length}`);
@@ -368,7 +368,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     let link = new LinkExpression()
                     link.author = "did:test";
                     link.timestamp = new Date().toISOString();
-                    link.data = new Link({source: "src", target: "target", predicate: "pred"});
+                    link.data = new Link({source: "ad4m://src", target: "test://target", predicate: "ad4m://pred"});
                     link.proof = new ExpressionProof("sig", "key");
                     link.proof.invalid = true;
                     link.proof.valid = false;

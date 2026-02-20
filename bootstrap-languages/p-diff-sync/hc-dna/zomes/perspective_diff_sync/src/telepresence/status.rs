@@ -65,7 +65,10 @@ pub fn create_did_pub_key_link(did: String) -> SocialContextResult<()> {
     debug!("PerspectiveDiffSync.create_did_pub_key_link({:?})", did);
     // TODO: should be agent_latest_pubkey, but that was made unstable behind dpki feature flag
     let agent_key = agent_info()?.agent_initial_pubkey;
-    debug!("PerspectiveDiffSync.create_did_pub_key_link() agent_key: {:?}", agent_key);
+    debug!(
+        "PerspectiveDiffSync.create_did_pub_key_link() agent_key: {:?}",
+        agent_key
+    );
 
     // For multi-user support: check if THIS SPECIFIC DID already has a link, not just any DID
     let did_entry = EntryTypes::Anchor(Anchor(did.clone()));
@@ -73,15 +76,20 @@ pub fn create_did_pub_key_link(did: String) -> SocialContextResult<()> {
 
     let existing_links = get_links(
         LinkQuery::try_new(did_entry_hash.clone(), LinkTypes::DidLink)?,
-        GetStrategy::Local
+        GetStrategy::Local,
     )?;
 
-    debug!("PerspectiveDiffSync.create_did_pub_key_link() existing_links: {:?}", existing_links);
-
+    debug!(
+        "PerspectiveDiffSync.create_did_pub_key_link() existing_links: {:?}",
+        existing_links
+    );
 
     // Only create the link if this specific DID doesn't already have one
     if existing_links.len() == 0 {
-        debug!("PerspectiveDiffSync.create_did_pub_key_link() creating new link for DID: {:?}", did);
+        debug!(
+            "PerspectiveDiffSync.create_did_pub_key_link() creating new link for DID: {:?}",
+            did
+        );
         let _did_entry = create_entry(&did_entry)?;
         create_link(
             agent_key.clone(),
@@ -96,7 +104,10 @@ pub fn create_did_pub_key_link(did: String) -> SocialContextResult<()> {
             LinkTag::new("did_link"),
         )?;
     } else {
-        debug!("PerspectiveDiffSync.create_did_pub_key_link() link already exists for DID: {:?}", did);
+        debug!(
+            "PerspectiveDiffSync.create_did_pub_key_link() link already exists for DID: {:?}",
+            did
+        );
     }
     Ok(())
 }
@@ -105,7 +116,7 @@ pub fn get_my_did() -> SocialContextResult<Option<String>> {
     let query = LinkQuery::try_new(
         // TODO: should be agent_latest_pubkey, but that was made unstable behind dpki feature flag
         agent_info()?.agent_initial_pubkey,
-        LinkTypes::DidLink
+        LinkTypes::DidLink,
     )?;
     let mut did_links = get_links(query, GetStrategy::Local)?;
     if did_links.len() > 0 {
@@ -134,12 +145,12 @@ pub fn get_my_did() -> SocialContextResult<Option<String>> {
 pub fn get_dids_agent_key(did: String) -> SocialContextResult<Option<AgentPubKey>> {
     let did_entry = Anchor(did);
     let did_entry_hash = hash_entry(EntryTypes::Anchor(did_entry.clone()))?;
-    let query = LinkQuery::try_new(
-        did_entry_hash,
-        LinkTypes::DidLink
-    )?;
+    let query = LinkQuery::try_new(did_entry_hash, LinkTypes::DidLink)?;
     let did_links = get_links(query, GetStrategy::Local)?;
-    debug!("PerspectiveDiffSync.get_dids_agent_key() did_links: {:?}", did_links);
+    debug!(
+        "PerspectiveDiffSync.get_dids_agent_key() did_links: {:?}",
+        did_links
+    );
     if did_links.len() > 0 {
         let entry: EntryHash = did_links[0].target.clone().try_into().unwrap();
         Ok(Some(AgentPubKey::from(entry)))
@@ -149,10 +160,7 @@ pub fn get_dids_agent_key(did: String) -> SocialContextResult<Option<AgentPubKey
 }
 
 pub fn get_agents_did_key(agent: AgentPubKey) -> SocialContextResult<Option<String>> {
-    let query = LinkQuery::try_new(
-        agent,
-        LinkTypes::DidLink
-    )?;
+    let query = LinkQuery::try_new(agent, LinkTypes::DidLink)?;
     let mut did_links = get_links(query, GetStrategy::Local)?;
     if did_links.len() > 0 {
         let did = get(
@@ -181,11 +189,8 @@ pub fn get_agents_did_key(agent: AgentPubKey) -> SocialContextResult<Option<Stri
 /// In multi-user scenarios, one Holochain agent can have multiple DIDs
 pub fn get_agents_did_keys(agent: AgentPubKey) -> SocialContextResult<Vec<String>> {
     let did_links = get_links(
-        LinkQuery::try_new(
-            agent,
-            LinkTypes::DidLink
-        )?,
-        GetStrategy::Local
+        LinkQuery::try_new(agent, LinkTypes::DidLink)?,
+        GetStrategy::Local,
     )?;
 
     let mut dids = Vec::new();
@@ -195,10 +200,7 @@ pub fn get_agents_did_keys(agent: AgentPubKey) -> SocialContextResult<Vec<String
             continue;
         }
 
-        let did_result = get(
-            entry_hash.unwrap(),
-            GetOptions::network(),
-        )?;
+        let did_result = get(entry_hash.unwrap(), GetOptions::network())?;
 
         if let Some(record) = did_result {
             if let Some(anchor) = record.entry().to_app_option::<Anchor>()? {
@@ -206,7 +208,7 @@ pub fn get_agents_did_keys(agent: AgentPubKey) -> SocialContextResult<Vec<String
             }
         }
     }
-    
+
     // Deduplicate DIDs in case multiple agent keys map to the same DID
     let deduped_dids = dedup(&dids);
     Ok(deduped_dids)

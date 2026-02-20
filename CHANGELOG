@@ -6,8 +6,31 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Fixed
+- Route neighbourhood signals to main agent when co-located with managed users on the same node [#680](https://github.com/coasys/ad4m/pull/680)
+- Reject links with invalid or empty source/target/predicate URIs [#676](https://github.com/coasys/ad4m/pull/676)
+- Gate perspectives admin-overview on launcher credential instead of ALL_CAPABILITY, so a main agent only sees perspectives it owns or has joined [#675](https://github.com/coasys/ad4m/pull/675)
+- P-Diff chunking fixes and link deserialization fix [#674](https://github.com/coasys/ad4m/pull/674)
+- Deadlock fixes in perspective and link language handling [#673](https://github.com/coasys/ad4m/pull/673)
+- Panic in p-diff-sync after diff chunking feature was introduced [#669](https://github.com/coasys/ad4m/pull/669)
+- Multi-user test fixes [#668](https://github.com/coasys/ad4m/pull/668)
+- Notification fixes for multi-user mode [#649](https://github.com/coasys/ad4m/pull/649)
+- Hotfix for blocked messages caused by Holochain issue [#642](https://github.com/coasys/ad4m/pull/642)
+- Re-attempt SurrealDB link additions up to 5 times on read-write conflicts [#640](https://github.com/coasys/ad4m/pull/640)
+- Duplicate agent fix [#641](https://github.com/coasys/ad4m/pull/641)
+
 ### Added
+- Multi-user / multi-agent support for single AD4M nodes: managed email users with isolated perspectives, scoped agent DIDs and JWT-based capability tokens [#629](https://github.com/coasys/ad4m/pull/629)
+- Email verification system for multi-user authentication [#643](https://github.com/coasys/ad4m/pull/643)
+- SMTP configuration toggle for email-based multi-user auth [#647](https://github.com/coasys/ad4m/pull/647)
+- Chunk large p-diff-sync diffs to avoid Holochain entry size limit [#655](https://github.com/coasys/ad4m/pull/655)
+- Collection instance filtering and SurrealDB graph traversal improvements [#650](https://github.com/coasys/ad4m/pull/650)
+
 ### Changed
+- Migrate notification system from Prolog to SurrealDB for better performance and multi-user support [#648](https://github.com/coasys/ad4m/pull/648)
+- Switch SurrealDB storage from in-memory to file-based RocksDB for persistence across restarts [#652](https://github.com/coasys/ad4m/pull/652)
+- Memory optimizations across executor [#644](https://github.com/coasys/ad4m/pull/644)
+- Ad4m-connect updates [#646](https://github.com/coasys/ad4m/pull/646)
+- Update Holochain to 0.7.0-dev.10-coasys [#645](https://github.com/coasys/ad4m/pull/645)
 
 ## [0.11.1] - 02/12/2025
 

@@ -7,16 +7,20 @@ use crate::types::{
     ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff, TokenizerSource, User,
     UserInfo,
 };
+use crate::utils::constant_time_eq;
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
+use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
 
@@ -152,6 +156,15 @@ impl Ad4mDb {
         )?;
 
         conn.execute(
+            "CREATE TABLE IF NOT EXISTS perspective_link_migration (
+                id INTEGER PRIMARY KEY,
+                perspective_uuid TEXT NOT NULL UNIQUE,
+                migrated_at TEXT NOT NULL
+             )",
+            [],
+        )?;
+
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS outbox (
                 id INTEGER PRIMARY KEY,
                 message TEXT NOT NULL,
@@ -180,7 +193,8 @@ impl Ad4mDb {
                 trigger TEXT NOT NULL,
                 perspective_ids TEXT NOT NULL,
                 webhookUrl TEXT NOT NULL,
-                webhookAuth TEXT NOT NULL
+                webhookAuth TEXT NOT NULL,
+                user_email TEXT
              )",
             [],
         )?;
@@ -255,6 +269,45 @@ impl Ad4mDb {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS email_verifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                code_hash TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                verified BOOLEAN DEFAULT 0,
+                verification_type TEXT NOT NULL,
+                UNIQUE(email, verification_type)
+             )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_email_verifications_email ON email_verifications(email)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_email_verifications_expires ON email_verifications(expires_at)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS email_rate_limits (
+                email TEXT PRIMARY KEY,
+                last_sent_at INTEGER NOT NULL
+             )",
+            [],
+        )?;
+
+        // Add failed_attempts column to email_verifications table if it doesn't exist
+        // This column tracks failed verification attempts to prevent brute force attacks
+        let _ = conn.execute(
+            "ALTER TABLE email_verifications ADD COLUMN failed_attempts INTEGER DEFAULT 0",
+            [],
+        );
+
         // Add owner_did column to existing perspective_handle table if it doesn't exist
         let _ = conn.execute(
             "ALTER TABLE perspective_handle ADD COLUMN owner_did TEXT",
@@ -272,6 +325,10 @@ impl Ad4mDb {
             "UPDATE perspective_handle SET owners = json_array(owner_did) WHERE owner_did IS NOT NULL AND owners = '[]'",
             [],
         );
+
+        // Add user_email column to notifications table for multi-user support
+        // This column tracks which user created the notification (NULL for main agent)
+        let _ = conn.execute("ALTER TABLE notifications ADD COLUMN user_email TEXT", []);
 
         Ok(Self { conn })
     }
@@ -410,13 +467,185 @@ impl Ad4mDb {
         Ok(result > 0)
     }
 
+    /// Validates that a notification query is safe and well-formed
+    fn validate_notification_query(query: &str) -> Result<(), String> {
+        let query_trimmed = query.trim();
+        let query_upper = query_trimmed.to_uppercase();
+
+        // Check for empty query
+        if query_trimmed.is_empty() {
+            return Err("Query cannot be empty".to_string());
+        }
+
+        // Check query length (prevent extremely long queries)
+        if query_trimmed.len() > 10000 {
+            return Err("Query is too long (max 10000 characters)".to_string());
+        }
+
+        // Validate that query starts with SELECT, RETURN, LET, or WITH
+        let first_word = query_upper.split_whitespace().next().unwrap_or("");
+        if !matches!(first_word, "SELECT" | "RETURN" | "LET" | "WITH") {
+            return Err(format!(
+                "Query must start with SELECT, RETURN, LET, or WITH. Got: {}",
+                first_word
+            ));
+        }
+
+        // Check for mutating operations
+        // Use a single pass that tracks string literals to avoid false positives
+        let mutating_operations = [
+            "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "REMOVE", "DEFINE", "ALTER", "RELATE",
+            "BEGIN", "COMMIT", "CANCEL",
+        ];
+
+        let query_bytes = query_upper.as_bytes();
+
+        for operation in &mutating_operations {
+            let op_bytes = operation.as_bytes();
+            let mut search_pos = 0;
+
+            while let Some(pos) = query_upper[search_pos..].find(operation) {
+                let absolute_pos = search_pos + pos;
+
+                // Re-track string state up to this position
+                let mut in_string = false;
+                let mut escaped = false;
+                let mut string_char: u8 = 0;
+
+                for i in 0..absolute_pos {
+                    let byte = query_bytes[i];
+
+                    match byte {
+                        b'\\' if in_string => {
+                            escaped = !escaped;
+                        }
+                        b'\'' | b'"' => {
+                            if !escaped {
+                                if in_string {
+                                    if byte == string_char {
+                                        in_string = false;
+                                    }
+                                } else {
+                                    in_string = true;
+                                    string_char = byte;
+                                }
+                            }
+                            if escaped {
+                                escaped = false;
+                            }
+                        }
+                        _ => {
+                            if escaped {
+                                escaped = false;
+                            }
+                        }
+                    }
+                }
+
+                // Skip if inside a string literal
+                if in_string {
+                    search_pos = absolute_pos + 1;
+                    continue;
+                }
+
+                // Check what comes before (byte-based)
+                let before_ok = if absolute_pos == 0 {
+                    true
+                } else {
+                    let before_byte = query_bytes[absolute_pos - 1];
+                    matches!(before_byte, b' ' | b'\t' | b'\n' | b'\r' | b';' | b'(')
+                };
+
+                // Check what comes after (byte-based)
+                let after_pos = absolute_pos + op_bytes.len();
+                let after_ok = if after_pos >= query_bytes.len() {
+                    true
+                } else {
+                    let after_byte = query_bytes[after_pos];
+                    matches!(after_byte, b' ' | b'\t' | b'\n' | b'\r' | b';' | b'(')
+                };
+
+                if before_ok && after_ok {
+                    return Err(format!(
+                        "Query contains mutating operation '{}' which is not allowed",
+                        operation
+                    ));
+                }
+
+                search_pos = absolute_pos + 1;
+            }
+        }
+
+        // Basic syntax check - ensure balanced parentheses
+        // Skip counting parentheses inside string literals
+        let mut paren_count = 0;
+        let mut in_string = false;
+        let mut string_char = ' '; // Track which quote character started the string
+        let mut escaped = false;
+
+        for c in query_trimmed.chars() {
+            match c {
+                '\\' if in_string => {
+                    // Toggle escaped state for backslashes inside strings
+                    // If already escaped, this is a literal backslash (\\)
+                    // If not escaped, next char will be escaped
+                    escaped = !escaped;
+                }
+                '\'' | '"' => {
+                    if !escaped {
+                        if in_string {
+                            // Check if this closes the current string
+                            if c == string_char {
+                                in_string = false;
+                            }
+                        } else {
+                            // Start a new string
+                            in_string = true;
+                            string_char = c;
+                        }
+                    }
+                    // Clear escaped state after processing
+                    if escaped {
+                        escaped = false;
+                    }
+                }
+                '(' if !in_string => paren_count += 1,
+                ')' if !in_string => paren_count -= 1,
+                _ => {
+                    // Any other character clears the escaped state
+                    if escaped {
+                        escaped = false;
+                    }
+                }
+            }
+
+            if paren_count < 0 {
+                return Err("Unbalanced parentheses in query".to_string());
+            }
+        }
+        if paren_count != 0 {
+            return Err("Unbalanced parentheses in query".to_string());
+        }
+
+        Ok(())
+    }
+
     pub fn add_notification(
         &self,
         notification: NotificationInput,
+        user_email: Option<String>,
     ) -> Result<String, rusqlite::Error> {
+        // Validate the trigger query before storing
+        if let Err(e) = Self::validate_notification_query(&notification.trigger) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "Invalid notification query: {}",
+                e
+            )));
+        }
+
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO notifications (id, granted, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO notifications (id, granted, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, user_email) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 id,
                 false,
@@ -428,6 +657,7 @@ impl Ad4mDb {
                 serde_json::to_string(&notification.perspective_ids).unwrap(),
                 notification.webhook_url,
                 notification.webhook_auth,
+                user_email,
             ],
         )?;
         Ok(id)
@@ -447,6 +677,7 @@ impl Ad4mDb {
                 perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
                 webhook_url: row.get(8)?,
                 webhook_auth: row.get(9)?,
+                user_email: row.get(10)?,
             })
         })?;
 
@@ -454,6 +685,67 @@ impl Ad4mDb {
         for notification in notification_iter {
             notifications.push(notification?);
         }
+        Ok(notifications)
+    }
+
+    pub fn get_notifications_for_user(
+        &self,
+        user_email: Option<String>,
+    ) -> Result<Vec<Notification>, rusqlite::Error> {
+        let notifications = if let Some(email) = user_email {
+            // Query for specific user's notifications
+            let mut stmt = self
+                .conn
+                .prepare("SELECT * FROM notifications WHERE user_email = ?1")?;
+            let notification_iter = stmt.query_map(params![email], |row| {
+                Ok(Notification {
+                    id: row.get(0)?,
+                    granted: row.get(1)?,
+                    description: row.get(2)?,
+                    app_name: row.get(3)?,
+                    app_url: row.get(4)?,
+                    app_icon_path: row.get(5)?,
+                    trigger: row.get(6)?,
+                    perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
+                    webhook_url: row.get(8)?,
+                    webhook_auth: row.get(9)?,
+                    user_email: row.get(10)?,
+                })
+            })?;
+
+            let mut result = Vec::new();
+            for notification in notification_iter {
+                result.push(notification?);
+            }
+            result
+        } else {
+            // Query for main agent's notifications (user_email IS NULL)
+            let mut stmt = self
+                .conn
+                .prepare("SELECT * FROM notifications WHERE user_email IS NULL")?;
+            let notification_iter = stmt.query_map([], |row| {
+                Ok(Notification {
+                    id: row.get(0)?,
+                    granted: row.get(1)?,
+                    description: row.get(2)?,
+                    app_name: row.get(3)?,
+                    app_url: row.get(4)?,
+                    app_icon_path: row.get(5)?,
+                    trigger: row.get(6)?,
+                    perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
+                    webhook_url: row.get(8)?,
+                    webhook_auth: row.get(9)?,
+                    user_email: row.get(10)?,
+                })
+            })?;
+
+            let mut result = Vec::new();
+            for notification in notification_iter {
+                result.push(notification?);
+            }
+            result
+        };
+
         Ok(notifications)
     }
 
@@ -475,6 +767,7 @@ impl Ad4mDb {
                 perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
                 webhook_url: row.get(8)?,
                 webhook_auth: row.get(9)?,
+                user_email: row.get(10)?,
             }))
         } else {
             Ok(None)
@@ -492,8 +785,16 @@ impl Ad4mDb {
         id: String,
         updated_notification: &Notification,
     ) -> Result<bool, rusqlite::Error> {
+        // Validate the trigger query before updating
+        if let Err(e) = Self::validate_notification_query(&updated_notification.trigger) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "Invalid notification query: {}",
+                e
+            )));
+        }
+
         let result = self.conn.execute(
-            "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9, granted = ?10 WHERE id = ?1",
+            "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9, granted = ?10, user_email = ?11 WHERE id = ?1",
             params![
                 id,
                 updated_notification.description,
@@ -505,6 +806,7 @@ impl Ad4mDb {
                 updated_notification.webhook_url,
                 updated_notification.webhook_auth,
                 updated_notification.granted,
+                updated_notification.user_email,
             ],
         )?;
         Ok(result > 0)
@@ -874,6 +1176,19 @@ impl Ad4mDb {
         Ok(())
     }
 
+    /// Helper function to normalize predicate values from the database.
+    /// Converts empty strings to None to maintain consistency with the Link type.
+    ///
+    /// In the database, None predicates are stored as empty strings ("").
+    /// This function ensures that when reading from the database, empty strings
+    /// are converted back to None, maintaining consistency across all link operations.
+    fn normalize_predicate(predicate: Option<String>) -> Option<String> {
+        match predicate.as_deref() {
+            Some("") => None,
+            _ => predicate,
+        }
+    }
+
     pub fn add_link(
         &self,
         perspective_uuid: &str,
@@ -998,10 +1313,7 @@ impl Ad4mDb {
                     let link = LinkExpression {
                         data: Link {
                             source: row.get(1)?,
-                            predicate: row.get(2).map(|p: Option<String>| match p.as_deref() {
-                                Some("") => None,
-                                _ => p,
-                            })?,
+                            predicate: Self::normalize_predicate(row.get(2)?),
                             target: row.get(3)?,
                         },
                         proof: ExpressionProof {
@@ -1039,7 +1351,7 @@ impl Ad4mDb {
             let link_expression = LinkExpression {
                 data: Link {
                     source: row.get(1)?,
-                    predicate: row.get(2)?,
+                    predicate: Self::normalize_predicate(row.get(2)?),
                     target: row.get(3)?,
                 },
                 proof: ExpressionProof {
@@ -1076,7 +1388,7 @@ impl Ad4mDb {
             let link_expression = LinkExpression {
                 data: Link {
                     source: row.get(1)?,
-                    predicate: row.get(2)?,
+                    predicate: Self::normalize_predicate(row.get(2)?),
                     target: row.get(3)?,
                 },
                 proof: ExpressionProof {
@@ -1113,7 +1425,7 @@ impl Ad4mDb {
             let link_expression = LinkExpression {
                 data: Link {
                     source: row.get(1)?,
-                    predicate: row.get(2)?,
+                    predicate: Self::normalize_predicate(row.get(2)?),
                     target: row.get(3)?,
                 },
                 proof: ExpressionProof {
@@ -1128,6 +1440,91 @@ impl Ad4mDb {
         })?;
         let links: Result<Vec<_>, _> = link_iter.collect();
         Ok(links?)
+    }
+
+    pub fn get_links_by_predicate(
+        &self,
+        perspective_uuid: &str,
+        predicate: &str,
+    ) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND predicate = ?2 ORDER BY timestamp, source, target, author",
+        )?;
+        let link_iter = stmt.query_map(params![perspective_uuid, predicate], |row| {
+            let status: LinkStatus =
+                serde_json::from_str(&row.get::<_, String>(8)?).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+            let link_expression = LinkExpression {
+                data: Link {
+                    source: row.get(1)?,
+                    predicate: Self::normalize_predicate(row.get(2)?),
+                    target: row.get(3)?,
+                },
+                proof: ExpressionProof {
+                    signature: row.get(6)?,
+                    key: row.get(7)?,
+                },
+                author: row.get(4)?,
+                timestamp: row.get(5)?,
+                status: Some(status.clone()),
+            };
+            Ok((link_expression, status))
+        })?;
+        let links: Result<Vec<_>, _> = link_iter.collect();
+        Ok(links?)
+    }
+
+    /// Check if a perspective's links have been migrated from Rusqlite to SurrealDB
+    ///
+    /// # Arguments
+    /// * `perspective_uuid` - UUID of the perspective to check
+    ///
+    /// # Returns
+    /// * `Ok(true)` if the perspective has been migrated
+    /// * `Ok(false)` if the perspective has not been migrated yet
+    pub fn is_perspective_migrated(&self, perspective_uuid: &str) -> Ad4mDbResult<bool> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COUNT(*) FROM perspective_link_migration WHERE perspective_uuid = ?1",
+        )?;
+        let count: i64 = stmt.query_row(params![perspective_uuid], |row| row.get(0))?;
+        Ok(count > 0)
+    }
+
+    /// Mark a perspective as having been migrated from Rusqlite to SurrealDB
+    ///
+    /// This function is idempotent - calling it multiple times for the same perspective is safe.
+    ///
+    /// # Arguments
+    /// * `perspective_uuid` - UUID of the perspective to mark as migrated
+    pub fn mark_perspective_as_migrated(&self, perspective_uuid: &str) -> Ad4mDbResult<()> {
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO perspective_link_migration (perspective_uuid, migrated_at) VALUES (?1, ?2)",
+            params![perspective_uuid, timestamp],
+        )?;
+        Ok(())
+    }
+
+    /// Delete all links for a perspective from Rusqlite storage
+    ///
+    /// This should only be called after successfully migrating links to SurrealDB.
+    ///
+    /// # Arguments
+    /// * `perspective_uuid` - UUID of the perspective whose links should be deleted
+    ///
+    /// # Returns
+    /// The number of links that were deleted
+    pub fn delete_all_links_for_perspective(&self, perspective_uuid: &str) -> Ad4mDbResult<usize> {
+        let count = self.conn.execute(
+            "DELETE FROM link WHERE perspective = ?1",
+            params![perspective_uuid],
+        )?;
+        Ok(count)
     }
 
     pub fn add_pending_diff(
@@ -1583,7 +1980,7 @@ impl Ad4mDb {
 
         // Export notifications
         let notifications: Vec<serde_json::Value> = self.conn.prepare(
-            "SELECT id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted FROM notifications"
+            "SELECT id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted, user_email FROM notifications"
         )?.query_map([], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
@@ -1595,7 +1992,8 @@ impl Ad4mDb {
                 "perspective_ids": row.get::<_, String>(6)?,
                 "webhook_url": row.get::<_, String>(7)?,
                 "webhook_auth": row.get::<_, String>(8)?,
-                "granted": row.get::<_, bool>(9)?
+                "granted": row.get::<_, bool>(9)?,
+                "user_email": row.get::<_, Option<String>>(10)?
             }))
         })?.collect::<Result<Vec<_>, _>>()?;
         export_data.insert(
@@ -1942,8 +2340,8 @@ impl Ad4mDb {
                             .and_then(|id| id.as_str())
                             .unwrap_or("<unknown>");
                         match self.conn.execute(
-                            "INSERT INTO notifications (id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted) 
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                            "INSERT INTO notifications (id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted, user_email)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                             params![
                                 notification["id"].as_str().unwrap_or(""),
                                 notification["description"].as_str().unwrap_or(""),
@@ -1954,7 +2352,8 @@ impl Ad4mDb {
                                 notification["perspective_ids"].as_str().unwrap_or(""),
                                 notification["webhook_url"].as_str().unwrap_or(""),
                                 notification["webhook_auth"].as_str().unwrap_or(""),
-                                notification["granted"].as_bool().unwrap_or(false)
+                                notification["granted"].as_bool().unwrap_or(false),
+                                notification["user_email"].as_str()
                             ],
                         ) {
                             Ok(_) => result.notifications.imported += 1,
@@ -2368,6 +2767,303 @@ impl Ad4mDb {
     pub fn set_multi_user_enabled(&self, enabled: bool) -> Ad4mDbResult<()> {
         self.set_setting("multi_user_enabled", if enabled { "true" } else { "false" })
     }
+
+    // Email verification functions
+
+    /// Generates a 6-digit verification code, stores its SHA-256 hash, and returns the plaintext code
+    pub fn create_verification_code(
+        &self,
+        email: &str,
+        verification_type: &str,
+    ) -> Ad4mDbResult<String> {
+        // Generate random 6-digit code
+        let code = rand::thread_rng().gen_range(100000..1000000).to_string();
+
+        // Hash the code
+        let mut hasher = Sha256::new();
+        hasher.update(code.as_bytes());
+        let code_hash = format!("{:x}", hasher.finalize());
+
+        // Get current timestamp
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let expires_at = now + (15 * 60); // 15 minutes
+
+        // Delete any existing verification for this email+type combination
+        self.conn.execute(
+            "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+            params![email, verification_type],
+        )?;
+
+        // Insert new verification (initialize failed_attempts to 0)
+        self.conn.execute(
+            "INSERT INTO email_verifications (email, code_hash, created_at, expires_at, verified, verification_type, failed_attempts)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, 0)",
+            params![email, code_hash, now, expires_at, verification_type],
+        )?;
+
+        Ok(code)
+    }
+
+    /// Verifies a code against the stored hash for a given email and verification type
+    /// Returns Ok(true) on success, Ok(false) on failure, or Err if code is invalidated due to too many attempts
+    pub fn verify_code(
+        &self,
+        email: &str,
+        code: &str,
+        verification_type: &str,
+    ) -> Ad4mDbResult<bool> {
+        // Maximum allowed failed attempts before invalidating the code
+        const MAX_FAILED_ATTEMPTS: i32 = 5;
+
+        // Hash the provided code
+        let mut hasher = Sha256::new();
+        hasher.update(code.as_bytes());
+        let code_hash = format!("{:x}", hasher.finalize());
+
+        // Get current timestamp
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Query for matching verification that hasn't expired, including failed_attempts
+        // Use COALESCE to handle NULL values for existing rows created before the migration
+        let result: Result<(String, i64, i32), _> = self.conn.query_row(
+            "SELECT code_hash, expires_at, COALESCE(failed_attempts, 0) FROM email_verifications
+             WHERE email = ?1 AND verification_type = ?2 AND verified = 0",
+            params![email, verification_type],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        );
+
+        match result {
+            Ok((stored_hash, expires_at, failed_attempts)) => {
+                // Check if code has been invalidated due to too many failed attempts
+                if failed_attempts >= MAX_FAILED_ATTEMPTS {
+                    // Delete the invalidated code
+                    self.conn.execute(
+                        "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+                        params![email, verification_type],
+                    )?;
+                    return Err(anyhow!(
+                        "Verification code has been invalidated due to too many failed attempts. Please request a new code."
+                    ));
+                }
+
+                // Check if expired
+                if now > expires_at {
+                    // Clean up expired code
+                    self.conn.execute(
+                        "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+                        params![email, verification_type],
+                    )?;
+                    return Ok(false);
+                }
+
+                // Constant-time comparison to prevent timing attacks
+                if constant_time_eq(&stored_hash, &code_hash) {
+                    // Mark as verified and delete
+                    self.conn.execute(
+                        "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+                        params![email, verification_type],
+                    )?;
+                    Ok(true)
+                } else {
+                    // Increment failed attempts counter
+                    let new_failed_attempts = failed_attempts + 1;
+                    self.conn.execute(
+                        "UPDATE email_verifications SET failed_attempts = ?1 WHERE email = ?2 AND verification_type = ?3",
+                        params![new_failed_attempts, email, verification_type],
+                    )?;
+
+                    // If we've reached the max attempts, invalidate the code
+                    if new_failed_attempts >= MAX_FAILED_ATTEMPTS {
+                        self.conn.execute(
+                            "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+                            params![email, verification_type],
+                        )?;
+                        return Err(anyhow!(
+                            "Verification code has been invalidated due to too many failed attempts. Please request a new code."
+                        ));
+                    }
+
+                    Ok(false)
+                }
+            }
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Removes all expired verification codes
+    pub fn cleanup_expired_codes(&self) -> Ad4mDbResult<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        self.conn.execute(
+            "DELETE FROM email_verifications WHERE expires_at < ?1",
+            params![now],
+        )?;
+
+        Ok(())
+    }
+
+    /// Deletes a specific verification code for an email and type
+    /// Used for cleanup when email sending fails or SMTP is unconfigured
+    pub fn delete_verification_code(
+        &self,
+        email: &str,
+        verification_type: &str,
+    ) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+            params![email, verification_type],
+        )?;
+
+        Ok(())
+    }
+
+    /// Check if a verification code exists for the given email (for any verification type)
+    /// Returns true if an active (non-expired, non-verified) code exists
+    pub fn has_verification_code(&self, email: &str) -> Ad4mDbResult<bool> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let result: Result<i32, _> = self.conn.query_row(
+            "SELECT COUNT(*) FROM email_verifications
+             WHERE email = ?1 AND verified = 0 AND expires_at > ?2",
+            params![email, now],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(count) => Ok(count > 0),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Checks if an email is rate-limited (returns error if rate-limited)
+    pub fn check_rate_limit(&self, email: &str) -> Ad4mDbResult<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let result: Result<i64, _> = self.conn.query_row(
+            "SELECT last_sent_at FROM email_rate_limits WHERE email = ?1",
+            params![email],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(last_sent_at) => {
+                let seconds_since_last = now - last_sent_at;
+                if seconds_since_last < 60 {
+                    return Err(anyhow!(
+                        "Please wait {} seconds before requesting another verification code",
+                        60 - seconds_since_last
+                    ));
+                }
+                Ok(())
+            }
+            Err(_) => Ok(()), // No rate limit entry exists yet
+        }
+    }
+
+    /// Updates the rate limit timestamp for an email
+    pub fn update_rate_limit(&self, email: &str) -> Ad4mDbResult<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        self.conn.execute(
+            "INSERT INTO email_rate_limits (email, last_sent_at) VALUES (?1, ?2)
+             ON CONFLICT(email) DO UPDATE SET last_sent_at = excluded.last_sent_at",
+            params![email, now],
+        )?;
+
+        Ok(())
+    }
+
+    /// Atomically checks and updates the rate limit for an email
+    /// This prevents TOCTOU race conditions where concurrent requests could bypass rate limiting
+    /// by checking before any of them update the timestamp.
+    ///
+    /// Returns an error if the email is rate-limited (within 60 seconds of last request),
+    /// otherwise updates the timestamp and returns Ok(()).
+    pub fn check_and_update_rate_limit(&self, email: &str) -> Ad4mDbResult<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Use a transaction to make check-and-update atomic
+        let tx = self.conn.unchecked_transaction()?;
+
+        // Check if rate limited
+        let result: Result<i64, _> = tx.query_row(
+            "SELECT last_sent_at FROM email_rate_limits WHERE email = ?1",
+            params![email],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(last_sent_at) => {
+                let seconds_since_last = now - last_sent_at;
+                if seconds_since_last < 60 {
+                    // Rate limited - rollback transaction and return error
+                    tx.rollback()?;
+                    return Err(anyhow!(
+                        "Please wait {} seconds before requesting another verification code",
+                        60 - seconds_since_last
+                    ));
+                }
+            }
+            Err(_) => {
+                // No rate limit entry exists yet, will be created below
+            }
+        }
+
+        // Update the rate limit timestamp
+        tx.execute(
+            "INSERT INTO email_rate_limits (email, last_sent_at) VALUES (?1, ?2)
+             ON CONFLICT(email) DO UPDATE SET last_sent_at = excluded.last_sent_at",
+            params![email, now],
+        )?;
+
+        // Commit the transaction
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Test helper: Set expiry time for a verification code (for testing expiration)
+    pub fn set_verification_code_expiry(
+        &self,
+        email: &str,
+        verification_type: &str,
+        expires_at: i64,
+    ) -> Ad4mDbResult<()> {
+        let rows_affected = self.conn.execute(
+            "UPDATE email_verifications SET expires_at = ?1 WHERE email = ?2 AND verification_type = ?3",
+            params![expires_at, email, verification_type],
+        )?;
+
+        if rows_affected == 0 {
+            return Err(anyhow!(
+                "No verification code found for email {} and type {}",
+                email,
+                verification_type
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2477,12 +3173,12 @@ mod tests {
             app_name: "Test App".to_string(),
             app_url: "http://test.app".to_string(),
             app_icon_path: "/test/icon.png".to_string(),
-            trigger: "test-trigger".to_string(),
+            trigger: "SELECT * FROM link WHERE predicate = 'test://trigger'".to_string(),
             perspective_ids: vec![perspective1.uuid.clone()],
             webhook_url: "http://test.webhook".to_string(),
             webhook_auth: "test-auth".to_string(),
         };
-        let notification_id = db.add_notification(notification).unwrap();
+        let notification_id = db.add_notification(notification, None).unwrap();
 
         // Add tasks
         let task = AIPromptExamples {
@@ -2702,6 +3398,29 @@ mod tests {
     }
 
     #[test]
+    fn can_get_links_by_predicate() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let p_uuid = Uuid::new_v4().to_string();
+
+        // Create two links with different predicates
+        let mut link1 = construct_dummy_link_expression(LinkStatus::Shared);
+        link1.data.predicate = Some("predicate1".to_string());
+        db.add_link(&p_uuid, &link1, &LinkStatus::Shared).unwrap();
+
+        let mut link2 = construct_dummy_link_expression(LinkStatus::Shared);
+        link2.data.predicate = Some("predicate2".to_string());
+        db.add_link(&p_uuid, &link2, &LinkStatus::Shared).unwrap();
+
+        // Query by predicate1 should only return link1
+        let result = db.get_links_by_predicate(&p_uuid, "predicate1").unwrap();
+        assert_eq!(result, vec![(link1, LinkStatus::Shared)]);
+
+        // Query by predicate2 should only return link2
+        let result = db.get_links_by_predicate(&p_uuid, "predicate2").unwrap();
+        assert_eq!(result, vec![(link2, LinkStatus::Shared)]);
+    }
+
+    #[test]
     fn can_update_link() {
         let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
@@ -2798,14 +3517,14 @@ mod tests {
             app_name: "Test App Name".to_string(),
             app_url: "Test App URL".to_string(),
             app_icon_path: "Test App Icon Path".to_string(),
-            trigger: "Test Trigger".to_string(),
+            trigger: "SELECT * FROM link WHERE predicate = 'test://trigger'".to_string(),
             perspective_ids: vec!["Test Perspective ID".to_string()],
             webhook_url: "Test Webhook URL".to_string(),
             webhook_auth: "Test Webhook Auth".to_string(),
         };
 
         // Add the test notification
-        let notification_id = db.add_notification(notification).unwrap();
+        let notification_id = db.add_notification(notification, None).unwrap();
         // Get all notifications
         let notifications = db.get_notifications().unwrap();
 
@@ -2821,7 +3540,10 @@ mod tests {
             test_notification.app_icon_path,
             "Test App Icon Path".to_string()
         );
-        assert_eq!(test_notification.trigger, "Test Trigger");
+        assert_eq!(
+            test_notification.trigger,
+            "SELECT * FROM link WHERE predicate = 'test://trigger'"
+        );
         assert_eq!(
             test_notification.perspective_ids,
             vec!["Test Perspective ID".to_string()]
@@ -2837,10 +3559,11 @@ mod tests {
             app_name: "Test App Name".to_string(),
             app_url: "Test App URL".to_string(),
             app_icon_path: "Test App Icon Path".to_string(),
-            trigger: "Test Trigger".to_string(),
+            trigger: "SELECT * FROM link WHERE predicate = 'test://updated'".to_string(),
             perspective_ids: vec!["Test Perspective ID".to_string()],
             webhook_url: "Test Webhook URL".to_string(),
             webhook_auth: "Test Webhook Auth".to_string(),
+            user_email: None,
         };
 
         // Update the test notification
@@ -2867,6 +3590,57 @@ mod tests {
         assert!(notifications_after_removal
             .iter()
             .all(|n| n.id != notification_id));
+    }
+
+    #[test]
+    fn test_notification_query_validation_with_string_literals() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Should accept: keyword inside string literal
+        let notification1 = NotificationInput {
+            description: "Test".to_string(),
+            app_name: "Test".to_string(),
+            app_url: "Test".to_string(),
+            app_icon_path: "Test".to_string(),
+            trigger: "SELECT * FROM link WHERE data = 'DELETE this'".to_string(),
+            perspective_ids: vec!["test".to_string()],
+            webhook_url: "".to_string(),
+            webhook_auth: "".to_string(),
+        };
+
+        let result1 = db.add_notification(notification1, None);
+        assert!(result1.is_ok(), "Should allow DELETE inside string literal");
+
+        // Should reject: actual DELETE operation
+        let notification2 = NotificationInput {
+            description: "Test".to_string(),
+            app_name: "Test".to_string(),
+            app_url: "Test".to_string(),
+            app_icon_path: "Test".to_string(),
+            trigger: "DELETE FROM link WHERE id = 123".to_string(),
+            perspective_ids: vec!["test".to_string()],
+            webhook_url: "".to_string(),
+            webhook_auth: "".to_string(),
+        };
+
+        let result2 = db.add_notification(notification2, None);
+        assert!(result2.is_err(), "Should reject actual DELETE operation");
+        assert!(result2.unwrap_err().to_string().contains("DELETE"));
+
+        // Should accept: escaped quotes with keyword
+        let notification3 = NotificationInput {
+            description: "Test".to_string(),
+            app_name: "Test".to_string(),
+            app_url: "Test".to_string(),
+            app_icon_path: "Test".to_string(),
+            trigger: r#"SELECT * FROM link WHERE data = "Don\'t DELETE this""#.to_string(),
+            perspective_ids: vec!["test".to_string()],
+            webhook_url: "".to_string(),
+            webhook_auth: "".to_string(),
+        };
+
+        let result3 = db.add_notification(notification3, None);
+        assert!(result3.is_ok(), "Should allow DELETE inside escaped string");
     }
 
     #[test]

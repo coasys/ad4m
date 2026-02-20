@@ -262,10 +262,13 @@ impl MockPerspectiveGraph {
             };
             let mocked_diff = PerspectiveDiffEntryReference::new(
                 PerspectiveDiff {
-                    additions: vec![create_link_expression(&mocked_hash.to_string(), &mocked_hash.to_string())],
+                    additions: vec![create_link_expression(
+                        &mocked_hash.to_string(),
+                        &mocked_hash.to_string(),
+                    )],
                     removals: vec![],
                 },
-                parents
+                parents,
             );
             let sb = mocked_diff
                 .try_into()
@@ -514,13 +517,15 @@ fn can_get_and_create_mocked_holochain_objects() {
     use perspective_diff_sync_integrity::{
         EntryTypes, PerspectiveDiff, PerspectiveDiffEntryReference,
     };
-    let commit = MockPerspectiveGraph::create_entry(EntryTypes::PerspectiveDiffEntryReference(PerspectiveDiffEntryReference::new(
-        PerspectiveDiff {
-            additions: vec![create_link_expression("test", "test")],
-            removals: vec![],
-        },
-        None,
-    )));
+    let commit = MockPerspectiveGraph::create_entry(EntryTypes::PerspectiveDiffEntryReference(
+        PerspectiveDiffEntryReference::new(
+            PerspectiveDiff {
+                additions: vec![create_link_expression("test", "test")],
+                removals: vec![],
+            },
+            None,
+        ),
+    ));
     assert!(commit.is_ok());
 
     let get_commit = MockPerspectiveGraph::get::<PerspectiveDiffEntryReference>(commit.unwrap());

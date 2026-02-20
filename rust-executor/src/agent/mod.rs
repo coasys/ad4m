@@ -387,8 +387,8 @@ impl AgentService {
 
         // Debug: Show what keys we have and what we're looking for
         let available_keys = wallet_ref.list_key_names();
-        log::debug!("🔍 get_user_agent_data() called for user: '{}'", user_email);
-        log::debug!("🔍 Available keys in wallet: {:?}", available_keys);
+        log::trace!("🔍 get_user_agent_data() called for user: '{}'", user_email);
+        log::trace!("🔍 Available keys in wallet: {:?}", available_keys);
 
         let did_document = wallet_ref
             .get_did_document(&user_email.to_string())
@@ -404,7 +404,7 @@ impl AgentService {
         let signing_key_id = did_document.verification_method[0].id.clone();
         let did = did_document.id.clone();
 
-        log::debug!("✅ Found user key for '{}' with DID: {}", user_email, did);
+        log::trace!("✅ Found user key for '{}' with DID: {}", user_email, did);
 
         Ok(AgentData {
             did,

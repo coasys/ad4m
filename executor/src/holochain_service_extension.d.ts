@@ -10,6 +10,7 @@ declare global {
         useMdns: bool,
         proxyUrl: String,
         bootstrapUrl: String,
+        relayUrl?: String,
         appPort: Number
     }
 

@@ -3,6 +3,7 @@ import { Link } from "../links/Links";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomPrologAtom, PropertyOptions, CollectionOptions, ModelOptions } from "./decorators";
 import { singularToPlural, pluralToSingular, propertyNameToSetterName, collectionToAdderName, collectionToRemoverName, collectionToSetterName } from "./util";
+import { escapeSurrealString } from "../utils";
 
 // JSON Schema type definitions
 interface JSONSchemaProperty {
@@ -89,9 +90,11 @@ export interface PropertyMetadata {
   /** Language for resolution (e.g., "literal") */
   resolveLanguage?: string;
   /** Custom Prolog getter code */
-  getter?: string;
+  prologGetter?: string;
   /** Custom Prolog setter code */
-  setter?: string;
+  prologSetter?: string;
+  /** Custom SurrealQL getter code */
+  getter?: string;
   /** Whether stored locally only */
   local?: boolean;
   /** Transform function */
@@ -109,7 +112,9 @@ export interface CollectionMetadata {
   /** The predicate URI (through value) */
   predicate: string;
   /** Filter conditions */
-  where?: { isInstance?: any; condition?: string };
+  where?: { isInstance?: any; prologCondition?: string; condition?: string };
+  /** Custom SurrealQL getter code */
+  getter?: string;
   /** Whether stored locally only */
   local?: boolean;
 }
@@ -408,7 +413,8 @@ export class Ad4mModel {
   #source: string;
   #perspective: PerspectiveProxy;
   author: string;
-  timestamp: string;
+  createdAt: any;
+  updatedAt: any;
 
   private static classNamesByClass = new WeakMap<typeof Ad4mModel, { [perspectiveId: string]: string }>();
 
@@ -435,6 +441,14 @@ export class Ad4mModel {
     }
 
     return classCache[perspectiveID];
+  }
+
+  /**
+   * Backwards compatibility alias for createdAt.
+   * @deprecated Use createdAt instead. This will be removed in a future version.
+   */
+  get timestamp(): any {
+    return (this as any).createdAt;
   }
 
   /**
@@ -501,8 +515,9 @@ export class Ad4mModel {
         writable: options.writable || false,
         ...(options.initial !== undefined && { initial: options.initial }),
         ...(options.resolveLanguage !== undefined && { resolveLanguage: options.resolveLanguage }),
+        ...(options.prologGetter !== undefined && { prologGetter: options.prologGetter }),
         ...(options.getter !== undefined && { getter: options.getter }),
-        ...(options.setter !== undefined && { setter: options.setter }),
+        ...(options.prologSetter !== undefined && { prologSetter: options.prologSetter }),
         ...(options.local !== undefined && { local: options.local }),
         ...(options.transform !== undefined && { transform: options.transform }),
         ...(options.flag !== undefined && { flag: options.flag })
@@ -519,7 +534,8 @@ export class Ad4mModel {
         name: collectionName,
         predicate: options.through || "",
         ...(options.where !== undefined && { where: options.where }),
-        ...(options.local !== undefined && { local: options.local })
+        ...(options.local !== undefined && { local: options.local }),
+        ...(options.getter !== undefined && { getter: options.getter })
       };
     }
     
@@ -614,6 +630,86 @@ export class Ad4mModel {
     return this.#perspective;
   }
 
+  /**
+   * Get property metadata from decorator (Phase 1: Prolog-free refactor)
+   * @private
+   */
+  private getPropertyMetadata(key: string): PropertyOptions | undefined {
+    const proto = Object.getPrototypeOf(this);
+    return proto.__properties?.[key];
+  }
+
+  /**
+   * Get collection metadata from decorator (Phase 1: Prolog-free refactor)
+   * @private
+   */
+  private getCollectionMetadata(key: string): CollectionOptions | undefined {
+    const proto = Object.getPrototypeOf(this);
+    return proto.__collections?.[key];
+  }
+
+  /**
+   * Generate property setter action from metadata (Phase 1: Prolog-free refactor)
+   * Replaces Prolog query: property_setter(C, key, Setter)
+   * @private
+   */
+  private generatePropertySetterAction(key: string, metadata: PropertyOptions): any[] {
+    // Check if property is read-only
+    if (metadata.writable === false) {
+      throw new Error(`Property "${key}" is read-only and cannot be written`);
+    }
+
+    if (metadata.prologSetter) {
+      // Custom Prolog setter - throw error for now (Phase 2)
+      throw new Error(
+        `Custom Prolog setter for property "${key}" not yet supported without Prolog. ` +
+        `Use standard @Property decorator or enable Prolog for custom setters.`
+      );
+    }
+
+    if (!metadata.through) {
+      throw new Error(`Property "${key}" has no 'through' predicate defined`);
+    }
+
+    return [{
+      action: "setSingleTarget",
+      source: "this",
+      predicate: metadata.through,
+      target: "value",
+      ...(metadata.local && { local: true })
+    }];
+  }
+
+  /**
+   * Generate collection action from metadata (Phase 1: Prolog-free refactor)
+   * Replaces Prolog queries: collection_adder, collection_remover, collection_setter
+   * @private
+   */
+  private generateCollectionAction(key: string, actionType: 'adder' | 'remover' | 'setter'): any[] {
+    const metadata = this.getCollectionMetadata(key);
+    if (!metadata) {
+      throw new Error(`Collection "${key}" has no metadata defined`);
+    }
+
+    if (!metadata.through) {
+      throw new Error(`Collection "${key}" has no 'through' predicate defined`);
+    }
+
+    const actionMap = {
+      adder: "addLink",
+      remover: "removeLink",
+      setter: "collectionSetter"
+    };
+
+    return [{
+      action: actionMap[actionType],
+      source: "this",
+      predicate: metadata.through,
+      target: "value",
+      ...(metadata.local && { local: true })
+    }];
+  }
+
   public static async assignValuesToInstance(perspective: PerspectiveProxy, instance: Ad4mModel, values: ValueTuple[]) {
     // Map properties to object
     const propsObject = Object.fromEntries(
@@ -662,24 +758,209 @@ export class Ad4mModel {
         })
       )
     );
+    // Filter out properties that are read-only (getters without setters)
+    const writableProps = Object.fromEntries(
+      Object.entries(propsObject).filter(([key]) => {
+        const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(instance), key);
+        if (!descriptor) {
+          // No descriptor means it's a regular property on the instance, allow it
+          return true;
+        }
+        // Check if it's an accessor descriptor (has get/set) vs data descriptor (has value/writable)
+        const isAccessor = descriptor.get !== undefined || descriptor.set !== undefined;
+        if (isAccessor) {
+          // Accessor descriptor: only allow if it has a setter
+          return descriptor.set !== undefined;
+        } else {
+          // Data descriptor: only allow if writable is not explicitly false
+          return descriptor.writable !== false;
+        }
+      })
+    );
     // Assign properties to instance
-    Object.assign(instance, propsObject);
+    Object.assign(instance, writableProps);
   }
 
   private async getData() {
     // Builds an object with the author, timestamp, all properties, & all collections on the Ad4mModel and saves it to the instance
-    const subQueries = [buildAuthorAndTimestampQuery(), buildPropertiesQuery(), buildCollectionsQuery()];
-    const fullQuery = `
-      Base = "${this.#baseExpression}",
-      subject_class("${this.#subjectClassName}", SubjectClass),
-      ${subQueries.join(", ")}
-    `;
+    // Use SurrealDB for data queries
+    try {
+      const ctor = this.constructor as typeof Ad4mModel;
+      const metadata = ctor.getModelMetadata();
 
-    const result = await this.#perspective.infer(fullQuery);
-    if (result?.[0]) {
-      const { Properties, Collections, Timestamp, Author } = result?.[0];
-      const values = [...Properties, ...Collections, ["timestamp", Timestamp], ["author", Author]];
-      await Ad4mModel.assignValuesToInstance(this.#perspective, this, values);
+      // Query for all links from this specific node (base expression)
+      // Using formatSurrealValue to prevent SQL injection by properly escaping the value
+      const safeBaseExpression = ctor.formatSurrealValue(this.#baseExpression);
+      // Note: We use ORDER BY timestamp ASC because:
+      // - For collections: we want chronological order (oldest to newest)
+      // - For properties: we select the LAST element to get "latest wins" semantics
+      const linksQuery = `
+        SELECT id, predicate, out.uri AS target, author, timestamp
+        FROM link
+        WHERE in.uri = ${safeBaseExpression}
+        ORDER BY timestamp ASC
+      `;
+      const links = await this.#perspective.querySurrealDB(linksQuery);
+
+      if (links && links.length > 0) {
+        let minTimestamp = null;
+        let maxTimestamp = null;
+        let latestAuthor = null;
+        let originalAuthor = null;
+
+        // Process properties (skip those with custom getter)
+        for (const [propName, propMeta] of Object.entries(metadata.properties)) {
+          if (propMeta.getter) continue; // Handle via custom getter evaluation
+          const matching = links.filter((l: any) => l.predicate === propMeta.predicate);
+          if (matching.length > 0) {
+            // "Latest wins" semantics: select the last element since links are ordered ASC.
+            // The last element has the most recent timestamp and represents the current property value.
+            const link = matching[matching.length - 1];
+            let value = link.target;
+
+            // Track timestamps/authors for createdAt and updatedAt
+            if (link.timestamp) {
+              if (!minTimestamp || link.timestamp < minTimestamp) {
+                minTimestamp = link.timestamp;
+                originalAuthor = link.author;
+              }
+              if (!maxTimestamp || link.timestamp > maxTimestamp) {
+                maxTimestamp = link.timestamp;
+                latestAuthor = link.author;
+              }
+            }
+
+            // Handle resolveLanguage
+            if (propMeta.resolveLanguage && propMeta.resolveLanguage !== 'literal') {
+              try {
+                const expression = await this.#perspective.getExpression(value);
+                if (expression) {
+                  try {
+                    value = JSON.parse(expression.data);
+                  } catch {
+                    value = expression.data;
+                  }
+                }
+              } catch (e) {
+                console.warn(`Failed to resolve expression for ${propName}:`, e);
+              }
+            } else if (typeof value === 'string' && value.startsWith('literal://')) {
+              // Parse literal URL
+              try {
+                const parsed = Literal.fromUrl(value).get();
+                value = parsed.data !== undefined ? parsed.data : parsed;
+              } catch (e) {
+                // Keep original value
+              }
+            }
+
+            // Apply transform if exists
+            if (propMeta.transform && typeof propMeta.transform === 'function') {
+              value = propMeta.transform(value);
+            }
+
+            (this as any)[propName] = value;
+          }
+        }
+
+        // Process collections (skip those with custom getter)
+        for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+          if (collMeta.getter) continue; // Handle via custom getter evaluation
+          const matching = links.filter((l: any) => l.predicate === collMeta.predicate);
+          // Collections preserve chronological order: links are sorted ASC by timestamp,
+          // so the collection reflects the order in which items were added (oldest to newest).
+          let values = matching.map((l: any) => l.target);
+          
+          // Apply where.condition filtering if present
+          if (collMeta.where?.condition && values.length > 0) {
+            try {
+              // Filter values by evaluating condition for each value
+              const filteredValues: string[] = [];
+              
+              for (const value of values) {
+                let condition = collMeta.where.condition
+                  .replace(/\$perspective/g, `'${this.#perspective.uuid}'`)
+                  .replace(/\$base/g, `'${this.#baseExpression}'`)
+                  .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
+                
+                // If condition starts with WHERE, wrap it in array length check pattern
+                // Using array::len() to properly count matching links
+                if (condition.trim().startsWith('WHERE')) {
+                  condition = `array::len(SELECT * FROM link ${condition}) > 0`;
+                }
+                
+                const filterQuery = `RETURN ${condition}`;
+                const result = await this.#perspective.querySurrealDB(filterQuery);
+                
+                // RETURN can return the value directly or in an array
+                const isTrue = result === true || (Array.isArray(result) && result.length > 0 && result[0] === true);
+                if (isTrue) {
+                  filteredValues.push(value);
+                }
+              }
+              
+              values = filteredValues;
+            } catch (error) {
+              console.warn(`Failed to apply condition filter for ${collName}:`, error);
+              // Keep unfiltered values on error
+            }
+          }
+          
+          // Apply where.isInstance filtering if present
+          if (collMeta.where?.isInstance && values.length > 0) {
+            try {
+              const className = typeof collMeta.where.isInstance === 'string' 
+                ? collMeta.where.isInstance 
+                : collMeta.where.isInstance.name;
+              
+              const filterMetadata = await this.#perspective.getSubjectClassMetadataFromSDNA(className);
+              if (filterMetadata) {
+                values = await this.#perspective.batchCheckSubjectInstances(values, filterMetadata);
+              }
+            } catch (error) {
+              // Keep unfiltered values on error
+            }
+          }
+          
+          (this as any)[collName] = values;
+        }
+
+        // Set author and timestamps
+        if (originalAuthor) {
+          (this as any).author = originalAuthor;
+        }
+        if (minTimestamp) {
+          (this as any).createdAt = minTimestamp;
+        }
+        if (maxTimestamp) {
+          (this as any).updatedAt = maxTimestamp;
+        }
+      }
+
+      // Evaluate SurrealQL getters
+      await ctor.evaluateCustomGettersForInstance(this, this.#perspective, metadata);
+      
+      // Apply where.isInstance filtering to getter collections
+      // (non-getter collections were already filtered above)
+      for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+        if (collMeta.getter && collMeta.where?.isInstance && (this as any)[collName]?.length > 0) {
+          try {
+            const className = typeof collMeta.where.isInstance === 'string'
+              ? collMeta.where.isInstance
+              : collMeta.where.isInstance.name;
+            
+            const filterMetadata = await this.#perspective.getSubjectClassMetadataFromSDNA(className);
+            if (filterMetadata) {
+              const filtered = await this.#perspective.batchCheckSubjectInstances((this as any)[collName], filterMetadata);
+              (this as any)[collName] = filtered;
+            }
+          } catch (error) {
+            // Keep unfiltered values on error
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`SurrealDB getData also failed for ${this.#baseExpression}:`, e);
     }
 
     return this;
@@ -710,6 +991,60 @@ export class Ad4mModel {
     `;
 
     return fullQuery;
+  }
+
+  /**
+   * Evaluates custom SurrealQL getters for properties and collections on a specific instance.
+   * @private
+   */
+  private static async evaluateCustomGettersForInstance(
+    instance: any,
+    perspective: PerspectiveProxy,
+    metadata: any
+  ) {
+    const safeBaseExpression = this.formatSurrealValue(instance.baseExpression);
+
+    // Evaluate property getters
+    for (const [propName, propMeta] of Object.entries(metadata.properties)) {
+      if ((propMeta as any).getter) {
+        try {
+          // Replace 'Base' placeholder with actual base expression
+          const query = (propMeta as any).getter.replace(/Base/g, safeBaseExpression);
+          // Query from node table to have graph traversal context
+          const result = await perspective.querySurrealDB(
+            `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`
+          );
+          if (result && result.length > 0 && result[0].value !== undefined && result[0].value !== null && result[0].value !== 'None' && result[0].value !== '') {
+            instance[propName] = result[0].value;
+          }
+        } catch (error) {
+          console.warn(`Failed to evaluate getter for ${propName}:`, error);
+        }
+      }
+    }
+
+    // Evaluate collection getters
+    for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+      if ((collMeta as any).getter) {
+        try {
+          // Replace 'Base' placeholder with actual base expression
+          const query = (collMeta as any).getter.replace(/Base/g, safeBaseExpression);
+          // Query from node table to have graph traversal context
+          const result = await perspective.querySurrealDB(
+            `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`
+          );
+          if (result && result.length > 0 && result[0].value !== undefined && result[0].value !== null) {
+            // Filter out 'None' from collection results
+            const value = result[0].value;
+            instance[collName] = Array.isArray(value) 
+              ? value.filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None')
+              : value;
+          }
+        } catch (error) {
+          console.warn(`Failed to evaluate getter for ${collName}:`, error);
+        }
+      }
+    }
   }
 
   /**
@@ -770,11 +1105,11 @@ export class Ad4mModel {
         // For flag properties, also filter by the target value
         if (propMeta.flag && propMeta.initial) {
           graphTraversalFilters.push(
-            `count(->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}' AND out.uri = '${propMeta.initial}']) > 0`
+            `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
           );
         } else {
           graphTraversalFilters.push(
-            `count(->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}']) > 0`
+            `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`
           );
         }
       }
@@ -788,11 +1123,11 @@ export class Ad4mModel {
           // For flag properties, also filter by the target value
           if (propMeta.flag) {
             graphTraversalFilters.push(
-              `count(->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}' AND out.uri = '${propMeta.initial}']) > 0`
+              `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
             );
           } else {
             graphTraversalFilters.push(
-              `count(->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}']) > 0`
+              `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`
             );
           }
           break; // Just need one defining property
@@ -913,7 +1248,7 @@ WHERE ${whereConditions.join(' AND ')}
         const propMeta = metadata.properties[propertyName];
         if (!propMeta) continue; // Skip if property not found in metadata
 
-        const predicate = propMeta.predicate;
+        const predicate = escapeSurrealString(propMeta.predicate);
         // Use fn::parse_literal() for properties with resolveLanguage
         const targetField = propMeta.resolveLanguage === 'literal' ? 'fn::parse_literal(out.uri)' : 'out.uri';
 
@@ -1045,7 +1380,7 @@ WHERE ${whereConditions.join(' AND ')}
         const propMeta = metadata.properties[propertyName];
         if (!propMeta) continue; // Skip if property not found in metadata
         
-        const predicate = propMeta.predicate;
+        const predicate = escapeSurrealString(propMeta.predicate);
         // Use fn::parse_literal() for properties with resolveLanguage
         const targetField = propMeta.resolveLanguage === 'literal' ? 'fn::parse_literal(target)' : 'target';
         
@@ -1121,7 +1456,8 @@ WHERE ${whereConditions.join(' AND ')}
       if (!propMeta) continue; // Skip if not found
       
       // Reference source directly since we're selecting from link table
-      fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${propMeta.predicate}' LIMIT 1) AS ${propName}`);
+      const escapedPredicate = escapeSurrealString(propMeta.predicate);
+      fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}' LIMIT 1) AS ${propName}`);
     }
     
     // Determine collections to fetch
@@ -1131,12 +1467,14 @@ WHERE ${whereConditions.join(' AND ')}
       if (!collMeta) continue; // Skip if not found
       
       // Reference source directly since we're selecting from link table
-      fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${collMeta.predicate}') AS ${collName}`);
+      const escapedPredicate = escapeSurrealString(collMeta.predicate);
+      fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}') AS ${collName}`);
     }
     
     // Always add author and timestamp fields
-    fields.push(`(SELECT VALUE author FROM link WHERE source = source LIMIT 1) AS author`);
-    fields.push(`(SELECT VALUE timestamp FROM link WHERE source = source LIMIT 1) AS timestamp`);
+    fields.push(`(SELECT VALUE author FROM link WHERE source = source ORDER BY timestamp ASC LIMIT 1) AS author`);
+    fields.push(`(SELECT VALUE timestamp FROM link WHERE source = source ORDER BY timestamp ASC LIMIT 1) AS createdAt`);
+    fields.push(`(SELECT VALUE timestamp FROM link WHERE source = source ORDER BY timestamp DESC LIMIT 1) AS updatedAt`);
     
     return fields.join(',\n  ');
   }
@@ -1157,7 +1495,8 @@ WHERE ${whereConditions.join(' AND ')}
       if (!propMeta) continue; // Skip if not found
       
       // Use array::first to get the first target value for this predicate
-      fields.push(`array::first(target[WHERE predicate = '${propMeta.predicate}']) AS ${propName}`);
+      const escapedPredicate = escapeSurrealString(propMeta.predicate);
+      fields.push(`array::first(target[WHERE predicate = '${escapedPredicate}']) AS ${propName}`);
     }
     
     // Determine collections to fetch
@@ -1167,12 +1506,14 @@ WHERE ${whereConditions.join(' AND ')}
       if (!collMeta) continue; // Skip if not found
       
       // Use array filtering to get all target values for this predicate
-      fields.push(`target[WHERE predicate = '${collMeta.predicate}'] AS ${collName}`);
+      const escapedPredicate = escapeSurrealString(collMeta.predicate);
+      fields.push(`target[WHERE predicate = '${escapedPredicate}'] AS ${collName}`);
     }
     
-    // Always add author and timestamp fields using array::first
+    // Always add author and timestamp fields
     fields.push(`array::first(author) AS author`);
-    fields.push(`array::first(timestamp) AS timestamp`);
+    fields.push(`array::first(timestamp) AS createdAt`);
+    fields.push(`array::last(timestamp) AS updatedAt`);
     
     return fields.join(',\n  ');
   }
@@ -1232,7 +1573,7 @@ WHERE ${whereConditions.join(' AND ')}
             });
           }
           // Collect values to assign to instance
-          const values = [...Properties, ...Collections, ["timestamp", Timestamp], ["author", Author]];
+          const values = [...Properties, ...Collections, ["createdAt", Timestamp], ["author", Author]];
           await Ad4mModel.assignValuesToInstance(perspective, instance, values);
 
           return instance;
@@ -1289,8 +1630,10 @@ WHERE ${whereConditions.join(' AND ')}
         
         const instance = new this(perspective, base) as any;
         
-        // Track the most recent timestamp and corresponding author
+        // Track both earliest (createdAt) and most recent (updatedAt) timestamps
+        let minTimestamp = null;
         let maxTimestamp = null;
+        let originalAuthor = null;
         let latestAuthor = null;
         
         // Process each link (track index for collection ordering)
@@ -1302,15 +1645,22 @@ WHERE ${whereConditions.join(' AND ')}
           // Skip 'None' values
           if (target === 'None') continue;
           
-          // Track the most recent timestamp and its author
-          if (link.timestamp && (!maxTimestamp || link.timestamp > maxTimestamp)) {
-            maxTimestamp = link.timestamp;
-            latestAuthor = link.author;
+          // Track both earliest (createdAt) and latest (updatedAt) timestamps with their authors
+          if (link.timestamp) {
+            if (!minTimestamp || link.timestamp < minTimestamp) {
+              minTimestamp = link.timestamp;
+              originalAuthor = link.author;
+            }
+            if (!maxTimestamp || link.timestamp > maxTimestamp) {
+              maxTimestamp = link.timestamp;
+              latestAuthor = link.author;
+            }
           }
           
-          // Find matching property
+          // Find matching property (skip those with getter)
           let foundProperty = false;
           for (const [propName, propMeta] of Object.entries(metadata.properties)) {
+            if (propMeta.getter) continue; // Handle via getter evaluation
             if (propMeta.predicate === predicate) {
               // For properties, take the first value (or we could use timestamp to get latest)
               // Note: Empty objects {} are truthy, so we need to check for them explicitly
@@ -1320,7 +1670,7 @@ WHERE ${whereConditions.join(' AND ')}
                 let convertedValue = target;
                 
                 // Only process if target has a value
-                if (target !== undefined && target !== null) {
+                if (target !== undefined && target !== null && target !== '') {
                   // Check if we need to resolve a non-literal language expression
                   if (propMeta.resolveLanguage != undefined && propMeta.resolveLanguage !== 'literal' && typeof target === 'string') {
                     // For non-literal languages, resolve the expression via perspective.getExpression()
@@ -1337,7 +1687,8 @@ WHERE ${whereConditions.join(' AND ')}
                         }
                       }
                     } catch (e) {
-                      console.warn(`Failed to resolve expression for ${propName}:`, e);
+                      console.warn(`Failed to resolve expression for ${propName} with target "${target}":`, e);
+                      console.warn("Falling back to raw value");
                       convertedValue = target; // Fall back to raw value
                     }
                   } else if (typeof target === 'string' && target.startsWith('literal://')) {
@@ -1376,9 +1727,10 @@ WHERE ${whereConditions.join(' AND ')}
             }
           }
           
-          // If not a property, check if it's a collection
+          // If not a property, check if it's a collection (skip those with getter)
           if (!foundProperty) {
             for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+              if (collMeta.getter) continue; // Handle via getter evaluation
               if (collMeta.predicate === predicate) {
                 // For collections, accumulate all values with their timestamps and indices for sorting
                 if (!instance[collName]) {
@@ -1405,18 +1757,32 @@ WHERE ${whereConditions.join(' AND ')}
           }
         }
         
-        // Set author and timestamp from the most recent link
-        if (latestAuthor && maxTimestamp) {
-          instance.author = latestAuthor;
-          // Convert timestamp to number (milliseconds) if it's an ISO string
-          if (typeof maxTimestamp === 'string' && maxTimestamp.includes('T')) {
-            instance.timestamp = new Date(maxTimestamp).getTime();
-          } else if (typeof maxTimestamp === 'string') {
-            // Try to parse as number string
-            const parsed = parseInt(maxTimestamp, 10);
-            instance.timestamp = isNaN(parsed) ? maxTimestamp : parsed;
+        // Set author and timestamps
+        if (originalAuthor) {
+          instance.author = originalAuthor;
+        }
+        
+        // Set createdAt from earliest timestamp
+        if (minTimestamp) {
+          if (typeof minTimestamp === 'string' && minTimestamp.includes('T')) {
+            instance.createdAt = new Date(minTimestamp).getTime();
+          } else if (typeof minTimestamp === 'string') {
+            const parsed = parseInt(minTimestamp, 10);
+            instance.createdAt = isNaN(parsed) ? minTimestamp : parsed;
           } else {
-            instance.timestamp = maxTimestamp;
+            instance.createdAt = minTimestamp;
+          }
+        }
+        
+        // Set updatedAt from most recent timestamp
+        if (maxTimestamp) {
+          if (typeof maxTimestamp === 'string' && maxTimestamp.includes('T')) {
+            instance.updatedAt = new Date(maxTimestamp).getTime();
+          } else if (typeof maxTimestamp === 'string') {
+            const parsed = parseInt(maxTimestamp, 10);
+            instance.updatedAt = isNaN(parsed) ? maxTimestamp : parsed;
+          } else {
+            instance.updatedAt = maxTimestamp;
           }
         }
         
@@ -1440,8 +1806,10 @@ WHERE ${whereConditions.join(' AND ')}
               // Use original index as tiebreaker for stable sorting
               return a.originalIndex - b.originalIndex;
             });
-            // Replace collection with sorted values
-            instance[collName] = pairs.map(p => p.value);
+            // Replace collection with sorted values, filtering out empty strings and None
+            instance[collName] = pairs
+              .map(p => p.value)
+              .filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None');
             // Clean up temporary arrays
             delete instance[timestampsKey];
             delete instance[indicesKey];
@@ -1452,8 +1820,9 @@ WHERE ${whereConditions.join(' AND ')}
         if (requestedProperties.length > 0 || requestedCollections.length > 0) {
           const requestedAttributes = [...requestedProperties, ...requestedCollections];
           Object.keys(instance).forEach((key) => {
-            // Keep only requested attributes, plus always keep timestamp and author
-            if (!requestedAttributes.includes(key) && key !== 'timestamp' && key !== 'author' && key !== 'baseExpression') {
+            // Keep only requested attributes, plus always keep createdAt, updatedAt, author, and baseExpression
+            // Note: timestamp is a getter alias for createdAt, so we preserve createdAt instead
+            if (!requestedAttributes.includes(key) && key !== 'createdAt' && key !== 'updatedAt' && key !== 'author' && key !== 'baseExpression') {
               delete instance[key];
             }
           });
@@ -1462,6 +1831,43 @@ WHERE ${whereConditions.join(' AND ')}
         instances.push(instance);
       } catch (error) {
         console.error(`Failed to process SurrealDB instance ${base}:`, error);
+      }
+    }
+    
+    // Evaluate custom getters for all instances (single pass)
+    // This populates collection values needed for where.isInstance filtering
+    for (const instance of instances) {
+      await this.evaluateCustomGettersForInstance(instance, perspective, metadata);
+    }
+    
+    // Filter collections by where.isInstance if specified
+    // Do this after initial evaluation so collection values exist for filtering
+    for (const instance of instances) {
+      for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+        if (collMeta.where?.isInstance && instance[collName]?.length > 0) {
+          try {
+            const targetClass = collMeta.where.isInstance;
+            const subjects = instance[collName];
+            
+            // Get the class metadata from SDNA to pass to batchCheckSubjectInstances
+            const targetClassName = typeof targetClass === 'string' 
+              ? targetClass 
+              : (targetClass as any).prototype?.className || targetClass.name;
+            const classMetadata = await perspective.getSubjectClassMetadataFromSDNA(targetClassName);
+            
+            if (!classMetadata) {
+              continue;
+            }
+            
+            // Check which subjects are instances of the target class
+            const validSubjects = await perspective.batchCheckSubjectInstances(subjects, classMetadata);
+            
+            // Update the collection with filtered instances
+            instance[collName] = validSubjects;
+          } catch (error) {
+            // On error, leave the collection unfiltered rather than breaking everything
+          }
+        }
       }
     }
     
@@ -1817,90 +2223,95 @@ WHERE ${whereConditions.join(' AND ')}
   }
 
   private async setProperty(key: string, value: any, batchId?: string) {
-    const setters = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), property_setter(C, "${key}", Setter)`
-    );
-    if (setters && setters.length > 0) {
-      const actions = eval(setters[0].Setter);
-      const resolveLanguageResults = await this.#perspective.infer(
-        `subject_class("${this.#subjectClassName}", C), property_resolve_language(C, "${key}", Language)`
-      );
-      let resolveLanguage;
-      if (resolveLanguageResults && resolveLanguageResults.length > 0) {
-        resolveLanguage = resolveLanguageResults[0].Language;
-      }
-
-      if (resolveLanguage) {
-        value = await this.#perspective.createExpression(value, resolveLanguage);
-      }
-      await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
+    // Phase 1: Use metadata instead of Prolog queries
+    const metadata = this.getPropertyMetadata(key);
+    if (!metadata) {
+      console.warn(`Property "${key}" has no metadata, skipping`);
+      return;
     }
+
+    // Generate actions from metadata (replaces Prolog query)
+    const actions = this.generatePropertySetterAction(key, metadata);
+
+    // Get resolve language from metadata (replaces Prolog query)
+    let resolveLanguage = metadata.resolveLanguage;
+
+    if (resolveLanguage) {
+      value = await this.#perspective.createExpression(value, resolveLanguage);
+    }
+
+    await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
   }
 
   private async setCollectionSetter(key: string, value: any, batchId?: string) {
-    let collectionSetters = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), collection_setter(C, "${singularToPlural(key)}", Setter)`
-    );
-    if (!collectionSetters) collectionSetters = [];
+    // Phase 1: Use metadata instead of Prolog queries
+    const metadata = this.getCollectionMetadata(key);
+    if (!metadata) {
+      console.warn(`Collection "${key}" has no metadata, skipping`);
+      return;
+    }
 
-    if (collectionSetters.length > 0) {
-      const actions = eval(collectionSetters[0].Setter);
+    // Generate actions from metadata (replaces Prolog query)
+    const actions = this.generateCollectionAction(key, 'setter');
 
-      if (value) {
-        if (Array.isArray(value)) {
-          await this.#perspective.executeAction(
-            actions,
-            this.#baseExpression,
-            value.map((v) => ({ name: "value", value: v })),
-            batchId
-          );
-        } else {
-          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
-        }
+    if (value != null) {
+      if (Array.isArray(value)) {
+        await this.#perspective.executeAction(
+          actions,
+          this.#baseExpression,
+          value.map((v) => ({ name: "value", value: v })),
+          batchId
+        );
+      } else {
+        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
       }
     }
   }
 
   private async setCollectionAdder(key: string, value: any, batchId?: string) {
-    let adders = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), collection_adder(C, "${singularToPlural(key)}", Adder)`
-    );
-    if (!adders) adders = [];
+    // Phase 1: Use metadata instead of Prolog queries
+    const metadata = this.getCollectionMetadata(key);
+    if (!metadata) {
+      console.warn(`Collection "${key}" has no metadata, skipping`);
+      return;
+    }
 
-    if (adders.length > 0) {
-      const actions = eval(adders[0].Adder);
-      if (value) {
-        if (Array.isArray(value)) {
-          await Promise.all(
-            value.map((v) =>
-              this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
-            )
-          );
-        } else {
-          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
-        }
+    // Generate actions from metadata (replaces Prolog query)
+    const actions = this.generateCollectionAction(key, 'adder');
+
+    if (value != null) {
+      if (Array.isArray(value)) {
+        await Promise.all(
+          value.map((v) =>
+            this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
+          )
+        );
+      } else {
+        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
       }
     }
   }
 
   private async setCollectionRemover(key: string, value: any, batchId?: string) {
-    let removers = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), collection_remover(C, "${singularToPlural(key)}", Remover)`
-    );
-    if (!removers) removers = [];
+    // Phase 1: Use metadata instead of Prolog queries
+    const metadata = this.getCollectionMetadata(key);
+    if (!metadata) {
+      console.warn(`Collection "${key}" has no metadata, skipping`);
+      return;
+    }
 
-    if (removers.length > 0) {
-      const actions = eval(removers[0].Remover);
-      if (value) {
-        if (Array.isArray(value)) {
-          await Promise.all(
-            value.map((v) =>
-              this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
-            )
-          );
-        } else {
-          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
-        }
+    // Generate actions from metadata (replaces Prolog query)
+    const actions = this.generateCollectionAction(key, 'remover');
+
+    if (value != null) {
+      if (Array.isArray(value)) {
+        await Promise.all(
+          value.map((v) =>
+            this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
+          )
+        );
+      } else {
+        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
       }
     }
   }
@@ -2003,10 +2414,17 @@ WHERE ${whereConditions.join(' AND ')}
               await this.setCollectionSetter(key, value.value, batchId);
               break;
           }
-        } else if (Array.isArray(value) && value.length > 0) {
+        } else if (Array.isArray(value)) {
+          // Handle all arrays as collections, including empty ones (which clears the collection)
           await this.setCollectionSetter(key, value, batchId);
         } else if (value !== undefined && value !== null && value !== "") {
           if (setProperties) {
+            // Check if this is a collection property (has collection metadata)
+            const collMetadata = this.getCollectionMetadata(key);
+            if (collMetadata) {
+              // Skip - it's a collection, not a regular property
+              continue;
+            }
             await this.setProperty(key, value, batchId);
           }
         }

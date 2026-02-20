@@ -1,7 +1,6 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { getCache, setCache, subscribe, unsubscribe } from "@coasys/hooks-helpers";
-import { Agent, AgentStatus, LinkExpression } from "@coasys/ad4m";
-import { AgentClient } from "@coasys/ad4m";
+import { Agent, AgentStatus, LinkExpression, AgentClient } from "@coasys/ad4m";
 
 type MeData = {
   agent?: Agent;
