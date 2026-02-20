@@ -105,18 +105,12 @@ impl LanguageController {
             language_address.clone(),
         );
 
-        // Create dedicated runtime handle for this language
-        let mut runtime_handle = LanguageRuntimeHandle::new(
-            language_address.clone(),
-            bundle_path.clone(),
-            storage_directory,
-            custom_settings,
-        )
-        .await
-        .map_err(|e| LanguageError::LoadError {
-            address: language_address.clone(),
-            message: e,
-        })?;
+        // Spawn dedicated runtime in its own thread
+        let runtime_handle = LanguageRuntimeHandle::spawn(language_address.clone())
+            .map_err(|e| LanguageError::LoadError {
+                address: language_address.clone(),
+                message: e,
+            })?;
 
         // Load the language bundle module
         let bundle_path_str = bundle_path.to_string_lossy().to_string();
@@ -153,7 +147,7 @@ impl LanguageController {
         info!("Unloading language: {}", language_address);
 
         let mut runtimes = self.runtimes.lock().await;
-        if let Some(mut runtime) = runtimes.remove(language_address) {
+        if let Some(runtime) = runtimes.remove(language_address) {
             // Teardown the runtime (cleanup language instance, drop thread)
             runtime.teardown().await
                 .map_err(|e| LanguageError::RuntimeError {
@@ -174,22 +168,24 @@ impl LanguageController {
 
     /// Execute a script on a specific language runtime
     ///
-    /// Uses dedicated per-language runtime with proper thread isolation
+    /// Uses dedicated per-language runtime with proper thread isolation.
+    /// Clones the handle so the runtimes lock is not held across the await.
     pub async fn execute_on_language(
         &self,
         language_address: &str,
         script: &str,
     ) -> Result<String, LanguageError> {
-        let mut runtimes = self.runtimes.lock().await;
+        let handle = {
+            let runtimes = self.runtimes.lock().await;
+            runtimes.get(language_address)
+                .ok_or_else(|| LanguageError::RuntimeError {
+                    address: language_address.to_string(),
+                    message: "Language not loaded".to_string(),
+                })?
+                .clone()
+        };
 
-        let runtime = runtimes.get_mut(language_address)
-            .ok_or_else(|| LanguageError::RuntimeError {
-                address: language_address.to_string(),
-                message: "Language not loaded".to_string(),
-            })?;
-
-        // Scripts already reference 'language' which is set as globalThis.__ad4m_language_instance__
-        runtime.execute(script.to_string())
+        handle.execute(script.to_string())
             .await
             .map_err(|e| LanguageError::RuntimeError {
                 address: language_address.to_string(),
@@ -243,7 +239,7 @@ impl LanguageController {
         let mut runtimes = self.runtimes.lock().await;
 
         // Teardown all language runtimes
-        for (address, mut runtime) in runtimes.drain() {
+        for (address, runtime) in runtimes.drain() {
             info!("Shutting down language runtime: {}", address);
             if let Err(e) = runtime.teardown().await {
                 error!("Error shutting down language {}: {}", address, e);
