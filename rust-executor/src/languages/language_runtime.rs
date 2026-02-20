@@ -51,27 +51,24 @@ impl LanguageRuntime {
         })
     }
 
-    /// Load a module (typically the language bundle)
+    /// Load a language bundle by dynamically importing it via the bootstrap's loadLanguageBundle()
     pub async fn load_module(&self, path: &str) -> Result<(), String> {
+        let script = format!(r#"await loadLanguageBundle("{}")"#, path);
         self.js_core
-            .load_module(path)
+            .execute(&script)
             .await
-            .map_err(|e| format!("Failed to load module {}: {}", path, e))
+            .map_err(|e| format!("Failed to load language bundle {}: {}", path, e))?;
+        Ok(())
     }
 
-    /// Initialize the language with context and call constructor
+    /// Initialize the language with context via the bootstrap's initLanguage()
     pub async fn load_language(&self, language_context: JsonValue) -> Result<(), String> {
         info!("Initializing language: {}", self.language_address);
 
         let context_json = serde_json::to_string(&language_context)
             .map_err(|e| format!("Failed to serialize language context: {}", e))?;
 
-        let script = format!(
-            "const language = await languageConstructor({});\n\
-             globalThis.__ad4m_language_instance__ = language;\n\
-             language",
-            context_json
-        );
+        let script = format!("await initLanguage({})", context_json);
 
         self.js_core.execute(&script).await.map_err(|e| {
             format!(

@@ -1,5 +1,6 @@
 import {
-    perspective_diff_received, sync_state_changed, telepresence_signal_received
+    perspective_diff_received, sync_state_changed, telepresence_signal_received,
+    register_holochain_signal_handler, ad4m_signal_emitted
 } from 'ext:core/ops';
 
 ((globalThis) => {
@@ -13,6 +14,11 @@ import {
         telepresenceSignalReceived: (signal, language_address, recipientDid) => {
             return telepresence_signal_received(signal, language_address, recipientDid);
         },
+        ad4mSignalEmitted: (signal, language_address) => {
+            return ad4m_signal_emitted(signal, language_address);
+        },
+        registerHolochainSignalHandler: (cellIdKey, language_address) => {
+            return register_holochain_signal_handler(cellIdKey, language_address);
+        },
     };
   })(globalThis);
-  

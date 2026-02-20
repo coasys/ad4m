@@ -446,18 +446,48 @@ impl JsCore {
                                             zome_name,
                                             signal: payload,
                                         } => {
+                                            // Build cell_id hex key for per-language routing
+                                            let dna_hash_raw = cell_id.dna_hash().get_raw_39().to_vec();
+                                            let agent_pubkey_raw = cell_id.agent_pubkey().get_raw_39().to_vec();
+                                            let cell_id_key = format!(
+                                                "{}:{}",
+                                                dna_hash_raw.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+                                                agent_pubkey_raw.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+                                            );
+
+                                            // Format the payload once (ExternWrapper is not Clone)
+                                            let payload_str = format!("{}", ExternWrapper(payload.into_inner()));
+                                            let dna_hash_dbg = format!("{:?}", dna_hash_raw);
+                                            let agent_pubkey_dbg = format!("{:?}", agent_pubkey_raw);
+
+                                            // Route to per-language runtime if a handler is registered
+                                            let maybe_lang_address: Option<String> = {
+                                                let handlers = crate::js_core::languages_extension::HOLOCHAIN_SIGNAL_HANDLERS.read().await;
+                                                handlers.get(&cell_id_key).cloned()
+                                            };
+                                            if let Some(lang_address) = maybe_lang_address {
+                                                let signal_script = format!(
+                                                    "await globalThis.__handleHolochainSignal__({{cell_id: [{}, {}], zome_name: '{}', payload: {}}})",
+                                                    dna_hash_dbg, agent_pubkey_dbg, zome_name, payload_str
+                                                );
+                                                let lang_addr = lang_address.clone();
+                                                tokio::spawn(async move {
+                                                    let controller = crate::languages::LanguageController::global_instance();
+                                                    if let Err(e) = controller.execute_on_language(&lang_addr, &signal_script).await {
+                                                        log::warn!("Failed to route Holochain signal to language {}: {}", lang_addr, e);
+                                                    }
+                                                });
+                                            }
+
+                                            // Also dispatch to the legacy JS handler
                                             let js_core_cloned = js_core.clone();
                                             tokio::task::spawn_local(async move {
-                                                // Handle the received signal here
                                                 let script = format!(
-                                                    "await core.holochainService.handleCallback({{cell_id: [{:?}, {:?}], zome_name: '{}', signal: {}}})",
-                                                    cell_id.dna_hash().get_raw_39().to_vec(), cell_id.agent_pubkey().get_raw_39().to_vec(), zome_name, ExternWrapper(payload.into_inner())
+                                                    "await core.holochainService.handleCallback({{cell_id: [{}, {}], zome_name: '{}', signal: {}}})",
+                                                    dna_hash_dbg, agent_pubkey_dbg, zome_name, payload_str
                                                 );
                                                 match js_core_cloned.execute_async_smart(script).await {
                                                     Ok(_res) => {
-                                                        // info!(
-                                                        //     "Holochain Handle Callback Completed Succesfully",
-                                                        // );
                                                     }
                                                     Err(err) => {
                                                         error!("Error executing callback: {:?}", err);

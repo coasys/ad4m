@@ -1,0 +1,185 @@
+// Language Bootstrap JS
+// Runs inside every per-language Deno runtime.
+// Bridges raw Deno ops (from registered extensions) and the LanguageContext
+// shape that language bundles expect.
+
+// Map of serialised cell_id key → signalCallback for Holochain signal routing.
+// Key format: `${hex(dnaHash)}:${hex(agentPubkey)}`
+globalThis.__holochainSignalCallbacks__ = new Map();
+
+/**
+ * Convert a Uint8Array / number[] to a hex string for use as a map key.
+ */
+function toHex(arr) {
+    return Array.from(arr, b => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Build a lookup key from a cell_id pair [dnaHash, agentPubkey].
+ */
+function cellIdKey(cellId) {
+    return `${toHex(cellId[0])}:${toHex(cellId[1])}`;
+}
+
+/**
+ * Extract every cell_id from a Holochain AppInfo and register the signal
+ * callback for each one — both in the JS-side map (for dispatch) and in the
+ * Rust-side registry (so the central signal loop knows which language to target).
+ */
+function registerSignalCallbacksForApp(appInfo, signalCallback, languageAddress) {
+    if (!signalCallback || !appInfo || !appInfo.cell_info) return;
+
+    for (const roleName of Object.keys(appInfo.cell_info)) {
+        const cellInfos = appInfo.cell_info[roleName];
+        for (const cellInfo of cellInfos) {
+            // cellInfo is an enum wrapper: { provisioned: {...} } | { cloned: {...} } | { stem: {...} }
+            const inner = cellInfo.provisioned || cellInfo.cloned || cellInfo.stem || cellInfo.value;
+            if (!inner || !inner.cell_id) continue;
+            const key = cellIdKey(inner.cell_id);
+            globalThis.__holochainSignalCallbacks__.set(key, signalCallback);
+            // Also notify Rust so the central signal loop can route to this language
+            LANGUAGE_CONTROLLER.registerHolochainSignalHandler(key, languageAddress);
+        }
+    }
+}
+
+/**
+ * Handle a Holochain signal dispatched from Rust.
+ * Rust calls this with the decoded signal object: { cell_id, zome_name, payload }.
+ * We match cell_id against registered callbacks and invoke the right one.
+ */
+globalThis.__handleHolochainSignal__ = async function(signal) {
+    if (!signal || !signal.cell_id) return;
+    const key = cellIdKey(signal.cell_id);
+    const callback = globalThis.__holochainSignalCallbacks__.get(key);
+    if (callback) {
+        try {
+            await callback(signal);
+        } catch (e) {
+            console.error("Error in Holochain signal callback:", e);
+        }
+    }
+};
+
+/**
+ * Dynamically imports the language bundle from a file:// URL and captures
+ * the default export as globalThis.languageConstructor.
+ */
+async function loadLanguageBundle(path) {
+    const url = path.startsWith("file://") ? path : `file://${path}`;
+    const module = await import(url);
+    // Handle module.default.default, module.default, or bare module
+    if (module.default && module.default.default) {
+        globalThis.languageConstructor = module.default.default;
+    } else if (module.default) {
+        globalThis.languageConstructor = module.default;
+    } else {
+        globalThis.languageConstructor = module;
+    }
+}
+
+/**
+ * Creates a Holochain delegate object for a given language address.
+ * Provides registerDNAs, call, and callAsync methods.
+ */
+function createHolochainDelegate(languageAddress) {
+    return {
+        async registerDNAs(dnas, signalCallback) {
+            const results = [];
+            for (const dna of dnas) {
+                const appId = `${languageAddress}-${dna.nick}`;
+                const installPayload = {
+                    installed_app_id: appId,
+                    agent_key: await HOLOCHAIN_SERVICE.getAgentKey(),
+                    membrane_proofs: {},
+                    existing_cells: {},
+                    network_seed: dna.network_seed || undefined,
+                    source: dna.source || { path: dna.path },
+                };
+                let appInfo;
+                try {
+                    appInfo = await HOLOCHAIN_SERVICE.installApp(installPayload);
+                } catch (e) {
+                    // App may already be installed
+                    appInfo = await HOLOCHAIN_SERVICE.getAppInfo(appId);
+                    if (!appInfo) {
+                        throw e;
+                    }
+                }
+                results.push(appInfo);
+
+                // Wire the signalCallback to every cell_id in this app
+                registerSignalCallbacksForApp(appInfo, signalCallback, languageAddress);
+            }
+            return results;
+        },
+
+        async call(dnaNick, zomeName, fnName, params) {
+            const appId = `${languageAddress}-${dnaNick}`;
+            return await HOLOCHAIN_SERVICE.callZomeFunction(
+                appId, dnaNick, zomeName, fnName, params
+            );
+        },
+
+        async callAsync(calls, timeoutMs) {
+            const promises = calls.map(call =>
+                HOLOCHAIN_SERVICE.callZomeFunction(
+                    `${languageAddress}-${call.dnaNick}`,
+                    call.dnaNick,
+                    call.zomeName,
+                    call.fnName,
+                    call.params
+                )
+            );
+            if (timeoutMs) {
+                const timeoutPromise = new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error("callAsync timeout")), timeoutMs)
+                );
+                return await Promise.race([Promise.all(promises), timeoutPromise]);
+            }
+            return await Promise.all(promises);
+        }
+    };
+}
+
+/**
+ * Creates an ad4mSignal function for a given language address.
+ * When called, publishes the signal via the LANGUAGE_CONTROLLER op.
+ */
+function createAd4mSignal(languageAddress) {
+    return function(signal) {
+        LANGUAGE_CONTROLLER.ad4mSignalEmitted(signal, languageAddress);
+    };
+}
+
+/**
+ * Initializes the language by parsing the context JSON, building the full
+ * LanguageContext with Holochain delegate and ad4mSignal, calling the
+ * language constructor, and storing the result.
+ */
+async function initLanguage(contextJson) {
+    const context = typeof contextJson === "string" ? JSON.parse(contextJson) : contextJson;
+
+    const languageAddress = context.Holochain.__languageAddress;
+
+    const holochainDelegate = createHolochainDelegate(languageAddress);
+    const ad4mSignal = createAd4mSignal(languageAddress);
+
+    const fullContext = {
+        agent: context.agent,
+        customSettings: context.customSettings,
+        storageDirectory: context.storageDirectory,
+        Holochain: holochainDelegate,
+        ad4mSignal: ad4mSignal,
+    };
+
+    const language = await globalThis.languageConstructor(fullContext);
+    globalThis.__ad4m_language_instance__ = language;
+    globalThis.language = language;
+    return language;
+}
+
+globalThis.loadLanguageBundle = loadLanguageBundle;
+globalThis.initLanguage = initLanguage;
+globalThis.createHolochainDelegate = createHolochainDelegate;
+globalThis.createAd4mSignal = createAd4mSignal;

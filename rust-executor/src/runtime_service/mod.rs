@@ -65,6 +65,22 @@ impl RuntimeService {
         func(runtime_ref)
     }
 
+    pub fn get_language_language_bundle(&self) -> String {
+        self.seed.language_language_bundle.clone()
+    }
+
+    pub fn get_agent_language(&self) -> String {
+        self.seed.agent_language.clone()
+    }
+
+    pub fn get_neighbourhood_language(&self) -> String {
+        self.seed.neighbourhood_language.clone()
+    }
+
+    pub fn get_perspective_language(&self) -> String {
+        self.seed.perspective_language.clone()
+    }
+
     pub fn get_trusted_agents(&self) -> Vec<String> {
         let mut trusted_agents: Vec<String> = self.seed.trusted_agents.clone();
         let mut stored_agents = Ad4mDb::with_global_instance(|db| db.get_all_trusted_agents())

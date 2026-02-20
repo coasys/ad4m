@@ -88,7 +88,7 @@ pub fn language_module_loader() -> Rc<StringModuleLoader> {
     let mut loader = StringModuleLoader::new();
     loader.add_module(
         "https://ad4m.language/bootstrap",
-        "// Minimal language bootstrap\nDeno.core.ops();\n// Language modules loaded via load_side_es_module\n",
+        include_str!("language_bootstrap.js"),
     );
     Rc::new(loader)
 }

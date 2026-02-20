@@ -6,8 +6,12 @@ pub mod language_runtime;
 pub mod language_runtime_handle;
 
 use deno_core::error::AnyError;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+use crate::graphql::graphql_types::ExceptionInfo;
+use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
+use crate::runtime_service::RuntimeService;
 use crate::types::Address;
 use crate::{
     agent::{did_for_context, signing_key_id_for_context, AgentContext},
@@ -19,12 +23,22 @@ use error::LanguageError;
 use language::Language;
 use language_context::LanguageContext;
 use language_runtime_handle::LanguageRuntimeHandle;
-use log::{error, info};
+use log::{error, info, warn};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use tokio::sync::Mutex as TokioMutex;
+
+/// Tracks addresses of system languages (language language, agent, neighbourhood, perspective)
+#[derive(Debug, Clone, Default)]
+pub struct SystemLanguageAddresses {
+    pub language_language: Option<String>,
+    pub agent_language: Option<String>,
+    pub neighbourhood_language: Option<String>,
+    pub perspective_language: Option<String>,
+    pub system_language_set: HashSet<String>,
+}
 
 lazy_static! {
     static ref LANGUAGE_CONTROLLER_INSTANCE: Arc<Mutex<Option<LanguageController>>> =
@@ -38,6 +52,13 @@ pub struct LanguageController {
 
     // Per-language runtime handles (isolated Deno instances per language)
     runtimes: Arc<TokioMutex<HashMap<String, LanguageRuntimeHandle>>>,
+
+    // System language address tracking
+    system_addresses: Arc<TokioMutex<SystemLanguageAddresses>>,
+
+    // Watch channel for signaling when all languages are ready
+    languages_ready_tx: Arc<tokio::sync::watch::Sender<bool>>,
+    languages_ready_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 impl LanguageController {
@@ -56,9 +77,13 @@ impl LanguageController {
     }
 
     fn new(js_core: JsCoreHandle) -> Self {
+        let (languages_ready_tx, languages_ready_rx) = tokio::sync::watch::channel(false);
         Self {
             js_core,
             runtimes: Arc::new(TokioMutex::new(HashMap::new())),
+            system_addresses: Arc::new(TokioMutex::new(SystemLanguageAddresses::default())),
+            languages_ready_tx: Arc::new(languages_ready_tx),
+            languages_ready_rx,
         }
     }
 
@@ -204,13 +229,22 @@ impl LanguageController {
             })
     }
 
-    /// Calculate IPFS hash for a language bundle (simplified version)
+    /// Calculate IPFS hash for a language bundle using the same algorithm as utils_extension::hash()
     fn calculate_language_hash(&self, bundle_content: &str) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(bundle_content.as_bytes());
-        let result = hasher.finalize();
-        format!("Qm{}", hex::encode(&result[..20]))
+        use cid::Cid;
+        use multibase::Base;
+        use multihash::{Code, MultihashDigest};
+
+        // Compute the SHA-256 multihash
+        let multihash = Code::Sha2_256.digest(bundle_content.as_bytes());
+
+        // Create a CID with version 1, raw codec (0x00)
+        let cid = Cid::new_v1(0x00, multihash);
+
+        // Encode the CID in base58btc
+        let encoded_cid = multibase::encode(Base::Base58Btc, cid.to_bytes());
+
+        format!("Qm{}", encoded_cid)
     }
 
     /// Get language settings from storage
@@ -261,19 +295,262 @@ impl LanguageController {
         Ok(())
     }
 
-    pub async fn install_language(language: Address) -> Result<(), AnyError> {
-        Self::global_instance()
-            .js_core
-            .execute("await core.waitForLanguages()".into())
-            .await?;
+    /// Save a language bundle to disk, returning (hash, bundle_path)
+    pub fn save_language_bundle(
+        &self,
+        bundle: &str,
+        meta: Option<&JsonValue>,
+    ) -> Result<(String, PathBuf), LanguageError> {
+        let hash = self.calculate_language_hash(bundle);
+        let language_dir = languages_directory().join(&hash);
+        fs::create_dir_all(&language_dir)?;
 
-        let script = format!(
-            r#"JSON.stringify(
-                await core.languageController.installLanguage("{}")
-            )"#,
-            language,
-        );
-        let _result = Self::global_instance().js_core.execute(script).await?;
+        let bundle_path = language_dir.join("bundle.js");
+        fs::write(&bundle_path, bundle)?;
+
+        if let Some(meta_value) = meta {
+            let meta_path = language_dir.join("meta.json");
+            let meta_content = serde_json::to_string_pretty(meta_value)?;
+            fs::write(&meta_path, meta_content)?;
+        }
+
+        Ok((hash, bundle_path))
+    }
+
+    /// Install a language from its address, fetching from the language language if not on disk
+    async fn install_language_from_address(&self, address: &str) -> Result<(), LanguageError> {
+        if self.is_language_loaded(address).await {
+            return Ok(());
+        }
+
+        let bundle_path = languages_directory().join(address).join("bundle.js");
+
+        if bundle_path.exists() {
+            // Bundle already on disk, just load it
+            self.load_language(bundle_path).await?;
+        } else {
+            // Fetch from the language language
+            let language_language_address = {
+                let sys = self.system_addresses.lock().await;
+                sys.language_language
+                    .clone()
+                    .ok_or_else(|| LanguageError::LoadError {
+                        address: address.to_string(),
+                        message: "Language language not loaded yet".to_string(),
+                    })?
+            };
+
+            let script = format!(
+                r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get("{}"))"#,
+                address
+            );
+
+            let result = self
+                .execute_on_language(&language_language_address, &script)
+                .await?;
+
+            let expression: JsonValue =
+                serde_json::from_str(&result).map_err(|e| LanguageError::LoadError {
+                    address: address.to_string(),
+                    message: format!("Failed to parse language expression: {}", e),
+                })?;
+
+            let bundle_source = expression
+                .get("data")
+                .and_then(|d| d.get("bundle"))
+                .and_then(|b| b.as_str())
+                .ok_or_else(|| LanguageError::LoadError {
+                    address: address.to_string(),
+                    message: "Language expression missing data.bundle field".to_string(),
+                })?;
+
+            let meta = expression.get("data");
+
+            let (_hash, saved_bundle_path) = self.save_language_bundle(bundle_source, meta)?;
+            self.load_language(saved_bundle_path).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Load system languages (language language first, then agent/neighbourhood/perspective)
+    pub async fn load_system_languages(
+        &self,
+        language_language_only: bool,
+    ) -> Result<(), LanguageError> {
+        // Step 1: Load the language language from the bootstrap seed bundle
+        let language_language_bundle =
+            RuntimeService::with_global_instance(|rs| rs.get_language_language_bundle());
+
+        let (hash, bundle_path) = self.save_language_bundle(&language_language_bundle, None)?;
+        self.load_language(bundle_path).await?;
+
+        // Store as system language
+        {
+            let mut sys = self.system_addresses.lock().await;
+            sys.language_language = Some(hash.clone());
+            sys.system_language_set.insert(hash.clone());
+        }
+
+        info!("Language language loaded: {}", hash);
+
+        if !language_language_only {
+            // Step 2: Load other system languages
+            let agent_language = RuntimeService::with_global_instance(|rs| rs.get_agent_language());
+            let neighbourhood_language =
+                RuntimeService::with_global_instance(|rs| rs.get_neighbourhood_language());
+            let perspective_language =
+                RuntimeService::with_global_instance(|rs| rs.get_perspective_language());
+
+            // Install agent language
+            if let Err(e) = self.install_language_from_address(&agent_language).await {
+                error!(
+                    "Failed to install agent language {}: {}",
+                    &agent_language, e
+                );
+            }
+
+            // Install neighbourhood language
+            if let Err(e) = self
+                .install_language_from_address(&neighbourhood_language)
+                .await
+            {
+                error!(
+                    "Failed to install neighbourhood language {}: {}",
+                    &neighbourhood_language, e
+                );
+            }
+
+            // Install perspective language
+            if let Err(e) = self
+                .install_language_from_address(&perspective_language)
+                .await
+            {
+                error!(
+                    "Failed to install perspective language {}: {}",
+                    &perspective_language, e
+                );
+            }
+
+            // Store system addresses
+            {
+                let mut sys = self.system_addresses.lock().await;
+                sys.agent_language = Some(agent_language.clone());
+                sys.neighbourhood_language = Some(neighbourhood_language.clone());
+                sys.perspective_language = Some(perspective_language.clone());
+                sys.system_language_set.insert(agent_language);
+                sys.system_language_set.insert(neighbourhood_language);
+                sys.system_language_set.insert(perspective_language);
+            }
+
+            // Step 3: Preload known link languages
+            let known_link_languages =
+                RuntimeService::with_global_instance(|rs| rs.get_know_link_languages());
+            for lang_address in known_link_languages {
+                if let Err(e) = self.install_language_from_address(&lang_address).await {
+                    warn!(
+                        "Failed to preload known link language {}: {}",
+                        lang_address, e
+                    );
+                }
+            }
+
+            // Step 4: Load any other installed languages from disk
+            self.load_installed_languages().await?;
+        }
+
+        // Signal that languages are ready
+        let _ = self.languages_ready_tx.send(true);
+        info!("All languages loaded and ready");
+
+        Ok(())
+    }
+
+    /// Load previously installed languages from the languages directory
+    async fn load_installed_languages(&self) -> Result<(), LanguageError> {
+        let langs_dir = languages_directory();
+        let system_set = {
+            let sys = self.system_addresses.lock().await;
+            sys.system_language_set.clone()
+        };
+
+        let entries = match fs::read_dir(&langs_dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                warn!("Could not read languages directory: {}", e);
+                return Ok(());
+            }
+        };
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let dir_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+
+            // Skip system languages (already loaded)
+            if system_set.contains(&dir_name) {
+                continue;
+            }
+
+            // Skip if already loaded
+            if self.is_language_loaded(&dir_name).await {
+                continue;
+            }
+
+            let bundle_path = path.join("bundle.js");
+            if !bundle_path.exists() {
+                continue;
+            }
+
+            if let Err(e) = self.load_language(bundle_path).await {
+                error!("Failed to load installed language {}: {}", dir_name, e);
+                // Publish exception like the JS behaviour
+                let exception_info = ExceptionInfo {
+                    title: "Failed to load language".to_string(),
+                    message: format!("Error loading language {}: {}", dir_name, e),
+                    r#type: crate::graphql::graphql_types::ExceptionType::LanguageIsNotLoaded,
+                    addon: None,
+                };
+                let exception_json = serde_json::to_string(&exception_info).unwrap_or_default();
+                tokio::spawn(async move {
+                    get_global_pubsub()
+                        .await
+                        .publish(&EXCEPTION_OCCURRED_TOPIC, &exception_json)
+                        .await;
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn install_language(language: Address) -> Result<(), AnyError> {
+        let controller = Self::global_instance();
+
+        // Wait for languages to be ready
+        let mut rx = controller.languages_ready_rx.clone();
+        while !*rx.borrow() {
+            rx.changed()
+                .await
+                .map_err(|e| AnyError::msg(format!("languages_ready channel closed: {}", e)))?;
+        }
+
+        controller
+            .install_language_from_address(&language)
+            .await
+            .map_err(|e| AnyError::msg(format!("{}", e)))?;
+
         Ok(())
     }
 
@@ -360,21 +637,10 @@ impl LanguageController {
     }
 
     pub async fn language_by_address(address: Address) -> Result<Option<Language>, AnyError> {
-        Self::global_instance()
-            .js_core
-            .execute("await core.waitForLanguages()".into())
-            .await?;
+        let controller = Self::global_instance();
 
-        let script = format!(
-            r#"
-            await core.languageController.languageByRef({{ address: "{}" }}) ? true : false
-            "#,
-            address,
-        );
-        let result: String = Self::global_instance().js_core.execute(script).await?;
-        let language_installed = serde_json::from_str::<bool>(&result)?;
-        if language_installed {
-            let language = Language::new(address, Self::global_instance().js_core.clone());
+        if controller.is_language_loaded(&address).await {
+            let language = Language::new(address, controller.js_core.clone());
             Ok(Some(language))
         } else {
             Ok(None)

@@ -175,6 +175,17 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     LanguageController::init_global_instance(js_core_handle.clone());
 
+    // Spawn background task to load system languages
+    let language_language_only = config.language_language_only.unwrap_or(false);
+    tokio::spawn(async move {
+        if let Err(e) = LanguageController::global_instance()
+            .load_system_languages(language_language_only)
+            .await
+        {
+            error!("Failed to load system languages: {}", e);
+        }
+    });
+
     // Set app data path for perspectives module (needed for file-based SurrealDB)
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
 
