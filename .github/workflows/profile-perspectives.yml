@@ -10,45 +10,26 @@ jobs:
   profile:
     name: Perspective Scaling Benchmark
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '18'
+      - name: Build executor
+        run: cargo build --release -p ad4m-executor
 
-      - name: Install pnpm
-        run: npm install -g pnpm
-
-      - name: Download AD4M executor v0.10.1
-        run: |
-          mkdir -p $HOME/.local/bin
-          curl -fSL "https://github.com/perspect3vism/ad4m/releases/download/v0.10.1/ad4m-cli-executor-linux-0.10.1-x64" \
-            -o $HOME/.local/bin/ad4m-executor
-          chmod +x $HOME/.local/bin/ad4m-executor
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-      - name: Install test dependencies
+      - name: Build test language and prepare test data
         working-directory: tests/js
         run: |
-          # Replace local link with npm registry version
-          sed -i 's|"@coasys/ad4m": "link:../../core"|"@coasys/ad4m": "^0.11.1"|' package.json
           pnpm install --no-frozen-lockfile
-
-      - name: Prepare bootstrap seed
-        working-directory: tests/js
-        run: |
-          # If bootstrapSeed.json doesn't exist, use the checked-in one or generate
-          if [ ! -f bootstrapSeed.json ]; then
-            echo '{"trustedAgents":[],"knownLinkLanguages":[],"directMessageLanguage":"","agentLanguage":"","perspectiveLanguage":"","neighbourhoodLanguage":"","languageLanguageBundle":""}' > bootstrapSeed.json
-          fi
+          pnpm run prepare-test
 
       - name: Run profiler
         working-directory: tests/js
         env:
-          AD4M_EXECUTOR_PATH: /home/runner/.local/bin/ad4m-executor
+          AD4M_EXECUTOR_PATH: ${{ github.workspace }}/target/release/ad4m-executor
         run: |
           npx tsx profile-perspectives.ts 2>&1 | tee /tmp/profile-output.txt
 

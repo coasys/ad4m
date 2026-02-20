@@ -1,18 +1,16 @@
 /**
- * Perspective scaling profiler for AD4M.
+ * Perspective & Neighbourhood scaling profiler for AD4M.
  *
- * Starts an AD4M executor, then creates perspectives in batches (1, 3, 10)
- * and snapshots system resource usage after each batch.
+ * Starts an AD4M executor with full bootstrap languages, then:
+ *   Phase 1: Creates local perspectives (0, 1, 3, 10) — baseline
+ *   Phase 2: Creates real neighbourhoods with perspective-diff-sync (0, 1, 3, 10) — full stack
  *
  * Usage:
  *   AD4M_EXECUTOR_PATH=/path/to/ad4m-executor npx tsx tests/js/profile-perspectives.ts
- *
- * Or if built locally:
- *   npx tsx tests/js/profile-perspectives.ts
  */
 
 import { ChildProcess, exec, execSync } from "node:child_process";
-import { rmSync, existsSync } from "node:fs";
+import { rmSync, existsSync, readFileSync } from "node:fs";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions/index.js";
 import { ApolloClient, InMemoryCache } from "@apollo/client/core/index.js";
 import Websocket from "ws";
@@ -20,7 +18,9 @@ import { createClient } from "graphql-ws";
 import path from "path";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
-import { Ad4mClient } from "@coasys/ad4m";
+import { Ad4mClient, Link, LinkExpression, Perspective, ExpressionProof } from "@coasys/ad4m";
+import { v4 as uuidv4 } from "uuid";
+import { runHcLocalServices } from "./utils/utils.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -30,6 +30,7 @@ const EXECUTOR_PATH =
   path.resolve(__dirname, "..", "..", "target", "release", "ad4m-executor");
 
 const BOOTSTRAP_SEED_PATH = path.resolve(__dirname, "bootstrapSeed.json");
+const DIFF_SYNC_HASH_PATH = path.resolve(__dirname, "scripts", "perspective-diff-sync-hash");
 const DATA_PATH = "/tmp/ad4m-profile-test";
 const GQL_PORT = 14000;
 const HC_ADMIN_PORT = 14001;
@@ -62,7 +63,11 @@ function apolloClient(port: number, token?: string): ApolloClient<any> {
   });
 }
 
-async function startExecutor(): Promise<ChildProcess> {
+async function startExecutor(
+  proxyUrl: string,
+  bootstrapUrl: string,
+  relayUrl?: string
+): Promise<ChildProcess> {
   if (!existsSync(EXECUTOR_PATH)) {
     throw new Error(
       `ad4m-executor not found at ${EXECUTOR_PATH}.\n` +
@@ -82,27 +87,36 @@ async function startExecutor(): Promise<ChildProcess> {
     { cwd: process.cwd() }
   );
 
+  const relayArg = relayUrl ? `--hc-relay-url ${relayUrl}` : "";
+
   const proc = exec(
     `${EXECUTOR_PATH} run ` +
       `--app-data-path ${DATA_PATH} ` +
       `--gql-port ${GQL_PORT} ` +
       `--hc-admin-port ${HC_ADMIN_PORT} ` +
       `--hc-app-port ${HC_APP_PORT} ` +
-      `--hc-use-bootstrap false ` +
-      `--hc-use-proxy false ` +
-      `--hc-use-local-proxy false ` +
-      `--hc-use-mdns false ` +
+      `--hc-proxy-url ${proxyUrl} ` +
+      `--hc-bootstrap-url ${bootstrapUrl} ` +
+      `${relayArg} ` +
+      `--hc-use-bootstrap true ` +
+      `--hc-use-proxy true ` +
+      `--hc-use-local-proxy true ` +
+      `--hc-use-mdns true ` +
       `--language-language-only false ` +
       `--run-dapp-server false ` +
       `--admin-credential profile-token`,
     { maxBuffer: 100 * 1024 * 1024 }
   );
 
-  // Suppress noisy output, but capture for ready detection
   const ready = new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("Executor startup timeout (120s)")), 120000);
+    const timeout = setTimeout(
+      () => reject(new Error("Executor startup timeout (180s)")),
+      180000
+    );
     const check = (data: Buffer) => {
-      if (data.toString().includes(`listening on http://127.0.0.1:${GQL_PORT}`)) {
+      if (
+        data.toString().includes(`listening on http://127.0.0.1:${GQL_PORT}`)
+      ) {
         clearTimeout(timeout);
         resolve();
       }
@@ -111,11 +125,20 @@ async function startExecutor(): Promise<ChildProcess> {
     proc.stderr!.on("data", check);
   });
 
-  // Silence stdout/stderr after ready detection
-  proc.stdout!.on("data", () => {});
-  proc.stderr!.on("data", () => {});
+  // Log executor output for debugging
+  proc.stdout!.on("data", (data: Buffer) => {
+    const s = data.toString();
+    if (s.includes("ERROR") || s.includes("WARN") || s.includes("listening")) {
+      process.stderr.write(`[executor] ${s}`);
+    }
+  });
+  proc.stderr!.on("data", (data: Buffer) => {
+    process.stderr.write(`[executor-err] ${data.toString()}`);
+  });
 
   await ready;
+  console.log("Executor ready, waiting for languages to settle...");
+  await sleep(10000); // Give bootstrap languages time to install
   return proc;
 }
 
@@ -157,7 +180,7 @@ function getAllDescendantPids(pid: number): string[] {
 
 interface Snapshot {
   label: string;
-  perspectiveCount: number;
+  count: number;
   rssKB: number;
   vszKB: number;
   cpuPercent: string;
@@ -221,7 +244,7 @@ function measureProcessTree(pid: number): {
 async function takeSnapshot(
   label: string,
   pid: number,
-  perspectiveCount: number
+  count: number
 ): Promise<Snapshot> {
   await sleep(5000); // settle time
 
@@ -229,7 +252,7 @@ async function takeSnapshot(
 
   const snapshot: Snapshot = {
     label,
-    perspectiveCount,
+    count,
     rssKB: tree.rssKB,
     vszKB: tree.vszKB,
     cpuPercent: tree.cpuPercent,
@@ -237,7 +260,7 @@ async function takeSnapshot(
   };
 
   console.log(`\n=== ${label} ===`);
-  console.log(`  Perspectives: ${perspectiveCount}`);
+  console.log(`  Count: ${count}`);
   console.log(`  Total RSS: ${(snapshot.rssKB / 1024).toFixed(1)} MB`);
   console.log(`  Total VSZ: ${(snapshot.vszKB / 1024).toFixed(1)} MB`);
   console.log(`  Total CPU: ${snapshot.cpuPercent}%`);
@@ -246,88 +269,177 @@ async function takeSnapshot(
   return snapshot;
 }
 
+function printTable(title: string, snapshots: Snapshot[], label: string) {
+  console.log(`\n=== ${title} ===\n`);
+  console.log(
+    `${label.padEnd(14)}| RSS (MB)  | VSZ (MB)  | CPU %  | Processes`
+  );
+  console.log(
+    "--------------|-----------|-----------|--------|----------"
+  );
+  for (const s of snapshots) {
+    console.log(
+      `${String(s.count).padStart(13)} | ${(s.rssKB / 1024)
+        .toFixed(1)
+        .padStart(9)} | ${(s.vszKB / 1024)
+        .toFixed(1)
+        .padStart(9)} | ${s.cpuPercent.padStart(6)} | ${String(
+        s.childProcesses
+      ).padStart(9)}`
+    );
+  }
+
+  console.log(`\n=== DELTA PER ${label.trim().toUpperCase()} ===\n`);
+  for (let i = 1; i < snapshots.length; i++) {
+    const prev = snapshots[i - 1];
+    const curr = snapshots[i];
+    const added = curr.count - prev.count;
+    if (added === 0) continue;
+    const rssDelta = curr.rssKB - prev.rssKB;
+    const procDelta = curr.childProcesses - prev.childProcesses;
+    console.log(
+      `${prev.count} → ${curr.count}: ` +
+        `+${(rssDelta / 1024).toFixed(1)} MB RSS ` +
+        `(${(rssDelta / 1024 / added).toFixed(1)} MB/each), ` +
+        `+${procDelta} processes`
+    );
+  }
+}
+
 // ── Main ──
 
 async function main() {
-  console.log("=== AD4M Perspective Scaling Profiler ===\n");
+  console.log("=== AD4M Perspective & Neighbourhood Scaling Profiler ===\n");
   console.log(`Executor: ${EXECUTOR_PATH}`);
   console.log(`Bootstrap: ${BOOTSTRAP_SEED_PATH}`);
-  console.log(`Data path: ${DATA_PATH}\n`);
+  console.log(`Data path: ${DATA_PATH}`);
 
-  console.log("Starting executor...");
-  const executorProcess = await startExecutor();
+  // Check for diff-sync hash
+  let diffSyncHash: string | null = null;
+  if (existsSync(DIFF_SYNC_HASH_PATH)) {
+    diffSyncHash = readFileSync(DIFF_SYNC_HASH_PATH, "utf-8").trim();
+    console.log(`Diff-sync hash: ${diffSyncHash}`);
+  } else {
+    console.log("WARNING: No perspective-diff-sync-hash found. Neighbourhood tests will be skipped.");
+  }
+  console.log();
+
+  // Start local bootstrap services
+  console.log("Starting local HC bootstrap services...");
+  const services = await runHcLocalServices();
+  console.log(`Bootstrap: ${services.bootstrapUrl}, Proxy: ${services.proxyUrl}, Relay: ${services.relayUrl}`);
+
+  console.log("\nStarting executor...");
+  const executorProcess = await startExecutor(
+    services.proxyUrl!,
+    services.bootstrapUrl!,
+    services.relayUrl || undefined
+  );
   const pid = executorProcess.pid!;
   console.log(`Executor PID: ${pid}`);
 
-  const snapshots: Snapshot[] = [];
+  const perspectiveSnapshots: Snapshot[] = [];
+  const neighbourhoodSnapshots: Snapshot[] = [];
 
   try {
     const client = new Ad4mClient(apolloClient(GQL_PORT, "profile-token"));
 
     console.log("\nGenerating agent...");
     await client.agent.generate("profiletest123");
-    await sleep(3000);
+    await sleep(5000);
 
-    // Baseline
-    snapshots.push(await takeSnapshot("Baseline (0 perspectives)", pid, 0));
+    // ── Phase 1: Local Perspectives ──
+    console.log("\n\n========================================");
+    console.log("  PHASE 1: LOCAL PERSPECTIVES (no link language)");
+    console.log("========================================\n");
 
-    // 1 perspective
+    perspectiveSnapshots.push(await takeSnapshot("Baseline (0 perspectives)", pid, 0));
+
     console.log("\n--- Creating 1 perspective ---");
-    await client.perspective.add("profile-test-1");
-    snapshots.push(await takeSnapshot("After 1 perspective", pid, 1));
+    await client.perspective.add("local-test-1");
+    perspectiveSnapshots.push(await takeSnapshot("After 1 perspective", pid, 1));
 
-    // 3 total
-    console.log("\n--- Creating 2 more perspectives (total 3) ---");
+    console.log("\n--- Creating 2 more (total 3) ---");
     for (let i = 2; i <= 3; i++) {
-      await client.perspective.add(`profile-test-${i}`);
+      await client.perspective.add(`local-test-${i}`);
     }
-    snapshots.push(await takeSnapshot("After 3 perspectives", pid, 3));
+    perspectiveSnapshots.push(await takeSnapshot("After 3 perspectives", pid, 3));
 
-    // 10 total
-    console.log("\n--- Creating 7 more perspectives (total 10) ---");
+    console.log("\n--- Creating 7 more (total 10) ---");
     for (let i = 4; i <= 10; i++) {
-      await client.perspective.add(`profile-test-${i}`);
+      await client.perspective.add(`local-test-${i}`);
     }
-    snapshots.push(await takeSnapshot("After 10 perspectives", pid, 10));
+    perspectiveSnapshots.push(await takeSnapshot("After 10 perspectives", pid, 10));
 
-    // Summary
-    console.log("\n\n=== SUMMARY ===\n");
-    console.log(
-      "Perspectives | RSS (MB)  | VSZ (MB)  | CPU %  | Processes"
-    );
-    console.log(
-      "-------------|-----------|-----------|--------|----------"
-    );
-    for (const s of snapshots) {
-      console.log(
-        `${String(s.perspectiveCount).padStart(12)} | ${(s.rssKB / 1024)
-          .toFixed(1)
-          .padStart(9)} | ${(s.vszKB / 1024)
-          .toFixed(1)
-          .padStart(9)} | ${s.cpuPercent.padStart(6)} | ${String(
-          s.childProcesses
-        ).padStart(9)}`
-      );
+    // ── Phase 2: Real Neighbourhoods ──
+    if (diffSyncHash) {
+      console.log("\n\n========================================");
+      console.log("  PHASE 2: REAL NEIGHBOURHOODS (perspective-diff-sync)");
+      console.log("========================================\n");
+
+      neighbourhoodSnapshots.push(await takeSnapshot("Baseline (0 neighbourhoods, 10 local perspectives)", pid, 0));
+
+      async function createNeighbourhood(name: string): Promise<string> {
+        const perspective = await client.perspective.add(name);
+
+        // Clone the diff-sync language with unique params
+        const linkLang = await client.languages.applyTemplateAndPublish(
+          diffSyncHash!,
+          JSON.stringify({ uid: uuidv4(), name })
+        );
+        console.log(`  Link language cloned: ${linkLang.address}`);
+
+        // Publish as neighbourhood
+        const url = await client.neighbourhood.publishFromPerspective(
+          perspective.uuid,
+          linkLang.address,
+          new Perspective([])
+        );
+        console.log(`  Neighbourhood published: ${url}`);
+
+        // Wait for sync state
+        let tries = 0;
+        while (tries < 30) {
+          const p = await client.perspective.byUUID(perspective.uuid);
+          if (p?.state === "Synced") break;
+          await sleep(2000);
+          tries++;
+        }
+
+        return url;
+      }
+
+      console.log("\n--- Creating 1 neighbourhood ---");
+      await createNeighbourhood("neighbourhood-1");
+      neighbourhoodSnapshots.push(await takeSnapshot("After 1 neighbourhood", pid, 1));
+
+      console.log("\n--- Creating 2 more neighbourhoods (total 3) ---");
+      for (let i = 2; i <= 3; i++) {
+        await createNeighbourhood(`neighbourhood-${i}`);
+      }
+      neighbourhoodSnapshots.push(await takeSnapshot("After 3 neighbourhoods", pid, 3));
+
+      console.log("\n--- Creating 7 more neighbourhoods (total 10) ---");
+      for (let i = 4; i <= 10; i++) {
+        await createNeighbourhood(`neighbourhood-${i}`);
+      }
+      neighbourhoodSnapshots.push(await takeSnapshot("After 10 neighbourhoods", pid, 10));
     }
 
-    // Deltas
-    console.log("\n=== DELTA PER PERSPECTIVE ===\n");
-    for (let i = 1; i < snapshots.length; i++) {
-      const prev = snapshots[i - 1];
-      const curr = snapshots[i];
-      const added = curr.perspectiveCount - prev.perspectiveCount;
-      const rssDelta = curr.rssKB - prev.rssKB;
-      const procDelta = curr.childProcesses - prev.childProcesses;
-      console.log(
-        `${prev.perspectiveCount} → ${curr.perspectiveCount}: ` +
-          `+${(rssDelta / 1024).toFixed(1)} MB RSS ` +
-          `(${(rssDelta / 1024 / added).toFixed(1)} MB/perspective), ` +
-          `+${procDelta} processes`
-      );
+    // ── Summary ──
+    console.log("\n\n========================================");
+    console.log("  RESULTS");
+    console.log("========================================");
+
+    printTable("LOCAL PERSPECTIVES (no link language)", perspectiveSnapshots, "Perspectives ");
+    if (neighbourhoodSnapshots.length > 0) {
+      printTable("REAL NEIGHBOURHOODS (perspective-diff-sync + Holochain DNA)", neighbourhoodSnapshots, "Neighbourhoods");
     }
+
   } finally {
     console.log("\nCleaning up...");
     await killProcess(executorProcess);
+    try { services.process.kill("SIGKILL"); } catch {}
   }
 }
 
