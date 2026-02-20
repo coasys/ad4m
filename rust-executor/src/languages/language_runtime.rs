@@ -1,7 +1,7 @@
 use serde_json::Value as JsonValue;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use crate::js_core::JsCore;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 
 /// Request sent to a LanguageRuntime via its channel
 #[derive(Debug)]
@@ -38,6 +38,13 @@ impl LanguageRuntime {
             language_address,
             js_core: JsCore::new_for_language(),
         }
+    }
+
+    /// Initialize the language runtime by executing the bootstrap module.
+    /// Must be called before processing requests to make Deno ops available.
+    pub async fn init(&self) -> Result<(), String> {
+        self.js_core.init_for_language().await
+            .map_err(|e| format!("Bootstrap failed for language {}: {}", self.language_address, e))
     }
 
     /// Load a module (typically the language bundle)
@@ -146,34 +153,71 @@ impl LanguageRuntime {
     }
 
     /// Main event loop: process requests from the channel until Teardown.
+    ///
+    /// Uses `tokio::select!` to concurrently poll the V8 event loop and
+    /// receive requests, mirroring the pattern in `JsCore::start()`.
+    /// Without event loop polling, JS async operations (timers, promises,
+    /// pending ops) would stall between requests.
     pub(crate) async fn process_requests(self, mut rx: UnboundedReceiver<LanguageRuntimeRequest>) {
-        while let Some(request) = rx.recv().await {
-            let is_teardown = matches!(request.operation, LanguageOperation::Teardown);
+        let local_set = tokio::task::LocalSet::new();
+        let js_core = self.js_core.clone();
+        let addr = self.language_address.clone();
 
-            let result = match request.operation {
-                LanguageOperation::Execute(script) => self.execute(&script).await,
-                LanguageOperation::LoadModule(path) => {
-                    self.load_module(&path).await.map(|_| String::new())
-                }
-                LanguageOperation::LoadLanguage(context) => {
-                    self.load_language(context).await.map(|_| String::new())
-                }
-                LanguageOperation::RegisterCallbacks => {
-                    self.register_callbacks().await.map(|(links, tp)| {
-                        format!("{{\"links\":{},\"telepresence\":{}}}", links, tp)
-                    })
-                }
-                LanguageOperation::Teardown => {
-                    self.teardown().await.map(|_| String::new())
-                }
-            };
+        local_set.run_until(async move {
+            loop {
+                tokio::select! {
+                    biased;
 
-            let _ = request.response_tx.send(result);
+                    // Poll requests from the channel
+                    maybe_request = rx.recv() => {
+                        match maybe_request {
+                            Some(request) => {
+                                let is_teardown = matches!(request.operation, LanguageOperation::Teardown);
 
-            if is_teardown {
-                debug!("Teardown complete for language: {}", self.language_address);
-                return;
+                                let result = match request.operation {
+                                    LanguageOperation::Execute(script) => self.execute(&script).await,
+                                    LanguageOperation::LoadModule(path) => {
+                                        self.load_module(&path).await.map(|_| String::new())
+                                    }
+                                    LanguageOperation::LoadLanguage(context) => {
+                                        self.load_language(context).await.map(|_| String::new())
+                                    }
+                                    LanguageOperation::RegisterCallbacks => {
+                                        self.register_callbacks().await.map(|(links, tp)| {
+                                            format!("{{\"links\":{},\"telepresence\":{}}}", links, tp)
+                                        })
+                                    }
+                                    LanguageOperation::Teardown => {
+                                        self.teardown().await.map(|_| String::new())
+                                    }
+                                };
+
+                                let _ = request.response_tx.send(result);
+
+                                if is_teardown {
+                                    debug!("Teardown complete for language: {}", addr);
+                                    return;
+                                }
+                            }
+                            None => {
+                                // Channel closed (all senders dropped), exit
+                                info!("[lang:{}] Request channel closed, shutting down", addr);
+                                return;
+                            }
+                        }
+                    }
+
+                    // Continuously poll V8 event loop for pending JS tasks/ops
+                    event_loop_result = js_core.event_loop() => {
+                        match event_loop_result {
+                            Ok(_) => {}
+                            Err(err) => {
+                                warn!("[lang:{}] Event loop error: {}", addr, err);
+                            }
+                        }
+                    }
+                }
             }
-        }
+        }).await;
     }
 }

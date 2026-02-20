@@ -81,11 +81,16 @@ pub fn main_worker_options() -> WorkerOptions {
     }
 }
 
-/// Create a minimal module loader for language runtimes that only loads from file paths
-/// and doesn't include the main.js and executor bundle
+/// Create a minimal module loader for language runtimes.
+/// Maps the bootstrap URL so MainWorker::bootstrap_from_options() can resolve it.
+/// Languages load their bundles from file paths afterwards.
 pub fn language_module_loader() -> Rc<StringModuleLoader> {
-    // Create an empty loader - languages load their bundles from file paths
-    Rc::new(StringModuleLoader::new())
+    let mut loader = StringModuleLoader::new();
+    loader.add_module(
+        "https://ad4m.language/bootstrap",
+        "// Minimal language bootstrap\nDeno.core.ops();\n// Language modules loaded via load_side_es_module\n",
+    );
+    Rc::new(loader)
 }
 
 /// Get a minimal main module URL for language runtimes

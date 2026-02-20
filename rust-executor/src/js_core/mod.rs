@@ -232,6 +232,17 @@ impl JsCore {
         Ok(())
     }
 
+    /// Initialize a language-specific runtime by executing the minimal bootstrap module.
+    /// This makes Deno ops available without loading the full executor/main.js.
+    pub async fn init_for_language(&self) -> Result<(), AnyError> {
+        let mut worker = self.worker.lock().await;
+        worker
+            .execute_main_module(&options::language_main_module_url())
+            .await
+            .map_err(|e| anyhow!("init_for_language(): could not execute bootstrap module: {}", e))?;
+        Ok(())
+    }
+
     /// Execute a script synchronously in this JsCore instance
     pub async fn execute(&self, script: &str) -> Result<String, String> {
         let script_fut = self
@@ -244,7 +255,7 @@ impl JsCore {
             .map_err(|e| format!("Script execution failed: {}", e))
     }
 
-    fn event_loop(&self) -> EventLoopFuture {
+    pub(crate) fn event_loop(&self) -> EventLoopFuture {
         EventLoopFuture::new(self.worker.clone())
     }
 

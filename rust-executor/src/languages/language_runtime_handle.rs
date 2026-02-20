@@ -4,7 +4,7 @@ use tokio::sync::{
     oneshot,
 };
 use serde_json::Value as JsonValue;
-use log::info;
+use log::{error, info};
 
 use super::language_runtime::{LanguageOperation, LanguageRuntime, LanguageRuntimeRequest};
 
@@ -35,7 +35,14 @@ impl LanguageRuntimeHandle {
                     .expect("Failed to create Tokio runtime for language");
 
                 rt.block_on(async {
-                    let runtime = LanguageRuntime::new(addr);
+                    let runtime = LanguageRuntime::new(addr.clone());
+
+                    // Execute bootstrap module to make Deno ops available
+                    if let Err(e) = runtime.init().await {
+                        error!("[lang:{}] Bootstrap failed: {}", addr, e);
+                        return;
+                    }
+
                     runtime.process_requests(rx).await;
                 });
             })

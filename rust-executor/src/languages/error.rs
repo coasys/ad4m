@@ -23,6 +23,12 @@ pub enum LanguageError {
 
     /// Serialization/deserialization error
     SerializationError { message: String },
+
+    /// Bootstrap module execution failed for a language runtime
+    BootstrapFailed { address: String, message: String },
+
+    /// V8 event loop panic/error in a language runtime
+    EventLoopPanic { address: String, message: String },
 }
 
 impl fmt::Display for LanguageError {
@@ -48,6 +54,12 @@ impl fmt::Display for LanguageError {
             }
             LanguageError::SerializationError { message } => {
                 write!(f, "Serialization error: {}", message)
+            }
+            LanguageError::BootstrapFailed { address, message } => {
+                write!(f, "Bootstrap failed for language {}: {}", address, message)
+            }
+            LanguageError::EventLoopPanic { address, message } => {
+                write!(f, "Event loop panic in language {}: {}", address, message)
             }
         }
     }
