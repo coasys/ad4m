@@ -32,7 +32,10 @@ jobs:
 
       - name: Install test dependencies
         working-directory: tests/js
-        run: pnpm install --no-frozen-lockfile
+        run: |
+          # Replace local link with npm registry version
+          sed -i 's|"@coasys/ad4m": "link:../../core"|"@coasys/ad4m": "^0.11.1"|' package.json
+          pnpm install --no-frozen-lockfile
 
       - name: Prepare bootstrap seed
         working-directory: tests/js
