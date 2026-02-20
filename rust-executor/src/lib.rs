@@ -10,7 +10,10 @@ pub mod holochain_service;
 pub mod js_core;
 mod prolog_service;
 pub mod runtime_service;
+#[cfg(feature = "surrealdb-links")]
 mod surreal_service;
+#[cfg(feature = "sqlite-links")]
+mod sqlite_service;
 pub mod utils;
 mod wallet;
 
@@ -175,7 +178,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     LanguageController::init_global_instance(js_core_handle.clone());
 
-    // Set app data path for perspectives module (needed for file-based SurrealDB)
+    // Set app data path for perspectives module (needed for file-based link storage)
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
 
     perspectives::initialize_from_db();

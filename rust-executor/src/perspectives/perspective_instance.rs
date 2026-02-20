@@ -27,7 +27,10 @@ use crate::pubsub::{
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
     RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
-use crate::surreal_service::SurrealDBService;
+#[cfg(feature = "surrealdb-links")]
+use crate::surreal_service::SurrealDBService as LinkService;
+#[cfg(feature = "sqlite-links")]
+use crate::sqlite_service::SqliteLinkService as LinkService;
 use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
 use chrono::DateTime;
@@ -193,17 +196,17 @@ pub struct PerspectiveInstance {
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
-    // Each perspective has its own isolated SurrealDB instance
-    surreal_service: Arc<SurrealDBService>,
+    // Each perspective has its own isolated link storage instance
+    surreal_service: Arc<LinkService>,
 }
 
 impl PerspectiveInstance {
     pub fn new(
         handle: PerspectiveHandle,
         created_from_join: Option<bool>,
-        surreal_service: SurrealDBService,
+        surreal_service: LinkService,
     ) -> Self {
-        // Each perspective gets its own isolated SurrealDB database
+        // Each perspective gets its own isolated link storage database
         // The service is created by the caller in an async context
 
         PerspectiveInstance {
@@ -4421,7 +4424,10 @@ mod tests {
     use crate::graphql::graphql_types::PerspectiveState;
     use crate::perspectives::perspective_instance::PerspectiveHandle;
     use crate::prolog_service::init_prolog_service;
-    use crate::surreal_service::SurrealDBService;
+    #[cfg(feature = "surrealdb-links")]
+    use crate::surreal_service::SurrealDBService as LinkService;
+    #[cfg(feature = "sqlite-links")]
+    use crate::sqlite_service::SqliteLinkService as LinkService;
     use crate::test_utils::setup_wallet;
     use fake::{Fake, Faker};
     use uuid::Uuid;
@@ -4435,7 +4441,7 @@ mod tests {
         init_prolog_service().await;
 
         let uuid = Uuid::new_v4().to_string();
-        let surreal_service = SurrealDBService::new("ad4m", &uuid, None)
+        let surreal_service = LinkService::new("ad4m", &uuid, None)
             .await
             .expect("Failed to create SurrealDB service");
 
@@ -4463,7 +4469,7 @@ mod tests {
 
     async fn create_perspective() -> PerspectiveInstance {
         let uuid = Uuid::new_v4().to_string();
-        let surreal_service = SurrealDBService::new("ad4m", &uuid, None)
+        let surreal_service = LinkService::new("ad4m", &uuid, None)
             .await
             .expect("Failed to create SurrealDB service");
 
