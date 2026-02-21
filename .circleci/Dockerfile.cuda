@@ -1,0 +1,61 @@
+# CUDA-enabled CI image for AD4M
+# Based on NVIDIA CUDA with Ubuntu 22.04 for glibc compatibility with release binaries
+FROM nvidia/cuda:12.5.1-devel-ubuntu22.04
+
+USER root
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies (matching non-CUDA Dockerfile)
+RUN apt-get update && apt-get install -y \
+    libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf \
+    protobuf-compiler cmake gobjc clang gnustep-devel libobjc4 libgnustep-base-dev \
+    libasound2-dev pkg-config fuse libfuse2 mesa-utils mesa-vulkan-drivers \
+    curl wget git sudo psmisc ca-certificates
+
+# Create circleci user (matching non-CUDA image)
+RUN useradd -ms /bin/bash circleci && \
+    echo 'circleci ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+
+# Install Go
+ENV GO_VERSION=1.24.6
+RUN wget https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz -O go.tar.gz \
+    && tar -C /usr/local -xzf go.tar.gz \
+    && rm go.tar.gz
+
+ENV GOPATH=/go
+ENV PATH=$GOPATH/bin:/usr/local/go/bin:$PATH
+
+# Install Node 18
+RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && apt-get install -y nodejs
+
+USER circleci
+WORKDIR /home/circleci
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+RUN ~/.cargo/bin/rustup install 1.92
+RUN ~/.cargo/bin/rustup default 1.92
+RUN ~/.cargo/bin/rustup target add wasm32-unknown-unknown
+
+# Install hc and kitsune2
+RUN ~/.cargo/bin/cargo install holochain_cli@0.7.0-dev.10
+RUN ~/.cargo/bin/cargo install kitsune2_bootstrap_srv --git https://github.com/holochain/kitsune2.git --rev ea3c2d42dde92f0889672a41f02f186ad9e75e4c --features "iroh-relay"
+
+# Install Deno
+RUN curl -fsSL https://deno.land/install.sh | sh
+ENV DENO_INSTALL="/home/circleci/.deno"
+
+# Configure npm global directory and install pnpm
+RUN mkdir -p ~/.npm-global && npm config set prefix '~/.npm-global'
+RUN npm install -g pnpm
+
+# Set PATH (includes CUDA)
+ENV PATH="/home/circleci/.cargo/bin:/home/circleci/.deno/bin:/home/circleci/.npm-global/bin:/usr/local/cuda/bin:$PATH"
+ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
+
+USER root
+RUN apt-get clean && rm -rf /var/lib/apt/lists/*
+
+USER circleci
