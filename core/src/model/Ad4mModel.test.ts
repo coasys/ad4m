@@ -1,9 +1,9 @@
 import { Ad4mModel } from "./Ad4mModel";
-import { ModelOptions, Property, Optional, ReadOnly, Collection, Flag } from "./decorators";
+import { Model, Field, HasMany, Flag } from "./decorators";
 
 describe("Ad4mModel.getModelMetadata()", () => {
   it("should extract basic model metadata with className", () => {
-    @ModelOptions({ name: "SimpleModel" })
+    @Model({ name: "SimpleModel" })
     class SimpleModel extends Ad4mModel {}
 
     const metadata = SimpleModel.getModelMetadata();
@@ -14,15 +14,15 @@ describe("Ad4mModel.getModelMetadata()", () => {
   });
 
   it("should extract property metadata with all fields", () => {
-    @ModelOptions({ name: "PropertyModel" })
+    @Model({ name: "PropertyModel" })
     class PropertyModel extends Ad4mModel {
-      @Property({ through: "test://name", resolveLanguage: "literal" })
+      @Field({ through: "test://name", resolveLanguage: "literal" , required: true, writable: true, initial: "literal://string:uninitialized"})
       name: string = "";
       
-      @Optional({ through: "test://optional", writable: true })
+      @Field({ through: "test://optional", writable: true })
       optional: string = "";
       
-      @ReadOnly({ through: "test://readonly" })
+      @Field({ through: "test://readonly" , writable: false})
       readonly: string = "";
       
       @Flag({ through: "test://type", value: "test://flag" })
@@ -55,18 +55,18 @@ describe("Ad4mModel.getModelMetadata()", () => {
   });
 
   it("should extract collection metadata with where clauses", () => {
-    @ModelOptions({ name: "CollectionModel" })
+    @Model({ name: "CollectionModel" })
     class CollectionModel extends Ad4mModel {
-      @Collection({ through: "test://items" })
+      @HasMany({ through: "test://items" })
       items: string[] = [];
       
-      @Collection({ 
+      @HasMany({ 
         through: "test://filtered",
         where: { condition: "triple(Target, 'test://active', 'true')" }
       })
       filtered: string[] = [];
       
-      @Collection({ through: "test://local", local: true })
+      @HasMany({ through: "test://local", local: true })
       local: string[] = [];
     }
 
@@ -89,9 +89,9 @@ describe("Ad4mModel.getModelMetadata()", () => {
   });
 
   it("should extract transform function from property metadata", () => {
-    @ModelOptions({ name: "TransformModel" })
+    @Model({ name: "TransformModel" })
     class TransformModel extends Ad4mModel {
-      @Optional({ 
+      @Field({ 
         through: "test://data",
         transform: (value: string) => value.toUpperCase()
       })
@@ -109,9 +109,9 @@ describe("Ad4mModel.getModelMetadata()", () => {
   });
 
   it("should extract custom SurrealQL getter from property metadata", () => {
-    @ModelOptions({ name: "CustomModel" })
+    @Model({ name: "CustomModel" })
     class CustomModel extends Ad4mModel {
-      @Optional({
+      @Field({
         through: "test://computed",
         getter: "(<-link[WHERE predicate = 'test://value'].in.uri)[0]"
       })
@@ -125,12 +125,12 @@ describe("Ad4mModel.getModelMetadata()", () => {
   });
 
   it("should handle collection with isInstance where clause", () => {
-    @ModelOptions({ name: "Comment" })
+    @Model({ name: "Comment" })
     class Comment extends Ad4mModel {}
     
-    @ModelOptions({ name: "Post" })
+    @Model({ name: "Post" })
     class Post extends Ad4mModel {
-      @Collection({ 
+      @HasMany({ 
         through: "post://comment",
         where: { isInstance: Comment }
       })
@@ -147,25 +147,25 @@ describe("Ad4mModel.getModelMetadata()", () => {
     class NoDecoratorModel extends Ad4mModel {}
 
     // Assert that calling getModelMetadata throws an error
-    expect(() => NoDecoratorModel.getModelMetadata()).toThrow("Model class must be decorated with @ModelOptions");
+    expect(() => NoDecoratorModel.getModelMetadata()).toThrow("Model class must be decorated with @Model");
   });
 
   it("should handle complex model with mixed property and collection types", () => {
-    @ModelOptions({ name: "Recipe" })
+    @Model({ name: "Recipe" })
     class Recipe extends Ad4mModel {
-      @Property({ through: "recipe://name", resolveLanguage: "literal" })
+      @Field({ through: "recipe://name", resolveLanguage: "literal" , required: true, writable: true, initial: "literal://string:uninitialized"})
       name: string = "";
       
-      @Optional({ through: "recipe://description" })
+      @Field({ through: "recipe://description" })
       description: string = "";
       
-      @ReadOnly({ through: "recipe://rating", getter: "avg_rating_surreal(Base, Value)" })
+      @Field({ through: "recipe://rating", getter: "avg_rating_surreal(Base, Value)" , writable: false})
       rating: number = 0;
       
-      @Collection({ through: "recipe://ingredient" })
+      @HasMany({ through: "recipe://ingredient" })
       ingredients: string[] = [];
       
-      @Collection({ through: "recipe://step", local: true })
+      @HasMany({ through: "recipe://step", local: true })
       steps: string[] = [];
     }
 
@@ -443,15 +443,15 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   }
 
   // Test Recipe model
-  @ModelOptions({ name: "Recipe" })
+  @Model({ name: "Recipe" })
   class Recipe extends Ad4mModel {
-    @Property({ through: "recipe://name" })
+    @Field({ through: "recipe://name" , required: true, writable: true, initial: "literal://string:uninitialized"})
     name: string = "";
     
-    @Property({ through: "recipe://rating" })
+    @Field({ through: "recipe://rating" , required: true, writable: true, initial: "literal://string:uninitialized"})
     rating: number = 0;
     
-    @Collection({ through: "recipe://ingredient" })
+    @HasMany({ through: "recipe://ingredient" })
     ingredients: string[] = [];
   }
 
@@ -633,12 +633,12 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   });
 
   it("should only select requested collections", async () => {
-    @ModelOptions({ name: "MultiCollectionModel" })
+    @Model({ name: "MultiCollectionModel" })
     class MultiCollectionModel extends Ad4mModel {
-      @Collection({ through: "test://coll1" })
+      @HasMany({ through: "test://coll1" })
       coll1: string[] = [];
 
-      @Collection({ through: "test://coll2" })
+      @HasMany({ through: "test://coll2" })
       coll2: string[] = [];
     }
 
@@ -798,12 +798,11 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   });
 
   it("should handle boolean values", async () => {
-    @ModelOptions({ name: "Task" })
+    @Model({ name: "Task" })
     class Task extends Ad4mModel {
-      @Property({ through: "task://completed" })
+      @Field({ through: "task://completed" , required: true, writable: true, initial: "literal://string:uninitialized"})
       completed: boolean = false;
     }
-
     const query = await Task.queryToSurrealQL(mockPerspective, { where: { completed: true } });
     
     expect(query).toContain("out.uri = true");
@@ -861,15 +860,15 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
 describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () => {
   // Test Recipe model
-  @ModelOptions({ name: "Recipe" })
+  @Model({ name: "Recipe" })
   class Recipe extends Ad4mModel {
-    @Property({ through: "recipe://name" })
+    @Field({ through: "recipe://name" , required: true, writable: true, initial: "literal://string:uninitialized"})
     name: string = "";
     
-    @Property({ through: "recipe://rating" })
+    @Field({ through: "recipe://rating" , required: true, writable: true, initial: "literal://string:uninitialized"})
     rating: number = 0;
     
-    @Collection({ through: "recipe://ingredient" })
+    @HasMany({ through: "recipe://ingredient" })
     ingredients: string[] = [];
   }
 
@@ -1179,15 +1178,15 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
 
 describe("Ad4mModel.count() with advanced where conditions", () => {
   // Test Recipe model
-  @ModelOptions({ name: "Recipe" })
+  @Model({ name: "Recipe" })
   class Recipe extends Ad4mModel {
-    @Property({ through: "recipe://name" })
+    @Field({ through: "recipe://name" , required: true, writable: true, initial: "literal://string:uninitialized"})
     name: string = "";
     
-    @Property({ through: "recipe://rating" })
+    @Field({ through: "recipe://rating" , required: true, writable: true, initial: "literal://string:uninitialized"})
     rating: number = 0;
     
-    @Collection({ through: "recipe://ingredient" })
+    @HasMany({ through: "recipe://ingredient" })
     ingredients: string[] = [];
   }
 

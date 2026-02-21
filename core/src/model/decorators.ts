@@ -25,7 +25,7 @@ export function hasLink(predicate: string): string {
 
 
 
-export interface PropertyOptions {
+export interface FieldOptions {
     /**
      * The predicate of the property. All properties must have this option.
      */
@@ -141,7 +141,7 @@ export interface PropertyOptions {
  * }
  * ```
  * 
- * @param {PropertyOptions} opts - Property configuration options
+ * @param {FieldOptions} opts - Property configuration options
  * @param {string} opts.through - The predicate URI for the property
  * @param {string} [opts.initial] - Initial value (required if property is required)
  * @param {boolean} [opts.required] - Whether the property must have a value
@@ -149,18 +149,14 @@ export interface PropertyOptions {
  * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
-export function Optional(opts: PropertyOptions) {
+export function Field(opts: FieldOptions) {
     return function <T>(target: T, key: keyof T) {
         if(typeof opts.writable === "undefined" && opts.through) {
             opts.writable = true
         }
         
-        if (opts.required && !opts.initial) {
-            throw new Error("SubjectProperty requires an 'initial' option if 'required' is true");
-        }
-
         if (!opts.through) {
-            throw new Error("SubjectProperty requires a 'through' option")
+            throw new Error("@Field requires a 'through' option")
         }
 
         target["__properties"] = target["__properties"] || {};
@@ -374,15 +370,47 @@ export interface CollectionOptions {
  * @param {string} [opts.where.prologCondition] - Custom Prolog condition for filtering
  * @param {boolean} [opts.local] - Whether collection links are stored locally only
  */
-export function Collection(opts: CollectionOptions) {
+export function HasMany(opts: CollectionOptions) {
     return function <T>(target: T, key: keyof T) {
         target["__collections"] = target["__collections"] || {};
-        target["__collections"][key] = opts;
+        target["__collections"][key] = { ...opts, direction: 'forward' as const };
 
         const value = key as string
         target[`add${capitalize(value)}`] = () => {}
         target[`remove${capitalize(value)}`] = () => {}
         target[`setCollection${capitalize(value)}`] = () => {}
+
+        Object.defineProperty(target, key, {configurable: true, writable: true});
+    };
+}
+
+export function HasOne(opts: CollectionOptions) {
+    return function <T>(target: T, key: keyof T) {
+        target["__collections"] = target["__collections"] || {};
+        target["__collections"][key] = { ...opts, direction: 'forward' as const, maxCount: 1 };
+
+        const value = key as string
+        target[`add${capitalize(value)}`] = () => {}
+        target[`remove${capitalize(value)}`] = () => {}
+        target[`setCollection${capitalize(value)}`] = () => {}
+
+        Object.defineProperty(target, key, {configurable: true, writable: true});
+    };
+}
+
+export function BelongsToOne(relatedModel: () => any, opts: CollectionOptions) {
+    return function <T>(target: T, key: keyof T) {
+        target["__collections"] = target["__collections"] || {};
+        target["__collections"][key] = { ...opts, direction: 'reverse' as const, maxCount: 1, relatedModel };
+
+        Object.defineProperty(target, key, {configurable: true, writable: true});
+    };
+}
+
+export function BelongsToMany(relatedModel: () => any, opts: CollectionOptions) {
+    return function <T>(target: T, key: keyof T) {
+        target["__collections"] = target["__collections"] || {};
+        target["__collections"][key] = { ...opts, direction: 'reverse' as const, relatedModel };
 
         Object.defineProperty(target, key, {configurable: true, writable: true});
     };
@@ -398,7 +426,7 @@ export function makeRandomId(length: number): string {
     return result;
  }
 
-export interface ModelOptionsOptions {
+export interface ModelConfig {
     /**
      * The name of the entity.
      */
@@ -456,10 +484,10 @@ export interface ModelOptionsOptions {
  * await perspective.ensureSDNASubjectClass(Recipe);
  * ```
  * 
- * @param {ModelOptionsOptions} opts - Model configuration
+ * @param {ModelConfig} opts - Model configuration
  * @param {string} opts.name - Unique name for the model class in AD4M
  */
-export function ModelOptions(opts: ModelOptionsOptions) {
+export function Model(opts: ModelConfig) {
     return function (target: any) {
         target.prototype.className = opts.name;
         target.className = opts.name;
@@ -643,6 +671,15 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                     collShape.writable = collMeta.writable;
                 }
 
+                // Relationship metadata
+                if (collMeta.maxCount !== undefined) {
+                    collShape.maxCount = collMeta.maxCount;
+                }
+
+                if (collMeta.direction === 'reverse') {
+                    collShape.inversePath = true;
+                }
+
                 // === Extract Collection Actions (adder/remover) ===
                 // Adder action - adds a link to the collection
                 collShape.adder = [{
@@ -683,125 +720,3 @@ export function ModelOptions(opts: ModelOptionsOptions) {
     }
 }
 
-/**
- * Decorator for defining required and writable properties on model classes.
- * 
- * @category Decorators
- * 
- * @description
- * A convenience decorator that defines a required property that must have an initial value and is writable by default.
- * This is equivalent to using @Optional with `required: true` and `writable: true`.
- * 
- * Properties defined with this decorator:
- * - Must have a value (required)
- * - Can be modified after creation (writable)
- * - Default to "literal://string:uninitialized" if no initial value is provided
- * 
- * @example
- * ```typescript
- * class User extends Ad4mModel {
- *   // Basic required property with default initial value
- *   @Property({
- *     through: "user://name"
- *   })
- *   name: string = "";
- * 
- *   // Required property with custom initial value
- *   @Property({
- *     through: "user://status",
- *     initial: "user://active"
- *   })
- *   status: string = "";
- * 
- *   // Required property with literal resolution
- *   @Property({
- *     through: "user://bio",
- *     resolveLanguage: "literal"
- *   })
- *   bio: string = "";
- * 
- *   // Required property with custom getter/setter
- *   @Property({
- *     through: "user://age",
- *     getter: `triple(Base, "user://birthYear", Year), Value is 2024 - Year`,
- *     setter: `Year is 2024 - Value, Actions = [{"action": "setSingleTarget", "source": "this", "predicate": "user://birthYear", "target": Year}]`
- *   })
- *   age: number = 0;
- * }
- * ```
- * 
- * @param {PropertyOptions} opts - Property configuration
- * @param {string} opts.through - The predicate URI for the property
- * @param {string} [opts.initial] - Initial value (defaults to "literal://string:uninitialized")
- * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
- * @param {boolean} [opts.local] - Whether the property should only be stored locally
- */
-export function Property(opts: PropertyOptions) {
-    return Optional({
-        ...opts,
-        required: true,
-        writable: true,
-        initial: opts.initial || "literal://string:uninitialized"
-    });
-}
-
-/**
- * Decorator for defining read-only properties on model classes.
- * 
- * @category Decorators
- * 
- * @description
- * A convenience decorator that defines a property that can only be read and cannot be modified after initialization.
- * This is equivalent to using @Optional with `writable: false`.
- * 
- * Read-only properties are ideal for:
- * - Computed or derived values
- * - Properties that should never change after creation
- * - Properties that are set by the system
- * - Properties that represent immutable data
- * 
- * @example
- * ```typescript
- * class Post extends Ad4mModel {
- *   // Read-only property with custom getter for computed value
- *   @ReadOnly({
- *     through: "post://likes",
- *     getter: `findall(User, triple(Base, "post://liked_by", User), Users), length(Users, Value)`
- *   })
- *   likeCount: number = 0;
- * 
- *   // Read-only property for creation timestamp
- *   @ReadOnly({
- *     through: "post://created_at",
- *     initial: new Date().toISOString()
- *   })
- *   createdAt: string = "";
- * 
- *   // Read-only property that resolves to a Literal
- *   @ReadOnly({
- *     through: "post://author",
- *     resolveLanguage: "literal"
- *   })
- *   author: string = "";
- * 
- *   // Read-only property for system-managed data
- *   @ReadOnly({
- *     through: "post://version",
- *     initial: "1.0.0"
- *   })
- *   version: string = "";
- * }
- * ```
- * 
- * @param {PropertyOptions} opts - Property configuration
- * @param {string} opts.through - The predicate URI for the property
- * @param {string} [opts.initial] - Initial value (if property should have one)
- * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
- * @param {boolean} [opts.local] - Whether the property should only be stored locally
- */
-export function ReadOnly(opts: PropertyOptions) {
-    return Optional({
-        ...opts,
-        writable: false
-    });
-}

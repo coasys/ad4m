@@ -147,6 +147,9 @@ export interface SHACLPropertyShape {
 
   /** AD4M-specific: Remover action for collection properties */
   remover?: AD4MAction[];
+
+  /** AD4M-specific: Reverse path traversal — sh:inversePath instead of sh:path */
+  inversePath?: boolean;
 }
 
 /**
@@ -234,7 +237,11 @@ export class SHACLShape {
       const isLast = i === this.properties.length - 1;
       
       turtle += `  sh:property [\n`;
-      turtle += `    sh:path <${prop.path}> ;\n`;
+      if (prop.inversePath) {
+        turtle += `    sh:path [ sh:inversePath <${prop.path}> ] ;\n`;
+      } else {
+        turtle += `    sh:path <${prop.path}> ;\n`;
+      }
       
       if (prop.datatype) {
         turtle += `    sh:datatype <${prop.datatype}> ;\n`;
@@ -350,10 +357,10 @@ export class SHACLShape {
         target: propShapeId
       });
       
-      // Property path
+      // Property path (forward or inverse)
       links.push({
         source: propShapeId,
-        predicate: "sh://path",
+        predicate: prop.inversePath ? "sh://inversePath" : "sh://path",
         target: prop.path
       });
       

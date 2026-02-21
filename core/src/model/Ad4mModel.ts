@@ -1,7 +1,7 @@
 import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { makeRandomId, PropertyOptions, CollectionOptions, ModelOptions } from "./decorators";
+import { makeRandomId, FieldOptions, CollectionOptions, Model } from "./decorators";
 import { singularToPlural, pluralToSingular, propertyNameToSetterName, collectionToAdderName, collectionToRemoverName, collectionToSetterName } from "./util";
 import { escapeSurrealString } from "../utils";
 
@@ -41,7 +41,7 @@ interface JSONSchemaToModelOptions {
   propertyMapping?: Record<string, string>;
   resolveLanguage?: string;
   local?: boolean;
-  propertyOptions?: Record<string, Partial<PropertyOptions>>;
+  propertyOptions?: Record<string, Partial<FieldOptions>>;
 }
 
 type ValueTuple = [name: string, value: any, resolve?: boolean];
@@ -357,7 +357,7 @@ export class Ad4mModel {
     // Validate that the class has @ModelOptions decorator
     // The decorator sets prototype.className, so we check for its existence
     if (!prototype.className || prototype.className === 'Ad4mModel') {
-      throw new Error("Model class must be decorated with @ModelOptions");
+      throw new Error("Model class must be decorated with @Model");
     }
     
     // Extract className
@@ -368,7 +368,7 @@ export class Ad4mModel {
     const prototypeProperties = prototype.__properties || {};
     
     for (const [propertyName, opts] of Object.entries(prototypeProperties)) {
-      const options = opts as PropertyOptions & { required?: boolean; flag?: boolean };
+      const options = opts as FieldOptions & { required?: boolean; flag?: boolean };
       propertiesMetadata[propertyName] = {
         name: propertyName,
         predicate: options.through || "",
@@ -493,7 +493,7 @@ export class Ad4mModel {
    * Get property metadata from decorator (Phase 1: Prolog-free refactor)
    * @private
    */
-  private getPropertyMetadata(key: string): PropertyOptions | undefined {
+  private getPropertyMetadata(key: string): FieldOptions | undefined {
     const proto = Object.getPrototypeOf(this);
     return proto.__properties?.[key];
   }
@@ -512,7 +512,7 @@ export class Ad4mModel {
    * Replaces Prolog query: property_setter(C, key, Setter)
    * @private
    */
-  private generatePropertySetterAction(key: string, metadata: PropertyOptions): any[] {
+  private generatePropertySetterAction(key: string, metadata: FieldOptions): any[] {
     // Check if property is read-only
     if (metadata.writable === false) {
       throw new Error(`Property "${key}" is read-only and cannot be written`);
@@ -2505,9 +2505,9 @@ WHERE ${whereConditions.join(' AND ')}
     (DynamicModelClass.prototype as any).__jsonSchema = schema;
     (DynamicModelClass.prototype as any).__jsonSchemaOptions = options;
     
-    // Apply the ModelOptions decorator to set up the generateSDNA method
-    const ModelOptionsDecorator = ModelOptions({ name: options.name });
-    ModelOptionsDecorator(DynamicModelClass);
+    // Apply the Model decorator to set up the generateSHACL method
+    const ModelDecorator = Model({ name: options.name });
+    ModelDecorator(DynamicModelClass);
     
     return DynamicModelClass as typeof Ad4mModel;
   }
@@ -2611,7 +2611,7 @@ WHERE ${whereConditions.join(' AND ')}
     propertyName: string,
     propertySchema: JSONSchemaProperty,
     options: JSONSchemaToModelOptions,
-    optionName: keyof PropertyOptions,
+    optionName: keyof FieldOptions,
     defaultValue?: any
   ): any {
     // 1. Property-specific options
