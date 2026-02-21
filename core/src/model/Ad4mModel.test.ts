@@ -22,7 +22,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
       @Optional({ through: "test://optional", writable: true })
       optional: string = "";
       
-      @ReadOnly({ through: "test://readonly", prologGetter: "custom_getter" })
+      @ReadOnly({ through: "test://readonly" })
       readonly: string = "";
       
       @Flag({ through: "test://type", value: "test://flag" })
@@ -47,7 +47,6 @@ describe("Ad4mModel.getModelMetadata()", () => {
     // Verify "readonly" property
     expect(metadata.properties.readonly.predicate).toBe("test://readonly");
     expect(metadata.properties.readonly.writable).toBe(false);
-    expect(metadata.properties.readonly.prologGetter).toBe("custom_getter");
     
     // Verify "type" property (flag)
     expect(metadata.properties.type.predicate).toBe("test://type");
@@ -109,23 +108,20 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(transformed).toBe("TEST");
   });
 
-  it("should extract custom getter and setter from property metadata", () => {
+  it("should extract custom SurrealQL getter from property metadata", () => {
     @ModelOptions({ name: "CustomModel" })
     class CustomModel extends Ad4mModel {
       @Optional({
         through: "test://computed",
-        prologGetter: "triple(Base, 'test://value', V), Value is V * 2",
-        prologSetter: "Value is V / 2, Actions = [{action: 'setSingleTarget', source: 'this', predicate: 'test://value', target: Value}]"
+        getter: "(<-link[WHERE predicate = 'test://value'].in.uri)[0]"
       })
-      computed: number = 0;
+      computed: string = "";
     }
 
     const metadata = CustomModel.getModelMetadata();
     
-    // Assert prologGetter and prologSetter contain the custom code
-    expect(metadata.properties.computed.prologGetter).toContain("triple(Base, 'test://value', V), Value is V * 2");
-    expect(metadata.properties.computed.prologSetter).toContain("Value is V / 2");
-    expect(metadata.properties.computed.prologSetter).toContain("setSingleTarget");
+    // Assert getter contains the custom SurrealQL code
+    expect(metadata.properties.computed.getter).toContain("test://value");
   });
 
   it("should handle collection with isInstance where clause", () => {
@@ -163,7 +159,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
       @Optional({ through: "recipe://description" })
       description: string = "";
       
-      @ReadOnly({ through: "recipe://rating", prologGetter: "avg_rating(Base, Value)" })
+      @ReadOnly({ through: "recipe://rating", getter: "avg_rating_surreal(Base, Value)" })
       rating: number = 0;
       
       @Collection({ through: "recipe://ingredient" })
@@ -194,7 +190,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.name.resolveLanguage).toBe("literal");
     expect(metadata.properties.description.predicate).toBe("recipe://description");
     expect(metadata.properties.rating.predicate).toBe("recipe://rating");
-    expect(metadata.properties.rating.prologGetter).toBe("avg_rating(Base, Value)");
+    expect(metadata.properties.rating.getter).toBe("avg_rating_surreal(Base, Value)");
     expect(metadata.collections.ingredients.predicate).toBe("recipe://ingredient");
     expect(metadata.collections.steps.predicate).toBe("recipe://step");
     expect(metadata.collections.steps.local).toBe(true);
@@ -1040,23 +1036,6 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     expect(results[0].name).toBe("Pasta");
   });
 
-  it("should use Prolog when useSurrealDB is false in findAll()", async () => {
-    const prologResults = [{
-      AllInstances: [
-        ["literal://recipe1", [["name", "Pasta"]], [["ingredients", ["pasta"]]], "2023-01-01T00:00:00Z", "did:key:alice"]
-      ],
-      TotalCount: 1
-    }];
-
-    mockPerspective.infer.mockResolvedValue(prologResults);
-
-    const results = await Recipe.findAll(mockPerspective, {}, false);
-    
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySurrealDB).not.toHaveBeenCalled();
-    expect(results).toHaveLength(1);
-  });
-
   it("should use SurrealDB by default in findAllAndCount()", async () => {
     const surrealResults = [
       {
@@ -1125,17 +1104,6 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     expect(count).toBe(5);
   });
 
-  it("should use Prolog when useSurrealDB is false in count()", async () => {
-    const prologResults = [{ TotalCount: 10 }];
-    mockPerspective.infer.mockResolvedValue(prologResults);
-
-    const count = await Recipe.count(mockPerspective, {}, false);
-    
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySurrealDB).not.toHaveBeenCalled();
-    expect(count).toBe(10);
-  });
-
   it("should use SurrealDB by default in ModelQueryBuilder.get()", async () => {
     const surrealResults = [
       {
@@ -1159,26 +1127,6 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(results).toHaveLength(1);
     expect(results[0].name).toBe("Pasta");
-  });
-
-  it("should use Prolog when useSurrealDB(false) in ModelQueryBuilder.get()", async () => {
-    const prologResults = [{
-      AllInstances: [
-        ["literal://recipe1", [["name", "Pasta"]], [["ingredients", ["pasta"]]], "2023-01-01T00:00:00Z", "did:key:alice"]
-      ],
-      TotalCount: 1
-    }];
-
-    mockPerspective.infer.mockResolvedValue(prologResults);
-
-    const results = await Recipe.query(mockPerspective)
-      .where({ name: "Pasta" })
-      .useSurrealDB(false)
-      .get();
-    
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySurrealDB).not.toHaveBeenCalled();
-    expect(results).toHaveLength(1);
   });
 
   it("should use SurrealDB by default in ModelQueryBuilder.count()", async () => {
@@ -1444,33 +1392,6 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     expect(count).toBe(getResults.length);
   });
 
-  it("should handle count() with Prolog for gt operator (legacy)", async () => {
-    const prologResults = [{ TotalCount: 2 }];
-    mockPerspective.infer.mockResolvedValue(prologResults);
 
-    const count = await Recipe.count(mockPerspective, { where: { rating: { gt: 3 } } }, false);
-    
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySurrealDB).not.toHaveBeenCalled();
-    expect(count).toBe(2);
-  });
-
-  it("should handle count() with Prolog for timestamp between (legacy)", async () => {
-    const prologResults = [{ TotalCount: 3 }];
-    mockPerspective.infer.mockResolvedValue(prologResults);
-
-    const startTimestamp = new Date("2023-01-02T00:00:00Z").getTime();
-    const endTimestamp = new Date("2023-01-04T00:00:00Z").getTime();
-    
-    const count = await Recipe.count(
-      mockPerspective, 
-      { where: { timestamp: { between: [startTimestamp, endTimestamp] } } }, 
-      false
-    );
-    
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySurrealDB).not.toHaveBeenCalled();
-    expect(count).toBe(3);
-  });
 });
 

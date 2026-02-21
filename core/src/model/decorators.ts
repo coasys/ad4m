@@ -1,6 +1,5 @@
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { Subject } from "./Subject";
-import { capitalize, propertyNameToSetterName, singularToPlural, stringifyObjectLiteral } from "./util";
+import { capitalize, propertyNameToSetterName, stringifyObjectLiteral } from "./util";
 import { SHACLShape, SHACLPropertyShape } from "../shacl/SHACLShape";
 
 export class PerspectiveAction {
@@ -23,126 +22,7 @@ export function hasLink(predicate: string): string {
     return `triple(this, "${predicate}", _)`
 }
 
-export interface InstanceQueryParams {
-/**
- * An object representing the WHERE clause of the query.
- */
-where?: object;
 
-/**
- * A string representing the Prolog condition clause of the query.
- */
-prologCondition?: string;
-}
-
-/**
- * Decorator for querying instances of a model class.
- * 
- * @category Decorators
- * 
- * @description
- * Allows you to define static query methods on your model class to retrieve instances based on custom conditions.
- * This decorator can only be applied to static async methods that return a Promise of an array of model instances.
- * 
- * The query can be constrained using either:
- * - A `where` clause that matches property values
- * - A custom Prolog `condition` for more complex queries
- * 
- * @example
- * ```typescript
- * class Recipe extends Ad4mModel {
- *   @Property({ through: "recipe://name" })
- *   name: string = "";
- * 
- *   @Property({ through: "recipe://rating" })
- *   rating: number = 0;
- * 
- *   // Get all recipes
- *   @InstanceQuery()
- *   static async all(perspective: PerspectiveProxy): Promise<Recipe[]> { return [] }
- * 
- *   // Get recipes by name
- *   @InstanceQuery({ where: { name: "Chocolate Cake" }})
- *   static async findByName(perspective: PerspectiveProxy): Promise<Recipe[]> { return [] }
- * 
- *   // Get highly rated recipes using a custom condition
- *   @InstanceQuery({ prologCondition: "triple(Instance, 'recipe://rating', Rating), Rating > 4" })
- *   static async topRated(perspective: PerspectiveProxy): Promise<Recipe[]> { return [] }
- * }
- * ```
- * 
- * @param {Object} [options] - Query options
- * @param {object} [options.where] - Object with property-value pairs to match
- * @param {string} [options.prologCondition] - Custom Prolog condition for more complex queries
- */
-export function InstanceQuery(options?: InstanceQueryParams) {
-    return function <T>(target: T, key: keyof T, descriptor: PropertyDescriptor) {
-        const originalMethod = descriptor.value;
-        if(typeof originalMethod !== "function") {
-            throw new Error("InstanceQuery decorator can only be applied to methods");
-        }
-
-        descriptor.value = async function(perspective: PerspectiveProxy): Promise<T[]> {
-            let instances: T[] = []
-            //@ts-ignore
-            let subjectClassName = target.name
-            let query = `subject_class("${subjectClassName}", C), instance(C, Instance)`
-            if(options && options.where) {
-                for(let prop in options.where) {
-                    let value = options.where[prop]
-                    query += `, property_getter(C, Instance, "${prop}", "${value}")`
-                }
-            }
-
-            if(options && options.prologCondition) {
-                query += ', ' + options.prologCondition
-            }
-
-            // Try Prolog first
-            try {
-                let results = await perspective.infer(query)
-                if(results && results !== false && typeof results !== "string" && results.length > 0) {
-                    for(let result of results) {
-                        let instance = result.Instance
-                        let subject = new Subject(perspective, instance, subjectClassName)
-                        await subject.init()
-                        instances.push(subject as T)
-                    }
-                    return instances
-                }
-            } catch (e) {
-                // Prolog failed, fall through to SurrealDB
-            }
-
-            // Fallback to SurrealDB (SdnaOnly mode)
-            // Get all instances first - pass the class constructor, not just the name
-            let allInstances = await perspective.getAllSubjectInstances(target)
-
-            // Filter by where clause if provided
-            if(options && options.where) {
-                let filtered = []
-                for(let instance of allInstances) {
-                    let matches = true
-                    for(let prop in options.where) {
-                        let expectedValue = options.where[prop]
-                        //@ts-ignore
-                        let actualValue = await instance[prop]
-                        if(actualValue !== expectedValue) {
-                            matches = false
-                            break
-                        }
-                    }
-                    if(matches) {
-                        filtered.push(instance as T)
-                    }
-                }
-                return filtered
-            }
-
-            return allInstances as T[]
-        }
-    };
-}
 
 
 export interface PropertyOptions {
@@ -170,16 +50,6 @@ export interface PropertyOptions {
      * The language used to store the property. Can be the default `Literal` Language or a custom language address.
      */
     resolveLanguage?: string;
-
-    /**
-     * Custom Prolog getter to get the value of the property. If not provided, the default getter will be used.
-     */
-    prologGetter?: string;
-
-    /**
-     * Custom Prolog setter to set the value of the property. Only available if the property is writable.
-     */
-    prologSetter?: string;
 
     /**
      * Custom SurrealQL getter to resolve the property value. Use this for custom graph traversals.
@@ -277,8 +147,6 @@ export interface PropertyOptions {
  * @param {boolean} [opts.required] - Whether the property must have a value
  * @param {boolean} [opts.writable=true] - Whether the property can be modified
  * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
- * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
- * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function Optional(opts: PropertyOptions) {
@@ -291,8 +159,8 @@ export function Optional(opts: PropertyOptions) {
             throw new Error("SubjectProperty requires an 'initial' option if 'required' is true");
         }
 
-        if (!opts.through && !opts.prologGetter) {
-            throw new Error("SubjectProperty requires either 'through' or 'prologGetter' option")
+        if (!opts.through) {
+            throw new Error("SubjectProperty requires a 'through' option")
         }
 
         target["__properties"] = target["__properties"] || {};
@@ -520,7 +388,7 @@ export function Collection(opts: CollectionOptions) {
     };
 }
 
-export function makeRandomPrologAtom(length: number): string {
+export function makeRandomId(length: number): string {
     let result = '';
     let characters = 'abcdefghijklmnopqrstuvwxyz';
     let charactersLength = characters.length;
@@ -595,180 +463,6 @@ export function ModelOptions(opts: ModelOptionsOptions) {
     return function (target: any) {
         target.prototype.className = opts.name;
         target.className = opts.name;
-
-        target.generateSDNA = function() {
-            let sdna = ""
-            let subjectName = opts.name
-            let obj = target.prototype;
-
-            let uuid = makeRandomPrologAtom(8)
-
-            sdna += `subject_class("${subjectName}", ${uuid}).\n`
-
-
-            let classRemoverActions = []
-
-            let constructorActions = []
-            if(obj.subjectConstructor && obj.subjectConstructor.length) {
-                constructorActions = constructorActions.concat(obj.subjectConstructor)
-            }
-
-            let instanceConditions = []
-            if(obj.isSubjectInstance && obj.isSubjectInstance.length) {
-                instanceConditions = instanceConditions.concat(obj.isSubjectInstance)
-            }
-
-            let propertiesCode = []
-            let properties = obj.__properties || {}
-            for(let property in properties) {
-                let propertyCode = `property(${uuid}, "${property}").\n`
-
-                let { through, initial, required, resolveLanguage, writable, flag, prologGetter, prologSetter, local } = properties[property]
-
-                if(resolveLanguage) {
-                    propertyCode += `property_resolve(${uuid}, "${property}").\n`
-                    propertyCode += `property_resolve_language(${uuid}, "${property}", "${resolveLanguage}").\n`
-                }
-
-                if(prologGetter) {
-                    propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- ${prologGetter}.\n`
-                } else if(through) {
-                    propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- triple(Base, "${through}", Value).\n`
-
-                    if(required) {
-                        if(flag) {
-                            instanceConditions.push(`triple(Base, "${through}", "${initial}")`)
-                        } else {
-                            instanceConditions.push(`triple(Base, "${through}", _)`)
-                        }
-                    }
-                }
-
-                if(prologSetter) {
-                    propertyCode += `property_setter(${uuid}, "${property}", Actions) :- ${prologSetter}.\n`
-                } else if (writable && through) {
-                    let setter = obj[propertyNameToSetterName(property)]
-                    if(typeof setter === "function") {
-                        let action = [{
-                            action: "setSingleTarget",
-                            source: "this",
-                            predicate: through,
-                            target: "value",
-                            ...(local && { local: true })
-                        }]
-                        propertyCode += `property_setter(${uuid}, "${property}", '${stringifyObjectLiteral(action)}').\n`
-                    }
-                }
-
-                propertiesCode.push(propertyCode)
-
-                if(initial) {
-                    constructorActions.push({
-                        action: "addLink",
-                        source: "this",
-                        predicate: through,
-                        target: initial,
-                    })
-
-                    classRemoverActions.push({
-                        action: "removeLink",
-                        source: "this",
-                        predicate: through,
-                        target: "*",
-                    })
-                }
-            }
-
-            let collectionsCode = []
-            let collections = obj.__collections || {}
-            for(let collection in collections) {
-                let collectionCode = `collection(${uuid}, "${collection}").\n`
-
-                let { through, where, local} = collections[collection]
-
-                if(through) {
-                    if(where) {
-                        if(!where.isInstance && !where.prologCondition && !where.condition) {
-                            throw "'where' needs one of 'isInstance', 'prologCondition', or 'condition'"
-                        }
-
-                        let conditions = []
-
-                        if(where.isInstance) {
-                            let otherClass
-                            if(where.isInstance.name) {
-                                otherClass = where.isInstance.name
-                            } else {
-                                otherClass = where.isInstance
-                            }
-                            conditions.push(`instance(OtherClass, Target), subject_class("${otherClass}", OtherClass)`)
-                        }
-
-                        if(where.prologCondition) {
-                            conditions.push(where.prologCondition)
-                        }
-
-                        // If there are Prolog conditions (isInstance or prologCondition), use setof with conditions
-                        // If only condition is present, use simple findall (SurrealDB will filter later)
-                        if(conditions.length > 0) {
-                            const conditionString = conditions.join(", ")
-                            collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- setof(Target, (triple(Base, "${through}", Target), ${conditionString}), List).\n`
-                        } else {
-                            // Only SurrealDB condition present (no Prolog filtering)
-                            collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
-                        }
-                    } else {
-                        collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
-                    }
-
-                    let collectionAdderAction = [{
-                        action: "addLink",
-                        source: "this",
-                        predicate: through,
-                        target: "value",
-                        ...(local && { local: true })
-                    }]
-
-                    let collectionRemoverAction = [{
-                        action: "removeLink",
-                        source: "this",
-                        predicate: through,
-                        target: "value",
-                    }]
-
-                    let collectionSetterAction = [{
-                        action: "collectionSetter",
-                        source: "this",
-                        predicate: through,
-                        target: "value",
-                        ...(local && { local: true })
-                    }]
-                    collectionCode += `collection_adder(${uuid}, "${collection}", '${stringifyObjectLiteral(collectionAdderAction)}').\n`
-                    collectionCode += `collection_remover(${uuid}, "${collection}", '${stringifyObjectLiteral(collectionRemoverAction)}').\n`
-                    collectionCode += `collection_setter(${uuid}, "${collection}", '${stringifyObjectLiteral(collectionSetterAction)}').\n`
-                }
-
-                collectionsCode.push(collectionCode)
-            }
-
-            let subjectContructorJSONString = stringifyObjectLiteral(constructorActions)
-            sdna += `constructor(${uuid}, '${subjectContructorJSONString}').\n`
-            if(instanceConditions.length > 0) {
-                let instanceConditionProlog = instanceConditions.join(", ")
-                sdna += `instance(${uuid}, Base) :- ${instanceConditionProlog}.\n`
-                sdna += "\n"
-            }
-            sdna += `destructor(${uuid}, '${stringifyObjectLiteral(classRemoverActions)}').\n`
-            sdna += "\n"
-            sdna += propertiesCode.join("\n")
-            sdna += "\n"
-            sdna += collectionsCode.join("\n")
-
-            return {
-                sdna,
-                name: subjectName
-            }
-        }
 
         // Generate SHACL shape (W3C standard + AD4M action definitions)
         target.generateSHACL = function() {
@@ -1040,8 +734,6 @@ export function ModelOptions(opts: ModelOptionsOptions) {
  * @param {string} opts.through - The predicate URI for the property
  * @param {string} [opts.initial] - Initial value (defaults to "literal://string:uninitialized")
  * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
- * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
- * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function Property(opts: PropertyOptions) {
@@ -1105,7 +797,6 @@ export function Property(opts: PropertyOptions) {
  * @param {string} opts.through - The predicate URI for the property
  * @param {string} [opts.initial] - Initial value (if property should have one)
  * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
- * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function ReadOnly(opts: PropertyOptions) {

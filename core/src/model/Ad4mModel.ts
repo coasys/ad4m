@@ -1,7 +1,7 @@
 import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { makeRandomPrologAtom, PropertyOptions, CollectionOptions, ModelOptions } from "./decorators";
+import { makeRandomId, PropertyOptions, CollectionOptions, ModelOptions } from "./decorators";
 import { singularToPlural, pluralToSingular, propertyNameToSetterName, collectionToAdderName, collectionToRemoverName, collectionToSetterName } from "./util";
 import { escapeSurrealString } from "../utils";
 
@@ -69,7 +69,7 @@ export type Query = {
   count?: boolean;
 };
 
-export type AllInstancesResult = { AllInstances: Ad4mModel[]; TotalCount?: number; isInit?: boolean };
+export type AllInstancesResult = any;
 export type ResultsWithTotalCount<T> = { results: T[]; totalCount?: number };
 export type PaginationResult<T> = { results: T[]; totalCount?: number; pageSize: number; pageNumber: number };
 
@@ -89,10 +89,6 @@ export interface PropertyMetadata {
   initial?: string;
   /** Language for resolution (e.g., "literal") */
   resolveLanguage?: string;
-  /** Custom Prolog getter code */
-  prologGetter?: string;
-  /** Custom Prolog setter code */
-  prologSetter?: string;
   /** Custom SurrealQL getter code */
   getter?: string;
   /** Whether stored locally only */
@@ -133,141 +129,6 @@ export interface ModelMetadata {
 
 function capitalize(word: string): string {
   return word.charAt(0).toUpperCase() + word.slice(1);
-}
-
-function buildSourceQuery(source?: string): string {
-  // Constrains the query to instances that have the provided source
-  if (!source) return "";
-  return `triple("${source}", "ad4m://has_child", Base)`;
-}
-
-// todo: only return Timestamp & Author from query (Base, AllLinks, and SortLinks not required)
-function buildAuthorAndTimestampQuery(): string {
-  // Gets the author and timestamp of a Ad4mModel instance (based on the first link mentioning the base)
-  return `
-    findall(
-      [T, A],
-      link(Base, _, _, T, A),
-      AllLinks
-    ),
-    sort(AllLinks, SortedLinks),
-    SortedLinks = [[Timestamp, Author]|_]
-  `;
-}
-
-function buildPropertiesQuery(properties?: string[]): string {
-  // Gets the name, value, and resolve boolean for all (or some) properties on a Ad4mModel instance
-  // Resolves literals (if property_resolve/2 is true) to their value - either the data field if it is
-  // an Expression in JSON literal, or the direct literal value if it is a simple literal
-  // If no properties are provided, all are included
-  return `
-    findall([PropertyName, PropertyValue, Resolve], (
-      % Constrain to specified properties if provided
-      ${properties ? `member(PropertyName, [${properties.map((name) => `"${name}"`).join(", ")}]),` : ""}
-      resolve_property(SubjectClass, Base, PropertyName, PropertyValue, Resolve)
-    ), Properties)
-  `;
-}
-
-function buildCollectionsQuery(collections?: string[]): string {
-  // Gets the name and array of values for all (or some) collections on a Ad4mModel instance
-  // If no collections are provided, all are included
-  return `
-    findall([CollectionName, CollectionValues], (
-      % Constrain to specified collections if provided
-      ${collections ? `member(CollectionName, [${collections.map((name) => `"${name}"`).join(", ")}]),` : ""}
-
-      collection(SubjectClass, CollectionName),
-      collection_getter(SubjectClass, Base, CollectionName, CollectionValues)
-    ), Collections)
-  `;
-}
-
-function buildWhereQuery(where: Where = {}): string {
-  // Constrains the query to instances that match the provided where conditions
-
-  function formatValue(value) {
-    // Wrap strings in quotes
-    return typeof value === "string" ? `"${value}"` : value;
-  }
-
-  return (Object.entries(where) as [string, WhereCondition][])
-    .map(([key, value]) => {
-      const isSpecial = ["base", "author", "timestamp"].includes(key);
-      const getter = `resolve_property(SubjectClass, Base, "${key}", Value${key}, _)`;
-      // const getter = `property_getter(SubjectClass, Base, "${key}", URI), literal_from_url(URI, V, _)`;
-      const field = capitalize(key);
-
-      // Handle direct array values (for IN conditions)
-      if (Array.isArray(value)) {
-        const formattedValues = value.map((v) => formatValue(v)).join(", ");
-        if (isSpecial) return `member(${field}, [${formattedValues}])`;
-        else return `${getter}, member(Value${key}, [${formattedValues}])`;
-      }
-
-      // Handle operation object
-      if (typeof value === "object" && value !== null) {
-        const { not, between, lt, lte, gt, gte } = value;
-
-        // Handle NOT operation
-        if (not !== undefined) {
-          if (Array.isArray(not)) {
-            // NOT IN array
-            const formattedValues = not.map((v) => formatValue(v)).join(", ");
-            if (isSpecial) return `\\+ member(${field}, [${formattedValues}])`;
-            else return `${getter}, \\+ member(Value${key}, [${formattedValues}])`;
-          } else {
-            // NOT EQUAL
-            if (isSpecial) return `${field} \\= ${formatValue(not)}`;
-            else return `${getter}, Value${key} \\= ${formatValue(not)}`;
-          }
-        }
-
-        // Handle BETWEEN
-        if (between !== undefined && Array.isArray(between) && between.length === 2) {
-          if (isSpecial) return `${field} >= ${between[0]}, ${field} =< ${between[1]}`;
-          else return `${getter}, Value${key} >= ${between[0]}, Value${key} =< ${between[1]}`;
-        }
-
-        // Handle lt, lte, gt, & gte operations
-        const operators = [
-          { value: lt, symbol: "<" }, // LESS THAN
-          { value: lte, symbol: "=<" }, // LESS THAN OR EQUAL TO
-          { value: gt, symbol: ">" }, // GREATER THAN
-          { value: gte, symbol: ">=" }, // GREATER THAN OR EQUAL TO
-        ];
-
-        for (const { value, symbol } of operators) {
-          if (value !== undefined)
-            return isSpecial ? `${field} ${symbol} ${value}` : `${getter}, Value${key} ${symbol} ${value}`;
-        }
-      }
-
-      // Default to direct equality
-      if (isSpecial) return `${field} = ${formatValue(value)}`;
-      else return `${getter}, Value${key} = ${formatValue(value)}`;
-    })
-    .join(", ");
-}
-
-function buildCountQuery(count?: boolean): string {
-  return count ? "length(UnsortedInstances, TotalCount)" : "";
-}
-
-function buildOrderQuery(order?: Order): string {
-  if (!order) return "SortedInstances = UnsortedInstances";
-  const [propertyName, direction] = Object.entries(order)[0];
-  return `sort_instances(UnsortedInstances, "${propertyName}", "${direction}", SortedInstances)`;
-}
-
-function buildOffsetQuery(offset?: number): string {
-  if (!offset || offset < 0) return "InstancesWithOffset = SortedInstances";
-  return `skipN(SortedInstances, ${offset}, InstancesWithOffset)`;
-}
-
-function buildLimitQuery(limit?: number): string {
-  if (!limit || limit < 0) return "AllInstances = InstancesWithOffset";
-  return `takeN(InstancesWithOffset, ${limit}, AllInstances)`;
 }
 
 function normalizeNamespaceString(namespace: string): string {
@@ -515,9 +376,7 @@ export class Ad4mModel {
         writable: options.writable || false,
         ...(options.initial !== undefined && { initial: options.initial }),
         ...(options.resolveLanguage !== undefined && { resolveLanguage: options.resolveLanguage }),
-        ...(options.prologGetter !== undefined && { prologGetter: options.prologGetter }),
         ...(options.getter !== undefined && { getter: options.getter }),
-        ...(options.prologSetter !== undefined && { prologSetter: options.prologSetter }),
         ...(options.local !== undefined && { local: options.local }),
         ...(options.transform !== undefined && { transform: options.transform }),
         ...(options.flag !== undefined && { flag: options.flag })
@@ -610,7 +469,7 @@ export class Ad4mModel {
    * ```
    */
   constructor(perspective: PerspectiveProxy, baseExpression?: string, source?: string) {
-    this.#baseExpression = baseExpression ? baseExpression : Literal.from(makeRandomPrologAtom(24)).toUrl();
+    this.#baseExpression = baseExpression ? baseExpression : Literal.from(makeRandomId(24)).toUrl();
     this.#perspective = perspective;
     this.#source = source || "ad4m://self";
   }
@@ -657,14 +516,6 @@ export class Ad4mModel {
     // Check if property is read-only
     if (metadata.writable === false) {
       throw new Error(`Property "${key}" is read-only and cannot be written`);
-    }
-
-    if (metadata.prologSetter) {
-      // Custom Prolog setter - throw error for now (Phase 2)
-      throw new Error(
-        `Custom Prolog setter for property "${key}" not yet supported without Prolog. ` +
-        `Use standard @Property decorator or enable Prolog for custom setters.`
-      );
     }
 
     if (!metadata.through) {
@@ -966,32 +817,7 @@ export class Ad4mModel {
     return this;
   }
 
-  // Todo: Only return AllInstances (InstancesWithOffset, SortedInstances, & UnsortedInstances not required)
-  public static async queryToProlog(perspective: PerspectiveProxy, query: Query, modelClassName?: string | null) {
-    const { source, properties, collections, where, order, offset, limit, count } = query;
-    const className = modelClassName || (await this.getClassName(perspective));
 
-    const instanceQueries = [
-      buildAuthorAndTimestampQuery(),
-      buildSourceQuery(source),
-      buildPropertiesQuery(properties),
-      buildCollectionsQuery(collections),
-      buildWhereQuery(where),
-    ];
-
-    const resultSetQueries = [buildCountQuery(count), buildOrderQuery(order), buildOffsetQuery(offset), buildLimitQuery(limit)];
-
-    const fullQuery = `
-      findall([Base, Properties, Collections, Timestamp, Author], (
-        subject_class("${className}", SubjectClass),
-        instance(SubjectClass, Base),
-        ${instanceQueries.filter((q) => q).join(", ")}
-      ), UnsortedInstances),
-      ${resultSetQueries.filter((q) => q).join(", ")}
-    `;
-
-    return fullQuery;
-  }
 
   /**
    * Evaluates custom SurrealQL getters for properties and collections on a specific instance.
@@ -1553,39 +1379,7 @@ WHERE ${whereConditions.join(' AND ')}
     }
   }
 
-  public static async instancesFromPrologResult<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy,
-    query: Query,
-    result: AllInstancesResult
-  ): Promise<ResultsWithTotalCount<T>> {
-    if (!result?.[0]?.AllInstances) return { results: [], totalCount: 0 };
-    // Map results to instances
-    const requestedAttribtes = [...(query?.properties || []), ...(query?.collections || [])];
-    const allInstances = await Promise.all(
-      result[0].AllInstances.map(async ([Base, Properties, Collections, Timestamp, Author]) => {
-        try {
-          const instance = new this(perspective, Base) as any;
-          // Remove unrequested attributes from instance
-          if (requestedAttribtes.length) {
-            Object.keys(instance).forEach((key) => {
-              if (!requestedAttribtes.includes(key)) delete instance[key];
-            });
-          }
-          // Collect values to assign to instance
-          const values = [...Properties, ...Collections, ["createdAt", Timestamp], ["author", Author]];
-          await Ad4mModel.assignValuesToInstance(perspective, instance, values);
 
-          return instance;
-        } catch (error) {
-          console.error(`Failed to process instance ${Base}:`, error);
-          // Return null for failed instances - we'll filter these out below
-          return null;
-        }
-      })
-    );
-    return { results: allInstances.filter((instance) => instance !== null), totalCount: result[0].TotalCount };
-  }
 
   /**
    * Converts SurrealDB query results to Ad4mModel instances.
@@ -2060,20 +1854,12 @@ WHERE ${whereConditions.join(' AND ')}
   static async findAll<T extends Ad4mModel>(
     this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy, 
-    query: Query = {},
-    useSurrealDB: boolean = true
+    query: Query = {}
   ): Promise<T[]> {
-    if (useSurrealDB) {
-      const surrealQuery = await this.queryToSurrealQL(perspective, query);
-      const result = await perspective.querySurrealDB(surrealQuery);
-      const { results } = await this.instancesFromSurrealResult(perspective, query, result);
-      return results;
-    } else {
-      const prologQuery = await this.queryToProlog(perspective, query);
-      const result = await perspective.infer(prologQuery);
-      const { results } = await this.instancesFromPrologResult(perspective, query, result);
-      return results;
-    }
+    const surrealQuery = await this.queryToSurrealQL(perspective, query);
+    const result = await perspective.querySurrealDB(surrealQuery);
+    const { results } = await this.instancesFromSurrealResult(perspective, query, result);
+    return results;
   }
 
   /**
@@ -2099,18 +1885,11 @@ WHERE ${whereConditions.join(' AND ')}
   static async findAllAndCount<T extends Ad4mModel>(
     this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy, 
-    query: Query = {},
-    useSurrealDB: boolean = true
+    query: Query = {}
   ): Promise<ResultsWithTotalCount<T>> {
-    if (useSurrealDB) {
-      const surrealQuery = await this.queryToSurrealQL(perspective, query);
-      const result = await perspective.querySurrealDB(surrealQuery);
-      return await this.instancesFromSurrealResult(perspective, query, result);
-    } else {
-      const prologQuery = await this.queryToProlog(perspective, query);
-      const result = await perspective.infer(prologQuery);
-      return await this.instancesFromPrologResult(perspective, query, result);
-    }
+    const surrealQuery = await this.queryToSurrealQL(perspective, query);
+    const result = await perspective.querySurrealDB(surrealQuery);
+    return await this.instancesFromSurrealResult(perspective, query, result);
   }
 
   /**
@@ -2139,40 +1918,16 @@ WHERE ${whereConditions.join(' AND ')}
     perspective: PerspectiveProxy, 
     pageSize: number, 
     pageNumber: number, 
-    query?: Query,
-    useSurrealDB: boolean = true
+    query?: Query
   ): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(query || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    if (useSurrealDB) {
-      const surrealQuery = await this.queryToSurrealQL(perspective, paginationQuery);
-      const result = await perspective.querySurrealDB(surrealQuery);
-      const { results, totalCount } = await this.instancesFromSurrealResult(perspective, paginationQuery, result);
-      return { results, totalCount, pageSize, pageNumber };
-    } else {
-      const prologQuery = await this.queryToProlog(perspective, paginationQuery);
-      const result = await perspective.infer(prologQuery);
-      const { results, totalCount } = await this.instancesFromPrologResult(perspective, paginationQuery, result);
-      return { results, totalCount, pageSize, pageNumber };
-    }
+    const surrealQuery = await this.queryToSurrealQL(perspective, paginationQuery);
+    const result = await perspective.querySurrealDB(surrealQuery);
+    const { results, totalCount } = await this.instancesFromSurrealResult(perspective, paginationQuery, result);
+    return { results, totalCount, pageSize, pageNumber };
   }
 
-  static async countQueryToProlog(perspective: PerspectiveProxy, query: Query = {}, modelClassName?: string | null) {
-    const { source, where } = query;
-    const className = modelClassName || (await this.getClassName(perspective));
-    const instanceQueries = [buildAuthorAndTimestampQuery(), buildSourceQuery(source), buildWhereQuery(where)];
-    const resultSetQueries = [buildCountQuery(true), buildOrderQuery(), buildOffsetQuery(), buildLimitQuery()];
 
-    const fullQuery = `
-      findall([Base, Properties, Collections, Timestamp, Author], (
-        subject_class("${className}", SubjectClass),
-        instance(SubjectClass, Base),
-        ${instanceQueries.filter((q) => q).join(", ")}
-      ), UnsortedInstances),
-      ${resultSetQueries.filter((q) => q).join(", ")}
-    `;
-
-    return fullQuery;
-  }
 
   /**
    * Generates a SurrealQL COUNT query for the model.
@@ -2211,19 +1966,11 @@ WHERE ${whereConditions.join(' AND ')}
    * const countProlog = await Recipe.count(perspective, {}, false);
    * ```
    */
-  static async count(perspective: PerspectiveProxy, query: Query = {}, useSurrealDB: boolean = true) {
-    if (useSurrealDB) {
-      const surrealQuery = await this.queryToSurrealQL(perspective, query);
-      const result = await perspective.querySurrealDB(surrealQuery);
-      // Use instancesFromSurrealResult to apply JS-level filtering for advanced where conditions
-      // (e.g., gt, gte, lt, lte, between, contains on properties and author/timestamp)
-      // This ensures count() returns the same number as findAll().length
-      const { totalCount } = await this.instancesFromSurrealResult(perspective, query, result);
-      return totalCount;
-    } else {
-      const result = await perspective.infer(await this.countQueryToProlog(perspective, query));
-      return result?.[0]?.TotalCount || 0;
-    }
+  static async count(perspective: PerspectiveProxy, query: Query = {}) {
+    const surrealQuery = await this.queryToSurrealQL(perspective, query);
+    const result = await perspective.querySurrealDB(surrealQuery);
+    const { totalCount } = await this.instancesFromSurrealResult(perspective, query, result);
+    return totalCount;
   }
 
   private async setProperty(key: string, value: any, batchId?: string) {
@@ -2928,7 +2675,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   private modelClassName: string | null = null;
   private ctor: typeof Ad4mModel;
   private currentSubscription?: any;
-  private useSurrealDBFlag: boolean = true;
 
   constructor(perspective: PerspectiveProxy, ctor: typeof Ad4mModel, query?: Query) {
     this.perspective = perspective;
@@ -3102,10 +2848,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * Note: Subscriptions (subscribe(), countSubscribe(), paginateSubscribe()) default to SurrealDB live queries
    * if useSurrealDB(true) is set (default).
    */
-  useSurrealDB(enabled: boolean = true): ModelQueryBuilder<T> {
-    this.useSurrealDBFlag = enabled;
-    return this;
-  }
+
 
   /**
    * Executes the query once and returns the results.
@@ -3120,17 +2863,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async get(): Promise<T[]> {
-    if (this.useSurrealDBFlag) {
-      const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
-      const result = await this.perspective.querySurrealDB(surrealQuery);
-      const { results } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
-      return results as T[];
-    } else {
-      const query = await this.ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
-      const result = await this.perspective.infer(query);
-      const { results } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
-      return results as T[];
-    }
+    const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
+    const result = await this.perspective.querySurrealDB(surrealQuery);
+    const { results } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
+    return results as T[];
   }
 
   /**
@@ -3165,48 +2901,22 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * Prolog subscriptions remain available via `.useSurrealDB(false)`.
    */
   async subscribe(callback: (results: T[]) => void): Promise<T[]> {
-    // Clean up any existing subscription
     this.dispose();
+    const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
+    this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
 
-    if (this.useSurrealDBFlag) {
-        const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
-        this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
+    const processResults = async (result: any) => {
+      const { results } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
+      callback(results as T[]);
+    };
 
-        const processResults = async (result: any) => {
-            // The result from live query subscription update (handled in PerspectiveInstance listener)
-            // is the new full set of results (because we re-query in Rust).
-            // So we just need to map it to instances.
-            const { results } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
-            callback(results as T[]);
-        };
-
-        this.currentSubscription.onResult(processResults);
-        
-        // Process initial result
-        const { results } = await this.ctor.instancesFromSurrealResult(
-            this.perspective, 
-            this.queryParams, 
-            this.currentSubscription.result
-        );
-        return results as T[];
-    } else {
-        // Note: Subscriptions currently only work with Prolog
-        const query = await this.ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
-        this.currentSubscription = await this.perspective.subscribeInfer(query);
-
-        const processResults = async (result: AllInstancesResult) => {
-            const { results } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
-            callback(results as T[]);
-        };
-
-        this.currentSubscription.onResult(processResults);
-        const { results } = await this.ctor.instancesFromPrologResult(
-            this.perspective,
-            this.queryParams,
-            this.currentSubscription.result
-        );
-        return results as T[];
-    }
+    this.currentSubscription.onResult(processResults);
+    const { results } = await this.ctor.instancesFromSurrealResult(
+      this.perspective,
+      this.queryParams,
+      this.currentSubscription.result
+    );
+    return results as T[];
   }
 
   /**
@@ -3222,19 +2932,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async count(): Promise<number> {
-    if (this.useSurrealDBFlag) {
-      const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
-      const result = await this.perspective.querySurrealDB(surrealQuery);
-      // Use instancesFromSurrealResult to apply JS-level filtering for advanced where conditions
-      // (e.g., gt, gte, lt, lte, between, contains on properties and author/timestamp)
-      // This ensures count() returns the same number as get().length
-      const { totalCount } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
-      return totalCount;
-    } else {
-      const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
-      const result = await this.perspective.infer(query);
-      return result?.[0]?.TotalCount || 0;
-    }
+    const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
+    const result = await this.perspective.querySurrealDB(surrealQuery);
+    const { totalCount } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
+    return totalCount;
   }
 
   /**
@@ -3269,37 +2970,22 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * Prolog subscriptions remain available via `.useSurrealDB(false)`.
    */
   async countSubscribe(callback: (count: number) => void): Promise<number> {
-    // Clean up any existing subscription
     this.dispose();
+    const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
+    this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
 
-    if (this.useSurrealDBFlag) {
-      const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
-      this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
+    const processResults = async (result: any) => {
+      const { totalCount } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
+      callback(totalCount);
+    };
 
-      const processResults = async (result: any) => {
-        const { totalCount } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
-        callback(totalCount);
-      };
-
-      this.currentSubscription.onResult(processResults);
-      const { totalCount } = await this.ctor.instancesFromSurrealResult(
-        this.perspective, 
-        this.queryParams, 
-        this.currentSubscription.result
-      );
-      return totalCount;
-    } else {
-      const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
-      this.currentSubscription = await this.perspective.subscribeInfer(query);
-
-      const processResults = async (result: any) => {
-        const newCount = result?.[0]?.TotalCount || 0;
-        callback(newCount);
-      };
-
-      this.currentSubscription.onResult(processResults);
-      return this.currentSubscription.result?.[0]?.TotalCount || 0;
-    }
+    this.currentSubscription.onResult(processResults);
+    const { totalCount } = await this.ctor.instancesFromSurrealResult(
+      this.perspective,
+      this.queryParams,
+      this.currentSubscription.result
+    );
+    return totalCount;
   }
 
   /**
@@ -3319,17 +3005,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async paginate(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    if (this.useSurrealDBFlag) {
-      const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, paginationQuery);
-      const result = await this.perspective.querySurrealDB(surrealQuery);
-      const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, result)) as ResultsWithTotalCount<T>;
-      return { results, totalCount, pageSize, pageNumber };
-    } else {
-      const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);
-      const result = await this.perspective.infer(prologQuery);
-      const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, result)) as ResultsWithTotalCount<T>;
-      return { results, totalCount, pageSize, pageNumber };
-    }
+    const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, paginationQuery);
+    const result = await this.perspective.querySurrealDB(surrealQuery);
+    const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, result)) as ResultsWithTotalCount<T>;
+    return { results, totalCount, pageSize, pageNumber };
   }
 
   /**
@@ -3370,35 +3049,18 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     pageNumber: number, 
     callback: (results: PaginationResult<T>) => void
   ): Promise<PaginationResult<T>> {
-    // Clean up any existing subscription
     this.dispose();
-
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
+    const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, paginationQuery);
+    this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
 
-    if (this.useSurrealDBFlag) {
-      const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, paginationQuery);
-      this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
+    const processResults = async (result: any) => {
+      const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, result)) as ResultsWithTotalCount<T>;
+      callback({ results, totalCount, pageSize, pageNumber });
+    };
 
-      const processResults = async (result: any) => {
-        const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, result)) as ResultsWithTotalCount<T>;
-        callback({ results, totalCount, pageSize, pageNumber });
-      };
-
-      this.currentSubscription.onResult(processResults);
-      const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, this.currentSubscription.result)) as ResultsWithTotalCount<T>;
-      return { results, totalCount, pageSize, pageNumber };
-    } else {
-      const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);
-      this.currentSubscription = await this.perspective.subscribeInfer(prologQuery);
-
-      const processResults = async (r: AllInstancesResult) => {
-        const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, r)) as ResultsWithTotalCount<T>;
-        callback({ results, totalCount, pageSize, pageNumber });
-      };
-
-      this.currentSubscription.onResult(processResults);
-      const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, this.currentSubscription.result)) as ResultsWithTotalCount<T>;
-      return { results, totalCount, pageSize, pageNumber };
-    }
+    this.currentSubscription.onResult(processResults);
+    const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, this.currentSubscription.result)) as ResultsWithTotalCount<T>;
+    return { results, totalCount, pageSize, pageNumber };
   }
 }
