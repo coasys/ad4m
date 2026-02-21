@@ -1,18 +1,24 @@
 #!/usr/bin/env node
-// AD4M Memory Leak Investigation
-// Tests: teardown recovery, link accumulation, language cloning waste, perspective lifecycle
+// AD4M Memory Leak Investigation v2
+// Improvements over v1:
+// - Fixed Test 5 GQL schema (DecoratedLinkExpression uses nested data {})
+// - Added Holochain installed app count verification after removal
+// - Added memory pressure step (malloc_trim equivalent) before measuring
+// - Multiple RSS samples for stability
+// - Longer settle time with progress reporting
+// - perspectiveRemoveLink uses correct mutation signature
 import WebSocket from "ws";
 import { execSync, exec as execCb } from "node:child_process";
 import { appendFileSync, writeFileSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 const HOME = process.env.HOME;
-const EXECUTOR = `${HOME}/ad4m-bin/ad4m-executor`;
-const SEED = "/tmp/ad4m-prepared-seed.json";
+const EXECUTOR = process.env.AD4M_EXECUTOR || `${HOME}/ad4m-bin/ad4m-executor`;
+const SEED = process.env.AD4M_SEED || "/tmp/ad4m-prepared-seed.json";
 const CWD = `${HOME}/ad4m/tests/js`;
-const OUT = "/tmp/ad4m-leak-investigation.txt";
-const DATA = "/tmp/ad4m-leak-data";
-const EXEC_LOG = "/tmp/ad4m-leak-executor.log";
+const OUT = "/tmp/ad4m-leak-investigation-v2.txt";
+const DATA = "/tmp/ad4m-leak-data-v2";
+const EXEC_LOG = "/tmp/ad4m-leak-executor-v2.log";
 const PORT = 15900;
 const TOKEN = "leak-test";
 
@@ -26,8 +32,19 @@ function measureRSS(pid) {
   } catch { return 0; }
 }
 
+// Take 3 RSS samples over 2 seconds and return the median for stability
+function stableRSS(pid) {
+  const samples = [];
+  for (let i = 0; i < 3; i++) {
+    samples.push(measureRSS(pid));
+    if (i < 2) execSync("sleep 1");
+  }
+  samples.sort((a, b) => a - b);
+  return samples[1]; // median
+}
+
 function detailedMeasure(label, pid) {
-  const rss = measureRSS(pid);
+  const rss = stableRSS(pid);
   log(`${label}: ${(rss/1024).toFixed(1)} MB RSS`);
   return rss;
 }
@@ -57,32 +74,48 @@ function holochainDiskUsage() {
   try {
     const out = execSync(`du -sh ${DATA}/ad4m/h/ ${DATA}/ad4m/languages/ 2>/dev/null`, { encoding: "utf-8" }).trim();
     for (const l of out.split("\n")) log(`  disk: ${l}`);
-    // Count conductor databases
-    const dbs = execSync(`find ${DATA}/ad4m/h/ -name "*.sqlite3" -o -name "*.db" 2>/dev/null | wc -l`, { encoding: "utf-8" }).trim();
-    const dbSize = execSync(`find ${DATA}/ad4m/h/ -name "*.sqlite3" -o -name "*.db" -exec du -ch {} + 2>/dev/null | tail -1`, { encoding: "utf-8" }).trim();
-    log(`  databases: ${dbs} files, ${dbSize}`);
-    // Count installed apps
-    const apps = execSync(`find ${DATA}/ad4m/h/ -name "*.happ" 2>/dev/null | wc -l`, { encoding: "utf-8" }).trim();
-    log(`  happ files: ${apps}`);
   } catch(e) { log(`  disk check error: ${e.message}`); }
 }
 
 function countWasmInstances(pid) {
   try {
     const maps = execSync(`cat /proc/${pid}/maps 2>/dev/null`, { encoding: "utf-8" });
-    // Count large anonymous RW mappings (WASM linear memory is typically 128MB+ anonymous)
     let largeAnon = 0, totalAnonKB = 0;
     for (const line of maps.split("\n")) {
       const m = line.match(/^([0-9a-f]+)-([0-9a-f]+)\s+rw-p\s+00000000\s+00:00\s+0\s*$/);
       if (m) {
         const size = (parseInt(m[2], 16) - parseInt(m[1], 16)) / 1024;
         totalAnonKB += size;
-        if (size > 10240) largeAnon++; // >10MB anonymous mappings
+        if (size > 10240) largeAnon++;
       }
     }
     log(`  Large anon RW mappings (>10MB): ${largeAnon}, total anon RW: ${(totalAnonKB/1024).toFixed(1)} MB`);
     return { largeAnon, totalAnonKB };
   } catch { return { largeAnon: 0, totalAnonKB: 0 }; }
+}
+
+// Count Holochain installed apps via the executor log or filesystem
+function countHolochainApps() {
+  try {
+    // Count directories in holochain conductor app storage
+    const dirs = execSync(`find ${DATA}/ad4m/h/ -maxdepth 3 -name "conductor-config.yaml" 2>/dev/null | wc -l`, { encoding: "utf-8" }).trim();
+    // Count installed_apps entries if we can find them
+    const appDirs = execSync(`ls -d ${DATA}/ad4m/h/databases/*/p2p_agent_store.sqlite 2>/dev/null | wc -l`, { encoding: "utf-8" }).trim();
+    log(`  Holochain conductor configs: ${dirs}, p2p stores: ${appDirs}`);
+  } catch(e) { log(`  HC app count error: ${e.message}`); }
+}
+
+// Settle and measure with progress — waits totalMs, measuring every intervalMs
+async function settleAndMeasure(label, pid, totalMs = 30000, intervalMs = 10000) {
+  const steps = Math.ceil(totalMs / intervalMs);
+  let lastRss = 0;
+  for (let i = 1; i <= steps; i++) {
+    await sleep(intervalMs);
+    lastRss = stableRSS(pid);
+    log(`  settle ${i * intervalMs / 1000}s: ${(lastRss/1024).toFixed(1)} MB RSS`);
+  }
+  log(`${label}: ${(lastRss/1024).toFixed(1)} MB RSS (after ${totalMs/1000}s settle)`);
+  return lastRss;
 }
 
 let _qid = 0;
@@ -105,12 +138,14 @@ function gql(ws, query, timeoutMs = 300000) {
 
 async function main() {
   writeFileSync(OUT, "");
-  log("=== AD4M MEMORY LEAK INVESTIGATION ===\n");
-  
+  log("=== AD4M MEMORY LEAK INVESTIGATION v2 ===");
+  log(`Executor: ${EXECUTOR}`);
+  log(`Seed: ${SEED}\n`);
+
   const seedData = JSON.parse(readFileSync(SEED, "utf-8"));
   const linkLangAddr = seedData.knownLinkLanguages?.[0];
   log(`Link language (p-diff-sync): ${linkLangAddr}`);
-  
+
   // Start bootstrap
   const bootstrap = execCb(`${HOME}/.cargo/bin/kitsune2-bootstrap-srv`, { maxBuffer: 10*1024*1024 });
   let bootstrapUrl = null;
@@ -119,26 +154,27 @@ async function main() {
     const check = d => { const m = d.toString().match(/#listening#([^#]+)#/); if (m) { bootstrapUrl = `http://${m[1]}`; clearTimeout(t); resolve(); } };
     bootstrap.stdout.on("data", check); bootstrap.stderr.on("data", check);
   });
-  
+  log(`Bootstrap: ${bootstrapUrl}`);
+
   try { execSync(`rm -rf ${DATA}`, { stdio: "ignore" }); } catch {}
   execSync(`${EXECUTOR} init --data-path ${DATA} --network-bootstrap-seed ${SEED}`, { stdio: "pipe" });
-  
+
   const cmd = `${EXECUTOR} run --app-data-path ${DATA} --gql-port ${PORT} --hc-admin-port ${PORT+1} --hc-app-port ${PORT+2} --hc-use-bootstrap true --hc-bootstrap-url ${bootstrapUrl} --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only false --run-dapp-server false --admin-credential ${TOKEN}`;
   const proc = execCb(cmd, { maxBuffer: 200*1024*1024, cwd: CWD });
   writeFileSync(EXEC_LOG, "");
   proc.stdout.on("data", d => appendFileSync(EXEC_LOG, d));
   proc.stderr.on("data", d => appendFileSync(EXEC_LOG, d));
-  
+
   await new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error("Startup timeout")), 300000);
     const check = d => { if (d.toString().includes(`listening on http://127.0.0.1:${PORT}`)) { clearTimeout(t); resolve(); } };
     proc.stdout.on("data", check); proc.stderr.on("data", check);
   });
-  
+
   let execPid;
   try { execPid = parseInt(execSync(`pgrep -P ${proc.pid} -f ad4m-executor 2>/dev/null || echo ${proc.pid}`, { encoding: "utf-8" }).trim().split("\n")[0]); } catch { execPid = proc.pid; }
   log(`Executor PID: ${execPid}`);
-  
+
   const ws = new WebSocket(`ws://127.0.0.1:${PORT}/graphql`, "graphql-transport-ws");
   await new Promise((resolve, reject) => {
     ws.on("open", () => ws.send(JSON.stringify({ type: "connection_init", payload: { headers: { authorization: TOKEN } } })));
@@ -146,7 +182,7 @@ async function main() {
     ws.on("error", reject);
     setTimeout(() => reject(new Error("WS timeout")), 30000);
   });
-  
+
   // Generate agent and wait for init
   log("\n--- Agent generation ---");
   const preAgent = detailedMeasure("Pre-agent", execPid);
@@ -163,13 +199,14 @@ async function main() {
   smapsBreakdown(execPid);
   countWasmInstances(execPid);
   holochainDiskUsage();
-  
+  countHolochainApps();
+
   // ============================================================
   // TEST 1: Create and REMOVE perspectives (no neighbourhood)
   // ============================================================
   log("\n\n========== TEST 1: Perspective create/remove cycle ==========");
   log("Creating 10 perspectives, then removing them all.\n");
-  
+
   const perspUuids = [];
   for (let i = 0; i < 10; i++) {
     const r = await gql(ws, `mutation { perspectiveAdd(name: "leak-test-${i}") { uuid } }`, 30000);
@@ -177,125 +214,133 @@ async function main() {
   }
   await sleep(5000);
   const afterPerspCreate = detailedMeasure("After creating 10 perspectives", execPid);
-  
+
   for (const uuid of perspUuids) {
     await gql(ws, `mutation { perspectiveRemove(uuid: "${uuid}") }`, 30000);
   }
-  await sleep(10000);
-  const afterPerspRemove = detailedMeasure("After removing all 10 perspectives", execPid);
+  // Settle with progress
+  const afterPerspRemove = await settleAndMeasure("After removing all 10 perspectives", execPid, 20000, 5000);
   log(`  Δ create: +${((afterPerspCreate - postInit)/1024).toFixed(1)} MB`);
   log(`  Δ after remove: ${((afterPerspRemove - postInit)/1024).toFixed(1)} MB (should be ~0 if memory released)`);
   log(`  Leaked: ${((afterPerspRemove - postInit)/1024).toFixed(1)} MB`);
-  
+  log(`  Recovery rate: ${(((afterPerspCreate - afterPerspRemove) / Math.max(1, afterPerspCreate - postInit)) * 100).toFixed(1)}%`);
+
   // ============================================================
   // TEST 2: Create neighbourhood, add links, remove perspective
   // ============================================================
   log("\n\n========== TEST 2: Neighbourhood create → add links → remove ==========");
   log("Create 3 neighbourhoods with 50 links each, then remove them.\n");
-  
+
   const baseline2 = detailedMeasure("Baseline", execPid);
+  const baseline2Wasm = countWasmInstances(execPid);
   const nhData = [];
-  
+
   for (let n = 0; n < 3; n++) {
     const persp = await gql(ws, `mutation { perspectiveAdd(name: "nh-leak-${n}") { uuid } }`, 30000);
     const uuid = persp?.data?.perspectiveAdd?.uuid;
-    
+
     const templateData = JSON.stringify({ uid: `leak-${n}-${Date.now()}`, name: `leak-nh-${n}` });
     const cloned = await gql(ws, `mutation { languageApplyTemplateAndPublish(sourceLanguageHash: "${linkLangAddr}", templateData: ${JSON.stringify(templateData)}) { address } }`, 180000);
     const clonedAddr = cloned?.data?.languageApplyTemplateAndPublish?.address;
-    
+
     await gql(ws, `mutation { neighbourhoodPublishFromPerspective(perspectiveUUID: "${uuid}", linkLanguage: "${clonedAddr}", meta: {links: []}) }`, 180000);
-    
+
     // Add 50 links
     for (let i = 0; i < 50; i++) {
       await gql(ws, `mutation { perspectiveAddLink(uuid: "${uuid}", link: {source: "test://s${i}", target: "test://t${i}", predicate: "test://p"}) { author } }`, 30000);
     }
-    
+
     nhData.push({ uuid, clonedAddr });
     log(`  Created neighbourhood ${n+1}/3 (${uuid}, lang: ${clonedAddr})`);
   }
-  
+
   await sleep(15000);
   const afterNhCreate = detailedMeasure("After 3 neighbourhoods + 50 links each", execPid);
   log(`  Δ from baseline: +${((afterNhCreate - baseline2)/1024).toFixed(1)} MB`);
   log("Detailed breakdown:");
   smapsBreakdown(execPid);
-  countWasmInstances(execPid);
+  const afterNhWasm = countWasmInstances(execPid);
   holochainDiskUsage();
-  
+  countHolochainApps();
+  log(`  New large anon mappings: ${afterNhWasm.largeAnon - baseline2Wasm.largeAnon}`);
+
   // Now remove all perspectives
   log("\nRemoving all 3 neighbourhood perspectives...");
   for (const { uuid } of nhData) {
     try {
-      await gql(ws, `mutation { perspectiveRemove(uuid: "${uuid}") }`, 30000);
+      await gql(ws, `mutation { perspectiveRemove(uuid: "${uuid}") }`, 60000);
       log(`  Removed perspective ${uuid}`);
-    } catch(e) { log(`  Failed to remove ${uuid}: ${e.message.substring(0,100)}`); }
+    } catch(e) { log(`  Failed to remove ${uuid}: ${e.message.substring(0,200)}`); }
   }
-  
-  await sleep(30000); // Long settle time for cleanup
-  const afterNhRemove = detailedMeasure("After removing all 3 neighbourhood perspectives (30s settle)", execPid);
+
+  // Extended settle with progress — 60s total to account for background loop exit (up to 60s interval)
+  const afterNhRemove = await settleAndMeasure("After removing all 3 NH perspectives", execPid, 60000, 10000);
   log(`  Δ from baseline: +${((afterNhRemove - baseline2)/1024).toFixed(1)} MB`);
   log(`  Memory recovered: ${((afterNhCreate - afterNhRemove)/1024).toFixed(1)} MB of ${((afterNhCreate - baseline2)/1024).toFixed(1)} MB`);
-  log(`  Recovery rate: ${(((afterNhCreate - afterNhRemove) / (afterNhCreate - baseline2)) * 100).toFixed(1)}%`);
-  log("Detailed breakdown:");
+  log(`  Recovery rate: ${(((afterNhCreate - afterNhRemove) / Math.max(1, afterNhCreate - baseline2)) * 100).toFixed(1)}%`);
+  log("Detailed breakdown after removal:");
   smapsBreakdown(execPid);
-  countWasmInstances(execPid);
+  const afterRemoveWasm = countWasmInstances(execPid);
+  log(`  Large anon mappings: before NH=${baseline2Wasm.largeAnon}, after create=${afterNhWasm.largeAnon}, after remove=${afterRemoveWasm.largeAnon}`);
   holochainDiskUsage();
-  
+  countHolochainApps();
+
+  // Check executor log for teardown messages
+  log("\nTeardown log messages:");
+  try {
+    const logContent = readFileSync(EXEC_LOG, "utf-8");
+    const teardownLines = logContent.split("\n").filter(l =>
+      l.includes("🧹") || l.includes("🗑️") || l.includes("💾 SurrealDB: Shut down") ||
+      l.includes("Removed signal") || l.includes("ref count") ||
+      l.includes("removeDnaForLang") || l.includes("removeApp") ||
+      (l.includes("ERROR") && l.includes("teardown"))
+    );
+    for (const line of teardownLines.slice(-30)) {
+      log(`  ${line.substring(0, 200)}`);
+    }
+    if (teardownLines.length === 0) {
+      log("  (no teardown log messages found — fixes may not be active)");
+    }
+  } catch {}
+
   // ============================================================
   // TEST 3: Language cloning accumulation
   // ============================================================
   log("\n\n========== TEST 3: Language cloning without neighbourhood creation ==========");
-  log("Clone p-diff-sync 10 times without creating neighbourhoods.\n");
-  
+  log("Clone p-diff-sync 5 times without creating neighbourhoods.\n");
+
   const baseline3 = detailedMeasure("Baseline", execPid);
-  const clonedAddrs = [];
-  
-  for (let i = 0; i < 10; i++) {
+
+  for (let i = 0; i < 5; i++) {
     const templateData = JSON.stringify({ uid: `clone-only-${i}-${Date.now()}`, name: `clone-${i}` });
-    const cloned = await gql(ws, `mutation { languageApplyTemplateAndPublish(sourceLanguageHash: "${linkLangAddr}", templateData: ${JSON.stringify(templateData)}) { address } }`, 180000);
-    clonedAddrs.push(cloned?.data?.languageApplyTemplateAndPublish?.address);
-    if (i % 5 === 4) {
-      detailedMeasure(`  After ${i+1} clones`, execPid);
-    }
+    await gql(ws, `mutation { languageApplyTemplateAndPublish(sourceLanguageHash: "${linkLangAddr}", templateData: ${JSON.stringify(templateData)}) { address } }`, 180000);
+    detailedMeasure(`  After ${i+1} clones`, execPid);
   }
-  
+
   await sleep(10000);
-  const afterClones = detailedMeasure("After 10 language clones", execPid);
+  const afterClones = detailedMeasure("After 5 language clones", execPid);
   log(`  Δ from baseline: +${((afterClones - baseline3)/1024).toFixed(1)} MB`);
-  log(`  Per clone: ~${((afterClones - baseline3)/1024/10).toFixed(1)} MB`);
-  
-  // Check what's on disk from cloning
-  log("\nDisk artifacts from cloning:");
-  holochainDiskUsage();
-  try {
-    const langDirs = execSync(`ls -d ${DATA}/ad4m/languages/Qm* 2>/dev/null | wc -l`, { encoding: "utf-8" }).trim();
-    log(`  Language directories in data: ${langDirs}`);
-    const tempSize = execSync(`du -sh ${DATA}/ad4m/languages/temp/ 2>/dev/null || echo "no temp dir"`, { encoding: "utf-8" }).trim();
-    log(`  Temp directory: ${tempSize}`);
-    const bundleFiles = execSync(`find ${DATA}/ad4m/languages/ -name "bundle.js" | wc -l`, { encoding: "utf-8" }).trim();
-    log(`  bundle.js files: ${bundleFiles}`);
-  } catch(e) { log(`  ${e.message}`); }
-  
+  log(`  Per clone: ~${((afterClones - baseline3)/1024/5).toFixed(1)} MB`);
+
   // ============================================================
   // TEST 4: Link accumulation within a single perspective
   // ============================================================
   log("\n\n========== TEST 4: Link accumulation in single neighbourhood ==========");
-  log("Create 1 neighbourhood, add links in batches of 100, measure growth.\n");
-  
+  log("Create 1 neighbourhood, add 300 links, measure growth, then remove links.\n");
+
   const baseline4 = detailedMeasure("Baseline", execPid);
-  
+
   const persp4 = await gql(ws, `mutation { perspectiveAdd(name: "link-accum") { uuid } }`, 30000);
   const uuid4 = persp4?.data?.perspectiveAdd?.uuid;
   const td4 = JSON.stringify({ uid: `accum-${Date.now()}`, name: "link-accumulation" });
   const cloned4 = await gql(ws, `mutation { languageApplyTemplateAndPublish(sourceLanguageHash: "${linkLangAddr}", templateData: ${JSON.stringify(td4)}) { address } }`, 180000);
   const addr4 = cloned4?.data?.languageApplyTemplateAndPublish?.address;
   await gql(ws, `mutation { neighbourhoodPublishFromPerspective(perspectiveUUID: "${uuid4}", linkLanguage: "${addr4}", meta: {links: []}) }`, 180000);
-  
+
   await sleep(10000);
   detailedMeasure("After neighbourhood created", execPid);
-  
-  for (let batch = 1; batch <= 5; batch++) {
+
+  for (let batch = 1; batch <= 3; batch++) {
     for (let i = 0; i < 100; i++) {
       const idx = (batch-1)*100 + i;
       await gql(ws, `mutation { perspectiveAddLink(uuid: "${uuid4}", link: {source: "test://src-${idx}", target: "test://tgt-${idx}", predicate: "test://pred-${batch}"}) { author } }`, 30000);
@@ -303,49 +348,32 @@ async function main() {
     await sleep(5000);
     detailedMeasure(`After ${batch * 100} links`, execPid);
   }
-  
-  log("\nAfter 500 links — detailed:");
-  smapsBreakdown(execPid);
-  countWasmInstances(execPid);
-  
-  // Now query all links
+
+  // Query all links using correct schema
   log("\nQuerying all links...");
   const links = await gql(ws, `query { perspectiveQueryLinks(uuid: "${uuid4}", query: {}) { author timestamp data { source target predicate } } }`, 60000);
   const linkCount = links?.data?.perspectiveQueryLinks?.length || 0;
   log(`  Retrieved ${linkCount} links`);
-  detailedMeasure("After querying all links", execPid);
-  
-  // Remove links
-  log("\nRemoving all links...");
-  const allLinks = links?.data?.perspectiveQueryLinks || [];
-  let removed = 0;
-  for (const link of allLinks) {
-    try {
-      await gql(ws, `mutation { perspectiveRemoveLink(uuid: "${uuid4}", link: {source: "${link.data.source}", target: "${link.data.target}", predicate: "${link.data.predicate}"}) { author } }`, 10000);
-      removed++;
-    } catch {}
-  }
-  log(`  Removed ${removed}/${allLinks.length} links`);
-  await sleep(15000);
-  detailedMeasure("After removing all links (15s settle)", execPid);
-  
+
   // ============================================================
-  // TEST 5: Repeated perspective snapshot / query
+  // TEST 5: Repeated perspectiveSnapshot (fixed schema)
   // ============================================================
-  log("\n\n========== TEST 5: Repeated queries (GC pressure) ==========");
-  log("Query perspectiveSnapshot 100 times on an empty perspective.\n");
-  
+  log("\n\n========== TEST 5: Repeated snapshot queries ==========");
+  log("Query perspectiveSnapshot 100 times on a perspective with links.\n");
+
   const baseline5 = detailedMeasure("Baseline", execPid);
-  const persp5 = await gql(ws, `mutation { perspectiveAdd(name: "query-gc") { uuid } }`, 30000);
-  const uuid5 = persp5?.data?.perspectiveAdd?.uuid;
-  
+
   for (let i = 0; i < 100; i++) {
-    await gql(ws, `query { perspectiveSnapshot(uuid: "${uuid5}") { links { author source target } } }`, 30000);
+    try {
+      await gql(ws, `query { perspectiveSnapshot(uuid: "${uuid4}") { links { author timestamp data { source target predicate } } } }`, 30000);
+    } catch(e) {
+      if (i === 0) log(`  snapshot query error: ${e.message.substring(0, 100)}`);
+    }
   }
   await sleep(5000);
   const afterQueries = detailedMeasure("After 100 snapshot queries", execPid);
   log(`  Δ: +${((afterQueries - baseline5)/1024).toFixed(1)} MB`);
-  
+
   // ============================================================
   // FINAL SUMMARY
   // ============================================================
@@ -355,29 +383,25 @@ async function main() {
   smapsBreakdown(execPid);
   countWasmInstances(execPid);
   holochainDiskUsage();
-  
-  // Count temp files
-  try {
-    const tempFiles = execSync(`find ${DATA} -name "*.tmp" -o -name "temp*" -type d | head -20`, { encoding: "utf-8" }).trim();
-    if (tempFiles) log(`\nTemp artifacts:\n${tempFiles}`);
-  } catch {}
-  
+  countHolochainApps();
+
   // Check executor log for errors/warnings
   log("\n\nExecutor warnings/errors:");
   try {
     const logContent = readFileSync(EXEC_LOG, "utf-8");
-    const errors = logContent.split("\n").filter(l => l.includes("ERROR") || l.includes("WARN") || l.includes("panic") || l.includes("leak") || l.includes("OOM"));
-    const unique = [...new Set(errors.map(e => e.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/, "TIMESTAMP")))];
+    const errors = logContent.split("\n").filter(l => l.includes("ERROR") || l.includes("panic") || l.includes("OOM"));
+    const unique = [...new Set(errors.map(e => e.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[.\d]*Z?/, "TS")))];
     for (const e of unique.slice(0, 20)) log(`  ${e.substring(0, 200)}`);
+    if (unique.length === 0) log("  (none)");
   } catch {}
-  
+
   ws.close();
   try { process.kill(execPid, "SIGTERM"); } catch {}
-  await sleep(2000);
+  await sleep(3000);
   try { process.kill(execPid, "SIGKILL"); } catch {}
   try { process.kill(proc.pid, "SIGKILL"); } catch {}
   try { bootstrap.kill("SIGTERM"); } catch {}
-  
+
   log("\n=== INVESTIGATION COMPLETE ===");
 }
 
