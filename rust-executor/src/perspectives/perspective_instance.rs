@@ -246,7 +246,48 @@ impl PerspectiveInstance {
     }
 
     pub async fn teardown_background_tasks(&self) {
+        // Signal all background loops to stop
         *self.is_teardown.lock().await = true;
+
+        let uuid = self.persisted.lock().await.uuid.clone();
+        log::info!("🧹 Tearing down perspective {}: starting resource cleanup", uuid);
+
+        // 1. Remove Prolog engine pools (main pool + notification pool)
+        let prolog_service = get_prolog_service().await;
+        if let Err(e) = prolog_service.remove_perspective_pool(uuid.clone()).await {
+            log::error!("Error removing Prolog pool for perspective {}: {:?}", uuid, e);
+        }
+        let notification_pool = notification_pool_name(&uuid);
+        if let Err(e) = prolog_service.remove_perspective_pool(notification_pool).await {
+            log::error!("Error removing notification Prolog pool for perspective {}: {:?}", uuid, e);
+        }
+
+        // 2. Shut down SurrealDB instance (drop all data and indexes)
+        if let Err(e) = self.surreal_service.shutdown().await {
+            log::error!("Error shutting down SurrealDB for perspective {}: {:?}", uuid, e);
+        }
+
+        // 3. If this is a neighbourhood, unload the link language (which uninstalls the Holochain hApp)
+        let handle = self.persisted.lock().await.clone();
+        if let Some(ref nh) = handle.neighbourhood {
+            let link_language_address = nh.data.link_language.clone();
+            log::info!("🧹 Perspective {} is a neighbourhood, removing link language: {}", uuid, link_language_address);
+            if let Err(e) = LanguageController::language_remove(link_language_address.clone()).await {
+                log::error!("Error unloading link language {} for perspective {}: {:?}", link_language_address, uuid, e);
+            }
+        }
+
+        // 4. Clear subscribed queries to release any held state
+        self.subscribed_queries.lock().await.clear();
+        self.surreal_subscribed_queries.lock().await.clear();
+
+        // 5. Clear batch store
+        self.batch_store.write().await.clear();
+
+        // 6. Clear the link language reference
+        *self.link_language.write().await = None;
+
+        log::info!("🧹 Perspective {} teardown complete", uuid);
     }
 
     /// Sync existing links from Prolog to SurrealDB

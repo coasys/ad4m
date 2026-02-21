@@ -118,6 +118,7 @@ impl HolochainService {
         let (sender, mut receiver) = mpsc::unbounded_channel::<HolochainServiceRequest>();
         let (stream_sender, stream_receiver) = mpsc::unbounded_channel::<Signal>();
         let (new_app_ids_sender, mut new_app_ids_receiver) = mpsc::unbounded_channel::<AppInfo>();
+        let (removed_app_ids_sender, mut removed_app_ids_receiver) = mpsc::unbounded_channel::<String>();
 
         let inteface = HolochainServiceInterface {
             sender,
@@ -164,6 +165,11 @@ impl HolochainService {
                                 Some(new_app_id) = new_app_ids_receiver.recv() => {
                                     let sig_broadcasters = conductor_clone.subscribe_to_app_signals(new_app_id.installed_app_id.clone());
                                     streams.insert(new_app_id.installed_app_id.clone(), tokio_stream::wrappers::BroadcastStream::new(sig_broadcasters));
+                                }
+                                Some(removed_app_id) = removed_app_ids_receiver.recv() => {
+                                    // Clean up signal stream for removed app to prevent memory leak
+                                    streams.remove(&removed_app_id);
+                                    log::info!("🧹 Removed signal stream for uninstalled app: {}", removed_app_id);
                                 }
                                 // Add a gentle backoff when no signals are available to prevent busy-waiting
                                 _ = tokio::time::sleep(tokio::time::Duration::from_millis(1)) => {
@@ -215,11 +221,16 @@ impl HolochainService {
                                     }
                                 }
                                 HolochainServiceRequest::RemoveApp(app_id, response_tx) => {
+                                    let app_id_clone = app_id.clone();
                                     match timeout(
                                         std::time::Duration::from_secs(10),
                                         service.remove_app(app_id)
                                     ).await.map_err(|_| anyhow!("Timeout error; Remove App")) {
                                         Ok(result) => {
+                                            if result.is_ok() {
+                                                // Notify signal stream loop to clean up this app's stream
+                                                let _ = removed_app_ids_sender.send(app_id_clone);
+                                            }
                                             let _ = response_tx.send(HolochainServiceResponse::RemoveApp(result));
                                         },
                                         Err(err) => {
