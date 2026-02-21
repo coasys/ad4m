@@ -20,7 +20,6 @@ export * from "./perspectives/PerspectiveDiff";
 export * from "./perspectives/LinkQuery";
 export * from "./SmartLiteral";
 export * from "./model/decorators";
-export * from "./model/Subject";
 export * from "./model/prolog";
 export * from "./neighbourhood/Neighbourhood";
 export * from "./neighbourhood/NeighbourhoodProxy";
