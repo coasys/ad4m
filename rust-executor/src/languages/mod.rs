@@ -123,4 +123,35 @@ impl LanguageController {
             Ok(None)
         }
     }
+
+    /// Remove a language from the JS LanguageController.
+    /// This calls `core.languageController.languageRemove(address)` which:
+    /// - Tears down any intervals the language has running
+    /// - Removes the language from the #languages Map
+    /// - Removes the language constructor from #languageConstructors
+    /// - Calls HolochainService.removeDnaForLang() to uninstall the hApp
+    /// - Deletes language files from disk
+    pub async fn language_remove(address: Address) -> Result<(), AnyError> {
+        Self::global_instance()
+            .js_core
+            .execute("await core.waitForLanguages()".into())
+            .await?;
+
+        let script = format!(
+            r#"await core.languageController.languageRemove("{}")"#,
+            address,
+        );
+        let mut js = Self::global_instance().js_core;
+        match js.execute(script).await {
+            Ok(_) => {
+                log::info!("🗑️ Successfully removed language: {}", address);
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("⚠️ Error removing language {}: {:?}", address, e);
+                // Don't propagate - language may already be removed or never loaded
+                Ok(())
+            }
+        }
+    }
 }

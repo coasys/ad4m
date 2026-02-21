@@ -239,6 +239,13 @@ export default class HolochainService {
     }
 
     async removeDnaForLang(lang: string) {
+        // Clean up signal callbacks for this language before removing the app
+        const before = this.#signalCallbacks.length;
+        this.#signalCallbacks = this.#signalCallbacks.filter(e => e[2] !== lang);
+        const removed = before - this.#signalCallbacks.length;
+        if (removed > 0) {
+            console.log(`Removed ${removed} signal callback(s) for language ${lang}`);
+        }
         await HOLOCHAIN_SERVICE.removeApp(lang);
     }
 

@@ -66,7 +66,7 @@ impl PrologService {
         Ok(())
     }
 
-    pub async fn _remove_perspective_pool(&self, perspective_id: String) -> Result<(), Error> {
+    pub async fn remove_perspective_pool(&self, perspective_id: String) -> Result<(), Error> {
         let mut pools = self.engine_pools.write().await;
         if let Some(pool) = pools.remove(&perspective_id) {
             pool._drop_all().await?;
@@ -435,7 +435,7 @@ mod prolog_test {
 
         // Test pool removal
         assert!(service
-            ._remove_perspective_pool(perspective_id.clone())
+            .remove_perspective_pool(perspective_id.clone())
             .await
             .is_ok());
         assert!(!service.has_perspective_pool(perspective_id.clone()).await);
