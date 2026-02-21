@@ -145,6 +145,67 @@ jobs:
         asset_content_type: application/octet-stream
 
   # ============================================================================
+  # Linux CUDA Binary Build - Uses CUDA Docker container
+  # ============================================================================
+  build-launcher-binary-linux-cuda:
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest
+
+    needs:
+      - create-release
+
+    steps:
+    - name: Fetch source code
+      uses: actions/checkout@v3
+
+    - name: Extract version
+      id: extract_version
+      uses: Saionaro/extract-package-version@v1.1.1
+      with:
+        path: ui
+
+    - name: Verify Rust toolchain
+      run: rustc --version && cargo --version && rustup target list --installed | grep wasm
+
+    - name: Verify CUDA
+      run: nvcc --version
+
+    - name: pnpm Install
+      run: pnpm install --no-frozen-lockfile
+
+    - name: Install core dependencies
+      run: cd ./core && pnpm install --no-frozen-lockfile
+
+    - name: Build AD4M-CLI
+      run: pnpm build-libs
+
+    - name: Build Launcher binary with CUDA
+      run: pnpm run package-ad4m:cuda
+
+    - name: Upload Release AppImage CUDA Asset
+      id: upload-release-appimage-cuda-asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: target/release/bundle/appimage/ADAM Launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
+        asset_name: ADAM.Launcher_${{ steps.extract_version.outputs.version }}_amd64_CUDA.AppImage
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M CLI executor Linux CUDA Binary
+      id: upload-release-linux-ad4m-cli-executor-cuda-binary
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: target/release/ad4m-executor
+        asset_name: ad4m-cli-executor-linux-${{ steps.extract_version.outputs.version }}-x64-CUDA
+        asset_content_type: application/octet-stream
+
+  # ============================================================================
   # macOS Binary Build - Uses aggressive caching (Docker not available on macOS)
   # ============================================================================
   build-launcher-binary-macos:

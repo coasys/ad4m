@@ -85,4 +85,17 @@ ENV PATH="/home/circleci/.cargo/bin:/home/circleci/.deno/bin:/home/circleci/.npm
 # We need killall for the CLI tests
 USER root
 RUN apt-get update && apt-get install psmisc
+
+# Install CUDA toolkit (for --features cuda builds)
+RUN apt-get install -y gnupg2 && \
+    wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb && \
+    dpkg -i cuda-keyring_1.1-1_all.deb && \
+    rm cuda-keyring_1.1-1_all.deb && \
+    apt-get update && \
+    apt-get install -y cuda-toolkit-12-5 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/usr/local/cuda-12.5/bin:$PATH"
+ENV LD_LIBRARY_PATH="/usr/local/cuda-12.5/lib64:$LD_LIBRARY_PATH"
+
 USER circleci
