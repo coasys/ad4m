@@ -514,17 +514,9 @@ impl SurrealDBService {
     /// Drops all data (nodes, links, indexes) so the in-memory database can be reclaimed.
     /// The Surreal<Db> itself will be dropped when all Arc references are released.
     pub async fn shutdown(&self) -> Result<(), Error> {
-        // Delete all data from both tables
-        self.db.query("DELETE FROM link").await.ok();
-        self.db.query("DELETE FROM node").await.ok();
-        // Remove indexes and function definitions to free memory
-        self.db.query("REMOVE INDEX IF EXISTS idx_link_source ON TABLE link").await.ok();
-        self.db.query("REMOVE INDEX IF EXISTS idx_link_target ON TABLE link").await.ok();
-        self.db.query("REMOVE INDEX IF EXISTS idx_link_predicate ON TABLE link").await.ok();
-        self.db.query("REMOVE INDEX IF EXISTS idx_link_author ON TABLE link").await.ok();
-        self.db.query("REMOVE INDEX IF EXISTS idx_link_timestamp ON TABLE link").await.ok();
-        self.db.query("REMOVE INDEX IF EXISTS idx_link_status ON TABLE link").await.ok();
-        self.db.query("REMOVE INDEX IF EXISTS idx_node_uri ON TABLE node").await.ok();
+        // SurrealDB uses in-memory storage (Surreal::new::<Mem>), so data is not persistent.
+        // Just log the shutdown — the Arc<Surreal<Db>> will be dropped when all references
+        // are released, freeing the in-memory data automatically.
         log::info!("💾 SurrealDB: Shut down perspective database");
         Ok(())
     }

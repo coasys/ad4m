@@ -77,7 +77,6 @@ const loadModule = async (modulePath: string) => {
 export default class LanguageController {
     #languages: Map<string, Language>
     #languageConstructors: Map<string, (context: LanguageContext)=>Language>
-    #languageRefCounts: Map<string, number>
     #context: object;
     #linkObservers: LinkObservers[];
     #telepresenceSignalObservers: TelepresenceSignalObserver[];
@@ -102,7 +101,6 @@ export default class LanguageController {
             interactions() { return [] },
         } as Language)
         this.#languageConstructors = new Map()
-        this.#languageRefCounts = new Map()
         this.#linkObservers = []
         this.#telepresenceSignalObservers = []
         this.#syncStateChangeObservers = []
@@ -469,28 +467,6 @@ export default class LanguageController {
             // throw Error(`Error loading language [${sourcePath}]: ${e.toString()}`)
         }
     }
-
-    /// Add a reference to a language (called when a perspective starts using it)
-    languageAddRef(address: string): void {
-        const count = this.#languageRefCounts.get(address) || 0;
-        this.#languageRefCounts.set(address, count + 1);
-        console.log(`Language ${address}: ref count increased to ${count + 1}`);
-    }
-
-    /// Release a reference to a language (called during perspective teardown)
-    /// When ref count reaches 0, the language is removed
-    async languageReleaseRef(address: string): Promise<void> {
-        const count = this.#languageRefCounts.get(address) || 0;
-        if (count <= 1) {
-            this.#languageRefCounts.delete(address);
-            console.log(`Language ${address}: ref count reached 0, removing language`);
-            await this.languageRemove(address);
-        } else {
-            this.#languageRefCounts.set(address, count - 1);
-            console.log(`Language ${address}: ref count decreased to ${count - 1}`);
-        }
-    }
-
     async languageRemove(hash: String): Promise<void> {
         //Teardown any intervals the language has running
         const language = this.#languages.get(hash as string);
