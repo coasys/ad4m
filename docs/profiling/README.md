@@ -4,37 +4,66 @@ Profiling of the AD4M executor's memory usage during neighbourhood operations, a
 
 ## Results
 
-- **[Profiling Results](profiling-results-2026-02-21.md)** — Baseline memory measurements, per-neighbourhood growth (~78 MB each), scaling projections
+- **[Profiling Results](profiling-results-2026-02-21.md)** — Baseline memory measurements, per-neighbourhood growth (~140 MB each), scaling projections
 - **[Leak Investigation](leak-investigation-2026-02-21.md)** — Memory recovery tests showing 0% memory freed on neighbourhood/perspective teardown
 
 ## Key Findings
 
-1. **Neighbourhood teardown leaks 100% of allocated memory.** `perspectiveRemove` does not uninstall Holochain hApps or free WASM runtimes. 3 neighbourhoods allocated 416 MB; removing all 3 recovered 0 MB.
-2. **Each neighbourhood costs ~78 MB** (Wasmer WASM linear memory + Holochain conductor state).
-3. **Bare perspectives leak ~2.4 MB each** on create/remove.
-4. **Language cloning accumulates ~4.2 MB per clone** even when unused.
+### Root Cause: Holochain Conductor Memory Retention
+
+When a neighbourhood is created, the executor clones a link language, installs it as a Holochain app, and allocates ~140MB of anonymous mmap'd memory (wasmer WASM pages + LMDB environments). When the neighbourhood is removed:
+
+1. **AD4M-layer cleanup works correctly** — SurrealDB databases shut down, signal streams removed, languages cleaned up, Holochain apps uninstalled via `uninstall_app`
+2. **Holochain conductor does not release memory** — anonymous mmap'd regions persist, large allocation count remains unchanged, RSS shows 0.0% recovery even after 60s settling
+
+This was confirmed by comparing an unpatched binary (no cleanup) against a patched binary (full teardown) — both show identical 0% memory recovery, proving the leak is below the AD4M layer in the Holochain conductor's wasmer/LMDB memory management.
+
+### Comparison: Original vs Patched Binary
+
+| Metric | Original | Patched |
+|--------|----------|---------|
+| Post-init RSS | 747 MB | 768 MB |
+| 3 NHs + 50 links each | 1201 MB (+428) | 1224 MB (+430) |
+| After removing NHs (60s settle) | 1201 MB (0.0% recovery) | 1224 MB (0.0% recovery) |
+| Large anon mappings: before/create/remove | 25/50/50 | 25/53/52 |
+| Teardown logs firing | ❌ None | ✅ Full cleanup |
+| Language cloning cost | 9.4 MB/clone | 4.6 MB/clone |
+
+### Additional Findings
+
+1. **Bare perspectives leak ~2.6 MB each** on create/remove cycle (both binaries).
+2. **Language cloning cost halved** with the patch (9.4 → 4.6 MB/clone).
+3. **Snapshot queries do not leak** — 100 queries add <1 MB.
+4. **Link accumulation** — 300 links in a single neighbourhood adds ~30 MB.
 
 ## Reproduction
 
 ### Prerequisites
 - Ubuntu 22.04 (tested on x86_64, 32GB RAM)
-- AD4M v0.11.1 executor binary
-- `kitsune2-bootstrap-srv` (from cargo)
-- `hc` CLI for building bootstrap languages
+- AD4M executor binary (v0.11.1 or from this branch)
 - Node.js 18+
+- Bootstrap languages published or available as seed
 
-### Steps
-1. Build bootstrap languages from `bootstrap-languages/` using `hc` CLI
-2. Run `publish-langs.mjs` to publish languages and generate a prepared seed
-3. Fix `storagePath` in the seed to point to `<ad4m-repo>/tests/js/tst-tmp/languages/`
-4. Run `profiler-v9.mjs` or `leak-investigation.mjs` from `<ad4m-repo>/tests/js/` as CWD
+### Running the Leak Investigation
 
-### Scripts
-- **[publish-langs.mjs](publish-langs.mjs)** — Publishes bootstrap languages via the language-language
-- **[profiler-v9.mjs](profiler-v9.mjs)** — Memory profiling across neighbourhood creation
-- **[leak-investigation.mjs](leak-investigation.mjs)** — Create/destroy cycle tests for leak detection
+```bash
+# From the ad4m/tests/js directory
+node ../../docs/profiling/leak-investigation.mjs
+```
 
-## Environment
-- AD4M v0.11.1, Holochain 0.7.0-dev.10-coasys fork
-- Single agent, local bootstrap, no proxy/relay
-- Measured via `/proc/<pid>/smaps` (RSS, PSS, per-mapping breakdown)
+The script:
+1. Starts the executor with a prepared seed
+2. Runs 5 test phases: bare perspective cycles, neighbourhood create/remove, language cloning, link accumulation, and snapshot query stress
+3. Measures RSS via `/proc/<pid>/smaps_rollup` with detailed memory breakdowns
+4. Outputs per-test deltas and recovery rates
+
+### Code Fixes (this branch)
+
+The `fix: Implement memory leak fixes` commit adds:
+- **Perspective teardown** — proper cleanup of Prolog pools, SurrealDB, link languages, subscribed queries, batch stores
+- **Language removal** — Rust LanguageController calls JS `languageRemove()` during teardown
+- **Signal stream cleanup** — removes Holochain signal callbacks on language removal
+- **Language reference counting** — tracks usage to prevent premature removal
+- **SurrealDB shutdown** — drops perspective databases on teardown
+
+These fixes are necessary but not sufficient — the Holochain conductor memory retention remains an upstream issue.
