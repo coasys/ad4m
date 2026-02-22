@@ -134,10 +134,10 @@ rodio = "*"
 libc = "0.2"
 chat-gpt-lib-rs = { version = "0.5.1", git = "https://github.com/coasys/chat-gpt-lib-rs" }
 anyhow = "1.0.95"
+async-trait = "0.1"
 portpicker = "0.1.1"
 deno_error = "0.5.6"
 thiserror = "2.0.12"
-surrealdb = { version = "2.4", default-features = false, features = ["kv-mem", "scripting"] }
 surrealdb = { version = "2.4", default-features = false, features = ["kv-rocksdb", "kv-mem", "scripting"], optional = true }
 urlencoding = { version = "2", optional = true }
 wasmer = { version = "6.1.0", optional = true, features = ["sys", "cranelift"] }

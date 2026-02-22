@@ -9,7 +9,7 @@ use crate::{
     graphql::graphql_types::{DecoratedNeighbourhoodExpression, Neighbourhood},
     js_core::JsCoreHandle,
 };
-use language::Language;
+use language::{Language, LanguageBackend};
 
 lazy_static! {
     static ref LANGUAGE_CONTROLLER_INSTANCE: Arc<Mutex<Option<LanguageController>>> =
@@ -102,7 +102,25 @@ impl LanguageController {
         Ok(neighbourhood)
     }
 
-    pub async fn language_by_address(address: Address) -> Result<Option<Language>, AnyError> {
+    /// Look up a language by address, returning a boxed `LanguageBackend`.
+    ///
+    /// When the `wasm-languages` feature is enabled, this checks the WASM
+    /// registry first and falls back to the JS runtime.
+    pub async fn language_by_address(
+        address: Address,
+    ) -> Result<Option<Box<dyn LanguageBackend>>, AnyError> {
+        // Check WASM registry first (feature-gated)
+        #[cfg(feature = "wasm-languages")]
+        {
+            if crate::wasm_core::is_wasm_language(&address) {
+                let instance = crate::wasm_core::get_wasm_language(&address)
+                    .map_err(|e| deno_core::anyhow::anyhow!("{}", e))?;
+                let wasm_lang = language::wasm_backend::WasmLanguage::new(instance);
+                return Ok(Some(Box::new(wasm_lang)));
+            }
+        }
+
+        // Fall back to JS
         Self::global_instance()
             .js_core
             .execute("await core.waitForLanguages()".into())
@@ -118,20 +136,55 @@ impl LanguageController {
         let language_installed = serde_json::from_str::<bool>(&result)?;
         if language_installed {
             let language = Language::new(address, Self::global_instance().js_core.clone());
-            Ok(Some(language))
+            Ok(Some(Box::new(language)))
         } else {
             Ok(None)
         }
     }
 
+    /// Install a WASM language from a file path and return a boxed backend.
+    #[cfg(feature = "wasm-languages")]
+    pub fn install_wasm_language(
+        wasm_path: &std::path::Path,
+        address: &str,
+    ) -> Result<Box<dyn LanguageBackend>, AnyError> {
+        crate::wasm_core::register_wasm_language(wasm_path, address)
+            .map_err(|e| deno_core::anyhow::anyhow!("{}", e))?;
+        let instance = crate::wasm_core::get_wasm_language(address)
+            .map_err(|e| deno_core::anyhow::anyhow!("{}", e))?;
+        Ok(Box::new(language::wasm_backend::WasmLanguage::new(instance)))
+    }
+
+    /// Detect whether a language bundle file is WASM (magic bytes `\0asm`)
+    /// or JS, and return `true` if it is WASM.
+    #[cfg(feature = "wasm-languages")]
+    pub fn is_wasm_bundle(path: &std::path::Path) -> bool {
+        use std::io::Read;
+        let mut file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let mut magic = [0u8; 4];
+        if file.read_exact(&mut magic).is_err() {
+            return false;
+        }
+        // WebAssembly magic number: \0asm
+        magic == [0x00, 0x61, 0x73, 0x6D]
+    }
+
     /// Remove a language from the JS LanguageController.
-    /// This calls `core.languageController.languageRemove(address)` which:
-    /// - Tears down any intervals the language has running
-    /// - Removes the language from the #languages Map
-    /// - Removes the language constructor from #languageConstructors
-    /// - Calls HolochainService.removeDnaForLang() to uninstall the hApp
-    /// - Deletes language files from disk
     pub async fn language_remove(address: Address) -> Result<(), AnyError> {
+        // If it's a WASM language, unregister from WASM registry
+        #[cfg(feature = "wasm-languages")]
+        {
+            if crate::wasm_core::is_wasm_language(&address) {
+                crate::wasm_core::unregister_wasm_language(&address)
+                    .map_err(|e| deno_core::anyhow::anyhow!("{}", e))?;
+                log::info!("🗑️ Successfully removed WASM language: {}", address);
+                return Ok(());
+            }
+        }
+
         Self::global_instance()
             .js_core
             .execute("await core.waitForLanguages()".into())
@@ -149,7 +202,6 @@ impl LanguageController {
             }
             Err(e) => {
                 log::warn!("⚠️ Error removing language {}: {:?}", address, e);
-                // Don't propagate - language may already be removed or never loaded
                 Ok(())
             }
         }
