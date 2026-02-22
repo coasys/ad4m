@@ -1125,7 +1125,8 @@ impl AIService {
             // Parse language upfront and use canonical form for cache key
             let whisper_lang = if let Some(ref lang) = language {
                 Some(
-                    lang.parse::<WhisperLanguage>()
+                    lang.to_lowercase()
+                        .parse::<WhisperLanguage>()
                         .map_err(|_| anyhow::anyhow!("Unsupported whisper language: {}", lang))?,
                 )
             } else {
