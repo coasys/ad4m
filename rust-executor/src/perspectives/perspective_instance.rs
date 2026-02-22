@@ -177,7 +177,7 @@ pub struct PerspectiveInstance {
     is_teardown: Arc<Mutex<bool>>,
     sdna_change_mutex: Arc<Mutex<()>>,
     prolog_update_mutex: Arc<RwLock<()>>,
-    link_language: Arc<RwLock<Option<Arc<Mutex<dyn LanguageBackend>>>>>,
+    link_language: Arc<RwLock<Option<Arc<Mutex<Box<dyn LanguageBackend>>>>>>,
     trigger_notification_check: Arc<Mutex<bool>>,
     trigger_prolog_subscription_check: Arc<Mutex<bool>>,
     trigger_surreal_subscription_check: Arc<Mutex<bool>>,
