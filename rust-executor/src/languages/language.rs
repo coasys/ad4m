@@ -4,8 +4,33 @@ use crate::{
     graphql::graphql_types::{OnlineAgent, PerspectiveExpression},
     types::{Perspective, PerspectiveDiff},
 };
+use async_trait::async_trait;
 use base64::prelude::*;
 use deno_core::error::AnyError;
+
+/// Trait abstracting link-language backends (JS or WASM).
+/// All methods take `&mut self` so implementations can mutate internal state.
+#[async_trait]
+pub trait LanguageBackend: Send + Sync {
+    async fn sync(&mut self) -> Result<(), AnyError>;
+    async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<String>, AnyError>;
+    async fn current_revision(&mut self) -> Result<Option<String>, AnyError>;
+    async fn render(&mut self) -> Result<Option<Perspective>, AnyError>;
+    async fn others(&mut self) -> Result<Vec<String>, AnyError>;
+    async fn has_telepresence_adapter(&mut self) -> Result<bool, AnyError>;
+    async fn set_online_status(&mut self, status: PerspectiveExpression) -> Result<(), AnyError>;
+    async fn get_online_agents(&mut self) -> Result<Vec<OnlineAgent>, AnyError>;
+    async fn send_signal(
+        &mut self,
+        remote_agent_did: String,
+        payload: PerspectiveExpression,
+    ) -> Result<(), AnyError>;
+    async fn send_broadcast(&mut self, payload: PerspectiveExpression) -> Result<(), AnyError>;
+}
+
+// ---------------------------------------------------------------------------
+// JS (Deno) backend – the original `Language` implementation
+// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct Language {
@@ -22,6 +47,7 @@ fn parse_revision(js_result: String) -> Result<Option<String>, AnyError> {
         Ok(serde_json::from_str::<Option<String>>(&js_result)?)
     }
 }
+
 impl Language {
     pub fn new(address: String) -> Self {
         Self { address }
@@ -30,6 +56,7 @@ impl Language {
     pub fn address(&self) -> &str {
         &self.address
     }
+}
 
     pub async fn sync(&mut self) -> Result<(), AnyError> {
         let controller = LanguageController::global_instance();
@@ -117,7 +144,7 @@ impl Language {
         Ok(result.trim() == "true")
     }
 
-    pub async fn set_online_status(
+    async fn set_online_status(
         &mut self,
         status: PerspectiveExpression,
     ) -> Result<(), AnyError> {
@@ -151,7 +178,7 @@ impl Language {
         Ok(online_agents)
     }
 
-    pub async fn send_signal(
+    async fn send_signal(
         &mut self,
         remote_agent_did: String,
         payload: PerspectiveExpression,
@@ -207,5 +234,85 @@ impl Language {
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         log::debug!("set_local_agents result: {}", result);
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WASM backend
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "wasm-languages")]
+pub mod wasm_backend {
+    use super::*;
+    use crate::wasm_core::WasmLanguageInstance;
+    use std::sync::{Arc, Mutex};
+
+    /// WASM-based language backend wrapping a `WasmLanguageInstance`.
+    pub struct WasmLanguage {
+        instance: Arc<Mutex<WasmLanguageInstance>>,
+    }
+
+    impl WasmLanguage {
+        pub fn new(instance: Arc<Mutex<WasmLanguageInstance>>) -> Self {
+            Self { instance }
+        }
+    }
+
+    #[async_trait]
+    impl LanguageBackend for WasmLanguage {
+        async fn sync(&mut self) -> Result<(), AnyError> {
+            // WASM sync not yet implemented
+            Ok(())
+        }
+
+        async fn commit(&mut self, _diff: PerspectiveDiff) -> Result<Option<String>, AnyError> {
+            // WASM commit not yet implemented
+            Ok(None)
+        }
+
+        async fn current_revision(&mut self) -> Result<Option<String>, AnyError> {
+            // WASM current_revision not yet implemented
+            Ok(None)
+        }
+
+        async fn render(&mut self) -> Result<Option<Perspective>, AnyError> {
+            // WASM render not yet implemented
+            Ok(None)
+        }
+
+        async fn others(&mut self) -> Result<Vec<String>, AnyError> {
+            // WASM others not yet implemented
+            Ok(vec![])
+        }
+
+        async fn has_telepresence_adapter(&mut self) -> Result<bool, AnyError> {
+            Ok(false)
+        }
+
+        async fn set_online_status(
+            &mut self,
+            _status: PerspectiveExpression,
+        ) -> Result<(), AnyError> {
+            Ok(())
+        }
+
+        async fn get_online_agents(&mut self) -> Result<Vec<OnlineAgent>, AnyError> {
+            Ok(vec![])
+        }
+
+        async fn send_signal(
+            &mut self,
+            _remote_agent_did: String,
+            _payload: PerspectiveExpression,
+        ) -> Result<(), AnyError> {
+            Ok(())
+        }
+
+        async fn send_broadcast(
+            &mut self,
+            _payload: PerspectiveExpression,
+        ) -> Result<(), AnyError> {
+            Ok(())
+        }
     }
 }

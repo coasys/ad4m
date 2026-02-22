@@ -12,7 +12,7 @@ use crate::graphql::graphql_types::{
     PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter, PerspectiveState,
     PerspectiveStateFilter,
 };
-use crate::languages::language::Language;
+use crate::languages::language::LanguageBackend;
 use crate::languages::LanguageController;
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
 use crate::prolog_service::get_prolog_service;
@@ -182,7 +182,7 @@ pub struct PerspectiveInstance {
     is_teardown: Arc<Mutex<bool>>,
     sdna_change_mutex: Arc<Mutex<()>>,
     prolog_update_mutex: Arc<RwLock<()>>,
-    link_language: Arc<RwLock<Option<Language>>>,
+    link_language: Arc<RwLock<Option<Arc<Mutex<dyn LanguageBackend>>>>>,
     trigger_notification_check: Arc<Mutex<bool>>,
     trigger_prolog_subscription_check: Arc<Mutex<bool>>,
     trigger_surreal_subscription_check: Arc<Mutex<bool>>,
@@ -378,7 +378,7 @@ impl PerspectiveInstance {
 
                         {
                             let mut link_language_guard = self.link_language.write().await;
-                            *link_language_guard = Some(language);
+                            *link_language_guard = Some(Arc::new(Mutex::new(language)));
                         }
                         // Cache language→perspective mapping for fast signal routing
                         {
@@ -431,8 +431,9 @@ impl PerspectiveInstance {
                 link_language_guard.clone()
             };
 
-            if let Some(mut link_language) = link_language_clone {
-                match link_language.sync().await {
+            if let Some(link_language) = link_language_clone {
+                let mut ll = link_language.lock().await;
+                match ll.sync().await {
                     Ok(_) => {
                         // Transition to Synced state on successful sync
                         let _ = self
@@ -525,9 +526,10 @@ impl PerspectiveInstance {
                 link_language_guard.clone()
             };
 
-            if let Some(mut link_language) = link_language_clone {
+            if let Some(link_language) = link_language_clone {
+                let mut ll = link_language.lock().await;
                 log::info!("Committing {} pending diffs...", pending_ids.len());
-                let commit_result = link_language.commit(pending_diffs).await;
+                let commit_result = ll.commit(pending_diffs).await;
                 match commit_result {
                     Ok(Some(_)) => {
                         Ad4mDb::with_global_instance(|db| {
@@ -718,9 +720,10 @@ impl PerspectiveInstance {
                 link_language_guard.clone()
             };
 
-            if let Some(mut link_language) = link_language_clone {
+            if let Some(link_language) = link_language_clone {
+                let mut ll = link_language.lock().await;
                 // Got Link Language reference
-                if link_language.current_revision().await?.is_some() {
+                if ll.current_revision().await?.is_some() {
                     // Revision set, we are synced
                     // we are in a healthy Neighbourhood state and should be able to commit
                     // but let's make sure we're not DoS'ing the link language in bursts
@@ -728,7 +731,7 @@ impl PerspectiveInstance {
                         self.immediate_commits_remaining.lock().await;
                     if *immediate_commits_remaining > 0 {
                         *immediate_commits_remaining -= 1;
-                        link_language.commit(diff.clone()).await
+                        ll.commit(diff.clone()).await
                     } else {
                         Err(anyhow!("Debouncing commit burst"))
                     }
@@ -3077,8 +3080,9 @@ impl PerspectiveInstance {
 
     pub async fn has_telepresence_adapter(&self) -> bool {
         let link_language_clone = self.link_language.read().await.clone();
-        if let Some(mut link_language) = link_language_clone {
-            match link_language.has_telepresence_adapter().await {
+        if let Some(link_language) = link_language_clone {
+            let mut ll = link_language.lock().await;
+            match ll.has_telepresence_adapter().await {
                 Ok(result) => result,
                 Err(e) => {
                     log::error!("Error calling has_telepresence_adapter: {:?}", e);
@@ -3092,8 +3096,9 @@ impl PerspectiveInstance {
 
     pub async fn online_agents(&self) -> Result<Vec<OnlineAgent>, AnyError> {
         let link_language_clone = self.link_language.read().await.clone();
-        if let Some(mut link_language) = link_language_clone {
-            Ok(link_language
+        if let Some(link_language) = link_language_clone {
+            let mut ll = link_language.lock().await;
+            Ok(ll
                 .get_online_agents()
                 .await?
                 .into_iter()
@@ -3109,8 +3114,9 @@ impl PerspectiveInstance {
 
     pub async fn set_online_status(&self, status: PerspectiveExpression) -> Result<(), AnyError> {
         let link_language_clone = self.link_language.read().await.clone();
-        if let Some(mut link_language) = link_language_clone {
-            link_language.set_online_status(status).await
+        if let Some(link_language) = link_language_clone {
+            let mut ll = link_language.lock().await;
+            ll.set_online_status(status).await
         } else {
             Err(self.no_link_language_error().await)
         }
@@ -3299,8 +3305,9 @@ impl PerspectiveInstance {
 
         // Also send through link language for remote users
         let link_language_clone = self.link_language.read().await.clone();
-        if let Some(mut link_language) = link_language_clone {
-            link_language.send_broadcast(payload).await
+        if let Some(link_language) = link_language_clone {
+            let mut ll = link_language.lock().await;
+            ll.send_broadcast(payload).await
         } else {
             Err(self.no_link_language_error().await)
         }
