@@ -9,8 +9,6 @@ use deno_core::error::AnyError;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use crate::graphql::graphql_types::ExceptionInfo;
-use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
 use crate::runtime_service::RuntimeService;
 use crate::types::Address;
 use crate::{
@@ -140,6 +138,7 @@ impl LanguageController {
 
         // Load the language bundle module
         let bundle_path_str = bundle_path.to_string_lossy().to_string();
+        info!("Loading module for language {}", language_address);
         runtime_handle
             .load_module(bundle_path_str)
             .await
@@ -147,8 +146,10 @@ impl LanguageController {
                 address: language_address.clone(),
                 message: format!("Failed to load language module: {}", e),
             })?;
+        info!("Module loaded for language {}", language_address);
 
         // Initialize the language with context
+        info!("Calling load_language for {}", language_address);
         runtime_handle
             .load_language(language_context.to_json())
             .await
@@ -156,8 +157,10 @@ impl LanguageController {
                 address: language_address.clone(),
                 message: format!("Failed to initialize language: {}", e),
             })?;
+        info!("load_language completed for {}", language_address);
 
         // Register callbacks for adapters
+        info!("Registering callbacks for {}", language_address);
         runtime_handle
             .register_callbacks()
             .await
@@ -165,6 +168,7 @@ impl LanguageController {
                 address: language_address.clone(),
                 message: format!("Failed to register callbacks: {}", e),
             })?;
+        info!("Callbacks registered for {}", language_address);
 
         // Store the runtime handle
         let mut runtimes = self.runtimes.lock().await;
@@ -202,31 +206,68 @@ impl LanguageController {
 
     /// Execute a script on a specific language runtime
     ///
-    /// Uses dedicated per-language runtime with proper thread isolation.
-    /// Clones the handle so the runtimes lock is not held across the await.
+    /// First tries dedicated per-language Rust runtime with proper thread isolation.
+    /// Falls back to JS-side LanguageController for dynamically installed languages
+    /// that don't have their own Rust runtime.
     pub async fn execute_on_language(
         &self,
         language_address: &str,
         script: &str,
     ) -> Result<String, LanguageError> {
+        // Try Rust-side per-language runtime first
         let handle = {
             let runtimes = self.runtimes.lock().await;
-            runtimes
-                .get(language_address)
-                .ok_or_else(|| LanguageError::RuntimeError {
-                    address: language_address.to_string(),
-                    message: "Language not loaded".to_string(),
-                })?
-                .clone()
+            runtimes.get(language_address).cloned()
         };
 
-        handle
-            .execute(script.to_string())
+        if let Some(handle) = handle {
+            return handle
+                .execute(script.to_string())
+                .await
+                .map_err(|e| LanguageError::RuntimeError {
+                    address: language_address.to_string(),
+                    message: e,
+                });
+        }
+
+        // Fall back to JS-side execution for dynamically installed languages.
+        // The script references `language` as a bare variable, so we wrap it
+        // to get the language from the JS LanguageController first.
+        // Note: We wrap the script in parentheses for the return statement to
+        // avoid JavaScript ASI (automatic semicolon insertion) when the script
+        // starts with a newline.
+        let js_script = format!(
+            r#"
+            (async () => {{
+                const language = await core.languageController.languageByRef({{ address: "{}", name: "" }});
+                if (!language) {{
+                    throw new Error("Language not loaded on JS side: {}");
+                }}
+                return ({});
+            }})()
+            "#,
+            language_address, language_address, script
+        );
+
+        log::info!(
+            "execute_on_language JS fallback for {}: script = {}",
+            language_address,
+            &script[..script.len().min(200)]
+        );
+        let mut js_core = self.js_core.clone();
+        let result = js_core
+            .execute(js_script)
             .await
             .map_err(|e| LanguageError::RuntimeError {
                 address: language_address.to_string(),
-                message: e,
-            })
+                message: e.to_string(),
+            });
+        log::info!(
+            "execute_on_language JS fallback result for {}: {:?}",
+            language_address,
+            result.as_ref().map(|r| &r[..r.len().min(200)])
+        );
+        result
     }
 
     /// Calculate IPFS hash for a language bundle using the same algorithm as utils_extension::hash()
@@ -317,58 +358,70 @@ impl LanguageController {
         Ok((hash, bundle_path))
     }
 
-    /// Install a language from its address, fetching from the language language if not on disk
+    /// Ensure a language bundle is saved on disk, fetching from the language language if needed.
+    /// Does NOT spawn a per-language runtime — during the transition period, language operations
+    /// are handled by the JS-side LanguageController.
     async fn install_language_from_address(&self, address: &str) -> Result<(), LanguageError> {
-        if self.is_language_loaded(address).await {
-            return Ok(());
-        }
-
         let bundle_path = languages_directory().join(address).join("bundle.js");
 
         if bundle_path.exists() {
-            // Bundle already on disk, just load it
-            self.load_language(bundle_path).await?;
-        } else {
-            // Fetch from the language language
-            let language_language_address = {
-                let sys = self.system_addresses.lock().await;
-                sys.language_language
-                    .clone()
-                    .ok_or_else(|| LanguageError::LoadError {
-                        address: address.to_string(),
-                        message: "Language language not loaded yet".to_string(),
-                    })?
-            };
+            // Bundle already on disk
+            info!("Language bundle already on disk: {}", address);
+            return Ok(());
+        }
 
-            let script = format!(
-                r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get("{}"))"#,
-                address
-            );
-
-            let result = self
-                .execute_on_language(&language_language_address, &script)
-                .await?;
-
-            let expression: JsonValue =
-                serde_json::from_str(&result).map_err(|e| LanguageError::LoadError {
-                    address: address.to_string(),
-                    message: format!("Failed to parse language expression: {}", e),
-                })?;
-
-            let bundle_source = expression
-                .get("data")
-                .and_then(|d| d.get("bundle"))
-                .and_then(|b| b.as_str())
+        // Fetch from the language language
+        let language_language_address = {
+            let sys = self.system_addresses.lock().await;
+            sys.language_language
+                .clone()
                 .ok_or_else(|| LanguageError::LoadError {
                     address: address.to_string(),
-                    message: "Language expression missing data.bundle field".to_string(),
-                })?;
+                    message: "Language language not loaded yet".to_string(),
+                })?
+        };
 
-            let meta = expression.get("data");
+        // Get meta from expressionAdapter.get()
+        let meta_script = format!(
+            r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get("{}"))"#,
+            address
+        );
 
-            let (_hash, saved_bundle_path) = self.save_language_bundle(bundle_source, meta)?;
-            self.load_language(saved_bundle_path).await?;
+        let meta_result = self
+            .execute_on_language(&language_language_address, &meta_script)
+            .await?;
+
+        let meta_expression: JsonValue =
+            serde_json::from_str(&meta_result).map_err(|e| LanguageError::LoadError {
+                address: address.to_string(),
+                message: format!("Failed to parse language expression: {}", e),
+            })?;
+
+        let meta = meta_expression.get("data");
+
+        // Get bundle source from languageAdapter.getLanguageSource()
+        let source_script = format!(
+            r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource("{}")"#,
+            address
+        );
+
+        let bundle_source = self
+            .execute_on_language(&language_language_address, &source_script)
+            .await
+            .map_err(|e| LanguageError::LoadError {
+                address: address.to_string(),
+                message: format!("Failed to get language source: {}", e),
+            })?;
+
+        if bundle_source.is_empty() {
+            return Err(LanguageError::LoadError {
+                address: address.to_string(),
+                message: "Language source is empty".to_string(),
+            });
         }
+
+        let (_hash, _saved_bundle_path) = self.save_language_bundle(&bundle_source, meta)?;
+        info!("Saved language bundle for: {}", address);
 
         Ok(())
     }
@@ -383,7 +436,9 @@ impl LanguageController {
             RuntimeService::with_global_instance(|rs| rs.get_language_language_bundle());
 
         let (hash, bundle_path) = self.save_language_bundle(&language_language_bundle, None)?;
+        info!("Saved language language bundle, hash={}, loading...", hash);
         self.load_language(bundle_path).await?;
+        info!("load_language returned successfully for language language");
 
         // Store as system language
         {
@@ -466,7 +521,9 @@ impl LanguageController {
         Ok(())
     }
 
-    /// Load previously installed languages from the languages directory
+    /// Scan previously installed languages from the languages directory.
+    /// During the transition period, this only logs what's found.
+    /// The JS-side LanguageController handles loading these into runtimes.
     async fn load_installed_languages(&self) -> Result<(), LanguageError> {
         let langs_dir = languages_directory();
         let system_set = {
@@ -503,32 +560,9 @@ impl LanguageController {
                 continue;
             }
 
-            // Skip if already loaded
-            if self.is_language_loaded(&dir_name).await {
-                continue;
-            }
-
             let bundle_path = path.join("bundle.js");
-            if !bundle_path.exists() {
-                continue;
-            }
-
-            if let Err(e) = self.load_language(bundle_path).await {
-                error!("Failed to load installed language {}: {}", dir_name, e);
-                // Publish exception like the JS behaviour
-                let exception_info = ExceptionInfo {
-                    title: "Failed to load language".to_string(),
-                    message: format!("Error loading language {}: {}", dir_name, e),
-                    r#type: crate::graphql::graphql_types::ExceptionType::LanguageIsNotLoaded,
-                    addon: None,
-                };
-                let exception_json = serde_json::to_string(&exception_info).unwrap_or_default();
-                tokio::spawn(async move {
-                    get_global_pubsub()
-                        .await
-                        .publish(&EXCEPTION_OCCURRED_TOPIC, &exception_json)
-                        .await;
-                });
+            if bundle_path.exists() {
+                info!("Found installed language on disk: {}", dir_name);
             }
         }
 
@@ -536,9 +570,10 @@ impl LanguageController {
     }
 
     pub async fn install_language(language: Address) -> Result<(), AnyError> {
-        let controller = Self::global_instance();
+        let mut controller = Self::global_instance();
 
-        // Wait for languages to be ready
+        // Wait for system languages to be ready before installing.
+        // This ensures the language-language is loaded and can fetch bundles.
         let mut rx = controller.languages_ready_rx.clone();
         while !*rx.borrow() {
             rx.changed()
@@ -550,6 +585,24 @@ impl LanguageController {
             .install_language_from_address(&language)
             .await
             .map_err(|e| AnyError::msg(format!("{}", e)))?;
+
+        // After saving the bundle to disk, tell the JS-side LanguageController
+        // to install/load the language so it's available via language_by_address().
+        let script = format!(
+            r#"
+            (async () => {{
+                try {{
+                    await core.languageController.installLanguage("{}", null);
+                }} catch(e) {{
+                    console.error("JS-side installLanguage failed for {}: " + e);
+                }}
+            }})()
+            "#,
+            language, language
+        );
+        if let Err(e) = controller.js_core.execute(script).await {
+            log::warn!("Failed to trigger JS-side language install for {}: {}", language, e);
+        }
 
         Ok(())
     }
@@ -639,11 +692,24 @@ impl LanguageController {
     pub async fn language_by_address(address: Address) -> Result<Option<Language>, AnyError> {
         let controller = Self::global_instance();
 
+        // First check Rust-side runtimes (system languages loaded in per-language Deno runtimes)
         if controller.is_language_loaded(&address).await {
             let language = Language::new(address, controller.js_core.clone());
-            Ok(Some(language))
-        } else {
-            Ok(None)
+            return Ok(Some(language));
         }
+
+        // Fall back: check if the language bundle exists on disk.
+        // If it does, the language is either already loaded on the JS side
+        // (via applyTemplateAndPublish or loadInstalledLanguages) or will be loaded
+        // on-demand when accessed. The Language struct delegates all calls to the
+        // JS-side LanguageController which handles loading.
+        let bundle_path = languages_directory().join(&address).join("bundle.js");
+        if bundle_path.exists() {
+            log::info!("language_by_address: found bundle on disk for {}", address);
+            let language = Language::new(address, controller.js_core.clone());
+            return Ok(Some(language));
+        }
+
+        Ok(None)
     }
 }

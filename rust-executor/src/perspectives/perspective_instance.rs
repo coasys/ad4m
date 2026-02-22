@@ -295,6 +295,11 @@ impl PerspectiveInstance {
                     .expect("must be some")
                     .clone();
 
+                log::info!(
+                    "ensure_link_language: checking language {} for perspective",
+                    nh.data.link_language
+                );
+
                 match LanguageController::language_by_address(nh.data.link_language.clone()).await {
                     Ok(Some(mut language)) => {
                         // Set local agents before storing the language

@@ -70,14 +70,26 @@ impl LanguageRuntime {
 
         let script = format!("await initLanguage({})", context_json);
 
-        self.js_core.execute(&script).await.map_err(|e| {
-            format!(
-                "Failed to call language constructor for {}: {}",
-                self.language_address, e
-            )
-        })?;
-
-        Ok(())
+        match self.js_core.execute(&script).await {
+            Ok(result) => {
+                info!(
+                    "Language constructor completed for {}: {}",
+                    self.language_address,
+                    &result[..result.len().min(200)]
+                );
+                Ok(())
+            }
+            Err(e) => {
+                error!(
+                    "Failed to call language constructor for {}: {}",
+                    self.language_address, e
+                );
+                Err(format!(
+                    "Failed to call language constructor for {}: {}",
+                    self.language_address, e
+                ))
+            }
+        }
     }
 
     /// Execute a script in this language's runtime
@@ -185,6 +197,7 @@ impl LanguageRuntime {
                         match maybe_request {
                             Some(request) => {
                                 let is_teardown = matches!(request.operation, LanguageOperation::Teardown);
+                                debug!("[lang:{}] Processing operation: {:?}", addr, request.operation);
 
                                 let result = match request.operation {
                                     LanguageOperation::Execute(script) => self.execute(&script).await,
@@ -203,6 +216,12 @@ impl LanguageRuntime {
                                         self.teardown().await.map(|_| String::new())
                                     }
                                 };
+
+                                if let Err(ref e) = result {
+                                    error!("[lang:{}] Operation failed: {}", addr, e);
+                                } else {
+                                    debug!("[lang:{}] Operation completed successfully", addr);
+                                }
 
                                 let _ = request.response_tx.send(result);
 

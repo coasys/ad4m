@@ -57,7 +57,14 @@ impl LanguageRuntimeHandle {
 
     /// Send an operation and wait for the result.
     async fn send(&self, operation: LanguageOperation) -> Result<String, String> {
+        let op_name = format!("{:?}", operation);
         let (response_tx, response_rx) = oneshot::channel();
+
+        info!(
+            "[handle:{}] Sending operation: {}",
+            self.language_address,
+            &op_name[..op_name.len().min(100)]
+        );
 
         self.tx
             .send(LanguageRuntimeRequest {
@@ -66,9 +73,16 @@ impl LanguageRuntimeHandle {
             })
             .map_err(|e| format!("Language runtime channel closed: {}", e))?;
 
-        response_rx
+        let result = response_rx
             .await
-            .map_err(|e| format!("Language runtime dropped without responding: {}", e))?
+            .map_err(|e| format!("Language runtime dropped without responding: {}", e))?;
+
+        match &result {
+            Ok(_) => info!("[handle:{}] Operation completed OK", self.language_address),
+            Err(e) => error!("[handle:{}] Operation failed: {}", self.language_address, e),
+        }
+
+        result
     }
 
     pub async fn execute(&self, script: String) -> Result<String, String> {

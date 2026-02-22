@@ -41,12 +41,19 @@ impl LanguageContext {
     pub fn to_json(&self) -> JsonValue {
         let storage_dir_str = self.storage_directory.to_string_lossy().to_string();
 
+        // Ensure customSettings is always an object (never null),
+        // matching the JS-side behavior where missing settings default to {}.
+        let custom_settings = match &self.custom_settings {
+            Some(v) if !v.is_null() => v.clone(),
+            _ => json!({}),
+        };
+
         json!({
             "agent": {
                 "did": self.agent_did,
                 "signingKeyId": self.agent_signing_key_id,
             },
-            "customSettings": self.custom_settings,
+            "customSettings": custom_settings,
             "storageDirectory": storage_dir_str,
             // Holochain delegate is created in JS via the holochain extension ops
             "Holochain": {

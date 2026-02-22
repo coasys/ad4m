@@ -185,6 +185,19 @@ export default class Ad4mCore {
     }
 
     async initLanguages() {
+        // Load languages into Rust-side per-language runtimes.
+        // This runs in parallel with JS-side loading since many operations
+        // (languagePublish, applyTemplateAndPublish, etc.) still go through
+        // the JS LanguageController and need its internal state set up.
+        try {
+            // @ts-ignore - LANGUAGE_CONTROLLER is injected by the Rust runtime extension
+            await LANGUAGE_CONTROLLER.loadSystemLanguages(this.#config.languageLanguageOnly ?? false)
+        } catch(e) {
+            console.error("Rust-side language loading failed:", e)
+        }
+
+        // JS-side language loading — sets up JS LanguageController internal state
+        // needed by operations not yet ported to Rust.
         await this.#languageController!.loadLanguages()
         this.#resolveLanguagesReady()
     }

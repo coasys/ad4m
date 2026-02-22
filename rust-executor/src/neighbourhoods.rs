@@ -159,6 +159,12 @@ pub async fn install_neighbourhood_with_context(
     );
     let neighbourhood = neighbourhood_exp.unwrap();
 
+    // Install the link language before checking its availability.
+    // This fetches the bundle from the language-language and loads it on the JS side.
+    if let Err(e) = LanguageController::install_language(neighbourhood.data.link_language.clone()).await {
+        log::warn!("Failed to install link language {}: {}", neighbourhood.data.link_language, e);
+    }
+
     let state = if LanguageController::language_by_address(neighbourhood.data.link_language.clone())
         .await?
         .is_some()

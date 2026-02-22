@@ -6,6 +6,7 @@ use tokio::sync::RwLock;
 
 use crate::{
     graphql::graphql_types::{PerspectiveExpression, PerspectiveState},
+    js_core::error::AnyhowWrapperError,
     types::PerspectiveDiff,
 };
 
@@ -55,6 +56,17 @@ fn register_holochain_signal_handler(
     });
 }
 
+#[op2(async)]
+#[string]
+async fn load_system_languages(language_language_only: bool) -> Result<String, AnyhowWrapperError> {
+    let controller = crate::languages::LanguageController::global_instance();
+    controller
+        .load_system_languages(language_language_only)
+        .await
+        .map_err(|e| AnyhowWrapperError::from(anyhow::anyhow!("{}", e)))?;
+    Ok("ok".to_string())
+}
+
 #[op2]
 fn ad4m_signal_emitted(#[serde] signal: JsonValue, #[string] language_address: String) {
     let signal_json = serde_json::to_string(&serde_json::json!({
@@ -73,7 +85,7 @@ fn ad4m_signal_emitted(#[serde] signal: JsonValue, #[string] language_address: S
 
 deno_core::extension!(
     language_service,
-    ops = [perspective_diff_received, sync_state_changed, telepresence_signal_received, register_holochain_signal_handler, ad4m_signal_emitted],
+    ops = [perspective_diff_received, sync_state_changed, telepresence_signal_received, register_holochain_signal_handler, load_system_languages, ad4m_signal_emitted],
     esm_entry_point = "ext:language_service/languages_extension.js",
     esm = [dir "src/js_core", "languages_extension.js"]
 );

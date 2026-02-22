@@ -173,18 +173,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     js_core_handle.initialized().await;
     info!("js_core initialized.");
 
+    // Set languages directory based on app data path (must be before LanguageController)
+    crate::utils::set_languages_directory(config.app_data_path.as_ref().unwrap());
+
     LanguageController::init_global_instance(js_core_handle.clone());
 
-    // Spawn background task to load system languages
-    let language_language_only = config.language_language_only.unwrap_or(false);
-    tokio::spawn(async move {
-        if let Err(e) = LanguageController::global_instance()
-            .load_system_languages(language_language_only)
-            .await
-        {
-            error!("Failed to load system languages: {}", e);
-        }
-    });
+    // NOTE: load_system_languages() is triggered from the JS side via the
+    // load_system_languages Deno op when agent.generate or agent.unlock is called.
+    // See Ad4mCore.initLanguages() which calls LANGUAGE_CONTROLLER.loadSystemLanguages().
 
     // Set app data path for perspectives module (needed for file-based SurrealDB)
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
