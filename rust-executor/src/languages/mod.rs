@@ -41,6 +41,22 @@ impl LanguageController {
     }
 
     pub async fn install_language(language: Address) -> Result<(), AnyError> {
+        // Check if this is a WASM language bundle
+        #[cfg(feature = "wasm-languages")]
+        {
+            // Look for a .wasm bundle in the language directory
+            let script = "core.languageController.getLanguagesPath()".to_string();
+            if let Ok(languages_path) = Self::global_instance().js_core.execute(script).await {
+                let bundle_path = format!("{}/languages/{}/bundle.wasm", languages_path.trim_matches('"'), language);
+                let path = std::path::Path::new(&bundle_path);
+                if path.exists() && Self::is_wasm_bundle(path) {
+                    log::info!("Installing WASM language from {}", bundle_path);
+                    Self::install_wasm_language(path, &language)?;
+                    return Ok(());
+                }
+            }
+        }
+
         Self::global_instance()
             .js_core
             .execute("await core.waitForLanguages()".into())

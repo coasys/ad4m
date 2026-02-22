@@ -750,6 +750,147 @@ impl WasmLanguageInstance {
         let links: Vec<AbiLinkExpression> = from_json_bytes(&bytes)?;
         Ok(links)
     }
+
+    /// Call `ad4m_sync() -> Result<(), Error>`.
+    pub fn sync(&mut self) -> Result<(), WasmLanguageError> {
+        if !self.capabilities.has_links_adapter {
+            return Err(WasmLanguageError::FunctionNotAvailable("ad4m_sync".to_string()));
+        }
+        let func: TypedFunction<(), u64> = self
+            .instance
+            .exports
+            .get_typed_function(&self.store, "ad4m_sync")
+            .map_err(|e| WasmLanguageError::MissingExport(format!("ad4m_sync: {}", e)))?;
+        let result = func
+            .call(&mut self.store)
+            .map_err(|e| WasmLanguageError::RuntimeError(format!("{}", e)))?;
+        if result == 0 {
+            return Ok(());
+        }
+        let bytes = self.read_result(result)?;
+        // Check for error response
+        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            if let Some(err) = val.get("error") {
+                return Err(WasmLanguageError::RuntimeError(err.as_str().unwrap_or("unknown error").to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Call `ad4m_commit(diff_json) -> Option<String>`.
+    pub fn commit(&mut self, diff: &AbiPerspectiveDiff) -> Result<Option<String>, WasmLanguageError> {
+        if !self.capabilities.has_links_adapter {
+            return Err(WasmLanguageError::FunctionNotAvailable("ad4m_commit".to_string()));
+        }
+        let input = to_json_bytes(diff)?;
+        let (ptr, len) = self.write_input(&input)?;
+        let func: TypedFunction<(u32, u32), u64> = self
+            .instance
+            .exports
+            .get_typed_function(&self.store, "ad4m_commit")
+            .map_err(|e| WasmLanguageError::MissingExport(format!("ad4m_commit: {}", e)))?;
+        let result = func
+            .call(&mut self.store, ptr, len)
+            .map_err(|e| WasmLanguageError::RuntimeError(format!("{}", e)))?;
+        if result == 0 {
+            return Ok(None);
+        }
+        let bytes = self.read_result(result)?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let val: serde_json::Value = from_json_bytes(&bytes)?;
+        if let Some(err) = val.get("error") {
+            return Err(WasmLanguageError::RuntimeError(err.as_str().unwrap_or("unknown error").to_string()));
+        }
+        let revision: Option<String> = serde_json::from_value(val)?;
+        Ok(revision)
+    }
+
+    /// Call `ad4m_render() -> Option<Perspective>` (returns links as JSON).
+    pub fn render(&mut self) -> Result<Option<Vec<AbiLinkExpression>>, WasmLanguageError> {
+        if !self.capabilities.has_links_adapter {
+            return Err(WasmLanguageError::FunctionNotAvailable("ad4m_render".to_string()));
+        }
+        let func: TypedFunction<(), u64> = self
+            .instance
+            .exports
+            .get_typed_function(&self.store, "ad4m_render")
+            .map_err(|e| WasmLanguageError::MissingExport(format!("ad4m_render: {}", e)))?;
+        let result = func
+            .call(&mut self.store)
+            .map_err(|e| WasmLanguageError::RuntimeError(format!("{}", e)))?;
+        if result == 0 {
+            return Ok(None);
+        }
+        let bytes = self.read_result(result)?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let val: serde_json::Value = from_json_bytes(&bytes)?;
+        if let Some(err) = val.get("error") {
+            return Err(WasmLanguageError::RuntimeError(err.as_str().unwrap_or("unknown error").to_string()));
+        }
+        let links: Option<Vec<AbiLinkExpression>> = serde_json::from_value(val)?;
+        Ok(links)
+    }
+
+    /// Call `ad4m_current_revision() -> Option<String>`.
+    pub fn current_revision(&mut self) -> Result<Option<String>, WasmLanguageError> {
+        if !self.capabilities.has_links_adapter {
+            return Err(WasmLanguageError::FunctionNotAvailable("ad4m_current_revision".to_string()));
+        }
+        let func: TypedFunction<(), u64> = self
+            .instance
+            .exports
+            .get_typed_function(&self.store, "ad4m_current_revision")
+            .map_err(|e| WasmLanguageError::MissingExport(format!("ad4m_current_revision: {}", e)))?;
+        let result = func
+            .call(&mut self.store)
+            .map_err(|e| WasmLanguageError::RuntimeError(format!("{}", e)))?;
+        if result == 0 {
+            return Ok(None);
+        }
+        let bytes = self.read_result(result)?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let val: serde_json::Value = from_json_bytes(&bytes)?;
+        if let Some(err) = val.get("error") {
+            return Err(WasmLanguageError::RuntimeError(err.as_str().unwrap_or("unknown error").to_string()));
+        }
+        let revision: Option<String> = serde_json::from_value(val)?;
+        Ok(revision)
+    }
+
+    /// Call `ad4m_others() -> Vec<String>`.
+    pub fn others(&mut self) -> Result<Vec<String>, WasmLanguageError> {
+        if !self.capabilities.has_links_adapter {
+            return Err(WasmLanguageError::FunctionNotAvailable("ad4m_others".to_string()));
+        }
+        let func: TypedFunction<(), u64> = self
+            .instance
+            .exports
+            .get_typed_function(&self.store, "ad4m_others")
+            .map_err(|e| WasmLanguageError::MissingExport(format!("ad4m_others: {}", e)))?;
+        let result = func
+            .call(&mut self.store)
+            .map_err(|e| WasmLanguageError::RuntimeError(format!("{}", e)))?;
+        if result == 0 {
+            return Ok(vec![]);
+        }
+        let bytes = self.read_result(result)?;
+        if bytes.is_empty() {
+            return Ok(vec![]);
+        }
+        let val: serde_json::Value = from_json_bytes(&bytes)?;
+        if let Some(err) = val.get("error") {
+            return Err(WasmLanguageError::RuntimeError(err.as_str().unwrap_or("unknown error").to_string()));
+        }
+        let dids: Vec<String> = serde_json::from_value(val)?;
+        Ok(dids)
+    }
+
 }
 
 // ============================================================================
@@ -880,16 +1021,20 @@ pub fn load_wasm_language_from_bytes(
         has_interactions: exports.contains("ad4m_interactions"),
         has_teardown: exports.contains("ad4m_teardown"),
         has_is_immutable_expression: exports.contains("ad4m_is_immutable_expression"),
+        has_links_adapter: exports.contains("ad4m_sync")
+            && exports.contains("ad4m_commit")
+            && exports.contains("ad4m_render"),
     };
 
     debug!(
-        "Language capabilities: expression={}, put={}, link={}, interactions={}, teardown={}, immutable={}",
+        "Language capabilities: expression={}, put={}, link={}, interactions={}, teardown={}, immutable={}, links_adapter={}",
         capabilities.has_expression_adapter,
         capabilities.has_put_adapter,
         capabilities.has_link_adapter,
         capabilities.has_interactions,
         capabilities.has_teardown,
         capabilities.has_is_immutable_expression,
+        capabilities.has_links_adapter,
     );
 
     Ok(WasmLanguageInstance {

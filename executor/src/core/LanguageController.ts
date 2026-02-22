@@ -228,6 +228,16 @@ export default class LanguageController {
             throw new Error("Language to be loaded does not contain any data")
         }
         // @ts-ignore
+        // Detect WASM language bundles by magic bytes (\0asm)
+        const magic = bundleBytes.slice(0, 4);
+        if (magic[0] === 0x00 && magic[1] === 0x61 && magic[2] === 0x73 && magic[3] === 0x6D) {
+            console.log("LanguageController.loadLanguage: detected WASM language at", sourceFilePath);
+            const hash = await this.ipfsHash(bundleBytes);
+            // Store minimal entry — the Rust side will pick it up via language_by_address
+            this.#languages.set(hash, { name: hash } as Language);
+            return { hash, language: { name: hash } as Language };
+        }
+
         const hash = await this.ipfsHash(bundleBytes)
         console.debug("LanguageController.loadLanguage: loading language at path", sourceFilePath, "with hash", hash);
         let languageSource;

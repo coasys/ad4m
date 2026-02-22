@@ -274,28 +274,94 @@ pub mod wasm_backend {
     #[async_trait]
     impl LanguageBackend for WasmLanguage {
         async fn sync(&mut self) -> Result<(), AnyError> {
-            // WASM sync not yet implemented
-            Ok(())
+            let mut instance = self.instance.lock().unwrap();
+            if !instance.capabilities().has_links_adapter {
+                return Ok(());
+            }
+            instance.sync().map_err(|e| anyhow::anyhow!("{}", e))
         }
 
-        async fn commit(&mut self, _diff: PerspectiveDiff) -> Result<Option<String>, AnyError> {
-            // WASM commit not yet implemented
-            Ok(None)
+        async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<String>, AnyError> {
+            let mut instance = self.instance.lock().unwrap();
+            if !instance.capabilities().has_links_adapter {
+                return Ok(None);
+            }
+            let abi_diff = crate::wasm_core::abi::AbiPerspectiveDiff {
+                additions: diff.additions.into_iter().map(|le| crate::wasm_core::abi::AbiLinkExpression {
+                    author: le.author,
+                    timestamp: le.timestamp,
+                    data: crate::wasm_core::abi::AbiLink {
+                        source: le.data.source,
+                        target: le.data.target,
+                        predicate: le.data.predicate,
+                    },
+                    proof: crate::wasm_core::abi::AbiExpressionProof {
+                        key: le.proof.key,
+                        signature: le.proof.signature,
+                    },
+                    status: le.status.map(|s| format!("{:?}", s).to_lowercase()),
+                }).collect(),
+                removals: diff.removals.into_iter().map(|le| crate::wasm_core::abi::AbiLinkExpression {
+                    author: le.author,
+                    timestamp: le.timestamp,
+                    data: crate::wasm_core::abi::AbiLink {
+                        source: le.data.source,
+                        target: le.data.target,
+                        predicate: le.data.predicate,
+                    },
+                    proof: crate::wasm_core::abi::AbiExpressionProof {
+                        key: le.proof.key,
+                        signature: le.proof.signature,
+                    },
+                    status: le.status.map(|s| format!("{:?}", s).to_lowercase()),
+                }).collect(),
+            };
+            instance.commit(&abi_diff).map_err(|e| anyhow::anyhow!("{}", e))
         }
 
         async fn current_revision(&mut self) -> Result<Option<String>, AnyError> {
-            // WASM current_revision not yet implemented
-            Ok(None)
+            let mut instance = self.instance.lock().unwrap();
+            if !instance.capabilities().has_links_adapter {
+                return Ok(None);
+            }
+            instance.current_revision().map_err(|e| anyhow::anyhow!("{}", e))
         }
 
         async fn render(&mut self) -> Result<Option<Perspective>, AnyError> {
-            // WASM render not yet implemented
-            Ok(None)
+            let mut instance = self.instance.lock().unwrap();
+            if !instance.capabilities().has_links_adapter {
+                return Ok(None);
+            }
+            match instance.render().map_err(|e| anyhow::anyhow!("{}", e))? {
+                Some(links) => {
+                    let link_exprs: Vec<crate::types::LinkExpression> = links.into_iter().map(|le| {
+                        crate::types::LinkExpression {
+                            author: le.author,
+                            timestamp: le.timestamp,
+                            data: crate::types::Link {
+                                source: le.data.source,
+                                target: le.data.target,
+                                predicate: le.data.predicate,
+                            },
+                            proof: crate::types::ExpressionProof {
+                                key: le.proof.key,
+                                signature: le.proof.signature,
+                            },
+                            status: le.status.and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok()),
+                        }
+                    }).collect();
+                    Ok(Some(Perspective { links: link_exprs }))
+                }
+                None => Ok(None),
+            }
         }
 
         async fn others(&mut self) -> Result<Vec<String>, AnyError> {
-            // WASM others not yet implemented
-            Ok(vec![])
+            let mut instance = self.instance.lock().unwrap();
+            if !instance.capabilities().has_links_adapter {
+                return Ok(vec![]);
+            }
+            instance.others().map_err(|e| anyhow::anyhow!("{}", e))
         }
 
         async fn has_telepresence_adapter(&mut self) -> Result<bool, AnyError> {

@@ -96,3 +96,26 @@ pub trait LanguageTeardown {
     /// Called when the language is being unloaded. Default is no-op.
     fn teardown(&mut self) {}
 }
+
+/// Trait for languages that support link synchronisation (LinksAdapter).
+/// All methods have default implementations, so languages only need to
+/// override the ones they support.
+pub trait LinksAdapter {
+    /// Sync with the network.
+    fn sync(&mut self) -> Result<(), String> { Ok(()) }
+
+    /// Commit a perspective diff and return an optional revision string.
+    fn commit(&mut self, diff: &PerspectiveDiff) -> Result<Option<String>, String> {
+        let _ = diff;
+        Err("not implemented".into())
+    }
+
+    /// Render the current state as a list of link expressions.
+    fn render(&mut self) -> Result<Option<Vec<LinkExpression>>, String> { Ok(None) }
+
+    /// Get the current revision string.
+    fn current_revision(&mut self) -> Result<Option<String>, String> { Ok(None) }
+
+    /// Get the list of other agents (DIDs).
+    fn others(&mut self) -> Result<Vec<String>, String> { Ok(vec![]) }
+}
