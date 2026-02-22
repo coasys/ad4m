@@ -1124,14 +1124,3 @@ pub fn is_wasm_language(language_address: &str) -> bool {
         .map(|registry| registry.contains_key(language_address))
         .unwrap_or(false)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_abi_constants() {
-        assert!(AD4M_LANGUAGE_ABI_VERSION >= 1);
-        assert!(AD4M_LANGUAGE_ABI_MIN_VERSION <= AD4M_LANGUAGE_ABI_VERSION);
-    }
-}

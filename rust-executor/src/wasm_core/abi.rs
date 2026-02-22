@@ -91,7 +91,7 @@ pub const OPTIONAL_EXPORTS: &[&str] = &[
 // ============================================================================
 
 /// The WASM import module name for AD4M host functions.
-pub const HOST_MODULE_NAME: &str = "ad4m";
+pub const HOST_MODULE_NAME: &str = "env";
 
 /// Host function names available to guest modules.
 pub mod host_functions {

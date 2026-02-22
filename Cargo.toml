@@ -9,6 +9,7 @@ members = [
 exclude = [
     "wasm-language-sdk",
     "examples/wasm-languages/note-store",
+    "examples/wasm-languages/link-store",
 ]
 
 [patch.crates-io]
