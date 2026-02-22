@@ -22,27 +22,11 @@ commands:
             echo "pnpm: $(pnpm --version)"
 
   setup_integration_test_environment:
-    description: "Setup common integration test environment with caches, installs, and builds"
+    description: "Setup common integration test environment"
     steps:
       - checkout
       - attach_workspace:
           at: .
-      - restore_cache:
-          keys:
-            - agent-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
-            - agent-language-rust-cache-
-      - restore_cache:
-          keys:
-            - direct-message-language-rust-cache-{{ checksum "bootstrap-languages/direct-message-language/hc-dna/Cargo.lock" }}
-            - direct-message-language-rust-cache-
-      - restore_cache:
-          keys:
-            - file-storage-rust-cache-{{ checksum "bootstrap-languages/file-storage/hc-dna/Cargo.lock" }}
-            - file-storage-rust-cache-
-      - restore_cache:
-          keys:
-            - p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
-            - p-diff-sync-rust-cache-
       - setup_env
       - run:
           name: Install dependencies
@@ -53,26 +37,7 @@ commands:
       - run:
           name: Build bootstrap languages
           command: pnpm run build-languages
-      - save_cache:
-          key: agent-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
-          paths:
-            - ./bootstrap-languages/agent-language/hc-dna/target
-      - save_cache:
-          key: direct-message-language-rust-cache-{{ checksum "bootstrap-languages/direct-message-language/hc-dna/Cargo.lock" }}
-          paths:
-            - ./bootstrap-languages/direct-message-language/hc-dna/target
-      - save_cache:
-          key: file-storage-rust-cache-{{ checksum "bootstrap-languages/file-storage/hc-dna/Cargo.lock" }}
-          paths:
-            - ./bootstrap-languages/file-storage-language/hc-dna/target
-      - save_cache:
-          key: p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
-          paths:
-            - ./bootstrap-languages/p-diff-sync/hc-dna/target
 
-orbs:
-  node: circleci/node@5.2.0
-  go: circleci/go@1.10.0
 
 jobs:
   build-and-test:
@@ -80,10 +45,6 @@ jobs:
     resource_class: coasys/marvin
     steps:
       - checkout
-      - restore_cache:
-          keys:
-            - rust-cache-{{ checksum "Cargo.lock" }}-1.92
-            - rust-cache-
       - setup_env
       - run:
           name: cargo fmt --check
@@ -112,14 +73,7 @@ jobs:
           name: cargo clippy
           no_output_timeout: 30m
           command: cargo clippy --all --exclude ad4m-launcher
-      - save_cache:
-          key: rust-cache-{{ checksum "Cargo.lock" }}-1.92
-          paths:
-            - ./target
-            - ~/.cargo/registry
-            - ~/.cargo/git
       - persist_to_workspace:
-          no-output-timeout: 30m
           root: .
           paths:
             - ./target/release/ad4m
