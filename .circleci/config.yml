@@ -5,17 +5,17 @@ version: 2.1
 
 commands:
   setup_env:
-    description: "Set up build environment (NVM, Rust, Deno, Go, pnpm)"
+    description: "Set up build environment (Node 18, Rust, Deno, Go, pnpm)"
     steps:
       - run:
           name: Setup build environment
           command: |
-            echo 'export NVM_DIR="$HOME/.nvm"' >> $BASH_ENV
-            echo 'source "$NVM_DIR/nvm.sh"' >> $BASH_ENV
-            echo 'nvm use 18' >> $BASH_ENV
-            echo 'export PATH="$HOME/.cargo/bin:$HOME/.deno/bin:$HOME/.local/go/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/go/bin:$PATH"' >> $BASH_ENV
+            # Add all tool paths directly to PATH — no NVM sourcing (nvm use prints to stdout
+            # which corrupts subshell commands in cargo build scripts like libffi's libtool)
+            echo 'export PATH="$HOME/.nvm/versions/node/v18.20.8/bin:$HOME/.cargo/bin:$HOME/.deno/bin:$HOME/.local/go/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/go/bin:$PATH"' >> $BASH_ENV
             source $BASH_ENV
             echo "Node: $(node --version)"
+            echo "npm: $(npm --version)"
             echo "Rust: $(rustc --version)"
             echo "Deno: $(deno --version | head -1)"
             echo "Go: $(go version)"
