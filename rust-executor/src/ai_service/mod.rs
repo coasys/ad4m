@@ -1124,9 +1124,10 @@ impl AIService {
             let mut shared_models = self.shared_whisper_models.lock().await;
             // Parse language upfront and use canonical form for cache key
             let whisper_lang = if let Some(ref lang) = language {
-                Some(lang
-                    .parse::<WhisperLanguage>()
-                    .map_err(|_| anyhow::anyhow!("Unsupported whisper language: {}", lang))?)
+                Some(
+                    lang.parse::<WhisperLanguage>()
+                        .map_err(|_| anyhow::anyhow!("Unsupported whisper language: {}", lang))?,
+                )
             } else {
                 None
             };
