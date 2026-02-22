@@ -128,8 +128,4 @@ impl From<std::string::FromUtf8Error> for WasmLanguageError {
     }
 }
 
-impl From<WasmLanguageError> for deno_core::error::AnyError {
-    fn from(err: WasmLanguageError) -> Self {
-        deno_core::anyhow::anyhow!("{}", err)
-    }
-}
+// From<WasmLanguageError> for AnyError covered by blanket impl

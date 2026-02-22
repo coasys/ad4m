@@ -815,3 +815,16 @@ mod tests {
 
     // Additional tests for other functions can be added here
 }
+
+lazy_static! {
+    static ref APP_DATA_PATH: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+}
+
+pub fn set_app_data_path(path: String) {
+    let mut data_path = APP_DATA_PATH.write().unwrap();
+    *data_path = Some(path);
+}
+
+fn get_app_data_path() -> Option<String> {
+    APP_DATA_PATH.read().unwrap().clone()
+}

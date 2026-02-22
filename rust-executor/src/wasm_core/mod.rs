@@ -105,7 +105,7 @@ fn alloc_and_write(
 /// Returns the agent's DID as a JSON string.
 fn host_agent_did(mut env: FunctionEnvMut<HostEnv>) -> u64 {
     let (host_env, mut store) = env.data_and_store_mut();
-    match crate::agent::did_for_context(&crate::agent::AgentContext::main_agent()) {
+    match Ok::<_, deno_core::error::AnyError>(crate::agent::did()) {
         Ok(did) => {
             let json = match serde_json::to_vec(&did) {
                 Ok(j) => j,
@@ -148,7 +148,7 @@ fn host_agent_sign(mut env: FunctionEnvMut<HostEnv>, data_ptr: u32, data_len: u3
             return 0;
         }
     };
-    match crate::agent::sign_for_context(&data, &crate::agent::AgentContext::main_agent()) {
+    match crate::agent::sign(&data) {
         Ok(signature) => {
             let json = match serde_json::to_vec(&signature) {
                 Ok(j) => j,
@@ -248,7 +248,7 @@ fn host_agent_create_signed_expression(
         }
     };
     let sorted = crate::js_core::utils::sort_json_value(&content);
-    match crate::agent::create_signed_expression(sorted, &crate::agent::AgentContext::main_agent()) {
+    match crate::agent::create_signed_expression(sorted) {
         Ok(expr) => {
             let json = match serde_json::to_vec(&expr) {
                 Ok(j) => j,
