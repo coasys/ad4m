@@ -302,17 +302,19 @@ export class AIClient {
             endThreshold?: number;
             endWindow?: number;
             timeBeforeSpeech?: number;
-        }
+        },
+        language?: string
     ): Promise<string> {
         const { aiOpenTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
-                mutation AiOpenTranscriptionStream($modelId: String!, $params: VoiceActivityParamsInput) {
-                    aiOpenTranscriptionStream(modelId: $modelId, params: $params)
+                mutation AiOpenTranscriptionStream($modelId: String!, $params: VoiceActivityParamsInput, $language: String) {
+                    aiOpenTranscriptionStream(modelId: $modelId, params: $params, language: $language)
                 }
             `,
             variables: {
                 modelId,
-                params
+                params,
+                language
             }
         }));
 

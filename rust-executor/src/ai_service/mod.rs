@@ -1113,37 +1113,50 @@ impl AIService {
         &self,
         model_id: String,
         params: Option<VoiceActivityParams>,
+        language: Option<String>,
     ) -> Result<String> {
         let model_size = Self::get_whisper_model_size(model_id.clone())?;
 
         // MEMORY OPTIMIZATION: Load each Whisper model size ONCE and share across all streams using that size
         // Arc cloning is cheap (just increments ref count), saves 500MB-1.5GB per stream!
+        // Language is set at build time, so include it in the cache key
         let whisper_model = {
             let mut shared_models = self.shared_whisper_models.lock().await;
-            let model_key = format!("{:?}", model_size); // Use Debug format as key (e.g., "Small", "Medium")
+            let lang_key = language.as_deref().unwrap_or("auto");
+            let model_key = format!("{:?}_{}", model_size, lang_key);
 
             if !shared_models.contains_key(&model_key) {
                 log::info!(
-                    "Loading shared Whisper model {} ({:?}) (ONE model per size, ~500MB-1.5GB)...",
+                    "Loading shared Whisper model {} ({:?}, language: {}) (ONE model per size, ~500MB-1.5GB)...",
                     model_id,
-                    model_size
+                    model_size,
+                    lang_key
                 );
 
-                let model = WhisperBuilder::default()
+                let mut builder = WhisperBuilder::default()
                     .with_source(model_size)
-                    .with_device(Self::new_candle_device())
-                    .build()
-                    .await?;
+                    .with_device(Self::new_candle_device());
+
+                if let Some(ref lang) = language {
+                    let whisper_lang: WhisperLanguage = lang
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("Unsupported whisper language: {}", lang))?;
+                    builder = builder.with_language(Some(whisper_lang));
+                }
+
+                let model = builder.build().await?;
 
                 log::info!(
-                    "Shared Whisper model {:?} loaded! All streams using this size will reuse this model.",
-                    model_size
+                    "Shared Whisper model {:?} (language: {}) loaded! All streams using this config will reuse this model.",
+                    model_size,
+                    lang_key
                 );
                 shared_models.insert(model_key.clone(), Arc::new(model));
             } else {
                 log::info!(
-                    "Reusing existing shared Whisper model {:?} for new stream",
-                    model_size
+                    "Reusing existing shared Whisper model {:?} (language: {}) for new stream",
+                    model_size,
+                    lang_key
                 );
             }
 

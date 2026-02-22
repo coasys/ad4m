@@ -2614,11 +2614,12 @@ impl Mutation {
         context: &RequestContext,
         model_id: String,
         params: Option<VoiceActivityParamsInput>,
+        language: Option<String>,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
         Ok(AIService::global_instance()
             .await?
-            .open_transcription_stream(model_id, params.map(|p| p.into()))
+            .open_transcription_stream(model_id, params.map(|p| p.into()), language)
             .await?)
     }
 

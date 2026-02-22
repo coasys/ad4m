@@ -338,7 +338,8 @@ export default class AIResolver {
     @Mutation(() => String)
     aiOpenTranscriptionStream(
         @Arg("modelId") modelId: string,
-        @Arg("params", () => VoiceActivityParamsInput, { nullable: true }) params?: VoiceActivityParamsInput
+        @Arg("params", () => VoiceActivityParamsInput, { nullable: true }) params?: VoiceActivityParamsInput,
+        @Arg("language", { nullable: true }) language?: string
     ): string {
         return "streamId"
     }
