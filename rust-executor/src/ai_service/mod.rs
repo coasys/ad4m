@@ -1122,7 +1122,18 @@ impl AIService {
         // Language is set at build time, so include it in the cache key
         let whisper_model = {
             let mut shared_models = self.shared_whisper_models.lock().await;
-            let lang_key = language.as_deref().unwrap_or("auto");
+            // Parse language upfront and use canonical form for cache key
+            let whisper_lang = if let Some(ref lang) = language {
+                Some(lang
+                    .parse::<WhisperLanguage>()
+                    .map_err(|_| anyhow::anyhow!("Unsupported whisper language: {}", lang))?)
+            } else {
+                None
+            };
+            let lang_key = whisper_lang
+                .as_ref()
+                .map(|l| l.to_string())
+                .unwrap_or_else(|| "auto".to_string());
             let model_key = format!("{:?}_{}", model_size, lang_key);
 
             if !shared_models.contains_key(&model_key) {
@@ -1137,10 +1148,7 @@ impl AIService {
                     .with_source(model_size)
                     .with_device(Self::new_candle_device());
 
-                if let Some(ref lang) = language {
-                    let whisper_lang: WhisperLanguage = lang
-                        .parse()
-                        .map_err(|_| anyhow::anyhow!("Unsupported whisper language: {}", lang))?;
+                if let Some(whisper_lang) = whisper_lang {
                     builder = builder.with_language(Some(whisper_lang));
                 }
 
