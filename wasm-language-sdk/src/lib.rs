@@ -38,6 +38,7 @@ pub mod prelude {
     pub use crate::host::*;
     pub use crate::memory::*;
     pub use crate::types::*;
+    pub use crate::ad4m_links_adapter;
 }
 
 /// Current ABI version. Must match the host's expected version.
@@ -190,6 +191,129 @@ macro_rules! ad4m_language {
         pub extern "C" fn ad4m_teardown() {
             let lang = get_language();
             lang.teardown();
+        }
+    };
+}
+
+/// Macro to generate WASM exports for LinksAdapter methods.
+///
+/// Use this in addition to `ad4m_language!` when your language implements `LinksAdapter`.
+/// These exports are optional — if not present, the host will detect that the language
+/// does not have a links adapter via capability flags.
+///
+/// # Usage
+/// ```rust,ignore
+/// ad4m_language!(MyLanguage, "my-language");
+/// ad4m_links_adapter!(MyLanguage);
+/// ```
+#[macro_export]
+macro_rules! ad4m_links_adapter {
+    ($lang_type:ty) => {
+        #[no_mangle]
+        pub extern "C" fn ad4m_sync() -> u64 {
+            let lang = get_language();
+            match lang.sync() {
+                Ok(()) => {
+                    let json = b"null";
+                    $crate::memory::write_output(json)
+                }
+                Err(e) => {
+                    let err_json = match serde_json::to_vec(&serde_json::json!({"error": e})) {
+                        Ok(j) => j,
+                        Err(_) => return 0,
+                    };
+                    $crate::memory::write_output(&err_json)
+                }
+            }
+        }
+
+        #[no_mangle]
+        pub extern "C" fn ad4m_commit(ptr: u32, len: u32) -> u64 {
+            let input = $crate::memory::read_input(ptr, len);
+            let diff: $crate::types::PerspectiveDiff = match serde_json::from_slice(&input) {
+                Ok(d) => d,
+                Err(_) => return 0,
+            };
+            let lang = get_language();
+            match lang.commit(&diff) {
+                Ok(revision) => {
+                    let json = match serde_json::to_vec(&revision) {
+                        Ok(j) => j,
+                        Err(_) => return 0,
+                    };
+                    $crate::memory::write_output(&json)
+                }
+                Err(e) => {
+                    let err_json = match serde_json::to_vec(&serde_json::json!({"error": e})) {
+                        Ok(j) => j,
+                        Err(_) => return 0,
+                    };
+                    $crate::memory::write_output(&err_json)
+                }
+            }
+        }
+
+        #[no_mangle]
+        pub extern "C" fn ad4m_render() -> u64 {
+            let lang = get_language();
+            match lang.render() {
+                Ok(links) => {
+                    let json = match serde_json::to_vec(&links) {
+                        Ok(j) => j,
+                        Err(_) => return 0,
+                    };
+                    $crate::memory::write_output(&json)
+                }
+                Err(e) => {
+                    let err_json = match serde_json::to_vec(&serde_json::json!({"error": e})) {
+                        Ok(j) => j,
+                        Err(_) => return 0,
+                    };
+                    $crate::memory::write_output(&err_json)
+                }
+            }
+        }
+
+        #[no_mangle]
+        pub extern "C" fn ad4m_current_revision() -> u64 {
+            let lang = get_language();
+            match lang.current_revision() {
+                Ok(revision) => {
+                    let json = match serde_json::to_vec(&revision) {
+                        Ok(j) => j,
+                        Err(_) => return 0,
+                    };
+                    $crate::memory::write_output(&json)
+                }
+                Err(e) => {
+                    let err_json = match serde_json::to_vec(&serde_json::json!({"error": e})) {
+                        Ok(j) => j,
+                        Err(_) => return 0,
+                    };
+                    $crate::memory::write_output(&err_json)
+                }
+            }
+        }
+
+        #[no_mangle]
+        pub extern "C" fn ad4m_others() -> u64 {
+            let lang = get_language();
+            match lang.others() {
+                Ok(dids) => {
+                    let json = match serde_json::to_vec(&dids) {
+                        Ok(j) => j,
+                        Err(_) => return 0,
+                    };
+                    $crate::memory::write_output(&json)
+                }
+                Err(e) => {
+                    let err_json = match serde_json::to_vec(&serde_json::json!({"error": e})) {
+                        Ok(j) => j,
+                        Err(_) => return 0,
+                    };
+                    $crate::memory::write_output(&err_json)
+                }
+            }
         }
     };
 }

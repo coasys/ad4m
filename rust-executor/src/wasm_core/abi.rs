@@ -72,6 +72,14 @@ pub const LINK_EXPORTS: &[&str] = &[
 ];
 
 /// Names of optional exports.
+/// Names of optional exports for links adapter (sync/commit/render).
+pub const LINKS_ADAPTER_EXPORTS: &[&str] = &[
+    "ad4m_sync",
+    "ad4m_commit",
+    "ad4m_render",
+    "ad4m_current_revision",
+    "ad4m_others",
+];
 pub const OPTIONAL_EXPORTS: &[&str] = &[
     "ad4m_interactions",
     "ad4m_teardown",
@@ -188,6 +196,7 @@ pub struct LanguageCapabilities {
     pub has_interactions: bool,
     pub has_teardown: bool,
     pub has_is_immutable_expression: bool,
+    pub has_links_adapter: bool,
 }
 
 // ============================================================================
