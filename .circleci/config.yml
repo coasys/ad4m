@@ -1,8 +1,26 @@
 version: 2.1
-references:
-  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:d0c3e9683811505955185782a5cd683952f846f1abc520c35c1293ad7f046593
+
+# Self-hosted machine runner on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04)
+# Resource class: coasys/marvin
 
 commands:
+  setup_env:
+    description: "Set up build environment (NVM, Rust, Deno, Go, pnpm)"
+    steps:
+      - run:
+          name: Setup build environment
+          command: |
+            echo 'export NVM_DIR="$HOME/.nvm"' >> $BASH_ENV
+            echo 'source "$NVM_DIR/nvm.sh"' >> $BASH_ENV
+            echo 'nvm use 18' >> $BASH_ENV
+            echo 'export PATH="$HOME/.cargo/bin:$HOME/.deno/bin:$HOME/.local/go/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/go/bin:$PATH"' >> $BASH_ENV
+            source $BASH_ENV
+            echo "Node: $(node --version)"
+            echo "Rust: $(rustc --version)"
+            echo "Deno: $(deno --version | head -1)"
+            echo "Go: $(go version)"
+            echo "pnpm: $(pnpm --version)"
+
   setup_integration_test_environment:
     description: "Setup common integration test environment with caches, installs, and builds"
     steps:
@@ -25,9 +43,7 @@ commands:
           keys:
             - p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
             - p-diff-sync-rust-cache-
-      - run:
-          name: Install specific pnpm version
-          command: npm install -g pnpm@9.15.0
+      - setup_env
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
@@ -53,9 +69,6 @@ commands:
           key: p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
           paths:
             - ./bootstrap-languages/p-diff-sync/hc-dna/target
-      - run:
-          name: Install ffmpeg for transcription test
-          command: sudo apt-get update && sudo apt-get install ffmpeg --fix-missing
 
 orbs:
   node: circleci/node@5.2.0
@@ -63,15 +76,15 @@ orbs:
 
 jobs:
   build-and-test:
-    docker:
-      - image: *ad4m_image
-    resource_class: xlarge
+    machine: true
+    resource_class: coasys/marvin
     steps:
       - checkout
       - restore_cache:
           keys:
             - rust-cache-{{ checksum "Cargo.lock" }}-1.92
             - rust-cache-
+      - setup_env
       - run:
           name: cargo fmt --check
           command: cargo fmt --check
@@ -126,9 +139,8 @@ jobs:
           no_output_timeout: 30m
 
   integration-tests-js:
-    docker:
-      - image: *ad4m_image
-    resource_class: xlarge
+    machine: true
+    resource_class: coasys/marvin
     steps:
       - setup_integration_test_environment
       - run:
@@ -137,9 +149,8 @@ jobs:
           no_output_timeout: 30m
 
   integration-tests-multi-user-simple:
-    docker:
-      - image: *ad4m_image
-    resource_class: xlarge
+    machine: true
+    resource_class: coasys/marvin
     steps:
       - setup_integration_test_environment
       - run:
@@ -148,9 +159,8 @@ jobs:
           no_output_timeout: 30m
 
   integration-tests-email-verification:
-    docker:
-      - image: *ad4m_image
-    resource_class: xlarge
+    machine: true
+    resource_class: coasys/marvin
     steps:
       - setup_integration_test_environment
       - run:
@@ -159,12 +169,13 @@ jobs:
           no_output_timeout: 30m
 
   integration-tests-cli:
-    docker:
-      - image: *ad4m_image
+    machine: true
+    resource_class: coasys/marvin
     steps:
       - checkout
       - attach_workspace:
           at: .
+      - setup_env
       - run:
           name: git submodule
           command: git submodule update --init --recursive
