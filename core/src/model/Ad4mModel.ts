@@ -2601,6 +2601,12 @@ WHERE ${whereConditions.join(" AND ")}
 
     if (resolveLanguage) {
       value = await this.#perspective.createExpression(value, resolveLanguage);
+    } else if (typeof value !== "string" || !/^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(value)) {
+      // Encode raw values as literal:// URIs so they are valid link targets.
+      // This mirrors what Rust's resolve_property_value does inside createSubject.
+      // Values that already carry a URI scheme (did:, expression://, literal://, etc.)
+      // are passed through unchanged.
+      value = Literal.from(value).toUrl();
     }
 
     await this.#perspective.executeAction(
@@ -2728,28 +2734,53 @@ WHERE ${whereConditions.join(" AND ")}
   }
 
   /**
-   * Saves the model instance to the perspective.
-   * Creates a new instance with the base expression and links it to the source.
+   * Persists the model instance to the perspective.
    *
-   * @param batchId - Optional batch ID for batch operations
+   * Automatically determines whether to **create** or **update**:
+   * - If no links exist for `baseExpression` yet (new instance): runs the full
+   *   create path — `createSubject`, `ad4m://has_child` link, then relation setters.
+   * - If links already exist (existing instance): runs the update path — property
+   *   and relation setters only; skips `createSubject` and `has_child` to avoid
+   *   duplicate links.
+   *
+   * This means `save()` is always correct regardless of whether the instance was
+   * just constructed or was fetched from the perspective.
+   *
+   * @param batchId - Optional batch ID for batch operations. When provided the
+   *   caller is responsible for calling `perspective.commitBatch(batchId)`.
    * @throws Will throw if instance creation, linking, or updating fails
    *
    * @example
    * ```typescript
+   * // Create
    * const recipe = new Recipe(perspective);
    * recipe.name = "Spaghetti";
    * recipe.ingredients = ["pasta", "tomato sauce"];
    * await recipe.save();
    *
-   * // Or with batch operations:
+   * // Update
+   * recipe.name = "Spaghetti Bolognese";
+   * await recipe.save();  // same call — no separate update()
+   *
+   * // Batch operations
    * const batchId = await perspective.createBatch();
    * await recipe.save(batchId);
    * await perspective.commitBatch(batchId);
    * ```
    */
   async save(batchId?: string) {
-    // We use createSubject's initialValues to set properties (but not relations)
-    // We then later use innerUpdate to set relations
+    const ctor = this.constructor as typeof Ad4mModel;
+
+    // Check whether this instance already exists in the perspective so we can
+    // choose the create vs update path. Query persisted links only — uncommitted
+    // batch state is not visible to SurrealDB queries, which is correct: if the
+    // caller passed in a batchId and the instance was written earlier in that
+    // same (not-yet-committed) batch, we treat it as new here, which is safe.
+    const safeBase = ctor.formatSurrealValue(this.#baseExpression);
+    const existingLinks = await this.#perspective.querySurrealDB(
+      `SELECT 1 FROM link WHERE in.uri = ${safeBase} LIMIT 1`,
+    );
+    const isNew = !existingLinks || existingLinks.length === 0;
 
     let batchCreatedHere = false;
     if (!batchId) {
@@ -2757,48 +2788,54 @@ WHERE ${whereConditions.join(" AND ")}
       batchCreatedHere = true;
     }
 
-    // First filter out the properties that are not relations (arrays)
-    const initialValues = {};
-    for (const [key, value] of Object.entries(this)) {
-      if (
-        value !== undefined &&
-        value !== null &&
-        !(Array.isArray(value) && value.length > 0) &&
-        !value?.action
-      ) {
-        initialValues[key] = value;
+    if (isNew) {
+      // ── CREATE PATH ───────────────────────────────────────────────────────
+      // Use createSubject's initialValues to set scalar properties (not relations),
+      // then innerUpdate(false) for relations only.
+
+      // Filter to scalar (non-relation, non-action) values for createSubject
+      const initialValues = {};
+      for (const [key, value] of Object.entries(this)) {
+        if (
+          value !== undefined &&
+          value !== null &&
+          !(Array.isArray(value) && value.length > 0) &&
+          !value?.action
+        ) {
+          initialValues[key] = value;
+        }
       }
+
+      const className =
+        await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
+
+      await this.perspective.createSubject(
+        className,
+        this.#baseExpression,
+        initialValues,
+        batchId,
+      );
+
+      // Attach instance to its parent source node
+      await this.#perspective.add(
+        new Link({
+          source: this.#source,
+          predicate: "ad4m://has_child",
+          target: this.baseExpression,
+        }),
+        "shared",
+        batchId,
+      );
+
+      // Set relations
+      await this.innerUpdate(false, batchId);
+    } else {
+      // ── UPDATE PATH ───────────────────────────────────────────────────────
+      // Instance already exists — update properties and relations only.
+      // Skipping createSubject and has_child prevents duplicate links.
+      await this.innerUpdate(true, batchId);
     }
 
-    // Get the class name instead of passing the instance to avoid Prolog query generation
-    const className =
-      await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
-
-    // Create the subject with the initial values
-    await this.perspective.createSubject(
-      className,
-      this.#baseExpression,
-      initialValues,
-      batchId,
-    );
-
-    // Link the subject to the source
-    await this.#perspective.add(
-      new Link({
-        source: this.#source,
-        predicate: "ad4m://has_child",
-        target: this.baseExpression,
-      }),
-      "shared",
-      batchId,
-    );
-
-    // Set relations
-    await this.innerUpdate(false, batchId);
-
-    // If we got a batchId passed in, we let the caller decide when to commit.
-    // But then we can call getData() since the instance won't exist in the perspective
-    // until the bacht is committedl
     if (batchCreatedHere) {
       await this.perspective.commitBatch(batchId);
       await this.getData();
@@ -2864,27 +2901,15 @@ WHERE ${whereConditions.join(" AND ")}
   }
 
   /**
-   * Updates the model instance's properties and relations.
+   * @deprecated Use `save()` instead. `save()` now automatically detects whether
+   * to create or update based on whether the instance already exists in the
+   * perspective. `update()` is kept for backwards compatibility and simply
+   * delegates to `save()`.
    *
    * @param batchId - Optional batch ID for batch operations
-   * @throws Will throw if property setting or relation updates fail
-   *
-   * @example
-   * ```typescript
-   * const recipe = await Recipe.findAll(perspective)[0];
-   * recipe.rating = 5;
-   * recipe.ingredients.push("garlic");
-   * await recipe.update();
-   *
-   * // Or with batch operations:
-   * const batchId = await perspective.createBatch();
-   * await recipe.update(batchId);
-   * await perspective.commitBatch(batchId);
-   * ```
    */
   async update(batchId?: string) {
-    await this.innerUpdate(true, batchId);
-    await this.getData();
+    return this.save(batchId);
   }
 
   /**

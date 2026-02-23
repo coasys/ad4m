@@ -3857,14 +3857,25 @@ impl PerspectiveInstance {
                         //log::info!("🎯 CREATE SUBJECT: Property '{}' setter resolved in {:?}",
                         //    prop, prop_start.elapsed());
 
-                        // Compare predicates between setter and constructor commands
+                        // Merge setter commands into the constructor command list.
+                        // When a setter predicate matches a constructor command, we
+                        // REPLACE the entire constructor command with the setter command
+                        // (using the resolved target value). This preserves the setter's
+                        // action type (e.g. SetSingleTarget) so that re-saves correctly
+                        // remove old links before writing the new value, rather than
+                        // leaving both the stale and updated link in the graph.
                         for setter_cmd in setter_commands.iter() {
                             let mut overwritten = false;
                             if let Some(setter_pred) = &setter_cmd.predicate {
                                 for cmd in commands.iter_mut() {
                                     if let Some(pred) = &cmd.predicate {
                                         if pred == setter_pred {
-                                            cmd.target = Some(target_value.clone());
+                                            // Replace the whole command, not just the target,
+                                            // so the setter action (e.g. SetSingleTarget) is used.
+                                            *cmd = Command {
+                                                target: Some(target_value.clone()),
+                                                ..setter_cmd.clone()
+                                            };
                                             overwritten = true;
                                             break;
                                         }
