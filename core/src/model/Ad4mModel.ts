@@ -609,6 +609,13 @@ export class Ad4mModel {
     key: string,
     metadata: PropertyOptions,
   ): any[] {
+    // Check if property is a flag (immutable — written once by createSubject constructor action)
+    if (metadata.flag) {
+      throw new Error(
+        `Property "${key}" is a @Flag and cannot be set after creation`,
+      );
+    }
+
     // Check if property is read-only
     if (metadata.writable === false) {
       throw new Error(`Property "${key}" is read-only and cannot be written`);
@@ -2601,7 +2608,10 @@ WHERE ${whereConditions.join(" AND ")}
 
     if (resolveLanguage) {
       value = await this.#perspective.createExpression(value, resolveLanguage);
-    } else if (typeof value !== "string" || !/^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(value)) {
+    } else if (
+      typeof value !== "string" ||
+      !/^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(value)
+    ) {
       // Encode raw values as literal:// URIs so they are valid link targets.
       // This mirrors what Rust's resolve_property_value does inside createSubject.
       // Values that already carry a URI scheme (did:, expression://, literal://, etc.)
@@ -2891,6 +2901,13 @@ WHERE ${whereConditions.join(" AND ")}
             const relationMetadata = this.getRelationMetadata(key);
             if (relationMetadata) {
               // Skip - it's a relation, not a regular property
+              continue;
+            }
+            // Skip flag fields — flags are immutable, written once by the
+            // createSubject constructor action. Re-writing them would corrupt
+            // the flag link via setSingleTarget on every re-save.
+            const propMeta = this.getPropertyMetadata(key);
+            if (propMeta?.flag) {
               continue;
             }
             await this.setProperty(key, value, batchId);

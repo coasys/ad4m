@@ -46,17 +46,16 @@ That PR already completed the foundational migration:
 | Scenario 08 expanded to 12 tests — all 6 decorator types covered                                | `findOne`, re-`save`, `remove*`, `set*`, `delete`, `@BelongsToMany` all tested   |
 | Unified `save()` — create vs update routed by SurrealDB existence check                         | `Ad4mModel.ts` — `update()` deprecated, delegates to `save()`                    |
 | Rust `create_subject` merge fix — preserves `SetSingleTarget` action on re-save                 | `perspective_instance.rs` — replaces `cmd.target` with full command struct       |
+| Rust executor rebuilt — all 13 scenario 08 tests passing                                        | `cargo build --release` — `create_subject` fix active, re-save verified ✅       |
+| Scenario 08 expanded to 13 tests — `@BelongsToOne pinnedBy` added                               | `TestComment.pinnedBy` field + test verifies null-case                           |
+| `@Flag` SHACL wiring — `innerUpdate()` skips flag fields; `generatePropertySetterAction()` guards | `flag?: boolean` added to `PropertyOptions`; flags immutable after creation ✅   |
+| Scenario 08 expanded to 14 tests — `@Flag` immutability on re-save                               | Re-saves post, verifies flag value survives and `findAll()` still returns it ✅   |
 
 ### Pending — Phase 2
 
-| Item                                       | Notes                                                                              |
-| ------------------------------------------ | ---------------------------------------------------------------------------------- |
-| `@Flag` SHACL wiring for `generateSHACL()` | Needed for `@Flag` predicate-uniqueness guarantee in SHACL                         |
-| Rust executor rebuild                      | `cargo build --release -p ad4m-executor` — needed to activate `create_subject` fix |
+**Phase 2 COMPLETE** ✅
 
 ### Pending — Phases 3–5
-
-Everything in Phases 3–5 is not started. Phase 2 is functionally complete (12/12 scenario 08 passing once Rust rebuild lands) — Phase 3 can begin after the rebuild.
 
 ---
 
@@ -1138,22 +1137,19 @@ to be cleanly separated before ordering logic can be injected cleanly).
 
 ## Test Strategy
 
-### `ad4m/tests/js` — canonical integration test suite ✅ PRIMARY
+### `ad4m/tests/js` — canonical integration test suite (post-merge)
 
-The `ad4m/tests/js` Mocha suite is the correct home for all `Ad4mModel` API tests. It
-boots a real Rust executor via `startExecutor`, connects via GraphQL, and runs against a
-live perspective with SurrealDB, SHACL, and the full executor stack — the same depth as
-the `we` playground but CI-runnable and co-located with the code under test.
+The `ad4m/tests/js` Mocha suite is the correct long-term home for all `Ad4mModel` API
+tests. However, the suite currently imports deprecated symbols (`Collection`, `ModelOptions`,
+`Optional`, `ReadOnly`, `InstanceQuery`, `Subject`) and has ad-hoc port allocation and
+heavyweight setup that needs cleaning up before it's a good target for new tests.
 
-**Existing pattern** (`tests/js/tests/prolog-and-literals.test.ts`): `before()` spins up
-executor, `after()` kills it, tests run against a real `PerspectiveProxy`. Scenario 08
-models and tests port directly into a new file using this pattern.
+**Decision:** Do not port scenario 08 into `tests/js` as part of this branch. The
+`tests/js` suite needs its own refactor pass — update deprecated imports, clean up the
+test structure, establish a clear pattern. That work belongs in a follow-up after this
+branch is merged, not mixed in here.
 
-**Target file:** `tests/js/tests/model-decorator-api.test.ts`
-
-This should cover all the `Ad4mModel` scenarios currently planned (01–10), written
-directly here rather than in the `we` playground first. Scenario 08 is the immediate
-port; the remaining scenarios get written here from the start.
+**Target file (post-merge):** `tests/js/tests/model-decorator-api.test.ts`
 
 **Why NOT in `ad4m/core` Jest:**
 The `core` Jest suite mocks `PerspectiveProxy` — it can't catch SurrealDB query edge
@@ -1164,7 +1160,7 @@ executor-touching behaviour in `tests/js`.
 
 ---
 
-### `we` playground (`apps/playgrounds/react/ad4m-model-testing`) — WE-layer tooling
+### `we` playground (`apps/playgrounds/react/ad4m-model-testing`) — active test harness
 
 The playground was built as a fast iteration environment during Phase 2 development and
 served its purpose well (scenario 08, 12/12 passing). Its future role is **not** as a
@@ -1187,24 +1183,24 @@ substitute for `tests/js` — it is a `we`-specific development and integration 
 **Scenario renaming:** Now that the generic `Ad4mModel` scenarios move to `tests/js`,
 the playground scenarios should be renamed to reflect their `we`-specific purpose:
 
-| Old name                  | New purpose                                         |
-| ------------------------- | --------------------------------------------------- |
-| `08-decorator-api.ts`     | Keep as reference / port to `tests/js`              |
-| Future scenarios 01–07    | Write directly in `tests/js`, not here              |
-| `08-we-models.ts` (new)   | `Space`/`Block` smoke test against new decorator API |
-| `09-hooks.ts` (new)       | `useSubjects`, `useSubject`, `useEntry` hooks        |
-| `10-neighbourhood.ts` (new) | Neighbourhood join + cross-agent sync              |
-
-
+| Old name                    | New purpose                                          |
+| --------------------------- | ---------------------------------------------------- |
+| `08-decorator-api.ts`       | Keep as reference / port to `tests/js`               |
+| Future scenarios 01–07      | Write directly in `tests/js`, not here               |
+| `08-we-models.ts` (new)     | `Space`/`Block` smoke test against new decorator API |
+| `09-hooks.ts` (new)         | `useSubjects`, `useSubject`, `useEntry` hooks        |
+| `10-neighbourhood.ts` (new) | Neighbourhood join + cross-agent sync                |
 
 ---
 
 ## Execution Order
 
 ```
-0   Port scenario 08 → tests/js/tests/model-decorator-api.test.ts
-      ← direct port of the 12 passing tests; executor lifecycle from prolog-and-literals.test.ts
-      ← remaining scenarios (01–07, 09–10) written here from the start, not in we playground
+0   [POST-MERGE] tests/js refactor + model-decorator-api.test.ts port
+      ← clean up deprecated imports in prolog-and-literals.test.ts
+      ← establish consistent port allocation and setup pattern
+      ← port scenario 08 models + 13 tests into model-decorator-api.test.ts
+      ← write remaining scenarios (01–07, 09–10) directly in tests/js
 1a  generatePrologFacts.ts                              ← first real code; verified by scenario 07
 1b  Remove dead Prolog paths                            ← delete after 1a verified
 1c  Delete Subject.ts                                   ← delete after 1b complete (removes eval())

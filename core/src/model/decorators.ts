@@ -103,6 +103,13 @@ export interface PropertyOptions {
    * The function takes the raw value as input and returns the transformed value.
    */
   transform?: (value: any) => any;
+
+  /**
+   * Indicates that this property is a @Flag — a fixed predicate/value pair written
+   * once by the createSubject constructor action and never changed. Flag properties
+   * are immutable and will be skipped during updates.
+   */
+  flag?: boolean;
 }
 
 /**
