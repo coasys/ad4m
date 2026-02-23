@@ -10,6 +10,7 @@ exclude = [
     "wasm-language-sdk",
     "examples/wasm-languages/note-store",
     "examples/wasm-languages/link-store",
+    "examples/wasm-languages/p-diff-sync-wasm",
 ]
 
 [patch.crates-io]
