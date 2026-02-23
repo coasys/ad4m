@@ -191,6 +191,23 @@ macro_rules! ad4m_language {
         pub extern "C" fn ad4m_teardown() {
             let lang = get_language();
             lang.teardown();
+
+        // ---- Init (DNA installation etc.) ----
+
+        #[no_mangle]
+        pub extern "C" fn ad4m_init() -> u64 {
+            let lang = get_language();
+            match lang.init() {
+                Ok(()) => 0,
+                Err(e) => {
+                    let err_json = match serde_json::to_vec(&serde_json::json!({"error": e})) {
+                        Ok(j) => j,
+                        Err(_) => return 0,
+                    };
+                    $crate::memory::write_output(&err_json)
+                }
+            }
+        }
         }
     };
 }

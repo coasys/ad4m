@@ -119,3 +119,13 @@ pub trait LinksAdapter {
     /// Get the list of other agents (DIDs).
     fn others(&mut self) -> Result<Vec<String>, String> { Ok(vec![]) }
 }
+
+/// Trait for language initialization.
+/// Called once after instantiation. Use this to install Holochain DNAs, etc.
+/// Provides a default no-op implementation.
+pub trait LanguageInit {
+    /// Called once after instantiation. Use this to install Holochain DNAs, etc.
+    fn init(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+}
