@@ -35,11 +35,12 @@ That PR already completed the foundational migration:
 
 ### Pending — Phase 2
 
-| Item                                                    | Notes                                             |
-| ------------------------------------------------------- | ------------------------------------------------- |
-| `setCollection*` → `set*` rename                        | Documented below; not yet implemented             |
-| `@HasOne`, `@BelongsToOne`, `@BelongsToMany` decorators | Phase 2b — not yet started                        |
-| `@Flag` SHACL wiring for `generateSHACL()`              | Needed for `@Flag` predicate-uniqueness guarantee |
+| Item                                                    | Notes                                                         |
+| ------------------------------------------------------- | ------------------------------------------------------------- |
+| `setCollection*` → `set*` rename                        | Documented below; not yet implemented                         |
+| WeakMap metadata registry (from Phase 4a)               | 🔴 Correctness bug — moved forward, see Issue Log             |
+| `@HasOne`, `@BelongsToOne`, `@BelongsToMany` decorators | Phase 2b — not yet started                                    |
+| `@Flag` SHACL wiring for `generateSHACL()`              | Needed for `@Flag` predicate-uniqueness guarantee             |
 
 ### Pending — Phases 3–5
 
@@ -47,7 +48,90 @@ Everything in Phases 3–5 is not started. Phase 2 must be green (scenario 08 al
 
 ---
 
-## Active Issues
+## Issue Log
+
+### Open
+
+### 🟡 `save()` batch lifecycle is implicit
+
+`save()` currently creates its own internal batch if none is provided, commits it, then calls `getData()`. This means:
+
+- A caller cannot call `save()` as part of a larger transaction without manually managing `createBatch()`/`commitBatch()`
+- The internal `batchId` string leaks across several method signatures
+- No rollback happens if something throws mid-save
+
+This is the problem Phase 3b's Transaction API addresses. Not urgent for Phase 2, but worth keeping in mind when reviewing save-related bugs — always check whether a batch lifecycle issue is masking the real failure.
+
+### 🔴 Dual hydration implementations (`getData` vs `instancesFromSurrealResult`)
+
+`getData()` (per-instance, called from `save()`) and `instancesFromSurrealResult()` (bulk, called from `findAll()`) both implement the same link→property/collection hydration logic independently. They already diverged once — the `->link AS links` bug we just fixed only affected `instancesFromSurrealResult`; if `getData()` had a similar SELECT bug it would require a separate investigation.
+
+The fix is a shared `hydrateInstance(instance, links, perspective, metadata)` pure function that both paths delegate to. This is already planned as `query/hydration.ts` in Phase 3a — it's listed there as the right place. Flag it here so it's treated as a correctness fix, not just a decomposition nicety.
+
+**Priority:** Fix as part of Phase 3a file decomposition.
+
+### 🔴 WeakMap metadata registry is sequenced too late (Phase 4 → Phase 2)
+
+The prototype mutation inheritance bug documented in Phase 4a is not a quality-of-life improvement — it is a **silent data corruption bug** that fires immediately when any `@HasMany`-decorated class is subclassed. The `Block` → `ImageBlock extends Block` case in `we/packages/models` will hit it as soon as `ImageBlock` is implemented.
+
+Phase 4 sequencing assumes it's safe to defer this until after file decomposition. It isn't — the bug is live in the current codebase and will corrupt any consumer who subclasses a model before Phase 4 lands.
+
+**Priority:** Move WeakMap metadata registry fix to Phase 2, alongside decorator renames. The fix is self-contained (WeakMaps in `decorators.ts` + updated `getModelMetadata()`) and has no dependency on Phase 3.
+
+### 🟡 String interpolation into SurrealQL — use parameterized queries
+
+`formatSurrealValue()` exists to prevent injection but the pattern is still string interpolation:
+
+```typescript
+`WHERE in.uri = ${safeBaseExpression}`
+```
+
+SurrealDB supports parameterized queries via `querySurrealDB(query, bindings)`. Parameterized queries are immune to escaping mistakes by construction — they are the industry standard for query safety and are guaranteed never to produce injection vulnerabilities regardless of input.
+
+```typescript
+// Current — string interpolation, relies on formatSurrealValue() being correct:
+`SELECT ... FROM link WHERE in.uri = ${formatSurrealValue(base)}`
+
+// Correct — parameterized, safe by construction:
+perspective.querySurrealDB(
+  'SELECT ... FROM link WHERE in.uri = $base',
+  { base }
+)
+```
+
+This applies throughout `queryToSurrealQL`, `getData()`, and any other raw SurrealQL construction. Should be addressed in Phase 3a when `SurrealQueryBuilder.ts` is extracted as its own module — the right time to standardize the query construction pattern.
+
+**Priority:** Phase 3a.
+
+### 🟡 `eval()` in `PerspectiveProxy` for setter actions
+
+The rollup build already warns about it:
+```
+lib/src/perspectives/PerspectiveProxy.js
+  const actions = eval(setter.Setter);
+```
+
+This is inside the `Subject.ts` setter evaluation path. `eval` is a CSP violation in any app with a strict Content Security Policy, suppresses V8's JIT optimizations for the surrounding function, and is a potential injection vector if `setter.Setter` ever comes from untrusted data.
+
+Phase 1c deletes `Subject.ts` entirely — this goes away then. This is an additional reason not to defer Phase 1c.
+
+**Priority:** Resolved by Phase 1c (already planned).
+
+### 🟡 `generateCollectionAction` duplicates Rust SHACL logic
+
+`addLocations()` generates its own action array in TypeScript:
+```typescript
+[{ action: "addLink", source: "this", predicate: "...", target: "value" }]
+```
+The Rust executor has `get_collection_adder_actions` that derives the same structure from SHACL. Two implementations of the same thing that must stay in sync. `save()` uses the SHACL-derived path (correct); collection mutations use the TypeScript-generated path (fragile).
+
+Long-term fix: have collection mutations also fetch SHACL-derived actions via the executor, the same way `createSubject` does. Short-term: add a comment in `generateCollectionAction` explicitly flagging the sync dependency so it's not silently broken by future SHACL changes.
+
+**Priority:** Phase 3 planning item (already noted in Architectural Notes below).
+
+---
+
+### Resolved
 
 ### ✅ `@HasMany` collection writes silently fail (`addLocations`, `addComments` etc.) — RESOLVED
 
@@ -77,16 +161,6 @@ Everything in Phases 3–5 is not started. Phase 2 must be green (scenario 08 al
 ### ✅ Perspective not cleared between test runs — RESOLVED
 
 **Fix applied:** Scenario 08 now clears all links at the start of `run()` using `new LinkQuery({})` (plain `{}` fails the TypeScript structural check since the installed `LinkQuery` type has a required `isMatch` method).
-
-### 🟡 `save()` batch lifecycle is implicit
-
-`save()` currently creates its own internal batch if none is provided, commits it, then calls `getData()`. This means:
-
-- A caller cannot call `save()` as part of a larger transaction without manually managing `createBatch()`/`commitBatch()`
-- The internal `batchId` string leaks across several method signatures
-- No rollback happens if something throws mid-save
-
-This is the problem Phase 3b's Transaction API addresses. Not urgent for Phase 2, but worth keeping in mind when reviewing save-related bugs — always check whether a batch lifecycle issue is masking the real failure.
 
 ---
 
@@ -201,6 +275,8 @@ Once 1a is in place and tested, delete from `Ad4mModel.ts` and `decorators.ts`:
 
 `Subject.ts` only exists to support the `@InstanceQuery` Prolog path.
 Once 1b deletes `@InstanceQuery` entirely, delete `Subject.ts`.
+
+**Additional motivation:** `Subject.ts` contains an `eval(setter.Setter)` call that the rollup build already warns about. `eval` is a CSP violation, suppresses V8 JIT, and is a potential injection vector. Deleting `Subject.ts` eliminates this entirely — see open issue in Issue Log.
 
 ---
 
@@ -478,9 +554,14 @@ core/src/model/
                                   # buildSurrealWhereClause, buildSurrealSelectFields,
                                   # formatSurrealValue, countQueryToSurrealQL,
                                   # matchesCondition — all pure functions, no Ad4mModel dep
+                                  # ⚠️ migrate string interpolation → parameterized queries
+                                  #    throughout (see open issue in Issue Log)
     hydration.ts                  # hydrate<T>(ctor, perspective, query, result) → instances
                                   # + hydrateRelation() for include resolution
                                   # takes ctor as parameter to avoid circular import
+                                  # ⚠️ consolidates getData() + instancesFromSurrealResult()
+                                  #    into one shared hydrateInstance() — eliminates
+                                  #    dual-implementation divergence (see open issue)
     QueryBuilder.ts               # ModelQueryBuilder<T> fluent class — includes .include()
     include.ts                    # resolveIncludes() — walks Include<T> tree, batches fetches
 
@@ -792,6 +873,8 @@ an `onError` callback just to track whether the subscription is healthy.
 
 ## Phase 4 — WeakMap Metadata Registry + Model Inheritance ⏳ NOT STARTED
 
+> ⚠️ **Note:** Phase 4a (WeakMap metadata registry) has been identified as a correctness bug fix, not a quality-of-life improvement. It should be implemented in Phase 2, before any model inheritance is attempted. The Phase 4 content below is retained for the full implementation detail; Phase 4b (inheritance patterns) remains a Phase 4 concern.
+
 ### 4a — WeakMap Metadata Registry
 
 Currently, decorators write metadata by mutating the class prototype:
@@ -1095,14 +1178,17 @@ The test app catches all of these.
       ← each subsequent phase fills in its scenarios before moving to the next phase
 1a  generatePrologFacts.ts                              ← first real code; verified by scenario 07
 1b  Remove dead Prolog paths                            ← delete after 1a verified
-1c  Delete Subject.ts                                   ← delete after 1b complete
+1c  Delete Subject.ts                                   ← delete after 1b complete (removes eval())
 2   Decorator cleanup (@Field, @Flag, @HasMany, etc.)   ← can overlap with 1b/1c
+    + WeakMap metadata registry (moved from Phase 4a)  ← correctness fix, not deferrable
     + update @we/models (5 files) in same PR            ← verified by scenario 08
 3a  File decomposition                                  ← after 1 & 2 complete
+    + shared hydrateInstance() in hydration.ts         ← eliminates dual hydration impls
+    + parameterized SurrealQL queries throughout        ← replaces string interpolation
 3b  Transaction API                                     ← alongside 3a; verified by scenario 06
 3c  Include / eager loading + JSON-first query API      ← after 3a; verified by scenarios 03 & 04
 3d  Subscriptions                                       ← after 3a; verified by scenario 05
-4   WeakMap metadata registry + model inheritance       ← after 3; verified by scenario 09
+4   Model inheritance (WeakMap already done in Phase 2) ← verified by scenario 09
 5   CRDT ordering                                       ← after 3; fills in scenario 10
 F   Flux decorator rename (~15 files in packages/api)   ← after test app validates Phase 2
 ```
