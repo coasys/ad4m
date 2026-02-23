@@ -25,13 +25,19 @@ jobs:
           go-version: '1.22'
 
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config protobuf-compiler cmake libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config protobuf-compiler cmake
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust-executor
           cache-on-failure: true
+
+      - name: Create JS build placeholders
+        run: |
+          mkdir -p executor/lib
+          echo "// placeholder for CI cargo check" > executor/lib/bundle.js
+          dd if=/dev/zero bs=1 count=64 of=rust-executor/CUSTOM_DENO_SNAPSHOT.bin 2>/dev/null
 
       - name: Check default features
         run: cd rust-executor && cargo check 2>&1
@@ -81,13 +87,19 @@ jobs:
           go-version: '1.22'
 
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config protobuf-compiler cmake libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config protobuf-compiler cmake
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust-executor
           cache-on-failure: true
+
+      - name: Create JS build placeholders
+        run: |
+          mkdir -p executor/lib
+          echo "// placeholder for CI cargo check" > executor/lib/bundle.js
+          dd if=/dev/zero bs=1 count=64 of=rust-executor/CUSTOM_DENO_SNAPSHOT.bin 2>/dev/null
 
       - name: Run wasm_core tests
         run: cd rust-executor && cargo test wasm_core --features wasm-languages -- --nocapture 2>&1
