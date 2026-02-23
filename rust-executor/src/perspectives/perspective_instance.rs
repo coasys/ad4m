@@ -4747,18 +4747,14 @@ impl PerspectiveInstance {
 
         // Only spawn prolog facts update if there are changes to update
         if !combined_diff.additions.is_empty() || !combined_diff.removals.is_empty() {
-            //let prolog_start = std::time::Instant::now();
-            //log::info!("🔄 BATCH COMMIT: Starting prolog facts update - {} add, {} rem",
-            //    combined_diff.additions.len(), combined_diff.removals.len());
-
-            // Update prolog facts once for all changes and wait for completion
-            // Update Prolog: subscription engine (immediate) + query engine (lazy)
-            // Update both Prolog engines: subscription (immediate) + query (lazy)
-            self.update_prolog_engines(combined_diff.clone()).await;
-
+            // Persist to SurrealDB BEFORE firing pubsub/prolog events.
+            // update_prolog_engines() spawns a task that publishes link-added events;
+            // if SurrealDB isn't written yet when those events arrive, any subscriber
+            // that immediately calls findAll() will get stale results.
             self.persist_link_diff(&combined_diff).await?;
 
-            //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
+            // Now it's safe to fire link-added events — SurrealDB is already committed.
+            self.update_prolog_engines(combined_diff.clone()).await;
         }
 
         //log::info!("🔄 BATCH COMMIT: Total batch commit took {:?}", commit_start.elapsed());
