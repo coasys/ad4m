@@ -2028,7 +2028,17 @@ export class PerspectiveProxy {
      * @param obj The template object
      */
     async subjectClassesByTemplate(obj: object): Promise<string[]> {
-        // SHACL-based lookup by className (Prolog-free)
+        // SHACL-based lookup: try property matching first (more precise), fall back to className
+        try {
+            const match = await this.findClassByProperties(obj);
+            if (match) {
+                return [match];
+            }
+        } catch (e) {
+            console.warn('subjectClassesByTemplate: property matching failed:', e);
+        }
+
+        // Fall back to className lookup
         try {
             // @ts-ignore - className is added dynamically by decorators
             const className = obj.className || obj.constructor?.className || obj.constructor?.prototype?.className;
@@ -2039,7 +2049,7 @@ export class PerspectiveProxy {
                 }
             }
         } catch (e) {
-            console.warn('subjectClassesByTemplate: SHACL lookup failed:', e);
+            console.warn('subjectClassesByTemplate: className lookup failed:', e);
         }
 
         return [];
