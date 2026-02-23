@@ -18,38 +18,38 @@ That PR already completed the foundational migration:
 
 ### Completed
 
-| Item                                                                             | Commit / Notes                                                          |
-| -------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| Phase 1 (Prolog removal)                                                         | `bd3a7b6c` in `ad4m-model-refactor`                                     |
-| Phase 2 decorator renames (`@Property`, `@HasMany`, `@Model`, `@Flag`)           | `bd3a7b6c` — `we` repo migrated in follow-up commit                     |
-| `@we/models` Phase 2 migration (`Space`, `Block`, block-types)                   | `we` `dev` branch                                                       |
-| `declare` → `HasManyMethods<Keys>` interface-merge pattern on `Space` + `Block`  | Replaces `declare add/remove/set` stubs; avoids Babel ordering issues   |
-| `HasManyMethods<Keys extends string>` utility type exported from `@coasys/ad4m`  | `decorators.ts`                                                         |
-| `get id()` public alias on `Ad4mModel`                                           | `Ad4mModel.ts` — alias for `baseExpression`                             |
-| Test app scaffold (`apps/playgrounds/react/ad4m-model-testing`)                  | All scenarios 01–10 wired, 08 active                                    |
-| Scenario 08 — rewritten with local `TestPost`/`TestComment`/`TestTag` models     | 5/5 passing ✅                                                          |
-| `uuid` field removed from `Space` model                                          | Was redundant with `baseExpression`/`id`                                |
-| `UserLocation` + `SpaceType` interfaces removed from `Space.ts`                  | Dead code — no consumers outside `Space.ts` itself                      |
-| `$perspective` phantom variable removed from `queryToSurrealQL`                  | Fixed — see resolved issues below                                       |
-| `->link AS links` hydration bug fixed in `queryToSurrealQL`                      | Fixed — see resolved issues below                                       |
-| `setCollection*` → `set*` rename                                                 | `ad4m@46e140e2`, `we@cf19352`                                           |
-| WeakMap metadata registry fix                                                    | `decorators.ts` — eliminates prototype-mutation inheritance bug         |
-| `@BelongsToOne` / `@BelongsToMany` decorators                                   | Implemented with `direction: "reverse"` — no mutator stubs generated    |
-| `@HasOne` decorator                                                               | Implemented with `maxCount: 1`                                          |
-| `@HasMany` / `@HasOne` accept optional model-class factory as first arg          | `HasMany(() => ModelClass, opts)` — for SHACL/isInstance metadata       |
-| `getModelMetadata()` propagates `direction` + `maxCount`                         | Root-cause fix for `@BelongsToOne` not populating reverse fields        |
-| Constructor skips `add/remove/set` stubs for `direction === "reverse"` relations | Prevents `addPost`/`removePost` being generated on `@BelongsToOne`      |
-| `getData()` reverse-link query (`WHERE out.uri = ...`, maps `l.source`)          | Single-instance hydration of reverse relations                          |
-| `instancesFromSurrealResult()` batch reverse-link query                          | `findAll()` hydration of reverse relations (`maxCount === 1` for HasOne)|
-| `generatePrologFacts` updated: `collections` → `relations` in metadata           | Keeps Prolog bridge in sync with renamed field                          |
-| `PerspectiveProxy.buildQueryFromTemplate` uses `getPropertiesMetadata` / `getRelationsMetadata` | Removed `__properties`/`__collections` prototype hacks       |
+| Item                                                                                            | Commit / Notes                                                           |
+| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Phase 1 (Prolog removal)                                                                        | `bd3a7b6c` in `ad4m-model-refactor`                                      |
+| Phase 2 decorator renames (`@Property`, `@HasMany`, `@Model`, `@Flag`)                          | `bd3a7b6c` — `we` repo migrated in follow-up commit                      |
+| `@we/models` Phase 2 migration (`Space`, `Block`, block-types)                                  | `we` `dev` branch                                                        |
+| `declare` → `HasManyMethods<Keys>` interface-merge pattern on `Space` + `Block`                 | Replaces `declare add/remove/set` stubs; avoids Babel ordering issues    |
+| `HasManyMethods<Keys extends string>` utility type exported from `@coasys/ad4m`                 | `decorators.ts`                                                          |
+| `get id()` public alias on `Ad4mModel`                                                          | `Ad4mModel.ts` — alias for `baseExpression`                              |
+| Test app scaffold (`apps/playgrounds/react/ad4m-model-testing`)                                 | All scenarios 01–10 wired, 08 active                                     |
+| Scenario 08 — rewritten with local `TestPost`/`TestComment`/`TestTag` models                    | 5/5 passing ✅                                                           |
+| `uuid` field removed from `Space` model                                                         | Was redundant with `baseExpression`/`id`                                 |
+| `UserLocation` + `SpaceType` interfaces removed from `Space.ts`                                 | Dead code — no consumers outside `Space.ts` itself                       |
+| `$perspective` phantom variable removed from `queryToSurrealQL`                                 | Fixed — see resolved issues below                                        |
+| `->link AS links` hydration bug fixed in `queryToSurrealQL`                                     | Fixed — see resolved issues below                                        |
+| `setCollection*` → `set*` rename                                                                | `ad4m@46e140e2`, `we@cf19352`                                            |
+| WeakMap metadata registry fix                                                                   | `decorators.ts` — eliminates prototype-mutation inheritance bug          |
+| `@BelongsToOne` / `@BelongsToMany` decorators                                                   | Implemented with `direction: "reverse"` — no mutator stubs generated     |
+| `@HasOne` decorator                                                                             | Implemented with `maxCount: 1`                                           |
+| `@HasMany` / `@HasOne` accept optional model-class factory as first arg                         | `HasMany(() => ModelClass, opts)` — for SHACL/isInstance metadata        |
+| `getModelMetadata()` propagates `direction` + `maxCount`                                        | Root-cause fix for `@BelongsToOne` not populating reverse fields         |
+| Constructor skips `add/remove/set` stubs for `direction === "reverse"` relations                | Prevents `addPost`/`removePost` being generated on `@BelongsToOne`       |
+| `getData()` reverse-link query (`WHERE out.uri = ...`, maps `l.source`)                         | Single-instance hydration of reverse relations                           |
+| `instancesFromSurrealResult()` batch reverse-link query                                         | `findAll()` hydration of reverse relations (`maxCount === 1` for HasOne) |
+| `generatePrologFacts` updated: `collections` → `relations` in metadata                          | Keeps Prolog bridge in sync with renamed field                           |
+| `PerspectiveProxy.buildQueryFromTemplate` uses `getPropertiesMetadata` / `getRelationsMetadata` | Removed `__properties`/`__collections` prototype hacks                   |
 
 ### Pending — Phase 2
 
-| Item                                                        | Notes                                                           |
-| ----------------------------------------------------------- | --------------------------------------------------------------- |
-| `@Flag` SHACL wiring for `generateSHACL()`                  | Needed for `@Flag` predicate-uniqueness guarantee in SHACL      |
-| Scenario 08 `@BelongsToMany` test                           | `TestTag.posts` reverse-traversal — not yet exercised in 08     |
+| Item                                       | Notes                                                       |
+| ------------------------------------------ | ----------------------------------------------------------- |
+| `@Flag` SHACL wiring for `generateSHACL()` | Needed for `@Flag` predicate-uniqueness guarantee in SHACL  |
+| Scenario 08 `@BelongsToMany` test          | `TestTag.posts` reverse-traversal — not yet exercised in 08 |
 
 ### Pending — Phases 3–5
 
@@ -79,7 +79,7 @@ The fix is a shared `hydrateInstance(instance, links, perspective, metadata)` pu
 
 **Priority:** Fix as part of Phase 3a file decomposition.
 
-###  String interpolation into SurrealQL — use parameterized queries
+### String interpolation into SurrealQL — use parameterized queries
 
 `formatSurrealValue()` exists to prevent injection but the pattern is still string interpolation:
 

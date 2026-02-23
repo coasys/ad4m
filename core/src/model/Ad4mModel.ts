@@ -440,8 +440,12 @@ export class Ad4mModel {
         ...(options.where !== undefined && { where: options.where }),
         ...(options.local !== undefined && { local: options.local }),
         ...(options.getter !== undefined && { getter: options.getter }),
-        ...((opts as any).direction !== undefined && { direction: (opts as any).direction }),
-        ...((opts as any).maxCount !== undefined && { maxCount: (opts as any).maxCount }),
+        ...((opts as any).direction !== undefined && {
+          direction: (opts as any).direction,
+        }),
+        ...((opts as any).maxCount !== undefined && {
+          maxCount: (opts as any).maxCount,
+        }),
       };
     }
 
@@ -930,7 +934,8 @@ export class Ad4mModel {
             }
           }
 
-          (this as any)[collName] = values;
+          (this as any)[collName] =
+            collMeta.maxCount === 1 ? (values[0] ?? null) : values;
         }
 
         // Process reverse relations (target ← predicate ← source)
@@ -944,7 +949,8 @@ export class Ad4mModel {
           `;
           let reverseLinks: any[] = [];
           try {
-            reverseLinks = (await this.#perspective.querySurrealDB(reverseLinksQuery)) ?? [];
+            reverseLinks =
+              (await this.#perspective.querySurrealDB(reverseLinksQuery)) ?? [];
           } catch {
             // leave empty — instance just won't have reverse relation data
           }
@@ -956,7 +962,7 @@ export class Ad4mModel {
             const values = matching.map((l: any) => l.source);
             // BelongsToOne: take only the first (most recent source wins)
             (this as any)[collName] =
-              collMeta.maxCount === 1 ? (values[0] ?? null) : values;
+              collMeta.maxCount === 1 ? values[0] ?? null : values;
           }
         }
 
@@ -1977,12 +1983,16 @@ WHERE ${whereConditions.join(" AND ")}
               return a.originalIndex - b.originalIndex;
             });
             // Replace collection with sorted values, filtering out empty strings and None
-            instance[collName] = pairs
+            const sortedValues = pairs
               .map((p) => p.value)
               .filter(
                 (v: any) =>
                   v !== undefined && v !== null && v !== "" && v !== "None",
               );
+            // @HasOne / maxCount:1 forward relations store a single string, not an array
+            const collMeta = metadata.relations[collName];
+            instance[collName] =
+              collMeta?.maxCount === 1 ? (sortedValues[0] ?? null) : sortedValues;
             // Clean up temporary arrays
             delete instance[timestampsKey];
             delete instance[indicesKey];
@@ -2044,7 +2054,7 @@ WHERE ${whereConditions.join(" AND ")}
             );
             const values = matching.map((l: any) => l.source);
             (instance as any)[collName] =
-              collMeta.maxCount === 1 ? (values[0] ?? null) : values;
+              collMeta.maxCount === 1 ? values[0] ?? null : values;
           }
         }
       } catch (e) {

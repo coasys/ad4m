@@ -438,15 +438,24 @@ export type HasManyMethods<Keys extends string> = {
   [K in Keys as `set${Capitalize<K>}`]: (values: string[]) => Promise<void>;
 };
 
-export function HasMany(relatedModelOrOpts: (() => any) | RelationOptions, opts?: RelationOptions) {
-  const resolvedOpts: RelationOptions = typeof relatedModelOrOpts === 'function' ? opts! : relatedModelOrOpts;
-  const relatedModel: (() => any) | undefined = typeof relatedModelOrOpts === 'function' ? relatedModelOrOpts : undefined;
+export function HasMany(
+  relatedModelOrOpts: (() => any) | RelationOptions,
+  opts?: RelationOptions,
+) {
+  const resolvedOpts: RelationOptions =
+    typeof relatedModelOrOpts === "function" ? opts! : relatedModelOrOpts;
+  const relatedModel: (() => any) | undefined =
+    typeof relatedModelOrOpts === "function" ? relatedModelOrOpts : undefined;
   return function <T>(target: T, key: keyof T) {
     const _hasManyExisting =
       relationRegistry.get((target as any).constructor) ?? {};
     relationRegistry.set((target as any).constructor, {
       ..._hasManyExisting,
-      [key as string]: { ...resolvedOpts, direction: "forward" as const, ...(relatedModel ? { relatedModel } : {}) },
+      [key as string]: {
+        ...resolvedOpts,
+        direction: "forward" as const,
+        ...(relatedModel ? { relatedModel } : {}),
+      },
     });
 
     const value = key as string;
@@ -458,15 +467,25 @@ export function HasMany(relatedModelOrOpts: (() => any) | RelationOptions, opts?
   };
 }
 
-export function HasOne(relatedModelOrOpts: (() => any) | RelationOptions, opts?: RelationOptions) {
-  const resolvedOpts: RelationOptions = typeof relatedModelOrOpts === 'function' ? opts! : relatedModelOrOpts;
-  const relatedModel: (() => any) | undefined = typeof relatedModelOrOpts === 'function' ? relatedModelOrOpts : undefined;
+export function HasOne(
+  relatedModelOrOpts: (() => any) | RelationOptions,
+  opts?: RelationOptions,
+) {
+  const resolvedOpts: RelationOptions =
+    typeof relatedModelOrOpts === "function" ? opts! : relatedModelOrOpts;
+  const relatedModel: (() => any) | undefined =
+    typeof relatedModelOrOpts === "function" ? relatedModelOrOpts : undefined;
   return function <T>(target: T, key: keyof T) {
     const _hasOneExisting =
       relationRegistry.get((target as any).constructor) ?? {};
     relationRegistry.set((target as any).constructor, {
       ..._hasOneExisting,
-      [key as string]: { ...resolvedOpts, direction: "forward" as const, maxCount: 1, ...(relatedModel ? { relatedModel } : {}) },
+      [key as string]: {
+        ...resolvedOpts,
+        direction: "forward" as const,
+        maxCount: 1,
+        ...(relatedModel ? { relatedModel } : {}),
+      },
     });
 
     const value = key as string;
