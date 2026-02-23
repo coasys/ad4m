@@ -118,8 +118,9 @@ export async function setProperty(
     | PropertyOptions
     | undefined;
   if (!metadata) {
-    console.warn(`Property "${key}" has no metadata, skipping`);
-    return;
+    throw new Error(
+      `setProperty called with unknown key "${key}" — ensure the field has a @Property decorator`,
+    );
   }
 
   const actions = generatePropertySetterAction(key, metadata);
@@ -334,9 +335,15 @@ export async function innerUpdate(
         if (setProperties) {
           // Skip relation fields — they are not scalar properties.
           if (getRelationsMetadata(proto.constructor)?.[key]) continue;
-          // Skip flag fields — flags are immutable, written once by createSubject.
           const propMeta = getPropertiesMetadata(proto.constructor)?.[key];
-          if (propMeta?.flag) continue;
+          // No @Property decorator for this key — skip silently.
+          // This covers generated relation methods (addX / removeX / setX)
+          // that appear as own enumerable properties on the instance, and
+          // base-class fields like `author` / `createdAt` that have no
+          // associated predicate.
+          if (!propMeta) continue;
+          // Skip flag fields — flags are immutable, written once by createSubject.
+          if (propMeta.flag) continue;
           await setProperty(ctx, key, value, batchId);
         }
       }

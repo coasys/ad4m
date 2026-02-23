@@ -84,9 +84,11 @@ export async function runTransaction<T>(
     await perspective.commitBatch(batchId);
     return result;
   } catch (err) {
-    // PerspectiveProxy has no abortBatch — log a warning so the caller knows
-    // the uncommitted batch will be discarded by the runtime on the next GC cycle.
-    console.warn(
+    // PerspectiveProxy has no abortBatch — the uncommitted batch will be
+    // discarded by the runtime on its next GC cycle.  Log at debug level
+    // only: the re-thrown error already carries all actionable information,
+    // and logging at warn would spam the console for intentional rollbacks.
+    console.debug(
       `[Ad4mModel.transaction] callback threw — batch ${batchId} was NOT committed and will be discarded.`,
       err,
     );
