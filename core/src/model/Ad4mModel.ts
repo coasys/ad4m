@@ -40,21 +40,15 @@ import type {
 } from "./types";
 
 // ── JSON Schema factory ────────────────────────────────────────────────────
-import {
-  createModelFromJSONSchema,
-  determineNamespace,
-  determinePredicate,
-  isArrayType,
-} from "./schema/fromJSONSchema";
+import { createModelFromJSONSchema } from "./schema/fromJSONSchema";
 import type {
   JSONSchema,
   JSONSchemaToModelOptions,
-  JSONSchemaProperty,
 } from "./schema/fromJSONSchema";
 export type {
   JSONSchema,
   JSONSchemaToModelOptions,
-  JSONSchemaProperty,
+  JSONSchemaProperty, // keep re-exporting for external consumers
 } from "./schema/fromJSONSchema";
 
 // ── Fluent query builder (re-exported for consumers) ──────────────────────
@@ -89,8 +83,13 @@ import {
 // ── Static query operations (each static method below delegates here) ─────────
 import * as ops from "./query/operations";
 
-// ── Internal-only types ────────────────────────────────────────────────────
-type ValueTuple = [name: string, value: any, resolve?: boolean];
+// ── Metadata helpers ────────────────────────────────────────────────────────
+import {
+  getModelMetadataForClass,
+  assignValuesToInstance as doAssignValues,
+  type ModelValueTuple,
+} from "./schema/metadata";
+export type { ModelValueTuple } from "./schema/metadata";
 
 /**
  * Base class for defining data models in AD4M.
@@ -278,128 +277,7 @@ export class Ad4mModel {
    * ```
    */
   public static getModelMetadata(): ModelMetadata {
-    // Access the prototype with any type to access decorator-added properties
-    const prototype = this.prototype as any;
-
-    // Validate that the class has @ModelOptions decorator
-    // The decorator sets prototype.className, so we check for its existence
-    if (!prototype.className || prototype.className === "Ad4mModel") {
-      throw new Error("Model class must be decorated with @Model");
-    }
-
-    // Extract className
-    const className = prototype.className;
-
-    // Extract properties from WeakMap registry
-    const propertiesMetadata: Record<string, PropertyMetadata> = {};
-    const prototypeProperties = getPropertiesMetadata(this);
-
-    for (const [propertyName, opts] of Object.entries(prototypeProperties)) {
-      const options = opts as PropertyOptions & {
-        required?: boolean;
-        flag?: boolean;
-      };
-      propertiesMetadata[propertyName] = {
-        name: propertyName,
-        predicate: options.through || "",
-        required: options.required || false,
-        writable: options.writable || false,
-        ...(options.initial !== undefined && { initial: options.initial }),
-        ...(options.resolveLanguage !== undefined && {
-          resolveLanguage: options.resolveLanguage,
-        }),
-        ...(options.getter !== undefined && { getter: options.getter }),
-        ...(options.local !== undefined && { local: options.local }),
-        ...(options.transform !== undefined && {
-          transform: options.transform,
-        }),
-        ...(options.flag !== undefined && { flag: options.flag }),
-      };
-    }
-
-    // Extract relations from WeakMap registry
-    const relationsMetadata: Record<string, RelationMetadata> = {};
-    const prototypeRelations = getRelationsMetadata(this);
-
-    for (const [relationName, opts] of Object.entries(prototypeRelations)) {
-      const options = opts as RelationOptions;
-      relationsMetadata[relationName] = {
-        name: relationName,
-        predicate: options.through || "",
-        ...(options.where !== undefined && { where: options.where }),
-        ...(options.local !== undefined && { local: options.local }),
-        ...(options.getter !== undefined && { getter: options.getter }),
-        ...((opts as any).direction !== undefined && {
-          direction: (opts as any).direction,
-        }),
-        ...((opts as any).maxCount !== undefined && {
-          maxCount: (opts as any).maxCount,
-        }),
-        ...((opts as any).relatedModel !== undefined && {
-          relatedModel: (opts as any).relatedModel,
-        }),
-      };
-    }
-
-    // Fallback: If both structures are empty but a JSON schema is attached, derive from it
-    // This handles edge cases where fromJSONSchema() was called but metadata wasn't properly populated
-    const hasProperties = Object.keys(propertiesMetadata).length > 0;
-    const hasRelations = Object.keys(relationsMetadata).length > 0;
-    const hasMetadata = hasProperties || hasRelations;
-
-    if (!hasMetadata && prototype.__jsonSchema) {
-      // Derive metadata from the attached JSON schema
-      const schema = prototype.__jsonSchema;
-      const options = prototype.__jsonSchemaOptions || {};
-
-      if (schema.properties) {
-        for (const [propertyName, propertySchema] of Object.entries(
-          schema.properties,
-        )) {
-          const isArray = isArrayType(propertySchema as JSONSchemaProperty);
-          const predicate = determinePredicate(
-            schema,
-            propertyName,
-            propertySchema as JSONSchemaProperty,
-            determineNamespace(schema, options),
-            options,
-          );
-
-          if (isArray) {
-            relationsMetadata[propertyName] = {
-              name: propertyName,
-              predicate: predicate,
-              ...(propertySchema["x-ad4m"]?.local !== undefined && {
-                local: propertySchema["x-ad4m"].local,
-              }),
-            };
-          } else {
-            const isRequired = schema.required?.includes(propertyName) || false;
-            propertiesMetadata[propertyName] = {
-              name: propertyName,
-              predicate: predicate,
-              required: isRequired,
-              writable: propertySchema["x-ad4m"]?.writable !== false,
-              ...(propertySchema["x-ad4m"]?.resolveLanguage && {
-                resolveLanguage: propertySchema["x-ad4m"].resolveLanguage,
-              }),
-              ...(propertySchema["x-ad4m"]?.initial && {
-                initial: propertySchema["x-ad4m"].initial,
-              }),
-              ...(propertySchema["x-ad4m"]?.local !== undefined && {
-                local: propertySchema["x-ad4m"].local,
-              }),
-            };
-          }
-        }
-      }
-    }
-
-    return {
-      className,
-      properties: propertiesMetadata,
-      relations: relationsMetadata,
-    };
+    return getModelMetadataForClass(this);
   }
 
   /**
@@ -568,87 +446,9 @@ export class Ad4mModel {
   public static async assignValuesToInstance(
     perspective: PerspectiveProxy,
     instance: Ad4mModel,
-    values: ValueTuple[],
+    values: ModelValueTuple[],
   ) {
-    // Map properties to object
-    const propsObject = Object.fromEntries(
-      await Promise.all(
-        values.map(async ([name, value, resolve]) => {
-          let finalValue = value;
-
-          // Handle UTF-8 byte sequences from Prolog URL decoding
-          if (!resolve && typeof value === "string") {
-            // Only attempt reconstruction if the string looks like a byte string (all code points <= 0xFF)
-            // and contains at least one high byte (>= 0x80). This avoids mangling valid Unicode.
-            const codePoints = Array.from(value, (ch) => ch.codePointAt(0)!);
-            const looksByteString = codePoints.every((cp) => cp <= 0xff);
-            const hasHighByte = codePoints.some((cp) => cp >= 0x80);
-            if (looksByteString && hasHighByte) {
-              try {
-                const bytes = Uint8Array.from(codePoints);
-                const decoded = new TextDecoder("utf-8", {
-                  fatal: true,
-                }).decode(bytes);
-                if (decoded !== value) finalValue = decoded;
-              } catch (error) {
-                // If UTF-8 conversion fails, keep the original value
-                console.warn(
-                  `UTF-8 byte reconstruction failed for property "${name}"`,
-                  { value, error },
-                );
-              }
-            }
-          }
-
-          // Resolve the value if necessary
-          if (resolve) {
-            let resolvedExpression = await perspective.getExpression(value);
-            if (resolvedExpression) {
-              try {
-                // Attempt to parse the data as JSON
-                finalValue = JSON.parse(resolvedExpression.data);
-              } catch (error) {
-                // If parsing fails, keep the original data
-                finalValue = resolvedExpression.data;
-              }
-            }
-          }
-          // Apply transform function if it exists
-          const transform = getPropertiesMetadata(
-            Object.getPrototypeOf(instance).constructor,
-          )?.[name]?.transform;
-          if (transform && typeof transform === "function") {
-            finalValue = transform(finalValue);
-          }
-          return [name, finalValue];
-        }),
-      ),
-    );
-    // Filter out properties that are read-only (getters without setters)
-    const writableProps = Object.fromEntries(
-      Object.entries(propsObject).filter(([key]) => {
-        const descriptor = Object.getOwnPropertyDescriptor(
-          Object.getPrototypeOf(instance),
-          key,
-        );
-        if (!descriptor) {
-          // No descriptor means it's a regular property on the instance, allow it
-          return true;
-        }
-        // Check if it's an accessor descriptor (has get/set) vs data descriptor (has value/writable)
-        const isAccessor =
-          descriptor.get !== undefined || descriptor.set !== undefined;
-        if (isAccessor) {
-          // Accessor descriptor: only allow if it has a setter
-          return descriptor.set !== undefined;
-        } else {
-          // Data descriptor: only allow if writable is not explicitly false
-          return descriptor.writable !== false;
-        }
-      }),
-    );
-    // Assign properties to instance
-    Object.assign(instance, writableProps);
+    return doAssignValues(perspective, instance, values);
   }
 
   private async getData() {
