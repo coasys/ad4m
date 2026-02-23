@@ -38,11 +38,11 @@ struct HostEnv {
     /// Guest's `ad4m_alloc` function, set after instantiation.
     alloc_fn: Option<TypedFunction<u32, u32>>,
     /// Tokio runtime handle for bridging sync host functions to async services.
-    tokio_handle: tokio::runtime::Handle,
+    tokio_handle: Option<tokio::runtime::Handle>,
 }
 
 impl HostEnv {
-    fn new(language_address: String, tokio_handle: tokio::runtime::Handle) -> Self {
+    fn new(language_address: String, tokio_handle: Option<tokio::runtime::Handle>) -> Self {
         Self {
             language_address,
             memory: None,
@@ -374,7 +374,15 @@ fn host_hc_call(mut env: FunctionEnvMut<HostEnv>, data_ptr: u32, data_len: u32) 
     };
 
     let language_address = host_env.language_address.clone();
-    let handle = host_env.tokio_handle.clone();
+    let handle = match host_env.tokio_handle.as_ref() {
+        Some(h) => h.clone(),
+        None => {
+            log::error!("No tokio runtime available for async host function");
+            
+            
+            return 0;
+        }
+    };
 
     // Bridge sync -> async using block_in_place to avoid deadlock in tokio runtime
     let result = tokio::task::block_in_place(|| {
@@ -522,7 +530,15 @@ fn host_hc_install_app(mut env: FunctionEnvMut<HostEnv>, data_ptr: u32, data_len
     };
 
     let language_address = host_env.language_address.clone();
-    let handle = host_env.tokio_handle.clone();
+    let handle = match host_env.tokio_handle.as_ref() {
+        Some(h) => h.clone(),
+        None => {
+            log::error!("No tokio runtime available for async host function");
+            
+            
+            return 0;
+        }
+    };
 
     let result = tokio::task::block_in_place(|| {
         handle.block_on(async {
@@ -593,7 +609,15 @@ fn host_hc_remove_app(mut env: FunctionEnvMut<HostEnv>, data_ptr: u32, data_len:
         }
     };
 
-    let handle = host_env.tokio_handle.clone();
+    let handle = match host_env.tokio_handle.as_ref() {
+        Some(h) => h.clone(),
+        None => {
+            log::error!("No tokio runtime available for async host function");
+            
+            
+            return 0;
+        }
+    };
 
     let result = tokio::task::block_in_place(|| {
         handle.block_on(async {
@@ -632,7 +656,15 @@ fn host_hc_remove_app(mut env: FunctionEnvMut<HostEnv>, data_ptr: u32, data_len:
 /// Returns the agent's Holochain public key.
 fn host_hc_get_agent_key(mut env: FunctionEnvMut<HostEnv>) -> u64 {
     let (host_env, mut store) = env.data_and_store_mut();
-    let handle = host_env.tokio_handle.clone();
+    let handle = match host_env.tokio_handle.as_ref() {
+        Some(h) => h.clone(),
+        None => {
+            log::error!("No tokio runtime available for async host function");
+            
+            
+            return 0;
+        }
+    };
 
     let result = tokio::task::block_in_place(|| {
         handle.block_on(async {
@@ -1147,7 +1179,7 @@ pub fn load_wasm_language_from_bytes(
         .map_err(|e| WasmLanguageError::CompilationError(format!("{}", e)))?;
 
     // Create host environment
-    let host_env = HostEnv::new(language_address.to_string(), tokio::runtime::Handle::current());
+    let host_env = HostEnv::new(language_address.to_string(), tokio::runtime::Handle::try_current().ok());
     let env = FunctionEnv::new(&mut store, host_env);
 
     // Define host function imports

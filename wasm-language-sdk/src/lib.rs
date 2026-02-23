@@ -191,6 +191,7 @@ macro_rules! ad4m_language {
         pub extern "C" fn ad4m_teardown() {
             let lang = get_language();
             lang.teardown();
+        }
 
         // ---- Init (DNA installation etc.) ----
 
@@ -207,7 +208,6 @@ macro_rules! ad4m_language {
                     $crate::memory::write_output(&err_json)
                 }
             }
-        }
         }
     };
 }

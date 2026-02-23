@@ -293,4 +293,56 @@ mod wasm_links_adapter_tests {
         let others = instance.others().unwrap();
         assert!(others.is_empty());
     }
+
+
+    // ============================================================================
+    // p-diff-sync-wasm tests (Holochain-backed link language)
+    // ============================================================================
+
+    fn p_diff_sync_wasm_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("examples/wasm-languages/p-diff-sync-wasm/target/wasm32-unknown-unknown/release")
+            .join("p_diff_sync_wasm.wasm")
+    }
+
+    #[test]
+    fn test_p_diff_sync_load_and_capabilities() {
+        let wasm_path = p_diff_sync_wasm_path();
+        if !wasm_path.exists() {
+            eprintln!("p-diff-sync WASM not found at {:?}, skipping", wasm_path);
+            return;
+        }
+        // Loading will fail because ad4m_init tries to install a DNA via Holochain
+        // which requires a running conductor. Verify the error is the expected one.
+        let result = load_wasm_language(&wasm_path, "test-p-diff-sync");
+        match result {
+            Ok(instance) => {
+                // If a tokio runtime + conductor are available, verify caps
+                assert_eq!(instance.name(), "p-diff-sync-wasm");
+                let caps = instance.capabilities();
+                assert!(caps.has_links_adapter, "p-diff-sync should have links adapter");
+            }
+            Err(e) => {
+                let err_str = format!("{}", e);
+                assert!(
+                    err_str.contains("ad4m_init failed") || err_str.contains("hc_install_app"),
+                    "Expected DNA install error, got: {}", err_str
+                );
+                eprintln!("p-diff-sync load correctly failed without conductor: {}", err_str);
+            }
+        }
+    }
+
+    #[test]
+    fn test_p_diff_sync_size_reasonable() {
+        let wasm_path = p_diff_sync_wasm_path();
+        if !wasm_path.exists() { return; }
+        let metadata = std::fs::metadata(&wasm_path).unwrap();
+        let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
+        // Should be ~1.4MB (1.1MB happ + code)
+        assert!(size_mb > 1.0, "WASM should be > 1MB (has embedded .happ)");
+        assert!(size_mb < 3.0, "WASM should be < 3MB");
+        eprintln!("p-diff-sync-wasm size: {:.2} MB", size_mb);
+    }
 }
