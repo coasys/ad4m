@@ -314,7 +314,7 @@ export interface CollectionOptions {
  * For each collection property, the following methods are automatically generated:
  * - `addX(value)` - Add a value to the collection
  * - `removeX(value)` - Remove a value from the collection
- * - `setCollectionX(values)` - Replace all values in the collection
+ * - `setX(values)` - Replace all values in the collection
  *
  * Where X is the capitalized property name.
  *
@@ -364,7 +364,7 @@ export interface CollectionOptions {
  * const recipe = new Recipe(perspective);
  * await recipe.addIngredients("ingredient://flour");
  * await recipe.removeIngredients("ingredient://sugar");
- * await recipe.setCollectionIngredients(["ingredient://butter", "ingredient://eggs"]);
+ * await recipe.setIngredients(["ingredient://butter", "ingredient://eggs"]);
  * ```
  *
  * @param {CollectionOptions} opts - Collection configuration
@@ -380,7 +380,7 @@ export interface CollectionOptions {
  * For each collection property `foo`, the decorator generates:
  * - `addFoo(value: string): Promise<void>`
  * - `removeFoo(value: string): Promise<void>`
- * - `setCollectionFoo(values: string[]): Promise<void>`
+ * - `setFoo(values: string[]): Promise<void>`
  *
  * Pass a string union of your \@HasMany property names and use interface merging —
  * this avoids the circular reference you'd get by passing the class itself:
@@ -399,7 +399,7 @@ export type HasManyMethods<Keys extends string> = {
 } & {
   [K in Keys as `remove${Capitalize<K>}`]: (value: string) => Promise<void>;
 } & {
-  [K in Keys as `setCollection${Capitalize<K>}`]: (
+  [K in Keys as `set${Capitalize<K>}`]: (
     values: string[],
   ) => Promise<void>;
 };
@@ -412,7 +412,7 @@ export function HasMany(opts: CollectionOptions) {
     const value = key as string;
     target[`add${capitalize(value)}`] = () => {};
     target[`remove${capitalize(value)}`] = () => {};
-    target[`setCollection${capitalize(value)}`] = () => {};
+    target[`set${capitalize(value)}`] = () => {};
 
     Object.defineProperty(target, key, { configurable: true, writable: true });
   };
@@ -430,7 +430,7 @@ export function HasOne(opts: CollectionOptions) {
     const value = key as string;
     target[`add${capitalize(value)}`] = () => {};
     target[`remove${capitalize(value)}`] = () => {};
-    target[`setCollection${capitalize(value)}`] = () => {};
+    target[`set${capitalize(value)}`] = () => {};
 
     Object.defineProperty(target, key, { configurable: true, writable: true });
   };

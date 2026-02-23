@@ -2136,12 +2136,23 @@ export class PerspectiveProxy {
                 collections.push(...Object.keys(obj).filter(key => Array.isArray(obj[key])).filter(key => key !== 'isSubjectInstance'))
             }
 
+            // Helper: distinguish collection setters (setComments, setLocations, …) from
+            // plain property setters (setName, setState, …) using @HasMany/__collections metadata
+            // rather than the old "setCollection" string prefix.
+            const _collectionsMetadata = Object.getPrototypeOf(obj)?.__collections || (obj as any).__collections || {};
+            const isCollectionSetter = (key: string): boolean => {
+                if (!key.startsWith("set") || key.length <= 3) return false;
+                const suffix = key.substring(3);
+                const collectionKey = suffix.charAt(0).toLowerCase() + suffix.slice(1);
+                return collectionKey in _collectionsMetadata;
+            };
+
             // Collect all set functions of the object in a list
-            let setFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("set") && !key.startsWith("setCollection"))
+            let setFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("set") && !isCollectionSetter(key))
             // Add all set functions of the object's prototype to that list
             setFunctions = setFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => {
                 const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(obj), key);
-                return descriptor && typeof descriptor.value === "function" && key.startsWith("set") && !key.startsWith("setCollection");
+                return descriptor && typeof descriptor.value === "function" && key.startsWith("set") && !isCollectionSetter(key);
             }));
 
             // Collect all add functions of the object in a list
@@ -2160,12 +2171,12 @@ export class PerspectiveProxy {
                 return descriptor && typeof descriptor.value === "function" && key.startsWith("remove");
             }));
 
-            // Collect all add functions of the object in a list
-            let setCollectionFunctions = Object.getOwnPropertyNames(obj).filter(key => (Object.prototype.hasOwnProperty.call(obj, key) && typeof obj[key] === "function") && key.startsWith("setCollection"))
-            // Add all add functions of the object's prototype to that list
+            // Collect all collection setter functions of the object in a list
+            let setCollectionFunctions = Object.getOwnPropertyNames(obj).filter(key => (Object.prototype.hasOwnProperty.call(obj, key) && typeof obj[key] === "function") && key.startsWith("set") && isCollectionSetter(key))
+            // Add all collection setter functions from the object's prototype to that list
             setCollectionFunctions = setCollectionFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => {
                 const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(obj), key);
-                return descriptor && typeof descriptor.value === "function" && key.startsWith("setCollection");
+                return descriptor && typeof descriptor.value === "function" && key.startsWith("set") && isCollectionSetter(key);
             }));
             // Construct query to find all subject classes that have the given properties and collections
             let query = `subject_class(Class, C)`

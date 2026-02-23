@@ -539,7 +539,7 @@ export class Ad4mModel {
         this.setCollectionAdder(key, value, batchId);
       this[`remove${cap}`] = (value: any, batchId?: string) =>
         this.setCollectionRemover(key, value, batchId);
-      this[`setCollection${cap}`] = (value: any, batchId?: string) =>
+      this[`set${cap}`] = (value: any, batchId?: string) =>
         this.setCollectionSetter(key, value, batchId);
     }
   }
@@ -2846,7 +2846,7 @@ WHERE ${whereConditions.join(" AND ")}
           // Add collection methods
           const adderName = `add${capitalize(propertyName)}`;
           const removerName = `remove${capitalize(propertyName)}`;
-          const setterName = `setCollection${capitalize(propertyName)}`;
+          const setterName = `set${capitalize(propertyName)}`;
 
           (DynamicModelClass.prototype as any)[adderName] = function () {
             // Placeholder function for SDNA generation

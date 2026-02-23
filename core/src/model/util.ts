@@ -57,15 +57,15 @@ export function collectionRemoverToName(removerName: string): string {
 }
 
 export function collectionSetterToName(setterName: string): string {
-    // Extract the collection name after "setCollection" and lowercase first char
-    // The method name already has the plural collection name (e.g., "setCollectionComments")
-    let collectionName = setterName.substring(13)
+    // Extract the collection name after "set" and lowercase first char
+    // The method name has the plural collection name (e.g., "setComments")
+    let collectionName = setterName.substring(3)
     return collectionName.charAt(0).toLowerCase() + collectionName.slice(1)
 }
 
-// e.g. "comments" -> "addComment"
+// e.g. "comments" -> "setComment"
 export function collectionToSetterName(collection: string): string {
-    return `setCollection${capitalize(pluralToSingular(collection))}`
+    return `set${capitalize(pluralToSingular(collection))}`
 }
 
 
