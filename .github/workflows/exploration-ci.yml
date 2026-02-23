@@ -9,49 +9,11 @@ on:
     branches: [dev]
 
 jobs:
-  cargo-check:
-    name: Cargo Check
-    runs-on: ubuntu-22.04
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-
-      - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config protobuf-compiler cmake libasound2-dev
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust-executor
-          cache-on-failure: true
-
-      - name: Create JS build placeholders
-        run: |
-          mkdir -p executor/lib
-          echo "// placeholder for CI cargo check" > executor/lib/bundle.js
-          dd if=/dev/zero bs=1 count=64 of=rust-executor/CUSTOM_DENO_SNAPSHOT.bin 2>/dev/null
-          mkdir -p rust-executor/dapp/dist
-
-      - name: Check default features
-        run: cd rust-executor && cargo check 2>&1
-
-      - name: Check wasm-languages feature
-        if: contains(github.head_ref || github.ref, 'wasm-language-runtime')
-        run: cd rust-executor && cargo check --features wasm-languages 2>&1
-
   wasm-sdk:
     name: WASM SDK & Example
     if: contains(github.head_ref || github.ref, 'wasm-language-runtime')
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -66,29 +28,35 @@ jobs:
       - name: Build example note-store
         run: cd examples/wasm-languages/note-store && cargo build --release --target wasm32-unknown-unknown
 
+      - name: Build example link-store
+        run: cd examples/wasm-languages/link-store && cargo build --release --target wasm32-unknown-unknown
+
       - name: Verify WASM exports
         run: |
           sudo apt-get update && sudo apt-get install -y wabt || true
-          wasm-objdump -x examples/wasm-languages/note-store/target/wasm32-unknown-unknown/release/note_store_wasm.wasm 2>/dev/null | grep -E "ad4m_" || echo "wabt not available, skipping export check"
+          for wasm in examples/wasm-languages/*/target/wasm32-unknown-unknown/release/*.wasm; do
+            echo "=== $wasm ==="
+            wasm-objdump -x "$wasm" 2>/dev/null | grep -E "ad4m_" || echo "(wabt not available)"
+          done
 
-  rust-tests:
-    name: Rust Tests
-    if: contains(github.head_ref || github.ref, 'wasm-language-runtime')
+  cargo-check:
+    name: Cargo Check
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Rust
+        run: rustup default stable && rustc --version
 
-      - name: Install Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-
-      - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config protobuf-compiler cmake libasound2-dev
+      - name: Create JS build placeholders
+        run: |
+          mkdir -p executor/lib
+          echo "// placeholder" > executor/lib/bundle.js
+          dd if=/dev/zero bs=1 count=64 of=rust-executor/CUSTOM_DENO_SNAPSHOT.bin 2>/dev/null
+          mkdir -p rust-executor/dapp/dist
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -96,12 +64,38 @@ jobs:
           workspaces: rust-executor
           cache-on-failure: true
 
+      - name: Check default features
+        run: cd rust-executor && cargo check 2>&1
+
+      - name: Check wasm-languages feature
+        if: contains(github.head_ref || github.ref, 'wasm-language-runtime')
+        run: cd rust-executor && cargo check --features wasm-languages 2>&1
+
+  rust-tests:
+    name: Rust Tests
+    if: contains(github.head_ref || github.ref, 'wasm-language-runtime')
+    runs-on: ubuntu-22.04
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        run: rustup default stable && rustc --version
+
       - name: Create JS build placeholders
         run: |
           mkdir -p executor/lib
-          echo "// placeholder for CI cargo check" > executor/lib/bundle.js
+          echo "// placeholder" > executor/lib/bundle.js
           dd if=/dev/zero bs=1 count=64 of=rust-executor/CUSTOM_DENO_SNAPSHOT.bin 2>/dev/null
           mkdir -p rust-executor/dapp/dist
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-executor
+          cache-on-failure: true
 
       - name: Run wasm_core tests
         run: cd rust-executor && cargo test wasm_core --features wasm-languages -- --nocapture 2>&1
