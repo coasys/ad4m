@@ -3,9 +3,13 @@ import { Link } from "../links/Links";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import {
   makeRandomId,
-  FieldOptions,
-  CollectionOptions,
+  PropertyOptions,
+  RelationOptions,
   Model,
+  getPropertiesMetadata,
+  getRelationsMetadata,
+  propertyRegistry,
+  relationRegistry,
 } from "./decorators";
 import {
   singularToPlural,
@@ -53,7 +57,7 @@ interface JSONSchemaToModelOptions {
   propertyMapping?: Record<string, string>;
   resolveLanguage?: string;
   local?: boolean;
-  propertyOptions?: Record<string, Partial<FieldOptions>>;
+  propertyOptions?: Record<string, Partial<PropertyOptions>>;
 }
 
 type ValueTuple = [name: string, value: any, resolve?: boolean];
@@ -79,7 +83,7 @@ type Order = { [propertyName: string]: "ASC" | "DESC" };
 export type Query = {
   source?: string;
   properties?: string[];
-  collections?: string[]; // replace with include: Query[]
+  relations?: string[]; // replace with include: Query[]
   where?: Where;
   order?: Order;
   offset?: number;
@@ -123,9 +127,9 @@ export interface PropertyMetadata {
 }
 
 /**
- * Metadata for a single collection extracted from decorators.
+ * Metadata for a single relation extracted from decorators.
  */
-export interface CollectionMetadata {
+export interface RelationMetadata {
   /** The collection name */
   name: string;
   /** The predicate URI (through value) */
@@ -136,6 +140,10 @@ export interface CollectionMetadata {
   getter?: string;
   /** Whether stored locally only */
   local?: boolean;
+  /** Traversal direction — "forward" (default) for @HasMany/@HasOne, "reverse" for @BelongsToOne/@BelongsToMany */
+  direction?: "forward" | "reverse";
+  /** Maximum number of results (1 for @BelongsToOne / @HasOne) */
+  maxCount?: number;
 }
 
 /**
@@ -146,8 +154,8 @@ export interface ModelMetadata {
   className: string;
   /** Map of property name to metadata */
   properties: Record<string, PropertyMetadata>;
-  /** Map of collection name to metadata */
-  collections: Record<string, CollectionMetadata>;
+  /** Map of relation name to metadata */
+  relations: Record<string, RelationMetadata>;
 }
 
 function capitalize(word: string): string {
@@ -377,7 +385,7 @@ export class Ad4mModel {
    * const metadata = Recipe.getModelMetadata();
    * console.log(metadata.className); // "Recipe"
    * console.log(metadata.properties.name.predicate); // "recipe://name"
-   * console.log(metadata.collections.ingredients.predicate); // "recipe://ingredient"
+   * console.log(metadata.relations.ingredients.predicate); // "recipe://ingredient"
    * ```
    */
   public static getModelMetadata(): ModelMetadata {
@@ -393,12 +401,12 @@ export class Ad4mModel {
     // Extract className
     const className = prototype.className;
 
-    // Extract properties from prototype.__properties
+    // Extract properties from WeakMap registry
     const propertiesMetadata: Record<string, PropertyMetadata> = {};
-    const prototypeProperties = prototype.__properties || {};
+    const prototypeProperties = getPropertiesMetadata(this);
 
     for (const [propertyName, opts] of Object.entries(prototypeProperties)) {
-      const options = opts as FieldOptions & {
+      const options = opts as PropertyOptions & {
         required?: boolean;
         flag?: boolean;
       };
@@ -420,26 +428,28 @@ export class Ad4mModel {
       };
     }
 
-    // Extract collections from prototype.__collections
-    const collectionsMetadata: Record<string, CollectionMetadata> = {};
-    const prototypeCollections = prototype.__collections || {};
+    // Extract relations from WeakMap registry
+    const relationsMetadata: Record<string, RelationMetadata> = {};
+    const prototypeRelations = getRelationsMetadata(this);
 
-    for (const [collectionName, opts] of Object.entries(prototypeCollections)) {
-      const options = opts as CollectionOptions;
-      collectionsMetadata[collectionName] = {
-        name: collectionName,
+    for (const [relationName, opts] of Object.entries(prototypeRelations)) {
+      const options = opts as RelationOptions;
+      relationsMetadata[relationName] = {
+        name: relationName,
         predicate: options.through || "",
         ...(options.where !== undefined && { where: options.where }),
         ...(options.local !== undefined && { local: options.local }),
         ...(options.getter !== undefined && { getter: options.getter }),
+        ...((opts as any).direction !== undefined && { direction: (opts as any).direction }),
+        ...((opts as any).maxCount !== undefined && { maxCount: (opts as any).maxCount }),
       };
     }
 
     // Fallback: If both structures are empty but a JSON schema is attached, derive from it
     // This handles edge cases where fromJSONSchema() was called but metadata wasn't properly populated
     const hasProperties = Object.keys(propertiesMetadata).length > 0;
-    const hasCollections = Object.keys(collectionsMetadata).length > 0;
-    const hasMetadata = hasProperties || hasCollections;
+    const hasRelations = Object.keys(relationsMetadata).length > 0;
+    const hasMetadata = hasProperties || hasRelations;
 
     if (!hasMetadata && prototype.__jsonSchema) {
       // Derive metadata from the attached JSON schema
@@ -460,7 +470,7 @@ export class Ad4mModel {
           );
 
           if (isArray) {
-            collectionsMetadata[propertyName] = {
+            relationsMetadata[propertyName] = {
               name: propertyName,
               predicate: predicate,
               ...(propertySchema["x-ad4m"]?.local !== undefined && {
@@ -492,7 +502,7 @@ export class Ad4mModel {
     return {
       className,
       properties: propertiesMetadata,
-      collections: collectionsMetadata,
+      relations: relationsMetadata,
     };
   }
 
@@ -532,15 +542,21 @@ export class Ad4mModel {
     // stub with a closure that actually calls the private implementation so that callers like
     // `instance.addLocations(value)` persist the link in the perspective.
     const proto = Object.getPrototypeOf(this);
-    const collections: Record<string, any> = proto.__collections || {};
-    for (const key of Object.keys(collections)) {
+    const relations: Record<string, any> = getRelationsMetadata(
+      proto.constructor,
+    );
+    for (const key of Object.keys(relations)) {
+      // Reverse relations (@BelongsToOne / @BelongsToMany) are read-only traversals —
+      // the link is owned by the other side, so no mutator methods should exist here.
+      if (relations[key].direction === "reverse") continue;
+
       const cap = capitalize(key);
       this[`add${cap}`] = (value: any, batchId?: string) =>
-        this.setCollectionAdder(key, value, batchId);
+        this.setRelationAdder(key, value, batchId);
       this[`remove${cap}`] = (value: any, batchId?: string) =>
-        this.setCollectionRemover(key, value, batchId);
+        this.setRelationRemover(key, value, batchId);
       this[`set${cap}`] = (value: any, batchId?: string) =>
-        this.setCollectionSetter(key, value, batchId);
+        this.setRelationSetter(key, value, batchId);
     }
   }
 
@@ -568,18 +584,18 @@ export class Ad4mModel {
    * Get property metadata from decorator (Phase 1: Prolog-free refactor)
    * @private
    */
-  private getPropertyMetadata(key: string): FieldOptions | undefined {
+  private getPropertyMetadata(key: string): PropertyOptions | undefined {
     const proto = Object.getPrototypeOf(this);
-    return proto.__properties?.[key];
+    return getPropertiesMetadata(proto.constructor)?.[key];
   }
 
   /**
-   * Get collection metadata from decorator (Phase 1: Prolog-free refactor)
+   * Get relation metadata from decorator (Phase 1: Prolog-free refactor)
    * @private
    */
-  private getCollectionMetadata(key: string): CollectionOptions | undefined {
+  private getRelationMetadata(key: string): RelationOptions | undefined {
     const proto = Object.getPrototypeOf(this);
-    return proto.__collections?.[key];
+    return getRelationsMetadata(proto.constructor)?.[key];
   }
 
   /**
@@ -589,7 +605,7 @@ export class Ad4mModel {
    */
   private generatePropertySetterAction(
     key: string,
-    metadata: FieldOptions,
+    metadata: PropertyOptions,
   ): any[] {
     // Check if property is read-only
     if (metadata.writable === false) {
@@ -612,21 +628,21 @@ export class Ad4mModel {
   }
 
   /**
-   * Generate collection action from metadata (Phase 1: Prolog-free refactor)
+   * Generate relation action from metadata (Phase 1: Prolog-free refactor)
    * Replaces Prolog queries: collection_adder, collection_remover, collection_setter
    * @private
    */
-  private generateCollectionAction(
+  private generateRelationAction(
     key: string,
     actionType: "adder" | "remover" | "setter",
   ): any[] {
-    const metadata = this.getCollectionMetadata(key);
+    const metadata = this.getRelationMetadata(key);
     if (!metadata) {
-      throw new Error(`Collection "${key}" has no metadata defined`);
+      throw new Error(`Relation "${key}" has no metadata defined`);
     }
 
     if (!metadata.through) {
-      throw new Error(`Collection "${key}" has no 'through' predicate defined`);
+      throw new Error(`Relation "${key}" has no 'through' predicate defined`);
     }
 
     const actionMap = {
@@ -695,7 +711,9 @@ export class Ad4mModel {
             }
           }
           // Apply transform function if it exists
-          const transform = instance["__properties"]?.[name]?.transform;
+          const transform = getPropertiesMetadata(
+            Object.getPrototypeOf(instance).constructor,
+          )?.[name]?.transform;
           if (transform && typeof transform === "function") {
             finalValue = transform(finalValue);
           }
@@ -828,11 +846,17 @@ export class Ad4mModel {
           }
         }
 
-        // Process collections (skip those with custom getter)
-        for (const [collName, collMeta] of Object.entries(
-          metadata.collections,
-        )) {
-          if (collMeta.getter) continue; // Handle via custom getter evaluation
+        // Process relations (skip those with custom getter)
+        // Split relations by direction
+        const forwardRelations = Object.entries(metadata.relations).filter(
+          ([, m]) => !m.getter && m.direction !== "reverse",
+        );
+        const reverseRelations = Object.entries(metadata.relations).filter(
+          ([, m]) => !m.getter && m.direction === "reverse",
+        );
+
+        // Process forward relations (source → predicate → target)
+        for (const [collName, collMeta] of forwardRelations) {
           const matching = links.filter(
             (l: any) => l.predicate === collMeta.predicate,
           );
@@ -909,7 +933,33 @@ export class Ad4mModel {
           (this as any)[collName] = values;
         }
 
-        // Set author and timestamps
+        // Process reverse relations (target ← predicate ← source)
+        // Query links where THIS instance is the target, return the sources.
+        if (reverseRelations.length > 0) {
+          const reverseLinksQuery = `
+            SELECT in.uri AS source, predicate, id, author, timestamp
+            FROM link
+            WHERE out.uri = ${safeBaseExpression}
+            ORDER BY timestamp ASC
+          `;
+          let reverseLinks: any[] = [];
+          try {
+            reverseLinks = (await this.#perspective.querySurrealDB(reverseLinksQuery)) ?? [];
+          } catch {
+            // leave empty — instance just won't have reverse relation data
+          }
+
+          for (const [collName, collMeta] of reverseRelations) {
+            const matching = reverseLinks.filter(
+              (l: any) => l.predicate === collMeta.predicate,
+            );
+            const values = matching.map((l: any) => l.source);
+            // BelongsToOne: take only the first (most recent source wins)
+            (this as any)[collName] =
+              collMeta.maxCount === 1 ? (values[0] ?? null) : values;
+          }
+        }
+
         if (originalAuthor) {
           (this as any).author = originalAuthor;
         }
@@ -928,9 +978,9 @@ export class Ad4mModel {
         metadata,
       );
 
-      // Apply where.isInstance filtering to getter collections
-      // (non-getter collections were already filtered above)
-      for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+      // Apply where.isInstance filtering to getter relations
+      // (non-getter relations were already filtered above)
+      for (const [collName, collMeta] of Object.entries(metadata.relations)) {
         if (
           collMeta.getter &&
           collMeta.where?.isInstance &&
@@ -1009,8 +1059,8 @@ export class Ad4mModel {
       }
     }
 
-    // Evaluate collection getters
-    for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+    // Evaluate relation getters
+    for (const [collName, collMeta] of Object.entries(metadata.relations)) {
       if ((collMeta as any).getter) {
         try {
           // Replace 'Base' placeholder with actual base expression
@@ -1274,7 +1324,7 @@ WHERE ${whereConditions.join(" AND ")}
           );
         }
       } else {
-        // Handle regular properties via graph traversal
+        // Handle regular fields via graph traversal
         const propMeta = metadata.properties[propertyName];
         if (!propMeta) continue; // Skip if property not found in metadata
 
@@ -1454,7 +1504,7 @@ WHERE ${whereConditions.join(" AND ")}
           );
         }
       } else {
-        // Handle regular properties via subqueries
+        // Handle regular fields via subqueries
         const propMeta = metadata.properties[propertyName];
         if (!propMeta) continue; // Skip if property not found in metadata
 
@@ -1565,10 +1615,10 @@ WHERE ${whereConditions.join(" AND ")}
       );
     }
 
-    // Determine collections to fetch
-    const collsToFetch = collections || Object.keys(metadata.collections);
+    // Determine relations to fetch
+    const collsToFetch = collections || Object.keys(metadata.relations);
     for (const collName of collsToFetch) {
-      const collMeta = metadata.collections[collName];
+      const collMeta = metadata.relations[collName];
       if (!collMeta) continue; // Skip if not found
 
       // Reference source directly since we're selecting from link table
@@ -1618,10 +1668,10 @@ WHERE ${whereConditions.join(" AND ")}
       );
     }
 
-    // Determine collections to fetch
-    const collsToFetch = collections || Object.keys(metadata.collections);
+    // Determine relations to fetch
+    const collsToFetch = collections || Object.keys(metadata.relations);
     for (const collName of collsToFetch) {
-      const collMeta = metadata.collections[collName];
+      const collMeta = metadata.relations[collName];
       if (!collMeta) continue; // Skip if not found
 
       // Use array filtering to get all target values for this predicate
@@ -1693,7 +1743,7 @@ WHERE ${whereConditions.join(" AND ")}
 
     const metadata = this.getModelMetadata();
     const requestedProperties = query?.properties || [];
-    const requestedCollections = query?.collections || [];
+    const requestedRelations = query?.relations || [];
 
     // The query used GROUP BY with graph traversal, so each row has:
     // - source: the node ID (e.g., "node:abc123")
@@ -1843,10 +1893,10 @@ WHERE ${whereConditions.join(" AND ")}
             }
           }
 
-          // If not a property, check if it's a collection (skip those with getter)
+          // If not a field, check if it's a relation (skip those with getter)
           if (!foundProperty) {
             for (const [collName, collMeta] of Object.entries(
-              metadata.collections,
+              metadata.relations,
             )) {
               if (collMeta.getter) continue; // Handle via getter evaluation
               if (collMeta.predicate === predicate) {
@@ -1904,10 +1954,8 @@ WHERE ${whereConditions.join(" AND ")}
           }
         }
 
-        // Sort collections by timestamp to maintain insertion order
-        for (const [collName, collMeta] of Object.entries(
-          metadata.collections,
-        )) {
+        // Sort relations by timestamp to maintain insertion order
+        for (const [collName, collMeta] of Object.entries(metadata.relations)) {
           const timestampsKey = `__${collName}_timestamps`;
           const indicesKey = `__${collName}_indices`;
           if (instance[collName] && instance[timestampsKey]) {
@@ -1942,10 +1990,10 @@ WHERE ${whereConditions.join(" AND ")}
         }
 
         // Filter by requested attributes if specified
-        if (requestedProperties.length > 0 || requestedCollections.length > 0) {
+        if (requestedProperties.length > 0 || requestedRelations.length > 0) {
           const requestedAttributes = [
             ...requestedProperties,
-            ...requestedCollections,
+            ...requestedRelations,
           ];
           Object.keys(instance).forEach((key) => {
             // Keep only requested attributes, plus always keep createdAt, updatedAt, author, and baseExpression
@@ -1968,6 +2016,42 @@ WHERE ${whereConditions.join(" AND ")}
       }
     }
 
+    // Populate reverse relations (@BelongsToOne / @BelongsToMany) with a single batch query.
+    // Forward links (->link) are already in row.links; reverse links (<-link) are not,
+    // so we fetch them separately grouped by the target URI (= instance base expression).
+    const reverseRelationEntries = Object.entries(metadata.relations).filter(
+      ([, m]) => !m.getter && m.direction === "reverse",
+    );
+    if (reverseRelationEntries.length > 0 && instances.length > 0) {
+      try {
+        const inList = instances
+          .map((i) => `'${escapeSurrealString(i.baseExpression)}'`)
+          .join(", ");
+        const reverseLinksQuery = `
+          SELECT in.uri AS source, predicate, out.uri AS target, author, timestamp
+          FROM link
+          WHERE out.uri IN [${inList}]
+          ORDER BY timestamp ASC
+        `;
+        const reverseLinks: any[] =
+          (await perspective.querySurrealDB(reverseLinksQuery)) ?? [];
+        for (const instance of instances) {
+          for (const [collName, collMeta] of reverseRelationEntries) {
+            const matching = reverseLinks.filter(
+              (l: any) =>
+                l.target === instance.baseExpression &&
+                l.predicate === collMeta.predicate,
+            );
+            const values = matching.map((l: any) => l.source);
+            (instance as any)[collName] =
+              collMeta.maxCount === 1 ? (values[0] ?? null) : values;
+          }
+        }
+      } catch (e) {
+        console.warn("Failed to fetch reverse links for instances:", e);
+      }
+    }
+
     // Evaluate custom getters for all instances (single pass)
     // This populates collection values needed for where.isInstance filtering
     for (const instance of instances) {
@@ -1978,10 +2062,10 @@ WHERE ${whereConditions.join(" AND ")}
       );
     }
 
-    // Filter collections by where.isInstance if specified
-    // Do this after initial evaluation so collection values exist for filtering
+    // Filter relations by where.isInstance if specified
+    // Do this after initial evaluation so relation values exist for filtering
     for (const instance of instances) {
-      for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+      for (const [collName, collMeta] of Object.entries(metadata.relations)) {
         if (collMeta.where?.isInstance && instance[collName]?.length > 0) {
           try {
             const targetClass = collMeta.where.isInstance;
@@ -2391,16 +2475,16 @@ WHERE ${whereConditions.join(" AND ")}
     );
   }
 
-  private async setCollectionSetter(key: string, value: any, batchId?: string) {
+  private async setRelationSetter(key: string, value: any, batchId?: string) {
     // Phase 1: Use metadata instead of Prolog queries
-    const metadata = this.getCollectionMetadata(key);
+    const metadata = this.getRelationMetadata(key);
     if (!metadata) {
-      console.warn(`Collection "${key}" has no metadata, skipping`);
+      console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
 
     // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateCollectionAction(key, "setter");
+    const actions = this.generateRelationAction(key, "setter");
 
     if (value != null) {
       if (Array.isArray(value)) {
@@ -2421,16 +2505,16 @@ WHERE ${whereConditions.join(" AND ")}
     }
   }
 
-  private async setCollectionAdder(key: string, value: any, batchId?: string) {
+  private async setRelationAdder(key: string, value: any, batchId?: string) {
     // Phase 1: Use metadata instead of Prolog queries
-    const metadata = this.getCollectionMetadata(key);
+    const metadata = this.getRelationMetadata(key);
     if (!metadata) {
-      console.warn(`Collection "${key}" has no metadata, skipping`);
+      console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
 
     // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateCollectionAction(key, "adder");
+    const actions = this.generateRelationAction(key, "adder");
 
     if (value != null) {
       if (Array.isArray(value)) {
@@ -2455,20 +2539,16 @@ WHERE ${whereConditions.join(" AND ")}
     }
   }
 
-  private async setCollectionRemover(
-    key: string,
-    value: any,
-    batchId?: string,
-  ) {
+  private async setRelationRemover(key: string, value: any, batchId?: string) {
     // Phase 1: Use metadata instead of Prolog queries
-    const metadata = this.getCollectionMetadata(key);
+    const metadata = this.getRelationMetadata(key);
     if (!metadata) {
-      console.warn(`Collection "${key}" has no metadata, skipping`);
+      console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
 
     // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateCollectionAction(key, "remover");
+    const actions = this.generateRelationAction(key, "remover");
 
     if (value != null) {
       if (Array.isArray(value)) {
@@ -2599,25 +2679,25 @@ WHERE ${whereConditions.join(" AND ")}
         if (value?.action) {
           switch (value.action) {
             case "setter":
-              await this.setCollectionSetter(key, value.value, batchId);
+              await this.setRelationSetter(key, value.value, batchId);
               break;
             case "adder":
-              await this.setCollectionAdder(key, value.value, batchId);
+              await this.setRelationAdder(key, value.value, batchId);
               break;
             case "remover":
-              await this.setCollectionRemover(key, value.value, batchId);
+              await this.setRelationRemover(key, value.value, batchId);
               break;
             default:
-              await this.setCollectionSetter(key, value.value, batchId);
+              await this.setRelationSetter(key, value.value, batchId);
               break;
           }
         } else if (Array.isArray(value)) {
-          // Handle all arrays as collections, including empty ones (which clears the collection)
-          await this.setCollectionSetter(key, value, batchId);
+          // Handle all arrays as relations, including empty ones (which clears the relation)
+          await this.setRelationSetter(key, value, batchId);
         } else if (value !== undefined && value !== null && value !== "") {
           if (setProperties) {
-            // Check if this is a collection property (has collection metadata)
-            const collMetadata = this.getCollectionMetadata(key);
+            // Check if this is a relation (has relation metadata)
+            const collMetadata = this.getRelationMetadata(key);
             if (collMetadata) {
               // Skip - it's a collection, not a regular property
               continue;
@@ -2804,9 +2884,9 @@ WHERE ${whereConditions.join(" AND ")}
     (DynamicModelClass as any).className = options.name;
     (DynamicModelClass.prototype as any).className = options.name;
 
-    // Generate properties and collections metadata
+    // Generate properties and relations metadata
     const properties: any = {};
-    const collections: any = {};
+    const relations: any = {};
 
     if (schema.properties) {
       for (const [propertyName, propertySchema] of Object.entries(
@@ -2824,9 +2904,9 @@ WHERE ${whereConditions.join(" AND ")}
         const isArray = isArrayType(propertySchema);
 
         if (isArray) {
-          // Handle arrays as collections
-          // Store the singular form as the collection key since SDNA generation expects singular
-          collections[propertyName] = {
+          // Handle arrays as relations
+          // Store the singular form as the relation key since SDNA generation expects singular
+          relations[propertyName] = {
             through: predicate,
             local: this.getPropertyOption(
               propertyName,
@@ -2943,7 +3023,7 @@ WHERE ${whereConditions.join(" AND ")}
     }
 
     // Validate that at least one property has an initial value (needed for valid SDNA constructor)
-    // Collections don't create constructor actions, only properties with initial values do
+    // Relations don't create constructor actions, only properties with initial values do
     const hasPropertyWithInitial = Object.values(properties).some(
       (prop: any) => prop.initial,
     );
@@ -2985,9 +3065,10 @@ WHERE ${whereConditions.join(" AND ")}
       );
     }
 
-    // Attach metadata to prototype
-    (DynamicModelClass.prototype as any).__properties = properties;
-    (DynamicModelClass.prototype as any).__collections = collections;
+    // Register metadata in WeakMaps — same path as decorator-based classes,
+    // ensuring getModelMetadata() uses a single consistent read path.
+    propertyRegistry.set(DynamicModelClass, properties);
+    relationRegistry.set(DynamicModelClass, relations);
 
     // Store the JSON schema and options on the prototype for potential fallback use by getModelMetadata()
     (DynamicModelClass.prototype as any).__jsonSchema = schema;
@@ -3106,7 +3187,7 @@ WHERE ${whereConditions.join(" AND ")}
     propertyName: string,
     propertySchema: JSONSchemaProperty,
     options: JSONSchemaToModelOptions,
-    optionName: keyof FieldOptions,
+    optionName: keyof PropertyOptions,
     defaultValue?: any,
   ): any {
     // 1. Property-specific options
@@ -3315,18 +3396,18 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /**
-   * Specifies which collections to include in the results.
+   * Specifies which relations to include in the results.
    *
-   * @param collections - Array of collection names to include
+   * @param relations - Array of relation names to include
    * @returns The query builder for chaining
    *
    * @example
    * ```typescript
-   * .collections(["ingredients", "steps"])
+   * .relations(["ingredients", "steps"])
    * ```
    */
-  collections(collections: string[]): ModelQueryBuilder<T> {
-    this.queryParams.collections = collections;
+  relations(relations: string[]): ModelQueryBuilder<T> {
+    this.queryParams.relations = relations;
     return this;
   }
 

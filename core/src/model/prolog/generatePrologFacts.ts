@@ -1,5 +1,9 @@
-import type { Ad4mModel } from '../Ad4mModel';
-import type { ModelMetadata, PropertyMetadata, CollectionMetadata } from '../Ad4mModel';
+import type { Ad4mModel } from "../Ad4mModel";
+import type {
+  ModelMetadata,
+  PropertyMetadata,
+  RelationMetadata,
+} from "../Ad4mModel";
 
 type ModelClass = typeof Ad4mModel & {
   getModelMetadata(): ModelMetadata;
@@ -11,9 +15,9 @@ type ModelClass = typeof Ad4mModel & {
  */
 function toSnakeCase(str: string): string {
   return str
-    .replace(/([A-Z])/g, '_$1')
+    .replace(/([A-Z])/g, "_$1")
     .toLowerCase()
-    .replace(/^_/, '');
+    .replace(/^_/, "");
 }
 
 /**
@@ -34,20 +38,24 @@ function buildInstanceClause(
   const props = metadata.properties;
 
   // Collect flags first — these are the strongest recognizers
-  const flags = Object.values(props).filter((p) => p.flag && p.predicate && p.initial);
+  const flags = Object.values(props).filter(
+    (p) => p.flag && p.predicate && p.initial,
+  );
   if (flags.length > 0) {
     const conditions = flags
       .map((p) => `triple(X, '${p.predicate}', '${p.initial}')`)
-      .join(',\n    ');
+      .join(",\n    ");
     return `${predicateName}(X) :-\n    ${conditions}.`;
   }
 
   // Fallback: required non-flag properties
-  const required = Object.values(props).filter((p) => p.required && p.predicate && !p.flag);
+  const required = Object.values(props).filter(
+    (p) => p.required && p.predicate && !p.flag,
+  );
   if (required.length > 0) {
     const conditions = required
       .map((p) => `triple(X, '${p.predicate}', _)`)
-      .join(',\n    ');
+      .join(",\n    ");
     return `${predicateName}(X) :-\n    ${conditions}.`;
   }
 
@@ -81,7 +89,7 @@ function buildPropertyClause(
  */
 function buildCollectionClause(
   modelPredicateName: string,
-  coll: CollectionMetadata,
+  coll: RelationMetadata,
 ): string | null {
   if (!coll.predicate) return null;
 
@@ -128,7 +136,7 @@ export function generatePrologFacts(ModelClass: ModelClass): string {
   // Instance recognizer
   const instanceClause = buildInstanceClause(predicateName, metadata);
   if (instanceClause) {
-    lines.push('');
+    lines.push("");
     lines.push(`% Instance recognizer`);
     lines.push(instanceClause);
   }
@@ -139,21 +147,21 @@ export function generatePrologFacts(ModelClass: ModelClass): string {
     .filter((c): c is string => c !== null);
 
   if (propClauses.length > 0) {
-    lines.push('');
-    lines.push(`% Property getters`);
+    lines.push("");
+    lines.push(`% Field getters`);
     lines.push(...propClauses);
   }
 
-  // Collection getters
-  const collClauses = Object.values(metadata.collections)
+  // Relation getters
+  const collClauses = Object.values(metadata.relations)
     .map((c) => buildCollectionClause(predicateName, c))
     .filter((c): c is string => c !== null);
 
   if (collClauses.length > 0) {
-    lines.push('');
-    lines.push(`% Collection getters`);
+    lines.push("");
+    lines.push(`% Relation getters`);
     lines.push(...collClauses);
   }
 
-  return lines.join('\n');
+  return lines.join("\n");
 }

@@ -6,6 +6,35 @@ import {
 } from "./util";
 import { SHACLShape, SHACLPropertyShape } from "../shacl/SHACLShape";
 
+// Module-level WeakMaps keyed on the constructor function (not the prototype).
+// This eliminates the prototype-mutation inheritance bug: with the old
+// `target["__collections"] = target["__collections"] || {}` pattern, a subclass
+// decorator would find the parent prototype's object (truthy) and write into it,
+// silently corrupting the parent class's metadata.
+//
+// Each class constructor is a unique key, so BaseBlock and PollBlock get separate
+// entries even when PollBlock extends BaseBlock.
+export const propertyRegistry = new WeakMap<Function, Record<string, any>>();
+export const relationRegistry = new WeakMap<Function, Record<string, any>>();
+
+/** Returns the own + inherited property metadata for a given constructor, with own values winning. */
+export function getPropertiesMetadata(ctor: Function): Record<string, any> {
+  if (!ctor) return {};
+  const own = propertyRegistry.get(ctor) ?? {};
+  const parent = Object.getPrototypeOf(ctor);
+  if (!parent || parent === Function.prototype) return own;
+  return { ...getPropertiesMetadata(parent), ...own };
+}
+
+/** Returns the own + inherited relation metadata for a given constructor, with own values winning. */
+export function getRelationsMetadata(ctor: Function): Record<string, any> {
+  if (!ctor) return {};
+  const own = relationRegistry.get(ctor) ?? {};
+  const parent = Object.getPrototypeOf(ctor);
+  if (!parent || parent === Function.prototype) return own;
+  return { ...getRelationsMetadata(parent), ...own };
+}
+
 export class PerspectiveAction {
   action: string;
   source: string;
@@ -30,7 +59,7 @@ export function hasLink(predicate: string): string {
   return `triple(this, "${predicate}", _)`;
 }
 
-export interface FieldOptions {
+export interface PropertyOptions {
   /**
    * The predicate of the property. All properties must have this option.
    */
@@ -145,7 +174,7 @@ export interface FieldOptions {
  * }
  * ```
  *
- * @param {FieldOptions} opts - Property configuration options
+ * @param {PropertyOptions} opts - Property configuration options
  * @param {string} opts.through - The predicate URI for the property
  * @param {string} [opts.initial] - Initial value (required if property is required)
  * @param {boolean} [opts.required] - Whether the property must have a value
@@ -153,19 +182,23 @@ export interface FieldOptions {
  * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
-export function Field(opts: FieldOptions) {
+export function Property(opts: PropertyOptions) {
   return function <T>(target: T, key: keyof T) {
     if (typeof opts.writable === "undefined" && opts.through) {
       opts.writable = true;
     }
 
     if (!opts.through) {
-      throw new Error("@Field requires a 'through' option");
+      throw new Error("@Property requires a 'through' option");
     }
 
-    target["__properties"] = target["__properties"] || {};
-    target["__properties"][key] = target["__properties"][key] || {};
-    target["__properties"][key] = { ...target["__properties"][key], ...opts };
+    const _propertyExisting =
+      propertyRegistry.get((target as any).constructor) ?? {};
+    const _propertyExistingKey = _propertyExisting[key as string] ?? {};
+    propertyRegistry.set((target as any).constructor, {
+      ..._propertyExisting,
+      [key as string]: { ..._propertyExistingKey, ...opts },
+    });
 
     if (opts.writable) {
       const value = key as string;
@@ -255,15 +288,18 @@ export function Flag(opts: FlagOptions) {
       throw new Error("SubjectFlag requires a 'value' option");
     }
 
-    target["__properties"] = target["__properties"] || {};
-    target["__properties"][key] = target["__properties"][key] || {};
-    target["__properties"][key] = {
-      ...target["__properties"][key],
-      through: opts.through,
-      required: true,
-      initial: opts.value,
-      flag: true,
-    };
+    const _flagExisting =
+      propertyRegistry.get((target as any).constructor) ?? {};
+    propertyRegistry.set((target as any).constructor, {
+      ..._flagExisting,
+      [key as string]: {
+        ...(_flagExisting[key as string] ?? {}),
+        through: opts.through,
+        required: true,
+        initial: opts.value,
+        flag: true,
+      },
+    });
 
     // @ts-ignore
     target[key] = opts.value;
@@ -278,7 +314,7 @@ interface WhereOptions {
   condition?: string;
 }
 
-export interface CollectionOptions {
+export interface RelationOptions {
   /**
    * The predicate of the property. All properties must have this option.
    */
@@ -367,7 +403,7 @@ export interface CollectionOptions {
  * await recipe.setIngredients(["ingredient://butter", "ingredient://eggs"]);
  * ```
  *
- * @param {CollectionOptions} opts - Collection configuration
+ * @param {RelationOptions} opts - Collection configuration
  * @param {string} opts.through - The predicate URI for collection links
  * @param {WhereOptions} [opts.where] - Filter conditions for collection values
  * @param {any} [opts.where.isInstance] - Model class to filter instances by
@@ -399,15 +435,19 @@ export type HasManyMethods<Keys extends string> = {
 } & {
   [K in Keys as `remove${Capitalize<K>}`]: (value: string) => Promise<void>;
 } & {
-  [K in Keys as `set${Capitalize<K>}`]: (
-    values: string[],
-  ) => Promise<void>;
+  [K in Keys as `set${Capitalize<K>}`]: (values: string[]) => Promise<void>;
 };
 
-export function HasMany(opts: CollectionOptions) {
+export function HasMany(relatedModelOrOpts: (() => any) | RelationOptions, opts?: RelationOptions) {
+  const resolvedOpts: RelationOptions = typeof relatedModelOrOpts === 'function' ? opts! : relatedModelOrOpts;
+  const relatedModel: (() => any) | undefined = typeof relatedModelOrOpts === 'function' ? relatedModelOrOpts : undefined;
   return function <T>(target: T, key: keyof T) {
-    target["__collections"] = target["__collections"] || {};
-    target["__collections"][key] = { ...opts, direction: "forward" as const };
+    const _hasManyExisting =
+      relationRegistry.get((target as any).constructor) ?? {};
+    relationRegistry.set((target as any).constructor, {
+      ..._hasManyExisting,
+      [key as string]: { ...resolvedOpts, direction: "forward" as const, ...(relatedModel ? { relatedModel } : {}) },
+    });
 
     const value = key as string;
     target[`add${capitalize(value)}`] = () => {};
@@ -418,14 +458,16 @@ export function HasMany(opts: CollectionOptions) {
   };
 }
 
-export function HasOne(opts: CollectionOptions) {
+export function HasOne(relatedModelOrOpts: (() => any) | RelationOptions, opts?: RelationOptions) {
+  const resolvedOpts: RelationOptions = typeof relatedModelOrOpts === 'function' ? opts! : relatedModelOrOpts;
+  const relatedModel: (() => any) | undefined = typeof relatedModelOrOpts === 'function' ? relatedModelOrOpts : undefined;
   return function <T>(target: T, key: keyof T) {
-    target["__collections"] = target["__collections"] || {};
-    target["__collections"][key] = {
-      ...opts,
-      direction: "forward" as const,
-      maxCount: 1,
-    };
+    const _hasOneExisting =
+      relationRegistry.get((target as any).constructor) ?? {};
+    relationRegistry.set((target as any).constructor, {
+      ..._hasOneExisting,
+      [key as string]: { ...resolvedOpts, direction: "forward" as const, maxCount: 1, ...(relatedModel ? { relatedModel } : {}) },
+    });
 
     const value = key as string;
     target[`add${capitalize(value)}`] = () => {};
@@ -436,31 +478,32 @@ export function HasOne(opts: CollectionOptions) {
   };
 }
 
-export function BelongsToOne(relatedModel: () => any, opts: CollectionOptions) {
+export function BelongsToOne(relatedModel: () => any, opts: RelationOptions) {
   return function <T>(target: T, key: keyof T) {
-    target["__collections"] = target["__collections"] || {};
-    target["__collections"][key] = {
-      ...opts,
-      direction: "reverse" as const,
-      maxCount: 1,
-      relatedModel,
-    };
+    const _b2oExisting =
+      relationRegistry.get((target as any).constructor) ?? {};
+    relationRegistry.set((target as any).constructor, {
+      ..._b2oExisting,
+      [key as string]: {
+        ...opts,
+        direction: "reverse" as const,
+        maxCount: 1,
+        relatedModel,
+      },
+    });
 
     Object.defineProperty(target, key, { configurable: true, writable: true });
   };
 }
 
-export function BelongsToMany(
-  relatedModel: () => any,
-  opts: CollectionOptions,
-) {
+export function BelongsToMany(relatedModel: () => any, opts: RelationOptions) {
   return function <T>(target: T, key: keyof T) {
-    target["__collections"] = target["__collections"] || {};
-    target["__collections"][key] = {
-      ...opts,
-      direction: "reverse" as const,
-      relatedModel,
-    };
+    const _b2mExisting =
+      relationRegistry.get((target as any).constructor) ?? {};
+    relationRegistry.set((target as any).constructor, {
+      ..._b2mExisting,
+      [key as string]: { ...opts, direction: "reverse" as const, relatedModel },
+    });
 
     Object.defineProperty(target, key, { configurable: true, writable: true });
   };
@@ -547,25 +590,24 @@ export function Model(opts: ModelConfig) {
       const subjectName = opts.name;
       const obj = target.prototype;
 
-      // Determine namespace from first property or collection, or use default
+      // Determine namespace from first property or relation, or use default
       let namespace = "ad4m://";
-      const properties = obj.__properties || {};
-      const collections = obj.__collections || {};
+      const fields = getPropertiesMetadata(target);
+      const relations = getRelationsMetadata(target);
 
-      // Try properties first
-      if (Object.keys(properties).length > 0) {
-        const firstProp = properties[Object.keys(properties)[0]];
+      // Try fields first
+      if (Object.keys(fields).length > 0) {
+        const firstProp = fields[Object.keys(fields)[0]];
         if (firstProp.through) {
-          // Extract namespace from through predicate (e.g., "recipe://name" -> "recipe://")
           const match = firstProp.through.match(/^([^:]+:\/\/)/);
           if (match) {
             namespace = match[1];
           }
         }
       }
-      // Fall back to collections if no properties
-      else if (Object.keys(collections).length > 0) {
-        const firstColl = collections[Object.keys(collections)[0]];
+      // Fall back to relations if no fields
+      else if (Object.keys(relations).length > 0) {
+        const firstColl = relations[Object.keys(relations)[0]];
         if (firstColl.through) {
           const match = firstColl.through.match(/^([^:]+:\/\/)/);
           if (match) {
@@ -588,9 +630,9 @@ export function Model(opts: ModelConfig) {
       // === Extract Destructor Actions ===
       let destructorActions = [];
 
-      // Convert properties to SHACL property shapes
-      for (const propName in properties) {
-        const propMeta = properties[propName];
+      // Convert fields to SHACL property shapes
+      for (const propName in fields) {
+        const propMeta = fields[propName];
 
         if (!propMeta.through) continue; // Skip properties without predicates
 
@@ -688,10 +730,9 @@ export function Model(opts: ModelConfig) {
         shape.addProperty(propShape);
       }
 
-      // Convert collections to SHACL property shapes
-      // (collections variable already declared above for namespace inference)
-      for (const collName in collections) {
-        const collMeta = collections[collName];
+      // Convert relations to SHACL property shapes
+      for (const collName in relations) {
+        const collMeta = relations[collName];
 
         if (!collMeta.through) continue;
 

@@ -14,37 +14,46 @@ That PR already completed the foundational migration:
 
 ---
 
-## Current Status (as of 2026-02-22)
+## Current Status (as of 2026-02-23)
 
 ### Completed
 
-| Item                                                                            | Commit / Notes                                      |
-| ------------------------------------------------------------------------------- | --------------------------------------------------- |
-| Phase 1 (Prolog removal)                                                        | `bd3a7b6c` in `ad4m-model-refactor`                 |
-| Phase 2 decorator renames (`@Field`, `@HasMany`, `@Model`, `@Flag`)             | `bd3a7b6c` — `we` repo migrated in follow-up commit |
-| `@we/models` Phase 2 migration (`Space`, `Block`)                               | `5c716b5` in `we` `dev` branch                      |
-| `declare` statements for `@HasMany` generated methods on `Space` + `Block`      | In `we/packages/models/src/`                        |
-| `HasManyMethods<Keys extends string>` utility type exported from `@coasys/ad4m` | `decorators.ts`                                     |
-| `get id()` public alias on `Ad4mModel`                                          | `Ad4mModel.ts` — alias for `baseExpression`         |
-| Test app scaffold (`apps/playgrounds/react/ad4m-model-testing`)                 | All scenarios 01–10 wired, 08 active                |
-| Scenario 08 — `Space` model smoke test                                          | 4/4 passing ✅                                      |
-| `uuid` field removed from `Space` model                                         | Was redundant with `baseExpression`/`id`            |
-| `UserLocation` + `SpaceType` interfaces removed from `Space.ts`                 | Dead code — no consumers outside `Space.ts` itself  |
-| `$perspective` phantom variable removed from `queryToSurrealQL`                 | Fixed — see resolved issues below                   |
-| `->link AS links` hydration bug fixed in `queryToSurrealQL`                     | Fixed — see resolved issues below                   |
+| Item                                                                             | Commit / Notes                                                          |
+| -------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Phase 1 (Prolog removal)                                                         | `bd3a7b6c` in `ad4m-model-refactor`                                     |
+| Phase 2 decorator renames (`@Property`, `@HasMany`, `@Model`, `@Flag`)           | `bd3a7b6c` — `we` repo migrated in follow-up commit                     |
+| `@we/models` Phase 2 migration (`Space`, `Block`, block-types)                   | `we` `dev` branch                                                       |
+| `declare` → `HasManyMethods<Keys>` interface-merge pattern on `Space` + `Block`  | Replaces `declare add/remove/set` stubs; avoids Babel ordering issues   |
+| `HasManyMethods<Keys extends string>` utility type exported from `@coasys/ad4m`  | `decorators.ts`                                                         |
+| `get id()` public alias on `Ad4mModel`                                           | `Ad4mModel.ts` — alias for `baseExpression`                             |
+| Test app scaffold (`apps/playgrounds/react/ad4m-model-testing`)                  | All scenarios 01–10 wired, 08 active                                    |
+| Scenario 08 — rewritten with local `TestPost`/`TestComment`/`TestTag` models     | 5/5 passing ✅                                                          |
+| `uuid` field removed from `Space` model                                          | Was redundant with `baseExpression`/`id`                                |
+| `UserLocation` + `SpaceType` interfaces removed from `Space.ts`                  | Dead code — no consumers outside `Space.ts` itself                      |
+| `$perspective` phantom variable removed from `queryToSurrealQL`                  | Fixed — see resolved issues below                                       |
+| `->link AS links` hydration bug fixed in `queryToSurrealQL`                      | Fixed — see resolved issues below                                       |
+| `setCollection*` → `set*` rename                                                 | `ad4m@46e140e2`, `we@cf19352`                                           |
+| WeakMap metadata registry fix                                                    | `decorators.ts` — eliminates prototype-mutation inheritance bug         |
+| `@BelongsToOne` / `@BelongsToMany` decorators                                   | Implemented with `direction: "reverse"` — no mutator stubs generated    |
+| `@HasOne` decorator                                                               | Implemented with `maxCount: 1`                                          |
+| `@HasMany` / `@HasOne` accept optional model-class factory as first arg          | `HasMany(() => ModelClass, opts)` — for SHACL/isInstance metadata       |
+| `getModelMetadata()` propagates `direction` + `maxCount`                         | Root-cause fix for `@BelongsToOne` not populating reverse fields        |
+| Constructor skips `add/remove/set` stubs for `direction === "reverse"` relations | Prevents `addPost`/`removePost` being generated on `@BelongsToOne`      |
+| `getData()` reverse-link query (`WHERE out.uri = ...`, maps `l.source`)          | Single-instance hydration of reverse relations                          |
+| `instancesFromSurrealResult()` batch reverse-link query                          | `findAll()` hydration of reverse relations (`maxCount === 1` for HasOne)|
+| `generatePrologFacts` updated: `collections` → `relations` in metadata           | Keeps Prolog bridge in sync with renamed field                          |
+| `PerspectiveProxy.buildQueryFromTemplate` uses `getPropertiesMetadata` / `getRelationsMetadata` | Removed `__properties`/`__collections` prototype hacks       |
 
 ### Pending — Phase 2
 
-| Item                                                    | Notes                                                         |
-| ------------------------------------------------------- | ------------------------------------------------------------- |
-| `setCollection*` → `set*` rename                        | ✅ Done — `ad4m@46e140e2`, `we@cf19352`                       |
-| WeakMap metadata registry (from Phase 4a)               | 🔴 Correctness bug — moved forward, see Issue Log             |
-| `@HasOne`, `@BelongsToOne`, `@BelongsToMany` decorators | Phase 2b — not yet started                                    |
-| `@Flag` SHACL wiring for `generateSHACL()`              | Needed for `@Flag` predicate-uniqueness guarantee             |
+| Item                                                        | Notes                                                           |
+| ----------------------------------------------------------- | --------------------------------------------------------------- |
+| `@Flag` SHACL wiring for `generateSHACL()`                  | Needed for `@Flag` predicate-uniqueness guarantee in SHACL      |
+| Scenario 08 `@BelongsToMany` test                           | `TestTag.posts` reverse-traversal — not yet exercised in 08     |
 
 ### Pending — Phases 3–5
 
-Everything in Phases 3–5 is not started. Phase 2 must be green (scenario 08 all passing) before Phase 3 begins.
+Everything in Phases 3–5 is not started. Phase 2 is now functionally green (5/5 scenario 08 passing) — Phase 3 can begin.
 
 ---
 
@@ -62,7 +71,7 @@ Everything in Phases 3–5 is not started. Phase 2 must be green (scenario 08 al
 
 This is the problem Phase 3b's Transaction API addresses. Not urgent for Phase 2, but worth keeping in mind when reviewing save-related bugs — always check whether a batch lifecycle issue is masking the real failure.
 
-### 🔴 Dual hydration implementations (`getData` vs `instancesFromSurrealResult`)
+### � Dual hydration implementations (`getData` vs `instancesFromSurrealResult`)
 
 `getData()` (per-instance, called from `save()`) and `instancesFromSurrealResult()` (bulk, called from `findAll()`) both implement the same link→property/collection hydration logic independently. They already diverged once — the `->link AS links` bug we just fixed only affected `instancesFromSurrealResult`; if `getData()` had a similar SELECT bug it would require a separate investigation.
 
@@ -70,33 +79,24 @@ The fix is a shared `hydrateInstance(instance, links, perspective, metadata)` pu
 
 **Priority:** Fix as part of Phase 3a file decomposition.
 
-### 🔴 WeakMap metadata registry is sequenced too late (Phase 4 → Phase 2)
-
-The prototype mutation inheritance bug documented in Phase 4a is not a quality-of-life improvement — it is a **silent data corruption bug** that fires immediately when any `@HasMany`-decorated class is subclassed. The `Block` → `ImageBlock extends Block` case in `we/packages/models` will hit it as soon as `ImageBlock` is implemented.
-
-Phase 4 sequencing assumes it's safe to defer this until after file decomposition. It isn't — the bug is live in the current codebase and will corrupt any consumer who subclasses a model before Phase 4 lands.
-
-**Priority:** Move WeakMap metadata registry fix to Phase 2, alongside decorator renames. The fix is self-contained (WeakMaps in `decorators.ts` + updated `getModelMetadata()`) and has no dependency on Phase 3.
-
-### 🟡 String interpolation into SurrealQL — use parameterized queries
+###  String interpolation into SurrealQL — use parameterized queries
 
 `formatSurrealValue()` exists to prevent injection but the pattern is still string interpolation:
 
 ```typescript
-`WHERE in.uri = ${safeBaseExpression}`
+`WHERE in.uri = ${safeBaseExpression}`;
 ```
 
 SurrealDB supports parameterized queries via `querySurrealDB(query, bindings)`. Parameterized queries are immune to escaping mistakes by construction — they are the industry standard for query safety and are guaranteed never to produce injection vulnerabilities regardless of input.
 
 ```typescript
 // Current — string interpolation, relies on formatSurrealValue() being correct:
-`SELECT ... FROM link WHERE in.uri = ${formatSurrealValue(base)}`
+`SELECT ... FROM link WHERE in.uri = ${formatSurrealValue(base)}`;
 
 // Correct — parameterized, safe by construction:
-perspective.querySurrealDB(
-  'SELECT ... FROM link WHERE in.uri = $base',
-  { base }
-)
+perspective.querySurrealDB("SELECT ... FROM link WHERE in.uri = $base", {
+  base,
+});
 ```
 
 This applies throughout `queryToSurrealQL`, `getData()`, and any other raw SurrealQL construction. Should be addressed in Phase 3a when `SurrealQueryBuilder.ts` is extracted as its own module — the right time to standardize the query construction pattern.
@@ -106,6 +106,7 @@ This applies throughout `queryToSurrealQL`, `getData()`, and any other raw Surre
 ### 🟡 `eval()` in `PerspectiveProxy` for setter actions
 
 The rollup build already warns about it:
+
 ```
 lib/src/perspectives/PerspectiveProxy.js
   const actions = eval(setter.Setter);
@@ -120,9 +121,11 @@ Phase 1c deletes `Subject.ts` entirely — this goes away then. This is an addit
 ### 🟡 `generateCollectionAction` duplicates Rust SHACL logic
 
 `addLocations()` generates its own action array in TypeScript:
+
 ```typescript
-[{ action: "addLink", source: "this", predicate: "...", target: "value" }]
+[{ action: "addLink", source: "this", predicate: "...", target: "value" }];
 ```
+
 The Rust executor has `get_collection_adder_actions` that derives the same structure from SHACL. Two implementations of the same thing that must stay in sync. `save()` uses the SHACL-derived path (correct); collection mutations use the TypeScript-generated path (fragile).
 
 Long-term fix: have collection mutations also fetch SHACL-derived actions via the executor, the same way `createSubject` does. Short-term: add a comment in `generateCollectionAction` explicitly flagging the sync dependency so it's not silently broken by future SHACL changes.
@@ -132,6 +135,20 @@ Long-term fix: have collection mutations also fetch SHACL-derived actions via th
 ---
 
 ### Resolved
+
+### ✅ WeakMap metadata registry — RESOLVED
+
+**Root cause:** `getPropertiesMetadata` / `getRelationsMetadata` used `target` (the prototype object) as the WeakMap key when registering decorator metadata. Because `Object.getPrototypeOf(ChildClass.prototype) === ParentClass.prototype`, a read for a child class would silently fall through to the parent's WeakMap entry and inherit the parent's property/relation set, even when the child had no declared decorators.
+
+**Fix applied:** Registry key changed to `target.constructor` (the class constructor itself) in all four registry helpers (`registerProperty`, `getPropertiesMetadata`, `registerRelation`, `getRelationsMetadata`). Each class now has its own isolated entry; inheritance of metadata must be explicit.
+
+### ✅ `@BelongsToOne` reverse traversal not populating fields — RESOLVED
+
+**Root cause:** `getModelMetadata()` iterated over `getRelationsMetadata()` entries but only copied `through`, `className`, `model`, and `isCollection` into the returned metadata — silently dropping `direction` and `maxCount`. This meant that at runtime `relation.direction` was always `undefined`, so reverse-link query paths were never taken.
+
+**Fix applied:** `getModelMetadata()` now copies every field from the relation descriptor (`direction`, `maxCount`, `through`, `className`, `model`, `isCollection`) into the outgoing metadata object.
+
+**Verified:** Scenario 08 test 5 ("BelongsToOne reverse traversal") passing — `TestComment.post` correctly populated when fetched independently.
 
 ### ✅ `@HasMany` collection writes silently fail (`addLocations`, `addComments` etc.) — RESOLVED
 
@@ -288,27 +305,34 @@ The current decorator names have ergonomic problems:
 - `@Property` and `@ReadOnly` are just `@Optional` with preset args — the hierarchy isn't obvious and adds nothing
 - `@Collection` doesn't communicate direction or relationship type
 
-`@Property`, `@ReadOnly`, and `@Optional` are all deleted — no deprecated aliases. Both
+`@ReadOnly` and `@Optional` are all deleted — no deprecated aliases. Both
 known consumers (`@we/models`, `flux/packages/api`) are under our control and the
 migration is mechanical. Keeping aliases would just be cleanup debt with no benefit.
 
-`@Flag` is kept as its own decorator (not collapsed into `@Field`) because it has
+`@Flag` is kept as its own decorator (not collapsed into `@Property`) because it has
 genuinely distinct semantics: it writes a fixed predetermined value on every save,
 exists purely for graph queryability, and signals to `findAll()` to use it as a filter
-condition. `@Field({ flag: true, value: '...' })` would bury that intent. The name is
+condition. `@Property({ flag: true, value: '...' })` would bury that intent. The name is
 kept from the original — it already works, has no prior art confusion, and "flagging a
 node as a certain type" is natural language in graph contexts.
 
+**Note on naming — `@Property` not `@Field`:** The scalar decorator is named `@Property`
+(not `@Field`) because the rest of the API vocabulary is ORM-family: `@HasMany`,
+`@BelongsToOne`, `@HasOne`, `@BelongsToMany`. Those names come from ActiveRecord, not
+GraphQL. `@Field` would be the natural pairing for a GraphQL-centric API; `@Property`
+is the natural pairing for an ORM-centric one. `metadata.properties` and
+`metadata.relations` are the corresponding metadata keys.
+
 ### 2a — Changes
 
-| Old             | New        | Notes                                                                  |
-| --------------- | ---------- | ---------------------------------------------------------------------- |
-| `@Optional`     | `@Field`   | **Deleted** — use `@Field` directly                                    |
-| `@Property`     | `@Field`   | **Deleted** — was `@Field({ required: true })`, use that explicitly    |
-| `@ReadOnly`     | `@Field`   | **Deleted** — was `@Field({ writable: false })`, use that explicitly   |
-| `@Collection`   | `@HasMany` | Renamed with relationship semantics                                    |
-| `@Flag`         | `@Flag`    | **Unchanged** — already the right name                                 |
-| `@ModelOptions` | `@Model`   | Shorter, declarative — "this class is a model", not "here are options" |
+| Old             | New         | Notes                                                                   |
+| --------------- | ----------- | ----------------------------------------------------------------------- |
+| `@Optional`     | `@Property` | **Deleted** — use `@Property` directly                                  |
+| `@Property`     | `@Property` | **Kept** — renamed from old `@Optional`; pairs with the ORM vocabulary  |
+| `@ReadOnly`     | `@Property` | **Deleted** — was `@Property({ writable: false })`, use that explicitly |
+| `@Collection`   | `@HasMany`  | Renamed with relationship semantics                                     |
+| `@Flag`         | `@Flag`     | **Unchanged** — already the right name                                  |
+| `@ModelOptions` | `@Model`    | Shorter, declarative — "this class is a model", not "here are options"  |
 
 **Generated collection method rename — `setCollection*` → `set*`:** ✅ **IMPLEMENTED** (`ad4m@46e140e2`)
 
@@ -371,7 +395,7 @@ base class.
 **Rule:** Every model must be unambiguously identifiable in the graph. This means either:
 
 - At least one `@Flag` (a fixed predicate+value written on every instance), **or**
-- At least one `@Field({ required: true })` whose predicate is not used by any other model in the same perspective
+- At least one `@Property({ required: true })` whose predicate is not used by any other model in the same perspective
 
 This is not currently enforced at runtime — it is a developer responsibility. A future
 validation pass in `getModelMetadata()` could warn when neither condition is met.
@@ -520,7 +544,7 @@ It is naturally a separate PR because Flux is a separate monorepo.
 
 ### What Gets Dropped
 
-- `@Optional`, `@Property`, `@ReadOnly` — deleted entirely, use `@Field` with explicit options
+- `@Optional`, `@ReadOnly` — deleted entirely, use `@Property` with explicit options (`required`, `writable`)
 - `prologGetter` / `prologSetter` options (removed in Phase 1)
 - `@InstanceQuery` entirely (removed in Phase 1) — replaced by static methods using the query API
 - `through` being optional when `prologGetter` was set (now always required)
@@ -981,7 +1005,7 @@ class PollBlock extends BaseBlock {
   @Flag({ through: "we://blockType", value: "we://poll" })
   blockType = "we://poll"; // written on every save — makes instances queryable
 
-  @Field({ through: "we://question", required: true })
+  @Property({ through: "we://question", required: true })
   question: string = "";
 }
 
@@ -1000,7 +1024,7 @@ merge parent metadata. Child properties win over parent:
 ```typescript
 static getModelMetadata(): ModelMetadata {
   const allProperties = {};
-  const allCollections = {};
+  const allRelations = {};
   // Walk from root → leaf, so leaf (child) assignments win:
   const chain = [];
   let ctor = this as unknown as Function;
@@ -1179,7 +1203,7 @@ The test app catches all of these.
 1a  generatePrologFacts.ts                              ← first real code; verified by scenario 07
 1b  Remove dead Prolog paths                            ← delete after 1a verified
 1c  Delete Subject.ts                                   ← delete after 1b complete (removes eval())
-2   Decorator cleanup (@Field, @Flag, @HasMany, etc.)   ← can overlap with 1b/1c
+2   Decorator cleanup (@Property, @Flag, @HasMany, etc.)   ← can overlap with 1b/1c
     + WeakMap metadata registry (moved from Phase 4a)  ← correctness fix, not deferrable
     + update @we/models (5 files) in same PR            ← verified by scenario 08
 3a  File decomposition                                  ← after 1 & 2 complete
