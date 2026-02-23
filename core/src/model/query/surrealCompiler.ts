@@ -1,5 +1,6 @@
 /**
- * Pure SurrealQL query-building functions for the AD4M model layer.
+ * Pure SurrealQL compiler — translates high-level `Query<T>` objects into
+ * raw SurrealQL strings.
  *
  * All functions are stateless — they take `ModelMetadata` (and optionally a
  * `Query`) as plain data and return strings or booleans.  No dependency on the

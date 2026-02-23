@@ -15,7 +15,7 @@
 
 import type { PerspectiveProxy } from "../../perspectives/PerspectiveProxy";
 import type { ModelMetadata, IncludeMap, Query } from "../types";
-import { formatSurrealValue } from "./SurrealQueryBuilder";
+import { formatSurrealValue } from "./surrealCompiler";
 import { hydrateInstanceFromLinks, evaluateCustomGetters } from "./hydration";
 import { _findAllInternal } from "./operations";
 

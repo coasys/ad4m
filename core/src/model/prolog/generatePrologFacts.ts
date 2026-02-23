@@ -84,8 +84,13 @@ function buildPropertyClause(
 /**
  * Build a collection getter clause.
  *
- * Example:
+ * Forward relations (@HasMany / @HasOne):
  *   poll_entries(X, Values) :- findall(V, triple(X, 'flux://entry', V), Values).
+ *
+ * Reverse relations (@BelongsToMany / @BelongsToOne):
+ *   The link points TO this instance (OtherNode → predicate → ThisNode), so
+ *   the subject and object are swapped:
+ *   test_tag_posts(X, Values) :- findall(V, triple(V, 'test://has_tag', X), Values).
  */
 function buildCollectionClause(
   modelPredicateName: string,
@@ -94,6 +99,10 @@ function buildCollectionClause(
   if (!coll.predicate) return null;
 
   const clauseName = `${modelPredicateName}_${toSnakeCase(coll.name)}`;
+  if (coll.direction === "reverse") {
+    // Reverse traversal: find nodes whose outgoing predicate link points to X
+    return `${clauseName}(X, Values) :- findall(V, triple(V, '${coll.predicate}', X), Values).`;
+  }
   return `${clauseName}(X, Values) :- findall(V, triple(X, '${coll.predicate}', V), Values).`;
 }
 

@@ -14,8 +14,12 @@
 import { Literal } from "../Literal";
 import type { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import type { PropertyOptions, RelationOptions } from "./decorators";
-import { getPropertiesMetadata, getRelationsMetadata } from "./decorators";
-import { formatSurrealValue } from "./query/SurrealQueryBuilder";
+import {
+  getPropertiesMetadata,
+  getRelationsMetadata,
+  propertyRegistry,
+} from "./decorators";
+import { formatSurrealValue } from "./query/surrealCompiler";
 import { fetchInstanceData } from "./query/fetchInstance";
 import { getModelMetadata as _getModelMetadata } from "./schema/metadata";
 
@@ -397,6 +401,25 @@ export async function saveInstance(
     );
 
     await innerUpdate(ctx, false, batchId);
+
+    // Write inherited properties not present in the class's own SHACL shape.
+    // When a derived class uses sh:node to reference its parent shape, createSubject
+    // only writes properties defined in the derived shape. Inherited @Property fields
+    // (registered on the parent constructor) are silently ignored by the Rust backend.
+    // We detect them by comparing the full merged metadata against the own-only registry.
+    const proto = Object.getPrototypeOf(ctx.instance);
+    const ownPropKeys = new Set(
+      Object.keys(propertyRegistry.get(proto.constructor) ?? {}),
+    );
+    const allPropMeta = getPropertiesMetadata(proto.constructor);
+    for (const [key, propMeta] of Object.entries(allPropMeta)) {
+      if (ownPropKeys.has(key)) continue; // already handled by createSubject
+      if ((propMeta as PropertyOptions).flag) continue; // flags are immutable
+      const value = (ctx.instance as any)[key];
+      if (value !== undefined && value !== null && value !== "") {
+        await setProperty(ctx, key, value, batchId);
+      }
+    }
   } else {
     // ── UPDATE PATH ─────────────────────────────────────────────────────────
     // Instance already exists — update properties and relations only.

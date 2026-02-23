@@ -12,12 +12,12 @@
 
 import type { PerspectiveProxy } from "../../perspectives/PerspectiveProxy";
 import type { Query, ResultsWithTotalCount, PaginationResult } from "../types";
-import type { Ad4mModelCtor } from "./QueryBuilder";
+import type { Ad4mModelCtor } from "./ModelQueryBuilder";
 import {
   buildSurrealQuery,
   buildSurrealCountQuery,
   matchesCondition,
-} from "./SurrealQueryBuilder";
+} from "./surrealCompiler";
 import { hydrateInstanceFromLinks, evaluateCustomGetters } from "./hydration";
 import { escapeSurrealString } from "../../utils";
 

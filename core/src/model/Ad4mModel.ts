@@ -1,5 +1,6 @@
 import { Literal } from "../Literal";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
+import { SHACLShape } from "../shacl/SHACLShape";
 import { makeRandomId, getRelationsMetadata } from "./decorators";
 import * as mutation from "./mutation";
 export type { MutationContext } from "./mutation";
@@ -44,7 +45,7 @@ export type {
 } from "./schema/fromJSONSchema";
 
 // ── Fluent query builder (re-exported for consumers) ──────────────────────
-import { ModelQueryBuilder } from "./query/QueryBuilder";
+import { ModelQueryBuilder } from "./query/ModelQueryBuilder";
 export { ModelQueryBuilder };
 
 // ── SurrealDB query helpers (used internally, also re-exported) ────────────
@@ -57,7 +58,7 @@ export {
   buildSurrealWhereClause,
   buildSurrealSelectFields,
   buildSurrealSelectFieldsWithAggregation,
-} from "./query/SurrealQueryBuilder";
+} from "./query/surrealCompiler";
 
 // ── Hydration utilities (re-exported for advanced consumers) ──────────────
 export {
@@ -264,6 +265,14 @@ export class Ad4mModel {
    */
   public static getModelMetadata(): ModelMetadata {
     return _getModelMetadata(this);
+  }
+
+  /**
+   * Generates the SHACL shape for this model class.
+   * Attached dynamically by the `@Model` decorator.
+   */
+  static generateSHACL(): { shape: SHACLShape; name: string } {
+    throw new Error('generateSHACL() is only available on classes decorated with @Model');
   }
 
   /**
@@ -612,7 +621,7 @@ export class Ad4mModel {
    * console.log(recipe.name, recipe.ingredients);
    * ```
    */
-  async get(include?: IncludeMap) {
+  async get(include?: IncludeMap): Promise<this> {
     return this.getData(include);
   }
 

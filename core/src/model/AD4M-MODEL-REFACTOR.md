@@ -26,7 +26,7 @@ That PR already completed the foundational migration:
 | `declare` → `HasManyMethods<Keys>` interface-merge pattern on `Space` + `Block`                                                                                                                                                            | Replaces `declare add/remove/set` stubs; avoids Babel ordering issues            |
 | `HasManyMethods<Keys extends string>` utility type exported from `@coasys/ad4m`                                                                                                                                                            | `decorators.ts`                                                                  |
 | `get id()` public alias on `Ad4mModel`                                                                                                                                                                                                     | `Ad4mModel.ts` — alias for `baseExpression`                                      |
-| Test app scaffold (`apps/playgrounds/react/ad4m-model-testing`)                                                                                                                                                                            | All scenarios 01–10 wired, 08 active                                             |
+| Test app scaffold (`apps/playgrounds/react/ad4m-model-testing`)                                                                                                                                                                            | Scenarios 01–09 fully live; 10 stubs (Phase 5 not started)                       |
 | `uuid` field removed from `Space` model                                                                                                                                                                                                    | Was redundant with `baseExpression`/`id`                                         |
 | `UserLocation` + `SpaceType` interfaces removed from `Space.ts`                                                                                                                                                                            | Dead code — no consumers outside `Space.ts` itself                               |
 | `$perspective` phantom variable removed from `queryToSurrealQL`                                                                                                                                                                            | Fixed — see resolved issues below                                                |
@@ -65,8 +65,8 @@ That PR already completed the foundational migration:
 | 3a File decomposition       | ✅ COMPLETE    |
 | 3b Transaction API          | ✅ COMPLETE    |
 | 3c IncludeMap eager loading | ✅ COMPLETE    |
-| 3d Subscriptions            | ⏳ NEXT        |
-| 4 Model inheritance         | ⏳ NOT STARTED |
+| 3d Subscriptions            | ✅ COMPLETE    |
+| 4 Model inheritance         | ✅ COMPLETE    |
 | 5 CRDT ordering             | ⏳ NOT STARTED |
 
 ---
@@ -615,7 +615,7 @@ It is naturally a separate PR because Flux is a separate monorepo.
 
 ---
 
-## Phase 3 — File Decomposition ✅ PARTIALLY COMPLETE (3a/3b/3c done; 3d next)
+## Phase 3 — File Decomposition ✅ COMPLETE (3a/3b/3c/3d all done)
 
 `Ad4mModel.ts` is currently 3,404 lines containing two exported classes, ~15 distinct concerns, and a mix of pure functions and instance/static methods. Split it:
 
@@ -963,7 +963,7 @@ an `onError` callback just to track whether the subscription is healthy.
 
 ---
 
-## Phase 4 — WeakMap Metadata Registry + Model Inheritance ⏳ NOT STARTED
+## Phase 4 — WeakMap Metadata Registry + Model Inheritance ✅ COMPLETE
 
 > ⚠️ **Note:** Phase 4a (WeakMap metadata registry) has been identified as a correctness bug fix, not a quality-of-life improvement. It should be implemented in Phase 2, before any model inheritance is attempted. The Phase 4 content below is retained for the full implementation detail; Phase 4b (inheritance patterns) remains a Phase 4 concern.
 

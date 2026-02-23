@@ -13,7 +13,7 @@
 import { Literal } from "../../Literal";
 import { PerspectiveProxy } from "../../perspectives/PerspectiveProxy";
 import type { ModelMetadata } from "../types";
-import { formatSurrealValue } from "./SurrealQueryBuilder";
+import { formatSurrealValue } from "./surrealCompiler";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
