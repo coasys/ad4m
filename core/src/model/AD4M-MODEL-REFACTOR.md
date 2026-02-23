@@ -37,7 +37,7 @@ That PR already completed the foundational migration:
 
 | Item                                                    | Notes                                                         |
 | ------------------------------------------------------- | ------------------------------------------------------------- |
-| `setCollection*` → `set*` rename                        | Documented below; not yet implemented                         |
+| `setCollection*` → `set*` rename                        | ✅ Done — `ad4m@46e140e2`, `we@cf19352`                       |
 | WeakMap metadata registry (from Phase 4a)               | 🔴 Correctness bug — moved forward, see Issue Log             |
 | `@HasOne`, `@BelongsToOne`, `@BelongsToMany` decorators | Phase 2b — not yet started                                    |
 | `@Flag` SHACL wiring for `generateSHACL()`              | Needed for `@Flag` predicate-uniqueness guarantee             |
@@ -204,7 +204,7 @@ interface Space extends HasManyMethods<"locations"> {}
 // generates addLocations, removeLocations, setLocations
 ```
 
-But this requires repeating the key name as a string literal. Until the `setCollection*` → `set*` rename is done, both approaches require manual sync when `@HasMany` properties are added/removed. Post-rename, `HasManyMethods` becomes cleaner. For now, `declare` is preferred as it's closer to the decorator.
+Post-rename (`set*` is now live), `HasManyMethods` uses `` `set${Capitalize<K>}` `` and the `declare` stubs are just `declare setLocations`, `declare setComments`, etc.
 
 ---
 
@@ -310,7 +310,7 @@ node as a certain type" is natural language in graph contexts.
 | `@Flag`         | `@Flag`    | **Unchanged** — already the right name                                 |
 | `@ModelOptions` | `@Model`   | Shorter, declarative — "this class is a model", not "here are options" |
 
-**Generated collection method rename — `setCollection*` → `set*`:** ⚠️ **NOT YET IMPLEMENTED**
+**Generated collection method rename — `setCollection*` → `set*`:** ✅ **IMPLEMENTED** (`ad4m@46e140e2`)
 
 The `setCollection` prefix on the bulk-replace method (`setCollectionComments`, etc.) is
 a leftover from the `@Collection` era. Now that the decorator is `@HasMany`, keeping
