@@ -511,12 +511,11 @@ impl SurrealDBService {
     }
 
     /// Fully shut down this perspective's SurrealDB instance.
-    /// Drops all data (nodes, links, indexes) so the in-memory database can be reclaimed.
     /// The Surreal<Db> itself will be dropped when all Arc references are released.
     pub async fn shutdown(&self) -> Result<(), Error> {
-        // SurrealDB uses in-memory storage (Surreal::new::<Mem>), so data is not persistent.
+        // SurrealDB uses RocksDb for file storage.
         // Just log the shutdown — the Arc<Surreal<Db>> will be dropped when all references
-        // are released, freeing the in-memory data automatically.
+        // are released.
         log::info!("💾 SurrealDB: Shut down perspective database");
         Ok(())
     }
