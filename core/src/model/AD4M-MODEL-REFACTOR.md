@@ -18,44 +18,56 @@ That PR already completed the foundational migration:
 
 ### Completed
 
-| Item                                                                                              | Commit / Notes                                                                   |
-| ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| Phase 1 (Prolog removal)                                                                          | `bd3a7b6c` in `ad4m-model-refactor`                                              |
-| Phase 2 decorator renames (`@Property`, `@HasMany`, `@Model`, `@Flag`)                            | `bd3a7b6c` — `we` repo migrated in follow-up commit                              |
-| `@we/models` Phase 2 migration (`Space`, `Block`, block-types)                                    | `we` `dev` branch                                                                |
-| `declare` → `HasManyMethods<Keys>` interface-merge pattern on `Space` + `Block`                   | Replaces `declare add/remove/set` stubs; avoids Babel ordering issues            |
-| `HasManyMethods<Keys extends string>` utility type exported from `@coasys/ad4m`                   | `decorators.ts`                                                                  |
-| `get id()` public alias on `Ad4mModel`                                                            | `Ad4mModel.ts` — alias for `baseExpression`                                      |
-| Test app scaffold (`apps/playgrounds/react/ad4m-model-testing`)                                   | All scenarios 01–10 wired, 08 active                                             |
-| `uuid` field removed from `Space` model                                                           | Was redundant with `baseExpression`/`id`                                         |
-| `UserLocation` + `SpaceType` interfaces removed from `Space.ts`                                   | Dead code — no consumers outside `Space.ts` itself                               |
-| `$perspective` phantom variable removed from `queryToSurrealQL`                                   | Fixed — see resolved issues below                                                |
-| `->link AS links` hydration bug fixed in `queryToSurrealQL`                                       | Fixed — see resolved issues below                                                |
-| `setCollection*` → `set*` rename                                                                  | `ad4m@46e140e2`, `we@cf19352`                                                    |
-| WeakMap metadata registry fix                                                                     | `decorators.ts` — eliminates prototype-mutation inheritance bug                  |
-| `@BelongsToOne` / `@BelongsToMany` decorators                                                     | Implemented with `direction: "reverse"` — no mutator stubs generated             |
-| `@HasOne` decorator                                                                               | Implemented with `maxCount: 1`                                                   |
-| `@HasMany` / `@HasOne` accept optional model-class factory as first arg                           | `HasMany(() => ModelClass, opts)` — for SHACL/isInstance metadata                |
-| `getModelMetadata()` propagates `direction` + `maxCount`                                          | Root-cause fix for `@BelongsToOne` not populating reverse fields                 |
-| Constructor skips `add/remove/set` stubs for `direction === "reverse"` relations                  | Prevents `addPost`/`removePost` being generated on `@BelongsToOne`               |
-| `getData()` reverse-link query (`WHERE out.uri = ...`, maps `l.source`)                           | Single-instance hydration of reverse relations                                   |
-| `instancesFromSurrealResult()` batch reverse-link query                                           | `findAll()` hydration of reverse relations (`maxCount === 1` for HasOne)         |
-| `generatePrologFacts` updated: `collections` → `relations` in metadata                            | Keeps Prolog bridge in sync with renamed field                                   |
-| `PerspectiveProxy.buildQueryFromTemplate` uses `getPropertiesMetadata` / `getRelationsMetadata`   | Removed `__properties`/`__collections` prototype hacks                           |
-| `collection*` → `relation*` rename (Rust, TypeScript, Prolog facts)                               | `ad4m@2f5eabca`, `we@98c2300` — `collectionSetter` → `relationSetter` throughout |
-| Scenario 08 expanded to 12 tests — all 6 decorator types covered                                  | `findOne`, re-`save`, `remove*`, `set*`, `delete`, `@BelongsToMany` all tested   |
-| Unified `save()` — create vs update routed by SurrealDB existence check                           | `Ad4mModel.ts` — `update()` deprecated, delegates to `save()`                    |
-| Rust `create_subject` merge fix — preserves `SetSingleTarget` action on re-save                   | `perspective_instance.rs` — replaces `cmd.target` with full command struct       |
-| Rust executor rebuilt — all 13 scenario 08 tests passing                                          | `cargo build --release` — `create_subject` fix active, re-save verified ✅       |
-| Scenario 08 expanded to 13 tests — `@BelongsToOne pinnedBy` added                                 | `TestComment.pinnedBy` field + test verifies null-case                           |
-| `@Flag` SHACL wiring — `innerUpdate()` skips flag fields; `generatePropertySetterAction()` guards | `flag?: boolean` added to `PropertyOptions`; flags immutable after creation ✅   |
-| Scenario 08 expanded to 14 tests — `@Flag` immutability on re-save                                | Re-saves post, verifies flag value survives and `findAll()` still returns it ✅  |
+| Item                                                                                                                                                                                                                                       | Commit / Notes                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| Phase 1 (Prolog removal)                                                                                                                                                                                                                   | `bd3a7b6c` in `ad4m-model-refactor`                                              |
+| Phase 2 decorator renames (`@Property`, `@HasMany`, `@Model`, `@Flag`)                                                                                                                                                                     | `bd3a7b6c` — `we` repo migrated in follow-up commit                              |
+| `@we/models` Phase 2 migration (`Space`, `Block`, block-types)                                                                                                                                                                             | `we` `dev` branch                                                                |
+| `declare` → `HasManyMethods<Keys>` interface-merge pattern on `Space` + `Block`                                                                                                                                                            | Replaces `declare add/remove/set` stubs; avoids Babel ordering issues            |
+| `HasManyMethods<Keys extends string>` utility type exported from `@coasys/ad4m`                                                                                                                                                            | `decorators.ts`                                                                  |
+| `get id()` public alias on `Ad4mModel`                                                                                                                                                                                                     | `Ad4mModel.ts` — alias for `baseExpression`                                      |
+| Test app scaffold (`apps/playgrounds/react/ad4m-model-testing`)                                                                                                                                                                            | All scenarios 01–10 wired, 08 active                                             |
+| `uuid` field removed from `Space` model                                                                                                                                                                                                    | Was redundant with `baseExpression`/`id`                                         |
+| `UserLocation` + `SpaceType` interfaces removed from `Space.ts`                                                                                                                                                                            | Dead code — no consumers outside `Space.ts` itself                               |
+| `$perspective` phantom variable removed from `queryToSurrealQL`                                                                                                                                                                            | Fixed — see resolved issues below                                                |
+| `->link AS links` hydration bug fixed in `queryToSurrealQL`                                                                                                                                                                                | Fixed — see resolved issues below                                                |
+| `setCollection*` → `set*` rename                                                                                                                                                                                                           | `ad4m@46e140e2`, `we@cf19352`                                                    |
+| WeakMap metadata registry fix                                                                                                                                                                                                              | `decorators.ts` — eliminates prototype-mutation inheritance bug                  |
+| `@BelongsToOne` / `@BelongsToMany` decorators                                                                                                                                                                                              | Implemented with `direction: "reverse"` — no mutator stubs generated             |
+| `@HasOne` decorator                                                                                                                                                                                                                        | Implemented with `maxCount: 1`                                                   |
+| `@HasMany` / `@HasOne` accept optional model-class factory as first arg                                                                                                                                                                    | `HasMany(() => ModelClass, opts)` — for SHACL/isInstance metadata                |
+| `getModelMetadata()` propagates `direction` + `maxCount`                                                                                                                                                                                   | Root-cause fix for `@BelongsToOne` not populating reverse fields                 |
+| Constructor skips `add/remove/set` stubs for `direction === "reverse"` relations                                                                                                                                                           | Prevents `addPost`/`removePost` being generated on `@BelongsToOne`               |
+| `getData()` reverse-link query (`WHERE out.uri = ...`, maps `l.source`)                                                                                                                                                                    | Single-instance hydration of reverse relations                                   |
+| `instancesFromSurrealResult()` batch reverse-link query                                                                                                                                                                                    | `findAll()` hydration of reverse relations (`maxCount === 1` for HasOne)         |
+| `generatePrologFacts` updated: `collections` → `relations` in metadata                                                                                                                                                                     | Keeps Prolog bridge in sync with renamed field                                   |
+| `PerspectiveProxy.buildQueryFromTemplate` uses `getPropertiesMetadata` / `getRelationsMetadata`                                                                                                                                            | Removed `__properties`/`__collections` prototype hacks                           |
+| `collection*` → `relation*` rename (Rust, TypeScript, Prolog facts)                                                                                                                                                                        | `ad4m@2f5eabca`, `we@98c2300` — `collectionSetter` → `relationSetter` throughout |
+| Scenario 08 expanded to 12 tests — all 6 decorator types covered                                                                                                                                                                           | `findOne`, re-`save`, `remove*`, `set*`, `delete`, `@BelongsToMany` all tested   |
+| Unified `save()` — create vs update routed by SurrealDB existence check                                                                                                                                                                    | `Ad4mModel.ts` — `update()` deprecated, delegates to `save()`                    |
+| Rust `create_subject` merge fix — preserves `SetSingleTarget` action on re-save                                                                                                                                                            | `perspective_instance.rs` — replaces `cmd.target` with full command struct       |
+| Rust executor rebuilt — all 13 scenario 08 tests passing                                                                                                                                                                                   | `cargo build --release` — `create_subject` fix active, re-save verified ✅       |
+| Scenario 08 expanded to 13 tests — `@BelongsToOne pinnedBy` added                                                                                                                                                                          | `TestComment.pinnedBy` field + test verifies null-case                           |
+| `@Flag` SHACL wiring — `innerUpdate()` skips flag fields; `generatePropertySetterAction()` guards                                                                                                                                          | `flag?: boolean` added to `PropertyOptions`; flags immutable after creation ✅   |
+| Scenario 08 expanded to 14 tests — `@Flag` immutability on re-save                                                                                                                                                                         | Re-saves post, verifies flag value survives and `findAll()` still returns it ✅  |
+| Phase 3a: file decomposition — `types.ts`, `SurrealQueryBuilder.ts`, `hydration.ts`, `operations.ts`, `QueryBuilder.ts`, `fetchInstance.ts`, `metadata.ts`, `fromJSONSchema.ts`, `mutation.ts` extracted; `Ad4mModel.ts` 3,917 → 759 lines | `eb2f4b4b` → `6dcc5283` (6 commits)                                              |
+| Phase 3b: Transaction API — `transaction.ts`, `runTransaction`, `TransactionContext`; `save()` / `delete()` accept `tx?: TransactionContext` instead of raw `batchId` string                                                               | `a66d833b`                                                                       |
+| Phase 3c: `IncludeMap` Prisma-style eager loading — absent = no hydration, present = exactly the named relations; `.include(map)` on `QueryBuilder`; `include?` param on `get()` / `getData()`                                             | `6d02ad2d`                                                                       |
 
 ### Pending — Phase 2
 
 **Phase 2 COMPLETE** ✅
 
 ### Pending — Phases 3–5
+
+| Phase                       | Status         |
+| --------------------------- | -------------- |
+| 3a File decomposition       | ✅ COMPLETE    |
+| 3b Transaction API          | ✅ COMPLETE    |
+| 3c IncludeMap eager loading | ✅ COMPLETE    |
+| 3d Subscriptions            | ⏳ NEXT        |
+| 4 Model inheritance         | ⏳ NOT STARTED |
+| 5 CRDT ordering             | ⏳ NOT STARTED |
 
 ---
 
@@ -86,26 +98,6 @@ These are queried by name in the Rust executor (`engine_pool.rs`, `sdna.rs`, `pe
 ## Issue Log
 
 ### Open
-
-### 🟡 `save()` batch lifecycle is implicit
-
-`save()` creates its own internal batch if none is provided, commits it, then calls `getData()`. This means:
-
-- A caller cannot call `save()` as part of a larger transaction without manually managing `createBatch()`/`commitBatch()`
-- The internal `batchId` string leaks across several method signatures
-- No rollback happens if something throws mid-save
-
-**Note:** `save()` now performs a SurrealDB existence check (`SELECT 1 FROM link WHERE in.uri = $base LIMIT 1`) before creating a batch. This single round-trip is outside the batch and cannot be rolled back as part of it — not a problem in practice (existence checks are idempotent) but worth knowing if you're reasoning about atomicity.
-
-This is the problem Phase 3b's Transaction API addresses. Not urgent for Phase 2, but worth keeping in mind when reviewing save-related bugs — always check whether a batch lifecycle issue is masking the real failure.
-
-### � Dual hydration implementations (`getData` vs `instancesFromSurrealResult`)
-
-`getData()` (per-instance, called from `save()`) and `instancesFromSurrealResult()` (bulk, called from `findAll()`) both implement the same link→property/collection hydration logic independently. They already diverged once — the `->link AS links` bug we just fixed only affected `instancesFromSurrealResult`; if `getData()` had a similar SELECT bug it would require a separate investigation.
-
-The fix is a shared `hydrateInstance(instance, links, perspective, metadata)` pure function that both paths delegate to. This is already planned as `query/hydration.ts` in Phase 3a — it's listed there as the right place. Flag it here so it's treated as a correctness fix, not just a decomposition nicety.
-
-**Priority:** Fix as part of Phase 3a file decomposition.
 
 ### String interpolation into SurrealQL — use parameterized queries
 
@@ -163,6 +155,14 @@ Long-term fix: have collection mutations also fetch SHACL-derived actions via th
 ---
 
 ### Resolved
+
+### ✅ `save()` batch lifecycle — RESOLVED (Phase 3b, `a66d833b`)
+
+**Fix applied:** `Ad4mModel.transaction(perspective, async (tx) => { ... })` wraps operations in a single batch with automatic commit on success and abort on throw. `save()` and `delete()` accept `tx?: TransactionContext` instead of a raw `batchId` string — `TransactionContext` is an opaque type so callers cannot misuse it. Implemented in `core/src/model/transaction.ts`.
+
+### ✅ Dual hydration implementations (`getData` vs `instancesFromSurrealResult`) — RESOLVED (Phase 3a, `eb2f4b4b`)
+
+**Fix applied:** Both single-instance (`fetchInstanceData` in `fetchInstance.ts`) and bulk query (`instancesFromSurrealResult` in `operations.ts`) paths now delegate to `hydrateInstanceFromLinks(instance, links, perspective, metadata)` in `core/src/model/query/hydration.ts`. The two independent implementations are gone; the divergence cannot recur.
 
 ### ✅ WeakMap metadata registry — RESOLVED
 
@@ -615,7 +615,7 @@ It is naturally a separate PR because Flux is a separate monorepo.
 
 ---
 
-## Phase 3 — File Decomposition ⏳ NOT STARTED
+## Phase 3 — File Decomposition ✅ PARTIALLY COMPLETE (3a/3b/3c done; 3d next)
 
 `Ad4mModel.ts` is currently 3,404 lines containing two exported classes, ~15 distinct concerns, and a mix of pure functions and instance/static methods. Split it:
 
@@ -683,7 +683,7 @@ and has a separate metadata path.
 **Public API stays the same:** All current exports from `Ad4mModel.ts` and `decorators.ts`
 are re-exported from `index.ts`. No consumer changes required for the decomposition alone.
 
-### 3b — Transaction API
+### 3b — Transaction API ✅ COMPLETE (`a66d833b`)
 
 Currently `save()`, `update()`, and `delete()` each accept an optional `batchId?: string`.
 Internally, if no `batchId` is provided, each call creates its own batch and commits it
@@ -742,7 +742,9 @@ Any existing call sites passing a raw `batchId` string will be a type error, whi
 the desired outcome. The Flux API models don't use `batchId` directly (confirmed by grep),
 so this is a zero-impact change in practice.
 
-### 3c — Include / Eager Loading + JSON-first Query API
+### 3c — Include / Eager Loading ✅ COMPLETE (`6d02ad2d`)
+
+> **Implementation note:** The planned `Include<T>[]` array format (with a `relation` key per object) was replaced with a Prisma-style `IncludeMap = { [relationName: string]: true | Query }`. Semantics: absent = no hydration (not "hydrate all"), present = exactly the named relations. Nested recursive `include` arrays and the separate `include.ts` module are deferred — the current IncludeMap covers the immediate use case with less API surface. The JSON-first query API redesign can be revisited if nested eager loading becomes necessary.
 
 This is what completes Phase 2's relationship decorators. In Phase 2, `@HasMany` /
 `@HasOne` / `@BelongsToOne` / `@BelongsToMany` still return `string[]` (base expression IDs).
@@ -845,7 +847,9 @@ same class appears twice, that branch stops.
 **Lazy by default:** Without `include`, relationship properties remain `string[]`.
 No automatic eager loading. P2P bandwidth is a first-class concern.
 
-### 3d — Subscriptions — not a flag on `Query<T>`. Mixing it into the
+### 3d — Subscriptions ⏳ NEXT
+
+> Not a flag on `Query<T>`. Mixing it into the
 
 query object would make the return type conditional on a runtime boolean, forcing messy
 overloads on `findAll`. The query object stays purely descriptive of _what_ data is wanted;
@@ -1207,12 +1211,12 @@ the playground scenarios should be renamed to reflect their `we`-specific purpos
 2   Decorator cleanup (@Property, @Flag, @HasMany, etc.)   ← can overlap with 1b/1c
     + WeakMap metadata registry (moved from Phase 4a)  ← correctness fix, not deferrable
     + update @we/models (5 files) in same PR            ← verified by we playground 08-we-models.ts
-3a  File decomposition                                  ← after 1 & 2 complete
-    + shared hydrateInstance() in hydration.ts         ← eliminates dual hydration impls
-    + parameterized SurrealQL queries throughout        ← replaces string interpolation
-3b  Transaction API                                     ← alongside 3a; verified by scenario 06
-3c  Include / eager loading + JSON-first query API      ← after 3a; verified by scenarios 03 & 04
-3d  Subscriptions                                       ← after 3a; verified by scenario 05
+3a  File decomposition ✅                               ← `eb2f4b4b` → `6dcc5283`
+    + shared hydrateInstance() in hydration.ts ✅      ← eliminates dual hydration impls
+    + parameterized SurrealQL queries throughout ⏳     ← still uses string interpolation
+3b  Transaction API ✅                                  ← `a66d833b`
+3c  Include / eager loading (IncludeMap) ✅             ← `6d02ad2d`
+3d  Subscriptions ⏳ ← NEXT                             ← verified by scenario 05
 4   Model inheritance (WeakMap already done in Phase 2) ← verified by scenario 09
 5   CRDT ordering                                       ← after 3; fills in scenario 10
 F   Flux decorator rename (~15 files in packages/api)   ← after test app validates Phase 2
