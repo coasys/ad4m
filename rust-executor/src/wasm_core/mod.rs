@@ -37,14 +37,17 @@ struct HostEnv {
     memory: Option<Memory>,
     /// Guest's `ad4m_alloc` function, set after instantiation.
     alloc_fn: Option<TypedFunction<u32, u32>>,
+    /// Tokio runtime handle for bridging sync host functions to async services.
+    tokio_handle: tokio::runtime::Handle,
 }
 
 impl HostEnv {
-    fn new(language_address: String) -> Self {
+    fn new(language_address: String, tokio_handle: tokio::runtime::Handle) -> Self {
         Self {
             language_address,
             memory: None,
             alloc_fn: None,
+            tokio_handle,
         }
     }
 
@@ -362,21 +365,59 @@ fn host_hc_call(mut env: FunctionEnvMut<HostEnv>, data_ptr: u32, data_len: u32) 
             return 0;
         }
     };
-    let _request: AbiHcCallRequest = match from_json_bytes(&data) {
+    let request: AbiHcCallRequest = match from_json_bytes(&data) {
         Ok(r) => r,
         Err(e) => {
             error!("host_hc_call: JSON parse error: {}", e);
             return 0;
         }
     };
-    // Holochain calls require async context. For now, return an error indicating
-    // that HC calls from WASM languages require the async bridge (future work).
-    let error_msg = "Holochain calls from WASM languages are not yet supported in synchronous mode";
-    warn!("host_hc_call: {}", error_msg);
-    let json = match serde_json::to_vec(&serde_json::json!({"error": error_msg})) {
+
+    let language_address = host_env.language_address.clone();
+    let handle = host_env.tokio_handle.clone();
+
+    // Bridge sync -> async using block_in_place to avoid deadlock in tokio runtime
+    let result = tokio::task::block_in_place(|| {
+        handle.block_on(async {
+            let hc_service = match crate::holochain_service::interface::maybe_get_holochain_service().await {
+                Some(s) => s,
+                None => {
+                    return Err(anyhow::anyhow!("Holochain service not available"));
+                }
+            };
+            let payload = if request.payload.is_empty() {
+                None
+            } else {
+                Some(holochain::prelude::ExternIO(request.payload))
+            };
+            hc_service.call_zome_function(
+                language_address,
+                request.dna_nick,
+                request.zome_name,
+                request.fn_name,
+                payload,
+            ).await
+        })
+    });
+
+    let response = match result {
+        Ok(zome_response) => {
+            match zome_response {
+                holochain::prelude::ZomeCallResponse::Ok(extern_io) => {
+                    serde_json::json!({"Ok": extern_io.0})
+                }
+                other => {
+                    serde_json::json!({"error": format!("{:?}", other)})
+                }
+            }
+        }
+        Err(e) => serde_json::json!({"error": format!("{}", e)}),
+    };
+
+    let json = match serde_json::to_vec(&response) {
         Ok(j) => j,
         Err(e) => {
-            error!("host_hc_call: JSON error: {}", e);
+            error!("host_hc_call: JSON serialize error: {}", e);
             return 0;
         }
     };
@@ -930,7 +971,7 @@ pub fn load_wasm_language_from_bytes(
         .map_err(|e| WasmLanguageError::CompilationError(format!("{}", e)))?;
 
     // Create host environment
-    let host_env = HostEnv::new(language_address.to_string());
+    let host_env = HostEnv::new(language_address.to_string(), tokio::runtime::Handle::current());
     let env = FunctionEnv::new(&mut store, host_env);
 
     // Define host function imports

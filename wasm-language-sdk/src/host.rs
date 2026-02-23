@@ -119,20 +119,50 @@ pub fn hash(data: &str) -> Option<String> {
 }
 
 /// Call a Holochain zome function.
-#[derive(Serialize)]
-pub struct HcCallRequest {
-    pub dna_hash: Vec<u8>,
-    pub agent_pubkey: Vec<u8>,
-    pub zome_name: String,
-    pub fn_name: String,
-    pub payload: Vec<u8>,
-}
-
-/// Call a Holochain zome function.
-pub fn hc_call(request: &HcCallRequest) -> Option<Vec<u8>> {
-    let json = serde_json::to_vec(request).ok()?;
+///
+/// # Arguments
+/// * `dna_nick` - The DNA role name / nickname
+/// * `zome_name` - The zome to call
+/// * `fn_name` - The function within the zome
+/// * `payload` - Msgpack-encoded payload bytes
+///
+/// # Returns
+/// The raw response bytes on success, or an error string.
+pub fn holochain_call(dna_nick: &str, zome_name: &str, fn_name: &str, payload: &[u8]) -> Result<Vec<u8>, String> {
+    #[derive(Serialize)]
+    struct HcCallRequest<'a> {
+        dna_nick: &'a str,
+        zome_name: &'a str,
+        fn_name: &'a str,
+        payload: Vec<u8>,
+    }
+    let request = HcCallRequest {
+        dna_nick,
+        zome_name,
+        fn_name,
+        payload: payload.to_vec(),
+    };
+    let json = serde_json::to_vec(&request).map_err(|e| format!("serialize error: {}", e))?;
     let fat_input = write_output(&json);
     let (ptr, len) = decode_fat_ptr(fat_input);
     let fat = unsafe { _host_hc_call(ptr, len) };
-    read_host_result(fat)
+    let bytes = read_host_result(fat).ok_or_else(|| "hc_call returned null".to_string())?;
+    // Parse response - check for error field
+    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+        if let Some(err) = val.get("error") {
+            return Err(err.as_str().unwrap_or("unknown error").to_string());
+        }
+        if let Some(ok_data) = val.get("Ok") {
+            if let Some(arr) = ok_data.as_array() {
+                return Ok(arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect());
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+/// Legacy alias - calls holochain_call with the new API.
+#[deprecated(note = "Use holochain_call() instead")]
+pub fn hc_call(dna_nick: &str, zome_name: &str, fn_name: &str, payload: &[u8]) -> Option<Vec<u8>> {
+    holochain_call(dna_nick, zome_name, fn_name, payload).ok()
 }

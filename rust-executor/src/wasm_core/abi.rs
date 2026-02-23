@@ -172,8 +172,7 @@ pub struct AbiInteractionParameter {
 /// Request to call a Holochain zome function.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AbiHcCallRequest {
-    pub dna_hash: Vec<u8>,
-    pub agent_pubkey: Vec<u8>,
+    pub dna_nick: String,
     pub zome_name: String,
     pub fn_name: String,
     pub payload: Vec<u8>,
