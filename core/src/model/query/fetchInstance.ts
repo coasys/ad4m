@@ -22,10 +22,11 @@ import { _findAllInternal } from "./operations";
 /**
  * Hydrates `instance` in-place from SurrealDB and returns it.
  *
- * @param instance     - The Ad4mModel instance to populate
- * @param perspective  - Perspective that owns the instance
+ * @param instance       - The Ad4mModel instance to populate
+ * @param perspective    - Perspective that owns the instance
  * @param baseExpression - The instance's base expression URI
- * @param metadata     - Pre-resolved model metadata (from `getModelMetadata()`)
+ * @param metadata       - Pre-resolved model metadata (from `getModelMetadata()`)
+ * @param include        - Optional eager-load map
  */
 export async function fetchInstanceData(
   instance: any,

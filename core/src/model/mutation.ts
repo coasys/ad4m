@@ -428,6 +428,7 @@ export async function saveInstance(
 
   if (batchCreatedHere) {
     await ctx.perspective.commitBatch(batchId);
+
     // Rehydrate the instance so callers see the persisted state.
     const metadata = _getModelMetadata(ctx.instance.constructor);
     await fetchInstanceData(

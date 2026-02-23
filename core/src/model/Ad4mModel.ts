@@ -287,6 +287,35 @@ export class Ad4mModel {
   }
 
   /**
+   * Constructs a new instance, assigns the provided properties, saves it to
+   * the perspective, and returns it — all in one call.
+   *
+   * Use this when all data is known upfront.  For incremental or conditional
+   * construction use `new Model(perspective)` + `save()` instead.
+   *
+   * @param perspective - The perspective to save this instance in
+   * @param data - Plain object whose keys must match writable `@Property` /
+   *               `@Flag` fields on the model
+   * @returns The newly saved instance
+   *
+   * @example
+   * ```typescript
+   * const post = await Post.create(perspective, { title: 'Hello', body: 'World' });
+   * const comment = await Comment.create(perspective, { body: 'Nice post!' });
+   * ```
+   */
+  static async create<T extends Ad4mModel>(
+    this: new (perspective: PerspectiveProxy) => T,
+    perspective: PerspectiveProxy,
+    data: Partial<Omit<T, keyof Ad4mModel>>,
+  ): Promise<T> {
+    const instance = new this(perspective);
+    Object.assign(instance, data);
+    await instance.save();
+    return instance;
+  }
+
+  /**
    * Generates the SHACL shape for this model class.
    * Attached dynamically by the `@Model` decorator.
    */

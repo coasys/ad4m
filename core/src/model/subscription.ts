@@ -65,6 +65,13 @@ export function createSubscription<T>(
     if (rel.predicate) watchedPredicates.add(rel.predicate);
   }
 
+  // Minimum coalesce window used even when the caller requests no debounce.
+  // save() / delete() each add/remove several links in sequence; without this
+  // each link event would fire a separate rerun(). The executor guarantees
+  // SurrealDB is committed before link-added events are published, so this is
+  // purely an efficiency measure — not a timing workaround.
+  const SETTLE_MS = 50;
+
   let lastError: Error | null = null;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let active = true;
@@ -92,7 +99,15 @@ export function createSubscription<T>(
           if (debounceTimer !== null) clearTimeout(debounceTimer);
           debounceTimer = setTimeout(rerun, debounceMs);
         }
-      : rerun;
+      : () => {
+          // Even with no user-configured debounce, coalesce rapid link events.
+          // A single save() adds several links in sequence; without this each
+          // one would fire a separate rerun(). The executor now guarantees
+          // SurrealDB is written before link-added events fire, so this is
+          // purely an efficiency measure — not a timing workaround.
+          if (debounceTimer !== null) clearTimeout(debounceTimer);
+          debounceTimer = setTimeout(rerun, SETTLE_MS);
+        };
 
   const isRelevant = (link: LinkExpression): boolean => {
     const predicate = link.data?.predicate ?? "";
