@@ -10,16 +10,16 @@ import { Link } from "../links/Links";
  */
 function extractNamespace(uri: string): string {
   // Handle hash fragments first (highest priority)
-  const hashIndex = uri.lastIndexOf('#');
+  const hashIndex = uri.lastIndexOf("#");
   if (hashIndex !== -1) {
     return uri.substring(0, hashIndex + 1);
   }
-  
+
   // Handle protocol-style URIs with paths
   const protocolMatch = uri.match(/^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)(.*)$/);
   if (protocolMatch) {
     const afterScheme = protocolMatch[2];
-    const lastSlash = afterScheme.lastIndexOf('/');
+    const lastSlash = afterScheme.lastIndexOf("/");
     if (lastSlash !== -1) {
       // Has path segments - namespace includes up to last slash
       return protocolMatch[1] + afterScheme.substring(0, lastSlash + 1);
@@ -27,15 +27,15 @@ function extractNamespace(uri: string): string {
     // Simple protocol URI without path (e.g., "recipe://name")
     return protocolMatch[1];
   }
-  
+
   // Handle colon-separated (namespace:localName)
   const colonMatch = uri.match(/^([a-zA-Z][a-zA-Z0-9+.-]*:)/);
   if (colonMatch) {
     return colonMatch[1];
   }
-  
+
   // Fallback: no clear namespace
-  return '';
+  return "";
 }
 
 /**
@@ -44,13 +44,13 @@ function extractNamespace(uri: string): string {
  */
 function escapeTurtleString(value: string): string {
   return value
-    .replace(/\\/g, '\\\\')     // Backslash must be first
-    .replace(/"/g, '\\"')        // Double quotes
-    .replace(/\n/g, '\\n')       // Newlines
-    .replace(/\r/g, '\\r')       // Carriage returns
-    .replace(/\t/g, '\\t')       // Tabs
-    .replace(/\b/g, '\\b')       // Backspace
-    .replace(/\f/g, '\\f');      // Form feed
+    .replace(/\\/g, "\\\\") // Backslash must be first
+    .replace(/"/g, '\\"') // Double quotes
+    .replace(/\n/g, "\\n") // Newlines
+    .replace(/\r/g, "\\r") // Carriage returns
+    .replace(/\t/g, "\\t") // Tabs
+    .replace(/\b/g, "\\b") // Backspace
+    .replace(/\f/g, "\\f"); // Form feed
 }
 
 /**
@@ -63,23 +63,23 @@ function escapeTurtleString(value: string): string {
  */
 function extractLocalName(uri: string): string {
   // Handle hash fragments
-  const hashIndex = uri.lastIndexOf('#');
+  const hashIndex = uri.lastIndexOf("#");
   if (hashIndex !== -1) {
     return uri.substring(hashIndex + 1);
   }
-  
+
   // Handle slash-based namespaces
-  const lastSlash = uri.lastIndexOf('/');
+  const lastSlash = uri.lastIndexOf("/");
   if (lastSlash !== -1 && lastSlash < uri.length - 1) {
     return uri.substring(lastSlash + 1);
   }
-  
+
   // Handle colon-separated
   const colonMatch = uri.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:(.+)$/);
   if (colonMatch) {
     return colonMatch[1];
   }
-  
+
   // Fallback: entire URI
   return uri;
 }
@@ -110,7 +110,7 @@ export interface SHACLPropertyShape {
   datatype?: string;
 
   /** Node kind constraint (IRI, Literal, BlankNode) */
-  nodeKind?: 'IRI' | 'Literal' | 'BlankNode';
+  nodeKind?: "IRI" | "Literal" | "BlankNode";
 
   /** Minimum cardinality (required if >= 1) */
   minCount?: number;
@@ -166,6 +166,13 @@ export class SHACLShape {
   /** Property constraints */
   properties: SHACLPropertyShape[];
 
+  /**
+   * Parent shape URIs for SHACL inheritance (sh:node references).
+   * When a model class extends another @Model-decorated class, the child shape
+   * references the parent shape via sh:node rather than duplicating its properties.
+   */
+  parentShapes?: string[];
+
   /** AD4M-specific: Constructor actions for creating instances */
   constructor_actions?: AD4MAction[];
 
@@ -202,6 +209,16 @@ export class SHACLShape {
   }
 
   /**
+   * Add a parent shape reference (sh:node) for SHACL inheritance.
+   * The child shape will reference the parent shape instead of duplicating its properties.
+   * @param parentShapeUri - URI of the parent SHACL shape
+   */
+  addParentShape(parentShapeUri: string): void {
+    this.parentShapes = this.parentShapes ?? [];
+    this.parentShapes.push(parentShapeUri);
+  }
+
+  /**
    * Set constructor actions for this shape
    */
   setConstructorActions(actions: AD4MAction[]): void {
@@ -214,7 +231,7 @@ export class SHACLShape {
   setDestructorActions(actions: AD4MAction[]): void {
     this.destructor_actions = actions;
   }
-  
+
   /**
    * Serialize shape to Turtle (RDF) format
    */
@@ -223,75 +240,82 @@ export class SHACLShape {
     turtle += `@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n`;
     turtle += `@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n`;
     turtle += `@prefix ad4m: <ad4m://> .\n\n`;
-    
+
     turtle += `<${this.nodeShapeUri}>\n`;
     turtle += `  a sh:NodeShape ;\n`;
-    
+
     if (this.targetClass) {
       turtle += `  sh:targetClass <${this.targetClass}> ;\n`;
     }
-    
+
+    // Emit sh:node references for parent shapes (SHACL inheritance)
+    if (this.parentShapes && this.parentShapes.length > 0) {
+      for (const parentUri of this.parentShapes) {
+        turtle += `  sh:node <${parentUri}> ;\n`;
+      }
+    }
+
     // Add property shapes
     for (let i = 0; i < this.properties.length; i++) {
       const prop = this.properties[i];
       const isLast = i === this.properties.length - 1;
-      
+
       turtle += `  sh:property [\n`;
       if (prop.inversePath) {
         turtle += `    sh:path [ sh:inversePath <${prop.path}> ] ;\n`;
       } else {
         turtle += `    sh:path <${prop.path}> ;\n`;
       }
-      
+
       if (prop.datatype) {
         turtle += `    sh:datatype <${prop.datatype}> ;\n`;
       }
-      
+
       if (prop.nodeKind) {
         turtle += `    sh:nodeKind sh:${prop.nodeKind} ;\n`;
       }
-      
+
       if (prop.minCount !== undefined) {
         turtle += `    sh:minCount ${prop.minCount} ;\n`;
       }
-      
+
       if (prop.maxCount !== undefined) {
         turtle += `    sh:maxCount ${prop.maxCount} ;\n`;
       }
-      
+
       if (prop.pattern) {
         turtle += `    sh:pattern "${escapeTurtleString(prop.pattern)}" ;\n`;
       }
-      
+
       if (prop.minInclusive !== undefined) {
         turtle += `    sh:minInclusive ${prop.minInclusive} ;\n`;
       }
-      
+
       if (prop.maxInclusive !== undefined) {
         turtle += `    sh:maxInclusive ${prop.maxInclusive} ;\n`;
       }
-      
+
       if (prop.hasValue) {
         turtle += `    sh:hasValue "${escapeTurtleString(prop.hasValue)}" ;\n`;
       }
-      
+
       // AD4M-specific metadata
       if (prop.local !== undefined) {
         turtle += `    ad4m:local ${prop.local} ;\n`;
       }
-      
+
       if (prop.writable !== undefined) {
         turtle += `    ad4m:writable ${prop.writable} ;\n`;
       }
-      
+
       // Remove trailing semicolon and close bracket
-      turtle = turtle.slice(0, -2) + '\n';
+      turtle = turtle.slice(0, -2) + "\n";
       turtle += isLast ? `  ] .\n` : `  ] ;\n`;
     }
-    
+
     return turtle;
   }
-  
+
   /**
    * Serialize shape to AD4M Links (RDF triples)
    * Stores the shape as a graph of links in a Perspective
@@ -303,7 +327,7 @@ export class SHACLShape {
     links.push({
       source: this.nodeShapeUri,
       predicate: "rdf://type",
-      target: "sh://NodeShape"
+      target: "sh://NodeShape",
     });
 
     // Target class
@@ -311,8 +335,19 @@ export class SHACLShape {
       links.push({
         source: this.nodeShapeUri,
         predicate: "sh://targetClass",
-        target: this.targetClass
+        target: this.targetClass,
       });
+    }
+
+    // Parent shape references (sh:node — SHACL inheritance)
+    if (this.parentShapes && this.parentShapes.length > 0) {
+      for (const parentUri of this.parentShapes) {
+        links.push({
+          source: this.nodeShapeUri,
+          predicate: "sh://node",
+          target: parentUri,
+        });
+      }
     }
 
     // Constructor actions
@@ -320,7 +355,7 @@ export class SHACLShape {
       links.push({
         source: this.nodeShapeUri,
         predicate: "ad4m://constructor",
-        target: `literal://string:${JSON.stringify(this.constructor_actions)}`
+        target: `literal://string:${JSON.stringify(this.constructor_actions)}`,
       });
     }
 
@@ -329,14 +364,14 @@ export class SHACLShape {
       links.push({
         source: this.nodeShapeUri,
         predicate: "ad4m://destructor",
-        target: `literal://string:${JSON.stringify(this.destructor_actions)}`
+        target: `literal://string:${JSON.stringify(this.destructor_actions)}`,
       });
     }
-    
+
     // Property shapes (each gets a named URI: {namespace}/{ClassName}.{propertyName})
     for (let i = 0; i < this.properties.length; i++) {
       const prop = this.properties[i];
-      
+
       // Generate named property shape URI
       let propShapeId: string;
       if (prop.name && this.targetClass) {
@@ -349,100 +384,100 @@ export class SHACLShape {
         // Fallback to blank node if name is missing
         propShapeId = `_:propShape${i}`;
       }
-      
+
       // Link shape to property shape
       links.push({
         source: this.nodeShapeUri,
         predicate: "sh://property",
-        target: propShapeId
+        target: propShapeId,
       });
-      
+
       // Property path (forward or inverse)
       links.push({
         source: propShapeId,
         predicate: prop.inversePath ? "sh://inversePath" : "sh://path",
-        target: prop.path
+        target: prop.path,
       });
-      
+
       // Constraints
       if (prop.datatype) {
         links.push({
           source: propShapeId,
           predicate: "sh://datatype",
-          target: prop.datatype
+          target: prop.datatype,
         });
       }
-      
+
       if (prop.nodeKind) {
         links.push({
           source: propShapeId,
           predicate: "sh://nodeKind",
-          target: `sh://${prop.nodeKind}`
+          target: `sh://${prop.nodeKind}`,
         });
       }
-      
+
       if (prop.minCount !== undefined) {
         links.push({
           source: propShapeId,
           predicate: "sh://minCount",
-          target: `literal://${prop.minCount}^^xsd:integer`
+          target: `literal://${prop.minCount}^^xsd:integer`,
         });
       }
-      
+
       if (prop.maxCount !== undefined) {
         links.push({
           source: propShapeId,
           predicate: "sh://maxCount",
-          target: `literal://${prop.maxCount}^^xsd:integer`
+          target: `literal://${prop.maxCount}^^xsd:integer`,
         });
       }
-      
+
       if (prop.pattern) {
         links.push({
           source: propShapeId,
           predicate: "sh://pattern",
-          target: `literal://${prop.pattern}`
+          target: `literal://${prop.pattern}`,
         });
       }
-      
+
       if (prop.minInclusive !== undefined) {
         links.push({
           source: propShapeId,
           predicate: "sh://minInclusive",
-          target: `literal://${prop.minInclusive}`
+          target: `literal://${prop.minInclusive}`,
         });
       }
-      
+
       if (prop.maxInclusive !== undefined) {
         links.push({
           source: propShapeId,
           predicate: "sh://maxInclusive",
-          target: `literal://${prop.maxInclusive}`
+          target: `literal://${prop.maxInclusive}`,
         });
       }
-      
+
       if (prop.hasValue) {
         links.push({
           source: propShapeId,
           predicate: "sh://hasValue",
-          target: `literal://${prop.hasValue}`
+          target: `literal://${prop.hasValue}`,
         });
       }
-      
+
       // AD4M-specific metadata
       if (prop.local !== undefined) {
         links.push({
           source: propShapeId,
           predicate: "ad4m://local",
-          target: `literal://${prop.local}`
+          target: `literal://${prop.local}`,
         });
       }
-      
+
       if (prop.writable !== undefined) {
         links.push({
           source: propShapeId,
           predicate: "ad4m://writable",
-          target: `literal://${prop.writable}`
+          target: `literal://${prop.writable}`,
         });
       }
 
@@ -450,7 +485,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://resolveLanguage",
-          target: `literal://string:${prop.resolveLanguage}`
+          target: `literal://string:${prop.resolveLanguage}`,
         });
       }
 
@@ -459,7 +494,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://setter",
-          target: `literal://string:${JSON.stringify(prop.setter)}`
+          target: `literal://string:${JSON.stringify(prop.setter)}`,
         });
       }
 
@@ -467,7 +502,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://adder",
-          target: `literal://string:${JSON.stringify(prop.adder)}`
+          target: `literal://string:${JSON.stringify(prop.adder)}`,
         });
       }
 
@@ -475,32 +510,32 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://remover",
-          target: `literal://string:${JSON.stringify(prop.remover)}`
+          target: `literal://string:${JSON.stringify(prop.remover)}`,
         });
       }
     }
 
     return links;
   }
-  
+
   /**
    * Reconstruct shape from AD4M Links
    */
   static fromLinks(links: Link[], shapeUri: string): SHACLShape {
     // Find target class
-    const targetClassLink = links.find(l => 
-      l.source === shapeUri && l.predicate === "sh://targetClass"
+    const targetClassLink = links.find(
+      (l) => l.source === shapeUri && l.predicate === "sh://targetClass",
     );
-    
+
     const shape = new SHACLShape(shapeUri, targetClassLink?.target);
 
     // Find constructor actions
-    const constructorLink = links.find(l =>
-      l.source === shapeUri && l.predicate === "ad4m://constructor"
+    const constructorLink = links.find(
+      (l) => l.source === shapeUri && l.predicate === "ad4m://constructor",
     );
     if (constructorLink) {
       try {
-        const jsonStr = constructorLink.target.replace('literal://string:', '');
+        const jsonStr = constructorLink.target.replace("literal://string:", "");
         shape.constructor_actions = JSON.parse(jsonStr);
       } catch (e) {
         // Ignore parse errors
@@ -508,12 +543,12 @@ export class SHACLShape {
     }
 
     // Find destructor actions
-    const destructorLink = links.find(l =>
-      l.source === shapeUri && l.predicate === "ad4m://destructor"
+    const destructorLink = links.find(
+      (l) => l.source === shapeUri && l.predicate === "ad4m://destructor",
     );
     if (destructorLink) {
       try {
-        const jsonStr = destructorLink.target.replace('literal://string:', '');
+        const jsonStr = destructorLink.target.replace("literal://string:", "");
         shape.destructor_actions = JSON.parse(jsonStr);
       } catch (e) {
         // Ignore parse errors
@@ -521,161 +556,169 @@ export class SHACLShape {
     }
 
     // Find all property shapes
-    const propShapeLinks = links.filter(l => 
-      l.source === shapeUri && l.predicate === "sh://property"
+    const propShapeLinks = links.filter(
+      (l) => l.source === shapeUri && l.predicate === "sh://property",
     );
-    
+
     for (const propLink of propShapeLinks) {
       const propShapeId = propLink.target;
-      
+
       // Reconstruct property from its links
-      const pathLink = links.find(l => 
-        l.source === propShapeId && l.predicate === "sh://path"
+      const pathLink = links.find(
+        (l) => l.source === propShapeId && l.predicate === "sh://path",
       );
-      
+
       if (!pathLink) continue;
-      
+
       // Extract property name from propShapeId if it's a named URI
       // Format: {namespace}{ClassName}.{propertyName}
       let propertyName: string | undefined;
-      if (!propShapeId.startsWith('_:')) {
-        const lastDotIndex = propShapeId.lastIndexOf('.');
+      if (!propShapeId.startsWith("_:")) {
+        const lastDotIndex = propShapeId.lastIndexOf(".");
         if (lastDotIndex !== -1) {
           propertyName = propShapeId.substring(lastDotIndex + 1);
         }
       }
-      
+
       const prop: SHACLPropertyShape = {
         name: propertyName,
-        path: pathLink.target
+        path: pathLink.target,
       };
-      
+
       // Extract constraints
-      const datatypeLink = links.find(l => 
-        l.source === propShapeId && l.predicate === "sh://datatype"
+      const datatypeLink = links.find(
+        (l) => l.source === propShapeId && l.predicate === "sh://datatype",
       );
       if (datatypeLink) prop.datatype = datatypeLink.target;
-      
-      const nodeKindLink = links.find(l => 
-        l.source === propShapeId && l.predicate === "sh://nodeKind"
+
+      const nodeKindLink = links.find(
+        (l) => l.source === propShapeId && l.predicate === "sh://nodeKind",
       );
       if (nodeKindLink) {
-        prop.nodeKind = nodeKindLink.target.replace('sh://', '') as any;
+        prop.nodeKind = nodeKindLink.target.replace("sh://", "") as any;
       }
-      
-      const minCountLink = links.find(l => 
-        l.source === propShapeId && l.predicate === "sh://minCount"
+
+      const minCountLink = links.find(
+        (l) => l.source === propShapeId && l.predicate === "sh://minCount",
       );
       if (minCountLink) {
         // Handle both formats: literal://5^^xsd:integer and literal://number:5
-        let val = minCountLink.target.replace('literal://', '').replace(/\^\^.*$/, '');
-        if (val.startsWith('number:')) val = val.substring(7);
+        let val = minCountLink.target
+          .replace("literal://", "")
+          .replace(/\^\^.*$/, "");
+        if (val.startsWith("number:")) val = val.substring(7);
         prop.minCount = parseInt(val);
       }
-      
-      const maxCountLink = links.find(l => 
-        l.source === propShapeId && l.predicate === "sh://maxCount"
+
+      const maxCountLink = links.find(
+        (l) => l.source === propShapeId && l.predicate === "sh://maxCount",
       );
       if (maxCountLink) {
         // Handle both formats: literal://5^^xsd:integer and literal://number:5
-        let val = maxCountLink.target.replace('literal://', '').replace(/\^\^.*$/, '');
-        if (val.startsWith('number:')) val = val.substring(7);
+        let val = maxCountLink.target
+          .replace("literal://", "")
+          .replace(/\^\^.*$/, "");
+        if (val.startsWith("number:")) val = val.substring(7);
         prop.maxCount = parseInt(val);
       }
-      
-      const patternLink = links.find(l => 
-        l.source === propShapeId && l.predicate === "sh://pattern"
+
+      const patternLink = links.find(
+        (l) => l.source === propShapeId && l.predicate === "sh://pattern",
       );
       if (patternLink) {
-        prop.pattern = patternLink.target.replace('literal://', '');
+        prop.pattern = patternLink.target.replace("literal://", "");
       }
-      
-      const minInclusiveLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "sh://minInclusive"
+
+      const minInclusiveLink = links.find(
+        (l) => l.source === propShapeId && l.predicate === "sh://minInclusive",
       );
       if (minInclusiveLink) {
         // Handle both formats: literal://5 and literal://number:5
-        let val = minInclusiveLink.target.replace('literal://', '');
-        if (val.startsWith('number:')) val = val.substring(7);
+        let val = minInclusiveLink.target.replace("literal://", "");
+        if (val.startsWith("number:")) val = val.substring(7);
         prop.minInclusive = parseFloat(val);
       }
 
-      const maxInclusiveLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "sh://maxInclusive"
+      const maxInclusiveLink = links.find(
+        (l) => l.source === propShapeId && l.predicate === "sh://maxInclusive",
       );
       if (maxInclusiveLink) {
         // Handle both formats: literal://5 and literal://number:5
-        let val = maxInclusiveLink.target.replace('literal://', '');
-        if (val.startsWith('number:')) val = val.substring(7);
+        let val = maxInclusiveLink.target.replace("literal://", "");
+        if (val.startsWith("number:")) val = val.substring(7);
         prop.maxInclusive = parseFloat(val);
       }
-      
-      const hasValueLink = links.find(l => 
-        l.source === propShapeId && l.predicate === "sh://hasValue"
+
+      const hasValueLink = links.find(
+        (l) => l.source === propShapeId && l.predicate === "sh://hasValue",
       );
       if (hasValueLink) {
-        prop.hasValue = hasValueLink.target.replace('literal://', '');
+        prop.hasValue = hasValueLink.target.replace("literal://", "");
       }
-      
+
       // AD4M-specific
-      const localLink = links.find(l => 
-        l.source === propShapeId && l.predicate === "ad4m://local"
+      const localLink = links.find(
+        (l) => l.source === propShapeId && l.predicate === "ad4m://local",
       );
       if (localLink) {
         // Handle both formats: literal://true and literal://boolean:true
-        let val = localLink.target.replace('literal://', '');
-        if (val.startsWith('boolean:')) val = val.substring(8);
-        prop.local = val === 'true';
+        let val = localLink.target.replace("literal://", "");
+        if (val.startsWith("boolean:")) val = val.substring(8);
+        prop.local = val === "true";
       }
-      
-      const writableLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://writable"
+
+      const writableLink = links.find(
+        (l) => l.source === propShapeId && l.predicate === "ad4m://writable",
       );
       if (writableLink) {
         // Handle both formats: literal://true and literal://boolean:true
-        let val = writableLink.target.replace('literal://', '');
-        if (val.startsWith('boolean:')) val = val.substring(8);
-        prop.writable = val === 'true';
+        let val = writableLink.target.replace("literal://", "");
+        if (val.startsWith("boolean:")) val = val.substring(8);
+        prop.writable = val === "true";
       }
 
-      const resolveLangLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://resolveLanguage"
+      const resolveLangLink = links.find(
+        (l) =>
+          l.source === propShapeId && l.predicate === "ad4m://resolveLanguage",
       );
       if (resolveLangLink) {
-        prop.resolveLanguage = resolveLangLink.target.replace('literal://string:', '');
+        prop.resolveLanguage = resolveLangLink.target.replace(
+          "literal://string:",
+          "",
+        );
       }
 
       // Parse action arrays
-      const setterLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://setter"
+      const setterLink = links.find(
+        (l) => l.source === propShapeId && l.predicate === "ad4m://setter",
       );
       if (setterLink) {
         try {
-          const jsonStr = setterLink.target.replace('literal://string:', '');
+          const jsonStr = setterLink.target.replace("literal://string:", "");
           prop.setter = JSON.parse(jsonStr);
         } catch (e) {
           // Ignore parse errors
         }
       }
 
-      const adderLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://adder"
+      const adderLink = links.find(
+        (l) => l.source === propShapeId && l.predicate === "ad4m://adder",
       );
       if (adderLink) {
         try {
-          const jsonStr = adderLink.target.replace('literal://string:', '');
+          const jsonStr = adderLink.target.replace("literal://string:", "");
           prop.adder = JSON.parse(jsonStr);
         } catch (e) {
           // Ignore parse errors
         }
       }
 
-      const removerLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://remover"
+      const removerLink = links.find(
+        (l) => l.source === propShapeId && l.predicate === "ad4m://remover",
       );
       if (removerLink) {
         try {
-          const jsonStr = removerLink.target.replace('literal://string:', '');
+          const jsonStr = removerLink.target.replace("literal://string:", "");
           prop.remover = JSON.parse(jsonStr);
         } catch (e) {
           // Ignore parse errors
@@ -684,21 +727,21 @@ export class SHACLShape {
 
       shape.addProperty(prop);
     }
-    
+
     return shape;
   }
 
   /**
    * Convert the shape to a JSON-serializable object.
    * Useful for passing to addSdna() as shaclJson parameter.
-   * 
+   *
    * @returns JSON-serializable object representing the shape
    */
   toJSON(): object {
     return {
       node_shape_uri: this.nodeShapeUri,
       target_class: this.targetClass,
-      properties: this.properties.map(p => ({
+      properties: this.properties.map((p) => ({
         path: p.path,
         name: p.name,
         datatype: p.datatype,
@@ -728,7 +771,7 @@ export class SHACLShape {
     const shape = json.node_shape_uri
       ? new SHACLShape(json.node_shape_uri, json.target_class)
       : new SHACLShape(json.target_class);
-    
+
     for (const p of json.properties || []) {
       shape.addProperty({
         path: p.path,
@@ -749,14 +792,14 @@ export class SHACLShape {
         remover: p.remover,
       });
     }
-    
+
     if (json.constructor_actions) {
       shape.constructor_actions = json.constructor_actions;
     }
     if (json.destructor_actions) {
       shape.destructor_actions = json.destructor_actions;
     }
-    
+
     return shape;
   }
 }

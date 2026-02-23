@@ -658,6 +658,56 @@ export function Model(opts: ModelConfig) {
       const targetClass = `${namespace}${subjectName}`;
       const shape = new SHACLShape(shapeUri, targetClass);
 
+      // ── Detect @Model parent for sh:node inheritance ──────────────────────
+      // If the immediate prototype constructor is also @Model-decorated,
+      // emit sh:node <ParentShape> and use only OWN properties/relations
+      // rather than duplicating the parent's properties in the child shape.
+      const parentCtor = Object.getPrototypeOf(target);
+      const parentClassName: string | undefined =
+        parentCtor?.prototype?.className;
+      const isParentModel =
+        parentClassName &&
+        parentClassName !== "Ad4mModel" &&
+        (propertyRegistry.has(parentCtor) || relationRegistry.has(parentCtor));
+
+      let shapeFields: Record<string, any>;
+      let shapeRelations: Record<string, any>;
+      if (isParentModel) {
+        // Own-only fields/relations — parent's are covered by sh:node
+        shapeFields = propertyRegistry.get(target) ?? {};
+        shapeRelations = relationRegistry.get(target) ?? {};
+
+        // Derive parent shape URI from parent's own properties' namespace
+        const parentOwnFields = Object.values(
+          propertyRegistry.get(parentCtor) ?? {},
+        ) as any[];
+        const parentOwnRelations = Object.values(
+          relationRegistry.get(parentCtor) ?? {},
+        ) as any[];
+        let parentNamespace = "ad4m://";
+        if (parentOwnFields.length > 0 && parentOwnFields[0].through) {
+          const m = (parentOwnFields[0].through as string).match(
+            /^([^:]+:\/\/)/,
+          );
+          if (m) parentNamespace = m[1];
+        } else if (
+          parentOwnRelations.length > 0 &&
+          parentOwnRelations[0].through
+        ) {
+          const m = (parentOwnRelations[0].through as string).match(
+            /^([^:]+:\/\/)/,
+          );
+          if (m) parentNamespace = m[1];
+        }
+        const parentShapeUri = `${parentNamespace}${parentClassName}Shape`;
+        shape.addParentShape(parentShapeUri);
+      } else {
+        // No @Model parent — include all inherited properties directly
+        shapeFields = fields;
+        shapeRelations = relations;
+      }
+      // ──────────────────────────────────────────────────────────────────────
+
       // === Extract Constructor Actions (same logic as generateSDNA) ===
       let constructorActions = [];
       if (obj.subjectConstructor && obj.subjectConstructor.length) {
@@ -668,8 +718,8 @@ export function Model(opts: ModelConfig) {
       let destructorActions = [];
 
       // Convert fields to SHACL property shapes
-      for (const propName in fields) {
-        const propMeta = fields[propName];
+      for (const propName in shapeFields) {
+        const propMeta = shapeFields[propName];
 
         if (!propMeta.through) continue; // Skip properties without predicates
 
@@ -768,8 +818,8 @@ export function Model(opts: ModelConfig) {
       }
 
       // Convert relations to SHACL property shapes
-      for (const collName in relations) {
-        const collMeta = relations[collName];
+      for (const collName in shapeRelations) {
+        const collMeta = shapeRelations[collName];
 
         if (!collMeta.through) continue;
 
