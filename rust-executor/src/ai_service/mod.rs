@@ -54,8 +54,8 @@ pub struct AIService {
     llm_channel: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<LLMTaskRequest>>>>,
     transcription_streams: Arc<Mutex<HashMap<String, TranscriptionSession>>>,
     cleanup_task_shutdown: Arc<std::sync::Mutex<Option<oneshot::Sender<()>>>>,
-    /// Shared Whisper models - ONE model per size, shared across ALL streams using that size
-    /// Key = WhisperSource (Tiny/Small/Medium/Large), Value = Arc<Whisper>
+    /// Shared Whisper models - ONE model per size+language combination, shared across ALL streams
+    /// Key = "{size:?}_{lang_key}" (e.g., "Small_auto", "Small_de"), Value = Arc<Whisper>
     /// Cloning Arc is cheap (just increments ref count), model weights stay in memory once
     /// Saves 500MB-1.5GB per stream!
     shared_whisper_models: Arc<Mutex<HashMap<String, Arc<Whisper>>>>,
@@ -1163,9 +1163,7 @@ impl AIService {
                     .with_source(model_size)
                     .with_device(Self::new_candle_device());
 
-                if let Some(whisper_lang) = whisper_lang {
-                    builder = builder.with_language(Some(whisper_lang));
-                }
+                builder = builder.with_language(whisper_lang);
 
                 let model = builder.build().await?;
 
