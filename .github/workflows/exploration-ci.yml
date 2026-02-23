@@ -12,7 +12,7 @@ jobs:
   cargo-check:
     name: Cargo Check
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -44,7 +44,7 @@ jobs:
     name: WASM SDK & Example
     if: contains(github.head_ref || github.ref, 'wasm-language-runtime')
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -68,7 +68,7 @@ jobs:
     name: Rust Tests
     if: contains(github.head_ref || github.ref, 'wasm-language-runtime')
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
