@@ -18,6 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Rust
+        run: |
+          rustup default stable
+          rustc --version
+
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -66,6 +71,11 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        run: |
+          rustup default stable
+          rustc --version
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
