@@ -50,28 +50,7 @@ export type IncludeMap = { [relationName: string]: true | Query };
 
 export type Query = {
   properties?: string[];
-  /**
-   * Eagerly load specific relations as full model instances (Prisma-style map).
-   *
-   * Key = relation field name on the model.
-   * Value = `true` (all instances) or a `Query` to filter/order/limit the nested set.
-   *
-   * When absent, **no** relation hydration is performed — relations stay as bare ID strings.
-   *
-   * @example
-   * ```typescript
-   * // Hydrate comments (all) and tags (filtered)
-   * Recipe.findAll(perspective, {
-   *   include: {
-   *     comments: true,
-   *     tags: { where: { active: true }, limit: 5 },
-   *   },
-   * });
-   *
-   * // No include — relations are bare ID strings
-   * Recipe.findAll(perspective);
-   * ```
-   */
+  /** Eagerly hydrate relations. Key = field name; value = `true` or a sub-`Query`. See {@link IncludeMap}. */
   include?: IncludeMap;
   where?: Where;
   order?: Order;
@@ -81,24 +60,8 @@ export type Query = {
 };
 
 /**
- * Options for a live subscription.
- *
- * Extends `Query` (minus `count`, which has no meaning for ongoing subscriptions)
- * with delivery-layer concerns: `debounce` and `onError`.
- *
- * @example
- * ```typescript
- * Post.subscribe(
- *   perspective,
- *   {
- *     where: { published: true },
- *     order: { createdAt: "DESC" },
- *     debounce: 300,
- *     onError: (err) => console.error("Subscription error:", err),
- *   },
- *   (posts) => setPosts(posts),
- * );
- * ```
+ * Extends `Query` (minus `count`) with subscription delivery options.
+ * Pass to {@link Ad4mModel.subscribe} or the builder's `.subscribe()`.
  */
 export type SubscribeOptions = Omit<Query, "count"> & {
   /**
@@ -115,19 +78,8 @@ export type SubscribeOptions = Omit<Query, "count"> & {
 };
 
 /**
- * Handle returned by `Ad4mModel.subscribe()` / `ModelQueryBuilder.live()`.
- *
- * Call `unsubscribe()` when you no longer need the subscription to detach all
- * link listeners and stop re-queries.  `lastError` exposes the most recent
- * failure for polling UIs that want to show a "reconnecting…" state.
- *
- * @example
- * ```typescript
- * const sub = Post.subscribe(perspective, {}, (posts) => render(posts));
- * // later:
- * sub.unsubscribe();
- * if (sub.lastError) console.warn("Last known error:", sub.lastError);
- * ```
+ * Handle returned by `Ad4mModel.subscribe()`. Call `unsubscribe()` in cleanup.
+ * `lastError` holds the most recent unhandled error, or `null`.
  */
 export type Subscription = {
   unsubscribe(): void;

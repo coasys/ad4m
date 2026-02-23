@@ -1,25 +1,4 @@
-/**
- * Transaction API for Ad4mModel (Phase 3b).
- *
- * Replaces the scattered `batchId?: string` manual lifecycle pattern with a
- * single `Ad4mModel.transaction()` call that handles create-commit-abort
- * automatically.
- *
- * @example
- * ```typescript
- * // Before (fragile — leaked batch if save2 throws):
- * const batchId = await perspective.createBatch();
- * await model1.save(batchId);
- * await model2.save(batchId);
- * await perspective.commitBatch(batchId);
- *
- * // After (safe — auto-abort on error):
- * await Ad4mModel.transaction(perspective, async (tx) => {
- *   await model1.save(tx.batchId);
- *   await model2.save(tx.batchId);
- * });
- * ```
- */
+/** Atomic batch-transaction helper — see {@link runTransaction}. */
 
 import type { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 
@@ -46,29 +25,13 @@ export interface TransactionContext {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Runs `callback` inside a fresh batch transaction.
- *
- * - A new batch is created before calling `callback`.
- * - If `callback` resolves successfully the batch is **committed**.
- * - If `callback` throws (or rejects) the batch is **aborted** and the error
- *   is re-thrown, so the caller always sees the original failure.
- *
- * @param perspective - The perspective to open the transaction on
- * @param callback    - Async function that performs model operations using `tx`
- * @returns Whatever `callback` returns
+ * Commits on success, aborts (discards batch) and re-throws on failure.
  *
  * @example
  * ```typescript
- * const [post, comment] = await Ad4mModel.transaction(perspective, async (tx) => {
- *   const post = new Post(perspective);
- *   post.title = "Hello";
+ * await Ad4mModel.transaction(perspective, async (tx) => {
  *   await post.save(tx.batchId);
- *
- *   const comment = new Comment(perspective);
- *   comment.body = "First!";
  *   await comment.save(tx.batchId);
- *
- *   return [post, comment];
  * });
  * ```
  */
