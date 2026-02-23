@@ -180,7 +180,6 @@ import { createSubscription } from "./subscription";
  */
 export class Ad4mModel {
   #baseExpression: string;
-  #source: string;
   #perspective: PerspectiveProxy;
   author: string;
   createdAt: any;
@@ -272,7 +271,6 @@ export class Ad4mModel {
    *
    * @param perspective - The perspective where this model will be stored
    * @param baseExpression - Optional unique identifier for this instance
-   * @param source - Optional source expression this instance is linked to
    *
    * @example
    * ```typescript
@@ -281,21 +279,16 @@ export class Ad4mModel {
    *
    * // Create with specific base expression
    * const recipe = new Recipe(perspective, "recipe://chocolate-cake");
-   *
-   * // Create with source link
-   * const recipe = new Recipe(perspective, undefined, "cookbook://desserts");
    * ```
    */
   constructor(
     perspective: PerspectiveProxy,
     baseExpression?: string,
-    source?: string,
   ) {
     this.#baseExpression = baseExpression
       ? baseExpression
       : Literal.from(makeRandomId(24)).toUrl();
     this.#perspective = perspective;
-    this.#source = source || "ad4m://self";
 
     // Wire up real relation adder/remover/setter methods for decorator-based classes.
     // The @HasMany / @HasOne decorators place empty stubs on the prototype at class-definition
@@ -356,7 +349,6 @@ export class Ad4mModel {
     return {
       perspective: this.#perspective,
       baseExpression: this.#baseExpression,
-      source: this.#source,
       instance: this,
     };
   }

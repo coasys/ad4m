@@ -356,16 +356,9 @@ export function buildSurrealQuery(
   metadata: ModelMetadata,
   query: Query,
 ): string {
-  const { source, where } = query;
+  const { where } = query;
 
   const graphTraversalFilters: string[] = [];
-
-  if (source) {
-    graphTraversalFilters.push(
-      `count(<-link[WHERE in.uri = ${formatSurrealValue(source)} AND predicate = 'ad4m://has_child']) > 0`,
-    );
-  }
-
   for (const [, propMeta] of Object.entries(metadata.properties)) {
     if (propMeta.required) {
       if (propMeta.flag && propMeta.initial) {

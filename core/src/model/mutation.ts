@@ -12,7 +12,6 @@
  */
 
 import { Literal } from "../Literal";
-import { Link } from "../links/Links";
 import type { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import type { PropertyOptions, RelationOptions } from "./decorators";
 import { getPropertiesMetadata, getRelationsMetadata } from "./decorators";
@@ -31,8 +30,6 @@ export interface MutationContext {
   perspective: PerspectiveProxy;
   /** URI of the instance's root node in the graph. */
   baseExpression: string;
-  /** Source node to which the instance is attached via `ad4m://has_child`. */
-  source: string;
   /** The Ad4mModel instance itself (for `Object.entries`, prototype lookups, etc.) */
   instance: any;
 }
@@ -349,10 +346,10 @@ export async function innerUpdate(
  * Auto-detects create vs update by checking whether any links already exist
  * for `ctx.baseExpression`.
  *
- * - **Create path**: `createSubject` → `ad4m://has_child` link → `innerUpdate(false)` (relations only).
+ * - **Create path**: `createSubject` → `innerUpdate(false)` (relations only).
  * - **Update path**: `innerUpdate(true)` (properties + relations).
  *
- * @param ctx     - Mutation context (perspective, baseExpression, source, instance).
+ * @param ctx     - Mutation context (perspective, baseExpression, instance).
  * @param batchId - Optional caller-managed batch.  When omitted an internal batch
  *                  is created, committed, and the instance is rehydrated automatically.
  */
@@ -396,17 +393,6 @@ export async function saveInstance(
       className,
       ctx.baseExpression,
       initialValues,
-      batchId,
-    );
-
-    // Attach instance to its parent source node.
-    await ctx.perspective.add(
-      new Link({
-        source: ctx.source,
-        predicate: "ad4m://has_child",
-        target: ctx.baseExpression,
-      }),
-      "shared",
       batchId,
     );
 

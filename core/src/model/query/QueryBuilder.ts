@@ -86,11 +86,6 @@ export class ModelQueryBuilder<T extends import("../Ad4mModel").Ad4mModel> {
     return this;
   }
 
-  source(source: string): ModelQueryBuilder<T> {
-    this.queryParams.source = source;
-    return this;
-  }
-
   properties(properties: string[]): ModelQueryBuilder<T> {
     this.queryParams.properties = properties;
     return this;

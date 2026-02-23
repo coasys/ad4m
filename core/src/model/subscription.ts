@@ -57,7 +57,7 @@ export function createSubscription<T>(
   // Build the set of predicates this model reads/writes.
   // Any link touching one of these predicates could affect the query result.
   const metadata = getMetadata();
-  const watchedPredicates = new Set<string>(["ad4m://has_child"]);
+  const watchedPredicates = new Set<string>();
   for (const prop of Object.values(metadata.properties)) {
     if (prop.predicate) watchedPredicates.add(prop.predicate);
   }
@@ -96,15 +96,7 @@ export function createSubscription<T>(
 
   const isRelevant = (link: LinkExpression): boolean => {
     const predicate = link.data?.predicate ?? "";
-    if (!watchedPredicates.has(predicate)) return false;
-    if (
-      query.source &&
-      link.data?.source !== query.source &&
-      link.data?.target !== query.source
-    ) {
-      return false;
-    }
-    return true;
+    return watchedPredicates.has(predicate);
   };
 
   // LinkCallback must return null (see PerspectiveClient.ts type definition)

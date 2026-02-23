@@ -49,7 +49,6 @@ export type Order = { [propertyName: string]: "ASC" | "DESC" };
 export type IncludeMap = { [relationName: string]: true | Query };
 
 export type Query = {
-  source?: string;
   properties?: string[];
   /** @deprecated Use `include` instead. */
   relations?: string[];
