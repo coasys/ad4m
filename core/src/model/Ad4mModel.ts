@@ -268,6 +268,25 @@ export class Ad4mModel {
   }
 
   /**
+   * Registers this model class with a perspective by ensuring the SHACL/SDNA
+   * subject class is installed.  Equivalent to calling
+   * `perspective.ensureSDNASubjectClass(MyModel)` but keeps the call
+   * consistent with the rest of the model-centric static API.
+   *
+   * @param perspective - The perspective to register this model in
+   *
+   * @example
+   * ```typescript
+   * await MyModel.register(perspective);
+   * // or in parallel:
+   * await Promise.all([Post, Comment, Tag].map(M => M.register(perspective)));
+   * ```
+   */
+  static async register(perspective: PerspectiveProxy): Promise<void> {
+    await perspective.ensureSDNASubjectClass(this);
+  }
+
+  /**
    * Generates the SHACL shape for this model class.
    * Attached dynamically by the `@Model` decorator.
    */
