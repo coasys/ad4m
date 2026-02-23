@@ -157,10 +157,6 @@ export class PerspectiveClient {
     }
 
     /**
-     * Get all subject class names from SHACL links (Prolog-free implementation).
-     * 
-     * This is the preferred method when Prolog is disabled or unavailable.
-     /**
      * Executes a read-only SurrealQL query against a perspective's link cache.
      * 
      * Security: Only SELECT, RETURN, and other read-only queries are permitted.
