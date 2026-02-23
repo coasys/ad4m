@@ -15,6 +15,7 @@ import {
   Query,
   ResultsWithTotalCount,
   Where,
+  IncludeMap,
 } from "../types";
 
 // Forward-reference type only — avoids importing the full Ad4mModel
@@ -98,21 +99,23 @@ export class ModelQueryBuilder<T extends import("../Ad4mModel").Ad4mModel> {
   }
 
   /**
-   * Specifies which relations to eagerly load as full model instances.
+   * Eagerly load specific relations as full model instances.
    *
-   * Only the listed relations will be batch-hydrated, giving explicit control
-   * over which sub-graphs to load. Without `include`, all relations with a
-   * `relatedModel` factory are hydrated automatically (legacy behaviour).
+   * Key = relation field name on the model.
+   * Value = `true` (all instances) or a `Query` to filter/order/limit the nested set.
    *
    * @example
    * ```typescript
-   * const recipes = await Recipe.query(perspective)
-   *   .include(['author', 'comments'])
+   * Recipe.query(perspective)
+   *   .include({
+   *     comments: true,
+   *     tags: { where: { active: true }, limit: 5 },
+   *   })
    *   .get();
    * ```
    */
-  include(relations: string[]): ModelQueryBuilder<T> {
-    this.queryParams.include = relations;
+  include(map: IncludeMap): ModelQueryBuilder<T> {
+    this.queryParams.include = map;
     return this;
   }
 

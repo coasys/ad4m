@@ -160,28 +160,18 @@ export async function instancesFromSurrealResult<T>(
     }
   }
 
-  // ── 3. Batch-hydrate relations (one query per relation type) ─────────────
+  // ── 3. Batch-hydrate relations via explicit `include` map ─────────────────
   //
-  // Default behaviour (no `include`): hydrate every relation that has a
-  // `relatedModel` factory — preserves existing semantics.
-  //
-  // Explicit `include`: hydrate ONLY the listed relations, using whichever
-  // class source is available (relatedModel factory > where.isInstance).
-  if (_hydrateRelations) {
-    const explicitIncludes = query?.include;
+  // No hydration is performed unless `query.include` is set.
+  // Each key in the map is a relation field name; the value is either `true`
+  // (hydrate all with no filter) or a Query to filter/order/limit the nested set.
+  if (_hydrateRelations && query?.include) {
+    const includeMap = query.include;
     const hydrateEntries = Object.entries(metadata.relations).filter(
-      ([name, m]: [string, any]) => {
-        if (m.getter) return false;
-        if (explicitIncludes) {
-          // Explicit list: honour it regardless of relatedModel
-          return (
-            explicitIncludes.includes(name) &&
-            !!(m.relatedModel || m.where?.isInstance)
-          );
-        }
-        // Legacy default: auto-hydrate anything with a relatedModel factory
-        return !!m.relatedModel;
-      },
+      ([name, m]: [string, any]) =>
+        !m.getter &&
+        name in includeMap &&
+        !!(m.relatedModel || m.where?.isInstance),
     );
     for (const [relationName, relationMeta] of hydrateEntries) {
       const allIds = Array.from(
@@ -195,14 +185,20 @@ export async function instancesFromSurrealResult<T>(
       ) as string[];
       if (allIds.length === 0) continue;
       try {
-        // Prefer the relatedModel factory; fall back to where.isInstance class.
+        // Resolve the model class from relatedModel factory or where.isInstance.
         const RelatedModel = (relationMeta as any).relatedModel
           ? (relationMeta as any).relatedModel()
           : (relationMeta as any).where?.isInstance;
+        // Merge caller's sub-query with the id pre-filter.
+        const entry = includeMap[relationName];
+        const subQuery: Query =
+          entry === true
+            ? { where: { id: allIds } }
+            : { ...entry, where: { id: allIds, ...(entry as Query).where } };
         const allHydrated = await _findAllInternal(
           RelatedModel,
           perspective,
-          { where: { id: allIds } },
+          subQuery,
           false, // depth guard — no recursive nested-model hydration
         );
         const hydratedMap = new Map<string, any>(

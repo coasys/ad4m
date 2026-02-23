@@ -17,12 +17,14 @@ export type {
   PropertyMetadata,
   RelationMetadata,
   ModelMetadata,
+  IncludeMap,
 } from "./types";
 import type {
   Query,
   ResultsWithTotalCount,
   PaginationResult,
   ModelMetadata,
+  IncludeMap,
 } from "./types";
 
 // ── JSON Schema factory ────────────────────────────────────────────────────
@@ -354,13 +356,14 @@ export class Ad4mModel {
     };
   }
 
-  private async getData() {
+  private async getData(include?: IncludeMap) {
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
     return fetchInstanceData(
       this,
       this.#perspective,
       this.#baseExpression,
       metadata,
+      include,
     );
   }
 
@@ -612,8 +615,8 @@ export class Ad4mModel {
    * console.log(recipe.name, recipe.ingredients);
    * ```
    */
-  async get() {
-    return this.getData();
+  async get(include?: IncludeMap) {
+    return this.getData(include);
   }
 
   /**

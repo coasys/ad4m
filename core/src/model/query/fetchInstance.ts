@@ -14,7 +14,7 @@
  */
 
 import type { PerspectiveProxy } from "../../perspectives/PerspectiveProxy";
-import type { ModelMetadata } from "../types";
+import type { ModelMetadata, IncludeMap, Query } from "../types";
 import { formatSurrealValue } from "./SurrealQueryBuilder";
 import { hydrateInstanceFromLinks, evaluateCustomGetters } from "./hydration";
 import { _findAllInternal } from "./operations";
@@ -32,6 +32,7 @@ export async function fetchInstanceData(
   perspective: PerspectiveProxy,
   baseExpression: string,
   metadata: ModelMetadata,
+  include?: IncludeMap,
 ): Promise<any> {
   try {
     const safeBase = formatSurrealValue(baseExpression);
@@ -111,14 +112,26 @@ export async function fetchInstanceData(
           }
         }
 
-        // relatedModel: eager hydration
-        if ((relationMeta as any).relatedModel && values.length > 0) {
+        // relatedModel: eager hydration — only when caller asked for it via include
+        const includeEntry = include?.[relationName];
+        if (
+          includeEntry !== undefined &&
+          (relationMeta as any).relatedModel &&
+          values.length > 0
+        ) {
           try {
             const RelatedModel = (relationMeta as any).relatedModel() as any;
+            const subQuery: Query =
+              includeEntry === true
+                ? { where: { id: values } }
+                : {
+                    ...includeEntry,
+                    where: { id: values, ...(includeEntry as Query).where },
+                  };
             const hydrated = await _findAllInternal(
               RelatedModel,
               perspective,
-              { where: { id: values } },
+              subQuery,
               false,
             );
             instance[relationName] =
@@ -161,13 +174,25 @@ export async function fetchInstanceData(
         );
         const values = matching.map((l: any) => l.source);
 
-        if ((relationMeta as any).relatedModel && values.length > 0) {
+        const includeEntry = include?.[relationName];
+        if (
+          includeEntry !== undefined &&
+          (relationMeta as any).relatedModel &&
+          values.length > 0
+        ) {
           try {
             const RelatedModel = (relationMeta as any).relatedModel() as any;
+            const subQuery: Query =
+              includeEntry === true
+                ? { where: { id: values } }
+                : {
+                    ...includeEntry,
+                    where: { id: values, ...(includeEntry as Query).where },
+                  };
             const hydrated = await _findAllInternal(
               RelatedModel,
               perspective,
-              { where: { id: values } },
+              subQuery,
               false,
             );
             instance[relationName] =

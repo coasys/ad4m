@@ -29,37 +29,53 @@ export type WhereCondition =
 export type Where = { [propertyName: string]: WhereCondition };
 export type Order = { [propertyName: string]: "ASC" | "DESC" };
 
+/**
+ * Prisma-style eager-loading map.
+ *
+ * Key = relation field name on the model.
+ * Value = `true` (hydrate all with no filter) or a `Query` to
+ * filter / order / limit the nested set.
+ *
+ * @example
+ * ```typescript
+ * Recipe.findAll(perspective, {
+ *   include: {
+ *     comments: true,
+ *     tags: { where: { active: true }, order: { name: 'ASC' }, limit: 5 },
+ *   },
+ * });
+ * ```
+ */
+export type IncludeMap = { [relationName: string]: true | Query };
+
 export type Query = {
   source?: string;
   properties?: string[];
   /** @deprecated Use `include` instead. */
   relations?: string[];
   /**
-   * Relation names to eagerly load as full model instances.
+   * Eagerly load specific relations as full model instances (Prisma-style map).
    *
-   * Each name must match a relation defined on the model via `@HasMany`,
-   * `@HasOne`, `@BelongsToMany`, or `@BelongsToOne`. The relation must have
-   * either a `relatedModel` factory (set by passing `() => ModelClass` as the
-   * second decorator argument) or a `where.isInstance` class so that the
-   * loader knows which model class to instantiate.
+   * Key = relation field name on the model.
+   * Value = `true` (all instances) or a `Query` to filter/order/limit the nested set.
    *
-   * When `include` is **not** set, the existing behaviour is preserved:
-   * every relation that has a `relatedModel` factory is batch-hydrated
-   * automatically.
-   *
-   * When `include` **is** set, only the listed relations are batch-hydrated,
-   * giving callers explicit control over which sub-graphs to load.
+   * When absent, **no** relation hydration is performed — relations stay as bare ID strings.
    *
    * @example
    * ```typescript
-   * const recipes = await Recipe.findAll(perspective, {
-   *   include: ['author', 'comments'],
+   * // Hydrate comments (all) and tags (filtered)
+   * Recipe.findAll(perspective, {
+   *   include: {
+   *     comments: true,
+   *     tags: { where: { active: true }, limit: 5 },
+   *   },
    * });
-   * // recipe.author is a fully populated Author instance
-   * // recipe.comments is an array of populated Comment instances
+   *
+   * // No include — relations are bare ID strings
+   * Recipe.findAll(perspective);
    * ```
    */
-  include?: string[];
+  include?: IncludeMap;
   where?: Where;
   order?: Order;
   offset?: number;
