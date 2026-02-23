@@ -683,7 +683,7 @@ export class PerspectiveProxy {
    * Each action is an object with the following format:
    * ```typescript
    * {
-   *   action: "addLink" | "removeLink" | "setSingleTarget" | "collectionSetter",
+   *   action: "addLink" | "removeLink" | "setSingleTarget" | "relationSetter",
    *   source: string,    // Usually "this" to reference the current expression
    *   predicate: string, // The predicate URI
    *   target: string     // The target value or "value" for parameters
@@ -694,7 +694,7 @@ export class PerspectiveProxy {
    * - `addLink`: Creates a new link
    * - `removeLink`: Removes an existing link
    * - `setSingleTarget`: Removes all existing links with the same source/predicate and adds a new one
-   * - `collectionSetter`: Special command for setting collection properties
+   * - `relationSetter`: Special command for bulk-setting a relation (clears existing links, then adds new ones)
    *
    * When used with parameters, the special value "value" in the target field will be
    * replaced with the actual parameter value.
@@ -2529,11 +2529,11 @@ export class PerspectiveProxy {
       const _collectionsMetadata = getRelationsMetadata(
         Object.getPrototypeOf(obj)?.constructor ?? (obj as any).constructor,
       );
-      const isCollectionSetter = (key: string): boolean => {
+      const isRelationSetter = (key: string): boolean => {
         if (!key.startsWith("set") || key.length <= 3) return false;
         const suffix = key.substring(3);
-        const collectionKey = suffix.charAt(0).toLowerCase() + suffix.slice(1);
-        return collectionKey in _collectionsMetadata;
+        const relationKey = suffix.charAt(0).toLowerCase() + suffix.slice(1);
+        return relationKey in _collectionsMetadata;
       };
 
       // Collect all set functions of the object in a list
@@ -2541,7 +2541,7 @@ export class PerspectiveProxy {
         (key) =>
           typeof obj[key] === "function" &&
           key.startsWith("set") &&
-          !isCollectionSetter(key),
+          !isRelationSetter(key),
       );
       // Add all set functions of the object's prototype to that list
       setFunctions = setFunctions.concat(
@@ -2554,7 +2554,7 @@ export class PerspectiveProxy {
             descriptor &&
             typeof descriptor.value === "function" &&
             key.startsWith("set") &&
-            !isCollectionSetter(key)
+            !isRelationSetter(key)
           );
         }),
       );
@@ -2609,7 +2609,7 @@ export class PerspectiveProxy {
           Object.prototype.hasOwnProperty.call(obj, key) &&
           typeof obj[key] === "function" &&
           key.startsWith("set") &&
-          isCollectionSetter(key),
+          isRelationSetter(key),
       );
       // Add all collection setter functions from the object's prototype to that list
       setCollectionFunctions = setCollectionFunctions.concat(
@@ -2622,7 +2622,7 @@ export class PerspectiveProxy {
             descriptor &&
             typeof descriptor.value === "function" &&
             key.startsWith("set") &&
-            isCollectionSetter(key)
+            isRelationSetter(key)
           );
         }),
       );

@@ -410,32 +410,43 @@ export interface RelationOptions {
  * @param {string} [opts.where.prologCondition] - Custom Prolog condition for filtering
  * @param {boolean} [opts.local] - Whether collection links are stored locally only
  */
+/** Minimal structural type for Ad4mModel instances — used in mutator signatures to avoid circular imports. */
+export interface Ad4mModelLike {
+  readonly id: string;
+  readonly baseExpression: string;
+}
+
 /**
- * Utility type that generates the runtime methods produced by \@HasMany / \@Collection decorators.
+ * Utility type that generates the runtime methods produced by \@HasMany / \@HasOne decorators.
  *
- * For each collection property `foo`, the decorator generates:
- * - `addFoo(value: string): Promise<void>`
- * - `removeFoo(value: string): Promise<void>`
- * - `setFoo(values: string[]): Promise<void>`
+ * For each relation property `foo`, the decorator generates:
+ * - `addFoo(value)` — Add a value (string ID or model instance)
+ * - `removeFoo(value)` — Remove a value
+ * - `setFoo(values)` — Replace all values
  *
- * Pass a string union of your \@HasMany property names and use interface merging —
- * this avoids the circular reference you'd get by passing the class itself:
+ * Pass a string union of your \@HasMany/\@HasOne property names and use interface merging:
  * @example
  * ```typescript
  * \@Model({ name: 'Post' })
  * export class Post extends Ad4mModel {
- *   \@HasMany({ through: 'post://comment' })
- *   comments: string[] = [];
+ *   \@HasMany(() => Comment, { through: 'post://comment' })
+ *   comments: Comment[] = [];
  * }
  * export interface Post extends HasManyMethods<'comments'> {}
  * ```
  */
 export type HasManyMethods<Keys extends string> = {
-  [K in Keys as `add${Capitalize<K>}`]: (value: string) => Promise<void>;
+  [K in Keys as `add${Capitalize<K>}`]: (
+    value: string | Ad4mModelLike,
+  ) => Promise<void>;
 } & {
-  [K in Keys as `remove${Capitalize<K>}`]: (value: string) => Promise<void>;
+  [K in Keys as `remove${Capitalize<K>}`]: (
+    value: string | Ad4mModelLike,
+  ) => Promise<void>;
 } & {
-  [K in Keys as `set${Capitalize<K>}`]: (values: string[]) => Promise<void>;
+  [K in Keys as `set${Capitalize<K>}`]: (
+    values: (string | Ad4mModelLike)[],
+  ) => Promise<void>;
 };
 
 export function HasMany(

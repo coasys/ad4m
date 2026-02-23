@@ -11,14 +11,7 @@ import {
   propertyRegistry,
   relationRegistry,
 } from "./decorators";
-import {
-  singularToPlural,
-  pluralToSingular,
-  propertyNameToSetterName,
-  collectionToAdderName,
-  collectionToRemoverName,
-  collectionToSetterName,
-} from "./util";
+import { propertyNameToSetterName } from "./util";
 import { escapeSurrealString } from "../utils";
 
 // JSON Schema type definitions
@@ -130,7 +123,7 @@ export interface PropertyMetadata {
  * Metadata for a single relation extracted from decorators.
  */
 export interface RelationMetadata {
-  /** The collection name */
+  /** The relation name */
   name: string;
   /** The predicate URI (through value) */
   predicate: string;
@@ -144,6 +137,8 @@ export interface RelationMetadata {
   direction?: "forward" | "reverse";
   /** Maximum number of results (1 for @BelongsToOne / @HasOne) */
   maxCount?: number;
+  /** Model factory for eager hydration — set when decorator is called with () => ModelClass */
+  relatedModel?: () => any;
 }
 
 /**
@@ -208,14 +203,14 @@ function isNumericType(schema: JSONSchemaProperty): boolean {
  *
  * @description
  * Ad4mModel provides the foundation for creating data models that are stored in AD4M perspectives.
- * Each model instance is represented as a subgraph in the perspective, with properties and collections
+ * Each model instance is represented as a subgraph in the perspective, with properties and relations
  * mapped to links in that graph. The class uses Prolog-based queries to efficiently search and filter
  * instances based on their properties and relationships.
  *
  * Key concepts:
  * - Each model instance has a unique base expression that serves as its identifier
  * - Properties are stored as links with predicates defined by the `through` option
- * - Collections represent one-to-many relationships as sets of links
+ * - Relations represent one-to-many relationships as sets of links
  * - Queries are translated to Prolog for efficient graph pattern matching
  * - Changes are tracked through the perspective's subscription system
  *
@@ -250,12 +245,12 @@ function isNumericType(schema: JSONSchemaProperty): boolean {
  *   })
  *   averageRating: number = 0;
  *
- *   // Collection of ingredients
- *   @Collection({ through: "recipe://ingredient" })
+ *   // Relation: ingredients
+ *   @HasMany({ through: "recipe://ingredient" })
  *   ingredients: string[] = [];
  *
- *   // Collection of comments that are instances of another model
- *   @Collection({
+ *   // Relation: comments that are instances of another model
+ *   @HasMany({
  *     through: "recipe://comment",
  *     where: { isInstance: Comment }
  *   })
@@ -354,21 +349,21 @@ export class Ad4mModel {
    * Extracts metadata from decorators for query building.
    *
    * @description
-   * This method reads the metadata stored by decorators (@Property, @Collection, etc.)
+   * This method reads the metadata stored by decorators (@Property, @HasMany, etc.)
    * and returns it in a structured format that's easier to work with for query builders
    * and other systems that need to introspect model structure.
    *
    * The metadata includes:
    * - Class name from @ModelOptions
    * - Property metadata (predicates, types, constraints, etc.)
-   * - Collection metadata (predicates, filters, etc.)
+   * - Relation metadata (predicates, filters, etc.)
    *
    * For models created via `fromJSONSchema()`, this method will derive metadata from
-   * the stored `__properties` and `__collections` structures that were populated during
+   * the stored `__properties` and `__relations` structures that were populated during
    * the dynamic class creation. If these structures are empty but a JSON schema was
    * attached to the class, it can fall back to deriving metadata from that schema.
    *
-   * @returns Structured metadata object containing className, properties, and collections
+   * @returns Structured metadata object containing className, properties, and relations
    * @throws Error if the class doesn't have @ModelOptions decorator
    *
    * @example
@@ -378,7 +373,7 @@ export class Ad4mModel {
    *   @Property({ through: "recipe://name", resolveLanguage: "literal" })
    *   name: string = "";
    *
-   *   @Collection({ through: "recipe://ingredient" })
+   *   @HasMany({ through: "recipe://ingredient" })
    *   ingredients: string[] = [];
    * }
    *
@@ -445,6 +440,9 @@ export class Ad4mModel {
         }),
         ...((opts as any).maxCount !== undefined && {
           maxCount: (opts as any).maxCount,
+        }),
+        ...((opts as any).relatedModel !== undefined && {
+          relatedModel: (opts as any).relatedModel,
         }),
       };
     }
@@ -540,7 +538,7 @@ export class Ad4mModel {
     this.#perspective = perspective;
     this.#source = source || "ad4m://self";
 
-    // Wire up real collection adder/remover/setter methods for decorator-based classes.
+    // Wire up real relation adder/remover/setter methods for decorator-based classes.
     // The @HasMany / @HasOne decorators place empty stubs on the prototype at class-definition
     // time (e.g. `addLocations = () => {}`). Here, at instance-creation time, we replace each
     // stub with a closure that actually calls the private implementation so that callers like
@@ -633,7 +631,7 @@ export class Ad4mModel {
 
   /**
    * Generate relation action from metadata (Phase 1: Prolog-free refactor)
-   * Replaces Prolog queries: collection_adder, collection_remover, collection_setter
+   * Replaces Prolog queries: relation_adder, relation_remover, relation_setter
    * @private
    */
   private generateRelationAction(
@@ -652,7 +650,7 @@ export class Ad4mModel {
     const actionMap = {
       adder: "addLink",
       remover: "removeLink",
-      setter: "collectionSetter",
+      setter: "relationSetter",
     };
 
     return [
@@ -753,7 +751,7 @@ export class Ad4mModel {
   }
 
   private async getData() {
-    // Builds an object with the author, timestamp, all properties, & all collections on the Ad4mModel and saves it to the instance
+    // Builds an object with the author, timestamp, all properties, & all relations on the Ad4mModel and saves it to the instance
     // Use SurrealDB for data queries
     try {
       const ctor = this.constructor as typeof Ad4mModel;
@@ -763,7 +761,7 @@ export class Ad4mModel {
       // Using formatSurrealValue to prevent SQL injection by properly escaping the value
       const safeBaseExpression = ctor.formatSurrealValue(this.#baseExpression);
       // Note: We use ORDER BY timestamp ASC because:
-      // - For collections: we want chronological order (oldest to newest)
+      // - For relations: we want chronological order (oldest to newest)
       // - For properties: we select the LAST element to get "latest wins" semantics
       const linksQuery = `
         SELECT id, predicate, out.uri AS target, author, timestamp
@@ -860,22 +858,22 @@ export class Ad4mModel {
         );
 
         // Process forward relations (source → predicate → target)
-        for (const [collName, collMeta] of forwardRelations) {
+        for (const [relationName, relationMeta] of forwardRelations) {
           const matching = links.filter(
-            (l: any) => l.predicate === collMeta.predicate,
+            (l: any) => l.predicate === relationMeta.predicate,
           );
-          // Collections preserve chronological order: links are sorted ASC by timestamp,
-          // so the collection reflects the order in which items were added (oldest to newest).
+          // Relations preserve chronological order: links are sorted ASC by timestamp,
+          // so the relation reflects the order in which items were added (oldest to newest).
           let values = matching.map((l: any) => l.target);
 
           // Apply where.condition filtering if present
-          if (collMeta.where?.condition && values.length > 0) {
+          if (relationMeta.where?.condition && values.length > 0) {
             try {
               // Filter values by evaluating condition for each value
               const filteredValues: string[] = [];
 
               for (const value of values) {
-                let condition = collMeta.where.condition
+                let condition = relationMeta.where.condition
                   .replace(/\$perspective/g, `'${this.#perspective.uuid}'`)
                   .replace(/\$base/g, `'${this.#baseExpression}'`)
                   .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
@@ -904,7 +902,7 @@ export class Ad4mModel {
               values = filteredValues;
             } catch (error) {
               console.warn(
-                `Failed to apply condition filter for ${collName}:`,
+                `Failed to apply condition filter for ${relationName}:`,
                 error,
               );
               // Keep unfiltered values on error
@@ -912,12 +910,12 @@ export class Ad4mModel {
           }
 
           // Apply where.isInstance filtering if present
-          if (collMeta.where?.isInstance && values.length > 0) {
+          if (relationMeta.where?.isInstance && values.length > 0) {
             try {
               const className =
-                typeof collMeta.where.isInstance === "string"
-                  ? collMeta.where.isInstance
-                  : collMeta.where.isInstance.name;
+                typeof relationMeta.where.isInstance === "string"
+                  ? relationMeta.where.isInstance
+                  : relationMeta.where.isInstance.name;
 
               const filterMetadata =
                 await this.#perspective.getSubjectClassMetadataFromSDNA(
@@ -934,8 +932,25 @@ export class Ad4mModel {
             }
           }
 
-          (this as any)[collName] =
-            collMeta.maxCount === 1 ? (values[0] ?? null) : values;
+          if (relationMeta.relatedModel && values.length > 0) {
+            try {
+              const RelatedModel = relationMeta.relatedModel() as any;
+              const hydrated = await RelatedModel._findAllInternal(
+                this.#perspective,
+                { where: { id: values } },
+                false, // depth guard — don't recursively hydrate sub-relations
+              );
+              (this as any)[relationName] =
+                relationMeta.maxCount === 1 ? hydrated[0] ?? null : hydrated;
+            } catch (e) {
+              console.warn(`Failed to hydrate ${relationName}:`, e);
+              (this as any)[relationName] =
+                relationMeta.maxCount === 1 ? values[0] ?? null : values;
+            }
+          } else {
+            (this as any)[relationName] =
+              relationMeta.maxCount === 1 ? values[0] ?? null : values;
+          }
         }
 
         // Process reverse relations (target ← predicate ← source)
@@ -955,14 +970,29 @@ export class Ad4mModel {
             // leave empty — instance just won't have reverse relation data
           }
 
-          for (const [collName, collMeta] of reverseRelations) {
+          for (const [relationName, relationMeta] of reverseRelations) {
             const matching = reverseLinks.filter(
-              (l: any) => l.predicate === collMeta.predicate,
+              (l: any) => l.predicate === relationMeta.predicate,
             );
             const values = matching.map((l: any) => l.source);
-            // BelongsToOne: take only the first (most recent source wins)
-            (this as any)[collName] =
-              collMeta.maxCount === 1 ? values[0] ?? null : values;
+            if (relationMeta.relatedModel && values.length > 0) {
+              try {
+                const RelatedModel = relationMeta.relatedModel() as any;
+                const hydrated = await RelatedModel._findAllInternal(
+                  this.#perspective,
+                  { where: { id: values } },
+                  false,
+                );
+                (this as any)[relationName] =
+                  relationMeta.maxCount === 1 ? hydrated[0] ?? null : hydrated;
+              } catch (e) {
+                (this as any)[relationName] =
+                  relationMeta.maxCount === 1 ? values[0] ?? null : values;
+              }
+            } else {
+              (this as any)[relationName] =
+                relationMeta.maxCount === 1 ? values[0] ?? null : values;
+            }
           }
         }
 
@@ -986,17 +1016,19 @@ export class Ad4mModel {
 
       // Apply where.isInstance filtering to getter relations
       // (non-getter relations were already filtered above)
-      for (const [collName, collMeta] of Object.entries(metadata.relations)) {
+      for (const [relationName, relationMeta] of Object.entries(
+        metadata.relations,
+      )) {
         if (
-          collMeta.getter &&
-          collMeta.where?.isInstance &&
-          (this as any)[collName]?.length > 0
+          relationMeta.getter &&
+          relationMeta.where?.isInstance &&
+          (this as any)[relationName]?.length > 0
         ) {
           try {
             const className =
-              typeof collMeta.where.isInstance === "string"
-                ? collMeta.where.isInstance
-                : collMeta.where.isInstance.name;
+              typeof relationMeta.where.isInstance === "string"
+                ? relationMeta.where.isInstance
+                : relationMeta.where.isInstance.name;
 
             const filterMetadata =
               await this.#perspective.getSubjectClassMetadataFromSDNA(
@@ -1005,10 +1037,10 @@ export class Ad4mModel {
             if (filterMetadata) {
               const filtered =
                 await this.#perspective.batchCheckSubjectInstances(
-                  (this as any)[collName],
+                  (this as any)[relationName],
                   filterMetadata,
                 );
-              (this as any)[collName] = filtered;
+              (this as any)[relationName] = filtered;
             }
           } catch (error) {
             // Keep unfiltered values on error
@@ -1026,7 +1058,7 @@ export class Ad4mModel {
   }
 
   /**
-   * Evaluates custom SurrealQL getters for properties and collections on a specific instance.
+   * Evaluates custom SurrealQL getters for properties and relations on a specific instance.
    * @private
    */
   private static async evaluateCustomGettersForInstance(
@@ -1066,11 +1098,13 @@ export class Ad4mModel {
     }
 
     // Evaluate relation getters
-    for (const [collName, collMeta] of Object.entries(metadata.relations)) {
-      if ((collMeta as any).getter) {
+    for (const [relationName, relationMeta] of Object.entries(
+      metadata.relations,
+    )) {
+      if ((relationMeta as any).getter) {
         try {
           // Replace 'Base' placeholder with actual base expression
-          const query = (collMeta as any).getter.replace(
+          const query = (relationMeta as any).getter.replace(
             /Base/g,
             safeBaseExpression,
           );
@@ -1084,9 +1118,9 @@ export class Ad4mModel {
             result[0].value !== undefined &&
             result[0].value !== null
           ) {
-            // Filter out 'None' from collection results
+            // Filter out 'None' from relation results
             const value = result[0].value;
-            instance[collName] = Array.isArray(value)
+            instance[relationName] = Array.isArray(value)
               ? value.filter(
                   (v: any) =>
                     v !== undefined && v !== null && v !== "" && v !== "None",
@@ -1094,7 +1128,7 @@ export class Ad4mModel {
               : value;
           }
         } catch (error) {
-          console.warn(`Failed to evaluate getter for ${collName}:`, error);
+          console.warn(`Failed to evaluate getter for ${relationName}:`, error);
         }
       }
     }
@@ -1111,18 +1145,18 @@ export class Ad4mModel {
    *
    * The generated query uses a CTE (Common Table Expression) pattern:
    * 1. First, identify candidate base expressions by filtering links based on where conditions
-   * 2. Then, for each candidate base, resolve properties and collections via subqueries
+   * 2. Then, for each candidate base, resolve properties and relations via subqueries
    * 3. Finally, apply ordering, pagination (LIMIT/START) at the SQL level
    *
    * Key architectural notes:
    * - SurrealDB stores only raw links (source, predicate, target, author, timestamp)
    * - No SDNA knowledge at the database level
    * - Properties are resolved via subqueries that look for links with specific predicates
-   * - Collections are similar but return multiple values instead of one
+   * - Relations are similar but return multiple values instead of one
    * - Special fields (base, author, timestamp) are accessed directly, not via subqueries
    *
    * @param perspective - The perspective to query (used for metadata extraction)
-   * @param query - Query parameters (where, order, limit, offset, properties, collections)
+   * @param query - Query parameters (where, order, limit, offset, properties, relations)
    * @returns Complete SurrealQL query string ready for execution
    *
    * @example
@@ -1254,18 +1288,20 @@ WHERE ${whereConditions.join(" AND ")}
     const conditions: string[] = [];
 
     for (const [propertyName, condition] of Object.entries(where)) {
-      // Check if this is a special field (base, author, timestamp)
+      // Check if this is a special field (base/id, author, timestamp)
       // Note: author and timestamp filtering is done in JavaScript after query
-      const isSpecial = ["base", "author", "timestamp"].includes(propertyName);
+      const isSpecial = ["base", "id", "author", "timestamp"].includes(
+        propertyName,
+      );
 
       if (isSpecial) {
         // Skip author and timestamp - they'll be filtered in JavaScript
-        // Only handle 'base' (which maps to 'uri') here
+        // Only handle 'base'/'id' (which maps to 'uri') here
         if (propertyName === "author" || propertyName === "timestamp") {
           continue; // Skip - will be filtered post-query
         }
 
-        const columnName = "uri"; // base maps to uri in node table
+        const columnName = "uri"; // base/id maps to uri in node table
 
         // Handle base/uri field directly
         if (Array.isArray(condition)) {
@@ -1433,19 +1469,21 @@ WHERE ${whereConditions.join(" AND ")}
     const conditions: string[] = [];
 
     for (const [propertyName, condition] of Object.entries(where)) {
-      // Check if this is a special field (base, author, timestamp)
+      // Check if this is a special field (base/id, author, timestamp)
       // Note: author and timestamp filtering is done in JavaScript after GROUP BY
       // because they need to be computed from the grouped links first
-      const isSpecial = ["base", "author", "timestamp"].includes(propertyName);
+      const isSpecial = ["base", "id", "author", "timestamp"].includes(
+        propertyName,
+      );
 
       if (isSpecial) {
         // Skip author and timestamp - they'll be filtered in JavaScript
-        // Only handle 'base' (which maps to 'source') here
+        // Only handle 'base'/'id' (which maps to 'source') here
         if (propertyName === "author" || propertyName === "timestamp") {
           continue; // Skip - will be filtered post-query
         }
 
-        const columnName = "source"; // base maps to source
+        const columnName = "source"; // base/id maps to source
 
         // Handle base/source field directly
         if (Array.isArray(condition)) {
@@ -1582,21 +1620,21 @@ WHERE ${whereConditions.join(" AND ")}
    * Builds the SELECT fields for SurrealQL queries.
    *
    * @description
-   * Generates the field list for the SELECT clause, resolving properties and collections
+   * Generates the field list for the SELECT clause, resolving properties and relations
    * via subqueries. Each property is fetched with a subquery that finds the link with the
-   * appropriate predicate and returns its target. Collections are similar but don't use LIMIT 1.
+   * appropriate predicate and returns its target. Relations are similar but don't use LIMIT 1.
    *
    * Field types:
    * - Properties: `(SELECT VALUE target FROM link WHERE source = $parent.base AND predicate = 'X' LIMIT 1) AS propName`
-   * - Collections: `(SELECT VALUE target FROM link WHERE source = $parent.base AND predicate = 'X') AS collName`
+   * - Relations: `(SELECT VALUE target FROM link WHERE source = $parent.base AND predicate = 'X') AS relationName`
    * - Author/Timestamp: Always included to provide metadata about each instance
    *
-   * If properties or collections arrays are provided, only those fields are included.
-   * Otherwise, all properties/collections from metadata are included.
+   * If properties or relations arrays are provided, only those fields are included.
+   * Otherwise, all properties/relations from metadata are included.
    *
-   * @param metadata - Model metadata containing property and collection predicates
+   * @param metadata - Model metadata containing property and relation predicates
    * @param properties - Optional array of property names to include (default: all)
-   * @param collections - Optional array of collection names to include (default: all)
+   * @param relations - Optional array of relation names to include (default: all)
    * @returns Comma-separated SELECT field list
    *
    * @private
@@ -1604,7 +1642,7 @@ WHERE ${whereConditions.join(" AND ")}
   private static buildSurrealSelectFields(
     metadata: ModelMetadata,
     properties?: string[],
-    collections?: string[],
+    relations?: string[],
   ): string {
     const fields: string[] = [];
 
@@ -1622,15 +1660,15 @@ WHERE ${whereConditions.join(" AND ")}
     }
 
     // Determine relations to fetch
-    const collsToFetch = collections || Object.keys(metadata.relations);
-    for (const collName of collsToFetch) {
-      const collMeta = metadata.relations[collName];
-      if (!collMeta) continue; // Skip if not found
+    const relationsToFetch = relations || Object.keys(metadata.relations);
+    for (const relationName of relationsToFetch) {
+      const relationMeta = metadata.relations[relationName];
+      if (!relationMeta) continue; // Skip if not found
 
       // Reference source directly since we're selecting from link table
-      const escapedPredicate = escapeSurrealString(collMeta.predicate);
+      const escapedPredicate = escapeSurrealString(relationMeta.predicate);
       fields.push(
-        `(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}') AS ${collName}`,
+        `(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}') AS ${relationName}`,
       );
     }
 
@@ -1657,7 +1695,7 @@ WHERE ${whereConditions.join(" AND ")}
   private static buildSurrealSelectFieldsWithAggregation(
     metadata: ModelMetadata,
     properties?: string[],
-    collections?: string[],
+    relations?: string[],
   ): string {
     const fields: string[] = [];
 
@@ -1675,15 +1713,15 @@ WHERE ${whereConditions.join(" AND ")}
     }
 
     // Determine relations to fetch
-    const collsToFetch = collections || Object.keys(metadata.relations);
-    for (const collName of collsToFetch) {
-      const collMeta = metadata.relations[collName];
-      if (!collMeta) continue; // Skip if not found
+    const relationsToFetch = relations || Object.keys(metadata.relations);
+    for (const relationName of relationsToFetch) {
+      const relationMeta = metadata.relations[relationName];
+      if (!relationMeta) continue; // Skip if not found
 
       // Use array filtering to get all target values for this predicate
-      const escapedPredicate = escapeSurrealString(collMeta.predicate);
+      const escapedPredicate = escapeSurrealString(relationMeta.predicate);
       fields.push(
-        `target[WHERE predicate = '${escapedPredicate}'] AS ${collName}`,
+        `target[WHERE predicate = '${escapedPredicate}'] AS ${relationName}`,
       );
     }
 
@@ -1744,6 +1782,7 @@ WHERE ${whereConditions.join(" AND ")}
     perspective: PerspectiveProxy,
     query: Query,
     result: any[],
+    _hydrateRelations = true,
   ): Promise<ResultsWithTotalCount<T>> {
     if (!result || result.length === 0) return { results: [], totalCount: 0 };
 
@@ -1778,7 +1817,7 @@ WHERE ${whereConditions.join(" AND ")}
         let originalAuthor = null;
         let latestAuthor = null;
 
-        // Process each link (track index for collection ordering)
+        // Process each link (track index for relation ordering)
         for (let linkIndex = 0; linkIndex < links.length; linkIndex++) {
           const link = links[linkIndex];
           const predicate = link.predicate;
@@ -1901,26 +1940,26 @@ WHERE ${whereConditions.join(" AND ")}
 
           // If not a field, check if it's a relation (skip those with getter)
           if (!foundProperty) {
-            for (const [collName, collMeta] of Object.entries(
+            for (const [relationName, relationMeta] of Object.entries(
               metadata.relations,
             )) {
-              if (collMeta.getter) continue; // Handle via getter evaluation
-              if (collMeta.predicate === predicate) {
-                // For collections, accumulate all values with their timestamps and indices for sorting
-                if (!instance[collName]) {
-                  instance[collName] = [];
+              if (relationMeta.getter) continue; // Handle via getter evaluation
+              if (relationMeta.predicate === predicate) {
+                // For relations, accumulate all values with their timestamps and indices for sorting
+                if (!instance[relationName]) {
+                  instance[relationName] = [];
                 }
                 // Initialize timestamp tracking array if not already done
-                const timestampsKey = `__${collName}_timestamps`;
-                const indicesKey = `__${collName}_indices`;
+                const timestampsKey = `__${relationName}_timestamps`;
+                const indicesKey = `__${relationName}_indices`;
                 if (!instance[timestampsKey]) {
                   instance[timestampsKey] = [];
                 }
                 if (!instance[indicesKey]) {
                   instance[indicesKey] = [];
                 }
-                if (!instance[collName].includes(target)) {
-                  instance[collName].push(target);
+                if (!instance[relationName].includes(target)) {
+                  instance[relationName].push(target);
                   instance[timestampsKey].push(link.timestamp || "");
                   // Track original position in the links array for stable sorting
                   instance[indicesKey].push(linkIndex);
@@ -1961,12 +2000,14 @@ WHERE ${whereConditions.join(" AND ")}
         }
 
         // Sort relations by timestamp to maintain insertion order
-        for (const [collName, collMeta] of Object.entries(metadata.relations)) {
-          const timestampsKey = `__${collName}_timestamps`;
-          const indicesKey = `__${collName}_indices`;
-          if (instance[collName] && instance[timestampsKey]) {
+        for (const [relationName, relationMeta] of Object.entries(
+          metadata.relations,
+        )) {
+          const timestampsKey = `__${relationName}_timestamps`;
+          const indicesKey = `__${relationName}_indices`;
+          if (instance[relationName] && instance[timestampsKey]) {
             // Create array of [value, timestamp, index] tuples
-            const pairs = instance[collName].map(
+            const pairs = instance[relationName].map(
               (value: any, index: number) => ({
                 value,
                 timestamp: instance[timestampsKey][index] || "",
@@ -1982,7 +2023,7 @@ WHERE ${whereConditions.join(" AND ")}
               // Use original index as tiebreaker for stable sorting
               return a.originalIndex - b.originalIndex;
             });
-            // Replace collection with sorted values, filtering out empty strings and None
+            // Replace relation with sorted values, filtering out empty strings and None
             const sortedValues = pairs
               .map((p) => p.value)
               .filter(
@@ -1990,9 +2031,11 @@ WHERE ${whereConditions.join(" AND ")}
                   v !== undefined && v !== null && v !== "" && v !== "None",
               );
             // @HasOne / maxCount:1 forward relations store a single string, not an array
-            const collMeta = metadata.relations[collName];
-            instance[collName] =
-              collMeta?.maxCount === 1 ? (sortedValues[0] ?? null) : sortedValues;
+            const relationMeta = metadata.relations[relationName];
+            instance[relationName] =
+              relationMeta?.maxCount === 1
+                ? sortedValues[0] ?? null
+                : sortedValues;
             // Clean up temporary arrays
             delete instance[timestampsKey];
             delete instance[indicesKey];
@@ -2046,15 +2089,15 @@ WHERE ${whereConditions.join(" AND ")}
         const reverseLinks: any[] =
           (await perspective.querySurrealDB(reverseLinksQuery)) ?? [];
         for (const instance of instances) {
-          for (const [collName, collMeta] of reverseRelationEntries) {
+          for (const [relationName, relationMeta] of reverseRelationEntries) {
             const matching = reverseLinks.filter(
               (l: any) =>
                 l.target === instance.baseExpression &&
-                l.predicate === collMeta.predicate,
+                l.predicate === relationMeta.predicate,
             );
             const values = matching.map((l: any) => l.source);
-            (instance as any)[collName] =
-              collMeta.maxCount === 1 ? values[0] ?? null : values;
+            (instance as any)[relationName] =
+              relationMeta.maxCount === 1 ? values[0] ?? null : values;
           }
         }
       } catch (e) {
@@ -2062,8 +2105,52 @@ WHERE ${whereConditions.join(" AND ")}
       }
     }
 
+    // Batch-hydrate related models for relations that carry a relatedModel factory.
+    // One query per relation type across ALL instances (no N+1).
+    if (_hydrateRelations) {
+      const hydrateEntries = Object.entries(metadata.relations).filter(
+        ([, m]) => !m.getter && m.relatedModel,
+      );
+      for (const [relationName, relationMeta] of hydrateEntries) {
+        const allIds = Array.from(
+          new Set(
+            instances.flatMap((i: any) => {
+              const val = i[relationName];
+              if (!val) return [];
+              return Array.isArray(val) ? val.filter(Boolean) : [val];
+            }),
+          ),
+        ) as string[];
+        if (allIds.length === 0) continue;
+        try {
+          const RelatedModel = relationMeta.relatedModel!() as any;
+          const allHydrated = await RelatedModel._findAllInternal(
+            perspective,
+            { where: { id: allIds } },
+            false, // depth guard
+          );
+          const hydratedMap = new Map<string, any>(
+            allHydrated.map((h: any) => [h.baseExpression, h]),
+          );
+          for (const instance of instances) {
+            const val = (instance as any)[relationName];
+            if (!val) continue;
+            if (Array.isArray(val)) {
+              (instance as any)[relationName] = val
+                .map((id: string) => hydratedMap.get(id))
+                .filter((h: any) => h !== undefined);
+            } else if (typeof val === "string") {
+              (instance as any)[relationName] = hydratedMap.get(val) ?? null;
+            }
+          }
+        } catch (e) {
+          console.warn(`Failed to batch-hydrate ${relationName}:`, e);
+        }
+      }
+    }
+
     // Evaluate custom getters for all instances (single pass)
-    // This populates collection values needed for where.isInstance filtering
+    // This populates relation values needed for where.isInstance filtering
     for (const instance of instances) {
       await this.evaluateCustomGettersForInstance(
         instance,
@@ -2075,11 +2162,16 @@ WHERE ${whereConditions.join(" AND ")}
     // Filter relations by where.isInstance if specified
     // Do this after initial evaluation so relation values exist for filtering
     for (const instance of instances) {
-      for (const [collName, collMeta] of Object.entries(metadata.relations)) {
-        if (collMeta.where?.isInstance && instance[collName]?.length > 0) {
+      for (const [relationName, relationMeta] of Object.entries(
+        metadata.relations,
+      )) {
+        if (
+          relationMeta.where?.isInstance &&
+          instance[relationName]?.length > 0
+        ) {
           try {
-            const targetClass = collMeta.where.isInstance;
-            const subjects = instance[collName];
+            const targetClass = relationMeta.where.isInstance;
+            const subjects = instance[relationName];
 
             // Get the class metadata from SDNA to pass to batchCheckSubjectInstances
             const targetClassName =
@@ -2101,10 +2193,10 @@ WHERE ${whereConditions.join(" AND ")}
               classMetadata,
             );
 
-            // Update the collection with filtered instances
-            instance[collName] = validSubjects;
+            // Update the relation with filtered instances
+            instance[relationName] = validSubjects;
           } catch (error) {
-            // On error, leave the collection unfiltered rather than breaking everything
+            // On error, leave the relation unfiltered rather than breaking everything
           }
         }
       }
@@ -2119,8 +2211,8 @@ WHERE ${whereConditions.join(" AND ")}
     if (query.where) {
       filteredInstances = instances.filter((instance) => {
         for (const [propertyName, condition] of Object.entries(query.where!)) {
-          // Skip 'base' as it's filtered in SQL
-          if (propertyName === "base") continue;
+          // Skip 'base'/'id' as they're filtered in SQL
+          if (propertyName === "base" || propertyName === "id") continue;
 
           // For author and timestamp, always filter in JS
           if (propertyName === "author" || propertyName === "timestamp") {
@@ -2311,10 +2403,15 @@ WHERE ${whereConditions.join(" AND ")}
    * const recipesProlog = await Recipe.findAll(perspective, {}, false);
    * ```
    */
-  static async findAll<T extends Ad4mModel>(
+  /**
+   * Internal implementation used by findAll and eager relation hydration.
+   * Pass `_hydrateRelations = false` to prevent recursive model hydration (depth guard).
+   */
+  static async _findAllInternal<T extends Ad4mModel>(
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query: Query = {},
+    _hydrateRelations = true,
   ): Promise<T[]> {
     const surrealQuery = await this.queryToSurrealQL(perspective, query);
     const result = await perspective.querySurrealDB(surrealQuery);
@@ -2322,8 +2419,37 @@ WHERE ${whereConditions.join(" AND ")}
       perspective,
       query,
       result,
+      _hydrateRelations,
     );
     return results;
+  }
+
+  static async findAll<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    query: Query = {},
+  ): Promise<T[]> {
+    return (this as any)._findAllInternal(perspective, query, true);
+  }
+
+  /**
+   * Returns the first matching instance, or `null` if none found.
+   *
+   * @example
+   * ```typescript
+   * const post = await TestPost.findOne(perspective, { where: { id: someId } });
+   * ```
+   */
+  static async findOne<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    query: Query = {},
+  ): Promise<T | null> {
+    const results = await (this as any).findAll(perspective, {
+      ...query,
+      limit: 1,
+    });
+    return results[0] ?? null;
   }
 
   /**
@@ -2493,6 +2619,12 @@ WHERE ${whereConditions.join(" AND ")}
       return;
     }
 
+    // Accept either a string ID or an Ad4mModel instance (extract baseExpression)
+    const toId = (v: any): any =>
+      v && typeof v === "object" && typeof v.baseExpression === "string"
+        ? v.baseExpression
+        : v;
+
     // Generate actions from metadata (replaces Prolog query)
     const actions = this.generateRelationAction(key, "setter");
 
@@ -2501,14 +2633,14 @@ WHERE ${whereConditions.join(" AND ")}
         await this.#perspective.executeAction(
           actions,
           this.#baseExpression,
-          value.map((v) => ({ name: "value", value: v })),
+          value.map((v) => ({ name: "value", value: toId(v) })),
           batchId,
         );
       } else {
         await this.#perspective.executeAction(
           actions,
           this.#baseExpression,
-          [{ name: "value", value }],
+          [{ name: "value", value: toId(value) }],
           batchId,
         );
       }
@@ -2523,6 +2655,12 @@ WHERE ${whereConditions.join(" AND ")}
       return;
     }
 
+    // Accept either a string ID or an Ad4mModel instance (extract baseExpression)
+    const toId = (v: any): any =>
+      v && typeof v === "object" && typeof v.baseExpression === "string"
+        ? v.baseExpression
+        : v;
+
     // Generate actions from metadata (replaces Prolog query)
     const actions = this.generateRelationAction(key, "adder");
 
@@ -2533,7 +2671,7 @@ WHERE ${whereConditions.join(" AND ")}
             this.#perspective.executeAction(
               actions,
               this.#baseExpression,
-              [{ name: "value", value: v }],
+              [{ name: "value", value: toId(v) }],
               batchId,
             ),
           ),
@@ -2542,7 +2680,7 @@ WHERE ${whereConditions.join(" AND ")}
         await this.#perspective.executeAction(
           actions,
           this.#baseExpression,
-          [{ name: "value", value }],
+          [{ name: "value", value: toId(value) }],
           batchId,
         );
       }
@@ -2557,6 +2695,12 @@ WHERE ${whereConditions.join(" AND ")}
       return;
     }
 
+    // Accept either a string ID or an Ad4mModel instance (extract baseExpression)
+    const toId = (v: any): any =>
+      v && typeof v === "object" && typeof v.baseExpression === "string"
+        ? v.baseExpression
+        : v;
+
     // Generate actions from metadata (replaces Prolog query)
     const actions = this.generateRelationAction(key, "remover");
 
@@ -2567,7 +2711,7 @@ WHERE ${whereConditions.join(" AND ")}
             this.#perspective.executeAction(
               actions,
               this.#baseExpression,
-              [{ name: "value", value: v }],
+              [{ name: "value", value: toId(v) }],
               batchId,
             ),
           ),
@@ -2576,7 +2720,7 @@ WHERE ${whereConditions.join(" AND ")}
         await this.#perspective.executeAction(
           actions,
           this.#baseExpression,
-          [{ name: "value", value }],
+          [{ name: "value", value: toId(value) }],
           batchId,
         );
       }
@@ -2604,8 +2748,8 @@ WHERE ${whereConditions.join(" AND ")}
    * ```
    */
   async save(batchId?: string) {
-    // We use createSubject's initialValues to set properties (but not collections)
-    // We then later use innerUpdate to set collections
+    // We use createSubject's initialValues to set properties (but not relations)
+    // We then later use innerUpdate to set relations
 
     let batchCreatedHere = false;
     if (!batchId) {
@@ -2613,7 +2757,7 @@ WHERE ${whereConditions.join(" AND ")}
       batchCreatedHere = true;
     }
 
-    // First filter out the properties that are not collections (arrays)
+    // First filter out the properties that are not relations (arrays)
     const initialValues = {};
     for (const [key, value] of Object.entries(this)) {
       if (
@@ -2649,7 +2793,7 @@ WHERE ${whereConditions.join(" AND ")}
       batchId,
     );
 
-    // Set collections
+    // Set relations
     await this.innerUpdate(false, batchId);
 
     // If we got a batchId passed in, we let the caller decide when to commit.
@@ -2707,9 +2851,9 @@ WHERE ${whereConditions.join(" AND ")}
         } else if (value !== undefined && value !== null && value !== "") {
           if (setProperties) {
             // Check if this is a relation (has relation metadata)
-            const collMetadata = this.getRelationMetadata(key);
-            if (collMetadata) {
-              // Skip - it's a collection, not a regular property
+            const relationMetadata = this.getRelationMetadata(key);
+            if (relationMetadata) {
+              // Skip - it's a relation, not a regular property
               continue;
             }
             await this.setProperty(key, value, batchId);
@@ -2720,10 +2864,10 @@ WHERE ${whereConditions.join(" AND ")}
   }
 
   /**
-   * Updates the model instance's properties and collections.
+   * Updates the model instance's properties and relations.
    *
    * @param batchId - Optional batch ID for batch operations
-   * @throws Will throw if property setting or collection updates fail
+   * @throws Will throw if property setting or relation updates fail
    *
    * @example
    * ```typescript
@@ -2744,7 +2888,7 @@ WHERE ${whereConditions.join(" AND ")}
   }
 
   /**
-   * Gets the model instance with all properties and collections populated.
+   * Gets the model instance with all properties and relations populated.
    *
    * @returns The populated model instance
    * @throws Will throw if data retrieval fails
@@ -2933,7 +3077,7 @@ WHERE ${whereConditions.join(" AND ")}
             value: [],
           });
 
-          // Add collection methods
+          // Add relation methods
           const adderName = `add${capitalize(propertyName)}`;
           const removerName = `remove${capitalize(propertyName)}`;
           const setterName = `set${capitalize(propertyName)}`;

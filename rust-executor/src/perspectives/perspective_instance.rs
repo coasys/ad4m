@@ -88,8 +88,8 @@ pub enum Action {
     RemoveLink,
     #[serde(rename = "setSingleTarget")]
     SetSingleTarget,
-    #[serde(rename = "collectionSetter")]
-    CollectionSetter,
+    #[serde(rename = "relationSetter")]
+    RelationSetter,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -3344,7 +3344,7 @@ impl PerspectiveInstance {
                     )
                     .await?;
                 }
-                Action::CollectionSetter => {
+                Action::RelationSetter => {
                     let link_expressions = self
                         .get_links(&LinkQuery {
                             source: Some(source.clone()),

@@ -18,16 +18,16 @@ collection(c, "comments").
 collection_getter(c, Base, "comments", List) :- findall(C, triple(Base, "todo://comment", C), List).
 collection_adder(c, "comments", '[{action: "addLink", source: "this", predicate: "todo://comment", target: "value"}]').
 collection_remover(c, "comments", '[{action: "removeLink", source: "this", predicate: "todo://comment", target: "value"}]').
-collection_setter(c, "comments", '[{action: "collectionSetter", source: "this", predicate: "todo://comment", target: "value"}]').
+collection_setter(c, "comments", '[{action: "relationSetter", source: "this", predicate: "todo://comment", target: "value"}]').
 
 collection(c, "entries").
 collection_getter(c, Base, "entries", List) :- findall(C, triple(Base, "flux://entry_type", C), List).
 collection_adder(c, "entries", '[{action: "addLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
 collection_remover(c, "entries", '[{action: "removeLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
-collection_setter(c, "entries", '[{action: "collectionSetter", source: "this", predicate: "flux://entry_type", target: "value"}]').
+collection_setter(c, "entries", '[{action: "relationSetter", source: "this", predicate: "flux://entry_type", target: "value"}]').
 
 collection(c, "messages").
 collection_getter(c, Base, "messages", List) :- setof(Target, (triple(Base, "flux://entry_type", Target), instance(OtherClass, Target), subject_class("Message", OtherClass)), List).
 collection_adder(c, "messages", '[{action: "addLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
 collection_remover(c, "messages", '[{action: "removeLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
-collection_setter(c, "messages", '[{action: "collectionSetter", source: "this", predicate: "flux://entry_type", target: "value"}]').
+collection_setter(c, "messages", '[{action: "relationSetter", source: "this", predicate: "flux://entry_type", target: "value"}]').
