@@ -1489,7 +1489,7 @@ export class PerspectiveProxy {
                     writablePredicates.add(prop.path);
                 }
 
-                const isCollection = prop.collection || (prop.adder && prop.adder.length > 0 && !prop.maxCount);
+                const isCollection = prop.adder && prop.adder.length > 0;
                 if (isCollection) {
                     collections.set(prop.name, { predicate: prop.path });
                 } else {
