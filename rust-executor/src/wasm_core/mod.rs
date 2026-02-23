@@ -494,6 +494,182 @@ fn host_sync_state_changed(env: FunctionEnvMut<HostEnv>, data_ptr: u32, data_len
     };
     crate::perspectives::handle_sync_state_changed_from_link_language(state, language_address);
 }
+/// Host function: `hc_install_app(data_ptr, data_len) -> fat_ptr`
+/// Installs a Holochain app from raw .happ bundle bytes.
+fn host_hc_install_app(mut env: FunctionEnvMut<HostEnv>, data_ptr: u32, data_len: u32) -> u64 {
+    let (host_env, mut store) = env.data_and_store_mut();
+    let memory = match host_env.get_memory() {
+        Ok(m) => m.clone(),
+        Err(e) => {
+            error!("host_hc_install_app: {}", e);
+            return 0;
+        }
+    };
+    let view = memory.view(&store);
+    let data = match read_guest_bytes(&view, data_ptr, data_len) {
+        Ok(d) => d,
+        Err(e) => {
+            error!("host_hc_install_app: read error: {}", e);
+            return 0;
+        }
+    };
+    let request: AbiHcInstallAppRequest = match from_json_bytes(&data) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("host_hc_install_app: JSON parse error: {}", e);
+            return 0;
+        }
+    };
+
+    let language_address = host_env.language_address.clone();
+    let handle = host_env.tokio_handle.clone();
+
+    let result = tokio::task::block_in_place(|| {
+        handle.block_on(async {
+            let hc_service = match crate::holochain_service::interface::maybe_get_holochain_service().await {
+                Some(s) => s,
+                None => {
+                    return Err(anyhow::anyhow!("Holochain service not available"));
+                }
+            };
+            let agent_key = hc_service.get_agent_key().await?;
+            let payload = holochain::prelude::InstallAppPayload {
+                source: holochain::prelude::AppBundleSource::Bytes(request.happ_bytes.into()),
+                agent_key: Some(agent_key),
+                installed_app_id: Some(language_address.clone()),
+                network_seed: None,
+                roles_settings: None,
+                ignore_genesis_failure: false,
+            };
+            hc_service.install_app(payload).await
+        })
+    });
+
+    let response = match result {
+        Ok(app_info) => serde_json::json!({"Ok": format!("{:?}", app_info)}),
+        Err(e) => serde_json::json!({"error": format!("{}", e)}),
+    };
+
+    let json = match serde_json::to_vec(&response) {
+        Ok(j) => j,
+        Err(e) => {
+            error!("host_hc_install_app: JSON serialize error: {}", e);
+            return 0;
+        }
+    };
+    match alloc_and_write(&mut store, host_env, &json) {
+        Ok(ptr) => encode_fat_ptr(ptr, json.len() as u32),
+        Err(e) => {
+            error!("host_hc_install_app: alloc error: {}", e);
+            0
+        }
+    }
+}
+
+/// Host function: `hc_remove_app(data_ptr, data_len) -> fat_ptr`
+/// Removes a Holochain app by its installed app ID.
+fn host_hc_remove_app(mut env: FunctionEnvMut<HostEnv>, data_ptr: u32, data_len: u32) -> u64 {
+    let (host_env, mut store) = env.data_and_store_mut();
+    let memory = match host_env.get_memory() {
+        Ok(m) => m.clone(),
+        Err(e) => {
+            error!("host_hc_remove_app: {}", e);
+            return 0;
+        }
+    };
+    let view = memory.view(&store);
+    let data = match read_guest_bytes(&view, data_ptr, data_len) {
+        Ok(d) => d,
+        Err(e) => {
+            error!("host_hc_remove_app: read error: {}", e);
+            return 0;
+        }
+    };
+    let request: AbiHcRemoveAppRequest = match from_json_bytes(&data) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("host_hc_remove_app: JSON parse error: {}", e);
+            return 0;
+        }
+    };
+
+    let handle = host_env.tokio_handle.clone();
+
+    let result = tokio::task::block_in_place(|| {
+        handle.block_on(async {
+            let hc_service = match crate::holochain_service::interface::maybe_get_holochain_service().await {
+                Some(s) => s,
+                None => {
+                    return Err(anyhow::anyhow!("Holochain service not available"));
+                }
+            };
+            hc_service.remove_app(request.app_id).await
+        })
+    });
+
+    let response = match result {
+        Ok(()) => serde_json::json!({"Ok": true}),
+        Err(e) => serde_json::json!({"error": format!("{}", e)}),
+    };
+
+    let json = match serde_json::to_vec(&response) {
+        Ok(j) => j,
+        Err(e) => {
+            error!("host_hc_remove_app: JSON serialize error: {}", e);
+            return 0;
+        }
+    };
+    match alloc_and_write(&mut store, host_env, &json) {
+        Ok(ptr) => encode_fat_ptr(ptr, json.len() as u32),
+        Err(e) => {
+            error!("host_hc_remove_app: alloc error: {}", e);
+            0
+        }
+    }
+}
+
+/// Host function: `hc_get_agent_key() -> fat_ptr`
+/// Returns the agent's Holochain public key.
+fn host_hc_get_agent_key(mut env: FunctionEnvMut<HostEnv>) -> u64 {
+    let (host_env, mut store) = env.data_and_store_mut();
+    let handle = host_env.tokio_handle.clone();
+
+    let result = tokio::task::block_in_place(|| {
+        handle.block_on(async {
+            let hc_service = match crate::holochain_service::interface::maybe_get_holochain_service().await {
+                Some(s) => s,
+                None => {
+                    return Err(anyhow::anyhow!("Holochain service not available"));
+                }
+            };
+            hc_service.get_agent_key().await
+        })
+    });
+
+    let response = match result {
+        Ok(agent_key) => {
+            let key_bytes: Vec<u8> = agent_key.get_raw_39().to_vec();
+            serde_json::json!({"Ok": key_bytes})
+        }
+        Err(e) => serde_json::json!({"error": format!("{}", e)}),
+    };
+
+    let json = match serde_json::to_vec(&response) {
+        Ok(j) => j,
+        Err(e) => {
+            error!("host_hc_get_agent_key: JSON serialize error: {}", e);
+            return 0;
+        }
+    };
+    match alloc_and_write(&mut store, host_env, &json) {
+        Ok(ptr) => encode_fat_ptr(ptr, json.len() as u32),
+        Err(e) => {
+            error!("host_hc_get_agent_key: alloc error: {}", e);
+            0
+        }
+    }
+}
+
 
 // ============================================================================
 // WASM Language Instance
@@ -986,6 +1162,9 @@ pub fn load_wasm_language_from_bytes(
             host_functions::HC_CALL => Function::new_typed_with_env(&mut store, &env, host_hc_call),
             host_functions::PERSPECTIVE_DIFF_RECEIVED => Function::new_typed_with_env(&mut store, &env, host_perspective_diff_received),
             host_functions::SYNC_STATE_CHANGED => Function::new_typed_with_env(&mut store, &env, host_sync_state_changed),
+            host_functions::HC_INSTALL_APP => Function::new_typed_with_env(&mut store, &env, host_hc_install_app),
+            host_functions::HC_REMOVE_APP => Function::new_typed_with_env(&mut store, &env, host_hc_remove_app),
+            host_functions::HC_GET_AGENT_KEY => Function::new_typed_with_env(&mut store, &env, host_hc_get_agent_key),
         }
     };
 
@@ -1077,6 +1256,23 @@ pub fn load_wasm_language_from_bytes(
         capabilities.has_is_immutable_expression,
         capabilities.has_links_adapter,
     );
+
+    // Call ad4m_init if the WASM module exports it (for DNA installation etc.)
+    if let Ok(init_fn) = instance.exports.get_typed_function::<(), u64>(&store, "ad4m_init") {
+        info!("Calling ad4m_init for WASM language: {}", language_name);
+        let init_result = init_fn.call(&mut store)
+            .map_err(|e| WasmLanguageError::RuntimeError(format!("ad4m_init call failed: {}", e)))?;
+        if init_result != 0 {
+            let (err_ptr, err_len) = decode_fat_ptr(init_result);
+            let memory = instance.exports.get_memory("memory")
+                .map_err(|e| WasmLanguageError::MemoryAccessError(format!("{}", e)))?;
+            let view = memory.view(&store);
+            let err_bytes = read_guest_bytes(&view, err_ptr, err_len)?;
+            let err_msg = String::from_utf8(err_bytes).unwrap_or_else(|_| "unknown error".to_string());
+            return Err(WasmLanguageError::RuntimeError(format!("ad4m_init failed: {}", err_msg)));
+        }
+        info!("ad4m_init completed successfully for: {}", language_name);
+    }
 
     Ok(WasmLanguageInstance {
         store,

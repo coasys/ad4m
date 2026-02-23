@@ -104,6 +104,9 @@ pub mod host_functions {
     pub const HC_CALL: &str = "hc_call";
     pub const PERSPECTIVE_DIFF_RECEIVED: &str = "perspective_diff_received";
     pub const SYNC_STATE_CHANGED: &str = "sync_state_changed";
+    pub const HC_INSTALL_APP: &str = "hc_install_app";
+    pub const HC_REMOVE_APP: &str = "hc_remove_app";
+    pub const HC_GET_AGENT_KEY: &str = "hc_get_agent_key";
 }
 
 // ============================================================================
@@ -264,4 +267,21 @@ mod tests {
         assert_eq!(decoded.target, link.target);
         assert_eq!(decoded.predicate, link.predicate);
     }
+}
+
+// ============================================================================
+// Holochain DNA Installation ABI Types
+// ============================================================================
+
+/// Request to install a Holochain app from raw .happ bundle bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbiHcInstallAppRequest {
+    /// Raw .happ file bytes
+    pub happ_bytes: Vec<u8>,
+}
+
+/// Request to remove a Holochain app by its installed app ID.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbiHcRemoveAppRequest {
+    pub app_id: String,
 }

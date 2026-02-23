@@ -166,3 +166,79 @@ pub fn holochain_call(dna_nick: &str, zome_name: &str, fn_name: &str, payload: &
 pub fn hc_call(dna_nick: &str, zome_name: &str, fn_name: &str, payload: &[u8]) -> Option<Vec<u8>> {
     holochain_call(dna_nick, zome_name, fn_name, payload).ok()
 }
+
+// ============================================================================
+// Holochain DNA Installation Host Functions
+// ============================================================================
+
+extern "C" {
+    #[link_name = "hc_install_app"]
+    fn _host_hc_install_app(data_ptr: u32, data_len: u32) -> u64;
+
+    #[link_name = "hc_remove_app"]
+    fn _host_hc_remove_app(data_ptr: u32, data_len: u32) -> u64;
+
+    #[link_name = "hc_get_agent_key"]
+    fn _host_hc_get_agent_key() -> u64;
+}
+
+/// Install a Holochain app from raw .happ bundle bytes.
+///
+/// The app will be installed with the language address as the installed_app_id,
+/// using the agent's key and empty membrane proofs.
+///
+/// Returns the AppInfo as a JSON value on success.
+pub fn holochain_install_app(happ_bytes: &[u8]) -> Result<serde_json::Value, String> {
+    #[derive(Serialize)]
+    struct HcInstallAppRequest {
+        happ_bytes: Vec<u8>,
+    }
+    let request = HcInstallAppRequest {
+        happ_bytes: happ_bytes.to_vec(),
+    };
+    let json = serde_json::to_vec(&request).map_err(|e| format!("serialize error: {}", e))?;
+    let fat_input = write_output(&json);
+    let (ptr, len) = decode_fat_ptr(fat_input);
+    let fat = unsafe { _host_hc_install_app(ptr, len) };
+    let bytes = read_host_result(fat).ok_or_else(|| "hc_install_app returned null".to_string())?;
+    let val: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("parse error: {}", e))?;
+    if let Some(err) = val.get("error") {
+        return Err(err.as_str().unwrap_or("unknown error").to_string());
+    }
+    Ok(val)
+}
+
+/// Remove a Holochain app by its installed app ID.
+pub fn holochain_remove_app(app_id: &str) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct HcRemoveAppRequest<'a> {
+        app_id: &'a str,
+    }
+    let request = HcRemoveAppRequest { app_id };
+    let json = serde_json::to_vec(&request).map_err(|e| format!("serialize error: {}", e))?;
+    let fat_input = write_output(&json);
+    let (ptr, len) = decode_fat_ptr(fat_input);
+    let fat = unsafe { _host_hc_remove_app(ptr, len) };
+    let bytes = read_host_result(fat).ok_or_else(|| "hc_remove_app returned null".to_string())?;
+    let val: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("parse error: {}", e))?;
+    if let Some(err) = val.get("error") {
+        return Err(err.as_str().unwrap_or("unknown error").to_string());
+    }
+    Ok(())
+}
+
+/// Get the agent's Holochain public key bytes.
+pub fn holochain_get_agent_key() -> Result<Vec<u8>, String> {
+    let fat = unsafe { _host_hc_get_agent_key() };
+    let bytes = read_host_result(fat).ok_or_else(|| "hc_get_agent_key returned null".to_string())?;
+    let val: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("parse error: {}", e))?;
+    if let Some(err) = val.get("error") {
+        return Err(err.as_str().unwrap_or("unknown error").to_string());
+    }
+    if let Some(ok_data) = val.get("Ok") {
+        if let Some(arr) = ok_data.as_array() {
+            return Ok(arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect());
+        }
+    }
+    Err("unexpected response format".to_string())
+}
