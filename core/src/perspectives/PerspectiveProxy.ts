@@ -1458,14 +1458,8 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Extracts subject class metadata from SDNA by parsing the Prolog text.
-     * Parses the instance rule to extract required predicates.
-     * Returns required predicates that define what makes something an instance,
-     * plus a map of property/collection names to their predicates.
-     */
-    /**
-     * Gets subject class metadata from SHACL links (Prolog-free implementation).
-     * Uses the link API directly instead of SurrealDB queries.
+     * Gets subject class metadata from SHACL links using SHACLShape.fromLinks().
+     * Retrieves the SHACL shape and extracts metadata for instance queries.
      */
     async getSubjectClassMetadataFromSDNA(className: string): Promise<{
         requiredPredicates: string[],
@@ -1474,123 +1468,53 @@ export class PerspectiveProxy {
         collections: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
     } | null> {
         try {
-            // Resolve the exact SHACL shape URI from the name mapping to avoid overlapping class name issues
-            const nameMapping = Literal.fromUrl(`literal://string:shacl://${className}`);
-            const shapeUriLinks = await this.get(new LinkQuery({
-                source: nameMapping.toUrl(),
-                predicate: "ad4m://shacl_shape_uri"
-            }));
-            
-            if (shapeUriLinks.length === 0) {
+            // Use getShacl() to retrieve the shape via SHACLShape.fromLinks()
+            const shape = await this.getShacl(className);
+            if (!shape) {
                 console.warn(`No SHACL metadata found for ${className}`);
                 return null;
             }
-            
-            const shapeUri = shapeUriLinks[0].data.target;
-            
-            // Get the target class URI from the shape
-            const targetClassLinks = await this.get(new LinkQuery({
-                source: shapeUri,
-                predicate: "sh://targetClass"
-            }));
-            
-            if (targetClassLinks.length === 0) {
-                console.warn(`No target class found for SHACL shape ${shapeUri}`);
-                return null;
-            }
-            
-            const classUri = targetClassLinks[0].data.target;
-            
+
             const requiredPredicates: string[] = [];
             const requiredTriples: Array<{predicate: string, target?: string}> = [];
             const properties = new Map<string, { predicate: string, resolveLanguage?: string }>();
             const collections = new Map<string, { predicate: string, instanceFilter?: string }>();
-            
-            // Get all property shapes FIRST to know which predicates are from properties vs flags
-            const propertyPredicates = new Set<string>();
-            const writablePredicates = new Set<string>(); // Track which predicates are writable
-            const propertyLinks = await this.get(new LinkQuery({
-                source: shapeUri,
-                predicate: "sh://property"
-            }));
-            
-            for (const propLink of propertyLinks) {
-                const propUri = propLink.data.target;
-                // Extract property name from URI (e.g., "todo://Todo.title" -> "title")
-                const propNameMatch = propUri.match(/\.([^.]+)$/);
-                if (!propNameMatch) continue;
-                const propName = propNameMatch[1];
-                
-                // Get property details
-                const propDetailLinks = await this.get(new LinkQuery({
-                    source: propUri
-                }));
-                
-                let predicate: string | undefined;
-                let resolveLanguage: string | undefined;
-                let isCollection = false;
-                let isWritable = false;
-                
-                for (const detail of propDetailLinks) {
-                    if (detail.data.predicate === 'sh://path') {
-                        predicate = detail.data.target;
-                    } else if (detail.data.predicate === 'ad4m://resolveLanguage') {
-                        resolveLanguage = detail.data.target?.replace('literal://string:', '');
-                    } else if (detail.data.predicate === 'rdf://type' && detail.data.target === 'ad4m://Collection') {
-                        isCollection = true;
-                    } else if (detail.data.predicate === 'ad4m://writable' && detail.data.target === 'literal://true') {
-                        isWritable = true;
-                    }
+
+            // Build property/collection maps and track writable predicates from shape properties
+            const writablePredicates = new Set<string>();
+            for (const prop of shape.properties) {
+                if (!prop.path || !prop.name) continue;
+
+                if (prop.writable) {
+                    writablePredicates.add(prop.path);
                 }
-                
-                if (predicate) {
-                    propertyPredicates.add(predicate); // Track predicates that come from properties
-                    if (isWritable) {
-                        writablePredicates.add(predicate); // Track which are writable
-                    }
-                    if (isCollection) {
-                        collections.set(propName, { predicate });
-                    } else {
-                        properties.set(propName, { predicate, resolveLanguage });
-                    }
+
+                const isCollection = prop.collection || (prop.adder && prop.adder.length > 0 && !prop.maxCount);
+                if (isCollection) {
+                    collections.set(prop.name, { predicate: prop.path });
+                } else {
+                    properties.set(prop.name, {
+                        predicate: prop.path,
+                        resolveLanguage: prop.resolveLanguage
+                    });
                 }
             }
-            
-            // Get constructor actions from SHACL shape
-            const constructorLinks = await this.get(new LinkQuery({
-                source: shapeUri,
-                predicate: "ad4m://constructor"
-            }));
-            
-            if (constructorLinks.length > 0) {
-                const constructorTarget = constructorLinks[0].data.target;
-                // Parse constructor actions from literal://string:[{...}]
-                if (constructorTarget && constructorTarget.startsWith('literal://string:')) {
-                    try {
-                        const actionsJson = constructorTarget.substring('literal://string:'.length);
-                        const actions = JSON.parse(actionsJson);
-                        for (const action of actions) {
-                            if (action.predicate) {
-                                requiredPredicates.push(action.predicate);
-                                // Flags: fixed target value + in propertyPredicates + NOT writable -> require exact match
-                                // Properties with initial: has target + in propertyPredicates + IS writable -> any value OK
-                                // Other: not in propertyPredicates -> require exact match if has target
-                                const isWritableProperty = writablePredicates.has(action.predicate);
-                                if (action.target && action.target !== 'value' && !isWritableProperty) {
-                                    // Either a flag (not writable) or not a property at all - require exact target
-                                    requiredTriples.push({ predicate: action.predicate, target: action.target });
-                                } else {
-                                    // Writable property with initial value - just require predicate exists
-                                    requiredTriples.push({ predicate: action.predicate });
-                                }
-                            }
+
+            // Extract required predicates/triples from constructor actions
+            if (shape.constructor_actions) {
+                for (const action of shape.constructor_actions) {
+                    if (action.predicate) {
+                        requiredPredicates.push(action.predicate);
+                        const isWritableProperty = writablePredicates.has(action.predicate);
+                        if (action.target && action.target !== 'value' && !isWritableProperty) {
+                            requiredTriples.push({ predicate: action.predicate, target: action.target });
+                        } else {
+                            requiredTriples.push({ predicate: action.predicate });
                         }
-                    } catch (e) {
-                        console.warn(`Failed to parse constructor actions for ${className}:`, e);
                     }
                 }
             }
-            
+
             return { requiredPredicates, requiredTriples, properties, collections };
         } catch (e) {
             console.error(`Error getting SHACL metadata for ${className}:`, e);
@@ -2061,27 +1985,8 @@ export class PerspectiveProxy {
         // Get SHACL shape (W3C standard + AD4M action definitions)
         const { shape } = jsClass.generateSHACL();
 
-        // Serialize SHACL shape to JSON for Rust backend
-        const shaclJson = JSON.stringify({
-            target_class: shape.targetClass,
-            constructor_actions: shape.constructor_actions,
-            destructor_actions: shape.destructor_actions,
-            properties: shape.properties.map((p: any) => ({
-                path: p.path,
-                name: p.name,
-                datatype: p.datatype,
-                min_count: p.minCount,
-                max_count: p.maxCount,
-                writable: p.writable,
-                local: p.local,
-                resolve_language: p.resolveLanguage,
-                node_kind: p.nodeKind,
-                collection: p.collection,
-                setter: p.setter,
-                adder: p.adder,
-                remover: p.remover
-            }))
-        });
+        // Serialize SHACL shape to JSON for Rust backend using SHACLShape.toJSON()
+        const shaclJson = JSON.stringify(shape.toJSON());
 
         // Pass SHACL JSON to backend (Prolog-free)
         // Backend stores SHACL links directly
