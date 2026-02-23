@@ -466,6 +466,7 @@ impl JsCore {
                                                 handlers.get(&cell_id_key).cloned()
                                             };
                                             if let Some(lang_address) = maybe_lang_address {
+                                                // Route to per-language runtime only
                                                 let signal_script = format!(
                                                     "await globalThis.__handleHolochainSignal__({{cell_id: [{}, {}], zome_name: '{}', payload: {}}})",
                                                     dna_hash_dbg, agent_pubkey_dbg, zome_name, payload_str
@@ -477,23 +478,23 @@ impl JsCore {
                                                         log::warn!("Failed to route Holochain signal to language {}: {}", lang_addr, e);
                                                     }
                                                 });
+                                            } else {
+                                                // No per-language runtime registered; fall back to legacy JS handler
+                                                let js_core_cloned = js_core.clone();
+                                                tokio::task::spawn_local(async move {
+                                                    let script = format!(
+                                                        "await core.holochainService.handleCallback({{cell_id: [{}, {}], zome_name: '{}', signal: {}}})",
+                                                        dna_hash_dbg, agent_pubkey_dbg, zome_name, payload_str
+                                                    );
+                                                    match js_core_cloned.execute_async_smart(script).await {
+                                                        Ok(_res) => {
+                                                        }
+                                                        Err(err) => {
+                                                            error!("Error executing callback: {:?}", err);
+                                                        }
+                                                    }
+                                                });
                                             }
-
-                                            // Also dispatch to the legacy JS handler
-                                            let js_core_cloned = js_core.clone();
-                                            tokio::task::spawn_local(async move {
-                                                let script = format!(
-                                                    "await core.holochainService.handleCallback({{cell_id: [{}, {}], zome_name: '{}', signal: {}}})",
-                                                    dna_hash_dbg, agent_pubkey_dbg, zome_name, payload_str
-                                                );
-                                                match js_core_cloned.execute_async_smart(script).await {
-                                                    Ok(_res) => {
-                                                    }
-                                                    Err(err) => {
-                                                        error!("Error executing callback: {:?}", err);
-                                                    }
-                                                }
-                                            });
                                         },
                                         Signal::System(_) => {
                                             // Handle the received signal here

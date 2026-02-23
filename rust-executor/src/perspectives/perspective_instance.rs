@@ -295,7 +295,7 @@ impl PerspectiveInstance {
                     .expect("must be some")
                     .clone();
 
-                log::info!(
+                log::debug!(
                     "ensure_link_language: checking language {} for perspective",
                     nh.data.link_language
                 );

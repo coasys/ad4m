@@ -107,11 +107,11 @@ impl LanguageRuntime {
                 const language = globalThis.__ad4m_language_instance__;
                 if (language && language.linksAdapter) {{
                     language.linksAdapter.addCallback((diff) => {{
-                        Deno.core.ops.perspective_diff_received(diff, "{addr}");
+                        LANGUAGE_CONTROLLER.perspectiveDiffReceived(diff, "{addr}");
                     }});
                     if (language.linksAdapter.addSyncStateChangeCallback) {{
                         language.linksAdapter.addSyncStateChangeCallback((state) => {{
-                            Deno.core.ops.sync_state_changed(state, "{addr}");
+                            LANGUAGE_CONTROLLER.syncStateChanged(state, "{addr}");
                         }});
                     }}
                     return true;
@@ -129,7 +129,7 @@ impl LanguageRuntime {
                 const language = globalThis.__ad4m_language_instance__;
                 if (language && language.telepresenceAdapter) {{
                     language.telepresenceAdapter.registerSignalCallback((signal, recipientDid) => {{
-                        Deno.core.ops.telepresence_signal_received(signal, "{addr}", recipientDid);
+                        LANGUAGE_CONTROLLER.telepresenceSignalReceived(signal, "{addr}", recipientDid);
                     }});
                     return true;
                 }}

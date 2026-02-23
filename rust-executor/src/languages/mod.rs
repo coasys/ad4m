@@ -221,13 +221,12 @@ impl LanguageController {
         };
 
         if let Some(handle) = handle {
-            return handle
-                .execute(script.to_string())
-                .await
-                .map_err(|e| LanguageError::RuntimeError {
+            return handle.execute(script.to_string()).await.map_err(|e| {
+                LanguageError::RuntimeError {
                     address: language_address.to_string(),
                     message: e,
-                });
+                }
+            });
         }
 
         // Fall back to JS-side execution for dynamically installed languages.
@@ -236,6 +235,7 @@ impl LanguageController {
         // Note: We wrap the script in parentheses for the return statement to
         // avoid JavaScript ASI (automatic semicolon insertion) when the script
         // starts with a newline.
+        log::debug!("execute_on_language: JS fallback for {}", language_address);
         let js_script = format!(
             r#"
             (async () => {{
@@ -249,25 +249,14 @@ impl LanguageController {
             language_address, language_address, script
         );
 
-        log::info!(
-            "execute_on_language JS fallback for {}: script = {}",
-            language_address,
-            &script[..script.len().min(200)]
-        );
         let mut js_core = self.js_core.clone();
-        let result = js_core
+        js_core
             .execute(js_script)
             .await
             .map_err(|e| LanguageError::RuntimeError {
                 address: language_address.to_string(),
                 message: e.to_string(),
-            });
-        log::info!(
-            "execute_on_language JS fallback result for {}: {:?}",
-            language_address,
-            result.as_ref().map(|r| &r[..r.len().min(200)])
-        );
-        result
+            })
     }
 
     /// Calculate IPFS hash for a language bundle using the same algorithm as utils_extension::hash()
@@ -365,10 +354,14 @@ impl LanguageController {
         let bundle_path = languages_directory().join(address).join("bundle.js");
 
         if bundle_path.exists() {
-            // Bundle already on disk
-            info!("Language bundle already on disk: {}", address);
+            log::debug!("Language bundle already on disk: {}", address);
             return Ok(());
         }
+
+        log::debug!(
+            "install_language_from_address: fetching {} from language-language",
+            address
+        );
 
         // Fetch from the language language
         let language_language_address = {
@@ -428,6 +421,28 @@ impl LanguageController {
 
     /// Load system languages (language language first, then agent/neighbourhood/perspective)
     pub async fn load_system_languages(
+        &self,
+        language_language_only: bool,
+    ) -> Result<(), LanguageError> {
+        let result = self
+            .load_system_languages_inner(language_language_only)
+            .await;
+
+        // Always signal that languages are ready, even on failure.
+        // During the transition period, the JS-side LanguageController handles
+        // language loading and the Rust side may fail. Other operations like
+        // install_language() wait on this signal and must not be blocked forever.
+        let _ = self.languages_ready_tx.send(true);
+        if result.is_ok() {
+            info!("All languages loaded and ready");
+        } else {
+            warn!("System language loading had errors, but signaling ready for JS-side fallback");
+        }
+
+        result
+    }
+
+    async fn load_system_languages_inner(
         &self,
         language_language_only: bool,
     ) -> Result<(), LanguageError> {
@@ -511,12 +526,10 @@ impl LanguageController {
             }
 
             // Step 4: Load any other installed languages from disk
-            self.load_installed_languages().await?;
+            if let Err(e) = self.load_installed_languages().await {
+                warn!("Failed to load installed languages: {}", e);
+            }
         }
-
-        // Signal that languages are ready
-        let _ = self.languages_ready_tx.send(true);
-        info!("All languages loaded and ready");
 
         Ok(())
     }
@@ -570,24 +583,27 @@ impl LanguageController {
     }
 
     pub async fn install_language(language: Address) -> Result<(), AnyError> {
+        log::debug!("install_language called for: {}", language);
         let mut controller = Self::global_instance();
 
-        // Wait for system languages to be ready before installing.
-        // This ensures the language-language is loaded and can fetch bundles.
-        let mut rx = controller.languages_ready_rx.clone();
-        while !*rx.borrow() {
-            rx.changed()
-                .await
-                .map_err(|e| AnyError::msg(format!("languages_ready channel closed: {}", e)))?;
+        // Try to install/save the language bundle on the Rust side.
+        // This may fail if the language-language isn't loaded in Rust runtimes yet.
+        // That's OK — the JS side will handle it.
+        match controller.install_language_from_address(&language).await {
+            Ok(()) => {
+                log::debug!(
+                    "install_language: Rust-side install succeeded for {}",
+                    language
+                );
+            }
+            Err(e) => {
+                log::debug!("install_language: Rust-side install failed for {} ({}), falling through to JS side", language, e);
+            }
         }
 
-        controller
-            .install_language_from_address(&language)
-            .await
-            .map_err(|e| AnyError::msg(format!("{}", e)))?;
-
-        // After saving the bundle to disk, tell the JS-side LanguageController
-        // to install/load the language so it's available via language_by_address().
+        // Tell the JS-side LanguageController to install/load the language.
+        // This handles both the case where Rust saved the bundle and the case where
+        // the JS side needs to fetch and install it.
         let script = format!(
             r#"
             (async () => {{
@@ -601,7 +617,11 @@ impl LanguageController {
             language, language
         );
         if let Err(e) = controller.js_core.execute(script).await {
-            log::warn!("Failed to trigger JS-side language install for {}: {}", language, e);
+            log::warn!(
+                "Failed to trigger JS-side language install for {}: {}",
+                language,
+                e
+            );
         }
 
         Ok(())
@@ -705,7 +725,7 @@ impl LanguageController {
         // JS-side LanguageController which handles loading.
         let bundle_path = languages_directory().join(&address).join("bundle.js");
         if bundle_path.exists() {
-            log::info!("language_by_address: found bundle on disk for {}", address);
+            log::debug!("language_by_address: found bundle on disk for {}", address);
             let language = Language::new(address, controller.js_core.clone());
             return Ok(Some(language));
         }
