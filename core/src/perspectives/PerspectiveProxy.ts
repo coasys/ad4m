@@ -1959,50 +1959,55 @@ export class PerspectiveProxy {
             return null;
         }
 
-        // Get all subject classes via SHACL links
-        const classLinks = await this.get(new LinkQuery({ predicate: "rdf://type", target: "ad4m://SubjectClass" }));
+        // Single SurrealDB query to find all classes and their properties/collections
+        const query = `SELECT 
+            in.uri AS shape_source, 
+            predicate, 
+            out.uri AS target 
+        FROM link 
+        WHERE predicate IN ['rdf://type', 'sh://property', 'sh://collection']`;
+        
+        const results = await this.querySurrealDB(query);
+        if (!results || results.length === 0) return null;
 
-        for (const link of classLinks) {
-            // Extract class name from source URI like "flux://Community" -> "Community"
-            const source = link.data.source;
-            const separatorIdx = source.indexOf("://");
-            if (separatorIdx < 0) continue;
-            const className = source.substring(separatorIdx + 3);
-            if (!className) continue;
+        // Build a map of className -> { properties, collections }
+        const classShapes: Map<string, { shapeUri: string, properties: string[], collections: string[] }> = new Map();
 
-            // Get SHACL properties for this class
-            const escaped = this.escapeRegExp(className);
-            const shapePattern = new RegExp(`[/:#]${escaped}Shape$`);
+        // First pass: find all subject classes
+        for (const r of results) {
+            if (r.predicate === 'rdf://type' && r.target === 'ad4m://SubjectClass') {
+                const source = r.shape_source;
+                const sepIdx = source.indexOf('://');
+                if (sepIdx < 0) continue;
+                const className = source.substring(sepIdx + 3).split('/').pop();
+                if (!className) continue;
+                classShapes.set(className, { shapeUri: source, properties: [], collections: [] });
+            }
+        }
 
-            // Get properties
-            const propLinks = await this.get(new LinkQuery({ predicate: "sh://property" }));
-            const classProps: string[] = [];
-            for (const pl of propLinks) {
-                if (shapePattern.test(pl.data.source)) {
-                    // Extract property name from target like "flux://Community.type" -> "type"
-                    const dotIdx = pl.data.target.lastIndexOf('.');
-                    if (dotIdx >= 0) {
-                        classProps.push(pl.data.target.substring(dotIdx + 1));
+        // Second pass: collect properties and collections for each class
+        for (const r of results) {
+            if (r.predicate === 'sh://property' || r.predicate === 'sh://collection') {
+                // Match shape source to class (e.g., "recipe://RecipeShape" -> "Recipe")
+                for (const [className, shape] of classShapes) {
+                    if (r.shape_source.endsWith(`${className}Shape`)) {
+                        const dotIdx = r.target.lastIndexOf('.');
+                        if (dotIdx < 0) continue;
+                        const name = r.target.substring(dotIdx + 1);
+                        if (r.predicate === 'sh://property') {
+                            shape.properties.push(name);
+                        } else {
+                            shape.collections.push(name);
+                        }
                     }
                 }
             }
+        }
 
-            // Get collections
-            const collLinks = await this.get(new LinkQuery({ predicate: "sh://collection" }));
-            const classCols: string[] = [];
-            for (const cl of collLinks) {
-                if (shapePattern.test(cl.data.source)) {
-                    const dotIdx = cl.data.target.lastIndexOf('.');
-                    if (dotIdx >= 0) {
-                        classCols.push(cl.data.target.substring(dotIdx + 1));
-                    }
-                }
-            }
-
-            // Check if all required properties and collections are present
-            const hasAllProps = properties.every(p => classProps.includes(p));
-            const hasAllCols = collections.every(c => classCols.includes(c));
-
+        // Find a class that has all required properties and collections
+        for (const [className, shape] of classShapes) {
+            const hasAllProps = properties.every(p => shape.properties.includes(p));
+            const hasAllCols = collections.every(c => shape.collections.includes(c));
             if (hasAllProps && hasAllCols) {
                 return className;
             }
