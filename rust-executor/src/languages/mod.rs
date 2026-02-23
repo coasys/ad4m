@@ -925,7 +925,7 @@ impl LanguageController {
 
         // Parse meta and add bundleType
         let mut meta_obj: serde_json::Value = serde_json::from_str(meta)
-            .unwrap_or(serde_json::json!({}));
+            .map_err(|e| deno_core::anyhow::anyhow!("Invalid meta JSON: {}", e))?;
         meta_obj["bundleType"] = serde_json::json!("wasm");
 
         // Compute hash for the address
