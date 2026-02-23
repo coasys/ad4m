@@ -76,6 +76,7 @@ impl LanguageInteractions for NoteStoreLanguage {
     }
 }
 
+impl LanguageInit for NoteStoreLanguage {}
 impl LanguageTeardown for NoteStoreLanguage {
     fn teardown(&mut self) {
         log("note-store: teardown");

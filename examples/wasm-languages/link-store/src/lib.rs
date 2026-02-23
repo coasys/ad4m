@@ -129,6 +129,7 @@ impl LanguageInteractions for LinkStoreLanguage {
     }
 }
 
+impl LanguageInit for LinkStoreLanguage {}
 impl LanguageTeardown for LinkStoreLanguage {
     fn teardown(&mut self) {
         log("link-store: teardown");
