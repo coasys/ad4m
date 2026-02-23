@@ -840,6 +840,124 @@ impl LanguageController {
         Ok(())
     }
 
+    /// Get the languages directory path from JS core
+    pub fn languages_path() -> String {
+        let instance = Self::global_instance();
+        format!("{}/ad4m/languages", instance.app_data_path)
+    }
+
+    /// Fetch language source from the language language via JS
+    async fn fetch_language_source(address: &str) -> Result<String, AnyError> {
+        Self::global_instance()
+            .js_core
+            .execute("await core.waitForLanguages()".into())
+            .await?;
+
+        let script = format!(
+            r#"await core.languageController.getLanguageSource("{}")"#,
+            address,
+        );
+        let result = Self::global_instance().js_core.execute(script).await?;
+        if result == "null" || result.is_empty() {
+            return Err(deno_core::anyhow::anyhow!("Language source not found: {}", address));
+        }
+        Ok(result.trim_matches('"').to_string())
+    }
+
+    /// Fetch language meta JSON from the language language via JS
+    async fn fetch_language_meta(address: &str) -> Result<String, AnyError> {
+        let script = format!(
+            r#"JSON.stringify(await core.languageController.getLanguageExpression("{}"))"#,
+            address,
+        );
+        Self::global_instance().js_core.execute(script).await
+    }
+
+    /// Check if a string looks like base64-encoded WASM (starts with AGFzbQ == \0asm)
+    #[cfg(feature = "wasm-languages")]
+    fn is_base64_wasm(data: &str) -> bool {
+        data.starts_with("AGFzbQ")
+    }
+
+    /// Decode base64 WASM, save to languages dir, and register
+    #[cfg(feature = "wasm-languages")]
+    async fn install_wasm_from_base64(base64_data: &str, address: &str) -> Result<(), AnyError> {
+        use base64::Engine;
+
+        let wasm_bytes = base64::engine::general_purpose::STANDARD
+            .decode(base64_data)
+            .map_err(|e| deno_core::anyhow::anyhow!("Base64 decode error: {}", e))?;
+
+        // Verify WASM magic
+        if wasm_bytes.len() < 4 || &wasm_bytes[0..4] != b"\0asm" {
+            return Err(deno_core::anyhow::anyhow!("Decoded data is not valid WASM"));
+        }
+
+        // Save to languages directory
+        let languages_path = Self::languages_path();
+        let lang_dir = format!("{}/{}", languages_path, address);
+        std::fs::create_dir_all(&lang_dir)?;
+        let bundle_path = format!("{}/bundle.wasm", lang_dir);
+        std::fs::write(&bundle_path, &wasm_bytes)?;
+        log::info!("Saved WASM bundle ({} bytes) to {}", wasm_bytes.len(), bundle_path);
+
+        // Register in WASM runtime
+        Self::install_wasm_language(std::path::Path::new(&bundle_path), address)?;
+        Ok(())
+    }
+
+    /// Publish a WASM language: base64-encode the binary and publish via language language
+    #[cfg(feature = "wasm-languages")]
+    pub async fn publish_wasm_language(
+        wasm_path: &std::path::Path,
+        meta: &str,
+    ) -> Result<String, AnyError> {
+        use base64::Engine;
+
+        let wasm_bytes = std::fs::read(wasm_path)?;
+
+        // Verify it's actually WASM
+        if wasm_bytes.len() < 4 || &wasm_bytes[0..4] != b"\0asm" {
+            return Err(deno_core::anyhow::anyhow!("File is not valid WASM: {}", wasm_path.display()));
+        }
+
+        let base64_data = base64::engine::general_purpose::STANDARD.encode(&wasm_bytes);
+
+        // Parse meta and add bundleType
+        let mut meta_obj: serde_json::Value = serde_json::from_str(meta)
+            .unwrap_or(serde_json::json!({}));
+        meta_obj["bundleType"] = serde_json::json!("wasm");
+
+        // Compute hash for the address
+        let hash_script = format!(
+            r#"UTILS.hash("{}")"#,
+            base64_data,
+        );
+        let hash = Self::global_instance().js_core.execute(hash_script).await?;
+        let hash = hash.trim_matches('"').to_string();
+        meta_obj["address"] = serde_json::json!(&hash);
+        let meta_json = serde_json::to_string(&meta_obj)?;
+
+        Self::global_instance()
+            .js_core
+            .execute("await core.waitForLanguages()".into())
+            .await?;
+
+        let script = format!(
+            r#"JSON.stringify(
+                await (core.languageController.getLanguageLanguage().expressionAdapter.putAdapter).createPublic({{
+                    bundle: `{}`,
+                    meta: {}
+                }})
+            )"#,
+            base64_data, meta_json,
+        );
+
+        let result = Self::global_instance().js_core.execute(script).await?;
+        log::info!("Published WASM language: {} (hash: {})", wasm_path.display(), hash);
+        Ok(result.trim_matches('"').to_string())
+    }
+
     pub async fn create_neighbourhood(neighbourhood: Neighbourhood) -> Result<Address, AnyError> {
         Self::create_neighbourhood_with_context(
             neighbourhood,

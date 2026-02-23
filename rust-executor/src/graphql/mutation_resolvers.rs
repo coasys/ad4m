@@ -1618,6 +1618,33 @@ impl Mutation {
         }
     }
 
+    async fn language_publish_wasm(
+        &self,
+        context: &RequestContext,
+        wasm_path: String,
+        meta: String,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &LANGUAGE_CREATE_CAPABILITY)?;
+        #[cfg(feature = "wasm-languages")]
+        {
+            let address = crate::languages::LanguageController::publish_wasm_language(
+                std::path::Path::new(&wasm_path),
+                &meta,
+            ).await.map_err(|e| FieldError::new(
+                format!("WASM publish error: {}", e),
+                coasys_juniper::Value::null(),
+            ))?;
+            return Ok(address);
+        }
+        #[cfg(not(feature = "wasm-languages"))]
+        {
+            Err(FieldError::new(
+                "WASM languages feature not enabled".to_string(),
+                coasys_juniper::Value::null(),
+            ))
+        }
+    }
+
     async fn language_write_settings(
         &self,
         context: &RequestContext,
