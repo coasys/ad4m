@@ -1121,7 +1121,6 @@ impl AIService {
         // Arc cloning is cheap (just increments ref count), saves 500MB-1.5GB per stream!
         // Language is set at build time, so include it in the cache key
         let whisper_model = {
-            let mut shared_models = self.shared_whisper_models.lock().await;
             // Parse language upfront and use canonical form for cache key
             let whisper_lang = if let Some(ref lang) = language {
                 Some(
@@ -1138,7 +1137,21 @@ impl AIService {
                 .unwrap_or_else(|| "auto".to_string());
             let model_key = format!("{:?}_{}", model_size, lang_key);
 
-            if !shared_models.contains_key(&model_key) {
+            // First check: acquire lock briefly to see if model already exists
+            let existing = {
+                let shared_models = self.shared_whisper_models.lock().await;
+                shared_models.get(&model_key).cloned()
+            }; // Lock dropped here
+
+            if let Some(model) = existing {
+                log::info!(
+                    "Reusing existing shared Whisper model {:?} (language: {}) for new stream",
+                    model_size,
+                    lang_key
+                );
+                model
+            } else {
+                // Model not found — build it outside the lock to avoid serializing callers
                 log::info!(
                     "Loading shared Whisper model {} ({:?}, language: {}) (ONE model per size, ~500MB-1.5GB)...",
                     model_id,
@@ -1161,17 +1174,14 @@ impl AIService {
                     model_size,
                     lang_key
                 );
-                shared_models.insert(model_key.clone(), Arc::new(model));
-            } else {
-                log::info!(
-                    "Reusing existing shared Whisper model {:?} (language: {}) for new stream",
-                    model_size,
-                    lang_key
-                );
-            }
 
-            // Clone the Arc - this is CHEAP! Just increments a reference count
-            shared_models.get(&model_key).unwrap().clone()
+                // Re-acquire lock and insert; use entry to handle race where another caller built it first
+                let mut shared_models = self.shared_whisper_models.lock().await;
+                let model_arc = shared_models
+                    .entry(model_key)
+                    .or_insert_with(|| Arc::new(model));
+                model_arc.clone()
+            }
         };
 
         log::info!("Opening transcription stream with model {:?}", model_size);
