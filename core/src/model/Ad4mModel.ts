@@ -12,7 +12,6 @@ import {
   relationRegistry,
 } from "./decorators";
 import { capitalize, propertyNameToSetterName } from "./util";
-import { escapeSurrealString } from "../utils";
 
 // ── Public types (re-exported so consumers see no change) ──────────────────
 export type {
@@ -73,12 +72,7 @@ export {
   buildSurrealSelectFields,
   buildSurrealSelectFieldsWithAggregation,
 } from "./query/SurrealQueryBuilder";
-import {
-  buildSurrealQuery,
-  buildSurrealCountQuery,
-  formatSurrealValue,
-  matchesCondition,
-} from "./query/SurrealQueryBuilder";
+import { formatSurrealValue } from "./query/SurrealQueryBuilder";
 
 // ── Hydration utilities (re-exported for advanced consumers) ──────────────
 export {
@@ -91,6 +85,9 @@ import {
   hydrateInstanceFromLinks,
   evaluateCustomGetters,
 } from "./query/hydration";
+
+// ── Static query operations (each static method below delegates here) ─────────
+import * as ops from "./query/operations";
 
 // ── Internal-only types ────────────────────────────────────────────────────
 type ValueTuple = [name: string, value: any, resolve?: boolean];
@@ -673,7 +670,12 @@ export class Ad4mModel {
 
       if (links && links.length > 0) {
         // ── 2. Shared hydration: properties + forward relations + timestamps ─
-        await hydrateInstanceFromLinks(this, links, metadata, this.#perspective);
+        await hydrateInstanceFromLinks(
+          this,
+          links,
+          metadata,
+          this.#perspective,
+        );
 
         // ── 3. Post-filters on forward relations ─────────────────────────────
         const forwardRelations = Object.entries(metadata.relations).filter(
@@ -697,7 +699,7 @@ export class Ad4mModel {
                 let condition = relationMeta.where.condition
                   .replace(/\$perspective/g, `'${this.#perspective.uuid}'`)
                   .replace(/\$base/g, `'${this.#baseExpression}'`)
-                  .replace(/Target/g, `'${value.replace(/'/g, "\'")}'`);
+                  .replace(/Target/g, `'${value.replace(/'/g, "'")}'`);
                 if (condition.trim().startsWith("WHERE")) {
                   condition = `array::len(SELECT * FROM link ${condition}) > 0`;
                 }
@@ -854,54 +856,19 @@ export class Ad4mModel {
     return this;
   }
 
-
-    /**
-   * Generates a SurrealQL query from a Query object.
+  /**
+   * Generates a SurrealQL query string for this model.
    *
-   * @description
-   * This method translates high-level query parameters into a SurrealQL query string
-   * that can be executed against the SurrealDB backend. Unlike Prolog queries which
-   * operate on SDNA-aware predicates, SurrealQL queries operate directly on raw links
-   * stored in SurrealDB.
-   *
-   * The generated query uses a CTE (Common Table Expression) pattern:
-   * 1. First, identify candidate base expressions by filtering links based on where conditions
-   * 2. Then, for each candidate base, resolve properties and relations via subqueries
-   * 3. Finally, apply ordering, pagination (LIMIT/START) at the SQL level
-   *
-   * Key architectural notes:
-   * - SurrealDB stores only raw links (source, predicate, target, author, timestamp)
-   * - No SDNA knowledge at the database level
-   * - Properties are resolved via subqueries that look for links with specific predicates
-   * - Relations are similar but return multiple values instead of one
-   * - Special fields (base, author, timestamp) are accessed directly, not via subqueries
-   *
-   * @param perspective - The perspective to query (used for metadata extraction)
+   * @param perspective - The perspective context
    * @param query - Query parameters (where, order, limit, offset, properties, relations)
    * @returns Complete SurrealQL query string ready for execution
-   *
-   * @example
-   * ```typescript
-   * const query = Recipe.queryToSurrealQL(perspective, {
-   *   where: { name: "Pasta", rating: { gt: 4 } },
-   *   order: { timestamp: "DESC" },
-   *   limit: 10
-   * });
-   * // Returns: SELECT source AS base, array::first(target[WHERE predicate = ...]) AS name, ...
-   * //          FROM link WHERE ... GROUP BY source ORDER BY timestamp DESC LIMIT 10
-   * ```
    */
   public static async queryToSurrealQL(
     perspective: PerspectiveProxy,
     query: Query,
   ): Promise<string> {
-    return buildSurrealQuery(this.getModelMetadata(), query);
+    return ops.queryToSurrealQL(this as any, perspective, query);
   }
-
-  // ── The private static query-building helpers (buildGraphTraversalWhereClause,
-  // buildSurrealWhereClause, buildSurrealSelectFields, buildSurrealSelectFieldsWithAggregation,
-  // formatSurrealValue) have been extracted to query/SurrealQueryBuilder.ts.
-  // They are re-exported above so any external callers continue to work.
 
   /**
    * Converts SurrealDB query results to Ad4mModel instances.
@@ -909,6 +876,7 @@ export class Ad4mModel {
    * @param perspective - The perspective context
    * @param query - The query parameters used
    * @param result - Array of result objects from SurrealDB
+   * @param _hydrateRelations - Set to false to skip nested relatedModel hydration
    * @returns Promise resolving to results with total count
    *
    * @internal
@@ -920,319 +888,15 @@ export class Ad4mModel {
     result: any[],
     _hydrateRelations = true,
   ): Promise<ResultsWithTotalCount<T>> {
-    if (!result || result.length === 0) return { results: [], totalCount: 0 };
-
-    const metadata = this.getModelMetadata();
-    const requestedProperties = query?.properties || [];
-    const requestedRelations = query?.relations || [];
-
-    // The query used GROUP BY with graph traversal, so each row has:
-    // - source: the node ID (e.g., "node:abc123")
-    // - source_uri: the actual URI (the base expression)
-    // - links: array of link objects with {predicate, target, author, timestamp}
-
-    const instances: T[] = [];
-    for (const row of result) {
-      try {
-        const base = row.source_uri;
-        if (!base) continue;
-
-        const links: any[] = row.links || [];
-        const instance = new this(perspective, base) as any;
-
-        // Hydrate properties, forward relations, author and timestamps
-        // using the shared implementation (same semantics as getData()).
-        await hydrateInstanceFromLinks(instance, links, metadata, perspective);
-
-        // Filter to only requested fields if the query specified them
-        if (requestedProperties.length > 0 || requestedRelations.length > 0) {
-          const requestedAttributes = [
-            ...requestedProperties,
-            ...requestedRelations,
-          ];
-          Object.keys(instance).forEach((key) => {
-            if (
-              !requestedAttributes.includes(key) &&
-              key !== "createdAt" &&
-              key !== "updatedAt" &&
-              key !== "author" &&
-              key !== "baseExpression"
-            ) {
-              delete instance[key];
-            }
-          });
-        }
-
-        instances.push(instance);
-      } catch (error) {
-        console.error(
-          `Failed to process SurrealDB instance ${(error as any)?.base ?? "unknown"}:`,
-          error,
-        );
-      }
-    }
-
-    // Populate reverse relations (@BelongsToOne / @BelongsToMany) with a single batch query.
-    // Forward links (->link) are already in row.links; reverse links (<-link) are not,
-    // so we fetch them separately grouped by the target URI (= instance base expression).
-    const reverseRelationEntries = Object.entries(metadata.relations).filter(
-      ([, m]) => !m.getter && m.direction === "reverse",
+    return ops.instancesFromSurrealResult(
+      this as any,
+      perspective,
+      query,
+      result,
+      _hydrateRelations,
     );
-    if (reverseRelationEntries.length > 0 && instances.length > 0) {
-      try {
-        const inList = instances
-          .map((i) => `'${escapeSurrealString(i.baseExpression)}'`)
-          .join(", ");
-        const reverseLinksQuery = `
-          SELECT in.uri AS source, predicate, out.uri AS target, author, timestamp
-          FROM link
-          WHERE out.uri IN [${inList}]
-          ORDER BY timestamp ASC
-        `;
-        const reverseLinks: any[] =
-          (await perspective.querySurrealDB(reverseLinksQuery)) ?? [];
-        for (const instance of instances) {
-          for (const [relationName, relationMeta] of reverseRelationEntries) {
-            const matching = reverseLinks.filter(
-              (l: any) =>
-                l.target === instance.baseExpression &&
-                l.predicate === relationMeta.predicate,
-            );
-            const values = matching.map((l: any) => l.source);
-            (instance as any)[relationName] =
-              relationMeta.maxCount === 1 ? values[0] ?? null : values;
-          }
-        }
-      } catch (e) {
-        console.warn("Failed to fetch reverse links for instances:", e);
-      }
-    }
-
-    // Batch-hydrate related models for relations that carry a relatedModel factory.
-    // One query per relation type across ALL instances (no N+1).
-    if (_hydrateRelations) {
-      const hydrateEntries = Object.entries(metadata.relations).filter(
-        ([, m]) => !m.getter && m.relatedModel,
-      );
-      for (const [relationName, relationMeta] of hydrateEntries) {
-        const allIds = Array.from(
-          new Set(
-            instances.flatMap((i: any) => {
-              const val = i[relationName];
-              if (!val) return [];
-              return Array.isArray(val) ? val.filter(Boolean) : [val];
-            }),
-          ),
-        ) as string[];
-        if (allIds.length === 0) continue;
-        try {
-          const RelatedModel = relationMeta.relatedModel!() as any;
-          const allHydrated = await RelatedModel._findAllInternal(
-            perspective,
-            { where: { id: allIds } },
-            false, // depth guard
-          );
-          const hydratedMap = new Map<string, any>(
-            allHydrated.map((h: any) => [h.baseExpression, h]),
-          );
-          for (const instance of instances) {
-            const val = (instance as any)[relationName];
-            if (!val) continue;
-            if (Array.isArray(val)) {
-              (instance as any)[relationName] = val
-                .map((id: string) => hydratedMap.get(id))
-                .filter((h: any) => h !== undefined);
-            } else if (typeof val === "string") {
-              (instance as any)[relationName] = hydratedMap.get(val) ?? null;
-            }
-          }
-        } catch (e) {
-          console.warn(`Failed to batch-hydrate ${relationName}:`, e);
-        }
-      }
-    }
-
-    // Evaluate custom getters for all instances (single pass)
-    // This populates relation values needed for where.isInstance filtering
-    for (const instance of instances) {
-      await evaluateCustomGetters(instance, perspective, metadata);
-    }
-
-    // Filter relations by where.isInstance if specified
-    // Do this after initial evaluation so relation values exist for filtering
-    for (const instance of instances) {
-      for (const [relationName, relationMeta] of Object.entries(
-        metadata.relations,
-      )) {
-        if (
-          relationMeta.where?.isInstance &&
-          instance[relationName]?.length > 0
-        ) {
-          try {
-            const targetClass = relationMeta.where.isInstance;
-            const subjects = instance[relationName];
-
-            // Get the class metadata from SDNA to pass to batchCheckSubjectInstances
-            const targetClassName =
-              typeof targetClass === "string"
-                ? targetClass
-                : (targetClass as any).prototype?.className || targetClass.name;
-            const classMetadata =
-              await perspective.getSubjectClassMetadataFromSDNA(
-                targetClassName,
-              );
-
-            if (!classMetadata) {
-              continue;
-            }
-
-            // Check which subjects are instances of the target class
-            const validSubjects = await perspective.batchCheckSubjectInstances(
-              subjects,
-              classMetadata,
-            );
-
-            // Update the relation with filtered instances
-            instance[relationName] = validSubjects;
-          } catch (error) {
-            // On error, leave the relation unfiltered rather than breaking everything
-          }
-        }
-      }
-    }
-
-    // Filter by where conditions that couldn't be filtered in SQL
-    // This includes:
-    // - author/timestamp (computed from grouped links)
-    // - Properties with comparison operators (gt, gte, lt, lte, between, contains)
-    //   because fn::parse_literal() comparisons in SurrealDB subqueries don't work reliably
-    let filteredInstances = instances;
-    if (query.where) {
-      filteredInstances = instances.filter((instance) => {
-        for (const [propertyName, condition] of Object.entries(query.where!)) {
-          // Skip 'base'/'id' as they're filtered in SQL
-          if (propertyName === "base" || propertyName === "id") continue;
-
-          // For author and timestamp, always filter in JS
-          if (propertyName === "author" || propertyName === "timestamp") {
-            if (!matchesCondition(instance[propertyName], condition)) {
-              return false;
-            }
-            continue;
-          }
-
-          // For regular properties, only filter comparison operators in JS
-          // Simple equality and NOT are handled in SQL, but gt/gte/lt/lte/between/contains need JS
-          if (
-            typeof condition === "object" &&
-            condition !== null &&
-            !Array.isArray(condition)
-          ) {
-            const ops = condition as any;
-            // Check if any comparison operators are present
-            const hasComparisonOps =
-              ops.gt !== undefined ||
-              ops.gte !== undefined ||
-              ops.lt !== undefined ||
-              ops.lte !== undefined ||
-              ops.between !== undefined ||
-              ops.contains !== undefined;
-            if (hasComparisonOps) {
-              if (!matchesCondition(instance[propertyName], condition)) {
-                return false;
-              }
-            }
-          }
-        }
-        return true;
-      });
-    }
-
-    // Apply ordering in JavaScript
-    // If limit/offset is used but no explicit order, default to ordering by timestamp (ASC)
-    // This ensures consistent pagination behavior
-    const effectiveOrder =
-      query.order ||
-      (query.limit !== undefined || query.offset !== undefined
-        ? { timestamp: "ASC" as "ASC" }
-        : null);
-
-    if (effectiveOrder) {
-      const orderPropName = Object.keys(effectiveOrder)[0];
-      const orderDirection = Object.values(effectiveOrder)[0];
-
-      filteredInstances.sort((a: any, b: any) => {
-        let aVal = a[orderPropName];
-        let bVal = b[orderPropName];
-
-        // Handle undefined values - push them to the end
-        if (aVal === undefined && bVal === undefined) return 0;
-        if (aVal === undefined) return orderDirection === "ASC" ? 1 : -1;
-        if (bVal === undefined) return orderDirection === "ASC" ? -1 : 1;
-
-        // Compare values
-        let comparison = 0;
-        if (typeof aVal === "number" && typeof bVal === "number") {
-          comparison = aVal - bVal;
-        } else if (typeof aVal === "string" && typeof bVal === "string") {
-          comparison = aVal.localeCompare(bVal);
-        } else {
-          // Convert to strings for comparison
-          comparison = String(aVal).localeCompare(String(bVal));
-        }
-
-        return orderDirection === "DESC" ? -comparison : comparison;
-      });
-    }
-
-    // Calculate totalCount BEFORE applying limit/offset
-    const totalCount = filteredInstances.length;
-
-    // Apply offset and limit in JavaScript
-    let paginatedInstances = filteredInstances;
-    if (query.offset !== undefined || query.limit !== undefined) {
-      const start = query.offset || 0;
-      const end = query.limit ? start + query.limit : undefined;
-      paginatedInstances = filteredInstances.slice(start, end);
-    }
-
-    return {
-      results: paginatedInstances,
-      totalCount,
-    };
   }
 
-  /**
-   * Checks if a value matches a condition (for post-query filtering).
-   * @private
-   */
-  /**
-   * Gets all instances of the model in the perspective that match the query params.
-   *
-   * @param perspective - The perspective to search in
-   * @param query - Optional query parameters to filter results
-   * @param useSurrealDB - Whether to use SurrealDB (default: true, 10-100x faster) or Prolog (legacy)
-   * @returns Array of matching models
-   *
-   * @example
-   * ```typescript
-   * // Get all recipes (uses SurrealDB by default)
-   * const allRecipes = await Recipe.findAll(perspective);
-   *
-   * // Get recipes with specific criteria (uses SurrealDB)
-   * const recipes = await Recipe.findAll(perspective, {
-   *   where: {
-   *     name: "Pasta",
-   *     rating: { gt: 4 }
-   *   },
-   *   order: { createdAt: "DESC" },
-   *   limit: 10
-   * });
-   *
-   * // Explicitly use Prolog (legacy, for backward compatibility)
-   * const recipesProlog = await Recipe.findAll(perspective, {}, false);
-   * ```
-   */
   /**
    * Internal implementation used by findAll and eager relation hydration.
    * Pass `_hydrateRelations = false` to prevent recursive model hydration (depth guard).
@@ -1243,23 +907,36 @@ export class Ad4mModel {
     query: Query = {},
     _hydrateRelations = true,
   ): Promise<T[]> {
-    const surrealQuery = await this.queryToSurrealQL(perspective, query);
-    const result = await perspective.querySurrealDB(surrealQuery);
-    const { results } = await this.instancesFromSurrealResult(
+    return ops._findAllInternal(
+      this as any,
       perspective,
       query,
-      result,
       _hydrateRelations,
     );
-    return results;
   }
 
+  /**
+   * Gets all instances of the model in the perspective that match the query.
+   *
+   * @param perspective - The perspective to search in
+   * @param query - Optional query parameters to filter results
+   * @returns Array of matching model instances
+   *
+   * @example
+   * ```typescript
+   * const recipes = await Recipe.findAll(perspective, {
+   *   where: { name: "Pasta", rating: { gt: 4 } },
+   *   order: { createdAt: "DESC" },
+   *   limit: 10
+   * });
+   * ```
+   */
   static async findAll<T extends Ad4mModel>(
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query: Query = {},
   ): Promise<T[]> {
-    return (this as any)._findAllInternal(perspective, query, true);
+    return ops.findAll(this as any, perspective, query);
   }
 
   /**
@@ -1275,19 +952,14 @@ export class Ad4mModel {
     perspective: PerspectiveProxy,
     query: Query = {},
   ): Promise<T | null> {
-    const results = await (this as any).findAll(perspective, {
-      ...query,
-      limit: 1,
-    });
-    return results[0] ?? null;
+    return ops.findOne(this as any, perspective, query);
   }
 
   /**
-   * Gets all instances with count of total matches without offset & limit applied.
+   * Gets all matching instances with the total count (ignoring limit/offset).
    *
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSurrealDB - Whether to use SurrealDB (default: true, 10-100x faster) or Prolog (legacy)
    * @returns Object containing results array and total count
    *
    * @example
@@ -1297,9 +969,6 @@ export class Ad4mModel {
    *   limit: 10
    * });
    * console.log(`Showing 10 of ${totalCount} dessert recipes`);
-   *
-   * // Use Prolog explicitly (legacy)
-   * const { results, totalCount } = await Recipe.findAllAndCount(perspective, {}, false);
    * ```
    */
   static async findAllAndCount<T extends Ad4mModel>(
@@ -1307,19 +976,16 @@ export class Ad4mModel {
     perspective: PerspectiveProxy,
     query: Query = {},
   ): Promise<ResultsWithTotalCount<T>> {
-    const surrealQuery = await this.queryToSurrealQL(perspective, query);
-    const result = await perspective.querySurrealDB(surrealQuery);
-    return await this.instancesFromSurrealResult(perspective, query, result);
+    return ops.findAllAndCount(this as any, perspective, query);
   }
 
   /**
-   * Helper function for pagination with explicit page size and number.
+   * Paginates results by explicit page size and 1-based page number.
    *
    * @param perspective - The perspective to search in
    * @param pageSize - Number of items per page
    * @param pageNumber - Which page to retrieve (1-based)
    * @param query - Optional additional query parameters
-   * @param useSurrealDB - Whether to use SurrealDB (default: true, 10-100x faster) or Prolog (legacy)
    * @returns Paginated results with metadata
    *
    * @example
@@ -1328,9 +994,6 @@ export class Ad4mModel {
    *   where: { category: "Main Course" }
    * });
    * console.log(`Page ${page.pageNumber} of recipes, ${page.results.length} items`);
-   *
-   * // Use Prolog explicitly (legacy)
-   * const pageProlog = await Recipe.paginate(perspective, 10, 1, {}, false);
    * ```
    */
   static async paginate<T extends Ad4mModel>(
@@ -1340,39 +1003,24 @@ export class Ad4mModel {
     pageNumber: number,
     query?: Query,
   ): Promise<PaginationResult<T>> {
-    const paginationQuery = {
-      ...(query || {}),
-      limit: pageSize,
-      offset: pageSize * (pageNumber - 1),
-      count: true,
-    };
-    const surrealQuery = await this.queryToSurrealQL(
+    return ops.paginate(
+      this as any,
       perspective,
-      paginationQuery,
+      pageSize,
+      pageNumber,
+      query ?? {},
     );
-    const result = await perspective.querySurrealDB(surrealQuery);
-    const { results, totalCount } = await this.instancesFromSurrealResult(
-      perspective,
-      paginationQuery,
-      result,
-    );
-    return { results, totalCount, pageSize, pageNumber };
   }
 
   /**
-   * Generates a SurrealQL COUNT query for the model.
-   *
-   * @param perspective - The perspective context
-   * @param query - Query parameters to filter the count
-   * @returns SurrealQL COUNT query string
-   *
+   * Generates a SurrealQL COUNT query for this model.
    * @private
    */
   public static async countQueryToSurrealQL(
     perspective: PerspectiveProxy,
     query: Query,
   ): Promise<string> {
-    return buildSurrealCountQuery(this.getModelMetadata(), query);
+    return ops.countQueryToSurrealQL(this as any, perspective, query);
   }
 
   /**
@@ -1380,29 +1028,16 @@ export class Ad4mModel {
    *
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSurrealDB - Whether to use SurrealDB (default: true, 10-100x faster) or Prolog (legacy)
    * @returns Total count of matching entities
    *
    * @example
    * ```typescript
    * const totalRecipes = await Recipe.count(perspective);
-   * const activeRecipes = await Recipe.count(perspective, {
-   *   where: { status: "active" }
-   * });
-   *
-   * // Use Prolog explicitly (legacy)
-   * const countProlog = await Recipe.count(perspective, {}, false);
+   * const activeRecipes = await Recipe.count(perspective, { where: { status: "active" } });
    * ```
    */
   static async count(perspective: PerspectiveProxy, query: Query = {}) {
-    const surrealQuery = await this.queryToSurrealQL(perspective, query);
-    const result = await perspective.querySurrealDB(surrealQuery);
-    const { totalCount } = await this.instancesFromSurrealResult(
-      perspective,
-      query,
-      result,
-    );
-    return totalCount;
+    return ops.count(this as any, perspective, query);
   }
 
   private async setProperty(key: string, value: any, batchId?: string) {
