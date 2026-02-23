@@ -4,6 +4,7 @@ import { ExpressionProof } from "../expression/Expression";
 import { LinkExpression } from "../links/Links";
 import { ExceptionType } from "../Exception";
 import { RUNTIME_MESSAGED_RECEIVED_TOPIC, EXCEPTION_OCCURRED_TOPIC, RUNTIME_NOTIFICATION_REQUESTED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC } from '../PubSub';
+import { UserCreationResult, AuthInfoInput } from "../agent/Agent";
 
 const testLink = new LinkExpression()
 testLink.author = "did:ad4m:test"
@@ -190,6 +191,36 @@ export class ImportResult {
 
     @Field()
     knownLinkLanguages: ImportStats;
+}
+
+@ObjectType()
+export class UserStatistics {
+    @Field()
+    email: string;
+
+    @Field()
+    did: string;
+
+    @Field({nullable: true})
+    lastSeen?: string;
+
+    @Field(type => Int)
+    perspectiveCount: number;
+}
+
+@ObjectType()
+export class VerificationRequestResult {
+    @Field()
+    success: boolean;
+
+    @Field()
+    message: string;
+
+    @Field()
+    requiresPassword: boolean;
+
+    @Field()
+    isExistingUser: boolean;
 }
 
 /**
@@ -424,6 +455,109 @@ export default class RuntimeResolver {
 
     @Mutation()
     runtimeImportPerspective(@Arg("filePath", type => String) filePath: string): boolean {
+        return true
+    }
+
+    @Query(returns => Boolean)
+    runtimeMultiUserEnabled(): boolean {
+        return false
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeSetMultiUserEnabled(@Arg("enabled") enabled: boolean): boolean {
+        return enabled
+    }
+
+    @Query(returns => [UserStatistics])
+    runtimeListUsers(): UserStatistics[] {
+        return [{
+            email: "test@example.com",
+            did: "did:key:test123",
+            lastSeen: new Date().toISOString(),
+            perspectiveCount: 5
+        }]
+    }
+
+    @Mutation(returns => VerificationRequestResult)
+    runtimeRequestLoginVerification(
+        @Arg("email") email: string,
+        @Arg("appInfo", { nullable: true }) appInfo?: AuthInfoInput
+    ): VerificationRequestResult {
+        // For testing: simulate existing user
+        return {
+            success: true,
+            message: "Verification email sent",
+            requiresPassword: false,
+            isExistingUser: true
+        }
+    }
+
+    @Mutation(returns => String)
+    runtimeVerifyEmailCode(
+        @Arg("email") email: string,
+        @Arg("code") code: string,
+        @Arg("verificationType") verificationType: string
+    ): string {
+        // For testing: return a test JWT token
+        return "test-jwt-token-from-email-verification"
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeTestEmail(@Arg("to") to: string): boolean {
+        // For testing: simulate successful email send
+        return true
+    }
+
+    @Mutation(returns => UserCreationResult)
+    runtimeCreateUser(
+        @Arg("email") email: string,
+        @Arg("password") password: string,
+        @Arg("appInfo", { nullable: true }) appInfo?: AuthInfoInput
+    ): UserCreationResult {
+        // For testing: simulate successful user creation (email verification flow)
+        return new UserCreationResult("did:key:test123", true)
+    }
+
+    @Mutation(returns => String)
+    runtimeLoginUser(
+        @Arg("email") email: string,
+        @Arg("password") password: string
+    ): string {
+        // For testing: return a test JWT token
+        return "test-jwt-token-from-password-login"
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeEmailTestModeEnable(): boolean {
+        // For testing: enable test mode
+        return true
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeEmailTestModeDisable(): boolean {
+        // For testing: disable test mode
+        return true
+    }
+
+    @Mutation(returns => String, { nullable: true })
+    runtimeEmailTestGetCode(@Arg("email") email: string): string | null {
+        // For testing: return a mock code
+        return "123456"
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeEmailTestClearCodes(): boolean {
+        // For testing: clear codes
+        return true
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeEmailTestSetExpiry(
+        @Arg("email") email: string,
+        @Arg("verificationType") verificationType: string,
+        @Arg("expiresAt") expiresAt: number
+    ): boolean {
+        // For testing: simulate setting expiry (no-op in mock)
         return true
     }
 }

@@ -251,7 +251,7 @@ fn host_agent_create_signed_expression(
         }
     };
     let sorted = crate::js_core::utils::sort_json_value(&content);
-    match crate::agent::create_signed_expression(sorted) {
+    match crate::agent::create_signed_expression(sorted, &crate::agent::AgentContext::main_agent()) {
         Ok(expr) => {
             let json = match serde_json::to_vec(&expr) {
                 Ok(j) => j,

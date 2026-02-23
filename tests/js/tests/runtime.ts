@@ -157,7 +157,7 @@ export default function runtimeTests(testContext: TestContext) {
                 appName: "Test App Name",
                 appUrl: "Test App URL",
                 appIconPath: "Test App Icon Path",
-                trigger: "Test Trigger",
+                trigger: "SELECT * FROM link WHERE predicate = 'test://never-matches'",
                 perspectiveIds: ["Test Perspective ID"],
                 webhookUrl: "Test Webhook URL",
                 webhookAuth: "Test Webhook Auth"
@@ -174,14 +174,16 @@ export default function runtimeTests(testContext: TestContext) {
                 if (exception.type === ExceptionType.InstallNotificationRequest) {
                     const requestedNotification = JSON.parse(exception.addon);
 
-                    expect(requestedNotification.description).to.equal(notification.description);
-                    expect(requestedNotification.appName).to.equal(notification.appName);
-                    expect(requestedNotification.appUrl).to.equal(notification.appUrl);
-                    expect(requestedNotification.appIconPath).to.equal(notification.appIconPath);
-                    expect(requestedNotification.trigger).to.equal(notification.trigger);
-                    expect(requestedNotification.perspectiveIds).to.eql(notification.perspectiveIds);
-                    expect(requestedNotification.webhookUrl).to.equal(notification.webhookUrl);
-                    expect(requestedNotification.webhookAuth).to.equal(notification.webhookAuth);
+                    // Only check assertions for THIS test's notification
+                    if (requestedNotification.description === notification.description) {
+                        expect(requestedNotification.appName).to.equal(notification.appName);
+                        expect(requestedNotification.appUrl).to.equal(notification.appUrl);
+                        expect(requestedNotification.appIconPath).to.equal(notification.appIconPath);
+                        expect(requestedNotification.trigger).to.equal(notification.trigger);
+                        expect(requestedNotification.perspectiveIds).to.eql(notification.perspectiveIds);
+                        expect(requestedNotification.webhookUrl).to.equal(notification.webhookUrl);
+                        expect(requestedNotification.webhookAuth).to.equal(notification.webhookAuth);
+                    }
                     // Automatically resolve without needing to manually manage a Promise
                     return null;
                 }
@@ -215,7 +217,7 @@ export default function runtimeTests(testContext: TestContext) {
                 appName: "Test App Name",
                 appUrl: "Test App URL",
                 appIconPath: "Test App Icon Path",
-                trigger: "Test Trigger",
+                trigger: "SELECT * FROM link WHERE predicate = 'test://updated'",
                 perspectiveIds: ["Test Perspective ID"],
                 webhookUrl: "Test Webhook URL",
                 webhookAuth: "Test Webhook Auth"
@@ -248,7 +250,7 @@ export default function runtimeTests(testContext: TestContext) {
                 appName: "ADAM tests",
                 appUrl: "Test App URL",
                 appIconPath: "Test App Icon Path",
-                trigger: `triple(Source, "${triggerPredicate}", Target)`,
+                trigger: `SELECT source, target, predicate FROM link WHERE predicate = '${triggerPredicate}'`,
                 perspectiveIds: [notificationPerspective.uuid],
                 webhookUrl: "Test Webhook URL",
                 webhookAuth: "Test Webhook Auth"
@@ -284,9 +286,9 @@ export default function runtimeTests(testContext: TestContext) {
             expect(triggerMatch.length).to.equal(1)
             let match = triggerMatch[0]
             //@ts-ignore
-            expect(match.Source).to.equal("test://source")
+            expect(match.source).to.equal("test://source")
             //@ts-ignore
-            expect(match.Target).to.equal("test://target1")
+            expect(match.target).to.equal("test://target1")
 
             // Ensuring we don't get old data on a new trigger
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target2"}))
@@ -297,9 +299,85 @@ export default function runtimeTests(testContext: TestContext) {
             expect(triggerMatch.length).to.equal(1)
             match = triggerMatch[0]
             //@ts-ignore
-            expect(match.Source).to.equal("test://source")
+            expect(match.source).to.equal("test://source")
             //@ts-ignore
-            expect(match.Target).to.equal("test://target2")
+            expect(match.target).to.equal("test://target2")
+        })
+
+        it("can detect mentions in notifications (Flux example)", async () => {
+            const ad4mClient = testContext.ad4mClient!
+            const agentStatus = await ad4mClient.agent.status()
+            const agentDid = agentStatus.did
+
+            let notificationPerspective = await ad4mClient.perspective.add("flux mention test")
+
+            const notification: NotificationInput = {
+                description: "You were mentioned in a message",
+                appName: "Flux Mentions",
+                appUrl: "https://flux.app",
+                appIconPath: "/flux-icon.png",
+                // Extract multiple data points from the match
+                trigger: `SELECT
+                    source as message_id,
+                    fn::parse_literal(target) as message_content,
+                    fn::strip_html(fn::parse_literal(target)) as plain_text,
+                    $agentDid as mentioned_agent,
+                    $perspectiveId as perspective_id
+                FROM link
+                WHERE predicate = 'rdf://content'
+                    AND fn::contains(fn::parse_literal(target), $agentDid)`,
+                perspectiveIds: [notificationPerspective.uuid],
+                webhookUrl: "https://test.webhook",
+                webhookAuth: "test-auth"
+            }
+
+            const notificationId = await ad4mClient.runtime.requestInstallNotification(notification);
+            await sleep(1000)
+            const granted = await ad4mClient.runtime.grantNotification(notificationId)
+            expect(granted).to.be.true
+
+            const mockFunction = sinon.stub();
+            await ad4mClient.runtime.addNotificationTriggeredCallback(mockFunction)
+
+            // Add a message that doesn't mention the agent
+            await notificationPerspective.add(new Link({
+                source: "message://1",
+                predicate: "rdf://content",
+                target: "literal://string:Hello%20world"
+            }))
+            await sleep(2000)
+            expect(mockFunction.called).to.be.false
+
+            // Add a message that mentions the agent (with HTML formatting)
+            const messageWithMention = `<p>Hey <strong>${agentDid!}</strong>, how are you?</p>`
+            await notificationPerspective.add(new Link({
+                source: "message://2",
+                predicate: "rdf://content",
+                target: `literal://string:${encodeURIComponent(messageWithMention)}`
+            }))
+            await sleep(7000)
+            expect(mockFunction.called).to.be.true
+
+            let triggeredNotification = mockFunction.getCall(0).args[0] as TriggeredNotification
+            expect(triggeredNotification.notification.description).to.equal(notification.description)
+            let triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
+            expect(triggerMatch.length).to.equal(1)
+
+            // Verify all extracted data points
+            //@ts-ignore
+            expect(triggerMatch[0].message_id).to.equal("message://2")
+            //@ts-ignore
+            expect(triggerMatch[0].message_content).to.include(agentDid)
+            //@ts-ignore
+            expect(triggerMatch[0].message_content).to.include("<strong>")
+            //@ts-ignore
+            expect(triggerMatch[0].plain_text).to.include(agentDid)
+            //@ts-ignore
+            expect(triggerMatch[0].plain_text).to.not.include("<strong>")
+            //@ts-ignore
+            expect(triggerMatch[0].mentioned_agent).to.equal(agentDid)
+            //@ts-ignore
+            expect(triggerMatch[0].perspective_id).to.equal(notificationPerspective.uuid)
         })
 
         it("can export and import database", async () => {

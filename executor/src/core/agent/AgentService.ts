@@ -15,9 +15,36 @@ import { getPubSub, tagExpressionSignatureStatus } from "../utils";
 export default class AgentService {
   #agentLanguage?: Language;
   #pubSub: PubSub;
+  #currentUserContext?: string; // Email of the current user context
+  #cachedMainAgentDid?: string; // Cache the main agent's DID for non-context calls
 
   constructor(rootConfigPath: string, adminCredential?: string) {
     this.#pubSub = getPubSub();
+    // Cache the main agent's DID on construction
+    try {
+      this.#cachedMainAgentDid = AGENT.did();
+    } catch (e) {
+      console.warn("Could not get main agent DID during construction:", e);
+    }
+  }
+
+  // Set the current user context for this AgentService instance
+  setUserContext(userEmail?: string) {
+    this.#currentUserContext = userEmail;
+  }
+
+  // Get the current user context
+  getUserContext(): string | undefined {
+    return this.#currentUserContext;
+  }
+
+  // Refresh the cached main agent DID (called after AGENT.load())
+  refreshMainAgentDid() {
+    try {
+      this.#cachedMainAgentDid = AGENT.did();
+    } catch (e) {
+      console.warn("Could not refresh main agent DID:", e);
+    }
   }
 
   getTaggedAgentCopy(): Agent {
@@ -33,15 +60,34 @@ export default class AgentService {
   }
 
   createSignedExpression(data: any): Expression {
+    if (this.#currentUserContext) {
+      // @ts-ignore - New function from Rust
+      return AGENT.createSignedExpressionForUser(this.#currentUserContext, data);
+    }
     return AGENT.createSignedExpression(data);
   }
 
   get did(): string {
-    return AGENT.did();
+    if (this.#currentUserContext) {
+      // @ts-ignore - New function from Rust
+      return AGENT.didForUser(this.#currentUserContext);
+    }
+    // Return cached main agent DID, or fallback to calling AGENT.did()
+    return this.#cachedMainAgentDid || AGENT.did();
   }
 
   get agent(): Agent {
+    if (this.#currentUserContext) {
+      // @ts-ignore - New function from Rust
+      return AGENT.agentForUser(this.#currentUserContext);
+    }
     return AGENT.agent();
+  }
+
+  // Return all local user DIDs (including main agent)
+  getAllLocalUserDIDs(): string[] {
+    // @ts-ignore - Rust implementation includes main agent + managed users
+    return AGENT.getAllLocalUserDIDs();
   }
 
   async updateAgent(a: Agent) {
@@ -125,6 +171,8 @@ export default class AgentService {
 
   async unlock(password: string) {
     AGENT.unlock(password);
+    // Refresh cached main agent DID after unlocking
+    this.refreshMainAgentDid();
     try {
       await this.storeAgentProfile();
     } catch (e) {
@@ -143,5 +191,7 @@ export function init(
 ): AgentService {
   const agent = new AgentService(rootConfigPath, adminCredential);
   AGENT.load();
+  // Update cached main agent DID after loading
+  agent.refreshMainAgentDid();
   return agent;
 }

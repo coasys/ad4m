@@ -9,7 +9,7 @@ use crate::{
     graphql::graphql_types::{DecoratedNeighbourhoodExpression, Neighbourhood},
     js_core::JsCoreHandle,
 };
-use language::{Language, LanguageBackend};
+use language::Language;
 
 lazy_static! {
     static ref LANGUAGE_CONTROLLER_INSTANCE: Arc<Mutex<Option<LanguageController>>> =
@@ -220,23 +220,59 @@ impl LanguageController {
     }
 
     pub async fn create_neighbourhood(neighbourhood: Neighbourhood) -> Result<Address, AnyError> {
+        Self::create_neighbourhood_with_context(
+            neighbourhood,
+            &crate::agent::AgentContext::main_agent(),
+        )
+        .await
+    }
+
+    pub async fn create_neighbourhood_with_context(
+        neighbourhood: Neighbourhood,
+        context: &crate::agent::AgentContext,
+    ) -> Result<Address, AnyError> {
         Self::global_instance()
             .js_core
             .execute("await core.waitForLanguages()".into())
             .await?;
 
         let neighbourhood_json = serde_json::to_string(&neighbourhood)?;
-        let script = format!(
-            r#"
-            await core
-                    .languageController
-                    .getNeighbourhoodLanguage()
-                    .expressionAdapter
-                    .putAdapter
-                    .createPublic({})
-            "#,
-            neighbourhood_json,
-        );
+
+        // Set user context for neighbourhood creation if it's a managed user
+        let script = if let Some(user_email) = &context.user_email {
+            format!(
+                r#"
+                (async () => {{
+                    const originalContext = core.agentService.getUserContext();
+                    core.agentService.setUserContext("{}");
+                    try {{
+                        return await core
+                                .languageController
+                                .getNeighbourhoodLanguage()
+                                .expressionAdapter
+                                .putAdapter
+                                .createPublic({});
+                    }} finally {{
+                        core.agentService.setUserContext(originalContext);
+                    }}
+                }})()
+                "#,
+                user_email, neighbourhood_json,
+            )
+        } else {
+            format!(
+                r#"
+                await core
+                        .languageController
+                        .getNeighbourhoodLanguage()
+                        .expressionAdapter
+                        .putAdapter
+                        .createPublic({})
+                "#,
+                neighbourhood_json,
+            )
+        };
+
         let result: String = Self::global_instance().js_core.execute(script).await?;
         Ok(result)
     }
@@ -265,25 +301,8 @@ impl LanguageController {
         Ok(neighbourhood)
     }
 
-    /// Look up a language by address, returning a boxed `LanguageBackend`.
-    ///
-    /// When the `wasm-languages` feature is enabled, this checks the WASM
-    /// registry first and falls back to the JS runtime.
-    pub async fn language_by_address(
-        address: Address,
-    ) -> Result<Option<Box<dyn LanguageBackend>>, AnyError> {
-        // Check WASM registry first (feature-gated)
-        #[cfg(feature = "wasm-languages")]
-        {
-            if crate::wasm_core::is_wasm_language(&address) {
-                let instance = crate::wasm_core::get_wasm_language(&address)
-                    .map_err(|e| deno_core::anyhow::anyhow!("{}", e))?;
-                let wasm_lang = language::wasm_backend::WasmLanguage::new(instance);
-                return Ok(Some(Box::new(wasm_lang)));
-            }
-        }
-
-        // Fall back to JS
+    /// Look up a language by address, returning a Language if installed.
+    pub async fn language_by_address(address: Address) -> Result<Option<Language>, AnyError> {
         Self::global_instance()
             .js_core
             .execute("await core.waitForLanguages()".into())
@@ -299,23 +318,21 @@ impl LanguageController {
         let language_installed = serde_json::from_str::<bool>(&result)?;
         if language_installed {
             let language = Language::new(address, Self::global_instance().js_core.clone());
-            Ok(Some(Box::new(language)))
+            Ok(Some(language))
         } else {
             Ok(None)
         }
     }
 
-    /// Install a WASM language from a file path and return a boxed backend.
+    /// Install a WASM language from a file path and register it.
     #[cfg(feature = "wasm-languages")]
     pub fn install_wasm_language(
         wasm_path: &std::path::Path,
         address: &str,
-    ) -> Result<Box<dyn LanguageBackend>, AnyError> {
+    ) -> Result<(), AnyError> {
         crate::wasm_core::register_wasm_language(wasm_path, address)
             .map_err(|e| deno_core::anyhow::anyhow!("{}", e))?;
-        let instance = crate::wasm_core::get_wasm_language(address)
-            .map_err(|e| deno_core::anyhow::anyhow!("{}", e))?;
-        Ok(Box::new(language::wasm_backend::WasmLanguage::new(instance)))
+        Ok(())
     }
 
     /// Detect whether a language bundle file is WASM (magic bytes `\0asm`)

@@ -114,6 +114,8 @@ enum Domain {
         hc_proxy_url: Option<String>,
         #[arg(long, action)]
         hc_bootstrap_url: Option<String>,
+        #[arg(long, action)]
+        hc_relay_url: Option<String>,
         #[arg(short, long, action)]
         connect_holochain: Option<bool>,
         #[arg(long, action)]
@@ -125,7 +127,11 @@ enum Domain {
         #[arg(long, action)]
         tls_key_file: Option<String>,
         #[arg(long, action)]
+        tls_port: Option<u16>,
+        #[arg(long, action)]
         log_holochain_metrics: Option<bool>,
+        #[arg(long, action)]
+        enable_multi_user: Option<bool>,
     },
     RunLocalHcServices {},
 }
@@ -168,18 +174,22 @@ async fn main() -> Result<()> {
         hc_use_proxy,
         hc_proxy_url,
         hc_bootstrap_url,
+        hc_relay_url,
         connect_holochain,
         admin_credential,
         localhost,
         tls_cert_file,
         tls_key_file,
+        tls_port,
         log_holochain_metrics,
+        enable_multi_user,
     } = args.domain
     {
-        let tls = if tls_cert_file.is_some() && tls_cert_file.is_some() {
+        let tls = if tls_cert_file.is_some() && tls_key_file.is_some() {
             Some(TlsConfig {
                 cert_file_path: tls_cert_file.unwrap(),
                 key_file_path: tls_key_file.unwrap(),
+                tls_port: tls_port.unwrap_or(12001),
             })
         } else {
             if tls_cert_file.is_some() || tls_key_file.is_some() {
@@ -202,12 +212,15 @@ async fn main() -> Result<()> {
                 hc_use_proxy,
                 hc_proxy_url,
                 hc_bootstrap_url,
+                hc_relay_url,
                 connect_holochain,
                 admin_credential,
                 localhost,
                 auto_permit_cap_requests: Some(true),
                 tls,
                 log_holochain_metrics,
+                enable_multi_user,
+                smtp_config: None,
             })
             .await;
         })

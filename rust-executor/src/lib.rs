@@ -2,6 +2,7 @@
 extern crate lazy_static;
 
 pub mod config;
+pub mod email_service;
 pub mod entanglement_service;
 mod globals;
 pub mod graphql;
@@ -11,8 +12,8 @@ pub mod js_core;
 pub mod wasm_core;
 mod prolog_service;
 pub mod runtime_service;
-#[cfg(feature = "surrealdb-links")]
 mod surreal_service;
+#[cfg(feature = "sqlite-links")]
 #[cfg(feature = "sqlite-links")]
 mod sqlite_service;
 pub mod utils;
@@ -21,7 +22,7 @@ mod wallet;
 pub mod agent;
 pub mod ai_service;
 mod dapp_server;
-mod db;
+pub mod db;
 pub mod init;
 pub mod languages;
 pub mod logging;
@@ -42,7 +43,7 @@ use js_core::JsCore;
 use crate::{
     agent::AgentService, ai_service::AIService, dapp_server::serve_dapp, db::Ad4mDb,
     languages::LanguageController, prolog_service::init_prolog_service,
-    runtime_service::RuntimeService, surreal_service::init_surreal_service, utils::find_port,
+    runtime_service::RuntimeService, utils::find_port,
 };
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
@@ -105,6 +106,15 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     )
     .expect("Failed to initialize Ad4mDb");
 
+    // Set multi-user mode before starting services to avoid race condition
+    if let Some(enable_multi_user) = config.enable_multi_user {
+        if enable_multi_user {
+            info!("Enabling multi-user mode...");
+            Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(true))
+                .expect("Failed to enable multi-user mode");
+        }
+    }
+
     info!("Initializing AI service...");
     AIService::init_global_instance()
         .await
@@ -112,6 +122,18 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     info!("Initializing Agent service...");
     AgentService::init_global_instance(config.app_data_path.clone().unwrap());
+
+    // Spawn background task to clean up expired verification codes every 5 minutes
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+            if let Err(e) = Ad4mDb::with_global_instance(|db| db.cleanup_expired_codes()) {
+                error!("Failed to cleanup expired verification codes: {}", e);
+            } else {
+                info!("Cleaned up expired verification codes");
+            }
+        }
+    });
 
     info!("Initializing Runtime service...");
     RuntimeService::init_global_instance(
@@ -147,13 +169,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     info!("Initializing Prolog service...");
     init_prolog_service().await;
 
-    info!("Initializing SurrealDB service...");
-    if let Err(e) = init_surreal_service().await {
-        error!("Failed to initialize SurrealDB service: {}", e);
-        // Don't panic - SurrealDB is optional for now
-        warn!("Continuing without SurrealDB support");
-    }
-
     find_and_set_port(&mut config.gql_port, 4000, "GraphQL");
     find_and_set_port(&mut config.hc_admin_port, 2000, "Holochain admin");
     find_and_set_port(&mut config.hc_app_port, 1337, "Holochain app");
@@ -165,7 +180,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     LanguageController::init_global_instance(js_core_handle.clone(), config.app_data_path.clone().unwrap_or_default());
 
-    // Set app data path for perspectives module (needed for file-based link storage)
+    // Set app data path for perspectives module (needed for file-based SurrealDB)
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
 
     perspectives::initialize_from_db();
