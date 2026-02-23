@@ -1,7 +1,5 @@
 import chalk from "chalk";
-import findProcess from "find-process";
 import glob from "glob";
-import { kill } from "process";
 import wget from 'wget-improved';
 import fetch from 'node-fetch';
 import path from "path";
@@ -25,20 +23,6 @@ export function cleanOutput(data: string) {
   }
 
   throw Error('cannot be parsed');
-}
-
-export async function findAndKillProcess(processName: string) {
-  try {
-    const list = await findProcess('name', processName)
-
-    for (const p of list) {   
-      if (p.name.includes(processName)) {
-        kill(p.pid, 'SIGKILL')
-      }   
-    }
-  } catch (err) {
-    logger.error(`No process found by name: ${processName}`)
-  } 
 }
 
 export function getTestFiles() {
