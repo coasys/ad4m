@@ -97,6 +97,25 @@ export class ModelQueryBuilder<T extends import("../Ad4mModel").Ad4mModel> {
     return this;
   }
 
+  /**
+   * Specifies which relations to eagerly load as full model instances.
+   *
+   * Only the listed relations will be batch-hydrated, giving explicit control
+   * over which sub-graphs to load. Without `include`, all relations with a
+   * `relatedModel` factory are hydrated automatically (legacy behaviour).
+   *
+   * @example
+   * ```typescript
+   * const recipes = await Recipe.query(perspective)
+   *   .include(['author', 'comments'])
+   *   .get();
+   * ```
+   */
+  include(relations: string[]): ModelQueryBuilder<T> {
+    this.queryParams.include = relations;
+    return this;
+  }
+
   overrideModelClassName(className: string): ModelQueryBuilder<T> {
     this.modelClassName = className;
     return this;

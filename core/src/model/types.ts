@@ -32,7 +32,34 @@ export type Order = { [propertyName: string]: "ASC" | "DESC" };
 export type Query = {
   source?: string;
   properties?: string[];
-  relations?: string[]; // replace with include: Query[]
+  /** @deprecated Use `include` instead. */
+  relations?: string[];
+  /**
+   * Relation names to eagerly load as full model instances.
+   *
+   * Each name must match a relation defined on the model via `@HasMany`,
+   * `@HasOne`, `@BelongsToMany`, or `@BelongsToOne`. The relation must have
+   * either a `relatedModel` factory (set by passing `() => ModelClass` as the
+   * second decorator argument) or a `where.isInstance` class so that the
+   * loader knows which model class to instantiate.
+   *
+   * When `include` is **not** set, the existing behaviour is preserved:
+   * every relation that has a `relatedModel` factory is batch-hydrated
+   * automatically.
+   *
+   * When `include` **is** set, only the listed relations are batch-hydrated,
+   * giving callers explicit control over which sub-graphs to load.
+   *
+   * @example
+   * ```typescript
+   * const recipes = await Recipe.findAll(perspective, {
+   *   include: ['author', 'comments'],
+   * });
+   * // recipe.author is a fully populated Author instance
+   * // recipe.comments is an array of populated Comment instances
+   * ```
+   */
+  include?: string[];
   where?: Where;
   order?: Order;
   offset?: number;

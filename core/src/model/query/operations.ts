@@ -160,10 +160,28 @@ export async function instancesFromSurrealResult<T>(
     }
   }
 
-  // ── 3. Batch-hydrate relatedModel relations (one query per relation type) ─
+  // ── 3. Batch-hydrate relations (one query per relation type) ─────────────
+  //
+  // Default behaviour (no `include`): hydrate every relation that has a
+  // `relatedModel` factory — preserves existing semantics.
+  //
+  // Explicit `include`: hydrate ONLY the listed relations, using whichever
+  // class source is available (relatedModel factory > where.isInstance).
   if (_hydrateRelations) {
+    const explicitIncludes = query?.include;
     const hydrateEntries = Object.entries(metadata.relations).filter(
-      ([, m]: [string, any]) => !m.getter && m.relatedModel,
+      ([name, m]: [string, any]) => {
+        if (m.getter) return false;
+        if (explicitIncludes) {
+          // Explicit list: honour it regardless of relatedModel
+          return (
+            explicitIncludes.includes(name) &&
+            !!(m.relatedModel || m.where?.isInstance)
+          );
+        }
+        // Legacy default: auto-hydrate anything with a relatedModel factory
+        return !!m.relatedModel;
+      },
     );
     for (const [relationName, relationMeta] of hydrateEntries) {
       const allIds = Array.from(
@@ -177,7 +195,10 @@ export async function instancesFromSurrealResult<T>(
       ) as string[];
       if (allIds.length === 0) continue;
       try {
-        const RelatedModel = (relationMeta as any).relatedModel() as any;
+        // Prefer the relatedModel factory; fall back to where.isInstance class.
+        const RelatedModel = (relationMeta as any).relatedModel
+          ? (relationMeta as any).relatedModel()
+          : (relationMeta as any).where?.isInstance;
         const allHydrated = await _findAllInternal(
           RelatedModel,
           perspective,
