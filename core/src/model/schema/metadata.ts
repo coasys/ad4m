@@ -3,7 +3,7 @@
  *
  * Extracted from Ad4mModel.ts (Phase 3a Part 4).
  *
- * - `getModelMetadataForClass()` — builds a ModelMetadata descriptor from the
+ * - `getModelMetadata(ctor)` — builds a ModelMetadata descriptor from the
  *   decorator registries, or falls back to the attached JSON Schema.
  * - `assignValuesToInstance()` — writes a batch of (name, value, resolve) tuples
  *   onto a model instance, resolving Literal expressions when requested.
@@ -47,7 +47,7 @@ export type ModelValueTuple = [name: string, value: any, resolve?: boolean];
  *
  * The matching `Ad4mModel.getModelMetadata()` static method delegates here.
  */
-export function getModelMetadataForClass(ctor: any): ModelMetadata {
+export function getModelMetadata(ctor: any): ModelMetadata {
   const prototype = ctor.prototype as any;
 
   if (!prototype.className || prototype.className === "Ad4mModel") {

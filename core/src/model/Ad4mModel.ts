@@ -84,12 +84,7 @@ import {
 import * as ops from "./query/operations";
 
 // ── Metadata helpers ────────────────────────────────────────────────────────
-import {
-  getModelMetadataForClass,
-  assignValuesToInstance as doAssignValues,
-  type ModelValueTuple,
-} from "./schema/metadata";
-export type { ModelValueTuple } from "./schema/metadata";
+import { getModelMetadata as _getModelMetadata } from "./schema/metadata";
 
 /**
  * Base class for defining data models in AD4M.
@@ -277,7 +272,7 @@ export class Ad4mModel {
    * ```
    */
   public static getModelMetadata(): ModelMetadata {
-    return getModelMetadataForClass(this);
+    return _getModelMetadata(this);
   }
 
   /**
@@ -441,14 +436,6 @@ export class Ad4mModel {
         ...(metadata.local && { local: true }),
       },
     ];
-  }
-
-  public static async assignValuesToInstance(
-    perspective: PerspectiveProxy,
-    instance: Ad4mModel,
-    values: ModelValueTuple[],
-  ) {
-    return doAssignValues(perspective, instance, values);
   }
 
   private async getData() {
