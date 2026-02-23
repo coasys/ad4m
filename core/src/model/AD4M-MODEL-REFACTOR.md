@@ -1136,141 +1136,81 @@ to be cleanly separated before ordering logic can be injected cleanly).
 
 ---
 
-## Test App
+## Test Strategy
 
-A live integration test playground in the WE monorepo that runs against a real
-`PerspectiveProxy` with actual SurrealDB/SHACL stack — not mocks.
+### `ad4m/tests/js` — canonical integration test suite ✅ PRIMARY
 
-**Why WE rather than Flux:**
+The `ad4m/tests/js` Mocha suite is the correct home for all `Ad4mModel` API tests. It
+boots a real Rust executor via `startExecutor`, connects via GraphQL, and runs against a
+live perspective with SurrealDB, SHACL, and the full executor stack — the same depth as
+the `we` playground but CI-runnable and co-located with the code under test.
 
-- WE already has `apps/playgrounds/` — a natural home for dev tooling, not end-user views
-- `@we/models` (`Space`, `Block`) uses the exact decorators being refactored and will need
-  migrating — the test app lives next to the code it validates
-- WE is closer to raw AD4M than Flux; a model test harness is developer infrastructure,
-  not a feature view
+**Existing pattern** (`tests/js/tests/prolog-and-literals.test.ts`): `before()` spins up
+executor, `after()` kills it, tests run against a real `PerspectiveProxy`. Scenario 08
+models and tests port directly into a new file using this pattern.
 
-**Location and naming:**
+**Target file:** `tests/js/tests/model-decorator-api.test.ts`
 
-The WE workspace glob already includes `apps/playgrounds/*/*` (see `pnpm-workspace.yaml`),
-so the app slots in with zero workspace config changes:
+This should cover all the `Ad4mModel` scenarios currently planned (01–10), written
+directly here rather than in the `we` playground first. Scenario 08 is the immediate
+port; the remaining scenarios get written here from the start.
 
-```
-apps/playgrounds/react/ad4m-model-testing/
-```
+**Why NOT in `ad4m/core` Jest:**
+The `core` Jest suite mocks `PerspectiveProxy` — it can't catch SurrealDB query edge
+cases, SHACL validation failures, batching race conditions, executor-side literal
+encoding, or subscription lifecycle bugs. Keep `core` Jest for pure logic (query
+building, SHACL generation, `Literal` encoding, `queryToSurrealQL` output shape). Keep
+executor-touching behaviour in `tests/js`.
 
-Package name: `@we/playground-ad4m-model-testing`. This follows the existing convention
-(`apps/playgrounds/react/demo`) and is unambiguous about what it tests.
+---
 
-**Stack:** Vite + React (matches existing playgrounds). No test framework — scenarios are
-plain async functions. `pnpm dev` starts it on a fixed port.
+### `we` playground (`apps/playgrounds/react/ad4m-model-testing`) — WE-layer tooling
 
-**AD4M connection:**
+The playground was built as a fast iteration environment during Phase 2 development and
+served its purpose well (scenario 08, 12/12 passing). Its future role is **not** as a
+substitute for `tests/js` — it is a `we`-specific development and integration tool.
 
-The test app runs in a browser pointing at a local AD4M agent — exactly the use case
-`@coasys/ad4m-connect` is designed for. Use it directly, the same way `we-web` does in
-`webAdapter.ts`:
+**Appropriate use cases going forward:**
 
-```typescript
-import Ad4mConnect from "@coasys/ad4m-connect";
+- **`@we/models` tests** — `Space`, `Block`, block-types. These models are `we`-specific,
+  use `we`-specific predicates, and are naturally tested alongside `we` code
+- **`ad4m-hooks` testing** — `useSubjects`, `useSubject`, `useEntry`. These are React
+  hooks; subscription re-render behaviour and React lifecycle integration can't be
+  tested in Mocha
+- **Neighbourhood + joining flows** — anything requiring the full `we` Electron shell
+  (creating a neighbourhood, inviting an agent, observing sync across participants)
+- **Visual/interactive debugging** — browser devtools, live state inspection, and hot
+  reload when diagnosing hard-to-reproduce bugs
+- **`we` release smoke tests** — quick sanity check before shipping that the full app
+  stack works end-to-end
 
-const connect = Ad4mConnect({
-  appName: "AD4M Model Test",
-  appDesc: "Model refactor integration test harness",
-  appDomain: "localhost",
-  appIconPath: "",
-  capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
-});
+**Scenario renaming:** Now that the generic `Ad4mModel` scenarios move to `tests/js`,
+the playground scenarios should be renamed to reflect their `we`-specific purpose:
 
-const client = await connect.getAd4mClient();
-```
+| Old name                  | New purpose                                         |
+| ------------------------- | --------------------------------------------------- |
+| `08-decorator-api.ts`     | Keep as reference / port to `tests/js`              |
+| Future scenarios 01–07    | Write directly in `tests/js`, not here              |
+| `08-we-models.ts` (new)   | `Space`/`Block` smoke test against new decorator API |
+| `09-hooks.ts` (new)       | `useSubjects`, `useSubject`, `useEntry` hooks        |
+| `10-neighbourhood.ts` (new) | Neighbourhood join + cross-agent sync              |
 
-`ad4m-connect` already handles the connection UI, token storage, and persistence across
-hot-reloads — no need for a hand-rolled localhost input or `localStorage` logic. The
-`PlatformAdapter` pattern used by the main apps (`we-electron`, `we-tauri`, `we-web`)
-is production infrastructure and not needed here.
 
-Once `client` is obtained, open or create a test perspective and pass it to the scenario
-harness via React context. A dev can point the app at a dedicated test perspective UUID
-stored in the connect config.
-
-**File structure:**
-
-```
-apps/playgrounds/react/ad4m-model-testing/
-  package.json            # name: @we/playground-ad4m-model-testing
-  vite.config.ts          # port: 3050 (or next available after react/demo's 3040)
-  tsconfig.json
-  index.html
-  src/
-    main.tsx
-    App.tsx               # ad4m-connect bootstrap + scenario harness shell
-    context/
-      PerspectiveContext.tsx  # React context holding the live PerspectiveProxy (set after ad4m-connect resolves)
-    harness/
-      ScenarioRunner.tsx  # runs one scenario, captures pass/fail/error, displays result
-      ScenarioList.tsx    # renders all scenarios, run-all button, individual run buttons
-      types.ts            # TestResult, ScenarioModule types
-    scenarios/
-      01-basic-crud.ts
-      02-querying.ts
-      03-collections.ts
-      04-relationships.ts
-      05-subscriptions.ts
-      06-transactions.ts
-      07-prolog-bridge.ts
-      08-we-models.ts
-      09-model-inheritance.ts
-      10-crdt-ordering.ts   # placeholder for Phase 5
-    models/
-      TestPost.ts
-      TestComment.ts        # @BelongsToOne(() => TestPost)
-      TestTag.ts            # @BelongsToMany(() => TestPost)
-```
-
-**Scenario contract:**
-
-```typescript
-// harness/types.ts
-export type TestResult = {
-  name: string;
-  passed: boolean;
-  error?: string;
-  durationMs: number;
-};
-
-export type ScenarioModule = {
-  name: string;
-  run: (perspective: PerspectiveProxy) => Promise<TestResult[]>;
-};
-```
-
-Each scenario file exports a `ScenarioModule`. `ScenarioRunner` imports it, calls `run()`,
-and renders the `TestResult[]` as a checklist. No test framework — just async functions
-and a UI.
-
-**`08-we-models.ts`** specifically exercises the existing `Space` and `Block` models from
-`@we/models` against the new decorator API, serving as an early smoke test for the
-`@we/models` migration before it is committed.
-
-**Why this over Jest unit tests:** The existing `Ad4mModel.test.ts` mocks
-`PerspectiveProxy` and therefore can't catch SurrealDB query edge cases, SHACL
-validation failures, batching race conditions, or subscription lifecycle bugs.
-The test app catches all of these.
 
 ---
 
 ## Execution Order
 
 ```
-0   Test app scaffold (apps/playgrounds/react/ad4m-model-testing)
-      ← FIRST step — connect wired up, all scenario stubs in place
-      ← each subsequent phase fills in its scenarios before moving to the next phase
+0   Port scenario 08 → tests/js/tests/model-decorator-api.test.ts
+      ← direct port of the 12 passing tests; executor lifecycle from prolog-and-literals.test.ts
+      ← remaining scenarios (01–07, 09–10) written here from the start, not in we playground
 1a  generatePrologFacts.ts                              ← first real code; verified by scenario 07
 1b  Remove dead Prolog paths                            ← delete after 1a verified
 1c  Delete Subject.ts                                   ← delete after 1b complete (removes eval())
 2   Decorator cleanup (@Property, @Flag, @HasMany, etc.)   ← can overlap with 1b/1c
     + WeakMap metadata registry (moved from Phase 4a)  ← correctness fix, not deferrable
-    + update @we/models (5 files) in same PR            ← verified by scenario 08
+    + update @we/models (5 files) in same PR            ← verified by we playground 08-we-models.ts
 3a  File decomposition                                  ← after 1 & 2 complete
     + shared hydrateInstance() in hydration.ts         ← eliminates dual hydration impls
     + parameterized SurrealQL queries throughout        ← replaces string interpolation
