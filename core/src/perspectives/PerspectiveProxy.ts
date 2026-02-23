@@ -1288,7 +1288,7 @@ export class PerspectiveProxy {
         const escapedAltPrefix = escapeSurrealString(alternatePrefix);
         
         // Single surreal query to get all flow-related links
-        const query = `SELECT in.uri AS source, predicate, out.uri AS target FROM link WHERE in.uri = '${escapedFlowUri}' OR string::starts::with(in.uri, '${escapedAltPrefix}')`;
+        const query = `SELECT in.uri AS source, predicate, out.uri AS target FROM link WHERE in.uri = '${escapedFlowUri}' OR string::starts_with(in.uri, '${escapedAltPrefix}')`;
         const result = await this.querySurrealDB(query);
         
         const flowLinks = (result || []).map((r: any) => ({
