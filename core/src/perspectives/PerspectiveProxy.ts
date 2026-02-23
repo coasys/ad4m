@@ -1306,8 +1306,22 @@ export class PerspectiveProxy {
      */
     async subjectClasses(): Promise<string[]> {
         try {
-            const shaclClasses = await this.#client.subjectClassesFromSHACL(this.#handle.uuid);
-            return shaclClasses || [];
+            // Query SHACL class links directly — no need for a separate GraphQL endpoint
+            const classLinks = await this.get(new LinkQuery({
+                predicate: "rdf://type",
+                target: "ad4m://SubjectClass"
+            }));
+            const classNames = classLinks
+                .map(l => {
+                    const source = l.data.source;
+                    // Extract class name from URI like "recipe://Recipe" or "flux://Channel"
+                    const parts = source.split("://");
+                    const lastPart = parts[parts.length - 1];
+                    return lastPart.split('/').pop() || '';
+                })
+                .filter(name => name.length > 0);
+            // Deduplicate
+            return [...new Set(classNames)];
         } catch (e) {
             console.warn('subjectClasses: SHACL lookup failed:', e);
             return [];
@@ -2019,7 +2033,7 @@ export class PerspectiveProxy {
             // @ts-ignore - className is added dynamically by decorators
             const className = obj.className || obj.constructor?.className || obj.constructor?.prototype?.className;
             if (className) {
-                const existingClasses = await this.#client.subjectClassesFromSHACL(this.#handle.uuid);
+                const existingClasses = await this.subjectClasses();
                 if (existingClasses.includes(className)) {
                     return [className];
                 }
