@@ -245,6 +245,18 @@ impl Query {
         address: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)?;
+
+        // If WASM language, return base64-encoded bundle
+        #[cfg(feature = "wasm-languages")]
+        if crate::wasm_core::is_wasm_language(&address) {
+            use base64::Engine;
+            let languages_path = crate::languages::LanguageController::languages_path();
+            let bundle_path = format!("{}/{}/bundle.wasm", languages_path, address);
+            let wasm_bytes = std::fs::read(&bundle_path)
+                .map_err(|e| FieldError::new(format!("Read WASM bundle: {}", e), coasys_juniper::Value::null()))?;
+            return Ok(base64::engine::general_purpose::STANDARD.encode(&wasm_bytes));
+        }
+
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
