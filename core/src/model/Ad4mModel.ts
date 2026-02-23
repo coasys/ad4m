@@ -1,17 +1,9 @@
 import { Literal } from "../Literal";
-import { Link } from "../links/Links";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import {
-  makeRandomId,
-  PropertyOptions,
-  RelationOptions,
-  Model,
-  getPropertiesMetadata,
-  getRelationsMetadata,
-  propertyRegistry,
-  relationRegistry,
-} from "./decorators";
-import { capitalize, propertyNameToSetterName } from "./util";
+import { makeRandomId, getRelationsMetadata } from "./decorators";
+import * as mutation from "./mutation";
+export type { MutationContext } from "./mutation";
+import { capitalize } from "./util";
 
 // ── Public types (re-exported so consumers see no change) ──────────────────
 export type {
@@ -28,14 +20,8 @@ export type {
 } from "./types";
 import type {
   Query,
-  Where,
-  Order,
-  WhereCondition,
-  AllInstancesResult,
   ResultsWithTotalCount,
   PaginationResult,
-  PropertyMetadata,
-  RelationMetadata,
   ModelMetadata,
 } from "./types";
 
@@ -66,7 +52,6 @@ export {
   buildSurrealSelectFields,
   buildSurrealSelectFieldsWithAggregation,
 } from "./query/SurrealQueryBuilder";
-import { formatSurrealValue } from "./query/SurrealQueryBuilder";
 
 // ── Hydration utilities (re-exported for advanced consumers) ──────────────
 export {
@@ -75,7 +60,6 @@ export {
   normalizeTimestamp,
 } from "./query/hydration";
 export type { RawLink } from "./query/hydration";
-
 
 // ── Static query operations (each static method below delegates here) ─────────
 import * as ops from "./query/operations";
@@ -189,7 +173,6 @@ export type { TransactionContext } from "./transaction";
  */
 export class Ad4mModel {
   #baseExpression: string;
-  #subjectClassName: string;
   #source: string;
   #perspective: PerspectiveProxy;
   author: string;
@@ -323,11 +306,21 @@ export class Ad4mModel {
 
       const cap = capitalize(key);
       this[`add${cap}`] = (value: any, batchId?: string) =>
-        this.setRelationAdder(key, value, batchId);
+        mutation.setRelationAdder(this.#mutationContext(), key, value, batchId);
       this[`remove${cap}`] = (value: any, batchId?: string) =>
-        this.setRelationRemover(key, value, batchId);
+        mutation.setRelationRemover(
+          this.#mutationContext(),
+          key,
+          value,
+          batchId,
+        );
       this[`set${cap}`] = (value: any, batchId?: string) =>
-        this.setRelationSetter(key, value, batchId);
+        mutation.setRelationSetter(
+          this.#mutationContext(),
+          key,
+          value,
+          batchId,
+        );
     }
   }
 
@@ -351,98 +344,24 @@ export class Ad4mModel {
     return this.#perspective;
   }
 
-  /**
-   * Get property metadata from decorator (Phase 1: Prolog-free refactor)
-   * @private
-   */
-  private getPropertyMetadata(key: string): PropertyOptions | undefined {
-    const proto = Object.getPrototypeOf(this);
-    return getPropertiesMetadata(proto.constructor)?.[key];
-  }
-
-  /**
-   * Get relation metadata from decorator (Phase 1: Prolog-free refactor)
-   * @private
-   */
-  private getRelationMetadata(key: string): RelationOptions | undefined {
-    const proto = Object.getPrototypeOf(this);
-    return getRelationsMetadata(proto.constructor)?.[key];
-  }
-
-  /**
-   * Generate property setter action from metadata (Phase 1: Prolog-free refactor)
-   * Replaces Prolog query: property_setter(C, key, Setter)
-   * @private
-   */
-  private generatePropertySetterAction(
-    key: string,
-    metadata: PropertyOptions,
-  ): any[] {
-    // Check if property is a flag (immutable — written once by createSubject constructor action)
-    if (metadata.flag) {
-      throw new Error(
-        `Property "${key}" is a @Flag and cannot be set after creation`,
-      );
-    }
-
-    // Check if property is read-only
-    if (metadata.writable === false) {
-      throw new Error(`Property "${key}" is read-only and cannot be written`);
-    }
-
-    if (!metadata.through) {
-      throw new Error(`Property "${key}" has no 'through' predicate defined`);
-    }
-
-    return [
-      {
-        action: "setSingleTarget",
-        source: "this",
-        predicate: metadata.through,
-        target: "value",
-        ...(metadata.local && { local: true }),
-      },
-    ];
-  }
-
-  /**
-   * Generate relation action from metadata (Phase 1: Prolog-free refactor)
-   * Replaces Prolog queries: relation_adder, relation_remover, relation_setter
-   * @private
-   */
-  private generateRelationAction(
-    key: string,
-    actionType: "adder" | "remover" | "setter",
-  ): any[] {
-    const metadata = this.getRelationMetadata(key);
-    if (!metadata) {
-      throw new Error(`Relation "${key}" has no metadata defined`);
-    }
-
-    if (!metadata.through) {
-      throw new Error(`Relation "${key}" has no 'through' predicate defined`);
-    }
-
-    const actionMap = {
-      adder: "addLink",
-      remover: "removeLink",
-      setter: "relationSetter",
+  /** Builds the context object for all mutation functions. */
+  #mutationContext(): mutation.MutationContext {
+    return {
+      perspective: this.#perspective,
+      baseExpression: this.#baseExpression,
+      source: this.#source,
+      instance: this,
     };
-
-    return [
-      {
-        action: actionMap[actionType],
-        source: "this",
-        predicate: metadata.through,
-        target: "value",
-        ...(metadata.local && { local: true }),
-      },
-    ];
   }
 
   private async getData() {
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
-    return fetchInstanceData(this, this.#perspective, this.#baseExpression, metadata);
+    return fetchInstanceData(
+      this,
+      this.#perspective,
+      this.#baseExpression,
+      metadata,
+    );
   }
 
   /**
@@ -629,162 +548,6 @@ export class Ad4mModel {
     return ops.count(this as any, perspective, query);
   }
 
-  private async setProperty(key: string, value: any, batchId?: string) {
-    // Phase 1: Use metadata instead of Prolog queries
-    const metadata = this.getPropertyMetadata(key);
-    if (!metadata) {
-      console.warn(`Property "${key}" has no metadata, skipping`);
-      return;
-    }
-
-    // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generatePropertySetterAction(key, metadata);
-
-    // Get resolve language from metadata (replaces Prolog query)
-    let resolveLanguage = metadata.resolveLanguage;
-
-    // Skip storing empty/null/undefined values to avoid invalid empty literals (e.g. literal://string:)
-    if (value === undefined || value === null || value === "") {
-      return;
-    }
-
-    if (resolveLanguage) {
-      value = await this.#perspective.createExpression(value, resolveLanguage);
-    } else if (
-      typeof value !== "string" ||
-      !/^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(value)
-    ) {
-      // Encode raw values as literal:// URIs so they are valid link targets.
-      // This mirrors what Rust's resolve_property_value does inside createSubject.
-      // Values that already carry a URI scheme (did:, expression://, literal://, etc.)
-      // are passed through unchanged.
-      value = Literal.from(value).toUrl();
-    }
-
-    await this.#perspective.executeAction(
-      actions,
-      this.#baseExpression,
-      [{ name: "value", value }],
-      batchId,
-    );
-  }
-
-  private async setRelationSetter(key: string, value: any, batchId?: string) {
-    // Phase 1: Use metadata instead of Prolog queries
-    const metadata = this.getRelationMetadata(key);
-    if (!metadata) {
-      console.warn(`Relation "${key}" has no metadata, skipping`);
-      return;
-    }
-
-    // Accept either a string ID or an Ad4mModel instance (extract baseExpression)
-    const toId = (v: any): any =>
-      v && typeof v === "object" && typeof v.baseExpression === "string"
-        ? v.baseExpression
-        : v;
-
-    // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateRelationAction(key, "setter");
-
-    if (value != null) {
-      if (Array.isArray(value)) {
-        await this.#perspective.executeAction(
-          actions,
-          this.#baseExpression,
-          value.map((v) => ({ name: "value", value: toId(v) })),
-          batchId,
-        );
-      } else {
-        await this.#perspective.executeAction(
-          actions,
-          this.#baseExpression,
-          [{ name: "value", value: toId(value) }],
-          batchId,
-        );
-      }
-    }
-  }
-
-  private async setRelationAdder(key: string, value: any, batchId?: string) {
-    // Phase 1: Use metadata instead of Prolog queries
-    const metadata = this.getRelationMetadata(key);
-    if (!metadata) {
-      console.warn(`Relation "${key}" has no metadata, skipping`);
-      return;
-    }
-
-    // Accept either a string ID or an Ad4mModel instance (extract baseExpression)
-    const toId = (v: any): any =>
-      v && typeof v === "object" && typeof v.baseExpression === "string"
-        ? v.baseExpression
-        : v;
-
-    // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateRelationAction(key, "adder");
-
-    if (value != null) {
-      if (Array.isArray(value)) {
-        await Promise.all(
-          value.map((v) =>
-            this.#perspective.executeAction(
-              actions,
-              this.#baseExpression,
-              [{ name: "value", value: toId(v) }],
-              batchId,
-            ),
-          ),
-        );
-      } else {
-        await this.#perspective.executeAction(
-          actions,
-          this.#baseExpression,
-          [{ name: "value", value: toId(value) }],
-          batchId,
-        );
-      }
-    }
-  }
-
-  private async setRelationRemover(key: string, value: any, batchId?: string) {
-    // Phase 1: Use metadata instead of Prolog queries
-    const metadata = this.getRelationMetadata(key);
-    if (!metadata) {
-      console.warn(`Relation "${key}" has no metadata, skipping`);
-      return;
-    }
-
-    // Accept either a string ID or an Ad4mModel instance (extract baseExpression)
-    const toId = (v: any): any =>
-      v && typeof v === "object" && typeof v.baseExpression === "string"
-        ? v.baseExpression
-        : v;
-
-    // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateRelationAction(key, "remover");
-
-    if (value != null) {
-      if (Array.isArray(value)) {
-        await Promise.all(
-          value.map((v) =>
-            this.#perspective.executeAction(
-              actions,
-              this.#baseExpression,
-              [{ name: "value", value: toId(v) }],
-              batchId,
-            ),
-          ),
-        );
-      } else {
-        await this.#perspective.executeAction(
-          actions,
-          this.#baseExpression,
-          [{ name: "value", value: toId(value) }],
-          batchId,
-        );
-      }
-    }
-  }
-
   /**
    * Persists the model instance to the perspective.
    *
@@ -821,142 +584,7 @@ export class Ad4mModel {
    * ```
    */
   async save(batchId?: string) {
-    const ctor = this.constructor as typeof Ad4mModel;
-
-    // Check whether this instance already exists in the perspective so we can
-    // choose the create vs update path. Query persisted links only — uncommitted
-    // batch state is not visible to SurrealDB queries, which is correct: if the
-    // caller passed in a batchId and the instance was written earlier in that
-    // same (not-yet-committed) batch, we treat it as new here, which is safe.
-    const safeBase = formatSurrealValue(this.#baseExpression);
-    const existingLinks = await this.#perspective.querySurrealDB(
-      `SELECT 1 FROM link WHERE in.uri = ${safeBase} LIMIT 1`,
-    );
-    const isNew = !existingLinks || existingLinks.length === 0;
-
-    let batchCreatedHere = false;
-    if (!batchId) {
-      batchId = await this.perspective.createBatch();
-      batchCreatedHere = true;
-    }
-
-    if (isNew) {
-      // ── CREATE PATH ───────────────────────────────────────────────────────
-      // Use createSubject's initialValues to set scalar properties (not relations),
-      // then innerUpdate(false) for relations only.
-
-      // Filter to scalar (non-relation, non-action) values for createSubject
-      const initialValues = {};
-      for (const [key, value] of Object.entries(this)) {
-        if (
-          value !== undefined &&
-          value !== null &&
-          !(Array.isArray(value) && value.length > 0) &&
-          !value?.action
-        ) {
-          initialValues[key] = value;
-        }
-      }
-
-      const className =
-        await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
-
-      await this.perspective.createSubject(
-        className,
-        this.#baseExpression,
-        initialValues,
-        batchId,
-      );
-
-      // Attach instance to its parent source node
-      await this.#perspective.add(
-        new Link({
-          source: this.#source,
-          predicate: "ad4m://has_child",
-          target: this.baseExpression,
-        }),
-        "shared",
-        batchId,
-      );
-
-      // Set relations
-      await this.innerUpdate(false, batchId);
-    } else {
-      // ── UPDATE PATH ───────────────────────────────────────────────────────
-      // Instance already exists — update properties and relations only.
-      // Skipping createSubject and has_child prevents duplicate links.
-      await this.innerUpdate(true, batchId);
-    }
-
-    if (batchCreatedHere) {
-      await this.perspective.commitBatch(batchId);
-      await this.getData();
-    }
-  }
-
-  private cleanCopy() {
-    const cleanCopy = {};
-    const props = Object.entries(this);
-    for (const [key, value] of props) {
-      if (
-        value !== undefined &&
-        value !== null &&
-        key !== "author" &&
-        key !== "timestamp"
-      ) {
-        cleanCopy[key] = value;
-      }
-    }
-    return cleanCopy;
-  }
-
-  private async innerUpdate(setProperties: boolean = true, batchId?: string) {
-    this.#subjectClassName =
-      await this.#perspective.stringOrTemplateObjectToSubjectClassName(
-        this.cleanCopy(),
-      );
-
-    const entries = Object.entries(this);
-    for (const [key, value] of entries) {
-      if (value !== undefined && value !== null) {
-        if (value?.action) {
-          switch (value.action) {
-            case "setter":
-              await this.setRelationSetter(key, value.value, batchId);
-              break;
-            case "adder":
-              await this.setRelationAdder(key, value.value, batchId);
-              break;
-            case "remover":
-              await this.setRelationRemover(key, value.value, batchId);
-              break;
-            default:
-              await this.setRelationSetter(key, value.value, batchId);
-              break;
-          }
-        } else if (Array.isArray(value)) {
-          // Handle all arrays as relations, including empty ones (which clears the relation)
-          await this.setRelationSetter(key, value, batchId);
-        } else if (value !== undefined && value !== null && value !== "") {
-          if (setProperties) {
-            // Check if this is a relation (has relation metadata)
-            const relationMetadata = this.getRelationMetadata(key);
-            if (relationMetadata) {
-              // Skip - it's a relation, not a regular property
-              continue;
-            }
-            // Skip flag fields — flags are immutable, written once by the
-            // createSubject constructor action. Re-writing them would corrupt
-            // the flag link via setSingleTarget on every re-save.
-            const propMeta = this.getPropertyMetadata(key);
-            if (propMeta?.flag) {
-              continue;
-            }
-            await this.setProperty(key, value, batchId);
-          }
-        }
-      }
-    }
+    return mutation.saveInstance(this.#mutationContext(), batchId);
   }
 
   /**
@@ -985,12 +613,7 @@ export class Ad4mModel {
    * ```
    */
   async get() {
-    this.#subjectClassName =
-      await this.#perspective.stringOrTemplateObjectToSubjectClassName(
-        this.cleanCopy(),
-      );
-
-    return await this.getData();
+    return this.getData();
   }
 
   /**

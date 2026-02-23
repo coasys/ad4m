@@ -128,9 +128,7 @@ export async function fetchInstanceData(
           } catch (e) {
             console.warn(`Failed to hydrate ${relationName}:`, e);
             instance[relationName] =
-              (relationMeta as any).maxCount === 1
-                ? values[0] ?? null
-                : values;
+              (relationMeta as any).maxCount === 1 ? values[0] ?? null : values;
           }
         } else {
           instance[relationName] =
@@ -178,9 +176,7 @@ export async function fetchInstanceData(
                 : hydrated;
           } catch (e) {
             instance[relationName] =
-              (relationMeta as any).maxCount === 1
-                ? values[0] ?? null
-                : values;
+              (relationMeta as any).maxCount === 1 ? values[0] ?? null : values;
           }
         } else {
           instance[relationName] =
@@ -208,10 +204,11 @@ export async function fetchInstanceData(
           const filterMetadata =
             await perspective.getSubjectClassMetadataFromSDNA(className);
           if (filterMetadata) {
-            instance[relationName] = await perspective.batchCheckSubjectInstances(
-              instance[relationName],
-              filterMetadata,
-            );
+            instance[relationName] =
+              await perspective.batchCheckSubjectInstances(
+                instance[relationName],
+                filterMetadata,
+              );
           }
         } catch {
           // keep unfiltered on error
