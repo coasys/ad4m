@@ -6,7 +6,6 @@ import { Perspective } from "./Perspective";
 import { Literal } from "../Literal";
 import { Subject } from "../model/Subject";
 import { ExpressionRendered } from "../expression/Expression";
-import { collectionAdderToName, collectionRemoverToName, collectionSetterToName } from "../model/util";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 import { AIClient } from "../ai/AIClient";
@@ -1375,11 +1374,16 @@ export class PerspectiveProxy {
                 batchId
             );
         } else {
-            let query = this.buildQueryFromTemplate(subjectClass as object);
+            const obj = subjectClass as any;
+            const resolvedClassName = obj.className || obj.constructor?.className || obj.constructor?.prototype?.className
+                || await this.findClassByProperties(obj);
+            if (!resolvedClassName) {
+                throw new Error("Could not resolve subject class name from object. Use a decorated class or pass a className string.");
+            }
             await this.#client.createSubject(
                 this.#handle.uuid, 
                 JSON.stringify({
-                    query,
+                    className: resolvedClassName,
                     initialValues
                 }), 
                 exprAddr,
@@ -1400,8 +1404,13 @@ export class PerspectiveProxy {
         if (typeof subjectClass === "string") {
             return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({className: subjectClass}), exprAddr))
         }
-        let query = this.buildQueryFromTemplate(subjectClass as object)
-        return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({query}), exprAddr))
+        const obj = subjectClass as any;
+        const resolvedClassName = obj.className || obj.constructor?.className || obj.constructor?.prototype?.className
+            || await this.findClassByProperties(obj);
+        if (!resolvedClassName) {
+            throw new Error("Could not resolve subject class name from object. Use a decorated class or pass a className string.");
+        }
+        return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({className: resolvedClassName}), exprAddr))
     }
 
     /**
@@ -1923,97 +1932,83 @@ export class PerspectiveProxy {
     }
 
 
-    private buildQueryFromTemplate(obj: object): string {
-        let result
-        // We need to avoid strict mode for the following intropsective code
-        (function(obj) {
-            // Collect all string properties of the object in a list
-            let properties = []
+    /**
+     * Find a subject class by matching an object's properties/collections against SHACL shapes.
+     * Queries SHACL links client-side to find a class whose properties contain all required ones.
+     * @returns The matching class name, or null if no match found.
+     */
+    private async findClassByProperties(obj: object): Promise<string | null> {
+        // Extract properties and collections from the object
+        let properties: string[] = [];
+        let collections: string[] = [];
+        const proto = Object.getPrototypeOf(obj);
 
-            // Collect all collections of the object in a list
-            let collections = []
+        if (proto?.__properties) {
+            properties = Object.keys(proto.__properties);
+        } else {
+            properties = Object.keys(obj).filter(key => !Array.isArray((obj as any)[key]));
+        }
 
-            // Collect all string properties of the object in a list
-            if(Object.getPrototypeOf(obj).__properties) {
-                Object.keys(Object.getPrototypeOf(obj).__properties).forEach(p => properties.push(p))
-            } else {
-                properties.push(...Object.keys(obj).filter(key => !Array.isArray(obj[key])))
-            }
+        if (proto?.__collections) {
+            collections = Object.keys(proto.__collections).filter(key => key !== 'isSubjectInstance');
+        } else {
+            collections = Object.keys(obj).filter(key => Array.isArray((obj as any)[key]) && key !== 'isSubjectInstance');
+        }
 
-            // Collect all collections of the object in a list
-            if (Object.getPrototypeOf(obj).__collections) {
-                Object.keys(Object.getPrototypeOf(obj).__collections).filter(key => key !== 'isSubjectInstance').forEach(c => {
-                    if (!collections.includes(c)) {
-                        collections.push(c);
+        if (properties.length === 0 && collections.length === 0) {
+            return null;
+        }
+
+        // Get all subject classes via SHACL links
+        const classLinks = await this.get(new LinkQuery({ predicate: "rdf://type", target: "ad4m://SubjectClass" }));
+
+        for (const link of classLinks) {
+            // Extract class name from source URI like "flux://Community" -> "Community"
+            const source = link.data.source;
+            const separatorIdx = source.indexOf("://");
+            if (separatorIdx < 0) continue;
+            const className = source.substring(separatorIdx + 3);
+            if (!className) continue;
+
+            // Get SHACL properties for this class
+            const escaped = this.escapeRegExp(className);
+            const shapePattern = new RegExp(`[/:#]${escaped}Shape$`);
+
+            // Get properties
+            const propLinks = await this.get(new LinkQuery({ predicate: "sh://property" }));
+            const classProps: string[] = [];
+            for (const pl of propLinks) {
+                if (shapePattern.test(pl.data.source)) {
+                    // Extract property name from target like "flux://Community.type" -> "type"
+                    const dotIdx = pl.data.target.lastIndexOf('.');
+                    if (dotIdx >= 0) {
+                        classProps.push(pl.data.target.substring(dotIdx + 1));
                     }
-                });
-            } else {
-                collections.push(...Object.keys(obj).filter(key => Array.isArray(obj[key])).filter(key => key !== 'isSubjectInstance'))
+                }
             }
 
-            // Collect all set functions of the object in a list
-            let setFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("set") && !key.startsWith("setCollection"))
-            // Add all set functions of the object's prototype to that list
-            setFunctions = setFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => {
-                const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(obj), key);
-                return descriptor && typeof descriptor.value === "function" && key.startsWith("set") && !key.startsWith("setCollection");
-            }));
-
-            // Collect all add functions of the object in a list
-            let addFunctions = Object.getOwnPropertyNames(obj).filter(key => (Object.prototype.hasOwnProperty.call(obj, key) && typeof obj[key] === "function") && key.startsWith("add"))
-            // Add all add functions of the object's prototype to that list
-            addFunctions = addFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => {
-                const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(obj), key);
-                return descriptor && typeof descriptor.value === "function" && key.startsWith("add");
-            }));
-
-            // Collect all remove functions of the object in a list
-            let removeFunctions = Object.getOwnPropertyNames(obj).filter(key => (Object.prototype.hasOwnProperty.call(obj, key) && typeof obj[key] === "function") && key.startsWith("remove"))
-            // Add all remove functions of the object's prototype to that list
-            removeFunctions = removeFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => {
-                const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(obj), key);
-                return descriptor && typeof descriptor.value === "function" && key.startsWith("remove");
-            }));
-
-            // Collect all add functions of the object in a list
-            let setCollectionFunctions = Object.getOwnPropertyNames(obj).filter(key => (Object.prototype.hasOwnProperty.call(obj, key) && typeof obj[key] === "function") && key.startsWith("setCollection"))
-            // Add all add functions of the object's prototype to that list
-            setCollectionFunctions = setCollectionFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => {
-                const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(obj), key);
-                return descriptor && typeof descriptor.value === "function" && key.startsWith("setCollection");
-            }));
-            // Construct query to find all subject classes that have the given properties and collections
-            let query = `subject_class(Class, C)`
-
-            for(let property of properties) {
-                query += `, property(C, "${property}")`
-            }
-            for(let collection of collections) {
-                query += `, collection(C, "${collection}")`
+            // Get collections
+            const collLinks = await this.get(new LinkQuery({ predicate: "sh://collection" }));
+            const classCols: string[] = [];
+            for (const cl of collLinks) {
+                if (shapePattern.test(cl.data.source)) {
+                    const dotIdx = cl.data.target.lastIndexOf('.');
+                    if (dotIdx >= 0) {
+                        classCols.push(cl.data.target.substring(dotIdx + 1));
+                    }
+                }
             }
 
-            for(let setFunction of setFunctions) {
-                // e.g.  "setState" -> "state"
-                let property = setFunction.substring(3)
-                property = property.charAt(0).toLowerCase() + property.slice(1)
-                query += `, property_setter(C, "${property}", _)`
-            }
-            for(let addFunction of addFunctions) {
-                query += `, collection_adder(C, "${collectionAdderToName(addFunction)}", _)`
-            }
+            // Check if all required properties and collections are present
+            const hasAllProps = properties.every(p => classProps.includes(p));
+            const hasAllCols = collections.every(c => classCols.includes(c));
 
-            for(let removeFunction of removeFunctions) {
-                query += `, collection_remover(C, "${collectionRemoverToName(removeFunction)}", _)`
+            if (hasAllProps && hasAllCols) {
+                return className;
             }
+        }
 
-            for(let setCollectionFunction of setCollectionFunctions) {
-                query += `, collection_setter(C, "${collectionSetterToName(setCollectionFunction)}", _)`
-            }
-
-            query += "."
-            result = query
-        }(obj))
-        return result
+        return null;
     }
 
     /** Returns all subject classes that match the given template object.
