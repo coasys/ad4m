@@ -16,7 +16,10 @@ import {
   ResultsWithTotalCount,
   Where,
   IncludeMap,
+  SubscribeOptions,
+  Subscription,
 } from "../types";
+import { createSubscription } from "../subscription";
 
 // Forward-reference type only — avoids importing the full Ad4mModel
 // module at the class level.
@@ -280,5 +283,38 @@ export class ModelQueryBuilder<T extends import("../Ad4mModel").Ad4mModel> {
       this.currentSubscription.result,
     )) as ResultsWithTotalCount<T>;
     return { results, totalCount, pageSize, pageNumber };
+  }
+
+  /**
+   * Terminal: creates a live subscription using the query parameters accumulated
+   * so far.  Fires `callback` immediately with current results, then on every
+   * relevant link change.
+   *
+   * Pass additional delivery options (`debounce`, `onError`) in `deliveryOpts`.
+   * Call `sub.unsubscribe()` to detach.
+   *
+   * @example
+   * ```typescript
+   * const sub = Post.query(perspective)
+   *   .where({ published: true })
+   *   .order({ createdAt: "DESC" })
+   *   .live((posts) => setPosts(posts), { debounce: 300 });
+   *
+   * // cleanup:
+   * sub.unsubscribe();
+   * ```
+   */
+  live(
+    callback: (results: T[]) => void,
+    deliveryOpts?: Pick<SubscribeOptions, "debounce" | "onError">,
+  ): Subscription {
+    const options: SubscribeOptions = { ...this.queryParams, ...deliveryOpts };
+    return createSubscription<T>(
+      (p, q) => this.ctor.findAll(p, q ?? {}),
+      () => this.ctor.getModelMetadata(),
+      this.perspective,
+      options,
+      callback,
+    );
   }
 }

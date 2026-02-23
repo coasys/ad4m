@@ -83,6 +83,61 @@ export type Query = {
   count?: boolean;
 };
 
+/**
+ * Options for a live subscription.
+ *
+ * Extends `Query` (minus `count`, which has no meaning for ongoing subscriptions)
+ * with delivery-layer concerns: `debounce` and `onError`.
+ *
+ * @example
+ * ```typescript
+ * Post.subscribe(
+ *   perspective,
+ *   {
+ *     where: { published: true },
+ *     order: { createdAt: "DESC" },
+ *     debounce: 300,
+ *     onError: (err) => console.error("Subscription error:", err),
+ *   },
+ *   (posts) => setPosts(posts),
+ * );
+ * ```
+ */
+export type SubscribeOptions = Omit<Query, "count"> & {
+  /**
+   * Debounce delay in milliseconds.  Multiple link changes within this window
+   * trigger only one re-query.  Default: `0` (no debouncing).
+   */
+  debounce?: number;
+  /**
+   * Called when the re-query or the callback throws.
+   * Defaults to `console.error` so failures are always visible without
+   * requiring every caller to handle them.
+   */
+  onError?: (err: Error) => void;
+};
+
+/**
+ * Handle returned by `Ad4mModel.subscribe()` / `ModelQueryBuilder.live()`.
+ *
+ * Call `unsubscribe()` when you no longer need the subscription to detach all
+ * link listeners and stop re-queries.  `lastError` exposes the most recent
+ * failure for polling UIs that want to show a "reconnecting…" state.
+ *
+ * @example
+ * ```typescript
+ * const sub = Post.subscribe(perspective, {}, (posts) => render(posts));
+ * // later:
+ * sub.unsubscribe();
+ * if (sub.lastError) console.warn("Last known error:", sub.lastError);
+ * ```
+ */
+export type Subscription = {
+  unsubscribe(): void;
+  /** The most recent unhandled error from re-query or callback, or `null`. */
+  readonly lastError: Error | null;
+};
+
 // ── Result shapes ──────────────────────────────────────────────────────────
 
 export type AllInstancesResult = any;

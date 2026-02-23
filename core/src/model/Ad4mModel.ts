@@ -18,6 +18,8 @@ export type {
   RelationMetadata,
   ModelMetadata,
   IncludeMap,
+  SubscribeOptions,
+  Subscription,
 } from "./types";
 import type {
   Query,
@@ -25,6 +27,8 @@ import type {
   PaginationResult,
   ModelMetadata,
   IncludeMap,
+  SubscribeOptions,
+  Subscription,
 } from "./types";
 
 // ── JSON Schema factory ────────────────────────────────────────────────────
@@ -73,7 +77,8 @@ import { getModelMetadata as _getModelMetadata } from "./schema/metadata";
 // ── Transaction API ──────────────────────────────────────────────────────────
 import { runTransaction } from "./transaction";
 export type { TransactionContext } from "./transaction";
-
+// ── Subscription API ───────────────────────────────────────────────────────────────
+import { createSubscription } from "./subscription";
 /**
  * Base class for defining data models in AD4M.
  *
@@ -751,6 +756,47 @@ export class Ad4mModel {
     callback: (tx: import("./transaction").TransactionContext) => Promise<T>,
   ): Promise<T> {
     return runTransaction(perspective, callback);
+  }
+
+  /**
+   * Subscribes to live updates for this model's query.
+   *
+   * Immediately invokes `callback` with the current results, then re-invokes
+   * it whenever a relevant link is added to or removed from the perspective.
+   *
+   * Call `sub.unsubscribe()` when you no longer need updates to avoid memory
+   * leaks and unnecessary re-queries.
+   *
+   * @param perspective - The perspective to watch
+   * @param options     - Query parameters + delivery options (`debounce`, `onError`)
+   * @param callback    - Receives the fresh result set on each change
+   * @returns A `Subscription` handle with `unsubscribe()` and `lastError`
+   *
+   * @example
+   * ```typescript
+   * const sub = Post.subscribe(
+   *   perspective,
+   *   { where: { published: true }, order: { createdAt: "DESC" }, debounce: 300 },
+   *   (posts) => setPosts(posts),
+   * );
+   *
+   * // In cleanup:
+   * sub.unsubscribe();
+   * ```
+   */
+  static subscribe<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    options: SubscribeOptions,
+    callback: (results: T[]) => void,
+  ): Subscription {
+    return createSubscription<T>(
+      (p, q) => this.findAll(p, q ?? {}),
+      () => this.getModelMetadata(),
+      perspective,
+      options,
+      callback,
+    );
   }
 
   static fromJSONSchema(
