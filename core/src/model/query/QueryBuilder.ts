@@ -91,11 +91,6 @@ export class ModelQueryBuilder<T extends import("../Ad4mModel").Ad4mModel> {
     return this;
   }
 
-  relations(relations: string[]): ModelQueryBuilder<T> {
-    this.queryParams.relations = relations;
-    return this;
-  }
-
   /**
    * Eagerly load specific relations as full model instances.
    *

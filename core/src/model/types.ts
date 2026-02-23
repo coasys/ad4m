@@ -50,8 +50,6 @@ export type IncludeMap = { [relationName: string]: true | Query };
 
 export type Query = {
   properties?: string[];
-  /** @deprecated Use `include` instead. */
-  relations?: string[];
   /**
    * Eagerly load specific relations as full model instances (Prisma-style map).
    *

@@ -81,9 +81,8 @@ export async function instancesFromSurrealResult<T>(
 
   const metadata = (ctor as any).getModelMetadata();
   const requestedProperties = query?.properties || [];
-  const requestedRelations = query?.relations || [];
 
-  // ── 1. Build instances from rows ─────────────────────────────────────────
+  // ── 1. Build instances from rows ──────────────────────────────────────────────────
   const instances: T[] = [];
   for (const row of result) {
     try {
@@ -96,15 +95,11 @@ export async function instancesFromSurrealResult<T>(
       // Shared hydration: properties + forward relations + author + timestamps
       await hydrateInstanceFromLinks(instance, links, metadata, perspective);
 
-      // If the query asked for specific fields only, strip everything else
-      if (requestedProperties.length > 0 || requestedRelations.length > 0) {
-        const requestedAttributes = [
-          ...requestedProperties,
-          ...requestedRelations,
-        ];
+      // If the query asked for specific properties only, strip everything else
+      if (requestedProperties.length > 0) {
         Object.keys(instance).forEach((key) => {
           if (
-            !requestedAttributes.includes(key) &&
+            !requestedProperties.includes(key) &&
             key !== "createdAt" &&
             key !== "updatedAt" &&
             key !== "author" &&

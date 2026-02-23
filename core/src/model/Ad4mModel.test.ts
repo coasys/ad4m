@@ -737,9 +737,10 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
       coll2: string[] = [];
     }
 
-    const query = await MultiCollectionModel.queryToSurrealQL(mockPerspective, {
-      relations: ["coll1"],
-    });
+    const query = await MultiCollectionModel.queryToSurrealQL(
+      mockPerspective,
+      {},
+    );
 
     // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
     expect(query).toContain(
@@ -993,7 +994,6 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   it("should generate query with only fields, no relations", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, {
       properties: ["name", "rating"],
-      relations: [],
     });
 
     // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
@@ -1005,7 +1005,6 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   it("should generate query with only relations, no fields", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, {
       properties: [],
-      relations: ["ingredients"],
     });
 
     // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
@@ -1211,54 +1210,6 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     expect(recipe.author).toBe("did:key:alice");
     // Timestamp is converted to Unix epoch (milliseconds)
     expect(recipe.timestamp).toBe(new Date("2023-01-01T00:00:00Z").getTime());
-  });
-
-  it("should filter relations when query specifies relations", async () => {
-    const surrealResults = [
-      {
-        source: "node:abc123",
-        source_uri: "literal://recipe1",
-        links: [
-          {
-            predicate: "recipe://name",
-            target: "Pasta",
-            author: "did:key:alice",
-            timestamp: "2023-01-01T00:00:00Z",
-          },
-          {
-            predicate: "recipe://rating",
-            target: "5",
-            author: "did:key:alice",
-            timestamp: "2023-01-01T00:00:00Z",
-          },
-          {
-            predicate: "recipe://ingredient",
-            target: "pasta",
-            author: "did:key:alice",
-            timestamp: "2023-01-01T00:00:00Z",
-          },
-          {
-            predicate: "recipe://ingredient",
-            target: "tomato",
-            author: "did:key:alice",
-            timestamp: "2023-01-01T00:00:00Z",
-          },
-        ],
-      },
-    ];
-
-    const result = await Recipe.instancesFromSurrealResult(
-      mockPerspective,
-      { relations: ["ingredients"] },
-      surrealResults,
-    );
-
-    expect(result.results).toHaveLength(1);
-    const recipe = result.results[0];
-    expect(recipe.ingredients).toEqual(["pasta", "tomato"]);
-    // name and rating should be removed since only "ingredients" was requested
-    expect(recipe.name).toBeUndefined();
-    expect(recipe.rating).toBeUndefined();
   });
 
   it("should handle results missing base field", async () => {
