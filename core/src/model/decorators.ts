@@ -113,81 +113,16 @@ export interface PropertyOptions {
 }
 
 /**
- * Decorator for defining optional properties on model classes.
+ * Declares a typed property backed by a single link triple in the perspective.
  *
- * @category Decorators
- *
- * @description
- * The most flexible property decorator that allows you to define properties with full control over:
- * - Whether the property is required
- * - Whether the property is writable
- * - How values are stored and retrieved
- * - Custom getter/setter logic
- * - Local vs network storage
- *
- * Both @Property and @ReadOnly are specialized versions of @Optional with preset configurations.
- *
- * @example
- * ```typescript
- * class Recipe extends Ad4mModel {
- *   // Basic optional property
- *   @Optional({
- *     through: "recipe://description"
- *   })
- *   description?: string;
- *
- *   // Optional property with custom initial value
- *   @Optional({
- *     through: "recipe://status",
- *     initial: "recipe://draft",
- *     required: true
- *   })
- *   status: string = "";
- *
- *   // Read-only property with custom getter
- *   @Optional({
- *     through: "recipe://rating",
- *     writable: false,
- *     getter: `
- *       findall(Rating, triple(Base, "recipe://user_rating", Rating), Ratings),
- *       sum_list(Ratings, Sum),
- *       length(Ratings, Count),
- *       Value is Sum / Count
- *     `
- *   })
- *   averageRating: number = 0;
- *
- *   // Property that resolves to a Literal and is stored locally
- *   @Optional({
- *     through: "recipe://notes",
- *     resolveLanguage: "literal",
- *     local: true
- *   })
- *   notes?: string;
- *
- *   // Property with custom getter and setter logic
- *   @Optional({
- *     through: "recipe://ingredients",
- *     getter: `
- *       triple(Base, "recipe://ingredients", RawValue),
- *       atom_json_term(RawValue, Value)
- *     `,
- *     setter: `
- *       atom_json_term(Value, JsonValue),
- *       Actions = [{"action": "setSingleTarget", "source": "this", "predicate": "recipe://ingredients", "target": JsonValue}]
- *     `
- *   })
- *   ingredients: string[] = [];
- * }
- * ```
- *
- * @param {PropertyOptions} opts - Property configuration options
- * @param {string} opts.through - The predicate URI for the property
- * @param {string} [opts.initial] - Initial value (required if property is required)
- * @param {boolean} [opts.required] - Whether the property must have a value
- * @param {boolean} [opts.writable=true] - Whether the property can be modified
- * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
- * @param {boolean} [opts.local] - Whether the property should only be stored locally
+ * @param opts.through        - Predicate URI (required)
+ * @param opts.initial        - Default value written by the constructor action
+ * @param opts.required       - Adds `sh:minCount 1` to the SHACL shape
+ * @param opts.writable       - Generates a setter action (default: `true` when `through` is set)
+ * @param opts.resolveLanguage - Language for value resolution (`"literal"`, etc.)
+ * @param opts.local          - Store only in local perspective, not shared with the network
+ * @param opts.getter         - Custom SurrealQL expression for computed / read-only properties
+ * @param opts.transform      - Post-fetch transform applied to the raw value
  */
 export function Property(opts: PropertyOptions) {
   return function <T>(target: T, key: keyof T) {
@@ -229,57 +164,16 @@ export interface FlagOptions {
 }
 
 /**
- * Decorator for defining flags on model classes.
+ * Immutable type-marker property: written once at creation and never modified.
  *
- * @category Decorators
- *
- * @description
- * A specialized property decorator for defining immutable type flags or markers on model instances.
- * Flags are always required properties with a fixed value that cannot be changed after creation.
- *
- * Common uses for flags:
- * - Type discrimination between different kinds of models
- * - Marking models with specific capabilities or features
- * - Versioning or compatibility markers
- *
- * Note: Use of Flag is discouraged unless you specifically need type-based filtering or
- * discrimination between different kinds of models. For most cases, regular properties
- * with @Property or @Optional are more appropriate.
+ * Use for type-discrimination predicates (e.g. `ad4m://type = "ad4m://message"`).
+ * For mutable data prefer `@Property`.
  *
  * @example
  * ```typescript
- * class Message extends Ad4mModel {
- *   // Type flag to identify message models
- *   @Flag({
- *     through: "ad4m://type",
- *     value: "ad4m://message"
- *   })
- *   type: string = "";
- *
- *   // Version flag for compatibility
- *   @Flag({
- *     through: "ad4m://version",
- *     value: "1.0.0"
- *   })
- *   version: string = "";
- *
- *   // Feature flag
- *   @Flag({
- *     through: "message://feature",
- *     value: "message://encrypted"
- *   })
- *   feature: string = "";
- * }
- *
- * // Later you can query for specific types:
- * const messages = await Message.query(perspective)
- *   .where({ type: "ad4m://message" })
- *   .run();
+ * @Flag({ through: "ad4m://type", value: "ad4m://message" })
+ * type: string = "";
  * ```
- *
- * @param {FlagOptions} opts - Flag configuration
- * @param {string} opts.through - The predicate URI for the flag
- * @param {string} opts.value - The fixed value for the flag
  */
 export function Flag(opts: FlagOptions) {
   return function <T>(target: T, key: keyof T) {
@@ -345,78 +239,6 @@ export interface RelationOptions {
   local?: boolean;
 }
 
-/**
- * Decorator for defining collections on model classes.
- *
- * @category Decorators
- *
- * @description
- * Defines a property that represents a collection of values linked to the model instance.
- * Collections are always arrays and support operations for adding, removing, and setting values.
- *
- * For each collection property, the following methods are automatically generated:
- * - `addX(value)` - Add a value to the collection
- * - `removeX(value)` - Remove a value from the collection
- * - `setX(values)` - Replace all values in the collection
- *
- * Where X is the capitalized property name.
- *
- * Collections can be filtered using the `where` option to only include values that:
- * - Are instances of a specific model class
- * - Match a custom Prolog condition
- *
- * @example
- * ```typescript
- * class Recipe extends Ad4mModel {
- *   // Basic collection of ingredients
- *   @Collection({
- *     through: "recipe://ingredient"
- *   })
- *   ingredients: string[] = [];
- *
- *   // Collection that only includes instances of another model
- *   @Collection({
- *     through: "recipe://comment",
- *     where: { isInstance: Comment }
- *   })
- *   comments: string[] = [];
- *
- *   // Collection with custom Prolog filter condition
- *   @Collection({
- *     through: "recipe://step",
- *     where: { prologCondition: `triple(Target, "step://order", Order), Order < 3` }
- *   })
- *   firstSteps: string[] = [];
- *
- *   // Collection with custom SurrealDB filter condition
- *   @Collection({
- *     through: "recipe://entries",
- *     where: { condition: `WHERE in.uri = Target AND predicate = 'recipe://has_ingredient' AND out.uri = 'recipe://test')`
- *   })
- *   ingredients: string[] = [];
- *
- *   // Local-only collection not shared with network
- *   @Collection({
- *     through: "recipe://note",
- *     local: true
- *   })
- *   privateNotes: string[] = [];
- * }
- *
- * // Using the generated methods:
- * const recipe = new Recipe(perspective);
- * await recipe.addIngredients("ingredient://flour");
- * await recipe.removeIngredients("ingredient://sugar");
- * await recipe.setIngredients(["ingredient://butter", "ingredient://eggs"]);
- * ```
- *
- * @param {RelationOptions} opts - Collection configuration
- * @param {string} opts.through - The predicate URI for collection links
- * @param {WhereOptions} [opts.where] - Filter conditions for collection values
- * @param {any} [opts.where.isInstance] - Model class to filter instances by
- * @param {string} [opts.where.prologCondition] - Custom Prolog condition for filtering
- * @param {boolean} [opts.local] - Whether collection links are stored locally only
- */
 /** Minimal structural type for Ad4mModel instances — used in mutator signatures to avoid circular imports. */
 export interface Ad4mModelLike {
   readonly id: string;
@@ -563,58 +385,15 @@ export interface ModelConfig {
 }
 
 /**
- * Decorator for defining model classes in AD4M.
+ * Registers the class as an AD4M SDNA subject, enabling `Ad4mModel` static query methods.
  *
- * @category Decorators
- *
- * @description
- * The root decorator that must be applied to any class that represents a model in AD4M.
- * It registers the class as a Social DNA (SDNA) subject class and provides the infrastructure
- * for storing and retrieving instances.
- *
- * This decorator:
- * - Registers the class with a unique name in the AD4M system
- * - Generates the necessary SDNA code for the model's properties and collections
- * - Enables the use of other model decorators (@Property, @Collection, etc.)
- * - Provides static query methods through the Ad4mModel base class
+ * Must be applied to every class that extends `Ad4mModel`.
  *
  * @example
  * ```typescript
- * @ModelOptions({ name: "Recipe" })
- * class Recipe extends Ad4mModel {
- *   @Property({
- *     through: "recipe://name",
- *     resolveLanguage: "literal"
- *   })
- *   name: string = "";
- *
- *   @Collection({ through: "recipe://ingredient" })
- *   ingredients: string[] = [];
- *
- *   // Static query methods from Ad4mModel:
- *   static async findByName(perspective: PerspectiveProxy, name: string) {
- *     return Recipe.query(perspective)
- *       .where({ name })
- *       .run();
- *   }
- * }
- *
- * // Using the model:
- * const recipe = new Recipe(perspective);
- * recipe.name = "Chocolate Cake";
- * await recipe.save();
- *
- * // Querying instances:
- * const recipes = await Recipe.query(perspective)
- *   .where({ name: "Chocolate Cake" })
- *   .run();
- *
- * // Using with PerspectiveProxy:
- * await perspective.ensureSDNASubjectClass(Recipe);
+ * @Model({ name: "Recipe" })
+ * class Recipe extends Ad4mModel { ... }
  * ```
- *
- * @param {ModelConfig} opts - Model configuration
- * @param {string} opts.name - Unique name for the model class in AD4M
  */
 export function Model(opts: ModelConfig) {
   return function (target: any) {

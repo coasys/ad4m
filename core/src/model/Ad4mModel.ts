@@ -81,103 +81,14 @@ export type { TransactionContext } from "./transaction";
 // ── Subscription API ───────────────────────────────────────────────────────────────
 import { createSubscription } from "./subscription";
 /**
- * Base class for defining data models in AD4M.
+ * Base class for all AD4M data models.
  *
- * @description
- * Ad4mModel provides the foundation for creating data models that are stored in AD4M perspectives.
- * Each model instance is represented as a subgraph in the perspective, with properties and relations
- * mapped to links in that graph. The class uses Prolog-based queries to efficiently search and filter
- * instances based on their properties and relationships.
+ * Instances are subgraphs in a {@link PerspectiveProxy}; properties and relations
+ * map to typed links. Decorators (`@Property`, `@HasMany`, etc.) declare the schema;
+ * query helpers (`findAll`, `query`, `subscribe`) run SurrealQL against the
+ * perspective's local graph engine.
  *
- * Key concepts:
- * - Each model instance has a unique base expression that serves as its identifier
- * - Properties are stored as links with predicates defined by the `through` option
- * - Relations represent one-to-many relationships as sets of links
- * - Queries are translated to Prolog for efficient graph pattern matching
- * - Changes are tracked through the perspective's subscription system
- *
- * @example
- * ```typescript
- * // Define a recipe model
- * @ModelOptions({ name: "Recipe" })
- * class Recipe extends Ad4mModel {
- *   // Required property with literal value
- *   @Property({
- *     through: "recipe://name",
- *     resolveLanguage: "literal"
- *   })
- *   name: string = "";
- *
- *   // Optional property with custom initial value
- *   @Optional({
- *     through: "recipe://status",
- *     initial: "recipe://draft"
- *   })
- *   status: string = "";
- *
- *   // Read-only computed property
- *   @ReadOnly({
- *     through: "recipe://rating",
- *     getter: `
- *       findall(Rating, triple(Base, "recipe://user_rating", Rating), Ratings),
- *       sum_list(Ratings, Sum),
- *       length(Ratings, Count),
- *       Value is Sum / Count
- *     `
- *   })
- *   averageRating: number = 0;
- *
- *   // Relation: ingredients
- *   @HasMany({ through: "recipe://ingredient" })
- *   ingredients: string[] = [];
- *
- *   // Relation: comments that are instances of another model
- *   @HasMany({
- *     through: "recipe://comment",
- *     where: { isInstance: Comment }
- *   })
- *   comments: Comment[] = [];
- * }
- *
- * // Create and save a new recipe
- * const recipe = new Recipe(perspective);
- * recipe.name = "Chocolate Cake";
- * recipe.ingredients = ["flour", "sugar", "cocoa"];
- * await recipe.save();
- *
- * // Query recipes in different ways
- * // Get all recipes
- * const allRecipes = await Recipe.findAll(perspective);
- *
- * // Find recipes with specific criteria
- * const desserts = await Recipe.findAll(perspective, {
- *   where: {
- *     status: "recipe://published",
- *     averageRating: { gt: 4 }
- *   },
- *   order: { name: "ASC" },
- *   limit: 10
- * });
- *
- * // Use the fluent query builder
- * const popularRecipes = await Recipe.query(perspective)
- *   .where({ averageRating: { gt: 4.5 } })
- *   .order({ averageRating: "DESC" })
- *   .limit(5)
- *   .get();
- *
- * // Subscribe to real-time updates
- * await Recipe.query(perspective)
- *   .where({ status: "recipe://cooking" })
- *   .subscribe(recipes => {
- *     console.log("Currently being cooked:", recipes);
- *   });
- *
- * // Paginate results
- * const { results, totalCount, pageNumber } = await Recipe.query(perspective)
- *   .where({ status: "recipe://published" })
- *   .paginate(10, 1);
- * ```
+ * See [README.md](./README.md) for a full worked example and decorator reference.
  */
 export class Ad4mModel {
   #id: string;
@@ -225,83 +136,26 @@ export class Ad4mModel {
     return (this as any).createdAt;
   }
 
-  /**
-   * Extracts metadata from decorators for query building.
-   *
-   * @description
-   * This method reads the metadata stored by decorators (@Property, @HasMany, etc.)
-   * and returns it in a structured format that's easier to work with for query builders
-   * and other systems that need to introspect model structure.
-   *
-   * The metadata includes:
-   * - Class name from @ModelOptions
-   * - Property metadata (predicates, types, constraints, etc.)
-   * - Relation metadata (predicates, filters, etc.)
-   *
-   * For models created via `fromJSONSchema()`, this method will derive metadata from
-   * the stored `__properties` and `__relations` structures that were populated during
-   * the dynamic class creation. If these structures are empty but a JSON schema was
-   * attached to the class, it can fall back to deriving metadata from that schema.
-   *
-   * @returns Structured metadata object containing className, properties, and relations
-   * @throws Error if the class doesn't have @ModelOptions decorator
-   *
-   * @example
-   * ```typescript
-   * @ModelOptions({ name: "Recipe" })
-   * class Recipe extends Ad4mModel {
-   *   @Property({ through: "recipe://name", resolveLanguage: "literal" })
-   *   name: string = "";
-   *
-   *   @HasMany({ through: "recipe://ingredient" })
-   *   ingredients: string[] = [];
-   * }
-   *
-   * const metadata = Recipe.getModelMetadata();
-   * console.log(metadata.className); // "Recipe"
-   * console.log(metadata.properties.name.predicate); // "recipe://name"
-   * console.log(metadata.relations.ingredients.predicate); // "recipe://ingredient"
-   * ```
-   */
+  /** Returns the class name, property predicates, and relation predicates from decorators. */
   public static getModelMetadata(): ModelMetadata {
     return _getModelMetadata(this);
   }
 
   /**
-   * Registers this model class with a perspective by ensuring the SHACL/SDNA
-   * subject class is installed.  Equivalent to calling
-   * `perspective.ensureSDNASubjectClass(MyModel)` but keeps the call
-   * consistent with the rest of the model-centric static API.
+   * Installs the SHACL/SDNA subject class in `perspective` (idempotent).
    *
-   * @param perspective - The perspective to register this model in
-   *
-   * @example
-   * ```typescript
-   * await MyModel.register(perspective);
-   * // or in parallel:
-   * await Promise.all([Post, Comment, Tag].map(M => M.register(perspective)));
-   * ```
+   * @example `await Promise.all([Post, Comment, Tag].map(M => M.register(perspective)));`
    */
   static async register(perspective: PerspectiveProxy): Promise<void> {
     await perspective.ensureSDNASubjectClass(this);
   }
 
   /**
-   * Constructs a new instance, assigns the provided properties, saves it to
-   * the perspective, and returns it — all in one call.
-   *
-   * Use this when all data is known upfront.  For incremental or conditional
-   * construction use `new Model(perspective)` + `save()` instead.
-   *
-   * @param perspective - The perspective to save this instance in
-   * @param data - Plain object whose keys must match writable `@Property` /
-   *               `@Flag` fields on the model
-   * @returns The newly saved instance
+   * One-shot factory: constructs, assigns `data`, saves, and returns the new instance.
    *
    * @example
    * ```typescript
    * const post = await Post.create(perspective, { title: 'Hello', body: 'World' });
-   * const comment = await Comment.create(perspective, { body: 'Nice post!' });
    * ```
    */
   static async create<T extends Ad4mModel>(
@@ -325,21 +179,7 @@ export class Ad4mModel {
     );
   }
 
-  /**
-   * Constructs a new model instance.
-   *
-   * @param perspective - The perspective where this model will be stored
-   * @param id - Optional unique identifier for this instance
-   *
-   * @example
-   * ```typescript
-   * // Create a new recipe with auto-generated id
-   * const recipe = new Recipe(perspective);
-   *
-   * // Create with specific id
-   * const recipe = new Recipe(perspective, "recipe://chocolate-cake");
-   * ```
-   */
+  /** @param id - Auto-generated from a random literal if omitted. */
   constructor(perspective: PerspectiveProxy, id?: string) {
     this.#id = id ? id : Literal.from(makeRandomId(24)).toUrl();
     this.#perspective = perspective;
@@ -385,10 +225,7 @@ export class Ad4mModel {
     return this.#id;
   }
 
-  /**
-   * Protected getter for the perspective.
-   * Allows subclasses to access the perspective while keeping it private from external code.
-   */
+  /** Read-only perspective access for subclasses. */
   protected get perspective(): PerspectiveProxy {
     return this.#perspective;
   }
@@ -416,17 +253,7 @@ export class Ad4mModel {
     return ops.queryToSurrealQL(this as any, perspective, query);
   }
 
-  /**
-   * Converts SurrealDB query results to Ad4mModel instances.
-   *
-   * @param perspective - The perspective context
-   * @param query - The query parameters used
-   * @param result - Array of result objects from SurrealDB
-   * @param _hydrateRelations - Set to false to skip nested relatedModel hydration
-   * @returns Promise resolving to results with total count
-   *
-   * @internal
-   */
+  /** @internal */
   public static async instancesFromSurrealResult<T extends Ad4mModel>(
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
@@ -462,18 +289,12 @@ export class Ad4mModel {
   }
 
   /**
-   * Gets all instances of the model in the perspective that match the query.
-   *
-   * @param perspective - The perspective to search in
-   * @param query - Optional query parameters to filter results
-   * @returns Array of matching model instances
+   * Returns all instances matching `query`.
    *
    * @example
    * ```typescript
    * const recipes = await Recipe.findAll(perspective, {
-   *   where: { name: "Pasta", rating: { gt: 4 } },
-   *   order: { createdAt: "DESC" },
-   *   limit: 10
+   *   where: { rating: { gt: 4 } }, order: { createdAt: "DESC" }, limit: 10,
    * });
    * ```
    */
@@ -502,19 +323,12 @@ export class Ad4mModel {
   }
 
   /**
-   * Gets all matching instances with the total count (ignoring limit/offset).
-   *
-   * @param perspective - The perspective to search in
-   * @param query - Optional query parameters to filter results
-   * @returns Object containing results array and total count
+   * Like `findAll` but also returns the unfiltered total count (useful for pagination UI).
    *
    * @example
    * ```typescript
-   * const { results, totalCount } = await Recipe.findAllAndCount(perspective, {
-   *   where: { category: "Dessert" },
-   *   limit: 10
-   * });
-   * console.log(`Showing 10 of ${totalCount} dessert recipes`);
+   * const { results, totalCount } = await Recipe.findAllAndCount(perspective, { limit: 10 });
+   * console.log(`Showing ${results.length} of ${totalCount}`);
    * ```
    */
   static async findAllAndCount<T extends Ad4mModel>(
@@ -526,20 +340,12 @@ export class Ad4mModel {
   }
 
   /**
-   * Paginates results by explicit page size and 1-based page number.
-   *
-   * @param perspective - The perspective to search in
-   * @param pageSize - Number of items per page
-   * @param pageNumber - Which page to retrieve (1-based)
-   * @param query - Optional additional query parameters
-   * @returns Paginated results with metadata
+   * Fetches a single page of results (`pageNumber` is 1-based).
    *
    * @example
    * ```typescript
-   * const page = await Recipe.paginate(perspective, 10, 1, {
-   *   where: { category: "Main Course" }
-   * });
-   * console.log(`Page ${page.pageNumber} of recipes, ${page.results.length} items`);
+   * const page = await Recipe.paginate(perspective, 10, 1);
+   * console.log(`Page ${page.pageNumber}, ${page.results.length} items`);
    * ```
    */
   static async paginate<T extends Ad4mModel>(
@@ -569,56 +375,23 @@ export class Ad4mModel {
     return ops.countQueryToSurrealQL(this as any, perspective, query);
   }
 
-  /**
-   * Gets a count of all matching instances.
-   *
-   * @param perspective - The perspective to search in
-   * @param query - Optional query parameters to filter results
-   * @returns Total count of matching entities
-   *
-   * @example
-   * ```typescript
-   * const totalRecipes = await Recipe.count(perspective);
-   * const activeRecipes = await Recipe.count(perspective, { where: { status: "active" } });
-   * ```
-   */
+  /** Returns the count of instances matching `query`. */
   static async count(perspective: PerspectiveProxy, query: Query = {}) {
     return ops.count(this as any, perspective, query);
   }
 
   /**
-   * Persists the model instance to the perspective.
+   * Persists the instance (create if new, update if existing).
    *
-   * Automatically determines whether to **create** or **update**:
-   * - If no links exist for this instance's `id` yet (new instance): runs the full
-   *   create path — `createSubject`, `ad4m://has_child` link, then relation setters.
-   * - If links already exist (existing instance): runs the update path — property
-   *   and relation setters only; skips `createSubject` and `has_child` to avoid
-   *   duplicate links.
-   *
-   * This means `save()` is always correct regardless of whether the instance was
-   * just constructed or was fetched from the perspective.
-   *
-   * @param batchId - Optional batch ID for batch operations. When provided the
-   *   caller is responsible for calling `perspective.commitBatch(batchId)`.
-   * @throws Will throw if instance creation, linking, or updating fails
+   * @param batchId - When provided the caller must call `perspective.commitBatch(batchId)`
    *
    * @example
    * ```typescript
-   * // Create
    * const recipe = new Recipe(perspective);
    * recipe.name = "Spaghetti";
-   * recipe.ingredients = ["pasta", "tomato sauce"];
-   * await recipe.save();
-   *
-   * // Update
-   * recipe.name = "Spaghetti Bolognese";
-   * await recipe.save();  // same call — no separate update()
-   *
-   * // Batch operations
-   * const batchId = await perspective.createBatch();
-   * await recipe.save(batchId);
-   * await perspective.commitBatch(batchId);
+   * await recipe.save();        // create
+   * recipe.name = "Bolognese";
+   * await recipe.save();        // update (detected automatically)
    * ```
    */
   async save(batchId?: string) {
@@ -656,47 +429,23 @@ export class Ad4mModel {
   }
 
   /**
-   * Deletes the model instance from the perspective.
-   *
-   * @param batchId - Optional batch ID for batch operations
-   * @throws Will throw if removal fails
-   *
-   * @example
-   * ```typescript
-   * const recipe = await Recipe.findAll(perspective)[0];
-   * await recipe.delete();
-   *
-   * // Or with batch operations:
-   * const batchId = await perspective.createBatch();
-   * await recipe.delete(batchId);
-   * await perspective.commitBatch(batchId);
-   * ```
+   * Removes all links for this instance from the perspective.
+   * @param batchId - Optional batch ID for batched operations
    */
   async delete(batchId?: string) {
     await this.#perspective.removeSubject(this, this.#id, batchId);
   }
 
   /**
-   * Creates a query builder for fluent query construction.
-   *
-   * @param perspective - The perspective to query
-   * @param query - Optional initial query parameters
-   * @returns A new query builder instance
+   * Returns a fluent query builder for this model.
    *
    * @example
    * ```typescript
-   * const recipes = await Recipe.query(perspective)
+   * const top5 = await Recipe.query(perspective)
    *   .where({ category: "Dessert" })
    *   .order({ rating: "DESC" })
    *   .limit(5)
    *   .run();
-   *
-   * // With real-time updates
-   * await Recipe.query(perspective)
-   *   .where({ status: "cooking" })
-   *   .subscribe(recipes => {
-   *     console.log("Currently cooking:", recipes);
-   *   });
    * ```
    */
   static query<T extends Ad4mModel>(
@@ -708,76 +457,12 @@ export class Ad4mModel {
   }
 
   /**
-   * Creates an Ad4mModel class from a JSON Schema definition.
-   *
-   * @description
-   * This method dynamically generates an Ad4mModel subclass from a JSON Schema,
-   * enabling integration with systems that use JSON Schema for type definitions.
-   *
-   * The method follows a cascading approach for determining predicates:
-   * 1. Explicit configuration in options parameter (highest precedence)
-   * 2. x-ad4m metadata in the JSON Schema
-   * 3. Inference from schema title and property names
-   * 4. Error if no namespace can be determined
-   *
-   * @example
-   * ```typescript
-   * // With explicit configuration
-   * const PersonClass = Ad4mModel.fromJSONSchema(schema, {
-   *   name: "Person",
-   *   namespace: "person://",
-   *   resolveLanguage: "literal"
-   * });
-   *
-   * // With property mapping
-   * const ContactClass = Ad4mModel.fromJSONSchema(schema, {
-   *   name: "Contact",
-   *   namespace: "contact://",
-   *   propertyMapping: {
-   *     "name": "foaf://name",
-   *     "email": "foaf://mbox"
-   *   }
-   * });
-   *
-   * // With x-ad4m metadata in schema
-   * const schema = {
-   *   "title": "Product",
-   *   "x-ad4m": { "namespace": "product://" },
-   *   "properties": {
-   *     "name": {
-   *       "type": "string",
-   *       "x-ad4m": { "through": "product://title" }
-   *     }
-   *   }
-   * };
-   * const ProductClass = Ad4mModel.fromJSONSchema(schema, { name: "Product" });
-   * ```
-   *
-   * @param schema - JSON Schema definition
-   * @param options - Configuration options
-   * @returns Generated Ad4mModel subclass
-   * @throws Error when namespace cannot be inferred
-   */
-  /**
-   * Runs `callback` inside a single atomic batch transaction.
-   *
-   * Creates a batch, passes a `TransactionContext` (with `.batchId`) to
-   * `callback`, then commits on success or aborts + rethrows on failure.
-   * This eliminates the error-prone manual `createBatch` / `commitBatch` pattern.
-   *
-   * @param perspective - The perspective to open the transaction on
-   * @param callback    - Async function that performs model operations via `tx`
-   * @returns Whatever `callback` returns
+   * Runs `callback` in an atomic batch; commits on success, aborts + rethrows on failure.
    *
    * @example
    * ```typescript
    * await Ad4mModel.transaction(perspective, async (tx) => {
-   *   const post = new Post(perspective);
-   *   post.title = "Hello";
    *   await post.save(tx.batchId);
-   *
-   *   const comment = new Comment(perspective);
-   *   comment.body = "World";
    *   await comment.save(tx.batchId);
    * });
    * ```
@@ -790,29 +475,20 @@ export class Ad4mModel {
   }
 
   /**
-   * Subscribes to live updates for this model's query.
+   * Fires `callback` immediately with current results, then on every relevant perspective change.
    *
-   * Immediately invokes `callback` with the current results, then re-invokes
-   * it whenever a relevant link is added to or removed from the perspective.
-   *
-   * Call `sub.unsubscribe()` when you no longer need updates to avoid memory
-   * leaks and unnecessary re-queries.
-   *
-   * @param perspective - The perspective to watch
-   * @param options     - Query parameters + delivery options (`debounce`, `onError`)
-   * @param callback    - Receives the fresh result set on each change
-   * @returns A `Subscription` handle with `unsubscribe()` and `lastError`
+   * @param options  - Query params plus optional `debounce` (ms) and `onError` handler
+   * @param callback - Receives the fresh result set on each delivery
+   * @returns `Subscription` with `unsubscribe()` — call it in cleanup to avoid leaks
    *
    * @example
    * ```typescript
    * const sub = Post.subscribe(
    *   perspective,
-   *   { where: { published: true }, order: { createdAt: "DESC" }, debounce: 300 },
+   *   { where: { published: true }, debounce: 300 },
    *   (posts) => setPosts(posts),
    * );
-   *
-   * // In cleanup:
-   * sub.unsubscribe();
+   * sub.unsubscribe(); // in cleanup
    * ```
    */
   static subscribe<T extends Ad4mModel>(
@@ -830,6 +506,18 @@ export class Ad4mModel {
     );
   }
 
+  /**
+   * Generates an `Ad4mModel` subclass from a JSON Schema definition.
+   *
+   * Predicate resolution order: explicit options → `x-ad4m` in schema → inferred from title/names.
+   *
+   * @example
+   * ```typescript
+   * const PersonClass = Ad4mModel.fromJSONSchema(schema, {
+   *   name: "Person", namespace: "person://", resolveLanguage: "literal",
+   * });
+   * ```
+   */
   static fromJSONSchema(
     schema: JSONSchema,
     options: JSONSchemaToModelOptions,
