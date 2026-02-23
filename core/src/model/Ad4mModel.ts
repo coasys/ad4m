@@ -402,17 +402,6 @@ export class Ad4mModel {
     };
   }
 
-  private async getData(include?: IncludeMap) {
-    const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
-    return fetchInstanceData(
-      this,
-      this.#perspective,
-      this.#id,
-      metadata,
-      include,
-    );
-  }
-
   /**
    * Generates a SurrealQL query string for this model.
    *
@@ -662,7 +651,8 @@ export class Ad4mModel {
    * ```
    */
   async get(include?: IncludeMap): Promise<this> {
-    return this.getData(include);
+    const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
+    return fetchInstanceData(this, this.#perspective, this.#id, metadata, include);
   }
 
   /**
