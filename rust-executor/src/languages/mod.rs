@@ -186,7 +186,7 @@ impl LanguageController {
 
         // Parse meta and add bundleType
         let mut meta_obj: serde_json::Value = serde_json::from_str(meta)
-            .unwrap_or(serde_json::json!({}));
+            .map_err(|e| deno_core::anyhow::anyhow!("Invalid meta JSON: {}", e))?;
         meta_obj["bundleType"] = serde_json::json!("wasm");
 
         // Compute hash for the address
@@ -361,6 +361,9 @@ impl LanguageController {
                 crate::wasm_core::unregister_wasm_language(&address)
                     .map_err(|e| deno_core::anyhow::anyhow!("{}", e))?;
                 log::info!("🗑️ Successfully removed WASM language: {}", address);
+                // Clean up bundle file
+                let lang_dir = format!("{}/{}", Self::languages_path(), address);
+                let _ = std::fs::remove_dir_all(&lang_dir);
                 return Ok(());
             }
         }

@@ -93,11 +93,12 @@ fn sdk_to_zome_diff(diff: &PerspectiveDiff) -> ZomePerspectiveDiff {
 
 pub struct PDiffSyncLanguage {
     installed: bool,
+    app_id: Option<String>,
 }
 
 impl Default for PDiffSyncLanguage {
     fn default() -> Self {
-        Self { installed: false }
+        Self { installed: false, app_id: None }
     }
 }
 
@@ -220,9 +221,8 @@ impl LanguageTeardown for PDiffSyncLanguage {
     fn teardown(&mut self) {
         log("p-diff-sync-wasm: teardown");
         if self.installed {
-            if let Ok(did) = agent_did().ok_or("no DID".to_string()) {
-                // Use agent DID as app_id (matches how the host installs it)
-                let _ = holochain_remove_app(&did);
+            if let Some(ref app_id) = self.app_id {
+                let _ = holochain_remove_app(app_id);
             }
             self.installed = false;
         }
@@ -237,6 +237,7 @@ impl LanguageInit for PDiffSyncLanguage {
         match holochain_install_app(HAPP_BYTES) {
             Ok(info) => {
                 log(&format!("p-diff-sync-wasm: DNA installed successfully: {:?}", info));
+                self.app_id = info.get("installed_app_id").and_then(|v| v.as_str()).map(|s| s.to_string());
                 self.installed = true;
                 Ok(())
             }

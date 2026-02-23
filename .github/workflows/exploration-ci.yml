@@ -36,12 +36,12 @@ jobs:
         run: cd rust-executor && cargo check --no-default-features --features sqlite-links 2>&1
 
       - name: Check wasm-languages feature
-        if: contains(github.ref, 'wasm-language-runtime')
+        if: contains(github.head_ref || github.ref, 'wasm-language-runtime')
         run: cd rust-executor && cargo check --features wasm-languages 2>&1
 
   wasm-sdk:
     name: WASM SDK & Example
-    if: contains(github.ref, 'wasm-language-runtime')
+    if: contains(github.head_ref || github.ref, 'wasm-language-runtime')
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
@@ -87,5 +87,5 @@ jobs:
         run: cd rust-executor && cargo test sqlite_service --no-default-features --features sqlite-links -- --nocapture 2>&1
 
       - name: Run wasm_core tests
-        if: contains(github.ref, 'wasm-language-runtime')
+        if: contains(github.head_ref || github.ref, 'wasm-language-runtime')
         run: cd rust-executor && cargo test wasm_core --features wasm-languages -- --nocapture 2>&1
