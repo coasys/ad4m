@@ -11,12 +11,7 @@
  */
 
 import { escapeSurrealString } from "../../utils";
-import {
-  ModelMetadata,
-  Query,
-  Where,
-  WhereCondition,
-} from "../types";
+import { ModelMetadata, Query, Where, WhereCondition } from "../types";
 
 // ── Value formatting ────────────────────────────────────────────────────────
 
@@ -357,7 +352,10 @@ export function buildSurrealSelectFieldsWithAggregation(
  * Builds the SurrealQL SELECT query for a given model metadata + query params.
  * This is the extracted, pure-function form of `Ad4mModel.queryToSurrealQL`.
  */
-export function buildSurrealQuery(metadata: ModelMetadata, query: Query): string {
+export function buildSurrealQuery(
+  metadata: ModelMetadata,
+  query: Query,
+): string {
   const { source, where } = query;
 
   const graphTraversalFilters: string[] = [];
@@ -437,7 +435,10 @@ export function buildSurrealCountQuery(
  * Used for post-query JavaScript filtering of operators that SurrealDB
  * cannot evaluate reliably (gt/gte/lt/lte/between/contains on literals).
  */
-export function matchesCondition(value: any, condition: WhereCondition): boolean {
+export function matchesCondition(
+  value: any,
+  condition: WhereCondition,
+): boolean {
   if (Array.isArray(condition)) {
     return (condition as any[]).includes(value);
   }

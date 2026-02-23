@@ -185,13 +185,16 @@ export async function hydrateInstanceFromLinks(
 
     // maxCount === 1: take first value (oldest) — "@HasOne" has only one link
     // in the happy path; "first" vs "last" only differs in error/corrupt state.
-    instance[relationName] = relMeta.maxCount === 1 ? values[0] ?? null : values;
+    instance[relationName] =
+      relMeta.maxCount === 1 ? values[0] ?? null : values;
   }
 
   // ── Author & timestamps ──────────────────────────────────────────────────────
   if (originalAuthor) instance.author = originalAuthor;
-  if (minTimestamp !== null) instance.createdAt = normalizeTimestamp(minTimestamp);
-  if (maxTimestamp !== null) instance.updatedAt = normalizeTimestamp(maxTimestamp);
+  if (minTimestamp !== null)
+    instance.createdAt = normalizeTimestamp(minTimestamp);
+  if (maxTimestamp !== null)
+    instance.updatedAt = normalizeTimestamp(maxTimestamp);
 }
 
 /**

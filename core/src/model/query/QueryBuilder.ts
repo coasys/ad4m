@@ -19,7 +19,8 @@ import {
 
 // Forward-reference type only — avoids importing the full Ad4mModel
 // module at the class level.
-export type Ad4mModelCtor<T> = typeof import("../Ad4mModel").Ad4mModel & (new (...args: any[]) => T);
+export type Ad4mModelCtor<T> = typeof import("../Ad4mModel").Ad4mModel &
+  (new (...args: any[]) => T);
 
 /**
  * Fluent builder for Ad4mModel queries.
