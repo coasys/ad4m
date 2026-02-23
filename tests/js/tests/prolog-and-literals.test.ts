@@ -329,9 +329,7 @@ describe("Prolog + Literals", () => {
 
             describe("with Message subject class registered", () => {
                 before(async () => {
-                    // @ts-ignore
-                    const { name, sdna } = Message.generateSDNA();
-                    await perspective!.addSdna(name, sdna, "subject_class")
+                    await perspective!.ensureSDNASubjectClass(Message)
                 })
 
                 afterEach(async () => {
@@ -458,9 +456,7 @@ describe("Prolog + Literals", () => {
                         await ad4m!.perspective.remove(perspective.uuid)
                     }
                     perspective = await ad4m!.perspective.add("active-record-implementation-test")
-                    // @ts-ignore
-                    const { name, sdna } = Recipe.generateSDNA();
-                    await perspective!.addSdna(name, sdna, 'subject_class')
+                    await perspective!.ensureSDNASubjectClass(Recipe)
                 })
 
                 it("save() & get()", async () => {
@@ -2663,8 +2659,7 @@ describe("Prolog + Literals", () => {
                         await ad4m!.perspective.remove(perspective.uuid)
                     }
                     perspective = await ad4m!.perspective.add("getter-test")
-                    const { name, sdna } = (BlogPost as any).generateSDNA();
-                    await perspective!.addSdna(name, sdna, 'subject_class')
+                    await perspective!.ensureSDNASubjectClass(BlogPost)
                 });
 
                 it("should evaluate getter for property", async () => {
