@@ -84,6 +84,10 @@ import { fetchInstanceData } from "./query/fetchInstance";
 // ── Metadata helpers ────────────────────────────────────────────────────────
 import { getModelMetadata as _getModelMetadata } from "./schema/metadata";
 
+// ── Transaction API ──────────────────────────────────────────────────────────
+import { runTransaction } from "./transaction";
+export type { TransactionContext } from "./transaction";
+
 /**
  * Base class for defining data models in AD4M.
  *
@@ -1092,6 +1096,37 @@ export class Ad4mModel {
    * @returns Generated Ad4mModel subclass
    * @throws Error when namespace cannot be inferred
    */
+  /**
+   * Runs `callback` inside a single atomic batch transaction.
+   *
+   * Creates a batch, passes a `TransactionContext` (with `.batchId`) to
+   * `callback`, then commits on success or aborts + rethrows on failure.
+   * This eliminates the error-prone manual `createBatch` / `commitBatch` pattern.
+   *
+   * @param perspective - The perspective to open the transaction on
+   * @param callback    - Async function that performs model operations via `tx`
+   * @returns Whatever `callback` returns
+   *
+   * @example
+   * ```typescript
+   * await Ad4mModel.transaction(perspective, async (tx) => {
+   *   const post = new Post(perspective);
+   *   post.title = "Hello";
+   *   await post.save(tx.batchId);
+   *
+   *   const comment = new Comment(perspective);
+   *   comment.body = "World";
+   *   await comment.save(tx.batchId);
+   * });
+   * ```
+   */
+  static async transaction<T>(
+    perspective: PerspectiveProxy,
+    callback: (tx: import("./transaction").TransactionContext) => Promise<T>,
+  ): Promise<T> {
+    return runTransaction(perspective, callback);
+  }
+
   static fromJSONSchema(
     schema: JSONSchema,
     options: JSONSchemaToModelOptions,
