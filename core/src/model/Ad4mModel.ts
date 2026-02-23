@@ -80,6 +80,18 @@ import {
   matchesCondition,
 } from "./query/SurrealQueryBuilder";
 
+// ── Hydration utilities (re-exported for advanced consumers) ──────────────
+export {
+  hydrateInstanceFromLinks,
+  evaluateCustomGetters,
+  normalizeTimestamp,
+} from "./query/hydration";
+export type { RawLink } from "./query/hydration";
+import {
+  hydrateInstanceFromLinks,
+  evaluateCustomGetters,
+} from "./query/hydration";
+
 // ── Internal-only types ────────────────────────────────────────────────────
 type ValueTuple = [name: string, value: any, resolve?: boolean];
 
@@ -643,172 +655,78 @@ export class Ad4mModel {
   }
 
   private async getData() {
-    // Builds an object with the author, timestamp, all properties, & all relations on the Ad4mModel and saves it to the instance
-    // Use SurrealDB for data queries
+    // Queries SurrealDB for all links belonging to this instance and hydrates
+    // all properties, forward/reverse relations, author, and timestamps.
     try {
       const ctor = this.constructor as typeof Ad4mModel;
       const metadata = ctor.getModelMetadata();
+      const safeBase = formatSurrealValue(this.#baseExpression);
 
-      // Query for all links from this specific node (base expression)
-      // Using formatSurrealValue to prevent SQL injection by properly escaping the value
-      const safeBaseExpression = formatSurrealValue(this.#baseExpression);
-      // Note: We use ORDER BY timestamp ASC because:
-      // - For relations: we want chronological order (oldest to newest)
-      // - For properties: we select the LAST element to get "latest wins" semantics
+      // ── 1. Query all forward links for this node ───────────────────────────
       const linksQuery = `
         SELECT id, predicate, out.uri AS target, author, timestamp
         FROM link
-        WHERE in.uri = ${safeBaseExpression}
+        WHERE in.uri = ${safeBase}
         ORDER BY timestamp ASC
       `;
       const links = await this.#perspective.querySurrealDB(linksQuery);
 
       if (links && links.length > 0) {
-        let minTimestamp = null;
-        let maxTimestamp = null;
-        let latestAuthor = null;
-        let originalAuthor = null;
+        // ── 2. Shared hydration: properties + forward relations + timestamps ─
+        await hydrateInstanceFromLinks(this, links, metadata, this.#perspective);
 
-        // Process properties (skip those with custom getter)
-        for (const [propName, propMeta] of Object.entries(
-          metadata.properties,
-        )) {
-          if (propMeta.getter) continue; // Handle via custom getter evaluation
-          const matching = links.filter(
-            (l: any) => l.predicate === propMeta.predicate,
-          );
-          if (matching.length > 0) {
-            // "Latest wins" semantics: select the last element since links are ordered ASC.
-            // The last element has the most recent timestamp and represents the current property value.
-            const link = matching[matching.length - 1];
-            let value = link.target;
-
-            // Track timestamps/authors for createdAt and updatedAt
-            if (link.timestamp) {
-              if (!minTimestamp || link.timestamp < minTimestamp) {
-                minTimestamp = link.timestamp;
-                originalAuthor = link.author;
-              }
-              if (!maxTimestamp || link.timestamp > maxTimestamp) {
-                maxTimestamp = link.timestamp;
-                latestAuthor = link.author;
-              }
-            }
-
-            // Handle resolveLanguage
-            if (
-              propMeta.resolveLanguage &&
-              propMeta.resolveLanguage !== "literal"
-            ) {
-              try {
-                const expression = await this.#perspective.getExpression(value);
-                if (expression) {
-                  try {
-                    value = JSON.parse(expression.data);
-                  } catch {
-                    value = expression.data;
-                  }
-                }
-              } catch (e) {
-                console.warn(
-                  `Failed to resolve expression for ${propName}:`,
-                  e,
-                );
-              }
-            } else if (
-              typeof value === "string" &&
-              value.startsWith("literal://")
-            ) {
-              // Parse literal URL
-              try {
-                const parsed = Literal.fromUrl(value).get();
-                value = parsed.data !== undefined ? parsed.data : parsed;
-              } catch (e) {
-                // Keep original value
-              }
-            }
-
-            // Apply transform if exists
-            if (
-              propMeta.transform &&
-              typeof propMeta.transform === "function"
-            ) {
-              value = propMeta.transform(value);
-            }
-
-            (this as any)[propName] = value;
-          }
-        }
-
-        // Process relations (skip those with custom getter)
-        // Split relations by direction
+        // ── 3. Post-filters on forward relations ─────────────────────────────
         const forwardRelations = Object.entries(metadata.relations).filter(
           ([, m]) => !m.getter && m.direction !== "reverse",
         );
-        const reverseRelations = Object.entries(metadata.relations).filter(
-          ([, m]) => !m.getter && m.direction === "reverse",
-        );
 
-        // Process forward relations (source → predicate → target)
         for (const [relationName, relationMeta] of forwardRelations) {
-          const matching = links.filter(
-            (l: any) => l.predicate === relationMeta.predicate,
-          );
-          // Relations preserve chronological order: links are sorted ASC by timestamp,
-          // so the relation reflects the order in which items were added (oldest to newest).
-          let values = matching.map((l: any) => l.target);
+          // Read back as mutable array for further filtering
+          const current = (this as any)[relationName];
+          let values: string[] = Array.isArray(current)
+            ? [...current]
+            : current != null
+              ? [current as string]
+              : [];
 
-          // Apply where.condition filtering if present
+          // where.condition: per-value SurrealQL evaluation
           if (relationMeta.where?.condition && values.length > 0) {
             try {
-              // Filter values by evaluating condition for each value
               const filteredValues: string[] = [];
-
               for (const value of values) {
                 let condition = relationMeta.where.condition
                   .replace(/\$perspective/g, `'${this.#perspective.uuid}'`)
                   .replace(/\$base/g, `'${this.#baseExpression}'`)
-                  .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
-
-                // If condition starts with WHERE, wrap it in array length check pattern
-                // Using array::len() to properly count matching links
+                  .replace(/Target/g, `'${value.replace(/'/g, "\'")}'`);
                 if (condition.trim().startsWith("WHERE")) {
                   condition = `array::len(SELECT * FROM link ${condition}) > 0`;
                 }
-
-                const filterQuery = `RETURN ${condition}`;
-                const result =
-                  await this.#perspective.querySurrealDB(filterQuery);
-
-                // RETURN can return the value directly or in an array
+                const result = await this.#perspective.querySurrealDB(
+                  `RETURN ${condition}`,
+                );
                 const isTrue =
                   result === true ||
                   (Array.isArray(result) &&
                     result.length > 0 &&
                     result[0] === true);
-                if (isTrue) {
-                  filteredValues.push(value);
-                }
+                if (isTrue) filteredValues.push(value);
               }
-
               values = filteredValues;
             } catch (error) {
               console.warn(
                 `Failed to apply condition filter for ${relationName}:`,
                 error,
               );
-              // Keep unfiltered values on error
             }
           }
 
-          // Apply where.isInstance filtering if present
+          // where.isInstance: batch subject-class check
           if (relationMeta.where?.isInstance && values.length > 0) {
             try {
               const className =
                 typeof relationMeta.where.isInstance === "string"
                   ? relationMeta.where.isInstance
                   : relationMeta.where.isInstance.name;
-
               const filterMetadata =
                 await this.#perspective.getSubjectClassMetadataFromSDNA(
                   className,
@@ -819,18 +737,19 @@ export class Ad4mModel {
                   filterMetadata,
                 );
               }
-            } catch (error) {
-              // Keep unfiltered values on error
+            } catch {
+              // keep unfiltered on error
             }
           }
 
+          // relatedModel: eager hydration via _findAllInternal
           if (relationMeta.relatedModel && values.length > 0) {
             try {
               const RelatedModel = relationMeta.relatedModel() as any;
               const hydrated = await RelatedModel._findAllInternal(
                 this.#perspective,
                 { where: { id: values } },
-                false, // depth guard — don't recursively hydrate sub-relations
+                false,
               );
               (this as any)[relationName] =
                 relationMeta.maxCount === 1 ? hydrated[0] ?? null : hydrated;
@@ -844,70 +763,57 @@ export class Ad4mModel {
               relationMeta.maxCount === 1 ? values[0] ?? null : values;
           }
         }
+      }
 
-        // Process reverse relations (target ← predicate ← source)
-        // Query links where THIS instance is the target, return the sources.
-        if (reverseRelations.length > 0) {
-          const reverseLinksQuery = `
-            SELECT in.uri AS source, predicate, id, author, timestamp
-            FROM link
-            WHERE out.uri = ${safeBaseExpression}
-            ORDER BY timestamp ASC
-          `;
-          let reverseLinks: any[] = [];
-          try {
-            reverseLinks =
-              (await this.#perspective.querySurrealDB(reverseLinksQuery)) ?? [];
-          } catch {
-            // leave empty — instance just won't have reverse relation data
-          }
+      // ── 4. Reverse relations (separate query: this instance as target) ─────
+      const reverseRelations = Object.entries(metadata.relations).filter(
+        ([, m]) => !m.getter && m.direction === "reverse",
+      );
+      if (reverseRelations.length > 0) {
+        let reverseLinks: any[] = [];
+        try {
+          reverseLinks =
+            (await this.#perspective.querySurrealDB(`
+              SELECT in.uri AS source, predicate, id, author, timestamp
+              FROM link
+              WHERE out.uri = ${safeBase}
+              ORDER BY timestamp ASC
+            `)) ?? [];
+        } catch {
+          // leave empty — instance just won't have reverse relation data
+        }
 
-          for (const [relationName, relationMeta] of reverseRelations) {
-            const matching = reverseLinks.filter(
-              (l: any) => l.predicate === relationMeta.predicate,
-            );
-            const values = matching.map((l: any) => l.source);
-            if (relationMeta.relatedModel && values.length > 0) {
-              try {
-                const RelatedModel = relationMeta.relatedModel() as any;
-                const hydrated = await RelatedModel._findAllInternal(
-                  this.#perspective,
-                  { where: { id: values } },
-                  false,
-                );
-                (this as any)[relationName] =
-                  relationMeta.maxCount === 1 ? hydrated[0] ?? null : hydrated;
-              } catch (e) {
-                (this as any)[relationName] =
-                  relationMeta.maxCount === 1 ? values[0] ?? null : values;
-              }
-            } else {
+        for (const [relationName, relationMeta] of reverseRelations) {
+          const matching = reverseLinks.filter(
+            (l: any) => l.predicate === relationMeta.predicate,
+          );
+          const values = matching.map((l: any) => l.source);
+
+          if (relationMeta.relatedModel && values.length > 0) {
+            try {
+              const RelatedModel = relationMeta.relatedModel() as any;
+              const hydrated = await RelatedModel._findAllInternal(
+                this.#perspective,
+                { where: { id: values } },
+                false,
+              );
+              (this as any)[relationName] =
+                relationMeta.maxCount === 1 ? hydrated[0] ?? null : hydrated;
+            } catch (e) {
               (this as any)[relationName] =
                 relationMeta.maxCount === 1 ? values[0] ?? null : values;
             }
+          } else {
+            (this as any)[relationName] =
+              relationMeta.maxCount === 1 ? values[0] ?? null : values;
           }
-        }
-
-        if (originalAuthor) {
-          (this as any).author = originalAuthor;
-        }
-        if (minTimestamp) {
-          (this as any).createdAt = minTimestamp;
-        }
-        if (maxTimestamp) {
-          (this as any).updatedAt = maxTimestamp;
         }
       }
 
-      // Evaluate SurrealQL getters
-      await ctor.evaluateCustomGettersForInstance(
-        this,
-        this.#perspective,
-        metadata,
-      );
+      // ── 5. Custom SurrealQL getters ────────────────────────────────────────
+      await evaluateCustomGetters(this, this.#perspective, metadata);
 
-      // Apply where.isInstance filtering to getter relations
-      // (non-getter relations were already filtered above)
+      // ── 6. where.isInstance filtering for getter relations ─────────────────
       for (const [relationName, relationMeta] of Object.entries(
         metadata.relations,
       )) {
@@ -921,7 +827,6 @@ export class Ad4mModel {
               typeof relationMeta.where.isInstance === "string"
                 ? relationMeta.where.isInstance
                 : relationMeta.where.isInstance.name;
-
             const filterMetadata =
               await this.#perspective.getSubjectClassMetadataFromSDNA(
                 className,
@@ -934,8 +839,8 @@ export class Ad4mModel {
                 );
               (this as any)[relationName] = filtered;
             }
-          } catch (error) {
-            // Keep unfiltered values on error
+          } catch {
+            // keep unfiltered on error
           }
         }
       }
@@ -949,84 +854,8 @@ export class Ad4mModel {
     return this;
   }
 
-  /**
-   * Evaluates custom SurrealQL getters for properties and relations on a specific instance.
-   * @private
-   */
-  private static async evaluateCustomGettersForInstance(
-    instance: any,
-    perspective: PerspectiveProxy,
-    metadata: any,
-  ) {
-    const safeBaseExpression = formatSurrealValue(instance.baseExpression);
 
-    // Evaluate property getters
-    for (const [propName, propMeta] of Object.entries(metadata.properties)) {
-      if ((propMeta as any).getter) {
-        try {
-          // Replace 'Base' placeholder with actual base expression
-          const query = (propMeta as any).getter.replace(
-            /Base/g,
-            safeBaseExpression,
-          );
-          // Query from node table to have graph traversal context
-          const result = await perspective.querySurrealDB(
-            `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`,
-          );
-          if (
-            result &&
-            result.length > 0 &&
-            result[0].value !== undefined &&
-            result[0].value !== null &&
-            result[0].value !== "None" &&
-            result[0].value !== ""
-          ) {
-            instance[propName] = result[0].value;
-          }
-        } catch (error) {
-          console.warn(`Failed to evaluate getter for ${propName}:`, error);
-        }
-      }
-    }
-
-    // Evaluate relation getters
-    for (const [relationName, relationMeta] of Object.entries(
-      metadata.relations,
-    )) {
-      if ((relationMeta as any).getter) {
-        try {
-          // Replace 'Base' placeholder with actual base expression
-          const query = (relationMeta as any).getter.replace(
-            /Base/g,
-            safeBaseExpression,
-          );
-          // Query from node table to have graph traversal context
-          const result = await perspective.querySurrealDB(
-            `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`,
-          );
-          if (
-            result &&
-            result.length > 0 &&
-            result[0].value !== undefined &&
-            result[0].value !== null
-          ) {
-            // Filter out 'None' from relation results
-            const value = result[0].value;
-            instance[relationName] = Array.isArray(value)
-              ? value.filter(
-                  (v: any) =>
-                    v !== undefined && v !== null && v !== "" && v !== "None",
-                )
-              : value;
-          }
-        } catch (error) {
-          console.warn(`Failed to evaluate getter for ${relationName}:`, error);
-        }
-      }
-    }
-  }
-
-  /**
+    /**
    * Generates a SurrealQL query from a Query object.
    *
    * @description
@@ -1074,7 +903,6 @@ export class Ad4mModel {
   // formatSurrealValue) have been extracted to query/SurrealQueryBuilder.ts.
   // They are re-exported above so any external callers continue to work.
 
-
   /**
    * Converts SurrealDB query results to Ad4mModel instances.
    *
@@ -1105,260 +933,24 @@ export class Ad4mModel {
 
     const instances: T[] = [];
     for (const row of result) {
-      let base;
       try {
-        // Use source_uri as the base (the actual URI), not the node ID
-        base = row.source_uri;
+        const base = row.source_uri;
+        if (!base) continue;
 
-        // Skip rows without a source_uri field
-        if (!base) {
-          continue;
-        }
-
-        const links = row.links || [];
-
+        const links: any[] = row.links || [];
         const instance = new this(perspective, base) as any;
 
-        // Track both earliest (createdAt) and most recent (updatedAt) timestamps
-        let minTimestamp = null;
-        let maxTimestamp = null;
-        let originalAuthor = null;
-        let latestAuthor = null;
+        // Hydrate properties, forward relations, author and timestamps
+        // using the shared implementation (same semantics as getData()).
+        await hydrateInstanceFromLinks(instance, links, metadata, perspective);
 
-        // Process each link (track index for relation ordering)
-        for (let linkIndex = 0; linkIndex < links.length; linkIndex++) {
-          const link = links[linkIndex];
-          const predicate = link.predicate;
-          const target = link.target;
-
-          // Skip 'None' values
-          if (target === "None") continue;
-
-          // Track both earliest (createdAt) and latest (updatedAt) timestamps with their authors
-          if (link.timestamp) {
-            if (!minTimestamp || link.timestamp < minTimestamp) {
-              minTimestamp = link.timestamp;
-              originalAuthor = link.author;
-            }
-            if (!maxTimestamp || link.timestamp > maxTimestamp) {
-              maxTimestamp = link.timestamp;
-              latestAuthor = link.author;
-            }
-          }
-
-          // Find matching property (skip those with getter)
-          let foundProperty = false;
-          for (const [propName, propMeta] of Object.entries(
-            metadata.properties,
-          )) {
-            if (propMeta.getter) continue; // Handle via getter evaluation
-            if (propMeta.predicate === predicate) {
-              // For properties, take the first value (or we could use timestamp to get latest)
-              // Note: Empty objects {} are truthy, so we need to check for them explicitly
-              const currentValue = instance[propName];
-              const isEmptyObject =
-                typeof currentValue === "object" &&
-                currentValue !== null &&
-                !Array.isArray(currentValue) &&
-                Object.keys(currentValue).length === 0;
-              if (
-                !currentValue ||
-                currentValue === "" ||
-                currentValue === 0 ||
-                isEmptyObject
-              ) {
-                let convertedValue = target;
-
-                // Only process if target has a value
-                if (target !== undefined && target !== null && target !== "") {
-                  // Check if we need to resolve a non-literal language expression.
-                  // resolveLanguage must be defined and not 'literal' to trigger expression resolution.
-                  // Also skip if the target itself is a literal:// URI — those are handled by the
-                  // literal-parsing branch below (avoids calling getExpression on empty literals like
-                  // "literal://string:" which would cause a deserialization error).
-                  if (
-                    propMeta.resolveLanguage != undefined &&
-                    propMeta.resolveLanguage !== "literal" &&
-                    typeof target === "string" &&
-                    !target.startsWith("literal://")
-                  ) {
-                    // For non-literal languages, resolve the expression via perspective.getExpression()
-                    // Note: Literals are already parsed by SurrealDB's fn::parse_literal()
-                    try {
-                      const expression =
-                        await perspective.getExpression(target);
-                      if (expression) {
-                        // Parse the expression data if it's a JSON string
-                        try {
-                          convertedValue = JSON.parse(expression.data);
-                        } catch {
-                          // If parsing fails, use the data as-is
-                          convertedValue = expression.data;
-                        }
-                      }
-                    } catch (e) {
-                      console.warn(
-                        `Failed to resolve expression for ${propName} with target "${target}":`,
-                        e,
-                      );
-                      console.warn("Falling back to raw value");
-                      convertedValue = target; // Fall back to raw value
-                    }
-                  } else if (
-                    typeof target === "string" &&
-                    target.startsWith("literal://")
-                  ) {
-                    // Fallback: If we somehow got a literal URL that wasn't parsed by SurrealDB, parse it now
-                    try {
-                      const parsed = Literal.fromUrl(target).get();
-                      if (parsed.data !== undefined) {
-                        convertedValue = parsed.data;
-                      } else {
-                        convertedValue = parsed;
-                      }
-                    } catch (e) {
-                      // If literal parsing fails, just use the value as-is (don't bail)
-                      convertedValue = target;
-                    }
-                  } else if (typeof target === "string") {
-                    // Type conversion: check the instance property's current type
-                    const expectedType = typeof instance[propName];
-                    if (expectedType === "number") {
-                      convertedValue = Number(target);
-                    } else if (expectedType === "boolean") {
-                      convertedValue = target === "true" || target === "1";
-                    }
-                  }
-                }
-
-                // Apply transform function if it exists
-                if (
-                  propMeta.transform &&
-                  typeof propMeta.transform === "function"
-                ) {
-                  convertedValue = propMeta.transform(convertedValue);
-                }
-
-                instance[propName] = convertedValue;
-              }
-              foundProperty = true;
-              break;
-            }
-          }
-
-          // If not a field, check if it's a relation (skip those with getter)
-          if (!foundProperty) {
-            for (const [relationName, relationMeta] of Object.entries(
-              metadata.relations,
-            )) {
-              if (relationMeta.getter) continue; // Handle via getter evaluation
-              if (relationMeta.predicate === predicate) {
-                // For relations, accumulate all values with their timestamps and indices for sorting
-                if (!instance[relationName]) {
-                  instance[relationName] = [];
-                }
-                // Initialize timestamp tracking array if not already done
-                const timestampsKey = `__${relationName}_timestamps`;
-                const indicesKey = `__${relationName}_indices`;
-                if (!instance[timestampsKey]) {
-                  instance[timestampsKey] = [];
-                }
-                if (!instance[indicesKey]) {
-                  instance[indicesKey] = [];
-                }
-                if (!instance[relationName].includes(target)) {
-                  instance[relationName].push(target);
-                  instance[timestampsKey].push(link.timestamp || "");
-                  // Track original position in the links array for stable sorting
-                  instance[indicesKey].push(linkIndex);
-                }
-                break;
-              }
-            }
-          }
-        }
-
-        // Set author and timestamps
-        if (originalAuthor) {
-          instance.author = originalAuthor;
-        }
-
-        // Set createdAt from earliest timestamp
-        if (minTimestamp) {
-          if (typeof minTimestamp === "string" && minTimestamp.includes("T")) {
-            instance.createdAt = new Date(minTimestamp).getTime();
-          } else if (typeof minTimestamp === "string") {
-            const parsed = parseInt(minTimestamp, 10);
-            instance.createdAt = isNaN(parsed) ? minTimestamp : parsed;
-          } else {
-            instance.createdAt = minTimestamp;
-          }
-        }
-
-        // Set updatedAt from most recent timestamp
-        if (maxTimestamp) {
-          if (typeof maxTimestamp === "string" && maxTimestamp.includes("T")) {
-            instance.updatedAt = new Date(maxTimestamp).getTime();
-          } else if (typeof maxTimestamp === "string") {
-            const parsed = parseInt(maxTimestamp, 10);
-            instance.updatedAt = isNaN(parsed) ? maxTimestamp : parsed;
-          } else {
-            instance.updatedAt = maxTimestamp;
-          }
-        }
-
-        // Sort relations by timestamp to maintain insertion order
-        for (const [relationName, relationMeta] of Object.entries(
-          metadata.relations,
-        )) {
-          const timestampsKey = `__${relationName}_timestamps`;
-          const indicesKey = `__${relationName}_indices`;
-          if (instance[relationName] && instance[timestampsKey]) {
-            // Create array of [value, timestamp, index] tuples
-            const pairs = instance[relationName].map(
-              (value: any, index: number) => ({
-                value,
-                timestamp: instance[timestampsKey][index] || "",
-                originalIndex: instance[indicesKey]?.[index] ?? index,
-              }),
-            );
-            // Sort by timestamp first, then by original index for stable sorting
-            pairs.sort((a, b) => {
-              const tsA = String(a.timestamp || "");
-              const tsB = String(b.timestamp || "");
-              const tsCompare = tsA.localeCompare(tsB);
-              if (tsCompare !== 0) return tsCompare;
-              // Use original index as tiebreaker for stable sorting
-              return a.originalIndex - b.originalIndex;
-            });
-            // Replace relation with sorted values, filtering out empty strings and None
-            const sortedValues = pairs
-              .map((p) => p.value)
-              .filter(
-                (v: any) =>
-                  v !== undefined && v !== null && v !== "" && v !== "None",
-              );
-            // @HasOne / maxCount:1 forward relations store a single string, not an array
-            const relationMeta = metadata.relations[relationName];
-            instance[relationName] =
-              relationMeta?.maxCount === 1
-                ? sortedValues[0] ?? null
-                : sortedValues;
-            // Clean up temporary arrays
-            delete instance[timestampsKey];
-            delete instance[indicesKey];
-          }
-        }
-
-        // Filter by requested attributes if specified
+        // Filter to only requested fields if the query specified them
         if (requestedProperties.length > 0 || requestedRelations.length > 0) {
           const requestedAttributes = [
             ...requestedProperties,
             ...requestedRelations,
           ];
           Object.keys(instance).forEach((key) => {
-            // Keep only requested attributes, plus always keep createdAt, updatedAt, author, and baseExpression
-            // Note: timestamp is a getter alias for createdAt, so we preserve createdAt instead
             if (
               !requestedAttributes.includes(key) &&
               key !== "createdAt" &&
@@ -1373,7 +965,10 @@ export class Ad4mModel {
 
         instances.push(instance);
       } catch (error) {
-        console.error(`Failed to process SurrealDB instance ${base}:`, error);
+        console.error(
+          `Failed to process SurrealDB instance ${(error as any)?.base ?? "unknown"}:`,
+          error,
+        );
       }
     }
 
@@ -1460,11 +1055,7 @@ export class Ad4mModel {
     // Evaluate custom getters for all instances (single pass)
     // This populates relation values needed for where.isInstance filtering
     for (const instance of instances) {
-      await this.evaluateCustomGettersForInstance(
-        instance,
-        perspective,
-        metadata,
-      );
+      await evaluateCustomGetters(instance, perspective, metadata);
     }
 
     // Filter relations by where.isInstance if specified
