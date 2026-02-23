@@ -38,6 +38,7 @@ jobs:
           mkdir -p executor/lib
           echo "// placeholder for CI cargo check" > executor/lib/bundle.js
           dd if=/dev/zero bs=1 count=64 of=rust-executor/CUSTOM_DENO_SNAPSHOT.bin 2>/dev/null
+          mkdir -p rust-executor/dapp/dist
 
       - name: Check default features
         run: cd rust-executor && cargo check 2>&1
@@ -100,6 +101,7 @@ jobs:
           mkdir -p executor/lib
           echo "// placeholder for CI cargo check" > executor/lib/bundle.js
           dd if=/dev/zero bs=1 count=64 of=rust-executor/CUSTOM_DENO_SNAPSHOT.bin 2>/dev/null
+          mkdir -p rust-executor/dapp/dist
 
       - name: Run wasm_core tests
         run: cd rust-executor && cargo test wasm_core --features wasm-languages -- --nocapture 2>&1
