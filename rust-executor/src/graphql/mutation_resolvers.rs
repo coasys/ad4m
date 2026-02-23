@@ -388,6 +388,21 @@ impl Mutation {
         language_address: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &EXPRESSION_CREATE_CAPABILITY)?;
+
+        // Check if this is a WASM language
+        #[cfg(feature = "wasm-languages")]
+        if crate::wasm_core::is_wasm_language(&language_address) {
+            let instance = crate::wasm_core::get_wasm_language(&language_address)
+                .map_err(|e| FieldError::new(format!("{}", e), coasys_juniper::Value::null()))?;
+            let mut lang = instance.lock()
+                .map_err(|e| FieldError::new(format!("Lock error: {}", e), coasys_juniper::Value::null()))?;
+            let content_value: serde_json::Value = serde_json::from_str(&content)
+                .unwrap_or(serde_json::Value::String(content.clone()));
+            let result = lang.expression_put(&content_value)
+                .map_err(|e| FieldError::new(format!("WASM expression_put error: {}", e), coasys_juniper::Value::null()))?;
+            return Ok(result);
+        }
+
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
@@ -490,6 +505,33 @@ impl Mutation {
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
         result.get_graphql_result()
+    }
+
+    async fn language_install_wasm(
+        &self,
+        context: &RequestContext,
+        wasm_path: String,
+        address: String,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &LANGUAGE_CREATE_CAPABILITY)?;
+        #[cfg(feature = "wasm-languages")]
+        {
+            crate::languages::LanguageController::install_wasm_language(
+                std::path::Path::new(&wasm_path),
+                &address,
+            ).map_err(|e| FieldError::new(
+                format!("WASM language install error: {}", e),
+                coasys_juniper::Value::null(),
+            ))?;
+            return Ok(address);
+        }
+        #[cfg(not(feature = "wasm-languages"))]
+        {
+            Err(FieldError::new(
+                "WASM languages feature not enabled".to_string(),
+                coasys_juniper::Value::null(),
+            ))
+        }
     }
 
     async fn language_write_settings(

@@ -96,7 +96,9 @@ fn agent() -> Result<Agent, AnyhowWrapperError> {
 #[serde]
 fn agent_load() -> Result<AgentStatus, AnyhowWrapperError> {
     AgentService::with_mutable_global_instance(|agent_service| {
-        agent_service.load();
+        if agent_service.is_initialized() {
+            agent_service.load();
+        }
         Ok(agent_service.dump())
     })
 }

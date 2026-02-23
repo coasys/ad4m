@@ -1,5 +1,5 @@
 import {
-    perspective_diff_received, sync_state_changed, telepresence_signal_received
+    perspective_diff_received, sync_state_changed, telepresence_signal_received, install_wasm_language
 } from 'ext:core/ops';
 
 ((globalThis) => {
@@ -13,6 +13,8 @@ import {
         telepresenceSignalReceived: (signal, language_address) => {
             return telepresence_signal_received(signal, language_address);
         },
+        installWasmLanguage: (wasmPath, address) => {
+            return install_wasm_language(wasmPath, address);
+        },
     };
   })(globalThis);
-  

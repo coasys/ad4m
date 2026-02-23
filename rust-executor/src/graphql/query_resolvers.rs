@@ -161,6 +161,27 @@ impl Query {
         url: String,
     ) -> FieldResult<Option<String>> {
         check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)?;
+
+        // Check if URL references a WASM language (format: lang://address/expr_addr)
+        #[cfg(feature = "wasm-languages")]
+        {
+            if let Some(rest) = url.strip_prefix("lang://") {
+                if let Some(slash_pos) = rest.find('/') {
+                    let lang_addr = &rest[..slash_pos];
+                    let expr_addr = &rest[slash_pos + 1..];
+                    if crate::wasm_core::is_wasm_language(lang_addr) {
+                        let instance = crate::wasm_core::get_wasm_language(lang_addr)
+                            .map_err(|e| FieldError::new(format!("{}", e), coasys_juniper::Value::null()))?;
+                        let mut lang = instance.lock()
+                            .map_err(|e| FieldError::new(format!("Lock error: {}", e), coasys_juniper::Value::null()))?;
+                        let result = lang.expression_get(expr_addr)
+                            .map_err(|e| FieldError::new(format!("WASM expression_get error: {}", e), coasys_juniper::Value::null()))?;
+                        return Ok(result.map(|e| serde_json::to_string(&e).unwrap_or_default()));
+                    }
+                }
+            }
+        }
+
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(

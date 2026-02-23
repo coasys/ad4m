@@ -13,4 +13,5 @@ fn main() {
     if cfg!(target_os = "macos") {
         println!("cargo:rustc-cfg=feature=\"metal\"");
     }
+    println!("cargo:rerun-if-changed=CUSTOM_DENO_SNAPSHOT.bin");
 }
