@@ -14,7 +14,125 @@ That PR already completed the foundational migration:
 
 ---
 
-## Principles
+## Current Status (as of 2026-02-22)
+
+### Completed
+
+| Item                                                                            | Commit / Notes                                      |
+| ------------------------------------------------------------------------------- | --------------------------------------------------- |
+| Phase 1 (Prolog removal)                                                        | `bd3a7b6c` in `ad4m-model-refactor`                 |
+| Phase 2 decorator renames (`@Field`, `@HasMany`, `@Model`, `@Flag`)             | `bd3a7b6c` — `we` repo migrated in follow-up commit |
+| `@we/models` Phase 2 migration (`Space`, `Block`)                               | `5c716b5` in `we` `dev` branch                      |
+| `declare` statements for `@HasMany` generated methods on `Space` + `Block`      | In `we/packages/models/src/`                        |
+| `HasManyMethods<Keys extends string>` utility type exported from `@coasys/ad4m` | `decorators.ts`                                     |
+| `get id()` public alias on `Ad4mModel`                                          | `Ad4mModel.ts` — alias for `baseExpression`         |
+| Test app scaffold (`apps/playgrounds/react/ad4m-model-testing`)                 | All scenarios 01–10 wired, 08 active                |
+| Scenario 08 — `Space` model smoke test                                          | 4/4 passing ✅                                      |
+| `uuid` field removed from `Space` model                                         | Was redundant with `baseExpression`/`id`            |
+| `UserLocation` + `SpaceType` interfaces removed from `Space.ts`                 | Dead code — no consumers outside `Space.ts` itself  |
+| `$perspective` phantom variable removed from `queryToSurrealQL`                 | Fixed — see resolved issues below                   |
+| `->link AS links` hydration bug fixed in `queryToSurrealQL`                     | Fixed — see resolved issues below                   |
+
+### Pending — Phase 2
+
+| Item                                                    | Notes                                             |
+| ------------------------------------------------------- | ------------------------------------------------- |
+| `setCollection*` → `set*` rename                        | Documented below; not yet implemented             |
+| `@HasOne`, `@BelongsToOne`, `@BelongsToMany` decorators | Phase 2b — not yet started                        |
+| `@Flag` SHACL wiring for `generateSHACL()`              | Needed for `@Flag` predicate-uniqueness guarantee |
+
+### Pending — Phases 3–5
+
+Everything in Phases 3–5 is not started. Phase 2 must be green (scenario 08 all passing) before Phase 3 begins.
+
+---
+
+## Active Issues
+
+### ✅ `@HasMany` collection writes silently fail (`addLocations`, `addComments` etc.) — RESOLVED
+
+**Root cause (write path):** The write was always working — `executeAction` returns `true` and the raw `perspective.get()` call (GraphQL layer) confirmed the link was persisted. The failure was entirely in the **read/hydration path**.
+
+`queryToSurrealQL` SELECT used `->link AS links` which in SurrealDB graph traversal returns **target node records** (fields: `id`, `uri`), not **edge records** (fields: `predicate`, `target`, `author`, `timestamp`). So `instancesFromSurrealResult` received link objects where every field was `undefined` — properties and collections could never be hydrated.
+
+`save()` appeared to work because it calls `getData()` which queries the `link` table directly with a correct field list — a separate code path.
+
+**Fix:** Replaced `->link AS links` with a correlated subquery returning edge fields:
+
+```sql
+(SELECT predicate, out.uri AS target, author, timestamp
+ FROM link WHERE in = $parent.id ORDER BY timestamp ASC) AS links
+```
+
+**Verified:** All 4 scenario 08 tests passing (save, findAll, field round-trip, locations collection).
+
+### ✅ `$perspective` phantom variable in `queryToSurrealQL` — RESOLVED
+
+**Root cause:** Every graph traversal filter in `queryToSurrealQL` and `buildGraphTraversalWhereClause` contained `WHERE perspective = $perspective AND ...`. The `link` table has **no `perspective` field** — each perspective is its own isolated SurrealDB database. The variable `$perspective` was also never substituted (unlike `surreal_query_notification` which substitutes `$perspectiveId`).
+
+**Fix applied:** All `perspective = $perspective AND` fragments removed. Isolation is guaranteed at the database level, not by a field filter.
+
+**Verified:** Scenario 08 tests unaffected — filter was a no-op.
+
+### ✅ Perspective not cleared between test runs — RESOLVED
+
+**Fix applied:** Scenario 08 now clears all links at the start of `run()` using `new LinkQuery({})` (plain `{}` fails the TypeScript structural check since the installed `LinkQuery` type has a required `isMatch` method).
+
+### 🟡 `save()` batch lifecycle is implicit
+
+`save()` currently creates its own internal batch if none is provided, commits it, then calls `getData()`. This means:
+
+- A caller cannot call `save()` as part of a larger transaction without manually managing `createBatch()`/`commitBatch()`
+- The internal `batchId` string leaks across several method signatures
+- No rollback happens if something throws mid-save
+
+This is the problem Phase 3b's Transaction API addresses. Not urgent for Phase 2, but worth keeping in mind when reviewing save-related bugs — always check whether a batch lifecycle issue is masking the real failure.
+
+---
+
+## Architectural Notes
+
+### How `executeAction` vs `createSubject` differ
+
+`save()` never calls `executeAction` directly. It calls `createSubject`, which goes:
+
+1. Rust fetches the SHACL-derived constructor actions from the perspective's link graph
+2. Merges in property setter actions
+3. Calls `execute_commands` with the merged set
+
+`addLocations()` calls `executeAction` directly with a TypeScript-generated action:
+
+```typescript
+[
+  {
+    action: "addLink",
+    source: "this",
+    predicate: "we://has_location",
+    target: "value",
+  },
+];
+```
+
+These two paths both eventually hit `execute_commands` in Rust, but the action-building provenance is different. If SHACL-derived actions have different field shapes than TypeScript-generated ones, the Rust deserializer may reject or silently ignore the TypeScript-generated form.
+
+**Implication for Phase 3:** The collection adder/remover/setter should ideally also go through SHACL-derived actions (like `createSubject` does for properties). `generateCollectionAction` is a TypeScript reimplementation of what `get_collection_adder_actions` already does in Rust from SHACL. These two implementations need to stay in sync — or better, consolidate so the TypeScript side fetches SHACL-derived actions rather than generating them independently. Filed for Phase 3 planning.
+
+### `__collections` prototype mutation inheritance bug
+
+Documented fully in Phase 4a. Currently affects any `@HasMany`-decorated class that is subclassed. The `|| {}` fallback in decorator code finds the parent's `__collections` object and writes into it rather than creating a child-specific one. The `Block` TODO comment in `Block.ts` (about `ImageBlock extends Block`) will hit this bug immediately when implemented.
+
+### `declare` statements vs `HasManyMethods<T>` utility
+
+`declare add${Capitalize<K>}` statements co-located with each `@HasMany` decorator are the current approach. They are accurate (TypeScript knows the method exists) but repetitive — every new `@HasMany` property needs 3 declare lines. The `HasManyMethods<Keys extends string>` utility exported from `decorators.ts` is available as an alternative:
+
+```typescript
+interface Space extends HasManyMethods<"locations"> {}
+// generates addLocations, removeLocations, setLocations
+```
+
+But this requires repeating the key name as a string literal. Until the `setCollection*` → `set*` rename is done, both approaches require manual sync when `@HasMany` properties are added/removed. Post-rename, `HasManyMethods` becomes cleaner. For now, `declare` is preferred as it's closer to the decorator.
+
+---
 
 - **SHACL as single source of truth** — model definitions live in SHACL only
 - **SurrealDB as default query engine** — all `Ad4mModel` queries use SurrealQL
@@ -25,7 +143,7 @@ That PR already completed the foundational migration:
 
 ---
 
-## Phase 1 — Prolog Removal + Prolog Bridge
+## Phase 1 — Prolog Removal + Prolog Bridge ✅ COMMITTED (`bd3a7b6c`)
 
 These two things go together: remove the dead auto-query path, and put the
 intentional Prolog-from-SHACL bridge in place first so there is a verified
@@ -86,7 +204,7 @@ Once 1b deletes `@InstanceQuery` entirely, delete `Subject.ts`.
 
 ---
 
-## Phase 2 — Decorator Cleanup
+## Phase 2 — Decorator Cleanup ✅ COMMITTED (`bd3a7b6c`)
 
 The current decorator names have ergonomic problems:
 
@@ -115,6 +233,53 @@ node as a certain type" is natural language in graph contexts.
 | `@Collection`   | `@HasMany` | Renamed with relationship semantics                                    |
 | `@Flag`         | `@Flag`    | **Unchanged** — already the right name                                 |
 | `@ModelOptions` | `@Model`   | Shorter, declarative — "this class is a model", not "here are options" |
+
+**Generated collection method rename — `setCollection*` → `set*`:** ⚠️ **NOT YET IMPLEMENTED**
+
+The `setCollection` prefix on the bulk-replace method (`setCollectionComments`, etc.) is
+a leftover from the `@Collection` era. Now that the decorator is `@HasMany`, keeping
+`setCollectionComments` on a `@HasMany`-decorated property is an inconsistency.
+
+Rename to drop the `Collection` infix — `setComments`, `setLocations`, etc. — matching the
+symmetry of `addComments` / `removeComments` / `setComments`.
+
+Files to update in `ad4m/core` as part of this PR:
+
+| File                  | Change                                                                                                                                                                                                                                                                                                                                 |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Ad4mModel.ts`        | `\`setCollection${cap}\`` → `\`set${cap}\`` (line ~487)                                                                                                                                                                                                                                                                                |
+| `decorators.ts`       | Two stub assignments: `setCollection${capitalize(value)}` → `set${capitalize(value)}`                                                                                                                                                                                                                                                  |
+| `PerspectiveProxy.ts` | Replace `startsWith("setCollection")` / `!startsWith("setCollection")` guards with `startsWith("set")` / `!key.match(/^set[A-Z]/) \|\| isCollectionSetter(key)` — needs a reliable way to distinguish property setters (`setName`) from collection setters (`setComments`). Use the `__collections` metadata on the instance to check. |
+| `util.ts`             | `collectionSetterToName`: slice at 3 not 13; `collectionToSetterName`: emit `set${capitalize(...)}` not `setCollection${capitalize(...)}`                                                                                                                                                                                              |
+| `HasManyMethods` type | Update mapped key template from `` `setCollection${Capitalize<K>}` `` to `` `set${Capitalize<K>}` ``                                                                                                                                                                                                                                   |
+
+**`PerspectiveProxy` disambiguation note:** The current code uses the `setCollection`
+prefix as a sentinel to tell collection setters apart from property setters like
+`setName`. After the rename, both start with `set`. The reliable discriminant is
+`__collections` metadata already stored on the prototype — check
+`obj.__collections?.[lowercasedSuffix]` to determine if a `set*` method is a collection
+setter or a property setter. This is more correct than string prefix matching anyway.
+
+**`baseExpression` → `id` public alias:** ✅ **IMPLEMENTED**
+
+`baseExpression` is the internal term used throughout `Ad4mModel.ts`. For consumers it is
+unnecessarily verbose and leaks implementation vocabulary ("base expression" is an AD4M
+graph concept; `id` is universal). A public getter alias was added in Phase 2:
+
+```typescript
+// Ad4mModel.ts
+get id(): string {
+  return this.baseExpression;
+}
+```
+
+`baseExpression` stays as-is internally (renaming it would be a much larger refactor with
+no benefit). The public `id` getter is purely additive — no breaking changes. Once added,
+consumers should use `id`; `baseExpression` remains but is considered internal.
+
+This also eliminates the need for model classes (like `Space`) to define a manual `uuid`
+field just to have a stable, queryable identifier — `id` already IS the unique identifier,
+and `where: { base: instance.id }` is the correct query pattern.
 
 **`@Flag` and predicate uniqueness:**
 
@@ -286,7 +451,7 @@ It is naturally a separate PR because Flux is a separate monorepo.
 
 ---
 
-## Phase 3 — File Decomposition
+## Phase 3 — File Decomposition ⏳ NOT STARTED
 
 `Ad4mModel.ts` is currently 3,404 lines containing two exported classes, ~15 distinct concerns, and a mix of pure functions and instance/static methods. Split it:
 
@@ -625,7 +790,7 @@ an `onError` callback just to track whether the subscription is healthy.
 
 ---
 
-## Phase 4 — WeakMap Metadata Registry + Model Inheritance
+## Phase 4 — WeakMap Metadata Registry + Model Inheritance ⏳ NOT STARTED
 
 ### 4a — WeakMap Metadata Registry
 
@@ -791,7 +956,7 @@ constructor also exists in the WeakMap registry (i.e. is itself decorated with `
 
 ---
 
-## Phase 5 — CRDT Ordering
+## Phase 5 — CRDT Ordering ⏳ NOT STARTED
 
 Implement deterministic ordering for concurrent link writes. Details in
 `CRDT-ORDERING-STRATEGY.md`. Depends on Phase 3 being complete (query layer needs

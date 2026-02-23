@@ -1,8 +1,20 @@
 import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { makeRandomId, FieldOptions, CollectionOptions, Model } from "./decorators";
-import { singularToPlural, pluralToSingular, propertyNameToSetterName, collectionToAdderName, collectionToRemoverName, collectionToSetterName } from "./util";
+import {
+  makeRandomId,
+  FieldOptions,
+  CollectionOptions,
+  Model,
+} from "./decorators";
+import {
+  singularToPlural,
+  pluralToSingular,
+  propertyNameToSetterName,
+  collectionToAdderName,
+  collectionToRemoverName,
+  collectionToSetterName,
+} from "./util";
 import { escapeSurrealString } from "../utils";
 
 // JSON Schema type definitions
@@ -54,7 +66,13 @@ type WhereOps = {
   gte: number; // greater than or equal to
   contains: string | number; // substring/element check
 };
-type WhereCondition = string | number | boolean | string[] | number[] | { [K in keyof WhereOps]?: WhereOps[K] };
+type WhereCondition =
+  | string
+  | number
+  | boolean
+  | string[]
+  | number[]
+  | { [K in keyof WhereOps]?: WhereOps[K] };
 type Where = { [propertyName: string]: WhereCondition };
 type Order = { [propertyName: string]: "ASC" | "DESC" };
 
@@ -71,7 +89,12 @@ export type Query = {
 
 export type AllInstancesResult = any;
 export type ResultsWithTotalCount<T> = { results: T[]; totalCount?: number };
-export type PaginationResult<T> = { results: T[]; totalCount?: number; pageSize: number; pageNumber: number };
+export type PaginationResult<T> = {
+  results: T[];
+  totalCount?: number;
+  pageSize: number;
+  pageNumber: number;
+};
 
 /**
  * Metadata for a single property extracted from decorators.
@@ -132,13 +155,13 @@ function capitalize(word: string): string {
 }
 
 function normalizeNamespaceString(namespace: string): string {
-  if (!namespace) return '';
-  if (namespace.includes('://')) {
-    const [scheme, rest] = namespace.split('://');
-    const path = (rest || '').replace(/\/+$/,'');
+  if (!namespace) return "";
+  if (namespace.includes("://")) {
+    const [scheme, rest] = namespace.split("://");
+    const path = (rest || "").replace(/\/+$/, "");
     return `${scheme}://${path}`;
   } else {
-    return namespace.replace(/\/+$/,'');
+    return namespace.replace(/\/+$/, "");
   }
 }
 
@@ -152,7 +175,10 @@ function normalizeSchemaType(type?: string | string[]): string | undefined {
   return undefined;
 }
 
-function isSchemaType(schema: JSONSchemaProperty, expectedType: string): boolean {
+function isSchemaType(
+  schema: JSONSchemaProperty,
+  expectedType: string,
+): boolean {
   return normalizeSchemaType(schema.type) === expectedType;
 }
 
@@ -171,20 +197,20 @@ function isNumericType(schema: JSONSchemaProperty): boolean {
 
 /**
  * Base class for defining data models in AD4M.
- * 
+ *
  * @description
  * Ad4mModel provides the foundation for creating data models that are stored in AD4M perspectives.
  * Each model instance is represented as a subgraph in the perspective, with properties and collections
  * mapped to links in that graph. The class uses Prolog-based queries to efficiently search and filter
  * instances based on their properties and relationships.
- * 
+ *
  * Key concepts:
  * - Each model instance has a unique base expression that serves as its identifier
  * - Properties are stored as links with predicates defined by the `through` option
  * - Collections represent one-to-many relationships as sets of links
  * - Queries are translated to Prolog for efficient graph pattern matching
  * - Changes are tracked through the perspective's subscription system
- * 
+ *
  * @example
  * ```typescript
  * // Define a recipe model
@@ -196,14 +222,14 @@ function isNumericType(schema: JSONSchemaProperty): boolean {
  *     resolveLanguage: "literal"
  *   })
  *   name: string = "";
- * 
+ *
  *   // Optional property with custom initial value
  *   @Optional({
  *     through: "recipe://status",
  *     initial: "recipe://draft"
  *   })
  *   status: string = "";
- * 
+ *
  *   // Read-only computed property
  *   @ReadOnly({
  *     through: "recipe://rating",
@@ -215,11 +241,11 @@ function isNumericType(schema: JSONSchemaProperty): boolean {
  *     `
  *   })
  *   averageRating: number = 0;
- * 
+ *
  *   // Collection of ingredients
  *   @Collection({ through: "recipe://ingredient" })
  *   ingredients: string[] = [];
- * 
+ *
  *   // Collection of comments that are instances of another model
  *   @Collection({
  *     through: "recipe://comment",
@@ -227,41 +253,41 @@ function isNumericType(schema: JSONSchemaProperty): boolean {
  *   })
  *   comments: Comment[] = [];
  * }
- * 
+ *
  * // Create and save a new recipe
  * const recipe = new Recipe(perspective);
  * recipe.name = "Chocolate Cake";
  * recipe.ingredients = ["flour", "sugar", "cocoa"];
  * await recipe.save();
- * 
+ *
  * // Query recipes in different ways
  * // Get all recipes
  * const allRecipes = await Recipe.findAll(perspective);
- * 
+ *
  * // Find recipes with specific criteria
  * const desserts = await Recipe.findAll(perspective, {
- *   where: { 
+ *   where: {
  *     status: "recipe://published",
  *     averageRating: { gt: 4 }
  *   },
  *   order: { name: "ASC" },
  *   limit: 10
  * });
- * 
+ *
  * // Use the fluent query builder
  * const popularRecipes = await Recipe.query(perspective)
  *   .where({ averageRating: { gt: 4.5 } })
  *   .order({ averageRating: "DESC" })
  *   .limit(5)
  *   .get();
- * 
+ *
  * // Subscribe to real-time updates
  * await Recipe.query(perspective)
  *   .where({ status: "recipe://cooking" })
  *   .subscribe(recipes => {
  *     console.log("Currently being cooked:", recipes);
  *   });
- * 
+ *
  * // Paginate results
  * const { results, totalCount, pageNumber } = await Recipe.query(perspective)
  *   .where({ status: "recipe://published" })
@@ -277,16 +303,19 @@ export class Ad4mModel {
   createdAt: any;
   updatedAt: any;
 
-  private static classNamesByClass = new WeakMap<typeof Ad4mModel, { [perspectiveId: string]: string }>();
+  private static classNamesByClass = new WeakMap<
+    typeof Ad4mModel,
+    { [perspectiveId: string]: string }
+  >();
 
   static async getClassName(perspective: PerspectiveProxy) {
-      // Check if this is the Ad4mModel class itself or a subclass
-      const isBaseClass = this === Ad4mModel;
-  
-      // For the base Ad4mModel class, we can't use the cache
-      if (isBaseClass) {
-        return await perspective.stringOrTemplateObjectToSubjectClassName(this);
-      }
+    // Check if this is the Ad4mModel class itself or a subclass
+    const isBaseClass = this === Ad4mModel;
+
+    // For the base Ad4mModel class, we can't use the cache
+    if (isBaseClass) {
+      return await perspective.stringOrTemplateObjectToSubjectClassName(this);
+    }
 
     // Get or create the cache for this class
     let classCache = this.classNamesByClass.get(this);
@@ -298,7 +327,8 @@ export class Ad4mModel {
     // Get or create the cached name for this perspective
     const perspectiveID = perspective.uuid;
     if (!classCache[perspectiveID]) {
-      classCache[perspectiveID] = await perspective.stringOrTemplateObjectToSubjectClassName(this);
+      classCache[perspectiveID] =
+        await perspective.stringOrTemplateObjectToSubjectClassName(this);
     }
 
     return classCache[perspectiveID];
@@ -314,36 +344,36 @@ export class Ad4mModel {
 
   /**
    * Extracts metadata from decorators for query building.
-   * 
+   *
    * @description
    * This method reads the metadata stored by decorators (@Property, @Collection, etc.)
    * and returns it in a structured format that's easier to work with for query builders
    * and other systems that need to introspect model structure.
-   * 
+   *
    * The metadata includes:
    * - Class name from @ModelOptions
    * - Property metadata (predicates, types, constraints, etc.)
    * - Collection metadata (predicates, filters, etc.)
-   * 
+   *
    * For models created via `fromJSONSchema()`, this method will derive metadata from
    * the stored `__properties` and `__collections` structures that were populated during
    * the dynamic class creation. If these structures are empty but a JSON schema was
    * attached to the class, it can fall back to deriving metadata from that schema.
-   * 
+   *
    * @returns Structured metadata object containing className, properties, and collections
    * @throws Error if the class doesn't have @ModelOptions decorator
-   * 
+   *
    * @example
    * ```typescript
    * @ModelOptions({ name: "Recipe" })
    * class Recipe extends Ad4mModel {
    *   @Property({ through: "recipe://name", resolveLanguage: "literal" })
    *   name: string = "";
-   *   
+   *
    *   @Collection({ through: "recipe://ingredient" })
    *   ingredients: string[] = [];
    * }
-   * 
+   *
    * const metadata = Recipe.getModelMetadata();
    * console.log(metadata.className); // "Recipe"
    * console.log(metadata.properties.name.predicate); // "recipe://name"
@@ -353,40 +383,47 @@ export class Ad4mModel {
   public static getModelMetadata(): ModelMetadata {
     // Access the prototype with any type to access decorator-added properties
     const prototype = this.prototype as any;
-    
+
     // Validate that the class has @ModelOptions decorator
     // The decorator sets prototype.className, so we check for its existence
-    if (!prototype.className || prototype.className === 'Ad4mModel') {
+    if (!prototype.className || prototype.className === "Ad4mModel") {
       throw new Error("Model class must be decorated with @Model");
     }
-    
+
     // Extract className
     const className = prototype.className;
-    
+
     // Extract properties from prototype.__properties
     const propertiesMetadata: Record<string, PropertyMetadata> = {};
     const prototypeProperties = prototype.__properties || {};
-    
+
     for (const [propertyName, opts] of Object.entries(prototypeProperties)) {
-      const options = opts as FieldOptions & { required?: boolean; flag?: boolean };
+      const options = opts as FieldOptions & {
+        required?: boolean;
+        flag?: boolean;
+      };
       propertiesMetadata[propertyName] = {
         name: propertyName,
         predicate: options.through || "",
         required: options.required || false,
         writable: options.writable || false,
         ...(options.initial !== undefined && { initial: options.initial }),
-        ...(options.resolveLanguage !== undefined && { resolveLanguage: options.resolveLanguage }),
+        ...(options.resolveLanguage !== undefined && {
+          resolveLanguage: options.resolveLanguage,
+        }),
         ...(options.getter !== undefined && { getter: options.getter }),
         ...(options.local !== undefined && { local: options.local }),
-        ...(options.transform !== undefined && { transform: options.transform }),
-        ...(options.flag !== undefined && { flag: options.flag })
+        ...(options.transform !== undefined && {
+          transform: options.transform,
+        }),
+        ...(options.flag !== undefined && { flag: options.flag }),
       };
     }
-    
+
     // Extract collections from prototype.__collections
     const collectionsMetadata: Record<string, CollectionMetadata> = {};
     const prototypeCollections = prototype.__collections || {};
-    
+
     for (const [collectionName, opts] of Object.entries(prototypeCollections)) {
       const options = opts as CollectionOptions;
       collectionsMetadata[collectionName] = {
@@ -394,37 +431,41 @@ export class Ad4mModel {
         predicate: options.through || "",
         ...(options.where !== undefined && { where: options.where }),
         ...(options.local !== undefined && { local: options.local }),
-        ...(options.getter !== undefined && { getter: options.getter })
+        ...(options.getter !== undefined && { getter: options.getter }),
       };
     }
-    
+
     // Fallback: If both structures are empty but a JSON schema is attached, derive from it
     // This handles edge cases where fromJSONSchema() was called but metadata wasn't properly populated
     const hasProperties = Object.keys(propertiesMetadata).length > 0;
     const hasCollections = Object.keys(collectionsMetadata).length > 0;
     const hasMetadata = hasProperties || hasCollections;
-    
+
     if (!hasMetadata && prototype.__jsonSchema) {
       // Derive metadata from the attached JSON schema
       const schema = prototype.__jsonSchema;
       const options = prototype.__jsonSchemaOptions || {};
-      
+
       if (schema.properties) {
-        for (const [propertyName, propertySchema] of Object.entries(schema.properties)) {
+        for (const [propertyName, propertySchema] of Object.entries(
+          schema.properties,
+        )) {
           const isArray = isArrayType(propertySchema as JSONSchemaProperty);
           const predicate = this.determinePredicate(
-            schema, 
-            propertyName, 
-            propertySchema as JSONSchemaProperty, 
+            schema,
+            propertyName,
+            propertySchema as JSONSchemaProperty,
             this.determineNamespace(schema, options),
-            options
+            options,
           );
-          
+
           if (isArray) {
             collectionsMetadata[propertyName] = {
               name: propertyName,
               predicate: predicate,
-              ...(propertySchema["x-ad4m"]?.local !== undefined && { local: propertySchema["x-ad4m"].local })
+              ...(propertySchema["x-ad4m"]?.local !== undefined && {
+                local: propertySchema["x-ad4m"].local,
+              }),
             };
           } else {
             const isRequired = schema.required?.includes(propertyName) || false;
@@ -433,51 +474,85 @@ export class Ad4mModel {
               predicate: predicate,
               required: isRequired,
               writable: propertySchema["x-ad4m"]?.writable !== false,
-              ...(propertySchema["x-ad4m"]?.resolveLanguage && { resolveLanguage: propertySchema["x-ad4m"].resolveLanguage }),
-              ...(propertySchema["x-ad4m"]?.initial && { initial: propertySchema["x-ad4m"].initial }),
-              ...(propertySchema["x-ad4m"]?.local !== undefined && { local: propertySchema["x-ad4m"].local })
+              ...(propertySchema["x-ad4m"]?.resolveLanguage && {
+                resolveLanguage: propertySchema["x-ad4m"].resolveLanguage,
+              }),
+              ...(propertySchema["x-ad4m"]?.initial && {
+                initial: propertySchema["x-ad4m"].initial,
+              }),
+              ...(propertySchema["x-ad4m"]?.local !== undefined && {
+                local: propertySchema["x-ad4m"].local,
+              }),
             };
           }
         }
       }
     }
-    
+
     return {
       className,
       properties: propertiesMetadata,
-      collections: collectionsMetadata
+      collections: collectionsMetadata,
     };
   }
 
   /**
    * Constructs a new model instance.
-   * 
+   *
    * @param perspective - The perspective where this model will be stored
    * @param baseExpression - Optional unique identifier for this instance
    * @param source - Optional source expression this instance is linked to
-   * 
+   *
    * @example
    * ```typescript
    * // Create a new recipe with auto-generated base expression
    * const recipe = new Recipe(perspective);
-   * 
+   *
    * // Create with specific base expression
    * const recipe = new Recipe(perspective, "recipe://chocolate-cake");
-   * 
+   *
    * // Create with source link
    * const recipe = new Recipe(perspective, undefined, "cookbook://desserts");
    * ```
    */
-  constructor(perspective: PerspectiveProxy, baseExpression?: string, source?: string) {
-    this.#baseExpression = baseExpression ? baseExpression : Literal.from(makeRandomId(24)).toUrl();
+  constructor(
+    perspective: PerspectiveProxy,
+    baseExpression?: string,
+    source?: string,
+  ) {
+    this.#baseExpression = baseExpression
+      ? baseExpression
+      : Literal.from(makeRandomId(24)).toUrl();
     this.#perspective = perspective;
     this.#source = source || "ad4m://self";
+
+    // Wire up real collection adder/remover/setter methods for decorator-based classes.
+    // The @HasMany / @HasOne decorators place empty stubs on the prototype at class-definition
+    // time (e.g. `addLocations = () => {}`). Here, at instance-creation time, we replace each
+    // stub with a closure that actually calls the private implementation so that callers like
+    // `instance.addLocations(value)` persist the link in the perspective.
+    const proto = Object.getPrototypeOf(this);
+    const collections: Record<string, any> = proto.__collections || {};
+    for (const key of Object.keys(collections)) {
+      const cap = capitalize(key);
+      this[`add${cap}`] = (value: any, batchId?: string) =>
+        this.setCollectionAdder(key, value, batchId);
+      this[`remove${cap}`] = (value: any, batchId?: string) =>
+        this.setCollectionRemover(key, value, batchId);
+      this[`setCollection${cap}`] = (value: any, batchId?: string) =>
+        this.setCollectionSetter(key, value, batchId);
+    }
   }
 
   /**
    * Gets the base expression of the subject.
    */
   get baseExpression() {
+    return this.#baseExpression;
+  }
+
+  /** Alias for {@link baseExpression}. Prefer `id` in new code. */
+  get id() {
     return this.#baseExpression;
   }
 
@@ -512,7 +587,10 @@ export class Ad4mModel {
    * Replaces Prolog query: property_setter(C, key, Setter)
    * @private
    */
-  private generatePropertySetterAction(key: string, metadata: FieldOptions): any[] {
+  private generatePropertySetterAction(
+    key: string,
+    metadata: FieldOptions,
+  ): any[] {
     // Check if property is read-only
     if (metadata.writable === false) {
       throw new Error(`Property "${key}" is read-only and cannot be written`);
@@ -522,13 +600,15 @@ export class Ad4mModel {
       throw new Error(`Property "${key}" has no 'through' predicate defined`);
     }
 
-    return [{
-      action: "setSingleTarget",
-      source: "this",
-      predicate: metadata.through,
-      target: "value",
-      ...(metadata.local && { local: true })
-    }];
+    return [
+      {
+        action: "setSingleTarget",
+        source: "this",
+        predicate: metadata.through,
+        target: "value",
+        ...(metadata.local && { local: true }),
+      },
+    ];
   }
 
   /**
@@ -536,7 +616,10 @@ export class Ad4mModel {
    * Replaces Prolog queries: collection_adder, collection_remover, collection_setter
    * @private
    */
-  private generateCollectionAction(key: string, actionType: 'adder' | 'remover' | 'setter'): any[] {
+  private generateCollectionAction(
+    key: string,
+    actionType: "adder" | "remover" | "setter",
+  ): any[] {
     const metadata = this.getCollectionMetadata(key);
     if (!metadata) {
       throw new Error(`Collection "${key}" has no metadata defined`);
@@ -549,19 +632,25 @@ export class Ad4mModel {
     const actionMap = {
       adder: "addLink",
       remover: "removeLink",
-      setter: "collectionSetter"
+      setter: "collectionSetter",
     };
 
-    return [{
-      action: actionMap[actionType],
-      source: "this",
-      predicate: metadata.through,
-      target: "value",
-      ...(metadata.local && { local: true })
-    }];
+    return [
+      {
+        action: actionMap[actionType],
+        source: "this",
+        predicate: metadata.through,
+        target: "value",
+        ...(metadata.local && { local: true }),
+      },
+    ];
   }
 
-  public static async assignValuesToInstance(perspective: PerspectiveProxy, instance: Ad4mModel, values: ValueTuple[]) {
+  public static async assignValuesToInstance(
+    perspective: PerspectiveProxy,
+    instance: Ad4mModel,
+    values: ValueTuple[],
+  ) {
     // Map properties to object
     const propsObject = Object.fromEntries(
       await Promise.all(
@@ -569,20 +658,25 @@ export class Ad4mModel {
           let finalValue = value;
 
           // Handle UTF-8 byte sequences from Prolog URL decoding
-          if (!resolve && typeof value === 'string') {
+          if (!resolve && typeof value === "string") {
             // Only attempt reconstruction if the string looks like a byte string (all code points <= 0xFF)
             // and contains at least one high byte (>= 0x80). This avoids mangling valid Unicode.
-            const codePoints = Array.from(value, ch => ch.codePointAt(0)!);
-            const looksByteString = codePoints.every(cp => cp <= 0xFF);
-            const hasHighByte = codePoints.some(cp => cp >= 0x80);
+            const codePoints = Array.from(value, (ch) => ch.codePointAt(0)!);
+            const looksByteString = codePoints.every((cp) => cp <= 0xff);
+            const hasHighByte = codePoints.some((cp) => cp >= 0x80);
             if (looksByteString && hasHighByte) {
               try {
                 const bytes = Uint8Array.from(codePoints);
-                const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+                const decoded = new TextDecoder("utf-8", {
+                  fatal: true,
+                }).decode(bytes);
                 if (decoded !== value) finalValue = decoded;
               } catch (error) {
                 // If UTF-8 conversion fails, keep the original value
-                console.warn(`UTF-8 byte reconstruction failed for property "${name}"`, { value, error });
+                console.warn(
+                  `UTF-8 byte reconstruction failed for property "${name}"`,
+                  { value, error },
+                );
               }
             }
           }
@@ -606,19 +700,23 @@ export class Ad4mModel {
             finalValue = transform(finalValue);
           }
           return [name, finalValue];
-        })
-      )
+        }),
+      ),
     );
     // Filter out properties that are read-only (getters without setters)
     const writableProps = Object.fromEntries(
       Object.entries(propsObject).filter(([key]) => {
-        const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(instance), key);
+        const descriptor = Object.getOwnPropertyDescriptor(
+          Object.getPrototypeOf(instance),
+          key,
+        );
         if (!descriptor) {
           // No descriptor means it's a regular property on the instance, allow it
           return true;
         }
         // Check if it's an accessor descriptor (has get/set) vs data descriptor (has value/writable)
-        const isAccessor = descriptor.get !== undefined || descriptor.set !== undefined;
+        const isAccessor =
+          descriptor.get !== undefined || descriptor.set !== undefined;
         if (isAccessor) {
           // Accessor descriptor: only allow if it has a setter
           return descriptor.set !== undefined;
@@ -626,7 +724,7 @@ export class Ad4mModel {
           // Data descriptor: only allow if writable is not explicitly false
           return descriptor.writable !== false;
         }
-      })
+      }),
     );
     // Assign properties to instance
     Object.assign(instance, writableProps);
@@ -660,9 +758,13 @@ export class Ad4mModel {
         let originalAuthor = null;
 
         // Process properties (skip those with custom getter)
-        for (const [propName, propMeta] of Object.entries(metadata.properties)) {
+        for (const [propName, propMeta] of Object.entries(
+          metadata.properties,
+        )) {
           if (propMeta.getter) continue; // Handle via custom getter evaluation
-          const matching = links.filter((l: any) => l.predicate === propMeta.predicate);
+          const matching = links.filter(
+            (l: any) => l.predicate === propMeta.predicate,
+          );
           if (matching.length > 0) {
             // "Latest wins" semantics: select the last element since links are ordered ASC.
             // The last element has the most recent timestamp and represents the current property value.
@@ -682,7 +784,10 @@ export class Ad4mModel {
             }
 
             // Handle resolveLanguage
-            if (propMeta.resolveLanguage && propMeta.resolveLanguage !== 'literal') {
+            if (
+              propMeta.resolveLanguage &&
+              propMeta.resolveLanguage !== "literal"
+            ) {
               try {
                 const expression = await this.#perspective.getExpression(value);
                 if (expression) {
@@ -693,9 +798,15 @@ export class Ad4mModel {
                   }
                 }
               } catch (e) {
-                console.warn(`Failed to resolve expression for ${propName}:`, e);
+                console.warn(
+                  `Failed to resolve expression for ${propName}:`,
+                  e,
+                );
               }
-            } else if (typeof value === 'string' && value.startsWith('literal://')) {
+            } else if (
+              typeof value === "string" &&
+              value.startsWith("literal://")
+            ) {
               // Parse literal URL
               try {
                 const parsed = Literal.fromUrl(value).get();
@@ -706,7 +817,10 @@ export class Ad4mModel {
             }
 
             // Apply transform if exists
-            if (propMeta.transform && typeof propMeta.transform === 'function') {
+            if (
+              propMeta.transform &&
+              typeof propMeta.transform === "function"
+            ) {
               value = propMeta.transform(value);
             }
 
@@ -715,64 +829,83 @@ export class Ad4mModel {
         }
 
         // Process collections (skip those with custom getter)
-        for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+        for (const [collName, collMeta] of Object.entries(
+          metadata.collections,
+        )) {
           if (collMeta.getter) continue; // Handle via custom getter evaluation
-          const matching = links.filter((l: any) => l.predicate === collMeta.predicate);
+          const matching = links.filter(
+            (l: any) => l.predicate === collMeta.predicate,
+          );
           // Collections preserve chronological order: links are sorted ASC by timestamp,
           // so the collection reflects the order in which items were added (oldest to newest).
           let values = matching.map((l: any) => l.target);
-          
+
           // Apply where.condition filtering if present
           if (collMeta.where?.condition && values.length > 0) {
             try {
               // Filter values by evaluating condition for each value
               const filteredValues: string[] = [];
-              
+
               for (const value of values) {
                 let condition = collMeta.where.condition
                   .replace(/\$perspective/g, `'${this.#perspective.uuid}'`)
                   .replace(/\$base/g, `'${this.#baseExpression}'`)
                   .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
-                
+
                 // If condition starts with WHERE, wrap it in array length check pattern
                 // Using array::len() to properly count matching links
-                if (condition.trim().startsWith('WHERE')) {
+                if (condition.trim().startsWith("WHERE")) {
                   condition = `array::len(SELECT * FROM link ${condition}) > 0`;
                 }
-                
+
                 const filterQuery = `RETURN ${condition}`;
-                const result = await this.#perspective.querySurrealDB(filterQuery);
-                
+                const result =
+                  await this.#perspective.querySurrealDB(filterQuery);
+
                 // RETURN can return the value directly or in an array
-                const isTrue = result === true || (Array.isArray(result) && result.length > 0 && result[0] === true);
+                const isTrue =
+                  result === true ||
+                  (Array.isArray(result) &&
+                    result.length > 0 &&
+                    result[0] === true);
                 if (isTrue) {
                   filteredValues.push(value);
                 }
               }
-              
+
               values = filteredValues;
             } catch (error) {
-              console.warn(`Failed to apply condition filter for ${collName}:`, error);
+              console.warn(
+                `Failed to apply condition filter for ${collName}:`,
+                error,
+              );
               // Keep unfiltered values on error
             }
           }
-          
+
           // Apply where.isInstance filtering if present
           if (collMeta.where?.isInstance && values.length > 0) {
             try {
-              const className = typeof collMeta.where.isInstance === 'string' 
-                ? collMeta.where.isInstance 
-                : collMeta.where.isInstance.name;
-              
-              const filterMetadata = await this.#perspective.getSubjectClassMetadataFromSDNA(className);
+              const className =
+                typeof collMeta.where.isInstance === "string"
+                  ? collMeta.where.isInstance
+                  : collMeta.where.isInstance.name;
+
+              const filterMetadata =
+                await this.#perspective.getSubjectClassMetadataFromSDNA(
+                  className,
+                );
               if (filterMetadata) {
-                values = await this.#perspective.batchCheckSubjectInstances(values, filterMetadata);
+                values = await this.#perspective.batchCheckSubjectInstances(
+                  values,
+                  filterMetadata,
+                );
               }
             } catch (error) {
               // Keep unfiltered values on error
             }
           }
-          
+
           (this as any)[collName] = values;
         }
 
@@ -789,20 +922,36 @@ export class Ad4mModel {
       }
 
       // Evaluate SurrealQL getters
-      await ctor.evaluateCustomGettersForInstance(this, this.#perspective, metadata);
-      
+      await ctor.evaluateCustomGettersForInstance(
+        this,
+        this.#perspective,
+        metadata,
+      );
+
       // Apply where.isInstance filtering to getter collections
       // (non-getter collections were already filtered above)
       for (const [collName, collMeta] of Object.entries(metadata.collections)) {
-        if (collMeta.getter && collMeta.where?.isInstance && (this as any)[collName]?.length > 0) {
+        if (
+          collMeta.getter &&
+          collMeta.where?.isInstance &&
+          (this as any)[collName]?.length > 0
+        ) {
           try {
-            const className = typeof collMeta.where.isInstance === 'string'
-              ? collMeta.where.isInstance
-              : collMeta.where.isInstance.name;
-            
-            const filterMetadata = await this.#perspective.getSubjectClassMetadataFromSDNA(className);
+            const className =
+              typeof collMeta.where.isInstance === "string"
+                ? collMeta.where.isInstance
+                : collMeta.where.isInstance.name;
+
+            const filterMetadata =
+              await this.#perspective.getSubjectClassMetadataFromSDNA(
+                className,
+              );
             if (filterMetadata) {
-              const filtered = await this.#perspective.batchCheckSubjectInstances((this as any)[collName], filterMetadata);
+              const filtered =
+                await this.#perspective.batchCheckSubjectInstances(
+                  (this as any)[collName],
+                  filterMetadata,
+                );
               (this as any)[collName] = filtered;
             }
           } catch (error) {
@@ -811,13 +960,14 @@ export class Ad4mModel {
         }
       }
     } catch (e) {
-      console.error(`SurrealDB getData also failed for ${this.#baseExpression}:`, e);
+      console.error(
+        `SurrealDB getData also failed for ${this.#baseExpression}:`,
+        e,
+      );
     }
 
     return this;
   }
-
-
 
   /**
    * Evaluates custom SurrealQL getters for properties and collections on a specific instance.
@@ -826,7 +976,7 @@ export class Ad4mModel {
   private static async evaluateCustomGettersForInstance(
     instance: any,
     perspective: PerspectiveProxy,
-    metadata: any
+    metadata: any,
   ) {
     const safeBaseExpression = this.formatSurrealValue(instance.baseExpression);
 
@@ -835,12 +985,22 @@ export class Ad4mModel {
       if ((propMeta as any).getter) {
         try {
           // Replace 'Base' placeholder with actual base expression
-          const query = (propMeta as any).getter.replace(/Base/g, safeBaseExpression);
+          const query = (propMeta as any).getter.replace(
+            /Base/g,
+            safeBaseExpression,
+          );
           // Query from node table to have graph traversal context
           const result = await perspective.querySurrealDB(
-            `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`
+            `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`,
           );
-          if (result && result.length > 0 && result[0].value !== undefined && result[0].value !== null && result[0].value !== 'None' && result[0].value !== '') {
+          if (
+            result &&
+            result.length > 0 &&
+            result[0].value !== undefined &&
+            result[0].value !== null &&
+            result[0].value !== "None" &&
+            result[0].value !== ""
+          ) {
             instance[propName] = result[0].value;
           }
         } catch (error) {
@@ -854,16 +1014,27 @@ export class Ad4mModel {
       if ((collMeta as any).getter) {
         try {
           // Replace 'Base' placeholder with actual base expression
-          const query = (collMeta as any).getter.replace(/Base/g, safeBaseExpression);
+          const query = (collMeta as any).getter.replace(
+            /Base/g,
+            safeBaseExpression,
+          );
           // Query from node table to have graph traversal context
           const result = await perspective.querySurrealDB(
-            `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`
+            `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`,
           );
-          if (result && result.length > 0 && result[0].value !== undefined && result[0].value !== null) {
+          if (
+            result &&
+            result.length > 0 &&
+            result[0].value !== undefined &&
+            result[0].value !== null
+          ) {
             // Filter out 'None' from collection results
             const value = result[0].value;
-            instance[collName] = Array.isArray(value) 
-              ? value.filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None')
+            instance[collName] = Array.isArray(value)
+              ? value.filter(
+                  (v: any) =>
+                    v !== undefined && v !== null && v !== "" && v !== "None",
+                )
               : value;
           }
         } catch (error) {
@@ -875,29 +1046,29 @@ export class Ad4mModel {
 
   /**
    * Generates a SurrealQL query from a Query object.
-   * 
+   *
    * @description
    * This method translates high-level query parameters into a SurrealQL query string
    * that can be executed against the SurrealDB backend. Unlike Prolog queries which
    * operate on SDNA-aware predicates, SurrealQL queries operate directly on raw links
    * stored in SurrealDB.
-   * 
+   *
    * The generated query uses a CTE (Common Table Expression) pattern:
    * 1. First, identify candidate base expressions by filtering links based on where conditions
    * 2. Then, for each candidate base, resolve properties and collections via subqueries
    * 3. Finally, apply ordering, pagination (LIMIT/START) at the SQL level
-   * 
+   *
    * Key architectural notes:
    * - SurrealDB stores only raw links (source, predicate, target, author, timestamp)
    * - No SDNA knowledge at the database level
    * - Properties are resolved via subqueries that look for links with specific predicates
    * - Collections are similar but return multiple values instead of one
    * - Special fields (base, author, timestamp) are accessed directly, not via subqueries
-   * 
+   *
    * @param perspective - The perspective to query (used for metadata extraction)
    * @param query - Query parameters (where, order, limit, offset, properties, collections)
    * @returns Complete SurrealQL query string ready for execution
-   * 
+   *
    * @example
    * ```typescript
    * const query = Recipe.queryToSurrealQL(perspective, {
@@ -909,7 +1080,10 @@ export class Ad4mModel {
    * //          FROM link WHERE ... GROUP BY source ORDER BY timestamp DESC LIMIT 10
    * ```
    */
-  public static async queryToSurrealQL(perspective: PerspectiveProxy, query: Query): Promise<string> {
+  public static async queryToSurrealQL(
+    perspective: PerspectiveProxy,
+    query: Query,
+  ): Promise<string> {
     const metadata = this.getModelMetadata();
     const { source, where, order, offset, limit } = query;
 
@@ -921,7 +1095,7 @@ export class Ad4mModel {
     if (source) {
       // Use graph traversal: node must be target of has_child link from source
       graphTraversalFilters.push(
-        `count(<-link[WHERE perspective = $perspective AND in.uri = ${this.formatSurrealValue(source)} AND predicate = 'ad4m://has_child']) > 0`
+        `count(<-link[WHERE in.uri = ${this.formatSurrealValue(source)} AND predicate = 'ad4m://has_child']) > 0`,
       );
     }
 
@@ -931,11 +1105,11 @@ export class Ad4mModel {
         // For flag properties, also filter by the target value
         if (propMeta.flag && propMeta.initial) {
           graphTraversalFilters.push(
-            `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
+            `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`,
           );
         } else {
           graphTraversalFilters.push(
-            `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`
+            `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`,
           );
         }
       }
@@ -949,11 +1123,11 @@ export class Ad4mModel {
           // For flag properties, also filter by the target value
           if (propMeta.flag) {
             graphTraversalFilters.push(
-              `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
+              `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`,
             );
           } else {
             graphTraversalFilters.push(
-              `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`
+              `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`,
             );
           }
           break; // Just need one defining property
@@ -962,7 +1136,10 @@ export class Ad4mModel {
     }
 
     // Build user WHERE clause filters using graph traversal
-    const userWhereClause = this.buildGraphTraversalWhereClause(metadata, where);
+    const userWhereClause = this.buildGraphTraversalWhereClause(
+      metadata,
+      where,
+    );
 
     // Build complete WHERE clause using graph traversal filters
     const whereConditions: string[] = [];
@@ -975,8 +1152,8 @@ export class Ad4mModel {
       whereConditions.push(userWhereClause);
     }
 
-    // Always ensure node has at least one link in this perspective
-    whereConditions.push(`count(->link[WHERE perspective = $perspective]) > 0`);
+    // Always ensure node has at least one link
+    whereConditions.push(`count(->link) > 0`);
 
     // Build the query FROM node using direct graph traversal in WHERE
     // This avoids slow subqueries and uses graph indexes for fast traversal
@@ -984,9 +1161,9 @@ export class Ad4mModel {
 SELECT
     id AS source,
     uri AS source_uri,
-    ->link[WHERE perspective = $perspective] AS links
+    (SELECT predicate, out.uri AS target, author, timestamp FROM link WHERE in = $parent.id ORDER BY timestamp ASC) AS links
 FROM node
-WHERE ${whereConditions.join(' AND ')}
+WHERE ${whereConditions.join(" AND ")}
     `.trim();
 
     return fullQuery;
@@ -1012,62 +1189,89 @@ WHERE ${whereConditions.join(' AND ')}
    *
    * @private
    */
-  private static buildGraphTraversalWhereClause(metadata: ModelMetadata, where?: Where): string {
-    if (!where) return '';
+  private static buildGraphTraversalWhereClause(
+    metadata: ModelMetadata,
+    where?: Where,
+  ): string {
+    if (!where) return "";
 
     const conditions: string[] = [];
 
     for (const [propertyName, condition] of Object.entries(where)) {
       // Check if this is a special field (base, author, timestamp)
       // Note: author and timestamp filtering is done in JavaScript after query
-      const isSpecial = ['base', 'author', 'timestamp'].includes(propertyName);
+      const isSpecial = ["base", "author", "timestamp"].includes(propertyName);
 
       if (isSpecial) {
         // Skip author and timestamp - they'll be filtered in JavaScript
         // Only handle 'base' (which maps to 'uri') here
-        if (propertyName === 'author' || propertyName === 'timestamp') {
+        if (propertyName === "author" || propertyName === "timestamp") {
           continue; // Skip - will be filtered post-query
         }
 
-        const columnName = 'uri'; // base maps to uri in node table
+        const columnName = "uri"; // base maps to uri in node table
 
         // Handle base/uri field directly
         if (Array.isArray(condition)) {
           // Array values (IN clause)
-          const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
+          const formattedValues = condition
+            .map((v) => this.formatSurrealValue(v))
+            .join(", ");
           conditions.push(`${columnName} IN [${formattedValues}]`);
-        } else if (typeof condition === 'object' && condition !== null) {
+        } else if (typeof condition === "object" && condition !== null) {
           // Operator object
           const ops = condition as any;
           if (ops.not !== undefined) {
             if (Array.isArray(ops.not)) {
-              const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
+              const formattedValues = ops.not
+                .map((v) => this.formatSurrealValue(v))
+                .join(", ");
               conditions.push(`${columnName} NOT IN [${formattedValues}]`);
             } else {
-              conditions.push(`${columnName} != ${this.formatSurrealValue(ops.not)}`);
+              conditions.push(
+                `${columnName} != ${this.formatSurrealValue(ops.not)}`,
+              );
             }
           }
-          if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
-            conditions.push(`${columnName} >= ${this.formatSurrealValue(ops.between[0])} AND ${columnName} <= ${this.formatSurrealValue(ops.between[1])}`);
+          if (
+            ops.between !== undefined &&
+            Array.isArray(ops.between) &&
+            ops.between.length === 2
+          ) {
+            conditions.push(
+              `${columnName} >= ${this.formatSurrealValue(ops.between[0])} AND ${columnName} <= ${this.formatSurrealValue(ops.between[1])}`,
+            );
           }
           if (ops.gt !== undefined) {
-            conditions.push(`${columnName} > ${this.formatSurrealValue(ops.gt)}`);
+            conditions.push(
+              `${columnName} > ${this.formatSurrealValue(ops.gt)}`,
+            );
           }
           if (ops.gte !== undefined) {
-            conditions.push(`${columnName} >= ${this.formatSurrealValue(ops.gte)}`);
+            conditions.push(
+              `${columnName} >= ${this.formatSurrealValue(ops.gte)}`,
+            );
           }
           if (ops.lt !== undefined) {
-            conditions.push(`${columnName} < ${this.formatSurrealValue(ops.lt)}`);
+            conditions.push(
+              `${columnName} < ${this.formatSurrealValue(ops.lt)}`,
+            );
           }
           if (ops.lte !== undefined) {
-            conditions.push(`${columnName} <= ${this.formatSurrealValue(ops.lte)}`);
+            conditions.push(
+              `${columnName} <= ${this.formatSurrealValue(ops.lte)}`,
+            );
           }
           if (ops.contains !== undefined) {
-            conditions.push(`${columnName} CONTAINS ${this.formatSurrealValue(ops.contains)}`);
+            conditions.push(
+              `${columnName} CONTAINS ${this.formatSurrealValue(ops.contains)}`,
+            );
           }
         } else {
           // Simple equality
-          conditions.push(`${columnName} = ${this.formatSurrealValue(condition)}`);
+          conditions.push(
+            `${columnName} = ${this.formatSurrealValue(condition)}`,
+          );
         }
       } else {
         // Handle regular properties via graph traversal
@@ -1076,23 +1280,36 @@ WHERE ${whereConditions.join(' AND ')}
 
         const predicate = escapeSurrealString(propMeta.predicate);
         // Use fn::parse_literal() for properties with resolveLanguage
-        const targetField = propMeta.resolveLanguage === 'literal' ? 'fn::parse_literal(out.uri)' : 'out.uri';
+        const targetField =
+          propMeta.resolveLanguage === "literal"
+            ? "fn::parse_literal(out.uri)"
+            : "out.uri";
 
         if (Array.isArray(condition)) {
           // Array values (IN clause)
-          const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
-          conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND ${targetField} IN [${formattedValues}]]) > 0`);
-        } else if (typeof condition === 'object' && condition !== null) {
+          const formattedValues = condition
+            .map((v) => this.formatSurrealValue(v))
+            .join(", ");
+          conditions.push(
+            `count(->link[WHERE predicate = '${predicate}' AND ${targetField} IN [${formattedValues}]]) > 0`,
+          );
+        } else if (typeof condition === "object" && condition !== null) {
           // Operator object
           const ops = condition as any;
           if (ops.not !== undefined) {
             if (Array.isArray(ops.not)) {
               // For NOT IN with array: must NOT have a link with value in the array
-              const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
-              conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND ${targetField} IN [${formattedValues}]]) = 0`);
+              const formattedValues = ops.not
+                .map((v) => this.formatSurrealValue(v))
+                .join(", ");
+              conditions.push(
+                `count(->link[WHERE predicate = '${predicate}' AND ${targetField} IN [${formattedValues}]]) = 0`,
+              );
             } else {
               // For NOT with single value: must NOT have this value
-              conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(ops.not)}]) = 0`);
+              conditions.push(
+                `count(->link[WHERE predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(ops.not)}]) = 0`,
+              );
             }
           }
           // Note: gt, gte, lt, lte, between, contains operators are filtered in JavaScript
@@ -1100,21 +1317,29 @@ WHERE ${whereConditions.join(' AND ')}
           // don't work reliably with numeric comparisons.
           // These are handled in instancesFromSurrealResult along with author/timestamp filtering.
           // However, we still need to ensure the property exists
-          const hasComparisonOps = ops.gt !== undefined || ops.gte !== undefined ||
-                                   ops.lt !== undefined || ops.lte !== undefined ||
-                                   ops.between !== undefined || ops.contains !== undefined;
+          const hasComparisonOps =
+            ops.gt !== undefined ||
+            ops.gte !== undefined ||
+            ops.lt !== undefined ||
+            ops.lte !== undefined ||
+            ops.between !== undefined ||
+            ops.contains !== undefined;
           if (hasComparisonOps) {
             // Ensure we only get nodes that have this property
-            conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}']) > 0`);
+            conditions.push(
+              `count(->link[WHERE predicate = '${predicate}']) > 0`,
+            );
           }
         } else {
           // Simple equality
-          conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(condition)}]) > 0`);
+          conditions.push(
+            `count(->link[WHERE predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(condition)}]) > 0`,
+          );
         }
       }
     }
 
-    return conditions.join(' AND ');
+    return conditions.join(" AND ");
   }
 
   /**
@@ -1143,88 +1368,128 @@ WHERE ${whereConditions.join(' AND ')}
    *
    * @private
    */
-  private static buildSurrealWhereClause(metadata: ModelMetadata, where?: Where): string {
-    if (!where) return '';
-    
+  private static buildSurrealWhereClause(
+    metadata: ModelMetadata,
+    where?: Where,
+  ): string {
+    if (!where) return "";
+
     const conditions: string[] = [];
-    
+
     for (const [propertyName, condition] of Object.entries(where)) {
       // Check if this is a special field (base, author, timestamp)
       // Note: author and timestamp filtering is done in JavaScript after GROUP BY
       // because they need to be computed from the grouped links first
-      const isSpecial = ['base', 'author', 'timestamp'].includes(propertyName);
-      
+      const isSpecial = ["base", "author", "timestamp"].includes(propertyName);
+
       if (isSpecial) {
         // Skip author and timestamp - they'll be filtered in JavaScript
         // Only handle 'base' (which maps to 'source') here
-        if (propertyName === 'author' || propertyName === 'timestamp') {
+        if (propertyName === "author" || propertyName === "timestamp") {
           continue; // Skip - will be filtered post-query
         }
-        
-        const columnName = 'source'; // base maps to source
-        
+
+        const columnName = "source"; // base maps to source
+
         // Handle base/source field directly
         if (Array.isArray(condition)) {
           // Array values (IN clause)
-          const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
+          const formattedValues = condition
+            .map((v) => this.formatSurrealValue(v))
+            .join(", ");
           conditions.push(`${columnName} IN [${formattedValues}]`);
-        } else if (typeof condition === 'object' && condition !== null) {
+        } else if (typeof condition === "object" && condition !== null) {
           // Operator object
           const ops = condition as any;
           if (ops.not !== undefined) {
             if (Array.isArray(ops.not)) {
-              const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
+              const formattedValues = ops.not
+                .map((v) => this.formatSurrealValue(v))
+                .join(", ");
               conditions.push(`${columnName} NOT IN [${formattedValues}]`);
             } else {
-              conditions.push(`${columnName} != ${this.formatSurrealValue(ops.not)}`);
+              conditions.push(
+                `${columnName} != ${this.formatSurrealValue(ops.not)}`,
+              );
             }
           }
-          if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
-            conditions.push(`${columnName} >= ${this.formatSurrealValue(ops.between[0])} AND ${columnName} <= ${this.formatSurrealValue(ops.between[1])}`);
+          if (
+            ops.between !== undefined &&
+            Array.isArray(ops.between) &&
+            ops.between.length === 2
+          ) {
+            conditions.push(
+              `${columnName} >= ${this.formatSurrealValue(ops.between[0])} AND ${columnName} <= ${this.formatSurrealValue(ops.between[1])}`,
+            );
           }
           if (ops.gt !== undefined) {
-            conditions.push(`${columnName} > ${this.formatSurrealValue(ops.gt)}`);
+            conditions.push(
+              `${columnName} > ${this.formatSurrealValue(ops.gt)}`,
+            );
           }
           if (ops.gte !== undefined) {
-            conditions.push(`${columnName} >= ${this.formatSurrealValue(ops.gte)}`);
+            conditions.push(
+              `${columnName} >= ${this.formatSurrealValue(ops.gte)}`,
+            );
           }
           if (ops.lt !== undefined) {
-            conditions.push(`${columnName} < ${this.formatSurrealValue(ops.lt)}`);
+            conditions.push(
+              `${columnName} < ${this.formatSurrealValue(ops.lt)}`,
+            );
           }
           if (ops.lte !== undefined) {
-            conditions.push(`${columnName} <= ${this.formatSurrealValue(ops.lte)}`);
+            conditions.push(
+              `${columnName} <= ${this.formatSurrealValue(ops.lte)}`,
+            );
           }
           if (ops.contains !== undefined) {
-            conditions.push(`${columnName} CONTAINS ${this.formatSurrealValue(ops.contains)}`);
+            conditions.push(
+              `${columnName} CONTAINS ${this.formatSurrealValue(ops.contains)}`,
+            );
           }
         } else {
           // Simple equality
-          conditions.push(`${columnName} = ${this.formatSurrealValue(condition)}`);
+          conditions.push(
+            `${columnName} = ${this.formatSurrealValue(condition)}`,
+          );
         }
       } else {
         // Handle regular properties via subqueries
         const propMeta = metadata.properties[propertyName];
         if (!propMeta) continue; // Skip if property not found in metadata
-        
+
         const predicate = escapeSurrealString(propMeta.predicate);
         // Use fn::parse_literal() for properties with resolveLanguage
-        const targetField = propMeta.resolveLanguage === 'literal' ? 'fn::parse_literal(target)' : 'target';
-        
+        const targetField =
+          propMeta.resolveLanguage === "literal"
+            ? "fn::parse_literal(target)"
+            : "target";
+
         if (Array.isArray(condition)) {
           // Array values (IN clause)
-          const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
-          conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} IN [${formattedValues}])`);
-        } else if (typeof condition === 'object' && condition !== null) {
+          const formattedValues = condition
+            .map((v) => this.formatSurrealValue(v))
+            .join(", ");
+          conditions.push(
+            `source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} IN [${formattedValues}])`,
+          );
+        } else if (typeof condition === "object" && condition !== null) {
           // Operator object
           const ops = condition as any;
           if (ops.not !== undefined) {
             if (Array.isArray(ops.not)) {
               // For NOT IN with array: exclude sources that HAVE a value in the array
-              const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
-              conditions.push(`source NOT IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} IN [${formattedValues}])`);
+              const formattedValues = ops.not
+                .map((v) => this.formatSurrealValue(v))
+                .join(", ");
+              conditions.push(
+                `source NOT IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} IN [${formattedValues}])`,
+              );
             } else {
               // For NOT with single value: exclude sources that HAVE this value
-              conditions.push(`source NOT IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(ops.not)})`);
+              conditions.push(
+                `source NOT IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(ops.not)})`,
+              );
             }
           }
           // Note: gt, gte, lt, lte, between, contains operators are filtered in JavaScript
@@ -1232,177 +1497,204 @@ WHERE ${whereConditions.join(' AND ')}
           // don't work reliably with numeric comparisons.
           // These are handled in instancesFromSurrealResult along with author/timestamp filtering.
           // However, we still need to ensure the property exists by filtering on the predicate
-          const hasComparisonOps = ops.gt !== undefined || ops.gte !== undefined ||
-                                   ops.lt !== undefined || ops.lte !== undefined ||
-                                   ops.between !== undefined || ops.contains !== undefined;
+          const hasComparisonOps =
+            ops.gt !== undefined ||
+            ops.gte !== undefined ||
+            ops.lt !== undefined ||
+            ops.lte !== undefined ||
+            ops.between !== undefined ||
+            ops.contains !== undefined;
           if (hasComparisonOps) {
             // Ensure we only get instances that have this property
-            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}')`);
+            conditions.push(
+              `source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}')`,
+            );
           }
         } else {
           // Simple equality
-          conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(condition)})`);
+          conditions.push(
+            `source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(condition)})`,
+          );
         }
       }
     }
-    
-    return conditions.join(' AND ');
+
+    return conditions.join(" AND ");
   }
 
   /**
    * Builds the SELECT fields for SurrealQL queries.
-   * 
+   *
    * @description
    * Generates the field list for the SELECT clause, resolving properties and collections
    * via subqueries. Each property is fetched with a subquery that finds the link with the
    * appropriate predicate and returns its target. Collections are similar but don't use LIMIT 1.
-   * 
+   *
    * Field types:
    * - Properties: `(SELECT VALUE target FROM link WHERE source = $parent.base AND predicate = 'X' LIMIT 1) AS propName`
    * - Collections: `(SELECT VALUE target FROM link WHERE source = $parent.base AND predicate = 'X') AS collName`
    * - Author/Timestamp: Always included to provide metadata about each instance
-   * 
+   *
    * If properties or collections arrays are provided, only those fields are included.
    * Otherwise, all properties/collections from metadata are included.
-   * 
+   *
    * @param metadata - Model metadata containing property and collection predicates
    * @param properties - Optional array of property names to include (default: all)
    * @param collections - Optional array of collection names to include (default: all)
    * @returns Comma-separated SELECT field list
-   * 
+   *
    * @private
    */
-  private static buildSurrealSelectFields(metadata: ModelMetadata, properties?: string[], collections?: string[]): string {
+  private static buildSurrealSelectFields(
+    metadata: ModelMetadata,
+    properties?: string[],
+    collections?: string[],
+  ): string {
     const fields: string[] = [];
-    
+
     // Determine properties to fetch
     const propsToFetch = properties || Object.keys(metadata.properties);
     for (const propName of propsToFetch) {
       const propMeta = metadata.properties[propName];
       if (!propMeta) continue; // Skip if not found
-      
+
       // Reference source directly since we're selecting from link table
       const escapedPredicate = escapeSurrealString(propMeta.predicate);
-      fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}' LIMIT 1) AS ${propName}`);
+      fields.push(
+        `(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}' LIMIT 1) AS ${propName}`,
+      );
     }
-    
+
     // Determine collections to fetch
     const collsToFetch = collections || Object.keys(metadata.collections);
     for (const collName of collsToFetch) {
       const collMeta = metadata.collections[collName];
       if (!collMeta) continue; // Skip if not found
-      
+
       // Reference source directly since we're selecting from link table
       const escapedPredicate = escapeSurrealString(collMeta.predicate);
-      fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}') AS ${collName}`);
+      fields.push(
+        `(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}') AS ${collName}`,
+      );
     }
-    
+
     // Always add author and timestamp fields
-    fields.push(`(SELECT VALUE author FROM link WHERE source = source ORDER BY timestamp ASC LIMIT 1) AS author`);
-    fields.push(`(SELECT VALUE timestamp FROM link WHERE source = source ORDER BY timestamp ASC LIMIT 1) AS createdAt`);
-    fields.push(`(SELECT VALUE timestamp FROM link WHERE source = source ORDER BY timestamp DESC LIMIT 1) AS updatedAt`);
-    
-    return fields.join(',\n  ');
+    fields.push(
+      `(SELECT VALUE author FROM link WHERE source = source ORDER BY timestamp ASC LIMIT 1) AS author`,
+    );
+    fields.push(
+      `(SELECT VALUE timestamp FROM link WHERE source = source ORDER BY timestamp ASC LIMIT 1) AS createdAt`,
+    );
+    fields.push(
+      `(SELECT VALUE timestamp FROM link WHERE source = source ORDER BY timestamp DESC LIMIT 1) AS updatedAt`,
+    );
+
+    return fields.join(",\n  ");
   }
 
   /**
    * Builds the SELECT fields for SurrealQL queries using aggregation functions.
    * Compatible with GROUP BY source queries.
-   * 
+   *
    * @private
    */
-  private static buildSurrealSelectFieldsWithAggregation(metadata: ModelMetadata, properties?: string[], collections?: string[]): string {
+  private static buildSurrealSelectFieldsWithAggregation(
+    metadata: ModelMetadata,
+    properties?: string[],
+    collections?: string[],
+  ): string {
     const fields: string[] = [];
-    
+
     // Determine properties to fetch
     const propsToFetch = properties || Object.keys(metadata.properties);
     for (const propName of propsToFetch) {
       const propMeta = metadata.properties[propName];
       if (!propMeta) continue; // Skip if not found
-      
+
       // Use array::first to get the first target value for this predicate
       const escapedPredicate = escapeSurrealString(propMeta.predicate);
-      fields.push(`array::first(target[WHERE predicate = '${escapedPredicate}']) AS ${propName}`);
+      fields.push(
+        `array::first(target[WHERE predicate = '${escapedPredicate}']) AS ${propName}`,
+      );
     }
-    
+
     // Determine collections to fetch
     const collsToFetch = collections || Object.keys(metadata.collections);
     for (const collName of collsToFetch) {
       const collMeta = metadata.collections[collName];
       if (!collMeta) continue; // Skip if not found
-      
+
       // Use array filtering to get all target values for this predicate
       const escapedPredicate = escapeSurrealString(collMeta.predicate);
-      fields.push(`target[WHERE predicate = '${escapedPredicate}'] AS ${collName}`);
+      fields.push(
+        `target[WHERE predicate = '${escapedPredicate}'] AS ${collName}`,
+      );
     }
-    
+
     // Always add author and timestamp fields
     fields.push(`array::first(author) AS author`);
     fields.push(`array::first(timestamp) AS createdAt`);
     fields.push(`array::last(timestamp) AS updatedAt`);
-    
-    return fields.join(',\n  ');
-  }
 
+    return fields.join(",\n  ");
+  }
 
   /**
    * Formats a value for use in SurrealQL queries.
-   * 
+   *
    * @description
    * Handles different value types:
    * - Strings: Wrapped in single quotes with backslash-escaped special characters
    * - Numbers/booleans: Converted to string
    * - Arrays: Recursively formatted and wrapped in brackets
-   * 
+   *
    * @param value - The value to format
    * @returns Formatted value string ready for SurrealQL
-   * 
+   *
    * @private
    */
   private static formatSurrealValue(value: any): string {
-    if (typeof value === 'string') {
+    if (typeof value === "string") {
       // Escape backslashes first, then single quotes and other special characters
       const escaped = value
-        .replace(/\\/g, '\\\\')  // Backslash -> \\
-        .replace(/'/g, "\\'")     // Single quote -> \'
-        .replace(/"/g, '\\"')     // Double quote -> \"
-        .replace(/\n/g, '\\n')    // Newline -> \n
-        .replace(/\r/g, '\\r')    // Carriage return -> \r
-        .replace(/\t/g, '\\t');   // Tab -> \t
+        .replace(/\\/g, "\\\\") // Backslash -> \\
+        .replace(/'/g, "\\'") // Single quote -> \'
+        .replace(/"/g, '\\"') // Double quote -> \"
+        .replace(/\n/g, "\\n") // Newline -> \n
+        .replace(/\r/g, "\\r") // Carriage return -> \r
+        .replace(/\t/g, "\\t"); // Tab -> \t
       return `'${escaped}'`;
-    } else if (typeof value === 'number' || typeof value === 'boolean') {
+    } else if (typeof value === "number" || typeof value === "boolean") {
       return String(value);
     } else if (Array.isArray(value)) {
-      return `[${value.map(v => this.formatSurrealValue(v)).join(', ')}]`;
+      return `[${value.map((v) => this.formatSurrealValue(v)).join(", ")}]`;
     } else {
       return String(value);
     }
   }
 
-
-
   /**
    * Converts SurrealDB query results to Ad4mModel instances.
-   * 
+   *
    * @param perspective - The perspective context
    * @param query - The query parameters used
    * @param result - Array of result objects from SurrealDB
    * @returns Promise resolving to results with total count
-   * 
+   *
    * @internal
    */
   public static async instancesFromSurrealResult<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query: Query,
-    result: any[]
+    result: any[],
   ): Promise<ResultsWithTotalCount<T>> {
     if (!result || result.length === 0) return { results: [], totalCount: 0 };
-    
+
     const metadata = this.getModelMetadata();
     const requestedProperties = query?.properties || [];
     const requestedCollections = query?.collections || [];
-    
+
     // The query used GROUP BY with graph traversal, so each row has:
     // - source: the node ID (e.g., "node:abc123")
     // - source_uri: the actual URI (the base expression)
@@ -1419,26 +1711,26 @@ WHERE ${whereConditions.join(' AND ')}
         if (!base) {
           continue;
         }
-        
+
         const links = row.links || [];
-        
+
         const instance = new this(perspective, base) as any;
-        
+
         // Track both earliest (createdAt) and most recent (updatedAt) timestamps
         let minTimestamp = null;
         let maxTimestamp = null;
         let originalAuthor = null;
         let latestAuthor = null;
-        
+
         // Process each link (track index for collection ordering)
         for (let linkIndex = 0; linkIndex < links.length; linkIndex++) {
           const link = links[linkIndex];
           const predicate = link.predicate;
           const target = link.target;
-          
+
           // Skip 'None' values
-          if (target === 'None') continue;
-          
+          if (target === "None") continue;
+
           // Track both earliest (createdAt) and latest (updatedAt) timestamps with their authors
           if (link.timestamp) {
             if (!minTimestamp || link.timestamp < minTimestamp) {
@@ -1450,31 +1742,48 @@ WHERE ${whereConditions.join(' AND ')}
               latestAuthor = link.author;
             }
           }
-          
+
           // Find matching property (skip those with getter)
           let foundProperty = false;
-          for (const [propName, propMeta] of Object.entries(metadata.properties)) {
+          for (const [propName, propMeta] of Object.entries(
+            metadata.properties,
+          )) {
             if (propMeta.getter) continue; // Handle via getter evaluation
             if (propMeta.predicate === predicate) {
               // For properties, take the first value (or we could use timestamp to get latest)
               // Note: Empty objects {} are truthy, so we need to check for them explicitly
               const currentValue = instance[propName];
-              const isEmptyObject = typeof currentValue === 'object' && currentValue !== null && !Array.isArray(currentValue) && Object.keys(currentValue).length === 0;
-              if (!currentValue || currentValue === "" || currentValue === 0 || isEmptyObject) {
+              const isEmptyObject =
+                typeof currentValue === "object" &&
+                currentValue !== null &&
+                !Array.isArray(currentValue) &&
+                Object.keys(currentValue).length === 0;
+              if (
+                !currentValue ||
+                currentValue === "" ||
+                currentValue === 0 ||
+                isEmptyObject
+              ) {
                 let convertedValue = target;
-                
+
                 // Only process if target has a value
-                if (target !== undefined && target !== null && target !== '') {
+                if (target !== undefined && target !== null && target !== "") {
                   // Check if we need to resolve a non-literal language expression.
                   // resolveLanguage must be defined and not 'literal' to trigger expression resolution.
                   // Also skip if the target itself is a literal:// URI — those are handled by the
                   // literal-parsing branch below (avoids calling getExpression on empty literals like
                   // "literal://string:" which would cause a deserialization error).
-                  if (propMeta.resolveLanguage != undefined && propMeta.resolveLanguage !== 'literal' && typeof target === 'string' && !target.startsWith('literal://')) {
+                  if (
+                    propMeta.resolveLanguage != undefined &&
+                    propMeta.resolveLanguage !== "literal" &&
+                    typeof target === "string" &&
+                    !target.startsWith("literal://")
+                  ) {
                     // For non-literal languages, resolve the expression via perspective.getExpression()
                     // Note: Literals are already parsed by SurrealDB's fn::parse_literal()
                     try {
-                      const expression = await perspective.getExpression(target);
+                      const expression =
+                        await perspective.getExpression(target);
                       if (expression) {
                         // Parse the expression data if it's a JSON string
                         try {
@@ -1485,15 +1794,21 @@ WHERE ${whereConditions.join(' AND ')}
                         }
                       }
                     } catch (e) {
-                      console.warn(`Failed to resolve expression for ${propName} with target "${target}":`, e);
+                      console.warn(
+                        `Failed to resolve expression for ${propName} with target "${target}":`,
+                        e,
+                      );
                       console.warn("Falling back to raw value");
                       convertedValue = target; // Fall back to raw value
                     }
-                  } else if (typeof target === 'string' && target.startsWith('literal://')) {
+                  } else if (
+                    typeof target === "string" &&
+                    target.startsWith("literal://")
+                  ) {
                     // Fallback: If we somehow got a literal URL that wasn't parsed by SurrealDB, parse it now
                     try {
                       const parsed = Literal.fromUrl(target).get();
-                      if(parsed.data !== undefined) {
+                      if (parsed.data !== undefined) {
                         convertedValue = parsed.data;
                       } else {
                         convertedValue = parsed;
@@ -1502,19 +1817,22 @@ WHERE ${whereConditions.join(' AND ')}
                       // If literal parsing fails, just use the value as-is (don't bail)
                       convertedValue = target;
                     }
-                  } else if (typeof target === 'string') {
+                  } else if (typeof target === "string") {
                     // Type conversion: check the instance property's current type
                     const expectedType = typeof instance[propName];
-                    if (expectedType === 'number') {
+                    if (expectedType === "number") {
                       convertedValue = Number(target);
-                    } else if (expectedType === 'boolean') {
-                      convertedValue = target === 'true' || target === '1';
+                    } else if (expectedType === "boolean") {
+                      convertedValue = target === "true" || target === "1";
                     }
                   }
                 }
 
                 // Apply transform function if it exists
-                if (propMeta.transform && typeof propMeta.transform === 'function') {
+                if (
+                  propMeta.transform &&
+                  typeof propMeta.transform === "function"
+                ) {
                   convertedValue = propMeta.transform(convertedValue);
                 }
 
@@ -1524,10 +1842,12 @@ WHERE ${whereConditions.join(' AND ')}
               break;
             }
           }
-          
+
           // If not a property, check if it's a collection (skip those with getter)
           if (!foundProperty) {
-            for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+            for (const [collName, collMeta] of Object.entries(
+              metadata.collections,
+            )) {
               if (collMeta.getter) continue; // Handle via getter evaluation
               if (collMeta.predicate === predicate) {
                 // For collections, accumulate all values with their timestamps and indices for sorting
@@ -1545,7 +1865,7 @@ WHERE ${whereConditions.join(' AND ')}
                 }
                 if (!instance[collName].includes(target)) {
                   instance[collName].push(target);
-                  instance[timestampsKey].push(link.timestamp || '');
+                  instance[timestampsKey].push(link.timestamp || "");
                   // Track original position in the links array for stable sorting
                   instance[indicesKey].push(linkIndex);
                 }
@@ -1554,51 +1874,55 @@ WHERE ${whereConditions.join(' AND ')}
             }
           }
         }
-        
+
         // Set author and timestamps
         if (originalAuthor) {
           instance.author = originalAuthor;
         }
-        
+
         // Set createdAt from earliest timestamp
         if (minTimestamp) {
-          if (typeof minTimestamp === 'string' && minTimestamp.includes('T')) {
+          if (typeof minTimestamp === "string" && minTimestamp.includes("T")) {
             instance.createdAt = new Date(minTimestamp).getTime();
-          } else if (typeof minTimestamp === 'string') {
+          } else if (typeof minTimestamp === "string") {
             const parsed = parseInt(minTimestamp, 10);
             instance.createdAt = isNaN(parsed) ? minTimestamp : parsed;
           } else {
             instance.createdAt = minTimestamp;
           }
         }
-        
+
         // Set updatedAt from most recent timestamp
         if (maxTimestamp) {
-          if (typeof maxTimestamp === 'string' && maxTimestamp.includes('T')) {
+          if (typeof maxTimestamp === "string" && maxTimestamp.includes("T")) {
             instance.updatedAt = new Date(maxTimestamp).getTime();
-          } else if (typeof maxTimestamp === 'string') {
+          } else if (typeof maxTimestamp === "string") {
             const parsed = parseInt(maxTimestamp, 10);
             instance.updatedAt = isNaN(parsed) ? maxTimestamp : parsed;
           } else {
             instance.updatedAt = maxTimestamp;
           }
         }
-        
+
         // Sort collections by timestamp to maintain insertion order
-        for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+        for (const [collName, collMeta] of Object.entries(
+          metadata.collections,
+        )) {
           const timestampsKey = `__${collName}_timestamps`;
           const indicesKey = `__${collName}_indices`;
           if (instance[collName] && instance[timestampsKey]) {
             // Create array of [value, timestamp, index] tuples
-            const pairs = instance[collName].map((value: any, index: number) => ({
-              value,
-              timestamp: instance[timestampsKey][index] || '',
-              originalIndex: instance[indicesKey]?.[index] ?? index
-            }));
+            const pairs = instance[collName].map(
+              (value: any, index: number) => ({
+                value,
+                timestamp: instance[timestampsKey][index] || "",
+                originalIndex: instance[indicesKey]?.[index] ?? index,
+              }),
+            );
             // Sort by timestamp first, then by original index for stable sorting
             pairs.sort((a, b) => {
-              const tsA = String(a.timestamp || '');
-              const tsB = String(b.timestamp || '');
+              const tsA = String(a.timestamp || "");
+              const tsB = String(b.timestamp || "");
               const tsCompare = tsA.localeCompare(tsB);
               if (tsCompare !== 0) return tsCompare;
               // Use original index as tiebreaker for stable sorting
@@ -1606,38 +1930,54 @@ WHERE ${whereConditions.join(' AND ')}
             });
             // Replace collection with sorted values, filtering out empty strings and None
             instance[collName] = pairs
-              .map(p => p.value)
-              .filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None');
+              .map((p) => p.value)
+              .filter(
+                (v: any) =>
+                  v !== undefined && v !== null && v !== "" && v !== "None",
+              );
             // Clean up temporary arrays
             delete instance[timestampsKey];
             delete instance[indicesKey];
           }
         }
-        
+
         // Filter by requested attributes if specified
         if (requestedProperties.length > 0 || requestedCollections.length > 0) {
-          const requestedAttributes = [...requestedProperties, ...requestedCollections];
+          const requestedAttributes = [
+            ...requestedProperties,
+            ...requestedCollections,
+          ];
           Object.keys(instance).forEach((key) => {
             // Keep only requested attributes, plus always keep createdAt, updatedAt, author, and baseExpression
             // Note: timestamp is a getter alias for createdAt, so we preserve createdAt instead
-            if (!requestedAttributes.includes(key) && key !== 'createdAt' && key !== 'updatedAt' && key !== 'author' && key !== 'baseExpression') {
+            if (
+              !requestedAttributes.includes(key) &&
+              key !== "createdAt" &&
+              key !== "updatedAt" &&
+              key !== "author" &&
+              key !== "baseExpression"
+            ) {
               delete instance[key];
             }
           });
         }
-        
+
         instances.push(instance);
       } catch (error) {
         console.error(`Failed to process SurrealDB instance ${base}:`, error);
       }
     }
-    
+
     // Evaluate custom getters for all instances (single pass)
     // This populates collection values needed for where.isInstance filtering
     for (const instance of instances) {
-      await this.evaluateCustomGettersForInstance(instance, perspective, metadata);
+      await this.evaluateCustomGettersForInstance(
+        instance,
+        perspective,
+        metadata,
+      );
     }
-    
+
     // Filter collections by where.isInstance if specified
     // Do this after initial evaluation so collection values exist for filtering
     for (const instance of instances) {
@@ -1646,20 +1986,27 @@ WHERE ${whereConditions.join(' AND ')}
           try {
             const targetClass = collMeta.where.isInstance;
             const subjects = instance[collName];
-            
+
             // Get the class metadata from SDNA to pass to batchCheckSubjectInstances
-            const targetClassName = typeof targetClass === 'string' 
-              ? targetClass 
-              : (targetClass as any).prototype?.className || targetClass.name;
-            const classMetadata = await perspective.getSubjectClassMetadataFromSDNA(targetClassName);
-            
+            const targetClassName =
+              typeof targetClass === "string"
+                ? targetClass
+                : (targetClass as any).prototype?.className || targetClass.name;
+            const classMetadata =
+              await perspective.getSubjectClassMetadataFromSDNA(
+                targetClassName,
+              );
+
             if (!classMetadata) {
               continue;
             }
-            
+
             // Check which subjects are instances of the target class
-            const validSubjects = await perspective.batchCheckSubjectInstances(subjects, classMetadata);
-            
+            const validSubjects = await perspective.batchCheckSubjectInstances(
+              subjects,
+              classMetadata,
+            );
+
             // Update the collection with filtered instances
             instance[collName] = validSubjects;
           } catch (error) {
@@ -1668,7 +2015,7 @@ WHERE ${whereConditions.join(' AND ')}
         }
       }
     }
-    
+
     // Filter by where conditions that couldn't be filtered in SQL
     // This includes:
     // - author/timestamp (computed from grouped links)
@@ -1676,13 +2023,13 @@ WHERE ${whereConditions.join(' AND ')}
     //   because fn::parse_literal() comparisons in SurrealDB subqueries don't work reliably
     let filteredInstances = instances;
     if (query.where) {
-      filteredInstances = instances.filter(instance => {
+      filteredInstances = instances.filter((instance) => {
         for (const [propertyName, condition] of Object.entries(query.where!)) {
           // Skip 'base' as it's filtered in SQL
-          if (propertyName === 'base') continue;
+          if (propertyName === "base") continue;
 
           // For author and timestamp, always filter in JS
-          if (propertyName === 'author' || propertyName === 'timestamp') {
+          if (propertyName === "author" || propertyName === "timestamp") {
             if (!this.matchesCondition(instance[propertyName], condition)) {
               return false;
             }
@@ -1691,12 +2038,20 @@ WHERE ${whereConditions.join(' AND ')}
 
           // For regular properties, only filter comparison operators in JS
           // Simple equality and NOT are handled in SQL, but gt/gte/lt/lte/between/contains need JS
-          if (typeof condition === 'object' && condition !== null && !Array.isArray(condition)) {
+          if (
+            typeof condition === "object" &&
+            condition !== null &&
+            !Array.isArray(condition)
+          ) {
             const ops = condition as any;
             // Check if any comparison operators are present
-            const hasComparisonOps = ops.gt !== undefined || ops.gte !== undefined ||
-                                     ops.lt !== undefined || ops.lte !== undefined ||
-                                     ops.between !== undefined || ops.contains !== undefined;
+            const hasComparisonOps =
+              ops.gt !== undefined ||
+              ops.gte !== undefined ||
+              ops.lt !== undefined ||
+              ops.lte !== undefined ||
+              ops.between !== undefined ||
+              ops.contains !== undefined;
             if (hasComparisonOps) {
               if (!this.matchesCondition(instance[propertyName], condition)) {
                 return false;
@@ -1711,8 +2066,11 @@ WHERE ${whereConditions.join(' AND ')}
     // Apply ordering in JavaScript
     // If limit/offset is used but no explicit order, default to ordering by timestamp (ASC)
     // This ensures consistent pagination behavior
-    const effectiveOrder = query.order ||
-      (query.limit !== undefined || query.offset !== undefined ? { timestamp: 'ASC' as 'ASC' } : null);
+    const effectiveOrder =
+      query.order ||
+      (query.limit !== undefined || query.offset !== undefined
+        ? { timestamp: "ASC" as "ASC" }
+        : null);
 
     if (effectiveOrder) {
       const orderPropName = Object.keys(effectiveOrder)[0];
@@ -1724,21 +2082,21 @@ WHERE ${whereConditions.join(' AND ')}
 
         // Handle undefined values - push them to the end
         if (aVal === undefined && bVal === undefined) return 0;
-        if (aVal === undefined) return orderDirection === 'ASC' ? 1 : -1;
-        if (bVal === undefined) return orderDirection === 'ASC' ? -1 : 1;
+        if (aVal === undefined) return orderDirection === "ASC" ? 1 : -1;
+        if (bVal === undefined) return orderDirection === "ASC" ? -1 : 1;
 
         // Compare values
         let comparison = 0;
-        if (typeof aVal === 'number' && typeof bVal === 'number') {
+        if (typeof aVal === "number" && typeof bVal === "number") {
           comparison = aVal - bVal;
-        } else if (typeof aVal === 'string' && typeof bVal === 'string') {
+        } else if (typeof aVal === "string" && typeof bVal === "string") {
           comparison = aVal.localeCompare(bVal);
         } else {
           // Convert to strings for comparison
           comparison = String(aVal).localeCompare(String(bVal));
         }
 
-        return orderDirection === 'DESC' ? -comparison : comparison;
+        return orderDirection === "DESC" ? -comparison : comparison;
       });
     }
 
@@ -1755,24 +2113,27 @@ WHERE ${whereConditions.join(' AND ')}
 
     return {
       results: paginatedInstances,
-      totalCount
+      totalCount,
     };
   }
-  
+
   /**
    * Checks if a value matches a condition (for post-query filtering).
    * @private
    */
-  private static matchesCondition(value: any, condition: WhereCondition): boolean {
+  private static matchesCondition(
+    value: any,
+    condition: WhereCondition,
+  ): boolean {
     // Handle array values (IN clause)
     if (Array.isArray(condition)) {
       return (condition as any[]).includes(value);
     }
-    
+
     // Handle operator object
-    if (typeof condition === 'object' && condition !== null) {
+    if (typeof condition === "object" && condition !== null) {
       const ops = condition as any;
-      
+
       // Special case: 'not' operator (exclusive with other operators)
       if (ops.not !== undefined) {
         if (Array.isArray(ops.not)) {
@@ -1781,95 +2142,104 @@ WHERE ${whereConditions.join(' AND ')}
           return value !== ops.not;
         }
       }
-      
+
       // Special case: 'between' operator (inclusive range, exclusive with gt/gte/lt/lte)
-      if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
+      if (
+        ops.between !== undefined &&
+        Array.isArray(ops.between) &&
+        ops.between.length === 2
+      ) {
         return value >= ops.between[0] && value <= ops.between[1];
       }
-      
+
       // For all other operators (gt, gte, lt, lte, contains), we need to check ALL of them
       // and return true only if ALL conditions are satisfied
       let allConditionsMet = true;
-      
+
       if (ops.gt !== undefined) {
-        allConditionsMet = allConditionsMet && (value > ops.gt);
+        allConditionsMet = allConditionsMet && value > ops.gt;
       }
-      
+
       if (ops.gte !== undefined) {
-        allConditionsMet = allConditionsMet && (value >= ops.gte);
+        allConditionsMet = allConditionsMet && value >= ops.gte;
       }
-      
+
       if (ops.lt !== undefined) {
-        allConditionsMet = allConditionsMet && (value < ops.lt);
+        allConditionsMet = allConditionsMet && value < ops.lt;
       }
-      
+
       if (ops.lte !== undefined) {
-        allConditionsMet = allConditionsMet && (value <= ops.lte);
+        allConditionsMet = allConditionsMet && value <= ops.lte;
       }
-      
+
       if (ops.contains !== undefined) {
-        if (typeof value === 'string') {
-          allConditionsMet = allConditionsMet && value.includes(String(ops.contains));
+        if (typeof value === "string") {
+          allConditionsMet =
+            allConditionsMet && value.includes(String(ops.contains));
         } else if (Array.isArray(value)) {
           allConditionsMet = allConditionsMet && value.includes(ops.contains);
         } else {
           allConditionsMet = false;
         }
       }
-      
+
       return allConditionsMet;
     }
-    
+
     // Simple equality
     return value === condition;
   }
 
   /**
    * Gets all instances of the model in the perspective that match the query params.
-   * 
+   *
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
    * @param useSurrealDB - Whether to use SurrealDB (default: true, 10-100x faster) or Prolog (legacy)
    * @returns Array of matching models
-   * 
+   *
    * @example
    * ```typescript
    * // Get all recipes (uses SurrealDB by default)
    * const allRecipes = await Recipe.findAll(perspective);
-   * 
+   *
    * // Get recipes with specific criteria (uses SurrealDB)
    * const recipes = await Recipe.findAll(perspective, {
-   *   where: { 
+   *   where: {
    *     name: "Pasta",
    *     rating: { gt: 4 }
    *   },
    *   order: { createdAt: "DESC" },
    *   limit: 10
    * });
-   * 
+   *
    * // Explicitly use Prolog (legacy, for backward compatibility)
    * const recipesProlog = await Recipe.findAll(perspective, {}, false);
    * ```
    */
   static async findAll<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy, 
-    query: Query = {}
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    query: Query = {},
   ): Promise<T[]> {
     const surrealQuery = await this.queryToSurrealQL(perspective, query);
     const result = await perspective.querySurrealDB(surrealQuery);
-    const { results } = await this.instancesFromSurrealResult(perspective, query, result);
+    const { results } = await this.instancesFromSurrealResult(
+      perspective,
+      query,
+      result,
+    );
     return results;
   }
 
   /**
    * Gets all instances with count of total matches without offset & limit applied.
-   * 
+   *
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
    * @param useSurrealDB - Whether to use SurrealDB (default: true, 10-100x faster) or Prolog (legacy)
    * @returns Object containing results array and total count
-   * 
+   *
    * @example
    * ```typescript
    * const { results, totalCount } = await Recipe.findAllAndCount(perspective, {
@@ -1877,15 +2247,15 @@ WHERE ${whereConditions.join(' AND ')}
    *   limit: 10
    * });
    * console.log(`Showing 10 of ${totalCount} dessert recipes`);
-   * 
+   *
    * // Use Prolog explicitly (legacy)
    * const { results, totalCount } = await Recipe.findAllAndCount(perspective, {}, false);
    * ```
    */
   static async findAllAndCount<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy, 
-    query: Query = {}
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    query: Query = {},
   ): Promise<ResultsWithTotalCount<T>> {
     const surrealQuery = await this.queryToSurrealQL(perspective, query);
     const result = await perspective.querySurrealDB(surrealQuery);
@@ -1894,51 +2264,64 @@ WHERE ${whereConditions.join(' AND ')}
 
   /**
    * Helper function for pagination with explicit page size and number.
-   * 
+   *
    * @param perspective - The perspective to search in
    * @param pageSize - Number of items per page
    * @param pageNumber - Which page to retrieve (1-based)
    * @param query - Optional additional query parameters
    * @param useSurrealDB - Whether to use SurrealDB (default: true, 10-100x faster) or Prolog (legacy)
    * @returns Paginated results with metadata
-   * 
+   *
    * @example
    * ```typescript
    * const page = await Recipe.paginate(perspective, 10, 1, {
    *   where: { category: "Main Course" }
    * });
    * console.log(`Page ${page.pageNumber} of recipes, ${page.results.length} items`);
-   * 
+   *
    * // Use Prolog explicitly (legacy)
    * const pageProlog = await Recipe.paginate(perspective, 10, 1, {}, false);
    * ```
    */
   static async paginate<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy, 
-    pageSize: number, 
-    pageNumber: number, 
-    query?: Query
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    pageSize: number,
+    pageNumber: number,
+    query?: Query,
   ): Promise<PaginationResult<T>> {
-    const paginationQuery = { ...(query || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const surrealQuery = await this.queryToSurrealQL(perspective, paginationQuery);
+    const paginationQuery = {
+      ...(query || {}),
+      limit: pageSize,
+      offset: pageSize * (pageNumber - 1),
+      count: true,
+    };
+    const surrealQuery = await this.queryToSurrealQL(
+      perspective,
+      paginationQuery,
+    );
     const result = await perspective.querySurrealDB(surrealQuery);
-    const { results, totalCount } = await this.instancesFromSurrealResult(perspective, paginationQuery, result);
+    const { results, totalCount } = await this.instancesFromSurrealResult(
+      perspective,
+      paginationQuery,
+      result,
+    );
     return { results, totalCount, pageSize, pageNumber };
   }
 
-
-
   /**
    * Generates a SurrealQL COUNT query for the model.
-   * 
+   *
    * @param perspective - The perspective context
    * @param query - Query parameters to filter the count
    * @returns SurrealQL COUNT query string
-   * 
+   *
    * @private
    */
-  public static async countQueryToSurrealQL(perspective: PerspectiveProxy, query: Query): Promise<string> {
+  public static async countQueryToSurrealQL(
+    perspective: PerspectiveProxy,
+    query: Query,
+  ): Promise<string> {
     // Use the same query as the main query (with GROUP BY), just without LIMIT/OFFSET
     // We'll count the number of rows returned (one row per source)
     const countQuery = { ...query };
@@ -1949,19 +2332,19 @@ WHERE ${whereConditions.join(' AND ')}
 
   /**
    * Gets a count of all matching instances.
-   * 
+   *
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
    * @param useSurrealDB - Whether to use SurrealDB (default: true, 10-100x faster) or Prolog (legacy)
    * @returns Total count of matching entities
-   * 
+   *
    * @example
    * ```typescript
    * const totalRecipes = await Recipe.count(perspective);
    * const activeRecipes = await Recipe.count(perspective, {
    *   where: { status: "active" }
    * });
-   * 
+   *
    * // Use Prolog explicitly (legacy)
    * const countProlog = await Recipe.count(perspective, {}, false);
    * ```
@@ -1969,7 +2352,11 @@ WHERE ${whereConditions.join(' AND ')}
   static async count(perspective: PerspectiveProxy, query: Query = {}) {
     const surrealQuery = await this.queryToSurrealQL(perspective, query);
     const result = await perspective.querySurrealDB(surrealQuery);
-    const { totalCount } = await this.instancesFromSurrealResult(perspective, query, result);
+    const { totalCount } = await this.instancesFromSurrealResult(
+      perspective,
+      query,
+      result,
+    );
     return totalCount;
   }
 
@@ -1996,7 +2383,12 @@ WHERE ${whereConditions.join(' AND ')}
       value = await this.#perspective.createExpression(value, resolveLanguage);
     }
 
-    await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
+    await this.#perspective.executeAction(
+      actions,
+      this.#baseExpression,
+      [{ name: "value", value }],
+      batchId,
+    );
   }
 
   private async setCollectionSetter(key: string, value: any, batchId?: string) {
@@ -2008,7 +2400,7 @@ WHERE ${whereConditions.join(' AND ')}
     }
 
     // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateCollectionAction(key, 'setter');
+    const actions = this.generateCollectionAction(key, "setter");
 
     if (value != null) {
       if (Array.isArray(value)) {
@@ -2016,10 +2408,15 @@ WHERE ${whereConditions.join(' AND ')}
           actions,
           this.#baseExpression,
           value.map((v) => ({ name: "value", value: v })),
-          batchId
+          batchId,
         );
       } else {
-        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
+        await this.#perspective.executeAction(
+          actions,
+          this.#baseExpression,
+          [{ name: "value", value }],
+          batchId,
+        );
       }
     }
   }
@@ -2033,22 +2430,36 @@ WHERE ${whereConditions.join(' AND ')}
     }
 
     // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateCollectionAction(key, 'adder');
+    const actions = this.generateCollectionAction(key, "adder");
 
     if (value != null) {
       if (Array.isArray(value)) {
         await Promise.all(
           value.map((v) =>
-            this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
-          )
+            this.#perspective.executeAction(
+              actions,
+              this.#baseExpression,
+              [{ name: "value", value: v }],
+              batchId,
+            ),
+          ),
         );
       } else {
-        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
+        await this.#perspective.executeAction(
+          actions,
+          this.#baseExpression,
+          [{ name: "value", value }],
+          batchId,
+        );
       }
     }
   }
 
-  private async setCollectionRemover(key: string, value: any, batchId?: string) {
+  private async setCollectionRemover(
+    key: string,
+    value: any,
+    batchId?: string,
+  ) {
     // Phase 1: Use metadata instead of Prolog queries
     const metadata = this.getCollectionMetadata(key);
     if (!metadata) {
@@ -2057,17 +2468,27 @@ WHERE ${whereConditions.join(' AND ')}
     }
 
     // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateCollectionAction(key, 'remover');
+    const actions = this.generateCollectionAction(key, "remover");
 
     if (value != null) {
       if (Array.isArray(value)) {
         await Promise.all(
           value.map((v) =>
-            this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
-          )
+            this.#perspective.executeAction(
+              actions,
+              this.#baseExpression,
+              [{ name: "value", value: v }],
+              batchId,
+            ),
+          ),
         );
       } else {
-        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
+        await this.#perspective.executeAction(
+          actions,
+          this.#baseExpression,
+          [{ name: "value", value }],
+          batchId,
+        );
       }
     }
   }
@@ -2075,17 +2496,17 @@ WHERE ${whereConditions.join(' AND ')}
   /**
    * Saves the model instance to the perspective.
    * Creates a new instance with the base expression and links it to the source.
-   * 
+   *
    * @param batchId - Optional batch ID for batch operations
    * @throws Will throw if instance creation, linking, or updating fails
-   * 
+   *
    * @example
    * ```typescript
    * const recipe = new Recipe(perspective);
    * recipe.name = "Spaghetti";
    * recipe.ingredients = ["pasta", "tomato sauce"];
    * await recipe.save();
-   * 
+   *
    * // Or with batch operations:
    * const batchId = await perspective.createBatch();
    * await recipe.save(batchId);
@@ -2097,46 +2518,55 @@ WHERE ${whereConditions.join(' AND ')}
     // We then later use innerUpdate to set collections
 
     let batchCreatedHere = false;
-    if(!batchId) {
-      batchId = await this.perspective.createBatch()
+    if (!batchId) {
+      batchId = await this.perspective.createBatch();
       batchCreatedHere = true;
     }
-    
 
     // First filter out the properties that are not collections (arrays)
     const initialValues = {};
     for (const [key, value] of Object.entries(this)) {
-      if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
+      if (
+        value !== undefined &&
+        value !== null &&
+        !(Array.isArray(value) && value.length > 0) &&
+        !value?.action
+      ) {
         initialValues[key] = value;
       }
     }
 
     // Get the class name instead of passing the instance to avoid Prolog query generation
-    const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
+    const className =
+      await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
 
     // Create the subject with the initial values
     await this.perspective.createSubject(
       className,
       this.#baseExpression,
       initialValues,
-      batchId
+      batchId,
     );
 
     // Link the subject to the source
     await this.#perspective.add(
-      new Link({ source: this.#source, predicate: "ad4m://has_child", target: this.baseExpression }),
-      'shared',
-      batchId
+      new Link({
+        source: this.#source,
+        predicate: "ad4m://has_child",
+        target: this.baseExpression,
+      }),
+      "shared",
+      batchId,
     );
 
     // Set collections
-    await this.innerUpdate(false, batchId)
+    await this.innerUpdate(false, batchId);
 
     // If we got a batchId passed in, we let the caller decide when to commit.
     // But then we can call getData() since the instance won't exist in the perspective
     // until the bacht is committedl
     if (batchCreatedHere) {
-      await this.perspective.commitBatch(batchId)
+      await this.perspective.commitBatch(batchId);
       await this.getData();
     }
   }
@@ -2145,7 +2575,12 @@ WHERE ${whereConditions.join(' AND ')}
     const cleanCopy = {};
     const props = Object.entries(this);
     for (const [key, value] of props) {
-      if (value !== undefined && value !== null && key !== "author" && key !== "timestamp") {
+      if (
+        value !== undefined &&
+        value !== null &&
+        key !== "author" &&
+        key !== "timestamp"
+      ) {
         cleanCopy[key] = value;
       }
     }
@@ -2153,7 +2588,10 @@ WHERE ${whereConditions.join(' AND ')}
   }
 
   private async innerUpdate(setProperties: boolean = true, batchId?: string) {
-    this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this.cleanCopy());
+    this.#subjectClassName =
+      await this.#perspective.stringOrTemplateObjectToSubjectClassName(
+        this.cleanCopy(),
+      );
 
     const entries = Object.entries(this);
     for (const [key, value] of entries) {
@@ -2193,17 +2631,17 @@ WHERE ${whereConditions.join(' AND ')}
 
   /**
    * Updates the model instance's properties and collections.
-   * 
+   *
    * @param batchId - Optional batch ID for batch operations
    * @throws Will throw if property setting or collection updates fail
-   * 
+   *
    * @example
    * ```typescript
    * const recipe = await Recipe.findAll(perspective)[0];
    * recipe.rating = 5;
    * recipe.ingredients.push("garlic");
    * await recipe.update();
-   * 
+   *
    * // Or with batch operations:
    * const batchId = await perspective.createBatch();
    * await recipe.update(batchId);
@@ -2217,10 +2655,10 @@ WHERE ${whereConditions.join(' AND ')}
 
   /**
    * Gets the model instance with all properties and collections populated.
-   * 
+   *
    * @returns The populated model instance
    * @throws Will throw if data retrieval fails
-   * 
+   *
    * @example
    * ```typescript
    * const recipe = new Recipe(perspective, existingId);
@@ -2229,22 +2667,25 @@ WHERE ${whereConditions.join(' AND ')}
    * ```
    */
   async get() {
-    this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this.cleanCopy());
+    this.#subjectClassName =
+      await this.#perspective.stringOrTemplateObjectToSubjectClassName(
+        this.cleanCopy(),
+      );
 
     return await this.getData();
   }
 
   /**
    * Deletes the model instance from the perspective.
-   * 
+   *
    * @param batchId - Optional batch ID for batch operations
    * @throws Will throw if removal fails
-   * 
+   *
    * @example
    * ```typescript
    * const recipe = await Recipe.findAll(perspective)[0];
    * await recipe.delete();
-   * 
+   *
    * // Or with batch operations:
    * const batchId = await perspective.createBatch();
    * await recipe.delete(batchId);
@@ -2257,11 +2698,11 @@ WHERE ${whereConditions.join(' AND ')}
 
   /**
    * Creates a query builder for fluent query construction.
-   * 
+   *
    * @param perspective - The perspective to query
    * @param query - Optional initial query parameters
    * @returns A new query builder instance
-   * 
+   *
    * @example
    * ```typescript
    * const recipes = await Recipe.query(perspective)
@@ -2269,7 +2710,7 @@ WHERE ${whereConditions.join(' AND ')}
    *   .order({ rating: "DESC" })
    *   .limit(5)
    *   .run();
-   * 
+   *
    * // With real-time updates
    * await Recipe.query(perspective)
    *   .where({ status: "cooking" })
@@ -2279,26 +2720,26 @@ WHERE ${whereConditions.join(' AND ')}
    * ```
    */
   static query<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T), 
-    perspective: PerspectiveProxy, 
-    query?: Query
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    query?: Query,
   ): ModelQueryBuilder<T> {
     return new ModelQueryBuilder<T>(perspective, this as any, query);
   }
 
   /**
    * Creates an Ad4mModel class from a JSON Schema definition.
-   * 
+   *
    * @description
    * This method dynamically generates an Ad4mModel subclass from a JSON Schema,
    * enabling integration with systems that use JSON Schema for type definitions.
-   * 
+   *
    * The method follows a cascading approach for determining predicates:
    * 1. Explicit configuration in options parameter (highest precedence)
    * 2. x-ad4m metadata in the JSON Schema
    * 3. Inference from schema title and property names
    * 4. Error if no namespace can be determined
-   * 
+   *
    * @example
    * ```typescript
    * // With explicit configuration
@@ -2307,7 +2748,7 @@ WHERE ${whereConditions.join(' AND ')}
    *   namespace: "person://",
    *   resolveLanguage: "literal"
    * });
-   * 
+   *
    * // With property mapping
    * const ContactClass = Ad4mModel.fromJSONSchema(schema, {
    *   name: "Contact",
@@ -2317,13 +2758,13 @@ WHERE ${whereConditions.join(' AND ')}
    *     "email": "foaf://mbox"
    *   }
    * });
-   * 
+   *
    * // With x-ad4m metadata in schema
    * const schema = {
    *   "title": "Product",
    *   "x-ad4m": { "namespace": "product://" },
    *   "properties": {
-   *     "name": { 
+   *     "name": {
    *       "type": "string",
    *       "x-ad4m": { "through": "product://title" }
    *     }
@@ -2331,7 +2772,7 @@ WHERE ${whereConditions.join(' AND ')}
    * };
    * const ProductClass = Ad4mModel.fromJSONSchema(schema, { name: "Product" });
    * ```
-   * 
+   *
    * @param schema - JSON Schema definition
    * @param options - Configuration options
    * @returns Generated Ad4mModel subclass
@@ -2339,117 +2780,160 @@ WHERE ${whereConditions.join(' AND ')}
    */
   static fromJSONSchema(
     schema: JSONSchema,
-    options: JSONSchemaToModelOptions
+    options: JSONSchemaToModelOptions,
   ): typeof Ad4mModel {
     // Disallow top-level "author" property since Ad4mModel provides it implicitly via link authorship
-    if (schema?.properties && Object.prototype.hasOwnProperty.call(schema.properties, "author")) {
-      throw new Error('JSON Schema must not define a top-level "author" property because Ad4mModel already exposes it. Please rename the property (e.g., "writer").');
+    if (
+      schema?.properties &&
+      Object.prototype.hasOwnProperty.call(schema.properties, "author")
+    ) {
+      throw new Error(
+        'JSON Schema must not define a top-level "author" property because Ad4mModel already exposes it. Please rename the property (e.g., "writer").',
+      );
     }
     // Determine namespace with cascading precedence
     const namespace = this.determineNamespace(schema, options);
-    
+
     // Create the dynamic class
     const DynamicModelClass = class extends Ad4mModel {};
-    
+
     // Set up class metadata
-    if (!options.name || options.name.trim() === '') {
+    if (!options.name || options.name.trim() === "") {
       throw new Error("options.name is required and cannot be empty");
     }
     (DynamicModelClass as any).className = options.name;
     (DynamicModelClass.prototype as any).className = options.name;
-    
+
     // Generate properties and collections metadata
     const properties: any = {};
     const collections: any = {};
-    
+
     if (schema.properties) {
-      for (const [propertyName, propertySchema] of Object.entries(schema.properties)) {
-        const predicate = this.determinePredicate(schema, propertyName, propertySchema, namespace, options);
+      for (const [propertyName, propertySchema] of Object.entries(
+        schema.properties,
+      )) {
+        const predicate = this.determinePredicate(
+          schema,
+          propertyName,
+          propertySchema,
+          namespace,
+          options,
+        );
         const isRequired = schema.required?.includes(propertyName) || false;
         const propertyType = normalizeSchemaType(propertySchema.type);
         const isArray = isArrayType(propertySchema);
-        
+
         if (isArray) {
           // Handle arrays as collections
           // Store the singular form as the collection key since SDNA generation expects singular
           collections[propertyName] = {
             through: predicate,
-            local: this.getPropertyOption(propertyName, propertySchema, options, 'local')
+            local: this.getPropertyOption(
+              propertyName,
+              propertySchema,
+              options,
+              "local",
+            ),
           };
-          
+
           // Define the property on prototype
           Object.defineProperty(DynamicModelClass.prototype, propertyName, {
             configurable: true,
             writable: true,
-            value: []
+            value: [],
           });
-          
+
           // Add collection methods
           const adderName = `add${capitalize(propertyName)}`;
           const removerName = `remove${capitalize(propertyName)}`;
           const setterName = `setCollection${capitalize(propertyName)}`;
-          
-          (DynamicModelClass.prototype as any)[adderName] = function() {
+
+          (DynamicModelClass.prototype as any)[adderName] = function () {
             // Placeholder function for SDNA generation
           };
-          (DynamicModelClass.prototype as any)[removerName] = function() {
+          (DynamicModelClass.prototype as any)[removerName] = function () {
             // Placeholder function for SDNA generation
           };
-          (DynamicModelClass.prototype as any)[setterName] = function() {
+          (DynamicModelClass.prototype as any)[setterName] = function () {
             // Placeholder function for SDNA generation
           };
-          
         } else {
           // Handle regular properties
-          let resolveLanguage = this.getPropertyOption(propertyName, propertySchema, options, 'resolveLanguage');
+          let resolveLanguage = this.getPropertyOption(
+            propertyName,
+            propertySchema,
+            options,
+            "resolveLanguage",
+          );
           // If no specific resolveLanguage for this property, use the global one
           if (!resolveLanguage && options.resolveLanguage) {
             resolveLanguage = options.resolveLanguage;
           }
-          const local = this.getPropertyOption(propertyName, propertySchema, options, 'local');
-          const writable = this.getPropertyOption(propertyName, propertySchema, options, 'writable', true);
-          let initial = this.getPropertyOption(propertyName, propertySchema, options, 'initial');
-          
+          const local = this.getPropertyOption(
+            propertyName,
+            propertySchema,
+            options,
+            "local",
+          );
+          const writable = this.getPropertyOption(
+            propertyName,
+            propertySchema,
+            options,
+            "writable",
+            true,
+          );
+          let initial = this.getPropertyOption(
+            propertyName,
+            propertySchema,
+            options,
+            "initial",
+          );
+
           // Handle nested objects by serializing to JSON
           if (isObjectType(propertySchema) && !resolveLanguage) {
-            resolveLanguage = 'literal';
-            console.warn(`Property "${propertyName}" is an object type. It will be stored as JSON. Consider flattening complex objects for better semantic querying.`);
+            resolveLanguage = "literal";
+            console.warn(
+              `Property "${propertyName}" is an object type. It will be stored as JSON. Consider flattening complex objects for better semantic querying.`,
+            );
           }
 
           // Ensure numeric properties use literal language for correct typing
-          if ((resolveLanguage === undefined || resolveLanguage === null) && isNumericType(propertySchema)) {
-            resolveLanguage = 'literal';
+          if (
+            (resolveLanguage === undefined || resolveLanguage === null) &&
+            isNumericType(propertySchema)
+          ) {
+            resolveLanguage = "literal";
           }
-          
+
           // If property is required, ensure it has an initial value
           if (isRequired && !initial) {
             if (isObjectType(propertySchema)) {
-              initial = 'literal://json:{}';
+              initial = "literal://json:{}";
             } else {
               initial = "ad4m://undefined";
             }
           }
-          
+
           properties[propertyName] = {
             through: predicate,
             required: isRequired,
             writable: writable,
             ...(resolveLanguage && { resolveLanguage }),
             ...(local !== undefined && { local }),
-            ...(initial && { initial })
+            ...(initial && { initial }),
           };
-          
+
           // Define the property on prototype
           Object.defineProperty(DynamicModelClass.prototype, propertyName, {
             configurable: true,
             writable: true,
-            value: this.getDefaultValueForType(propertyType)
+            value: this.getDefaultValueForType(propertyType),
           });
-          
+
           // Add setter function if writable
           if (writable) {
             const setterName = propertyNameToSetterName(propertyName);
-            (DynamicModelClass.prototype as any)[setterName] = function() {
+            (DynamicModelClass.prototype as any)[setterName] = function () {
               // This is a placeholder function that the SDNA generation looks for
               // The actual setter logic is handled by the Ad4mModel base class
             };
@@ -2457,105 +2941,114 @@ WHERE ${whereConditions.join(' AND ')}
         }
       }
     }
-    
+
     // Validate that at least one property has an initial value (needed for valid SDNA constructor)
     // Collections don't create constructor actions, only properties with initial values do
-    const hasPropertyWithInitial = Object.values(properties).some((prop: any) => prop.initial);
-    
+    const hasPropertyWithInitial = Object.values(properties).some(
+      (prop: any) => prop.initial,
+    );
+
     if (!hasPropertyWithInitial) {
       // If no properties have initial values, add a type identifier automatically
       const typeProperty = `ad4m://type`;
       let typeValue: string;
-      if (namespace.includes('://')) {
-        const [scheme, rest] = namespace.split('://');
-        const path = (rest || '').replace(/\/+$/,'');
+      if (namespace.includes("://")) {
+        const [scheme, rest] = namespace.split("://");
+        const path = (rest || "").replace(/\/+$/, "");
         if (path) {
           typeValue = `${scheme}://${path}/instance`;
         } else {
           typeValue = `${scheme}://instance`;
         }
       } else {
-        const path = namespace.replace(/\/+$/,'');
+        const path = namespace.replace(/\/+$/, "");
         typeValue = `${path}/instance`;
       }
-      
-      properties['__ad4m_type'] = {
+
+      properties["__ad4m_type"] = {
         through: typeProperty,
         required: true,
         writable: false,
         initial: typeValue,
-        flag: true
+        flag: true,
       };
-      
+
       // Add the type property to the prototype
-      Object.defineProperty(DynamicModelClass.prototype, '__ad4m_type', {
+      Object.defineProperty(DynamicModelClass.prototype, "__ad4m_type", {
         configurable: true,
         writable: false,
-        value: typeValue
+        value: typeValue,
       });
-      
-      console.warn(`No properties with initial values found. Added automatic type flag: ${typeProperty} = ${typeValue}`);
+
+      console.warn(
+        `No properties with initial values found. Added automatic type flag: ${typeProperty} = ${typeValue}`,
+      );
     }
-    
+
     // Attach metadata to prototype
     (DynamicModelClass.prototype as any).__properties = properties;
     (DynamicModelClass.prototype as any).__collections = collections;
-    
+
     // Store the JSON schema and options on the prototype for potential fallback use by getModelMetadata()
     (DynamicModelClass.prototype as any).__jsonSchema = schema;
     (DynamicModelClass.prototype as any).__jsonSchemaOptions = options;
-    
+
     // Apply the Model decorator to set up the generateSHACL method
     const ModelDecorator = Model({ name: options.name });
     ModelDecorator(DynamicModelClass);
-    
+
     return DynamicModelClass as typeof Ad4mModel;
   }
-  
+
   /**
    * Determines the namespace for predicates using cascading precedence
    */
-  private static determineNamespace(schema: JSONSchema, options: JSONSchemaToModelOptions): string {
+  private static determineNamespace(
+    schema: JSONSchema,
+    options: JSONSchemaToModelOptions,
+  ): string {
     // 1. Explicit namespace in options (highest precedence)
     if (options.namespace) {
       return options.namespace;
     }
-    
+
     // 2. x-ad4m metadata in schema
     if (schema["x-ad4m"]?.namespace) {
       return schema["x-ad4m"].namespace;
     }
-    
+
     // 3. Infer from schema title
     if (schema.title) {
       return `${schema.title.toLowerCase()}://`;
     }
-    
+
     // 4. Try to extract from $id if it's a URL
     if (schema.$id) {
       try {
         const url = new URL(schema.$id);
-        const pathParts = url.pathname.split('/').filter(p => p);
+        const pathParts = url.pathname.split("/").filter((p) => p);
         if (pathParts.length > 0) {
           const lastPart = pathParts[pathParts.length - 1];
-          const baseName = lastPart.replace(/\.schema\.json$/, '').replace(/\.json$/, '');
+          const baseName = lastPart
+            .replace(/\.schema\.json$/, "")
+            .replace(/\.json$/, "");
           return `${baseName.toLowerCase()}://`;
         }
       } catch {
         // If $id is not a valid URL, continue to error
       }
     }
-    
+
     // 5. Error if no namespace can be determined
     throw new Error(
       `Cannot infer namespace for JSON Schema. Please provide one of:
       - options.namespace
       - schema["x-ad4m"].namespace  
       - schema.title
-      - valid schema.$id`
+      - valid schema.$id`,
     );
   }
-  
+
   /**
    * Determines the predicate for a specific property using cascading precedence
    */
@@ -2564,46 +3057,48 @@ WHERE ${whereConditions.join(' AND ')}
     propertyName: string,
     propertySchema: JSONSchemaProperty,
     namespace: string,
-    options: JSONSchemaToModelOptions
+    options: JSONSchemaToModelOptions,
   ): string {
     // 1. Explicit property mapping (highest precedence)
     if (options.propertyMapping?.[propertyName]) {
       return options.propertyMapping[propertyName];
     }
-    
+
     // 2. x-ad4m metadata in property schema
     if (propertySchema["x-ad4m"]?.through) {
       return propertySchema["x-ad4m"].through;
     }
-    
+
     // 3. Generate from namespace + property name
     if (options.predicateTemplate) {
       const normalizedNs = normalizeNamespaceString(namespace);
-      const [scheme, rest] = normalizedNs.includes('://') ? normalizedNs.split('://') : ['', normalizedNs];
-      const nsNoScheme = rest || '';
+      const [scheme, rest] = normalizedNs.includes("://")
+        ? normalizedNs.split("://")
+        : ["", normalizedNs];
+      const nsNoScheme = rest || "";
       return options.predicateTemplate
-        .replace('${namespace}', nsNoScheme)
-        .replace('${scheme}', scheme)
-        .replace('${ns}', nsNoScheme)
-        .replace('${title}', schema.title || '')
-        .replace('${property}', propertyName);
+        .replace("${namespace}", nsNoScheme)
+        .replace("${scheme}", scheme)
+        .replace("${ns}", nsNoScheme)
+        .replace("${title}", schema.title || "")
+        .replace("${property}", propertyName);
     }
-    
+
     // 4. Custom predicate generator
     if (options.predicateGenerator) {
-      return options.predicateGenerator(schema.title || '', propertyName);
+      return options.predicateGenerator(schema.title || "", propertyName);
     }
-    
+
     // 5. Default: namespace + property name
     const normalizedNs = normalizeNamespaceString(namespace);
-    if (normalizedNs.includes('://')) {
+    if (normalizedNs.includes("://")) {
       // For namespaces like "product://", append property directly
       return `${normalizedNs}${propertyName}`;
     } else {
       return `${normalizedNs}://${propertyName}`;
     }
   }
-  
+
   /**
    * Gets property-specific options using cascading precedence
    */
@@ -2612,39 +3107,52 @@ WHERE ${whereConditions.join(' AND ')}
     propertySchema: JSONSchemaProperty,
     options: JSONSchemaToModelOptions,
     optionName: keyof FieldOptions,
-    defaultValue?: any
+    defaultValue?: any,
   ): any {
     // 1. Property-specific options
     if (options.propertyOptions?.[propertyName]?.[optionName] !== undefined) {
       return options.propertyOptions[propertyName][optionName];
     }
-    
+
     // 2. x-ad4m metadata in property
-    if (propertySchema["x-ad4m"]?.[optionName as keyof JSONSchemaProperty["x-ad4m"]] !== undefined) {
-      return propertySchema["x-ad4m"][optionName as keyof JSONSchemaProperty["x-ad4m"]];
+    if (
+      propertySchema["x-ad4m"]?.[
+        optionName as keyof JSONSchemaProperty["x-ad4m"]
+      ] !== undefined
+    ) {
+      return propertySchema["x-ad4m"][
+        optionName as keyof JSONSchemaProperty["x-ad4m"]
+      ];
     }
-    
+
     // 3. Global option
     if (options[optionName as keyof JSONSchemaToModelOptions] !== undefined) {
       return options[optionName as keyof JSONSchemaToModelOptions];
     }
-    
+
     // 4. Default value
     return defaultValue;
   }
-  
+
   /**
    * Gets default value for a JSON Schema type
    */
   private static getDefaultValueForType(type?: string): any {
     switch (type) {
-      case 'string': return '';
-      case 'number': return 0;
-      case 'integer': return 0;
-      case 'boolean': return false;
-      case 'array': return [];
-      case 'object': return {};
-      default: return '';
+      case "string":
+        return "";
+      case "number":
+        return 0;
+      case "integer":
+        return 0;
+      case "boolean":
+        return false;
+      case "array":
+        return [];
+      case "object":
+        return {};
+      default:
+        return "";
     }
   }
 }
@@ -2652,17 +3160,17 @@ WHERE ${whereConditions.join(' AND ')}
 /** Query builder for Ad4mModel queries.
  * Allows building queries with a fluent interface and either running them once
  * or subscribing to updates.
- * 
+ *
  * @example
  * ```typescript
  * const builder = Recipe.query(perspective)
  *   .where({ category: "Dessert" })
  *   .order({ rating: "DESC" })
  *   .limit(10);
- * 
+ *
  * // Run once
  * const recipes = await builder.run();
- * 
+ *
  * // Or subscribe to updates
  * await builder.subscribe(recipes => {
  *   console.log("Updated recipes:", recipes);
@@ -2676,7 +3184,11 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   private ctor: typeof Ad4mModel;
   private currentSubscription?: any;
 
-  constructor(perspective: PerspectiveProxy, ctor: typeof Ad4mModel, query?: Query) {
+  constructor(
+    perspective: PerspectiveProxy,
+    ctor: typeof Ad4mModel,
+    query?: Query,
+  ) {
     this.perspective = perspective;
     this.ctor = ctor;
     if (query) this.queryParams = query;
@@ -2684,13 +3196,13 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /**
    * Disposes of the current subscription if one exists.
-   * 
+   *
    * This method:
    * 1. Stops the keepalive signals to the subscription
    * 2. Unsubscribes from GraphQL subscription updates
    * 3. Notifies the backend to clean up subscription resources
    * 4. Clears the subscription reference
-   * 
+   *
    * You should call this method when you're done with a subscription
    * to prevent memory leaks and ensure proper cleanup.
    */
@@ -2703,10 +3215,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /**
    * Adds where conditions to the query.
-   * 
+   *
    * @param conditions - The conditions to filter by
    * @returns The query builder for chaining
-   * 
+   *
    * @example
    * ```typescript
    * .where({
@@ -2724,10 +3236,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /**
    * Sets the order for the query results.
-   * 
+   *
    * @param orderBy - The ordering criteria
    * @returns The query builder for chaining
-   * 
+   *
    * @example
    * ```typescript
    * .order({ createdAt: "DESC" })
@@ -2740,10 +3252,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /**
    * Sets the maximum number of results to return.
-   * 
+   *
    * @param limit - Maximum number of results
    * @returns The query builder for chaining
-   * 
+   *
    * @example
    * ```typescript
    * .limit(10)
@@ -2756,10 +3268,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /**
    * Sets the number of results to skip.
-   * 
+   *
    * @param offset - Number of results to skip
    * @returns The query builder for chaining
-   * 
+   *
    * @example
    * ```typescript
    * .offset(20) // Skip first 20 results
@@ -2772,10 +3284,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /**
    * Sets the source filter for the query.
-   * 
+   *
    * @param source - The source to filter by
    * @returns The query builder for chaining
-   * 
+   *
    * @example
    * ```typescript
    * .source("ad4m://self")
@@ -2788,10 +3300,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /**
    * Specifies which properties to include in the results.
-   * 
+   *
    * @param properties - Array of property names to include
    * @returns The query builder for chaining
-   * 
+   *
    * @example
    * ```typescript
    * .properties(["name", "description", "rating"])
@@ -2804,10 +3316,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /**
    * Specifies which collections to include in the results.
-   * 
+   *
    * @param collections - Array of collection names to include
    * @returns The query builder for chaining
-   * 
+   *
    * @example
    * ```typescript
    * .collections(["ingredients", "steps"])
@@ -2825,10 +3337,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /**
    * Enables or disables SurrealDB query path.
-   * 
+   *
    * @param enabled - Whether to use SurrealDB (default: true, 10-100x faster) or Prolog (legacy)
    * @returns The query builder for chaining
-   * 
+   *
    * @example
    * ```typescript
    * // Use SurrealDB (default)
@@ -2836,25 +3348,24 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    *   .where({ category: "Dessert" })
    *   .useSurrealDB(true)
    *   .get();
-   * 
+   *
    * // Use Prolog (legacy)
    * const recipesProlog = await Recipe.query(perspective)
    *   .where({ category: "Dessert" })
    *   .useSurrealDB(false)
    *   .get();
    * ```
-   * 
+   *
    * @remarks
    * Note: Subscriptions (subscribe(), countSubscribe(), paginateSubscribe()) default to SurrealDB live queries
    * if useSurrealDB(true) is set (default).
    */
 
-
   /**
    * Executes the query once and returns the results.
-   * 
+   *
    * @returns Array of matching entities
-   * 
+   *
    * @example
    * ```typescript
    * const recipes = await Recipe.query(perspective)
@@ -2863,9 +3374,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async get(): Promise<T[]> {
-    const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
+    const surrealQuery = await this.ctor.queryToSurrealQL(
+      this.perspective,
+      this.queryParams,
+    );
     const result = await this.perspective.querySurrealDB(surrealQuery);
-    const { results } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
+    const { results } = await this.ctor.instancesFromSurrealResult(
+      this.perspective,
+      this.queryParams,
+      result,
+    );
     return results as T[];
   }
 
@@ -2902,11 +3420,19 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async subscribe(callback: (results: T[]) => void): Promise<T[]> {
     this.dispose();
-    const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
-    this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
+    const surrealQuery = await this.ctor.queryToSurrealQL(
+      this.perspective,
+      this.queryParams,
+    );
+    this.currentSubscription =
+      await this.perspective.subscribeSurrealDB(surrealQuery);
 
     const processResults = async (result: any) => {
-      const { results } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
+      const { results } = await this.ctor.instancesFromSurrealResult(
+        this.perspective,
+        this.queryParams,
+        result,
+      );
       callback(results as T[]);
     };
 
@@ -2914,16 +3440,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const { results } = await this.ctor.instancesFromSurrealResult(
       this.perspective,
       this.queryParams,
-      this.currentSubscription.result
+      this.currentSubscription.result,
     );
     return results as T[];
   }
 
   /**
    * Gets the total count of matching entities.
-   * 
+   *
    * @returns Total count
-   * 
+   *
    * @example
    * ```typescript
    * const totalDesserts = await Recipe.query(perspective)
@@ -2932,9 +3458,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async count(): Promise<number> {
-    const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
+    const surrealQuery = await this.ctor.queryToSurrealQL(
+      this.perspective,
+      this.queryParams,
+    );
     const result = await this.perspective.querySurrealDB(surrealQuery);
-    const { totalCount } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
+    const { totalCount } = await this.ctor.instancesFromSurrealResult(
+      this.perspective,
+      this.queryParams,
+      result,
+    );
     return totalCount;
   }
 
@@ -2971,11 +3504,19 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async countSubscribe(callback: (count: number) => void): Promise<number> {
     this.dispose();
-    const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
-    this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
+    const surrealQuery = await this.ctor.queryToSurrealQL(
+      this.perspective,
+      this.queryParams,
+    );
+    this.currentSubscription =
+      await this.perspective.subscribeSurrealDB(surrealQuery);
 
     const processResults = async (result: any) => {
-      const { totalCount } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
+      const { totalCount } = await this.ctor.instancesFromSurrealResult(
+        this.perspective,
+        this.queryParams,
+        result,
+      );
       callback(totalCount);
     };
 
@@ -2983,18 +3524,18 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const { totalCount } = await this.ctor.instancesFromSurrealResult(
       this.perspective,
       this.queryParams,
-      this.currentSubscription.result
+      this.currentSubscription.result,
     );
     return totalCount;
   }
 
   /**
    * Gets a page of results with pagination metadata.
-   * 
+   *
    * @param pageSize - Number of items per page
    * @param pageNumber - Which page to retrieve (1-based)
    * @returns Paginated results with metadata
-   * 
+   *
    * @example
    * ```typescript
    * const page = await Recipe.query(perspective)
@@ -3003,11 +3544,26 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * console.log(`Page ${page.pageNumber}, ${page.results.length} of ${page.totalCount}`);
    * ```
    */
-  async paginate(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
-    const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, paginationQuery);
+  async paginate(
+    pageSize: number,
+    pageNumber: number,
+  ): Promise<PaginationResult<T>> {
+    const paginationQuery = {
+      ...(this.queryParams || {}),
+      limit: pageSize,
+      offset: pageSize * (pageNumber - 1),
+      count: true,
+    };
+    const surrealQuery = await this.ctor.queryToSurrealQL(
+      this.perspective,
+      paginationQuery,
+    );
     const result = await this.perspective.querySurrealDB(surrealQuery);
-    const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, result)) as ResultsWithTotalCount<T>;
+    const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(
+      this.perspective,
+      paginationQuery,
+      result,
+    )) as ResultsWithTotalCount<T>;
     return { results, totalCount, pageSize, pageNumber };
   }
 
@@ -3045,22 +3601,40 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * Prolog subscriptions remain available via `.useSurrealDB(false)`.
    */
   async paginateSubscribe(
-    pageSize: number, 
-    pageNumber: number, 
-    callback: (results: PaginationResult<T>) => void
+    pageSize: number,
+    pageNumber: number,
+    callback: (results: PaginationResult<T>) => void,
   ): Promise<PaginationResult<T>> {
     this.dispose();
-    const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, paginationQuery);
-    this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
+    const paginationQuery = {
+      ...(this.queryParams || {}),
+      limit: pageSize,
+      offset: pageSize * (pageNumber - 1),
+      count: true,
+    };
+    const surrealQuery = await this.ctor.queryToSurrealQL(
+      this.perspective,
+      paginationQuery,
+    );
+    this.currentSubscription =
+      await this.perspective.subscribeSurrealDB(surrealQuery);
 
     const processResults = async (result: any) => {
-      const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, result)) as ResultsWithTotalCount<T>;
+      const { results, totalCount } =
+        (await this.ctor.instancesFromSurrealResult(
+          this.perspective,
+          paginationQuery,
+          result,
+        )) as ResultsWithTotalCount<T>;
       callback({ results, totalCount, pageSize, pageNumber });
     };
 
     this.currentSubscription.onResult(processResults);
-    const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, this.currentSubscription.result)) as ResultsWithTotalCount<T>;
+    const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(
+      this.perspective,
+      paginationQuery,
+      this.currentSubscription.result,
+    )) as ResultsWithTotalCount<T>;
     return { results, totalCount, pageSize, pageNumber };
   }
 }
