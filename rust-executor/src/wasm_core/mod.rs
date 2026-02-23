@@ -1149,7 +1149,7 @@ impl WasmLanguageInstance {
 /// Loads and instantiates a WASM language module from a file path.
 ///
 /// Each call creates a fresh WASM store and instance with isolated linear memory.
-/// Host functions are injected as imports under the "ad4m" namespace.
+/// Host functions are injected as imports under the "env" namespace.
 pub fn load_wasm_language(
     wasm_path: &Path,
     language_address: &str,

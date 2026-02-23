@@ -8,7 +8,7 @@ use crate::memory::{decode_fat_ptr, read_input, write_output};
 use crate::types::Expression;
 use serde::Serialize;
 
-// Declare host function imports from the "ad4m" module.
+// Declare host function imports from the "env" module.
 // These are provided by the AD4M executor when instantiating the WASM module.
 extern "C" {
     #[link_name = "agent_did"]

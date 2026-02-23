@@ -78,3 +78,21 @@ deno_core::extension!(
     esm_entry_point = "ext:language_service/languages_extension.js",
     esm = [dir "src/js_core", "languages_extension.js"]
 );
+
+#[cfg(feature = "wasm-languages")]
+#[op2]
+#[string]
+fn install_wasm_language(#[string] wasm_path: String, #[string] address: String) -> Result<String, crate::js_core::error::AnyhowWrapperError> {
+    use std::path::Path;
+    log::info!("Installing WASM language from {} as {}", wasm_path, address);
+    crate::wasm_core::register_wasm_language(Path::new(&wasm_path), &address)
+        .map_err(|e| crate::js_core::error::AnyhowWrapperError::from(anyhow::anyhow!("{}", e)))?;
+    Ok(address)
+}
+
+#[cfg(not(feature = "wasm-languages"))]
+#[op2]
+#[string]
+fn install_wasm_language(#[string] _wasm_path: String, #[string] _address: String) -> Result<String, crate::js_core::error::AnyhowWrapperError> {
+    Err(crate::js_core::error::AnyhowWrapperError::from(anyhow::anyhow!("WASM languages not enabled")))
+}

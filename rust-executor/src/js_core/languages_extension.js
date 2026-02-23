@@ -20,5 +20,8 @@ import {
         registerHolochainSignalHandler: (cellIdKey, language_address) => {
             return register_holochain_signal_handler(cellIdKey, language_address);
         },
+        installWasmLanguage: (wasmPath, address) => {
+            return install_wasm_language(wasmPath, address);
+        },
     };
   })(globalThis);

@@ -1591,6 +1591,33 @@ impl Mutation {
         Ok(true)
     }
 
+    async fn language_install_wasm(
+        &self,
+        context: &RequestContext,
+        wasm_path: String,
+        address: String,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &LANGUAGE_CREATE_CAPABILITY)?;
+        #[cfg(feature = "wasm-languages")]
+        {
+            crate::languages::LanguageController::install_wasm_language(
+                std::path::Path::new(&wasm_path),
+                &address,
+            ).map_err(|e| FieldError::new(
+                format!("WASM language install error: {}", e),
+                coasys_juniper::Value::null(),
+            ))?;
+            return Ok(address);
+        }
+        #[cfg(not(feature = "wasm-languages"))]
+        {
+            Err(FieldError::new(
+                "WASM languages feature not enabled".to_string(),
+                coasys_juniper::Value::null(),
+            ))
+        }
+    }
+
     async fn language_write_settings(
         &self,
         context: &RequestContext,
