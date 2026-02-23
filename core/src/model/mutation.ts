@@ -2,7 +2,7 @@
  * Mutation helpers for Ad4mModel — extracted Phase 3c.
  *
  * All persistence functions that previously lived as private methods on Ad4mModel.
- * Each takes a `MutationContext` (perspective, baseExpression, source, instance)
+ * Each takes a `MutationContext` (perspective, id, instance)
  * instead of using `this`, making them independently testable and composable.
  *
  * Functions exported here cover the full write path:
@@ -32,8 +32,8 @@ import { getModelMetadata as _getModelMetadata } from "./schema/metadata";
 export interface MutationContext {
   /** The perspective that owns this instance. */
   perspective: PerspectiveProxy;
-  /** URI of the instance's root node in the graph. */
-  baseExpression: string;
+  /** URI of the instance's root node in the graph (the base expression). */
+  id: string;
   /** The Ad4mModel instance itself (for `Object.entries`, prototype lookups, etc.) */
   instance: any;
 }
@@ -141,17 +141,15 @@ export async function setProperty(
 
   await ctx.perspective.executeAction(
     actions,
-    ctx.baseExpression,
+    ctx.id,
     [{ name: "value", value }],
     batchId,
   );
 }
 
-/** Normalises a value to its baseExpression URI when it is an Ad4mModel instance. */
+/** Normalises an Ad4mModel instance to its id URI, passing other values through unchanged. */
 const toId = (v: any): any =>
-  v && typeof v === "object" && typeof v.baseExpression === "string"
-    ? v.baseExpression
-    : v;
+  v && typeof v === "object" && typeof v.id === "string" ? v.id : v;
 
 /** Sets (replaces) the full set of targets for a relation. */
 export async function setRelationSetter(
@@ -175,14 +173,14 @@ export async function setRelationSetter(
     if (Array.isArray(value)) {
       await ctx.perspective.executeAction(
         actions,
-        ctx.baseExpression,
+        ctx.id,
         value.map((v) => ({ name: "value", value: toId(v) })),
         batchId,
       );
     } else {
       await ctx.perspective.executeAction(
         actions,
-        ctx.baseExpression,
+        ctx.id,
         [{ name: "value", value: toId(value) }],
         batchId,
       );
@@ -214,7 +212,7 @@ export async function setRelationAdder(
         value.map((v) =>
           ctx.perspective.executeAction(
             actions,
-            ctx.baseExpression,
+            ctx.id,
             [{ name: "value", value: toId(v) }],
             batchId,
           ),
@@ -223,7 +221,7 @@ export async function setRelationAdder(
     } else {
       await ctx.perspective.executeAction(
         actions,
-        ctx.baseExpression,
+        ctx.id,
         [{ name: "value", value: toId(value) }],
         batchId,
       );
@@ -255,7 +253,7 @@ export async function setRelationRemover(
         value.map((v) =>
           ctx.perspective.executeAction(
             actions,
-            ctx.baseExpression,
+            ctx.id,
             [{ name: "value", value: toId(v) }],
             batchId,
           ),
@@ -264,7 +262,7 @@ export async function setRelationRemover(
     } else {
       await ctx.perspective.executeAction(
         actions,
-        ctx.baseExpression,
+        ctx.id,
         [{ name: "value", value: toId(value) }],
         batchId,
       );
@@ -355,12 +353,12 @@ export async function innerUpdate(
  * Persists `ctx.instance` to `ctx.perspective`.
  *
  * Auto-detects create vs update by checking whether any links already exist
- * for `ctx.baseExpression`.
+ * for `ctx.id`.
  *
  * - **Create path**: `createSubject` → `innerUpdate(false)` (relations only).
  * - **Update path**: `innerUpdate(true)` (properties + relations).
  *
- * @param ctx     - Mutation context (perspective, baseExpression, instance).
+ * @param ctx     - Mutation context (perspective, id, instance).
  * @param batchId - Optional caller-managed batch.  When omitted an internal batch
  *                  is created, committed, and the instance is rehydrated automatically.
  */
@@ -368,7 +366,7 @@ export async function saveInstance(
   ctx: MutationContext,
   batchId?: string,
 ): Promise<void> {
-  const safeBase = formatSurrealValue(ctx.baseExpression);
+  const safeBase = formatSurrealValue(ctx.id);
   const existingLinks = await ctx.perspective.querySurrealDB(
     `SELECT 1 FROM link WHERE in.uri = ${safeBase} LIMIT 1`,
   );
@@ -402,7 +400,7 @@ export async function saveInstance(
       );
     await ctx.perspective.createSubject(
       className,
-      ctx.baseExpression,
+      ctx.id,
       initialValues,
       batchId,
     );
@@ -438,11 +436,6 @@ export async function saveInstance(
 
     // Rehydrate the instance so callers see the persisted state.
     const metadata = _getModelMetadata(ctx.instance.constructor);
-    await fetchInstanceData(
-      ctx.instance,
-      ctx.perspective,
-      ctx.baseExpression,
-      metadata,
-    );
+    await fetchInstanceData(ctx.instance, ctx.perspective, ctx.id, metadata);
   }
 }

@@ -24,19 +24,19 @@ import { _findAllInternal } from "./operations";
  *
  * @param instance       - The Ad4mModel instance to populate
  * @param perspective    - Perspective that owns the instance
- * @param baseExpression - The instance's base expression URI
+ * @param id             - The instance's base expression URI
  * @param metadata       - Pre-resolved model metadata (from `getModelMetadata()`)
  * @param include        - Optional eager-load map
  */
 export async function fetchInstanceData(
   instance: any,
   perspective: PerspectiveProxy,
-  baseExpression: string,
+  id: string,
   metadata: ModelMetadata,
   include?: IncludeMap,
 ): Promise<any> {
   try {
-    const safeBase = formatSurrealValue(baseExpression);
+    const safeBase = formatSurrealValue(id);
 
     // ── 1. Forward links ────────────────────────────────────────────────────
     const links = await perspective.querySurrealDB(`
@@ -70,7 +70,7 @@ export async function fetchInstanceData(
             for (const value of values) {
               let condition = (relationMeta as any).where.condition
                 .replace(/\$perspective/g, `'${perspective.uuid}'`)
-                .replace(/\$base/g, `'${baseExpression}'`)
+                .replace(/\$base/g, `'${id}'`)
                 .replace(/Target/g, `'${value.replace(/'/g, "'")}'`);
               if (condition.trim().startsWith("WHERE")) {
                 condition = `array::len(SELECT * FROM link ${condition}) > 0`;
@@ -242,7 +242,7 @@ export async function fetchInstanceData(
       }
     }
   } catch (e) {
-    console.error(`SurrealDB getData failed for ${baseExpression}:`, e);
+    console.error(`SurrealDB getData failed for ${id}:`, e);
   }
 
   return instance;

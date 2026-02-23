@@ -180,7 +180,7 @@ import { createSubscription } from "./subscription";
  * ```
  */
 export class Ad4mModel {
-  #baseExpression: string;
+  #id: string;
   #perspective: PerspectiveProxy;
   author: string;
   createdAt: any;
@@ -320,31 +320,28 @@ export class Ad4mModel {
    * Attached dynamically by the `@Model` decorator.
    */
   static generateSHACL(): { shape: SHACLShape; name: string } {
-    throw new Error('generateSHACL() is only available on classes decorated with @Model');
+    throw new Error(
+      "generateSHACL() is only available on classes decorated with @Model",
+    );
   }
 
   /**
    * Constructs a new model instance.
    *
    * @param perspective - The perspective where this model will be stored
-   * @param baseExpression - Optional unique identifier for this instance
+   * @param id - Optional unique identifier for this instance
    *
    * @example
    * ```typescript
-   * // Create a new recipe with auto-generated base expression
+   * // Create a new recipe with auto-generated id
    * const recipe = new Recipe(perspective);
    *
-   * // Create with specific base expression
+   * // Create with specific id
    * const recipe = new Recipe(perspective, "recipe://chocolate-cake");
    * ```
    */
-  constructor(
-    perspective: PerspectiveProxy,
-    baseExpression?: string,
-  ) {
-    this.#baseExpression = baseExpression
-      ? baseExpression
-      : Literal.from(makeRandomId(24)).toUrl();
+  constructor(perspective: PerspectiveProxy, id?: string) {
+    this.#id = id ? id : Literal.from(makeRandomId(24)).toUrl();
     this.#perspective = perspective;
 
     // Wire up real relation adder/remover/setter methods for decorator-based classes.
@@ -382,15 +379,10 @@ export class Ad4mModel {
   }
 
   /**
-   * Gets the base expression of the subject.
+   * The unique identifier (base expression URI) of this instance.
    */
-  get baseExpression() {
-    return this.#baseExpression;
-  }
-
-  /** Alias for {@link baseExpression}. Prefer `id` in new code. */
   get id() {
-    return this.#baseExpression;
+    return this.#id;
   }
 
   /**
@@ -405,7 +397,7 @@ export class Ad4mModel {
   #mutationContext(): mutation.MutationContext {
     return {
       perspective: this.#perspective,
-      baseExpression: this.#baseExpression,
+      id: this.#id,
       instance: this,
     };
   }
@@ -415,7 +407,7 @@ export class Ad4mModel {
     return fetchInstanceData(
       this,
       this.#perspective,
-      this.#baseExpression,
+      this.#id,
       metadata,
       include,
     );
@@ -609,7 +601,7 @@ export class Ad4mModel {
    * Persists the model instance to the perspective.
    *
    * Automatically determines whether to **create** or **update**:
-   * - If no links exist for `baseExpression` yet (new instance): runs the full
+   * - If no links exist for this instance's `id` yet (new instance): runs the full
    *   create path — `createSubject`, `ad4m://has_child` link, then relation setters.
    * - If links already exist (existing instance): runs the update path — property
    *   and relation setters only; skips `createSubject` and `has_child` to avoid
@@ -691,7 +683,7 @@ export class Ad4mModel {
    * ```
    */
   async delete(batchId?: string) {
-    await this.#perspective.removeSubject(this, this.#baseExpression, batchId);
+    await this.#perspective.removeSubject(this, this.#id, batchId);
   }
 
   /**

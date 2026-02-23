@@ -210,7 +210,7 @@ export async function evaluateCustomGetters(
   perspective: PerspectiveProxy,
   metadata: ModelMetadata,
 ): Promise<void> {
-  const safeBase = formatSurrealValue(instance.baseExpression);
+  const safeBase = formatSurrealValue(instance.id);
 
   // Property getters
   for (const [propName, propMeta] of Object.entries(metadata.properties)) {

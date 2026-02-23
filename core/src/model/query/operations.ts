@@ -103,7 +103,7 @@ export async function instancesFromSurrealResult<T>(
             key !== "createdAt" &&
             key !== "updatedAt" &&
             key !== "author" &&
-            key !== "baseExpression"
+            key !== "id"
           ) {
             delete instance[key];
           }
@@ -127,7 +127,7 @@ export async function instancesFromSurrealResult<T>(
   if (reverseRelationEntries.length > 0 && instances.length > 0) {
     try {
       const inList = instances
-        .map((i: any) => `'${escapeSurrealString(i.baseExpression)}'`)
+        .map((i: any) => `'${escapeSurrealString(i.id)}'`)
         .join(", ");
       const reverseLinksQuery = `
         SELECT in.uri AS source, predicate, out.uri AS target, author, timestamp
@@ -142,7 +142,7 @@ export async function instancesFromSurrealResult<T>(
         for (const [relationName, relationMeta] of reverseRelationEntries) {
           const matching = reverseLinks.filter(
             (l: any) =>
-              l.target === (instance as any).baseExpression &&
+              l.target === (instance as any).id &&
               l.predicate === (relationMeta as any).predicate,
           );
           const values = matching.map((l: any) => l.source);
@@ -197,7 +197,7 @@ export async function instancesFromSurrealResult<T>(
           false, // depth guard — no recursive nested-model hydration
         );
         const hydratedMap = new Map<string, any>(
-          allHydrated.map((h: any) => [h.baseExpression, h]),
+          allHydrated.map((h: any) => [h.id, h]),
         );
         for (const instance of instances) {
           const val = (instance as any)[relationName];

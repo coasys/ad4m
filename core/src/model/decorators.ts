@@ -420,7 +420,6 @@ export interface RelationOptions {
 /** Minimal structural type for Ad4mModel instances — used in mutator signatures to avoid circular imports. */
 export interface Ad4mModelLike {
   readonly id: string;
-  readonly baseExpression: string;
 }
 
 /**
