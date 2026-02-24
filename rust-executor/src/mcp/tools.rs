@@ -5,9 +5,11 @@
 
 use super::server::McpContext;
 use crate::agent::capabilities::{
+    capabilities_from_token, check_capability,
+    defs::PERSPECTIVE_CREATE_CAPABILITY,
     get_user_default_capabilities,
     token::{decode_jwt, generate_jwt},
-    AuthInfo, DEFAULT_TOKEN_VALID_PERIOD,
+    AuthInfo, Capability, DEFAULT_TOKEN_VALID_PERIOD,
 };
 use crate::agent::{AgentContext, AgentService};
 use crate::db::Ad4mDb;
@@ -282,6 +284,13 @@ impl Ad4mMcpHandler {
             Some(token) if !token.is_empty() => Ok(AgentContext::from_auth_token(token)),
             _ => Err("Authentication required. Use login_email or set_token first.".to_string()),
         }
+    }
+
+    /// Get capabilities from the stored auth token (reuses same logic as GraphQL RequestContext)
+    async fn get_capabilities(&self) -> Result<Vec<Capability>, String> {
+        let token = self.get_auth_token().await;
+        let admin_cred = self.context.admin_credential.clone();
+        capabilities_from_token(token.unwrap_or_default(), admin_cred)
     }
 
     /// Get agent context for read operations - allows unauthenticated access for local/main agent
@@ -695,10 +704,16 @@ impl Ad4mMcpHandler {
     async fn add_perspective(&self, params: Parameters<AddPerspectiveParams>) -> String {
         let p = &params.0;
 
-        let _agent_context = match self.get_agent_context().await {
+        let agent_context = match self.get_agent_context().await {
             Ok(ctx) => ctx,
             Err(e) => return format!("Authentication error: {}", e),
         };
+
+        // Check capability (same as GraphQL mutation_resolvers)
+        let capabilities = self.get_capabilities().await;
+        if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+            return format!("Capability error: {}", e);
+        }
 
         let uuid = uuid::Uuid::new_v4().to_string();
         let handle = PerspectiveHandle {
