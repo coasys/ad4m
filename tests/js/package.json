@@ -36,8 +36,7 @@
     "test:ci:windows": "node scripts/cleanup.js && pnpm run test-smoke && node scripts/cleanup.js && pnpm run test-auth && node scripts/cleanup.js && pnpm run test-integration && node scripts/cleanup.js && pnpm run test-sdna && node scripts/cleanup.js && pnpm run test-model",
     "test": "node scripts/cleanTestingData.js && pnpm run prepare-test && pnpm run test:ci && node scripts/cleanTestingData.js",
     "test:windows": "pnpm run prepare-test:windows && pnpm run test:ci:windows && node scripts/cleanTestingData.js",
-    "test-single-prepare": "node scripts/cleanTestingData.js && pnpm run prepare-test && node scripts/cleanup.js",
-    "test-report-merge": "mochawesome-merge test-reports/*.json -o test-reports/combined.json && npx marge test-reports/combined.json --reportDir test-reports --reportFilename combined"
+    "test-single-prepare": "node scripts/cleanTestingData.js && pnpm run prepare-test && node scripts/cleanup.js"
   },
   "devDependencies": {
     "@apollo/client": "3.7.10",
@@ -69,8 +68,6 @@
     "json-stable-stringify": "^1.1.0",
     "kill-process-by-name": "^1.0.5",
     "mocha": "*",
-    "mochawesome": "^7.1.4",
-    "mochawesome-merge": "^5.1.1",
     "node-fetch": "^3.3.0",
     "node-wget-js": "^1.0.1",
     "react": "^17.0.1",
