@@ -6,10 +6,7 @@
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "build-npm-packages": {
-      "dependsOn": [
-        "@coasys/ad4m#build",
-        "@coasys/ad4m-connect#build"
-      ]
+      "dependsOn": ["@coasys/ad4m#build", "@coasys/ad4m-connect#build"]
     },
     "build-libs": {
       "dependsOn": [
@@ -23,7 +20,11 @@
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "build-core-executor": {
-      "dependsOn": ["@coasys/ad4m#build", "@coasys/ad4m-executor#build", "@coasys/dapp#build"],
+      "dependsOn": [
+        "@coasys/ad4m#build",
+        "@coasys/ad4m-executor#build",
+        "@coasys/dapp#build"
+      ],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "build-languages": {
@@ -35,7 +36,7 @@
         "@coasys/language-language#build",
         "@coasys/neighbourhood-language#build",
         "@coasys/file-storage#build",
-        
+
         "@coasys/centralized-perspective-diff-sync#build",
         "@coasys/centralized-agent-language#build",
         "@coasys/centralized-file-storage#build",
@@ -46,12 +47,20 @@
     },
 
     "build-dapp": {
-      "dependsOn": ["@coasys/ad4m#build", "@coasys/ad4m-connect#build", "@coasys/dapp#build"],
+      "dependsOn": [
+        "@coasys/ad4m#build",
+        "@coasys/ad4m-connect#build",
+        "@coasys/dapp#build"
+      ],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
 
     "@coasys/rust-ad4m-executor#build": {
-      "dependsOn": ["@coasys/dapp#build", "@coasys/ad4m-executor#build", "build-core-executor"],
+      "dependsOn": [
+        "@coasys/dapp#build",
+        "@coasys/ad4m-executor#build",
+        "build-core-executor"
+      ],
       "outputs": ["dist/**", "lib/**", "build/**", "CUSTOM_DENO_SNAPSHOT.bin"],
       "cache": false
     },
@@ -81,6 +90,7 @@
       "cache": false
     },
     "test-main": {},
+    "test:ci": {},
     "test": {
       "outputs": []
     },
