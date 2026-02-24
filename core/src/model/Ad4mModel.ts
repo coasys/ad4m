@@ -55,9 +55,6 @@ export {
   formatSurrealValue,
   matchesCondition,
   buildGraphTraversalWhereClause,
-  buildSurrealWhereClause,
-  buildSurrealSelectFields,
-  buildSurrealSelectFieldsWithAggregation,
 } from "./query/surrealCompiler";
 
 // ── Hydration utilities (re-exported for advanced consumers) ──────────────

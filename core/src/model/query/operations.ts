@@ -11,7 +11,12 @@
  */
 
 import type { PerspectiveProxy } from "../../perspectives/PerspectiveProxy";
-import type { Query, ResultsWithTotalCount, PaginationResult } from "../types";
+import type {
+  Query,
+  Where,
+  ResultsWithTotalCount,
+  PaginationResult,
+} from "../types";
 import type { Ad4mModelCtor } from "./ModelQueryBuilder";
 import {
   buildSurrealQuery,
@@ -307,28 +312,29 @@ export async function instancesFromSurrealResult<T>(
       : null);
 
   if (effectiveOrder) {
-    const orderPropName = Object.keys(effectiveOrder)[0];
-    const orderDirection = Object.values(effectiveOrder)[0];
-
+    const orderEntries = Object.entries(effectiveOrder) as [
+      string,
+      "ASC" | "DESC",
+    ][];
     filteredInstances.sort((a: any, b: any) => {
-      let aVal = a[orderPropName];
-      let bVal = b[orderPropName];
-
-      // Push undefined values to the end
-      if (aVal === undefined && bVal === undefined) return 0;
-      if (aVal === undefined) return orderDirection === "ASC" ? 1 : -1;
-      if (bVal === undefined) return orderDirection === "ASC" ? -1 : 1;
-
-      let comparison = 0;
-      if (typeof aVal === "number" && typeof bVal === "number") {
-        comparison = aVal - bVal;
-      } else if (typeof aVal === "string" && typeof bVal === "string") {
-        comparison = aVal.localeCompare(bVal);
-      } else {
-        comparison = String(aVal).localeCompare(String(bVal));
+      for (const [orderPropName, orderDirection] of orderEntries) {
+        let aVal = a[orderPropName];
+        let bVal = b[orderPropName];
+        if (aVal === undefined && bVal === undefined) continue;
+        if (aVal === undefined) return orderDirection === "ASC" ? 1 : -1;
+        if (bVal === undefined) return orderDirection === "ASC" ? -1 : 1;
+        let comparison = 0;
+        if (typeof aVal === "number" && typeof bVal === "number") {
+          comparison = aVal - bVal;
+        } else if (typeof aVal === "string" && typeof bVal === "string") {
+          comparison = aVal.localeCompare(bVal);
+        } else {
+          comparison = String(aVal).localeCompare(String(bVal));
+        }
+        if (comparison !== 0)
+          return orderDirection === "DESC" ? -comparison : comparison;
       }
-
-      return orderDirection === "DESC" ? -comparison : comparison;
+      return 0;
     });
   }
 
@@ -432,19 +438,49 @@ export async function paginate<T>(
   return { results, totalCount, pageSize, pageNumber };
 }
 
+/** Returns true when `where` has conditions that require JS post-filtering. */
+function hasJsFilterConditions(where?: Where): boolean {
+  if (!where) return false;
+  return Object.entries(where).some(([k, v]) => {
+    if (k === "author" || k === "timestamp") return true;
+    if (typeof v === "object" && v !== null && !Array.isArray(v)) {
+      const ops = v as any;
+      return (
+        ops.gt !== undefined ||
+        ops.gte !== undefined ||
+        ops.lt !== undefined ||
+        ops.lte !== undefined ||
+        ops.between !== undefined ||
+        ops.contains !== undefined
+      );
+    }
+    return false;
+  });
+}
+
 /** Returns a count of all matching instances. */
 export async function count(
   ctor: Ad4mModelCtor<any>,
   perspective: PerspectiveProxy,
   query: Query,
 ): Promise<number> {
-  const surrealQuery = await queryToSurrealQL(ctor, perspective, query);
+  // Strip pagination — count always wants total, not the paginated slice.
+  const countQuery: Query = { ...query, limit: undefined, offset: undefined };
+  const surrealQuery = await countQueryToSurrealQL(
+    ctor,
+    perspective,
+    countQuery,
+  );
   const result = await perspective.querySurrealDB(surrealQuery);
+  if (!result || result.length === 0) return 0;
+  // Fast path: SQL WHERE handles all conditions — skip full instance hydration.
+  if (!hasJsFilterConditions(countQuery.where)) return result.length;
+  // Slow path: hydrate so JS post-filters (gt/gte/author/etc.) can run.
   const { totalCount } = await instancesFromSurrealResult(
     ctor,
     perspective,
-    query,
+    countQuery,
     result,
   );
-  return totalCount;
+  return totalCount ?? 0;
 }

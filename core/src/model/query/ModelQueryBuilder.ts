@@ -13,7 +13,6 @@ import {
   Order,
   PaginationResult,
   Query,
-  ResultsWithTotalCount,
   Where,
   IncludeMap,
   SubscribeOptions,
@@ -43,7 +42,6 @@ export class ModelQueryBuilder<T extends import("../Ad4mModel").Ad4mModel> {
   private queryParams: Query = {};
   private modelClassName: string | null = null;
   private ctor: Ad4mModelCtor<T>;
-  private currentSubscription?: any;
 
   constructor(
     perspective: PerspectiveProxy,
@@ -53,17 +51,6 @@ export class ModelQueryBuilder<T extends import("../Ad4mModel").Ad4mModel> {
     this.perspective = perspective;
     this.ctor = ctor;
     if (query) this.queryParams = query;
-  }
-
-  /**
-   * Disposes of the current live subscription (if any).
-   * Call when done to avoid memory leaks.
-   */
-  dispose() {
-    if (this.currentSubscription) {
-      this.currentSubscription.dispose();
-      this.currentSubscription = undefined;
-    }
   }
 
   where(conditions: Where): ModelQueryBuilder<T> {
@@ -117,97 +104,29 @@ export class ModelQueryBuilder<T extends import("../Ad4mModel").Ad4mModel> {
     return this;
   }
 
-  /**
-   * Executes the query once and returns the results.
-   */
+  /** Executes the query and returns all matching instances. */
   async get(): Promise<T[]> {
-    const surrealQuery = await this.ctor.queryToSurrealQL(
-      this.perspective,
-      this.queryParams,
-    );
-    const result = await this.perspective.querySurrealDB(surrealQuery);
-    const { results } = await this.ctor.instancesFromSurrealResult(
-      this.perspective,
-      this.queryParams,
-      result,
-    );
-    return results as T[];
+    return this.ctor.findAll(this.perspective, this.queryParams) as Promise<
+      T[]
+    >;
   }
 
-  /**
-   * Subscribes to live updates and returns initial results.
-   * Call `dispose()` when done.
-   */
-  async subscribe(callback: (results: T[]) => void): Promise<T[]> {
-    this.dispose();
-    const surrealQuery = await this.ctor.queryToSurrealQL(
+  /** Alias for {@link get} — preferred terminal method in fluent chains. */
+  async run(): Promise<T[]> {
+    return this.get();
+  }
+
+  /** Returns the first matching instance, or `null` if none found. */
+  async first(): Promise<T | null> {
+    return this.ctor.findOne(
       this.perspective,
       this.queryParams,
-    );
-    this.currentSubscription =
-      await this.perspective.subscribeSurrealDB(surrealQuery);
-
-    const processResults = async (result: any) => {
-      const { results } = await this.ctor.instancesFromSurrealResult(
-        this.perspective,
-        this.queryParams,
-        result,
-      );
-      callback(results as T[]);
-    };
-
-    this.currentSubscription.onResult(processResults);
-    const { results } = await this.ctor.instancesFromSurrealResult(
-      this.perspective,
-      this.queryParams,
-      this.currentSubscription.result,
-    );
-    return results as T[];
+    ) as Promise<T | null>;
   }
 
   /** Returns the total count of matching entities. */
   async count(): Promise<number> {
-    const surrealQuery = await this.ctor.queryToSurrealQL(
-      this.perspective,
-      this.queryParams,
-    );
-    const result = await this.perspective.querySurrealDB(surrealQuery);
-    const { totalCount } = await this.ctor.instancesFromSurrealResult(
-      this.perspective,
-      this.queryParams,
-      result,
-    );
-    return totalCount;
-  }
-
-  /**
-   * Subscribes to count updates. Call `dispose()` when done.
-   */
-  async countSubscribe(callback: (count: number) => void): Promise<number> {
-    this.dispose();
-    const surrealQuery = await this.ctor.queryToSurrealQL(
-      this.perspective,
-      this.queryParams,
-    );
-    this.currentSubscription =
-      await this.perspective.subscribeSurrealDB(surrealQuery);
-
-    const processResults = async (result: any) => {
-      const { totalCount } = await this.ctor.instancesFromSurrealResult(
-        this.perspective,
-        this.queryParams,
-        result,
-      );
-      callback(totalCount);
-    };
-
-    this.currentSubscription.onResult(processResults);
-    const { totalCount } = await this.ctor.instancesFromSurrealResult(
-      this.perspective,
-      this.queryParams,
-      this.currentSubscription.result,
-    );
-    return totalCount;
+    return this.ctor.count(this.perspective, this.queryParams);
   }
 
   /** Returns a single page of results with pagination metadata. */
@@ -215,64 +134,12 @@ export class ModelQueryBuilder<T extends import("../Ad4mModel").Ad4mModel> {
     pageSize: number,
     pageNumber: number,
   ): Promise<PaginationResult<T>> {
-    const paginationQuery: Query = {
-      ...this.queryParams,
-      limit: pageSize,
-      offset: pageSize * (pageNumber - 1),
-      count: true,
-    };
-    const surrealQuery = await this.ctor.queryToSurrealQL(
+    return this.ctor.paginate(
       this.perspective,
-      paginationQuery,
-    );
-    const result = await this.perspective.querySurrealDB(surrealQuery);
-    const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(
-      this.perspective,
-      paginationQuery,
-      result,
-    )) as ResultsWithTotalCount<T>;
-    return { results, totalCount, pageSize, pageNumber };
-  }
-
-  /**
-   * Subscribes to paginated live updates. Call `dispose()` when done.
-   */
-  async paginateSubscribe(
-    pageSize: number,
-    pageNumber: number,
-    callback: (results: PaginationResult<T>) => void,
-  ): Promise<PaginationResult<T>> {
-    this.dispose();
-    const paginationQuery: Query = {
-      ...this.queryParams,
-      limit: pageSize,
-      offset: pageSize * (pageNumber - 1),
-      count: true,
-    };
-    const surrealQuery = await this.ctor.queryToSurrealQL(
-      this.perspective,
-      paginationQuery,
-    );
-    this.currentSubscription =
-      await this.perspective.subscribeSurrealDB(surrealQuery);
-
-    const processResults = async (result: any) => {
-      const { results, totalCount } =
-        (await this.ctor.instancesFromSurrealResult(
-          this.perspective,
-          paginationQuery,
-          result,
-        )) as ResultsWithTotalCount<T>;
-      callback({ results, totalCount, pageSize, pageNumber });
-    };
-
-    this.currentSubscription.onResult(processResults);
-    const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(
-      this.perspective,
-      paginationQuery,
-      this.currentSubscription.result,
-    )) as ResultsWithTotalCount<T>;
-    return { results, totalCount, pageSize, pageNumber };
+      pageSize,
+      pageNumber,
+      this.queryParams,
+    ) as Promise<PaginationResult<T>>;
   }
 
   /**

@@ -1,15 +1,10 @@
 /**
- * Metadata extraction and instance-hydration helpers for Ad4mModel.
+ * Metadata extraction helper for Ad4mModel.
  *
- * Extracted from Ad4mModel.ts (Phase 3a Part 4).
- *
- * - `getModelMetadata(ctor)` — builds a ModelMetadata descriptor from the
- *   decorator registries, or falls back to the attached JSON Schema.
- * - `assignValuesToInstance()` — writes a batch of (name, value, resolve) tuples
- *   onto a model instance, resolving Literal expressions when requested.
+ * - `getModelMetadata(ctor)` — builds a {@link ModelMetadata} descriptor from
+ *   the decorator registries, or falls back to the attached JSON Schema.
  */
 
-import type { PerspectiveProxy } from "../../perspectives/PerspectiveProxy";
 import { getPropertiesMetadata, getRelationsMetadata } from "../decorators";
 import type { PropertyOptions, RelationOptions } from "../decorators";
 import {
@@ -23,18 +18,6 @@ import type {
   PropertyMetadata,
   RelationMetadata,
 } from "../types";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Shared value-tuple type
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * A tuple describing one property assignment: `[propertyName, rawValue, resolve?]`
- *
- * - `resolve = true`  → `rawValue` is an expression URL; fetch it and unwrap `.data`
- * - `resolve = false` (default) → use `rawValue` as-is (with UTF-8 reconstruction)
- */
-export type ModelValueTuple = [name: string, value: any, resolve?: boolean];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // getModelMetadataForClass
@@ -161,89 +144,4 @@ export function getModelMetadata(ctor: any): ModelMetadata {
     properties: propertiesMetadata,
     relations: relationsMetadata,
   };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// assignValuesToInstance
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Writes a batch of `(name, rawValue, resolve?)` tuples onto `instance`.
- *
- * - When `resolve` is true the raw value is treated as an expression URL and
- *   fetched via `perspective.getExpression()`; the `.data` field (JSON-parsed
- *   if possible) becomes the final value.
- * - Read-only accessor descriptors (getter without setter) are silently skipped.
- */
-export async function assignValuesToInstance(
-  perspective: PerspectiveProxy,
-  instance: any,
-  values: ModelValueTuple[],
-): Promise<void> {
-  const propsObject = Object.fromEntries(
-    await Promise.all(
-      values.map(async ([name, value, resolve]) => {
-        let finalValue = value;
-
-        // Handle UTF-8 byte sequences from Prolog URL decoding
-        if (!resolve && typeof value === "string") {
-          const codePoints = Array.from(value, (ch) => ch.codePointAt(0)!);
-          const looksByteString = codePoints.every((cp) => cp <= 0xff);
-          const hasHighByte = codePoints.some((cp) => cp >= 0x80);
-          if (looksByteString && hasHighByte) {
-            try {
-              const bytes = Uint8Array.from(codePoints);
-              const decoded = new TextDecoder("utf-8", { fatal: true }).decode(
-                bytes,
-              );
-              if (decoded !== value) finalValue = decoded;
-            } catch (error) {
-              console.warn(
-                `UTF-8 byte reconstruction failed for property "${name}"`,
-                { value, error },
-              );
-            }
-          }
-        }
-
-        if (resolve) {
-          const resolvedExpression = await perspective.getExpression(value);
-          if (resolvedExpression) {
-            try {
-              finalValue = JSON.parse(resolvedExpression.data);
-            } catch {
-              finalValue = resolvedExpression.data;
-            }
-          }
-        }
-
-        // Apply transform function if defined on the property
-        const transform = getPropertiesMetadata(
-          Object.getPrototypeOf(instance).constructor,
-        )?.[name]?.transform;
-        if (transform && typeof transform === "function") {
-          finalValue = transform(finalValue);
-        }
-
-        return [name, finalValue];
-      }),
-    ),
-  );
-
-  // Skip read-only accessor descriptors (getters without setters)
-  const writableProps = Object.fromEntries(
-    Object.entries(propsObject).filter(([key]) => {
-      const descriptor = Object.getOwnPropertyDescriptor(
-        Object.getPrototypeOf(instance),
-        key,
-      );
-      if (!descriptor) return true; // plain instance property — always writable
-      const isAccessor =
-        descriptor.get !== undefined || descriptor.set !== undefined;
-      if (isAccessor) return descriptor.set !== undefined;
-      return descriptor.writable !== false;
-    }),
-  );
-
-  Object.assign(instance, writableProps);
 }

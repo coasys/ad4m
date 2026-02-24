@@ -71,7 +71,7 @@ export async function fetchInstanceData(
               let condition = (relationMeta as any).where.condition
                 .replace(/\$perspective/g, `'${perspective.uuid}'`)
                 .replace(/\$base/g, `'${id}'`)
-                .replace(/Target/g, `'${value.replace(/'/g, "'")}'`);
+                .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
               if (condition.trim().startsWith("WHERE")) {
                 condition = `array::len(SELECT * FROM link ${condition}) > 0`;
               }
