@@ -20,7 +20,7 @@ import {
   sleep,
   startExecutor,
   runHcLocalServices,
-} from "../utils/utils";
+} from "../../utils/utils";
 import { ChildProcess } from "node:child_process";
 import fetch from "node-fetch";
 import { LinkQuery } from "@coasys/ad4m";
@@ -44,9 +44,9 @@ const DIFF_SYNC_OFFICIAL = fs
   .toString();
 
 describe("Multi-User Simple integration tests", () => {
-  const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
+  const TEST_DIR = path.join(`${__dirname}/../../tst-tmp`);
   const appDataPath = path.join(TEST_DIR, "agents", "multi-user-simple");
-  const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
+  const bootstrapSeedPath = path.join(`${__dirname}/../../bootstrapSeed.json`);
   const gqlPort = 15900;
   const hcAdminPort = 15901;
   const hcAppPort = 15902;

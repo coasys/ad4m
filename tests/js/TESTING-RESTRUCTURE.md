@@ -13,6 +13,12 @@ serves as the target pattern for the rest of the suite.
 | fromJSONSchema moved into model/       | `tests/model-from-json-schema.test.ts` | `tests/model/model-from-json-schema.test.ts` |
 | fromJSONSchema added to test-model run | —                                      | `test-model` script now includes it          |
 | Shared executor for model suite        | 8 HC startups per `pnpm test-model`    | 1 HC startup via Root Hooks Plugin           |
+| integration/ folder created            | `tests/integration.test.ts` + bare `.ts` suite modules at top level | `tests/integration/` subfolder |
+| auth/ folder created                   | `tests/app.test.ts`, `tests/authentication.test.ts`, `tests/email-verification.test.ts` | `tests/auth/` |
+| sdna/ folder created                   | `tests/sdna.test.ts`, `tests/smart-literal.test.ts` | `tests/sdna/` |
+| multi-user/ folder created             | `tests/multi-user*.test.ts` at top level | `tests/multi-user/` subfolder |
+| multi-user.test.ts renamed             | `tests/multi-user.test.ts`             | `tests/multi-user/multi-user-auth.test.ts`   |
+| Dynamic ports for sdna tests           | Hardcoded 16600-16602                  | `startAgent` dynamic ports                   |
 
 ---
 
@@ -123,8 +129,8 @@ The batch operations tests within it are already fully covered by
 ```
 tests/
 │
-├── model/                               ← already clean
-│   ├── models.ts
+├── model/                               ← ✅ done
+│   ├── hooks.ts
 │   ├── model-core.test.ts
 │   ├── model-query.test.ts
 │   ├── model-subscriptions.test.ts
@@ -132,15 +138,15 @@ tests/
 │   ├── model-inheritance.test.ts
 │   ├── model-prolog.test.ts
 │   ├── model-where-operators.test.ts
-│   ├── model-from-json-schema.test.ts   ← done ✅
-│   └── model-advanced.test.ts           ← TODO: extract from sdna.test.ts
+│   ├── model-from-json-schema.test.ts
+│   └── model-advanced.test.ts
 │
-├── sdna/                                ← TODO: new folder
-│   ├── sdna.test.ts                     ← TODO: move + trim (decorators, getter, isInstance only)
-│   └── smart-literal.test.ts           ← TODO: move
+├── sdna/                                ← ✅ done
+│   ├── sdna.test.ts
+│   └── smart-literal.test.ts
 │
-├── integration/                         ← TODO: new folder
-│   ├── integration.test.ts              ← entry point, imports all suite modules below
+├── integration/                         ← ✅ done
+│   ├── integration.test.ts
 │   ├── agent.ts
 │   ├── agent-language.ts
 │   ├── ai.ts
@@ -153,70 +159,54 @@ tests/
 │   ├── social-dna-flow.ts
 │   └── triple-agent-test.ts
 │
-├── auth/                                ← TODO: new folder
+├── auth/                                ← ✅ done
 │   ├── app.test.ts
 │   ├── authentication.test.ts
 │   └── email-verification.test.ts
 │
-├── multi-user/                          ← TODO: new folder + split
-│   ├── multi-user-auth.test.ts          ← rename from multi-user.test.ts
-│   ├── multi-user-connect.test.ts
-│   ├── multi-user-config.test.ts        ← split from multi-user-simple.test.ts
-│   ├── multi-user-isolation.test.ts     ← split from multi-user-simple.test.ts
-│   └── multi-user-sdna.test.ts         ← split from multi-user-simple.test.ts
+├── multi-user/                          ← folder done ✅; split TODO
+│   ├── multi-user-auth.test.ts          ← ✅ renamed from multi-user.test.ts
+│   ├── multi-user-connect.test.ts       ← ✅ moved
+│   ├── multi-user-simple.test.ts        ← moved; split into focused files below is TODO
+│   ├── multi-user-config.test.ts        ← TODO: split from multi-user-simple.test.ts
+│   ├── multi-user-isolation.test.ts     ← TODO: split from multi-user-simple.test.ts
+│   ├── multi-user-sdna.test.ts          ← TODO: split from multi-user-simple.test.ts
+│   ├── multi-user-profiles.test.ts      ← TODO: split from multi-user-simple.test.ts
+│   ├── multi-user-neighbourhood.test.ts ← TODO: split from multi-user-simple.test.ts
+│   ├── multi-user-subscriptions.test.ts ← TODO: split from multi-user-simple.test.ts
+│   └── multi-user-notifications.test.ts ← TODO: split from multi-user-simple.test.ts
 │
-└── smoke.test.ts                        ← done ✅
+└── smoke.test.ts                        ← ✅ done
 ```
 
 ---
 
 ## Recommended order of work
 
-### Phase 1 — Extract from `sdna.test.ts` (medium effort, high value)
+### ~~Phase 1 — Extract from `sdna.test.ts`~~ ✅ DONE
 
-Extract `describe("Active record implementation")` into
-`model/model-advanced.test.ts`. This block tests:
+### ~~Phase 2 — Move `integration/` cluster~~ ✅ DONE
 
-- `local: true` property round-trip
-- SurrealDB `condition` filter in `@HasMany`
-- `resolveLanguage` round-trip (literal and non-literal)
-- `transform` property option
-- Very long property values
-- `get()` / `getData()` completeness
-- `findAll()` with resolved literal constraints
-- Emoji and special character handling (Prolog UTF-8 pipeline)
-- Subscription with emoji content
-
-The batch operations test within it is a **duplicate** of
-`model-transactions.test.ts` and should simply be deleted.
-
-After extraction, `sdna.test.ts` becomes focused: SDNA generation/comparison,
-SHACL decorator tests, getter feature tests, and isInstance filtering tests.
-
-### Phase 2 — Move `integration/` cluster (low value, mechanical)
-
-Move `integration.test.ts` + all bare `.ts` suite modules into an
-`integration/` subfolder. Requires updating all relative import paths inside
-the suite modules (`./integration.test` → `./integration.test` stays the same
-since they're in the same folder, but the `package.json` script path changes).
-
-Low priority — purely cosmetic.
+### ~~Phase 4 — Consolidate `auth/` and `sdna/` folders~~ ✅ DONE
 
 ### Phase 3 — Split `multi-user-simple.test.ts` (high value)
 
-The file is 3,700+ lines covering:
+The file is 3,700+ lines covering 10 distinct describe blocks. Each maps to a
+separate file in `multi-user/`. All blocks share a single `before/after` that
+starts one executor — splitting means each new file gets its own startup,
+which is slower but gives proper isolation and makes failures easier to locate.
 
-- `describe("Multi-User Configuration")` — enable/disable, user listing, timestamps
-- `describe.skip("Basic Multi-User Functionality")` — create/login/persistence/errors
-- `describe("Perspective Isolation")` — per-user perspective isolation
-- `describe("Link Authoring and Signatures")` — DID-based authorship
-- `describe("Subject Creation and SDNA Operations")` — SDNA in multi-user context
+Describe blocks and target files:
 
-Each of these maps directly to a separate file in `multi-user/`.
-
-### Phase 4 — Consolidate `auth/` and `sdna/` folders (cosmetic)
-
-Group `app.test.ts`, `authentication.test.ts`, `email-verification.test.ts`
-into `auth/`.
-
-Move `sdna.test.ts` and `smart-literal.test.ts` into `sdna/`.
+| Lines | Block | Target file |
+|-------|-------|-------------|
+| 109–301 | `Multi-User Configuration` | `multi-user-config.test.ts` |
+| 302–432 | `Basic Multi-User Functionality` (skipped) | include in config |
+| 433–608 | `Perspective Isolation` | `multi-user-isolation.test.ts` |
+| 609–682 | `Link Authoring and Signatures` | `multi-user-isolation.test.ts` |
+| 683–801 | `Subject Creation and SDNA Operations` | `multi-user-sdna.test.ts` |
+| 802–1350 | `Agent Profiles and Status` | `multi-user-profiles.test.ts` |
+| 1351–2187 | `Multi-User Neighbourhood Sharing` | `multi-user-neighbourhood.test.ts` |
+| 2188–2955 | `Multi-Node Multi-User Integration` | `multi-user-neighbourhood.test.ts` |
+| 2956–3376 | `Perspective Subscriptions` | `multi-user-subscriptions.test.ts` |
+| 3377–3689 | `Multi-User Notifications` | `multi-user-notifications.test.ts` |

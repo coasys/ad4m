@@ -18,8 +18,8 @@ import {
   SMART_LITERAL_CONTENT_PREDICATE,
 } from "@coasys/ad4m";
 import fetch from "node-fetch";
-import { startAgent } from "../helpers/index.js";
-import type { AgentHandle } from "../helpers/executor.js";
+import { startAgent } from "../../helpers/index.js";
+import type { AgentHandle } from "../../helpers/executor.js";
 
 //@ts-ignore
 global.fetch = fetch;
