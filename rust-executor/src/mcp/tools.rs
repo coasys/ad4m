@@ -301,6 +301,38 @@ impl Ad4mMcpHandler {
         }
     }
 
+    /// Resolve a literal value from a link target URI.
+    /// Handles: literal://string:X, literal://json:{signed expression with "data" field},
+    /// and URL-encoded variants.
+    fn resolve_literal_value(target: &str) -> String {
+        // Simple literal://string: prefix
+        if let Some(value) = target.strip_prefix("literal://string:") {
+            // URL-decode in case it's encoded
+            return urlencoding::decode(value)
+                .unwrap_or_else(|_| value.into())
+                .to_string();
+        }
+
+        // literal://json: — may be a signed expression with "data" field
+        if let Some(json_part) = target.strip_prefix("literal://json:") {
+            let decoded = urlencoding::decode(json_part)
+                .unwrap_or_else(|_| json_part.into())
+                .to_string();
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&decoded) {
+                if let Some(data) = parsed.get("data") {
+                    return match data {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                }
+            }
+            return decoded;
+        }
+
+        // Fallback: return as-is
+        target.to_string()
+    }
+
     /// Escape string for safe use in Prolog queries
     fn escape_prolog_string(s: &str) -> String {
         s.replace('\\', "\\\\")
@@ -548,13 +580,7 @@ impl Ad4mMcpHandler {
                                 ),
                             );
                         } else if let Some(link) = value_links.first() {
-                            // Strip literal:// prefix for cleaner output
-                            let value = link
-                                .data
-                                .target
-                                .strip_prefix("literal://string:")
-                                .unwrap_or(&link.data.target)
-                                .to_string();
+                            let value = Self::resolve_literal_value(&link.data.target);
                             data.insert(prop_name, serde_json::Value::String(value));
                         }
                     }
