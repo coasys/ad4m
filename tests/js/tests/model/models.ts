@@ -57,6 +57,7 @@ export class TestTag extends Ad4mModel {
     required: true,
     writable: true,
     initial: "literal://string:uninitialized",
+    resolveLanguage: "literal",
   })
   label: string = "";
 
@@ -77,6 +78,7 @@ export class TestPost extends Ad4mModel {
     required: true,
     writable: true,
     initial: "literal://string:uninitialized",
+    resolveLanguage: "literal",
   })
   title: string = "";
 

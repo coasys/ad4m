@@ -45,6 +45,8 @@ describe("Ad4mModel — Model Inheritance", function () {
 
   beforeEach(async () => {
     await wipePerspective(perspective);
+    await TestDerivedModel.register(perspective);
+    await TestPost.register(perspective);
   });
 
   // ── Metadata (no executor) ────────────────────────────────────────────────

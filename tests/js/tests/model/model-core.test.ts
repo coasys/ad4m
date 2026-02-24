@@ -45,6 +45,9 @@ describe("Ad4mModel — Core CRUD", function () {
 
   beforeEach(async () => {
     await wipePerspective(perspective);
+    await TestPost.register(perspective);
+    await TestComment.register(perspective);
+    await TestTag.register(perspective);
   });
 
   // ── save() / id ────────────────────────────────────────────────────────────

@@ -79,6 +79,7 @@ describe("Ad4mModel — Subscriptions", function () {
 
   beforeEach(async () => {
     await wipePerspective(perspective);
+    await TestPost.register(perspective);
   });
 
   // ── 1. Immediate initial callback ─────────────────────────────────────────

@@ -48,6 +48,9 @@ describe("Ad4mModel — Query API", function () {
 
   beforeEach(async () => {
     await wipePerspective(perspective);
+    await TestPost.register(perspective);
+    await TestComment.register(perspective);
+    await TestTag.register(perspective);
     // Re-seed fresh posts for every test so tests are fully independent
     p1 = await TestPost.create(perspective, { title: "Alpha", body: "first" });
     p2 = await TestPost.create(perspective, { title: "Beta", body: "second" });

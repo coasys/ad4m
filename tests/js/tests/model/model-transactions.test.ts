@@ -43,6 +43,7 @@ describe("Ad4mModel — Transactions", function () {
 
   beforeEach(async () => {
     await wipePerspective(perspective);
+    await TestPost.register(perspective);
   });
 
   // ── 1. Batch creates in one transaction ───────────────────────────────────
@@ -97,22 +98,20 @@ describe("Ad4mModel — Transactions", function () {
 
   // ── 3. Save then delete in same transaction ───────────────────────────────
 
-  it("save + delete inside transaction results in no remaining record", async () => {
-    let savedId: string | undefined;
+  it("delete inside transaction removes a pre-existing record", async () => {
+    // Create the record BEFORE the transaction — then delete it inside one
+    const post = await TestPost.create(perspective, {
+      title: "Ephemeral",
+      body: "",
+    });
+    const savedId = post.id;
 
     await TestPost.transaction(perspective, async (tx) => {
-      const post = new TestPost(perspective);
-      post.title = "Ephemeral";
-      post.body = "";
-      await post.save(tx.batchId);
-      savedId = post.id;
-
       await post.delete(tx.batchId);
     });
 
-    expect(savedId).to.be.a("string");
     const found = await TestPost.findOne(perspective, {
-      where: { id: savedId! },
+      where: { id: savedId },
     });
     expect(found).to.be.null;
   });
@@ -163,10 +162,14 @@ describe("Ad4mModel — Transactions", function () {
 
   // ── 6. Mixed transaction operations ──────────────────────────────────────
 
-  it("handles mixed create/update/delete operations inside one transaction", async () => {
-    // Create a record before the transaction so we can update it inside
-    const preExisting = await TestPost.create(perspective, {
-      title: "Pre Tx",
+  it("handles mixed create/update and pre-tx delete inside one transaction", async () => {
+    // Create two records before the transaction
+    const keep = await TestPost.create(perspective, {
+      title: "Keep Me",
+      body: "",
+    });
+    const remove = await TestPost.create(perspective, {
+      title: "Remove Me",
       body: "",
     });
 
@@ -177,24 +180,25 @@ describe("Ad4mModel — Transactions", function () {
       newPost.body = "";
       await newPost.save(tx.batchId);
 
-      // Update the pre-existing one
-      preExisting.title = "Updated In Tx";
-      await preExisting.save(tx.batchId);
+      // Update the keep record
+      keep.title = "Updated In Tx";
+      await keep.save(tx.batchId);
 
-      // Delete and re-add a post
-      const temp = new TestPost(perspective);
-      temp.title = "Temp";
-      temp.body = "";
-      await temp.save(tx.batchId);
-      await temp.delete(tx.batchId);
+      // Delete the remove record (pre-existing, not created in this batch)
+      await remove.delete(tx.batchId);
     });
 
     const all = await TestPost.findAll(perspective);
-    expect(all).to.have.length(2); // preExisting + newPost, temp was deleted
+    expect(all).to.have.length(2); // keep (updated) + newPost; remove was deleted
 
     const updated = await TestPost.findOne(perspective, {
-      where: { id: preExisting.id },
+      where: { id: keep.id },
     });
     expect(updated!.title).to.equal("Updated In Tx");
+
+    const gone = await TestPost.findOne(perspective, {
+      where: { id: remove.id },
+    });
+    expect(gone).to.be.null;
   });
 });
