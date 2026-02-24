@@ -345,57 +345,97 @@ impl Ad4mMcpHandler {
 
         match get_perspective(uuid) {
             Some(perspective) => {
-                let agent_context = self.get_agent_context_for_read().await;
+                // Query SHACL shapes stored as links: X --rdf://type--> ad4m://SubjectClass
+                let links = perspective
+                    .get_links(&LinkQuery {
+                        predicate: Some("rdf://type".to_string()),
+                        target: Some("ad4m://SubjectClass".to_string()),
+                        ..Default::default()
+                    })
+                    .await;
 
-                // Use Prolog to get subject classes
-                let query = "subject_class(ClassName, _)".to_string();
-                match perspective
-                    .prolog_query_with_context(query, &agent_context)
-                    .await
-                {
-                    Ok(result) => prolog_resolution_to_string(result),
-                    Err(e) => format!("Error getting subject classes: {}", e),
+                match links {
+                    Ok(class_links) => {
+                        let classes: Vec<String> = class_links
+                            .iter()
+                            .map(|l| {
+                                // Extract class name from source URI (e.g., "flux://Channel" -> "Channel")
+                                l.data
+                                    .source
+                                    .split("://")
+                                    .last()
+                                    .unwrap_or(&l.data.source)
+                                    .to_string()
+                            })
+                            .collect();
+                        serde_json::to_string_pretty(&classes)
+                            .unwrap_or_else(|e| format!("Error: {}", e))
+                    }
+                    Err(e) => format!("Error listing subject classes: {}", e),
                 }
             }
             None => format!("Perspective not found: {}", uuid),
         }
     }
 
-    /// Query instances of a subject class with optional filters
+    /// Query instances of a subject class
     #[tool(
-        description = "Query instances of a subject class (model) with optional Prolog filters. Returns all instances matching the criteria. WARNING: The 'query' parameter accepts raw Prolog syntax and is intended for trusted AI agents only."
+        description = "Query all instances of a subject class (model). Returns expression addresses of all instances. Use get_subject_data to read each instance's properties."
     )]
     async fn query_subjects(&self, params: Parameters<QuerySubjectsParams>) -> String {
         let p = &params.0;
 
         match get_perspective(&p.perspective_id) {
             Some(perspective) => {
-                let agent_context = self.get_agent_context_for_read().await;
+                // Find the target_class URI from the SHACL shape
+                // Shape links: {target_class} --rdf://type--> ad4m://SubjectClass
+                // AND: {target_class} --ad4m://shape--> {shapeUri}
+                // We match by class name extracted from target_class URI
 
-                // Escape class_name to prevent Prolog injection
-                let escaped_class_name = Self::escape_prolog_string(&p.class_name);
+                // First get all subject classes
+                let class_links = perspective
+                    .get_links(&LinkQuery {
+                        predicate: Some("rdf://type".to_string()),
+                        target: Some("ad4m://SubjectClass".to_string()),
+                        ..Default::default()
+                    })
+                    .await;
 
-                // Build Prolog query for subject instances
-                // Note: The filter query is passed directly as it's meant to be Prolog code
-                // Users should be aware this accepts raw Prolog syntax
-                let query = if let Some(filter) = &p.query {
-                    format!(
-                        r#"subject_class("{}", C), instance(C, Base), {}"#,
-                        escaped_class_name, filter
-                    )
-                } else {
-                    format!(
-                        r#"subject_class("{}", C), instance(C, Base)"#,
-                        escaped_class_name
-                    )
+                let target_class = match class_links {
+                    Ok(links) => links.iter().find_map(|l| {
+                        let name = l.data.source.split("://").last().unwrap_or("");
+                        if name == p.class_name {
+                            Some(l.data.source.clone())
+                        } else {
+                            None
+                        }
+                    }),
+                    Err(e) => return format!("Error finding class: {}", e),
                 };
 
-                match perspective
-                    .prolog_query_with_context(query, &agent_context)
-                    .await
-                {
-                    Ok(result) => prolog_resolution_to_string(result),
-                    Err(e) => format!("Error querying subjects: {}", e),
+                let target_class = match target_class {
+                    Some(tc) => tc,
+                    None => return format!("Subject class '{}' not found", p.class_name),
+                };
+
+                // Find instances: links where source has rdf://type -> target_class
+                let instance_links = perspective
+                    .get_links(&LinkQuery {
+                        predicate: Some("rdf://type".to_string()),
+                        target: Some(target_class),
+                        ..Default::default()
+                    })
+                    .await;
+
+                match instance_links {
+                    Ok(links) => {
+                        // Filter out the class definition itself (ad4m://SubjectClass link)
+                        let instances: Vec<String> =
+                            links.iter().map(|l| l.data.source.clone()).collect();
+                        serde_json::to_string_pretty(&instances)
+                            .unwrap_or_else(|e| format!("Error: {}", e))
+                    }
+                    Err(e) => format!("Error querying instances: {}", e),
                 }
             }
             None => format!("Perspective not found: {}", p.perspective_id),
@@ -404,29 +444,124 @@ impl Ad4mMcpHandler {
 
     /// Get all data (properties) for a specific subject instance
     #[tool(
-        description = "Get all data (properties and values) for a specific subject instance. Returns the complete state of the model instance."
+        description = "Get all data (properties and values) for a specific subject instance. Returns the complete state of the model instance as a JSON object with property names and values."
     )]
     async fn get_subject_data(&self, params: Parameters<GetSubjectDataParams>) -> String {
         let p = &params.0;
 
         match get_perspective(&p.perspective_id) {
-            Some(mut perspective) => {
-                let agent_context = self.get_agent_context_for_read().await;
-
-                let subject_class: SubjectClassOption = match serde_json::from_value(json!({
-                    "className": p.class_name
-                })) {
-                    Ok(sc) => sc,
-                    Err(e) => return format!("Error creating subject class: {}", e),
-                };
-
-                match perspective
-                    .get_subject_data(subject_class, p.expression_address.clone(), &agent_context)
+            Some(perspective) => {
+                // Resolve all properties from SHACL shape and read their values from links
+                let name_literal = format!("literal://string:shacl://{}", p.class_name);
+                let shape_links = match perspective
+                    .get_links(&LinkQuery {
+                        source: Some(name_literal),
+                        predicate: Some("ad4m://shacl_shape_uri".to_string()),
+                        ..Default::default()
+                    })
                     .await
                 {
-                    Ok(data) => data,
-                    Err(e) => format!("Error getting subject data: {}", e),
+                    Ok(links) => links,
+                    Err(e) => return format!("Error querying SHACL shape: {}", e),
+                };
+
+                if shape_links.is_empty() {
+                    return format!("No SHACL shape found for class '{}'", p.class_name);
                 }
+
+                let shape_uri = &shape_links[0].data.target;
+
+                // Get all property shapes
+                let prop_links = match perspective
+                    .get_links(&LinkQuery {
+                        source: Some(shape_uri.clone()),
+                        predicate: Some("sh://property".to_string()),
+                        ..Default::default()
+                    })
+                    .await
+                {
+                    Ok(links) => links,
+                    Err(e) => return format!("Error querying properties: {}", e),
+                };
+
+                let mut data = serde_json::Map::new();
+
+                for prop_link in &prop_links {
+                    let prop_uri = &prop_link.data.target;
+
+                    // Extract property name from URI: "flux://Channel.name" -> "name"
+                    let prop_name = prop_uri
+                        .rsplit_once('.')
+                        .map(|(_, name)| name.to_string())
+                        .unwrap_or_else(|| prop_uri.clone());
+
+                    // Get the predicate path for this property
+                    let path_links = match perspective
+                        .get_links(&LinkQuery {
+                            source: Some(prop_uri.clone()),
+                            predicate: Some("sh://path".to_string()),
+                            ..Default::default()
+                        })
+                        .await
+                    {
+                        Ok(links) => links,
+                        Err(_) => continue,
+                    };
+
+                    if let Some(path_link) = path_links.first() {
+                        let predicate = &path_link.data.target;
+
+                        // Check if this is a collection
+                        let is_collection = match perspective
+                            .get_links(&LinkQuery {
+                                source: Some(prop_uri.clone()),
+                                predicate: Some("rdf://type".to_string()),
+                                target: Some("ad4m://CollectionShape".to_string()),
+                                ..Default::default()
+                            })
+                            .await
+                        {
+                            Ok(links) => !links.is_empty(),
+                            Err(_) => false,
+                        };
+
+                        // Query the actual value links
+                        let value_links = match perspective
+                            .get_links(&LinkQuery {
+                                source: Some(p.expression_address.clone()),
+                                predicate: Some(predicate.clone()),
+                                ..Default::default()
+                            })
+                            .await
+                        {
+                            Ok(links) => links,
+                            Err(_) => continue,
+                        };
+
+                        if is_collection {
+                            let items: Vec<String> =
+                                value_links.iter().map(|l| l.data.target.clone()).collect();
+                            data.insert(
+                                prop_name,
+                                serde_json::Value::Array(
+                                    items.into_iter().map(serde_json::Value::String).collect(),
+                                ),
+                            );
+                        } else if let Some(link) = value_links.first() {
+                            // Strip literal:// prefix for cleaner output
+                            let value = link
+                                .data
+                                .target
+                                .strip_prefix("literal://string:")
+                                .unwrap_or(&link.data.target)
+                                .to_string();
+                            data.insert(prop_name, serde_json::Value::String(value));
+                        }
+                    }
+                }
+
+                serde_json::to_string_pretty(&serde_json::Value::Object(data))
+                    .unwrap_or_else(|e| format!("Error: {}", e))
             }
             None => format!("Perspective not found: {}", p.perspective_id),
         }
