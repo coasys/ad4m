@@ -994,6 +994,59 @@ impl SurrealDBService {
 
         Ok(vec![])
     }
+
+    /// Get all links matching a specific predicate where source ends with the given suffix
+    ///
+    /// # Arguments
+    /// * `_perspective_uuid` - UUID of the perspective (unused, for API consistency)
+    /// * `predicate` - Predicate URI to filter by
+    /// * `source_suffix` - Suffix that the source field must end with
+    ///
+    /// # Returns
+    /// * `Ok(Vec<DecoratedLinkExpression>)` - All matching links
+    /// * `Err(Error)` - Database query error
+    pub async fn get_links_by_predicate_and_source_suffix(
+        &self,
+        _perspective_uuid: &str,
+        predicate: &str,
+        source_suffix: &str,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        let query =
+            "SELECT * FROM link WHERE predicate = $predicate AND string::ends_with(source, $suffix)";
+        let results = self
+            .db
+            .query(query)
+            .bind(("predicate", predicate.to_string()))
+            .bind(("suffix", source_suffix.to_string()))
+            .await?;
+
+        let mut response = results;
+        let result: SurrealValue = response.take(0)?;
+
+        let json_string = serde_json::to_string(&result)?;
+        let json_value: Value = serde_json::from_str(&json_string)?;
+        let unwrapped = unwrap_surreal_json(json_value);
+
+        if let Value::Array(arr) = unwrapped {
+            let mut links: Vec<DecoratedLinkExpression> = Vec::new();
+            for value in arr {
+                match serde_json::from_value::<SurrealLink>(value.clone()) {
+                    Ok(surreal_link) => {
+                        links.push(surreal_link.into());
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to deserialize SurrealLink in get_links_by_predicate_and_source_suffix: {}. Offending value: {}",
+                            e, value
+                        );
+                    }
+                }
+            }
+            return Ok(links);
+        }
+
+        Ok(vec![])
+    }
 }
 
 #[cfg(test)]

@@ -1678,10 +1678,26 @@ export class PerspectiveProxy {
    */
   async subjectClasses(): Promise<string[]> {
     try {
-      const shaclClasses = await this.#client.subjectClassesFromSHACL(
-        this.#handle.uuid,
+      // Query SHACL class links directly — no need for a separate GraphQL endpoint
+      const classLinks = await this.get(
+        new LinkQuery({
+          predicate: "rdf://type",
+          target: "ad4m://SubjectClass",
+        }),
       );
-      return shaclClasses || [];
+      const classNames = classLinks
+        .map((l) => {
+          const source = l.data.source;
+          // Extract class name from URI like "recipe://RecipeShape" -> "Recipe"
+          const sepIdx = source.indexOf("://");
+          if (sepIdx < 0) return "";
+          const afterScheme = source.substring(sepIdx + 3);
+          const lastPart = afterScheme.split("/").pop() || "";
+          // Strip trailing "Shape" suffix if present
+          return lastPart.endsWith("Shape") ? lastPart.slice(0, -5) : lastPart;
+        })
+        .filter((name) => name.length > 0);
+      return [...new Set(classNames)];
     } catch (e) {
       console.warn("subjectClasses: SHACL lookup failed:", e);
       return [];
@@ -2660,6 +2676,103 @@ export class PerspectiveProxy {
     return result;
   }
 
+  /** Finds a single subject class whose SHACL shape matches all properties
+   * and collections present on `obj`.  Returns `null` when no match is found.
+   */
+  private async findClassByProperties(obj: object): Promise<string | null> {
+    // Extract property / collection names from the object or its prototype
+    let properties: string[] = [];
+    let collections: string[] = [];
+    const proto = Object.getPrototypeOf(obj);
+
+    if (proto?.__properties) {
+      properties = Object.keys(proto.__properties);
+    } else {
+      properties = Object.keys(obj).filter(
+        (key) => !Array.isArray((obj as any)[key]),
+      );
+    }
+
+    if (proto?.__collections) {
+      collections = Object.keys(proto.__collections).filter(
+        (k) => k !== "isSubjectInstance",
+      );
+    } else {
+      collections = Object.keys(obj).filter(
+        (key) =>
+          Array.isArray((obj as any)[key]) && key !== "isSubjectInstance",
+      );
+    }
+
+    if (properties.length === 0 && collections.length === 0) return null;
+
+    // Single SurrealDB query to fetch all SHACL links at once
+    const query = `SELECT
+      in.uri AS shape_source,
+      predicate,
+      out.uri AS target
+    FROM link
+    WHERE predicate IN ['rdf://type', 'sh://property', 'sh://collection']`;
+
+    const results = await this.querySurrealDB(query);
+    if (!results || results.length === 0) return null;
+
+    // Build className -> { shapeUri, properties[], collections[] }
+    const classShapes = new Map<
+      string,
+      { shapeUri: string; properties: string[]; collections: string[] }
+    >();
+
+    for (const r of results) {
+      if (r.predicate === "rdf://type" && r.target === "ad4m://SubjectClass") {
+        const source: string = r.shape_source;
+        const sepIdx = source.indexOf("://");
+        if (sepIdx < 0) continue;
+        let className = source
+          .substring(sepIdx + 3)
+          .split("/")
+          .pop();
+        if (!className) continue;
+        if (className.endsWith("Shape")) className = className.slice(0, -5);
+        classShapes.set(className, {
+          shapeUri: source,
+          properties: [],
+          collections: [],
+        });
+      }
+    }
+
+    for (const r of results) {
+      if (
+        r.predicate === "sh://property" ||
+        r.predicate === "sh://collection"
+      ) {
+        for (const [className, shape] of classShapes) {
+          if (r.shape_source.endsWith(`${className}Shape`)) {
+            const dotIdx = (r.target as string).lastIndexOf(".");
+            if (dotIdx < 0) continue;
+            const name = (r.target as string).substring(dotIdx + 1);
+            if (r.predicate === "sh://property") {
+              shape.properties.push(name);
+            } else {
+              shape.collections.push(name);
+            }
+          }
+        }
+      }
+    }
+
+    for (const [className, shape] of classShapes) {
+      const hasAllProps = properties.every((p) => shape.properties.includes(p));
+      const hasAllCols = collections.every((c) =>
+        shape.collections.includes(c),
+      );
+      if (hasAllProps && hasAllCols) return className;
+    }
+
+    return null;
+  }
+
   /** Returns all subject classes that match the given template object.
    * This function looks at the properties of the template object and
    * its setters and collections to create a Prolog query that finds
@@ -2672,7 +2785,15 @@ export class PerspectiveProxy {
    * @param obj The template object
    */
   async subjectClassesByTemplate(obj: object): Promise<string[]> {
-    // SHACL-based lookup by className (Prolog-free)
+    // Try property-shape matching first (more precise)
+    try {
+      const match = await this.findClassByProperties(obj);
+      if (match) return [match];
+    } catch (e) {
+      console.warn("subjectClassesByTemplate: property matching failed:", e);
+    }
+
+    // Fall back to className lookup against live SHACL links
     try {
       const o = obj as any;
       const className =
@@ -2680,15 +2801,13 @@ export class PerspectiveProxy {
         o.constructor?.className ||
         o.constructor?.prototype?.className;
       if (className) {
-        const existingClasses = await this.#client.subjectClassesFromSHACL(
-          this.#handle.uuid,
-        );
+        const existingClasses = await this.subjectClasses();
         if (existingClasses.includes(className)) {
           return [className];
         }
       }
     } catch (e) {
-      console.warn("subjectClassesByTemplate: SHACL lookup failed:", e);
+      console.warn("subjectClassesByTemplate: className lookup failed:", e);
     }
 
     return [];

@@ -359,8 +359,13 @@ impl PrologService {
     ) -> Result<QueryResolution, Error> {
         use deno_core::anyhow::anyhow;
 
-        // Check if Prolog is disabled
+        // Check if Prolog is disabled - return empty matches but log warning
         if PROLOG_MODE == PrologMode::Disabled {
+            log::warn!(
+                "Prolog query received but Prolog is DISABLED (perspective: {}, query: {})",
+                perspective_id,
+                query
+            );
             return Ok(QueryResolution::Matches(vec![]));
         }
 
@@ -410,8 +415,13 @@ impl PrologService {
     ) -> Result<QueryResolution, Error> {
         use deno_core::anyhow::anyhow;
 
-        // Check if Prolog is disabled
+        // Check if Prolog is disabled - return empty matches but log warning
         if PROLOG_MODE == PrologMode::Disabled {
+            log::warn!(
+                "Prolog subscription query received but Prolog is DISABLED (perspective: {}, query: {})",
+                perspective_id,
+                query
+            );
             return Ok(QueryResolution::Matches(vec![]));
         }
 

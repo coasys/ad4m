@@ -1,5 +1,5 @@
 use super::sdna::{generic_link_fact, is_sdna_link};
-use super::shacl_parser::{parse_prolog_sdna_to_shacl_links, parse_shacl_to_links};
+use super::shacl_parser::parse_shacl_to_links;
 use super::update_perspective;
 use super::utils::{
     prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string,
@@ -1734,26 +1734,11 @@ impl PerspectiveInstance {
         self.add_links(sdna_links, LinkStatus::Shared, None, context)
             .await?;
 
-        // Handle SHACL links:
-        // 1. If SHACL JSON provided explicitly, use it
-        // 2. Otherwise, for subject_class type, parse Prolog SDNA to generate SHACL links
+        // Handle SHACL links if SHACL JSON provided explicitly
         if let Some(shacl) = shacl_json {
             let shacl_links = parse_shacl_to_links(&shacl, &name)?;
             self.add_links(shacl_links, LinkStatus::Shared, None, context)
                 .await?;
-        } else if matches!(sdna_type, SdnaType::SubjectClass) && !original_prolog_code.is_empty() {
-            // Generate SHACL links from Prolog SDNA for backward compatibility
-            match parse_prolog_sdna_to_shacl_links(&original_prolog_code, &name) {
-                Ok(shacl_links) => {
-                    if !shacl_links.is_empty() {
-                        self.add_links(shacl_links, LinkStatus::Shared, None, context)
-                            .await?;
-                    }
-                }
-                Err(e) => {
-                    log::warn!("Failed to parse Prolog SDNA to SHACL for class '{}': {}. SHACL operations may not work for this class.", name, e);
-                }
-            }
         }
 
         //added = true;
@@ -3094,46 +3079,64 @@ impl PerspectiveInstance {
 
         // Check if this perspective is part of a neighbourhood
         if current_perspective_handle.shared_url.is_some() {
-            // Get all local user emails
+            // Helper closure: publish a signal locally and return Ok(())
+            let publish_local = |handle: PerspectiveHandle,
+                                 mut signal: PerspectiveExpression,
+                                 recipient: String| async move {
+                signal.verify_signatures();
+                get_global_pubsub()
+                    .await
+                    .publish(
+                        &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                        &serde_json::to_string(&NeighbourhoodSignalFilter {
+                            perspective: handle,
+                            signal,
+                            recipient: Some(recipient),
+                        })
+                        .unwrap(),
+                    )
+                    .await;
+            };
+
+            // Check if any managed email user is the recipient
             if let Ok(user_emails) = AgentService::list_user_emails() {
-                // Check if any local user has the recipient DID
                 for user_email in user_emails {
                     if let Ok(user_did) = AgentService::get_user_did_by_email(&user_email) {
                         if user_did == remote_agent_did {
-                            // This is a locally managed user!
-                            // Check if they own a perspective for this neighbourhood
                             if let Some(owners) = &current_perspective_handle.owners {
                                 if owners.contains(&remote_agent_did) {
-                                    // The recipient owns this perspective (they're in the same neighbourhood)
-                                    // Send signal directly via local pubsub
                                     log::debug!(
-                                        "Routing signal locally to user {} in neighbourhood {:?}",
+                                        "Routing signal locally to managed user {} in neighbourhood {:?}",
                                         user_email,
                                         current_perspective_handle.shared_url
                                     );
-
                                     let handle = self.persisted.lock().await.clone();
-                                    let mut signal = payload.clone();
-                                    signal.verify_signatures();
-
-                                    get_global_pubsub()
-                                        .await
-                                        .publish(
-                                            &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                                            &serde_json::to_string(&NeighbourhoodSignalFilter {
-                                                perspective: handle,
-                                                signal,
-                                                recipient: Some(remote_agent_did.clone()),
-                                            })
-                                            .unwrap(),
-                                        )
-                                        .await;
-
-                                    // Signal delivered locally, no need to go through link language
+                                    publish_local(handle, payload, remote_agent_did).await;
                                     return Ok(());
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            // Check if the main agent is the recipient.
+            // Treat owners=None or owners=[] as implicit main-agent ownership (legacy perspectives).
+            let main_agent_did = AgentService::with_global_instance(|s| s.did.clone());
+            if let Some(main_agent_did) = main_agent_did {
+                if main_agent_did == remote_agent_did {
+                    let is_owner = current_perspective_handle
+                        .owners
+                        .as_ref()
+                        .map_or(true, |o| o.is_empty() || o.contains(&remote_agent_did));
+                    if is_owner {
+                        log::debug!(
+                            "Routing signal locally to main agent in neighbourhood {:?}",
+                            current_perspective_handle.shared_url
+                        );
+                        let handle = self.persisted.lock().await.clone();
+                        publish_local(handle, payload, remote_agent_did).await;
+                        return Ok(());
                     }
                 }
             }
@@ -3173,12 +3176,11 @@ impl PerspectiveInstance {
             });
         }
 
-        // Route signals to local managed users who are owners of this perspective
+        // Route signals to all local agents (managed users + main agent) who are owners
         if current_perspective_handle.shared_url.is_some() {
+            // Send to each local managed email user who is an explicit owner
             if let Some(owners) = &current_perspective_handle.owners {
-                // Get all local user emails
                 if let Ok(user_emails) = AgentService::list_user_emails() {
-                    // Send signal to each local managed user who is an owner
                     for user_email in user_emails {
                         if let Ok(user_did) = AgentService::get_user_did_by_email(&user_email) {
                             if owners.contains(&user_did) {
@@ -3186,22 +3188,57 @@ impl PerspectiveInstance {
                                 let mut signal = payload.clone();
                                 signal.verify_signatures();
 
-                                let filter_data = NeighbourhoodSignalFilter {
-                                    perspective: handle.clone(),
-                                    signal: signal.clone(),
-                                    recipient: Some(user_did.clone()),
-                                };
-
                                 get_global_pubsub()
                                     .await
                                     .publish(
                                         &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                                        &serde_json::to_string(&filter_data).unwrap(),
+                                        &serde_json::to_string(&NeighbourhoodSignalFilter {
+                                            perspective: handle,
+                                            signal,
+                                            recipient: Some(user_did),
+                                        })
+                                        .unwrap(),
                                     )
                                     .await;
                             }
                         }
                     }
+                }
+            }
+
+            // Send to the main agent if it is an owner.
+            // The main agent is not in list_user_emails(), so it must be handled separately.
+            // Treat owners=None or owners=[] as implicit main-agent ownership (legacy perspectives).
+            let main_agent_did = AgentService::with_global_instance(|s| s.did.clone());
+            if let Some(main_agent_did) = main_agent_did {
+                let is_owner = current_perspective_handle
+                    .owners
+                    .as_ref()
+                    .map_or(true, |o| o.is_empty() || o.contains(&main_agent_did));
+                // Don't echo the broadcast back to the sender (loopback is handled separately).
+                let is_sender = payload.author == main_agent_did;
+                if is_owner && !is_sender {
+                    let handle = self.persisted.lock().await.clone();
+                    let mut signal = payload.clone();
+                    signal.verify_signatures();
+
+                    log::debug!(
+                        "Broadcasting signal locally to main agent in neighbourhood {:?}",
+                        current_perspective_handle.shared_url
+                    );
+
+                    get_global_pubsub()
+                        .await
+                        .publish(
+                            &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                            &serde_json::to_string(&NeighbourhoodSignalFilter {
+                                perspective: handle,
+                                signal,
+                                recipient: Some(main_agent_did),
+                            })
+                            .unwrap(),
+                        )
+                        .await;
                 }
             }
         }
@@ -3391,224 +3428,13 @@ impl PerspectiveInstance {
         //let method_start = std::time::Instant::now();
         //log::info!("🔍 SUBJECT CLASS: Starting class name resolution...");
 
-        Ok(if subject_class.class_name.is_some() {
-            //log::info!("🔍 SUBJECT CLASS: Using provided class name '{}' in {:?}", class_name, method_start.elapsed());
-            subject_class.class_name.unwrap()
+        Ok(if let Some(class_name) = subject_class.class_name {
+            class_name
         } else {
-            let query = subject_class.query.ok_or(anyhow!(
-                "SubjectClassOption needs to either have `name` or `query` set"
-            ))?;
-
-            // Use SHACL-based lookup (Prolog-free)
-            self.find_subject_class_from_shacl_by_query(&query)
-                .await?
-                .ok_or_else(|| anyhow!("No matching subject class found for query: {}", query))?
+            return Err(anyhow!(
+                "SubjectClassOption requires `className` to be set. Query-based lookup has been removed; resolve the class name client-side."
+            ));
         })
-    }
-
-    /// Find a subject class from SHACL links by parsing a Prolog-like query
-    /// Supports queries like: subject_class(Class, C), property(C, "name"), property(C, "rating").
-    /// NOTE: Ignores property_setter, collection_adder, etc. since SHACL handles those via actions
-    async fn find_subject_class_from_shacl_by_query(
-        &self,
-        query: &str,
-    ) -> Result<Option<String>, AnyError> {
-        use regex::Regex;
-
-        // Extract required properties from query like: property(C, "name"), property(C, "rating")
-        // NOTE: We use \b (word boundary) to match only "property(" not "property_setter(" etc.
-        let property_regex = Regex::new(r#"\bproperty\([^,]+,\s*"([^"]+)"\)"#)?;
-        let required_properties: Vec<String> = property_regex
-            .captures_iter(query)
-            .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
-            .collect();
-
-        // Extract required collections from query like: collection(C, "items")
-        // NOTE: We use \b to match only "collection(" not "collection_adder(" etc.
-        let collection_regex = Regex::new(r#"\bcollection\([^,]+,\s*"([^"]+)"\)"#)?;
-        let required_collections: Vec<String> = collection_regex
-            .captures_iter(query)
-            .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
-            .collect();
-
-        // Get all subject classes from SHACL rdf://type -> ad4m://SubjectClass links
-        let class_links = self
-            .get_links_local(&LinkQuery {
-                predicate: Some("rdf://type".to_string()),
-                target: Some("ad4m://SubjectClass".to_string()),
-                ..Default::default()
-            })
-            .await?;
-
-        // For each class, check if it has all required properties
-        for (link, _status) in class_links {
-            // Class name comes from link source (subject of rdf:type triple)
-            // Extract class name from URL like "flux://Community" -> "Community"
-            let class_name = if let Ok(url) = url::Url::parse(&link.data.source) {
-                // Try to get the host (for flux://Community), or path (for other formats)
-                let name = url.host_str().map(|s| s.to_string()).or_else(|| {
-                    let path = url.path().trim_start_matches('/');
-                    if !path.is_empty() {
-                        Some(path.to_string())
-                    } else {
-                        None
-                    }
-                });
-
-                match name {
-                    Some(n) if !n.is_empty() => n,
-                    _ => continue,
-                }
-            } else {
-                continue;
-            };
-
-            if class_name.is_empty() {
-                continue;
-            }
-
-            // Get properties for this class from SHACL links
-            let class_properties = self.get_shacl_properties_for_class(&class_name).await?;
-            let class_collections = self.get_shacl_collections_for_class(&class_name).await?;
-
-            // Check if all required properties are present
-            let has_all_properties = required_properties
-                .iter()
-                .all(|p| class_properties.contains(p));
-            let has_all_collections = required_collections
-                .iter()
-                .all(|c| class_collections.contains(c));
-
-            if has_all_properties && has_all_collections {
-                log::info!("Class '{}' matches query requirements", class_name);
-                return Ok(Some(class_name));
-            } else {
-                log::debug!(
-                    "Class '{}' does not match (props: {}, collections: {})",
-                    class_name,
-                    has_all_properties,
-                    has_all_collections
-                );
-            }
-        }
-
-        Ok(None)
-    }
-
-    /// Get property names for a subject class from SHACL links
-    async fn get_shacl_properties_for_class(
-        &self,
-        class_name: &str,
-    ) -> Result<Vec<String>, AnyError> {
-        let mut properties = Vec::new();
-        let shape_suffix = format!("{}Shape", class_name);
-
-        // Get sh://property links for this shape
-        let property_links = self
-            .get_links_local(&LinkQuery {
-                predicate: Some("sh://property".to_string()),
-                ..Default::default()
-            })
-            .await?;
-
-        for (link, _status) in &property_links {
-            if link.data.source.ends_with(&shape_suffix) {
-                let prop_shape_uri = &link.data.target;
-
-                // Extract property name from property shape URI
-                // Format is: "flux://Community.type" -> "type"
-                let prop_name = if let Some(dot_pos) = prop_shape_uri.rfind('.') {
-                    &prop_shape_uri[dot_pos + 1..]
-                } else {
-                    // Fallback: extract from end of URI
-                    prop_shape_uri
-                        .split("://")
-                        .last()
-                        .and_then(|s| s.split('/').last())
-                        .unwrap_or("")
-                };
-
-                if prop_name.is_empty() {
-                    continue;
-                }
-
-                // Check if this is a collection (has rdf://type = ad4m://CollectionShape)
-                let type_links = self
-                    .get_links_local(&LinkQuery {
-                        source: Some(prop_shape_uri.clone()),
-                        predicate: Some("rdf://type".to_string()),
-                        ..Default::default()
-                    })
-                    .await?;
-
-                let is_collection = type_links
-                    .iter()
-                    .any(|(l, _)| l.data.target == "ad4m://CollectionShape");
-
-                if !is_collection {
-                    properties.push(prop_name.to_string());
-                }
-            }
-        }
-
-        Ok(properties)
-    }
-
-    /// Get collection names for a subject class from SHACL links
-    async fn get_shacl_collections_for_class(
-        &self,
-        class_name: &str,
-    ) -> Result<Vec<String>, AnyError> {
-        let mut collections = Vec::new();
-        let shape_suffix = format!("{}Shape", class_name);
-
-        // Get sh://property links for this shape
-        let property_links = self
-            .get_links_local(&LinkQuery {
-                predicate: Some("sh://property".to_string()),
-                ..Default::default()
-            })
-            .await?;
-
-        for (link, _status) in &property_links {
-            if link.data.source.ends_with(&shape_suffix) {
-                let prop_shape_uri = &link.data.target;
-
-                // Check if this is a collection
-                let type_links = self
-                    .get_links_local(&LinkQuery {
-                        source: Some(prop_shape_uri.clone()),
-                        predicate: Some("rdf://type".to_string()),
-                        ..Default::default()
-                    })
-                    .await?;
-
-                let is_collection = type_links
-                    .iter()
-                    .any(|(l, _)| l.data.target == "ad4m://CollectionShape");
-
-                if is_collection {
-                    // Extract collection name from property shape URI
-                    // Format is: "flux://Community.channels" -> "channels"
-                    let coll_name = if let Some(dot_pos) = prop_shape_uri.rfind('.') {
-                        &prop_shape_uri[dot_pos + 1..]
-                    } else {
-                        // Fallback: extract from end of URI
-                        prop_shape_uri
-                            .split("://")
-                            .last()
-                            .and_then(|s| s.split('/').last())
-                            .unwrap_or("")
-                    };
-
-                    if !coll_name.is_empty() {
-                        collections.push(coll_name.to_string());
-                    }
-                }
-            }
-        }
-
-        Ok(collections)
     }
 
     /// Parse actions JSON from a literal target (format: "literal://string:{json}")
@@ -3632,21 +3458,18 @@ impl PerspectiveInstance {
         class_name: &str,
         predicate: &str,
     ) -> Result<Option<Vec<Command>>, AnyError> {
-        // Query for links with the given predicate that have a source ending with {ClassName}Shape
+        // Query SurrealDB for links with the given predicate whose source ends with {ClassName}Shape
         let shape_suffix = format!("{}Shape", class_name);
+        let uuid = self.persisted.lock().await.uuid.clone();
 
         let links = self
-            .get_links_local(&LinkQuery {
-                predicate: Some(predicate.to_string()),
-                ..Default::default()
-            })
+            .surreal_service
+            .get_links_by_predicate_and_source_suffix(&uuid, predicate, &shape_suffix)
             .await?;
 
-        // Find the link whose source ends with {ClassName}Shape
-        for (link, _status) in links {
-            if link.data.source.ends_with(&shape_suffix) {
-                return Self::parse_actions_from_literal(&link.data.target).map(Some);
-            }
+        // Return the first match
+        if let Some(link) = links.first() {
+            return Self::parse_actions_from_literal(&link.data.target).map(Some);
         }
 
         Ok(None)
@@ -3661,19 +3484,16 @@ impl PerspectiveInstance {
     ) -> Result<Option<Vec<Command>>, AnyError> {
         // Property shape URI format: {namespace}{ClassName}.{propertyName}
         let prop_suffix = format!("{}.{}", class_name, property);
+        let uuid = self.persisted.lock().await.uuid.clone();
 
         let links = self
-            .get_links_local(&LinkQuery {
-                predicate: Some(predicate.to_string()),
-                ..Default::default()
-            })
+            .surreal_service
+            .get_links_by_predicate_and_source_suffix(&uuid, predicate, &prop_suffix)
             .await?;
 
-        // Find the link whose source ends with {ClassName}.{propertyName}
-        for (link, _status) in links {
-            if link.data.source.ends_with(&prop_suffix) {
-                return Self::parse_actions_from_literal(&link.data.target).map(Some);
-            }
+        // Return the first match
+        if let Some(link) = links.first() {
+            return Self::parse_actions_from_literal(&link.data.target).map(Some);
         }
 
         Ok(None)
@@ -3686,25 +3506,21 @@ impl PerspectiveInstance {
         property: &str,
     ) -> Result<Option<String>, AnyError> {
         let prop_suffix = format!("{}.{}", class_name, property);
+        let uuid = self.persisted.lock().await.uuid.clone();
 
         let links = self
-            .get_links_local(&LinkQuery {
-                predicate: Some("ad4m://resolveLanguage".to_string()),
-                ..Default::default()
-            })
+            .surreal_service
+            .get_links_by_predicate_and_source_suffix(&uuid, "ad4m://resolveLanguage", &prop_suffix)
             .await?;
 
-        for (link, _status) in links {
-            if link.data.source.ends_with(&prop_suffix) {
-                // Extract value from literal://string:{value}
-                let prefix = "literal://string:";
-                if link.data.target.starts_with(prefix) {
-                    let encoded_value = &link.data.target[prefix.len()..];
-                    // Decode URL-encoded characters (same as parse_actions_from_literal)
-                    let decoded = urlencoding::decode(encoded_value)
-                        .map_err(|e| anyhow!("Failed to decode resolve language value: {}", e))?;
-                    return Ok(Some(decoded.to_string()));
-                }
+        if let Some(link) = links.first() {
+            // Extract value from literal://string:{value}
+            let prefix = "literal://string:";
+            if link.data.target.starts_with(prefix) {
+                let encoded_value = &link.data.target[prefix.len()..];
+                let decoded = urlencoding::decode(encoded_value)
+                    .map_err(|e| anyhow!("Failed to decode resolve language value: {}", e))?;
+                return Ok(Some(decoded.to_string()));
             }
         }
 

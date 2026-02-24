@@ -9,7 +9,7 @@ import { hideBin } from 'yargs/helpers';
 import { ChildProcessWithoutNullStreams, execFileSync, spawn } from 'child_process';
 import kill from 'tree-kill'
 import { resolve as resolvePath} from 'path'
-import { ad4mDataDirectory, cleanOutput, deleteAllAd4mData, findAndKillProcess, getAd4mHostBinary, getTestFiles, logger } from './utils.js';
+import { ad4mDataDirectory, cleanOutput, deleteAllAd4mData, getAd4mHostBinary, getTestFiles, logger } from './utils.js';
 import process from 'process';
 import { installSystemLanguages } from './installSystemLanguages.js';
 import { buildAd4mClient } from './client.js';
@@ -86,8 +86,6 @@ async function installLanguage(child: any, binaryPath: string, bundle: string, m
           neighbourhood,
           clear: () => {
             kill(child.pid!, async () => {
-              await findAndKillProcess('holochain')
-              await findAndKillProcess('lair-keystore')
               deleteAllAd4mData(relativePath);
               resolve(null);
             })
@@ -113,7 +111,6 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
       binaryPath = path.join(ad4mDataDirectory(`.ad4m-test`), 'binary', `ad4m`);
     }
 
-    await findAndKillProcess('holochain')
     const seedFile = path.join(__dirname, '../bootstrapSeed.json')
     const agentSeedFile = path.join(__dirname, `../${relativePath}-bootstrapSeed.json`);
 
@@ -152,13 +149,14 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
 
     let child: ChildProcessWithoutNullStreams;
 
-    const languageLanguageOnly = defaultLangPath ? 'false' : 'true';
+    // The bootstrap seed contains hashes for all system languages.
+    // The language-language fetches them from the bootstrap store at runtime.
     child = spawn(`${binaryPath}`, [
       'run',
       '--admin-credential', global.ad4mToken,
       '--app-data-path', relativePath,
       '--gql-port', port.toString(),
-      '--language-language-only', languageLanguageOnly,
+      '--language-language-only', 'false',
     ])
 
     const logFile = fs.createWriteStream(path.join(process.cwd(), 'ad4m-test.log'))
@@ -193,11 +191,8 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
       logger.info(`exit is called ${code}`);
     })
 
-    child.on('error', () => {
+    child.on('error', async () => {
       logger.error(`process error: ${child.pid}`)
-      findAndKillProcess('holochain')
-      findAndKillProcess('lair-keystore')
-      findAndKillProcess('ad4m')
       reject()
     });
   });
@@ -282,7 +277,8 @@ async function run() {
 
 
   if (args.ui) {
-    await startServer(relativePath, args.bundle!, args.meta!, 'expression', 4000, args.defaultLangPath, () => {
+    await installSystemLanguages(relativePath);
+    await startServer(relativePath, args.bundle!, args.meta!, 'expression', 4000, undefined, () => {
       const app = express();
 
       console.log(process.env.IP)

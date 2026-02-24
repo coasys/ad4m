@@ -66,3 +66,4 @@ rust-executor/test_data
 
 .npmrc
 docs-src/
+.worktrees/

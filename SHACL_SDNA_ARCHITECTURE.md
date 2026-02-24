@@ -220,15 +220,17 @@ for link in links {
 - [x] `resolve_property_value()` - Try SHACL for resolve language
 - [x] TypeScript `removeSubject()` - Try SHACL for destructor actions
 
-### Phase 3: Remove Prolog Fallbacks (This PR)
+### Phase 3: Remove Prolog Fallbacks ✅ (Completed in this PR)
 
-> **Note:** Prolog engines (scryer-prolog) are kept for complex queries and future
-> advanced features. Only the _fallback pattern_ is removed - SHACL becomes the
-> primary source for SDNA actions.
+> **Note:** Prolog engines (scryer-prolog) are kept available for complex queries and
+> future advanced features. Only the _fallback pattern_ is removed - SHACL is the
+> single source of truth for all SDNA actions.
 
 - [x] Remove Prolog fallbacks for action retrieval (SHACL-first is now SHACL-only)
-- [ ] Migrate Flows to same SHACL link pattern
+- [x] Migrate Flows to same SHACL link pattern (`SHACLFlow` class with `toLinks()`/`fromLinks()`)
 - [x] Keep scryer-prolog dependency (for complex Prolog queries later)
+- [x] Refactor TypeScript to use `SHACLShape.fromLinks()` / `toJSON()` throughout
+- [x] Use batched link operations (`addLinks()`) and single SurrealDB queries
 
 ---
 

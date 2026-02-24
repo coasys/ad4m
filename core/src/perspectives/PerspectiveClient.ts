@@ -157,26 +157,6 @@ export class PerspectiveClient {
     }
 
     /**
-     * Get all subject class names from SHACL links (Prolog-free implementation).
-     * 
-     * This is the preferred method when Prolog is disabled or unavailable.
-     * It queries SHACL links directly to find all registered subject classes.
-     * 
-     * @param uuid The perspective UUID
-     * @returns Array of subject class names
-     */
-    async subjectClassesFromSHACL(uuid: string): Promise<string[]> {
-        const { perspectiveSubjectClassesFromShacl } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query perspectiveSubjectClassesFromShacl($uuid: String!) {
-                perspectiveSubjectClassesFromShacl(uuid: $uuid)
-            }`,
-            variables: { uuid }
-        }))
-
-        return perspectiveSubjectClassesFromShacl
-    }
-
-    /**
      * Executes a read-only SurrealQL query against a perspective's link cache.
      * 
      * Security: Only SELECT, RETURN, and other read-only queries are permitted.
@@ -452,14 +432,20 @@ export class PerspectiveClient {
 
     /**
      * Adds Social DNA code to a perspective.
-     * @param shaclJson - Optional SHACL JSON string for SHACL-based SDNA (recommended for new code)
+     * 
+     * Preferred usage: pass shaclJson (from SHACLShape.toJSON()) as the primary schema definition.
+     * The sdnaCode parameter is kept for backward compatibility but SHACL is the source of truth
+     * for all SDNA operations. Prolog engines remain available for complex queries.
+     * 
+     * @param sdnaCode - Legacy Prolog code (pass empty string when using shaclJson)
+     * @param shaclJson - SHACL JSON string from SHACLShape.toJSON() (recommended)
      */
-    async addSdna(uuid: string,  name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string): Promise<boolean> {
+    async addSdna(uuid: string, name: string, sdnaCode: string | undefined, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string): Promise<boolean> {
         return unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveAddSdna($uuid: String!, $name: String!, $sdnaCode: String!, $sdnaType: String!, $shaclJson: String) {
+            mutation: gql`mutation perspectiveAddSdna($uuid: String!, $name: String!, $sdnaCode: String, $sdnaType: String!, $shaclJson: String) {
                 perspectiveAddSdna(uuid: $uuid, name: $name, sdnaCode: $sdnaCode, sdnaType: $sdnaType, shaclJson: $shaclJson)
             }`,
-            variables: { uuid, name, sdnaCode, sdnaType, shaclJson }
+            variables: { uuid, name, sdnaCode: sdnaCode || "", sdnaType, shaclJson }
         })).perspectiveAddSdna
     }
 
