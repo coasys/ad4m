@@ -201,4 +201,34 @@ describe("Ad4mModel — Transactions", function () {
     });
     expect(gone).to.be.null;
   });
+
+  // ── 7. Rollback on throw ──────────────────────────────────────────────────
+
+  it("transaction that throws is not committed — data remains unpersisted", async () => {
+    let abortedId: string | undefined;
+
+    let thrownErr: Error | undefined;
+    try {
+      await TestPost.transaction(perspective, async (tx) => {
+        const post = new TestPost(perspective);
+        post.title = "Should Not Persist";
+        post.body = "";
+        await post.save(tx.batchId);
+        abortedId = post.id;
+        throw new Error("intentional rollback");
+      });
+    } catch (err: any) {
+      thrownErr = err;
+    }
+
+    // The transaction MUST re-throw the original error
+    expect(thrownErr?.message).to.equal("intentional rollback");
+
+    // commitBatch was never called — the node should not exist in the perspective
+    expect(abortedId).to.be.a("string");
+    const found = await TestPost.findOne(perspective, {
+      where: { id: abortedId! },
+    });
+    expect(found).to.be.null;
+  });
 });

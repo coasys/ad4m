@@ -90,6 +90,8 @@ import { createSubscription } from "./subscription";
 export class Ad4mModel {
   #id: string;
   #perspective: PerspectiveProxy;
+  /** Tracks whether save() has ever been called on this instance (even in an uncommitted batch). */
+  #savedOnce: boolean = false;
   author: string;
   createdAt: any;
   updatedAt: any;
@@ -392,7 +394,8 @@ export class Ad4mModel {
    * ```
    */
   async save(batchId?: string) {
-    return mutation.saveInstance(this.#mutationContext(), batchId);
+    await mutation.saveInstance(this.#mutationContext(), batchId, this.#savedOnce);
+    this.#savedOnce = true;
   }
 
   /**

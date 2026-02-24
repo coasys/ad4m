@@ -365,12 +365,20 @@ export async function innerUpdate(
 export async function saveInstance(
   ctx: MutationContext,
   batchId?: string,
+  alreadyExists?: boolean,
 ): Promise<void> {
   const safeBase = formatSurrealValue(ctx.id);
-  const existingLinks = await ctx.perspective.querySurrealDB(
-    `SELECT 1 FROM link WHERE in.uri = ${safeBase} LIMIT 1`,
-  );
-  const isNew = !existingLinks || existingLinks.length === 0;
+  // Skip the DB round-trip when the caller already knows the instance was
+  // saved once (e.g. the second save() call inside the same uncommitted batch).
+  let isNew: boolean;
+  if (alreadyExists === true) {
+    isNew = false;
+  } else {
+    const existingLinks = await ctx.perspective.querySurrealDB(
+      `SELECT 1 FROM link WHERE in.uri = ${safeBase} LIMIT 1`,
+    );
+    isNew = !existingLinks || existingLinks.length === 0;
+  }
 
   let batchCreatedHere = false;
   if (!batchId) {

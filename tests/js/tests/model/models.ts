@@ -85,6 +85,9 @@ export class TestPost extends Ad4mModel {
   @Property({ through: "test://body", writable: true })
   body: string = "";
 
+  @Property({ through: "test://view_count", writable: true })
+  viewCount: number = 0;
+
   @HasMany(() => TestTag, { through: "test://has_tag" })
   tags: TestTag[] = [];
 

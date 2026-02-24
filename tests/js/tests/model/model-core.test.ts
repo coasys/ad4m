@@ -375,4 +375,66 @@ describe("Ad4mModel — Core CRUD", function () {
     expect(links.length).to.be.at.least(1);
     expect(links.some((l) => l.data.target === c.id)).to.be.true;
   });
+
+  // ── createdAt / updatedAt / author ─────────────────────────────────────────
+
+  it("findOne() populates createdAt, updatedAt, and author after save", async () => {
+    const post = await TestPost.create(perspective, {
+      title: "Meta Fields",
+      body: "",
+    });
+    const found = await TestPost.findOne(perspective, {
+      where: { id: post.id },
+    });
+    expect(found).to.not.be.null;
+    expect(found!.createdAt).to.not.be.undefined;
+    expect(found!.updatedAt).to.not.be.undefined;
+    expect(found!.author).to.be.a("string").and.not.equal("");
+    // createdAt ≤ updatedAt always holds (equal when nothing changed)
+    expect(Number(found!.createdAt)).to.be.at.most(Number(found!.updatedAt));
+  });
+
+  it("updatedAt advances past createdAt after a re-save", async () => {
+    const post = await TestPost.create(perspective, {
+      title: "Timestamp Advance",
+      body: "",
+    });
+    // Small pause — ensures the re-save link gets a strictly later timestamp
+    await new Promise((r) => setTimeout(r, 100));
+
+    post.body = "updated body";
+    await post.save();
+
+    const found = await TestPost.findOne(perspective, {
+      where: { id: post.id },
+    });
+    expect(found).to.not.be.null;
+    expect(Number(found!.updatedAt)).to.be.greaterThan(
+      Number(found!.createdAt),
+    );
+  });
+
+  // ── get(include) ───────────────────────────────────────────────────────────
+
+  it("get(include) hydrates relations on a bare-id instance", async () => {
+    const post = await TestPost.create(perspective, {
+      title: "Get Include Post",
+      body: "",
+    });
+    const comment = await TestComment.create(perspective, {
+      body: "populated via get",
+    });
+    await post.addComments(comment.id);
+
+    // Construct a fresh instance with only the id — nothing loaded yet
+    const bare = new TestPost(perspective, post.id);
+    await bare.get({ comments: true });
+
+    expect(bare.comments).to.be.an("array").with.length(1);
+    expect(bare.comments[0]).to.be.instanceOf(TestComment);
+    expect((bare.comments[0] as TestComment).id).to.equal(comment.id);
+    expect((bare.comments[0] as TestComment).body).to.equal(
+      "populated via get",
+    );
+  });
 });

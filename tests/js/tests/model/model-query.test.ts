@@ -270,6 +270,23 @@ describe("Ad4mModel — Query API", function () {
     expect(postIds).to.include(p2.id);
   });
 
+  it("include sub-query { where: { id } } narrows hydrated relations to matching ids", async () => {
+    const keep = await TestComment.create(perspective, { body: "keep" });
+    const drop = await TestComment.create(perspective, { body: "drop" });
+    await p1.addComments(keep.id);
+    await p1.addComments(drop.id);
+
+    const found = await TestPost.findOne(perspective, {
+      where: { id: p1.id },
+      include: { comments: { where: { id: keep.id } } },
+    });
+    expect(found).to.not.be.null;
+    // Only 'keep' should survive the sub-query id filter
+    expect(found!.comments).to.have.length(1);
+    expect((found!.comments[0] as TestComment).id).to.equal(keep.id);
+    expect((found!.comments[0] as TestComment).body).to.equal("keep");
+  });
+
   it("@BelongsToMany — include: { posts: true } hydrates to TestPost instances", async () => {
     const tag = await TestTag.create(perspective, { label: "hydrated-many" });
     const post1 = await TestPost.create(perspective, {
