@@ -269,4 +269,28 @@ describe("Ad4mModel — Query API", function () {
     expect(postIds).to.include(p1.id);
     expect(postIds).to.include(p2.id);
   });
+
+  it("@BelongsToMany — include: { posts: true } hydrates to TestPost instances", async () => {
+    const tag = await TestTag.create(perspective, { label: "hydrated-many" });
+    const post1 = await TestPost.create(perspective, {
+      title: "Tagged Post 1",
+      body: "",
+    });
+    const post2 = await TestPost.create(perspective, {
+      title: "Tagged Post 2",
+      body: "",
+    });
+    await post1.addTags(tag.id);
+    await post2.addTags(tag.id);
+    const found = await TestTag.findOne(perspective, {
+      where: { id: tag.id },
+      include: { posts: true },
+    });
+    expect(found).to.not.be.null;
+    expect(found!.posts.every((p) => p instanceof TestPost)).to.be.true;
+    expect(found!.posts.some((p) => (p as TestPost).id === post1.id)).to.be
+      .true;
+    expect(found!.posts.some((p) => (p as TestPost).id === post2.id)).to.be
+      .true;
+  });
 });
