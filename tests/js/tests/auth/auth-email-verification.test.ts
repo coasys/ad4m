@@ -64,7 +64,6 @@ describe("Email Verification with Mock Service", () => {
       bootstrapUrl!,
     );
 
-    // @ts-ignore - Suppress Apollo type mismatch
     adminAd4mClient = new Ad4mClient(apolloClient(gqlPort), false);
 
     // Generate initial admin agent (needed for JWT signing)
