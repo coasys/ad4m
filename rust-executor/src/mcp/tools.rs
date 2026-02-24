@@ -11,9 +11,11 @@ use crate::agent::capabilities::{
 };
 use crate::agent::{AgentContext, AgentService};
 use crate::db::Ad4mDb;
-use crate::perspectives::perspective_instance::{Command, Parameter, SubjectClassOption};
+use crate::graphql::graphql_types::{LinkQuery, LinkStatus, PerspectiveHandle, PerspectiveState};
+use crate::perspectives::perspective_instance::{Command, Parameter, SdnaType, SubjectClassOption};
 use crate::perspectives::utils::prolog_resolution_to_string;
-use crate::perspectives::{all_perspectives, get_perspective};
+use crate::perspectives::{add_perspective, all_perspectives, get_perspective};
+use crate::types::Link;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo, ToolsCapability},
@@ -118,6 +120,54 @@ pub struct SetTokenParams {
 /// Parameters for checking authentication status (no params needed)
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct AuthStatusParams {}
+
+// ============================================================================
+// Link & Perspective Parameter Types
+// ============================================================================
+
+/// Parameters for adding a link to a perspective
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct AddLinkParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+    /// Link source URI
+    pub source: String,
+    /// Link predicate URI
+    pub predicate: String,
+    /// Link target URI
+    pub target: String,
+}
+
+/// Parameters for querying links in a perspective
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct QueryLinksParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+    /// Optional source URI filter
+    pub source: Option<String>,
+    /// Optional predicate URI filter
+    pub predicate: Option<String>,
+    /// Optional target URI filter
+    pub target: Option<String>,
+}
+
+/// Parameters for adding SDNA (subject class definition) to a perspective
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct AddSdnaParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+    /// Subject class name
+    pub class_name: String,
+    /// SHACL shape definition as JSON string
+    pub shacl_json: String,
+}
+
+/// Parameters for creating a new perspective
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct AddPerspectiveParams {
+    /// Name for the new perspective
+    pub name: String,
+}
 
 // ============================================================================
 // MCP Handler
@@ -445,6 +495,168 @@ impl Ad4mMcpHandler {
                 }
             }
             None => format!("Perspective not found: {}", p.perspective_id),
+        }
+    }
+
+    // ========================================================================
+    // LINK & PERSPECTIVE TOOLS
+    // ========================================================================
+
+    /// Add a link to a perspective
+    #[tool(description = "Add a link (source, predicate, target) to a perspective.")]
+    async fn add_link(&self, params: Parameters<AddLinkParams>) -> String {
+        let p = &params.0;
+
+        match get_perspective(&p.perspective_id) {
+            Some(mut perspective) => {
+                let agent_context = match self.get_agent_context().await {
+                    Ok(ctx) => ctx,
+                    Err(e) => return format!("Authentication error: {}", e),
+                };
+
+                let link = Link {
+                    source: p.source.clone(),
+                    predicate: Some(p.predicate.clone()),
+                    target: p.target.clone(),
+                };
+
+                match perspective
+                    .add_link(link, LinkStatus::Shared, None, &agent_context)
+                    .await
+                {
+                    Ok(decorated) => {
+                        let result = json!({
+                            "success": true,
+                            "link": {
+                                "source": decorated.data.source,
+                                "predicate": decorated.data.predicate,
+                                "target": decorated.data.target,
+                                "timestamp": decorated.timestamp,
+                            }
+                        });
+                        serde_json::to_string_pretty(&result)
+                            .unwrap_or_else(|e| format!("Error: {}", e))
+                    }
+                    Err(e) => format!("Error adding link: {}", e),
+                }
+            }
+            None => format!("Perspective not found: {}", p.perspective_id),
+        }
+    }
+
+    /// Query links in a perspective
+    #[tool(
+        description = "Query links in a perspective with optional source, predicate, and target filters."
+    )]
+    async fn query_links(&self, params: Parameters<QueryLinksParams>) -> String {
+        let p = &params.0;
+
+        match get_perspective(&p.perspective_id) {
+            Some(perspective) => {
+                let agent_context = self.get_agent_context_for_read().await;
+                let _ = &agent_context; // used for consistency, get_links doesn't need it currently
+
+                let query = LinkQuery {
+                    source: p.source.clone(),
+                    predicate: p.predicate.clone(),
+                    target: p.target.clone(),
+                    ..Default::default()
+                };
+
+                match perspective.get_links(&query).await {
+                    Ok(links) => {
+                        let result: Vec<serde_json::Value> = links
+                            .iter()
+                            .map(|l| {
+                                json!({
+                                    "source": l.data.source,
+                                    "predicate": l.data.predicate,
+                                    "target": l.data.target,
+                                    "timestamp": l.timestamp,
+                                    "author": l.author,
+                                })
+                            })
+                            .collect();
+                        serde_json::to_string_pretty(&result)
+                            .unwrap_or_else(|e| format!("Error: {}", e))
+                    }
+                    Err(e) => format!("Error querying links: {}", e),
+                }
+            }
+            None => format!("Perspective not found: {}", p.perspective_id),
+        }
+    }
+
+    /// Add SDNA (subject class definition) to a perspective
+    #[tool(
+        description = "Register a subject class in a perspective using SHACL JSON definition. This defines the schema for typed model objects."
+    )]
+    async fn add_sdna(&self, params: Parameters<AddSdnaParams>) -> String {
+        let p = &params.0;
+
+        match get_perspective(&p.perspective_id) {
+            Some(mut perspective) => {
+                let agent_context = match self.get_agent_context().await {
+                    Ok(ctx) => ctx,
+                    Err(e) => return format!("Authentication error: {}", e),
+                };
+
+                match perspective
+                    .add_sdna(
+                        p.class_name.clone(),
+                        String::new(), // no prolog code, using SHACL
+                        SdnaType::SubjectClass,
+                        Some(p.shacl_json.clone()),
+                        &agent_context,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        let result = json!({
+                            "success": true,
+                            "perspective_id": p.perspective_id,
+                            "class_name": p.class_name,
+                        });
+                        serde_json::to_string_pretty(&result)
+                            .unwrap_or_else(|e| format!("Error: {}", e))
+                    }
+                    Err(e) => format!("Error adding SDNA: {}", e),
+                }
+            }
+            None => format!("Perspective not found: {}", p.perspective_id),
+        }
+    }
+
+    /// Create a new perspective
+    #[tool(description = "Create a new perspective (local knowledge graph) with a given name.")]
+    async fn add_perspective(&self, params: Parameters<AddPerspectiveParams>) -> String {
+        let p = &params.0;
+
+        let _agent_context = match self.get_agent_context().await {
+            Ok(ctx) => ctx,
+            Err(e) => return format!("Authentication error: {}", e),
+        };
+
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let handle = PerspectiveHandle {
+            uuid: uuid.clone(),
+            name: Some(p.name.clone()),
+            neighbourhood: None,
+            shared_url: None,
+            state: PerspectiveState::Private,
+            owners: None,
+        };
+
+        match add_perspective(handle, None).await {
+            Ok(_) => {
+                let result = json!({
+                    "success": true,
+                    "uuid": uuid,
+                    "name": p.name,
+                });
+                serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
+            }
+            Err(e) => format!("Error creating perspective: {}", e),
         }
     }
 

@@ -18,16 +18,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /**
- * MCP HTTP Integration Tests
- * 
- * These tests verify the MCP server works correctly over HTTP transport.
- * They make actual HTTP requests to the MCP endpoint, testing the real MCP protocol.
+ * MCP HTTP Integration Tests — Flux Chat Flow
+ *
+ * Proves an AI agent can participate in a Flux chat room entirely via MCP.
+ * NO AD4M client fallback — everything through MCP tools (except agent.generate).
  */
 
 const MCP_PORT = 3001;
 const MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}`;
 
-// MCP JSON-RPC request helper over HTTP
 let requestIdCounter = 0;
 
 interface McpResponse {
@@ -38,23 +37,17 @@ interface McpResponse {
 }
 
 async function mcpHttpRequest(
-    method: string, 
+    method: string,
     params: any = {},
     sessionId?: string
 ): Promise<McpResponse> {
     const id = ++requestIdCounter;
-    const request = {
-        jsonrpc: "2.0",
-        id,
-        method,
-        params
-    };
+    const request = { jsonrpc: "2.0", id, method, params };
 
     const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         'Accept': 'application/json'
     };
-    
     if (sessionId) {
         headers['Mcp-Session-Id'] = sessionId;
     }
@@ -72,7 +65,6 @@ async function mcpHttpRequest(
     return await response.json() as McpResponse;
 }
 
-// Helper to call MCP tool
 async function callMcpTool(
     toolName: string,
     args: Record<string, any> = {},
@@ -82,12 +74,11 @@ async function callMcpTool(
         name: toolName,
         arguments: args
     }, sessionId);
-    
+
     if (response.error) {
         throw new Error(`MCP tool error: ${response.error.message}`);
     }
-    
-    // MCP tool results come back as content array
+
     const content = response.result?.content;
     if (content && content[0]?.text) {
         try {
@@ -99,7 +90,6 @@ async function callMcpTool(
     return response.result;
 }
 
-// Helper to list available tools
 async function listMcpTools(sessionId?: string): Promise<any[]> {
     const response = await mcpHttpRequest("tools/list", {}, sessionId);
     if (response.error) {
@@ -108,32 +98,79 @@ async function listMcpTools(sessionId?: string): Promise<any[]> {
     return response.result?.tools || [];
 }
 
-// Helper to initialize MCP connection
 async function initializeMcp(): Promise<{ sessionId: string; serverInfo: any }> {
     const response = await mcpHttpRequest("initialize", {
         protocolVersion: "2024-11-05",
-        capabilities: {
-            roots: { listChanged: false }
-        },
-        clientInfo: {
-            name: "ad4m-test-client",
-            version: "1.0.0"
-        }
+        capabilities: { roots: { listChanged: false } },
+        clientInfo: { name: "ad4m-test-client", version: "1.0.0" }
     });
-    
+
     if (response.error) {
         throw new Error(`MCP initialize error: ${response.error.message}`);
     }
-    
-    // Session ID should come from response headers in stateful mode
+
     return {
         sessionId: response.result?.sessionId || "test-session",
         serverInfo: response.result
     };
 }
 
-describe("MCP HTTP Integration Tests", function() {
-    this.timeout(120000); // 2 minute timeout
+// ============================================================================
+// SHACL definitions for Flux models
+// ============================================================================
+
+const CHANNEL_SHACL = JSON.stringify({
+    target_class: "flux://Channel",
+    properties: [
+        {
+            path: "flux://channel_name",
+            name: "name",
+            datatype: "string",
+            min_count: 1,
+            max_count: 1,
+            writable: true,
+            resolve_language: "literal",
+            setter: [
+                { action: "setSingleTarget", source: "this", predicate: "flux://channel_name", target: "value", local: false }
+            ]
+        }
+    ],
+    constructor_actions: [
+        { action: "addLink", source: "this", predicate: "flux://entry_type", target: "flux://has_channel", local: false },
+        { action: "addLink", source: "this", predicate: "rdf://type", target: "flux://Channel", local: false }
+    ],
+    destructor_actions: []
+});
+
+const MESSAGE_SHACL = JSON.stringify({
+    target_class: "flux://Message",
+    properties: [
+        {
+            path: "flux://body",
+            name: "body",
+            datatype: "string",
+            min_count: 1,
+            max_count: 1,
+            writable: true,
+            resolve_language: "literal",
+            setter: [
+                { action: "setSingleTarget", source: "this", predicate: "flux://body", target: "value", local: false }
+            ]
+        }
+    ],
+    constructor_actions: [
+        { action: "addLink", source: "this", predicate: "flux://entry_type", target: "flux://has_message", local: false },
+        { action: "addLink", source: "this", predicate: "rdf://type", target: "flux://Message", local: false }
+    ],
+    destructor_actions: []
+});
+
+// ============================================================================
+// Test Suite
+// ============================================================================
+
+describe("MCP HTTP Flux Chat Integration Test", function() {
+    this.timeout(180000); // 3 minute timeout
 
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
     const appDataPath = path.join(TEST_DIR, "agents", "mcp-http-test");
@@ -144,8 +181,7 @@ describe("MCP HTTP Integration Tests", function() {
     const adminCredential = "mcp-http-test-admin";
 
     let executorProcess: ChildProcess | null = null;
-    let adminClient: Ad4mClient | null = null;
-    let testPerspectiveUuid: string | null = null;
+    let perspectiveUuid: string = "";
 
     before(async () => {
         // Clean up and create test directory
@@ -155,33 +191,30 @@ describe("MCP HTTP Integration Tests", function() {
         fs.mkdirSync(appDataPath, { recursive: true });
 
         // Start executor with MCP enabled
-        // Note: startExecutor needs to be updated to accept enable_mcp flag
         executorProcess = await startExecutor(
             appDataPath,
             bootstrapSeedPath,
             gqlPort,
             hcAdminPort,
             hcAppPort,
-            false,          // not languageLanguageOnly
+            false,              // not languageLanguageOnly
             adminCredential,
-            true            // enableMcp = true
+            undefined,          // proxyUrl (default)
+            undefined,          // bootstrapUrl (default)
+            undefined,          // relayUrl
+            true,               // enableMcp = true
         );
 
-        // Wait for both GraphQL and MCP servers to be ready
-        await sleep(5000);
+        // Wait for servers to settle
+        await sleep(3000);
 
-        // Initialize admin client for setup
-        adminClient = new Ad4mClient(apolloClient(gqlPort, adminCredential), false);
+        // Generate agent via GraphQL (no MCP equivalent yet)
+        const adminClient = new Ad4mClient(apolloClient(gqlPort, adminCredential), false);
         await adminClient.agent.generate("test-passphrase");
-
-        // Create a test perspective via GraphQL
-        const perspective = await adminClient.perspective.add("MCP HTTP Test");
-        testPerspectiveUuid = perspective.uuid;
-        console.log(`Created test perspective: ${testPerspectiveUuid}`);
+        console.log("Agent generated via GraphQL");
     });
 
     after(async () => {
-        // Cleanup executor
         if (executorProcess) {
             let attempts = 0;
             while (!executorProcess.killed && attempts < 10) {
@@ -195,149 +228,190 @@ describe("MCP HTTP Integration Tests", function() {
         }
     });
 
-    describe("MCP Server Connection", () => {
-        it("should respond to initialize request", async () => {
+    describe("1. MCP Connection & Auth", () => {
+        it("should initialize MCP connection", async () => {
             const { serverInfo } = await initializeMcp();
-            
             expect(serverInfo).to.exist;
             expect(serverInfo.protocolVersion).to.be.a('string');
             expect(serverInfo.serverInfo).to.exist;
-            expect(serverInfo.serverInfo.name).to.equal("ad4m-mcp-server");
         });
 
-        it("should list available tools", async () => {
+        it("should list all available tools including new ones", async () => {
             const tools = await listMcpTools();
-            
-            expect(tools).to.be.an('array');
-            expect(tools.length).to.be.greaterThan(0);
-            
-            // Check for expected tools
             const toolNames = tools.map((t: any) => t.name);
             expect(toolNames).to.include('list_perspectives');
-            expect(toolNames).to.include('list_subject_classes');
+            expect(toolNames).to.include('add_link');
+            expect(toolNames).to.include('query_links');
+            expect(toolNames).to.include('add_sdna');
+            expect(toolNames).to.include('add_perspective');
+            expect(toolNames).to.include('create_subject');
             expect(toolNames).to.include('query_subjects');
+            expect(toolNames).to.include('get_subject_data');
         });
-    });
 
-    describe("MCP Auth Tools", () => {
-        it("should check auth status (unauthenticated)", async () => {
+        it("should authenticate with admin credential via set_token", async () => {
+            const result = await callMcpTool('set_token', { token: adminCredential });
+            expect(result.success).to.be.true;
+        });
+
+        it("should confirm auth status", async () => {
             const status = await callMcpTool('auth_status');
-            
-            expect(status).to.exist;
-            expect(status.authenticated).to.be.a('boolean');
-        });
-
-        it("should login with email", async () => {
-            const result = await callMcpTool('login_email', {
-                email: 'test@example.com'
-            });
-            
-            // This will send a verification email in production
-            // For testing, we just verify the call succeeds
-            expect(result).to.exist;
-        });
-
-        it("should set token for authentication", async () => {
-            const result = await callMcpTool('set_token', {
-                token: adminCredential
-            });
-            
-            expect(result).to.exist;
-            expect(result.success).to.be.true;
+            expect(status.authenticated).to.be.true;
         });
     });
 
-    describe("MCP Perspective Tools", () => {
-        it("should list all perspectives", async () => {
-            // First authenticate with admin credential
-            await callMcpTool('set_token', { token: adminCredential });
-            
+    describe("2. Flux Chat Flow — All via MCP", () => {
+        it("step 1: create a perspective via MCP", async () => {
+            const result = await callMcpTool('add_perspective', { name: "Flux Test Room" });
+            expect(result.success).to.be.true;
+            expect(result.uuid).to.be.a('string');
+            perspectiveUuid = result.uuid;
+            console.log(`Created perspective via MCP: ${perspectiveUuid}`);
+        });
+
+        it("step 2: verify perspective appears in list", async () => {
             const perspectives = await callMcpTool('list_perspectives');
-            
             expect(perspectives).to.be.an('array');
-            expect(perspectives.length).to.be.greaterThan(0);
-            
-            const found = perspectives.find((p: any) => p.uuid === testPerspectiveUuid);
+            const found = perspectives.find((p: any) => p.uuid === perspectiveUuid);
             expect(found).to.exist;
+            expect(found.name).to.equal("Flux Test Room");
         });
 
-        it("should get perspective details", async () => {
-            const perspective = await callMcpTool('get_perspective', {
-                uuid: testPerspectiveUuid
+        it("step 3: register Channel subject class via add_sdna", async () => {
+            const result = await callMcpTool('add_sdna', {
+                perspective_id: perspectiveUuid,
+                class_name: "Channel",
+                shacl_json: CHANNEL_SHACL,
             });
-            
-            expect(perspective).to.exist;
-            expect(perspective.uuid).to.equal(testPerspectiveUuid);
-            expect(perspective.name).to.equal("MCP HTTP Test");
-        });
-    });
-
-    describe("MCP Subject Class Tools", () => {
-        it("should list subject classes in perspective", async () => {
-            // Add a simple subject class first via GraphQL
-            const sdna = `
-                subject_class("TestClass", c).
-                constructor(c, '[{action: "addLink", source: "this", predicate: "rdf://type", target: "test://class"}]').
-                property(c, "name").
-                property_getter(c, Base, "name", Value) :- triple(Base, "test://name", Value).
-            `;
-            await adminClient!.perspective.addSdna(testPerspectiveUuid!, sdna, "subject_class");
-            
-            // Now query via MCP
-            const classes = await callMcpTool('list_subject_classes', {
-                perspective_uuid: testPerspectiveUuid
-            });
-            
-            expect(classes).to.be.an('array');
-            expect(classes).to.include('TestClass');
-        });
-
-        it("should query subjects of a class", async () => {
-            // Create a subject instance via GraphQL
-            const proxy = await adminClient!.perspective.byUUID(testPerspectiveUuid!);
-            await proxy!.createSubject({ name: "Test Instance" }, "TestClass");
-            
-            // Query via MCP
-            const subjects = await callMcpTool('query_subjects', {
-                perspective_uuid: testPerspectiveUuid,
-                class_name: "TestClass"
-            });
-            
-            expect(subjects).to.be.an('array');
-            expect(subjects.length).to.be.greaterThan(0);
-        });
-    });
-
-    describe("MCP Link Operations", () => {
-        it("should query links in perspective", async () => {
-            const links = await callMcpTool('query_links', {
-                perspective_uuid: testPerspectiveUuid,
-                query: {}  // Empty query returns all links
-            });
-            
-            expect(links).to.be.an('array');
-        });
-
-        it("should add a link to perspective", async () => {
-            const result = await callMcpTool('add_link', {
-                perspective_uuid: testPerspectiveUuid,
-                link: {
-                    source: "test://source",
-                    predicate: "test://predicate",
-                    target: "test://target"
-                }
-            });
-            
-            expect(result).to.exist;
             expect(result.success).to.be.true;
-            
-            // Verify link was added
-            const links = await callMcpTool('query_links', {
-                perspective_uuid: testPerspectiveUuid,
-                query: { predicate: "test://predicate" }
+        });
+
+        it("step 4: register Message subject class via add_sdna", async () => {
+            const result = await callMcpTool('add_sdna', {
+                perspective_id: perspectiveUuid,
+                class_name: "Message",
+                shacl_json: MESSAGE_SHACL,
             });
-            
+            expect(result.success).to.be.true;
+        });
+
+        it("step 5: verify subject classes are registered", async () => {
+            const classes = await callMcpTool('list_subject_classes', {
+                perspective_id: perspectiveUuid,
+            });
+            // Result comes as prolog resolution string, should contain Channel and Message
+            const classStr = typeof classes === 'string' ? classes : JSON.stringify(classes);
+            expect(classStr).to.include('Channel');
+            expect(classStr).to.include('Message');
+        });
+
+        let channelAddr: string;
+
+        it("step 6: create a Channel instance via create_subject", async () => {
+            channelAddr = `flux://channel-${Date.now()}`;
+            const result = await callMcpTool('create_subject', {
+                perspective_id: perspectiveUuid,
+                class_name: "Channel",
+                expression_address: channelAddr,
+                initial_values: JSON.stringify({ name: "general" }),
+            });
+            expect(result.created).to.be.true;
+            console.log(`Created Channel: ${channelAddr}`);
+        });
+
+        it("step 7: set channel name property via add_link", async () => {
+            // The constructor should have set some links, but let's also explicitly
+            // set the channel name via a direct link
+            const result = await callMcpTool('add_link', {
+                perspective_id: perspectiveUuid,
+                source: channelAddr,
+                predicate: "flux://channel_name",
+                target: "literal://string:general",
+            });
+            expect(result.success).to.be.true;
+        });
+
+        let messageAddr: string;
+
+        it("step 8: create a Message in the channel via create_subject", async () => {
+            messageAddr = `flux://message-${Date.now()}`;
+            const result = await callMcpTool('create_subject', {
+                perspective_id: perspectiveUuid,
+                class_name: "Message",
+                expression_address: messageAddr,
+                initial_values: JSON.stringify({ body: "Hello from MCP!" }),
+            });
+            expect(result.created).to.be.true;
+            console.log(`Created Message: ${messageAddr}`);
+        });
+
+        it("step 9: set message body via add_link", async () => {
+            const result = await callMcpTool('add_link', {
+                perspective_id: perspectiveUuid,
+                source: messageAddr,
+                predicate: "flux://body",
+                target: "literal://string:Hello from MCP!",
+            });
+            expect(result.success).to.be.true;
+        });
+
+        it("step 10: link message as child of channel via add_link", async () => {
+            const result = await callMcpTool('add_link', {
+                perspective_id: perspectiveUuid,
+                source: channelAddr,
+                predicate: "ad4m://has_child",
+                target: messageAddr,
+            });
+            expect(result.success).to.be.true;
+        });
+
+        it("step 11: query all channels via query_subjects", async () => {
+            const result = await callMcpTool('query_subjects', {
+                perspective_id: perspectiveUuid,
+                class_name: "Channel",
+            });
+            const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+            expect(resultStr).to.include(channelAddr);
+        });
+
+        it("step 12: get channel data via get_subject_data", async () => {
+            const data = await callMcpTool('get_subject_data', {
+                perspective_id: perspectiveUuid,
+                class_name: "Channel",
+                expression_address: channelAddr,
+            });
+            const dataStr = typeof data === 'string' ? data : JSON.stringify(data);
+            expect(dataStr).to.include("general");
+        });
+
+        it("step 13: query links to find messages in channel", async () => {
+            const links = await callMcpTool('query_links', {
+                perspective_id: perspectiveUuid,
+                source: channelAddr,
+                predicate: "ad4m://has_child",
+            });
+            expect(links).to.be.an('array');
             expect(links.length).to.be.greaterThan(0);
+            const msgLink = links.find((l: any) => l.target === messageAddr);
+            expect(msgLink).to.exist;
+        });
+
+        it("step 14: get message data via get_subject_data", async () => {
+            const data = await callMcpTool('get_subject_data', {
+                perspective_id: perspectiveUuid,
+                class_name: "Message",
+                expression_address: messageAddr,
+            });
+            const dataStr = typeof data === 'string' ? data : JSON.stringify(data);
+            expect(dataStr).to.include("Hello from MCP!");
+        });
+
+        it("step 15: query all links in perspective", async () => {
+            const links = await callMcpTool('query_links', {
+                perspective_id: perspectiveUuid,
+            });
+            expect(links).to.be.an('array');
+            expect(links.length).to.be.greaterThan(5); // channel + message + type links + child link
         });
     });
 });

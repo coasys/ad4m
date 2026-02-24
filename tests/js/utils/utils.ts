@@ -151,6 +151,7 @@ export async function startExecutor(dataPath: string,
     proxyUrl: string = "wss://dev-test-bootstrap2.holochain.org",
     bootstrapUrl: string = "https://dev-test-bootstrap2.holochain.org",
     relayUrl?: string,
+    enableMcp: boolean = false,
 ): Promise<ChildProcess> {
     const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
 
@@ -172,23 +173,32 @@ export async function startExecutor(dataPath: string,
     }
 
     const relayUrlArg = relayUrl ? `--hc-relay-url ${relayUrl}` : '';
+    const mcpArg = enableMcp ? '--enable-mcp' : '';
 
     if (!adminCredential) {
-        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} ${relayUrlArg} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --run-dapp-server false`, execOptions)
+        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} ${relayUrlArg} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --run-dapp-server false ${mcpArg}`, execOptions)
     } else {
-        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} ${relayUrlArg} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${adminCredential} --run-dapp-server false`, execOptions)
+        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} ${relayUrlArg} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${adminCredential} --run-dapp-server false ${mcpArg}`, execOptions)
     }
     let executorReady = new Promise<void>((resolve, reject) => {
-        executorProcess!.stdout!.on('data', (data) => {
-            if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
-                resolve()
+        const waitFor = enableMcp
+            ? [`listening on http://127.0.0.1:${gqlPort}`, 'MCP HTTP server listening']
+            : [`listening on http://127.0.0.1:${gqlPort}`];
+        const found = new Set<string>();
+
+        const checkReady = (data: string) => {
+            for (const marker of waitFor) {
+                if (data.includes(marker)) {
+                    found.add(marker);
+                }
             }
-        });
-        executorProcess!.stderr!.on('data', (data) => {
-            if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
-                resolve()
+            if (found.size === waitFor.length) {
+                resolve();
             }
-        });
+        };
+
+        executorProcess!.stdout!.on('data', (data: any) => checkReady(data.toString()));
+        executorProcess!.stderr!.on('data', (data: any) => checkReady(data.toString()));
     })
 
     executorProcess!.stdout!.on('data', (data) => {
