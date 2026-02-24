@@ -70,6 +70,7 @@ That PR already completed the foundational migration:
 | 4 Model inheritance           | ✅ COMPLETE    |
 | 5 CRDT ordering               | ⏳ NOT STARTED |
 | 0 tests/js migration          | ⏳ PENDING     |
+| G External consumer migration | ⏳ NOT STARTED |
 
 ---
 
@@ -1203,6 +1204,78 @@ to be cleanly separated before ordering logic can be injected cleanly).
 
 ---
 
+## Phase G — External Consumer Migration & Prolog Subject Proxy Cleanup ⏳ NOT STARTED
+
+This phase is gated on **flux** and **ad4m-hooks** migrating their `SubjectRepository` implementations to the `Ad4mModel` API. It is not actionable on the `ad4m` side until that migration is complete, but the removal targets are well-understood now and are documented here so they don't get lost.
+
+### Background: What Flux and Hooks Currently Use
+
+**`flux/packages/api/src/factory/SubjectRepository`** (the one inside Flux — separate from `ad4m-hooks`):
+
+- `getAll()` calls `perspective.infer("subject_class(C), instance(C, Base), triple(...).")` — Prolog query
+- `getAll()` with pagination calls `perspective.infer("findall([Timestamp, Base], ...)")` — also Prolog
+- After `infer()` returns IDs, creates `new Subject(perspective, base, className)` + calls `subject.init()` — Subject proxy (already deleted from `Subject.ts` in Phase 1c, so this is the Rust Subject proxy path via GraphQL)
+- `getSubjectData()` reads properties by invoking Subject proxy getters (promise-based async getters), not `perspective.getSubjectData()`
+
+**`ad4m-hooks/helpers/src/factory/SubjectRepository`** (the one inside the `ad4m` monorepo):
+
+- `getSubjectData()` calls `perspective.getSubjectData(this.subject, entry.baseExpression)` — which calls `PerspectiveClient.getSubjectData()` → Rust `get_subject_data()` → 5 separate Prolog queries
+
+### Migration Path for Each Consumer
+
+**Flux `SubjectRepository`:**
+
+Replace `getAll()` + `getSubjectData()` with `Ad4mModel.findAll()`. The Subject proxy pattern (`subject.init()` + async getters) is replaced entirely by the SHACL-backed decorator model. For Flux's paginated case, use `findPage()` or a `limit`/`offset` query.
+
+```typescript
+// Before (Flux SubjectRepository.getAllData)
+const subjects = await this.getAll(source); // infer() → Prolog
+const data = await Promise.all(subjects.map(getSubjectData)); // Subject proxy getters
+
+// After
+const data = await MyModel.findAll(perspective, { source });
+```
+
+**`ad4m-hooks` `SubjectRepository`:**
+
+Replace `perspective.getSubjectData()` calls with `Ad4mModel.getData()` or `findAll()`. The hooks themselves (`useSubjects`, `useSubject`, etc.) should be wired to `Ad4mModel.subscribe()` for live updates rather than polling.
+
+### What Becomes Removable After Migration
+
+**TypeScript (`PerspectiveProxy.ts` / `PerspectiveClient.ts`):**
+
+| Symbol              | File                   | Action                                                   |
+| ------------------- | ---------------------- | -------------------------------------------------------- |
+| `getSubjectData()`  | `PerspectiveProxy.ts`  | Delete — only consumer is `ad4m-hooks/SubjectRepository` |
+| `getSubjectProxy()` | `PerspectiveProxy.ts`  | Delete — only consumer is `flux/SubjectRepository`       |
+| `getSubjectData()`  | `PerspectiveClient.ts` | Delete — no remaining callers                            |
+
+**Rust (`perspective_instance.rs`):**
+
+| Symbol                            | Action | Notes                                                                                                 |
+| --------------------------------- | ------ | ----------------------------------------------------------------------------------------------------- |
+| `get_subject_data()`              | Delete | Uses 5 Prolog queries: `subject_class`, `instance`, `property`, `property_getter`, `property_resolve` |
+| The `getSubjectData` GQL resolver | Delete | The entry point that exposes `get_subject_data` over GraphQL                                          |
+
+**`ad4m-hooks/helpers/src/factory/SubjectRepository.ts`:**
+
+Deprecate and eventually delete the whole class once hooks are rewritten to use `Ad4mModel`. Its `getAll()`/`create()`/`update()` surface maps directly onto `Ad4mModel.findAll()`/`save()`/`save()`. The hooks (`useSubjects` etc.) that depend on it should be rewritten to use `Ad4mModel.subscribe()` for live updates.
+
+**`flux/packages/api/src/factory/SubjectRepository.ts`:**
+
+Deprecate and eventually delete once Flux models are all `@Model`-decorated `Ad4mModel` subclasses. The paginated `getAll()` maps to `findPage()`. The `create()`/`update()` surface maps to `Ad4mModel.save()`.
+
+### Prolog Exposure After Migration
+
+Once Phase G is complete, `infer()` / `subscribeInfer()` remain as **explicit, opt-in** tools for hand-crafted Prolog queries — they are intentionally preserved per the architectural principles. The Prolog facts for model predicates continue to be derived from SHACL via `shacl_to_prolog.rs` so that `infer()` queries can reference model properties by name. What disappears is the **hidden Prolog path** — the one that fired invisibly inside `getSubjectData`, `getSubjectProxy`, and `Subject.init()` without the caller knowing Prolog was involved.
+
+### Prerequisites
+
+- Flux decorator rename (Phase F) must be complete first — there is no point migrating `SubjectRepository` before the model classes themselves use the new decorator API
+- `Ad4mModel.findPage()` should be verified with a full integration test before Flux's paginated `getAll()` is migrated
+
+---
+
 ## Test Strategy
 
 ### `ad4m/tests/js` — canonical integration test suite (post-merge)
@@ -1290,4 +1363,11 @@ Merge origin/dev (SHACL/Prolog PR #654) ✅             ← `9c6c57c0`
 4   Model inheritance (WeakMap already done in Phase 2) ✅  ← verified by scenario 09
 5   CRDT ordering ⏳                                    ← after 3e; fills in scenario 10
 F   Flux decorator rename (~15 files in packages/api)   ← after test app validates Phase 2
+G   External consumer migration ⏳                       ← gated on flux + hooks teams
+      ← flux/packages/api/SubjectRepository → rewrite using Ad4mModel.findAll()/save()
+      ← ad4m-hooks/helpers/SubjectRepository → rewrite using Ad4mModel + subscribe()
+      ← delete PerspectiveProxy.getSubjectData() + getSubjectProxy()
+      ← delete PerspectiveClient.getSubjectData()
+      ← delete Rust get_subject_data() + GQL resolver
+      ← prerequisite: Phase F (decorator rename) complete in flux
 ```
