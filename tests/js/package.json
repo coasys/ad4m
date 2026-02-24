@@ -4,12 +4,9 @@
   "type": "module",
   "scripts": {
     "test": "node scripts/cleanTestingData.js && pnpm run prepare-test && pnpm run test-run && node scripts/cleanTestingData.js",
-    "test-main": "pnpm run test",
     "test:windows": "pnpm run prepare-test:windows && pnpm run test-run:windows && node scripts/cleanTestingData.js",
     "test-run:windows": "node scripts/cleanup.js && pnpm run test-smoke && node scripts/cleanup.js && pnpm run test-auth && node scripts/cleanup.js && pnpm run test-integration && node scripts/cleanup.js && pnpm run test-sdna && node scripts/cleanup.js && pnpm run test-smart-literal && node scripts/cleanup.js && pnpm run test-model",
-    "test-all:windows": "pnpm run test-run:windows",
     "test-run": "node scripts/cleanup.js && pnpm run test-smoke && node scripts/cleanup.js && pnpm run test-auth && node scripts/cleanup.js && pnpm run test-integration && node scripts/cleanup.js && pnpm run test-sdna && node scripts/cleanup.js && pnpm run test-smart-literal && node scripts/cleanup.js && pnpm run test-model",
-    "test-all": "pnpm run test-run",
     "test-smoke": "ts-mocha -p tsconfig.json --require tests/setup.ts --timeout 1200000 --exit tests/smoke.test.ts",
     "test-integration": "ts-mocha -p tsconfig.json --require tests/setup.ts --timeout 1200000 --exit tests/integration/integration.test.ts",
     "test-app": "ts-mocha -p tsconfig.json --require tests/setup.ts --timeout 1200000 --exit tests/auth/app.test.ts",
