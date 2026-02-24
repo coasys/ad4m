@@ -7,18 +7,18 @@ serves as the target pattern for the rest of the suite.
 
 ## Changes already made
 
-| What                                   | Before                                 | After                                        |
-| -------------------------------------- | -------------------------------------- | -------------------------------------------- |
-| Smoke test renamed                     | `tests/simple.test.ts`                 | `tests/smoke.test.ts`                        |
-| fromJSONSchema moved into model/       | `tests/model-from-json-schema.test.ts` | `tests/model/model-from-json-schema.test.ts` |
-| fromJSONSchema added to test-model run | —                                      | `test-model` script now includes it          |
-| Shared executor for model suite        | 8 HC startups per `pnpm test-model`    | 1 HC startup via Root Hooks Plugin           |
-| integration/ folder created            | `tests/integration.test.ts` + bare `.ts` suite modules at top level | `tests/integration/` subfolder |
-| auth/ folder created                   | `tests/app.test.ts`, `tests/authentication.test.ts`, `tests/email-verification.test.ts` | `tests/auth/` |
-| sdna/ folder created                   | `tests/sdna.test.ts`, `tests/smart-literal.test.ts` | `tests/sdna/` |
-| multi-user/ folder created             | `tests/multi-user*.test.ts` at top level | `tests/multi-user/` subfolder |
-| multi-user.test.ts renamed             | `tests/multi-user.test.ts`             | `tests/multi-user/multi-user-auth.test.ts`   |
-| Dynamic ports for sdna tests           | Hardcoded 16600-16602                  | `startAgent` dynamic ports                   |
+| What                                   | Before                                                                                  | After                                        |
+| -------------------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------- |
+| Smoke test renamed                     | `tests/simple.test.ts`                                                                  | `tests/smoke.test.ts`                        |
+| fromJSONSchema moved into model/       | `tests/model-from-json-schema.test.ts`                                                  | `tests/model/model-from-json-schema.test.ts` |
+| fromJSONSchema added to test-model run | —                                                                                       | `test-model` script now includes it          |
+| Shared executor for model suite        | 8 HC startups per `pnpm test-model`                                                     | 1 HC startup via Root Hooks Plugin           |
+| integration/ folder created            | `tests/integration.test.ts` + bare `.ts` suite modules at top level                     | `tests/integration/` subfolder               |
+| auth/ folder created                   | `tests/app.test.ts`, `tests/authentication.test.ts`, `tests/email-verification.test.ts` | `tests/auth/`                                |
+| sdna/ folder created                   | `tests/sdna.test.ts`, `tests/smart-literal.test.ts`                                     | `tests/sdna/`                                |
+| multi-user/ folder created             | `tests/multi-user*.test.ts` at top level                                                | `tests/multi-user/` subfolder                |
+| multi-user.test.ts renamed             | `tests/multi-user.test.ts`                                                              | `tests/multi-user/multi-user-auth.test.ts`   |
+| Dynamic ports for sdna tests           | Hardcoded 16600-16602                                                                   | `startAgent` dynamic ports                   |
 
 ---
 
@@ -198,15 +198,15 @@ which is slower but gives proper isolation and makes failures easier to locate.
 
 Describe blocks and target files:
 
-| Lines | Block | Target file |
-|-------|-------|-------------|
-| 109–301 | `Multi-User Configuration` | `multi-user-config.test.ts` |
-| 302–432 | `Basic Multi-User Functionality` (skipped) | include in config |
-| 433–608 | `Perspective Isolation` | `multi-user-isolation.test.ts` |
-| 609–682 | `Link Authoring and Signatures` | `multi-user-isolation.test.ts` |
-| 683–801 | `Subject Creation and SDNA Operations` | `multi-user-sdna.test.ts` |
-| 802–1350 | `Agent Profiles and Status` | `multi-user-profiles.test.ts` |
-| 1351–2187 | `Multi-User Neighbourhood Sharing` | `multi-user-neighbourhood.test.ts` |
-| 2188–2955 | `Multi-Node Multi-User Integration` | `multi-user-neighbourhood.test.ts` |
-| 2956–3376 | `Perspective Subscriptions` | `multi-user-subscriptions.test.ts` |
-| 3377–3689 | `Multi-User Notifications` | `multi-user-notifications.test.ts` |
+| Lines     | Block                                      | Target file                        |
+| --------- | ------------------------------------------ | ---------------------------------- |
+| 109–301   | `Multi-User Configuration`                 | `multi-user-config.test.ts`        |
+| 302–432   | `Basic Multi-User Functionality` (skipped) | include in config                  |
+| 433–608   | `Perspective Isolation`                    | `multi-user-isolation.test.ts`     |
+| 609–682   | `Link Authoring and Signatures`            | `multi-user-isolation.test.ts`     |
+| 683–801   | `Subject Creation and SDNA Operations`     | `multi-user-sdna.test.ts`          |
+| 802–1350  | `Agent Profiles and Status`                | `multi-user-profiles.test.ts`      |
+| 1351–2187 | `Multi-User Neighbourhood Sharing`         | `multi-user-neighbourhood.test.ts` |
+| 2188–2955 | `Multi-Node Multi-User Integration`        | `multi-user-neighbourhood.test.ts` |
+| 2956–3376 | `Perspective Subscriptions`                | `multi-user-subscriptions.test.ts` |
+| 3377–3689 | `Multi-User Notifications`                 | `multi-user-notifications.test.ts` |
