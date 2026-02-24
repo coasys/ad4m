@@ -15,6 +15,7 @@ import { expect } from "chai";
 import { Ad4mClient, PerspectiveProxy } from "@coasys/ad4m";
 import fetch from "node-fetch";
 import { startAgent } from "../../helpers/index.js";
+import { getSharedAgent } from "./hooks.js";
 import { wipePerspective } from "../../utils/utils.js";
 import { TestPost, TestBaseModel, TestDerivedModel } from "./models.js";
 
@@ -26,21 +27,26 @@ global.fetch = fetch;
 describe("Ad4mModel — Model Inheritance", function () {
   this.timeout(120_000);
 
-  let stop: () => Promise<void>;
+  let ownStop: (() => Promise<void>) | null = null;
   let ad4m: Ad4mClient;
   let perspective: PerspectiveProxy;
 
   before(async () => {
-    const agent = await startAgent("model-inheritance");
-    ad4m = agent.client;
-    stop = agent.stop;
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("model-inheritance");
+      ad4m = agent.client;
+      ownStop = agent.stop;
+    }
     perspective = await ad4m.perspective.add("model-inheritance-test");
     await TestDerivedModel.register(perspective);
     await TestPost.register(perspective);
   });
 
   after(async () => {
-    await stop();
+    if (ownStop) await ownStop();
   });
 
   beforeEach(async () => {

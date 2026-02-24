@@ -19,6 +19,7 @@ import {
 } from "@coasys/ad4m";
 import fetch from "node-fetch";
 import { startAgent } from "../../helpers/index.js";
+import { getSharedAgent } from "./hooks.js";
 import { TestPost, TestTag } from "./models.js";
 
 //@ts-ignore
@@ -77,19 +78,24 @@ describe("Ad4mModel — generatePrologFacts() [pure]", function () {
 describe("Ad4mModel — Prolog Bridge (executor)", function () {
   this.timeout(120_000);
 
-  let stop: () => Promise<void>;
+  let ownStop: (() => Promise<void>) | null = null;
   let ad4m: Ad4mClient;
   let perspective: PerspectiveProxy;
 
   before(async () => {
-    const agent = await startAgent("model-prolog");
-    ad4m = agent.client;
-    stop = agent.stop;
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("model-prolog");
+      ad4m = agent.client;
+      ownStop = agent.stop;
+    }
     perspective = await ad4m.perspective.add("model-prolog-test");
   });
 
   after(async () => {
-    await stop();
+    if (ownStop) await ownStop();
   });
 
   it("perspective.infer() succeeds using generated Prolog facts", async () => {

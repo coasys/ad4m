@@ -12,10 +12,10 @@
  */
 
 import { expect } from "chai";
-import { ChildProcess } from "node:child_process";
 import { Ad4mClient, LinkQuery, PerspectiveProxy } from "@coasys/ad4m";
 import fetch from "node-fetch";
 import { startAgent, waitUntil } from "../../helpers/index.js";
+import { getSharedAgent } from "./hooks.js";
 import { wipePerspective } from "../../utils/utils.js";
 import { TestComment, TestPost, TestTag } from "./models.js";
 
@@ -25,14 +25,19 @@ global.fetch = fetch;
 describe("Ad4mModel — Core CRUD", function () {
   this.timeout(120_000);
 
-  let stop: () => Promise<void>;
+  let ownStop: (() => Promise<void>) | null = null;
   let ad4m: Ad4mClient;
   let perspective: PerspectiveProxy;
 
   before(async () => {
-    const agent = await startAgent("model-core");
-    ad4m = agent.client;
-    stop = agent.stop;
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("model-core");
+      ad4m = agent.client;
+      ownStop = agent.stop;
+    }
     perspective = await ad4m.perspective.add("model-core-test");
     await TestPost.register(perspective);
     await TestComment.register(perspective);
@@ -40,7 +45,7 @@ describe("Ad4mModel — Core CRUD", function () {
   });
 
   after(async () => {
-    await stop();
+    if (ownStop) await ownStop();
   });
 
   beforeEach(async () => {

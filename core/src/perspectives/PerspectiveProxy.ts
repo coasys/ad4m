@@ -30,6 +30,7 @@ import {
 } from "../model/decorators";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
+import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
 import { AIClient } from "../ai/AIClient";
 import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
 import { gql } from "@apollo/client/core";
@@ -1159,30 +1160,57 @@ export class PerspectiveProxy {
 
   /** Returns all the Social DNA flows defined in this perspective */
   async sdnaFlows(): Promise<string[]> {
-    const allFlows = await this.infer("register_sdna_flow(X, _)");
-    return allFlows.map((x) => x.X);
+    // Query for all flow registration links
+    const flowLinks = await this.get(
+      new LinkQuery({
+        source: "ad4m://self",
+        predicate: "ad4m://has_flow",
+      }),
+    );
+    return flowLinks.map((l) => {
+      try {
+        return Literal.fromUrl(l.data.target).get() as string;
+      } catch {
+        return l.data.target;
+      }
+    });
   }
 
   /** Returns all Social DNA flows that can be started from the given expression */
   async availableFlows(exprAddr: string): Promise<string[]> {
-    const availableFlows = await this.infer(
-      `flowable("${exprAddr}", F), register_sdna_flow(X, F)`,
-    );
-    return availableFlows.map((x) => x.X);
+    const allFlowNames = await this.sdnaFlows();
+    const available: string[] = [];
+    for (const name of allFlowNames) {
+      const flow = await this.getFlow(name);
+      if (!flow) continue;
+      if (flow.flowable === "any") {
+        available.push(name);
+      } else {
+        // Check if the expression matches the flowable link pattern
+        const pattern = flow.flowable as LinkPattern;
+        const source = pattern.source || exprAddr;
+        const links = await this.get(
+          new LinkQuery({
+            source,
+            predicate: pattern.predicate,
+            target: pattern.target,
+          }),
+        );
+        if (links.length > 0) {
+          available.push(name);
+        }
+      }
+    }
+    return available;
   }
 
   /**  Starts the Social DNA flow @param flowName on the expression @param exprAddr */
   async startFlow(flowName: string, exprAddr: string) {
-    let startAction = await this.infer(
-      `start_action(Action, F), register_sdna_flow("${flowName}", F)`,
-    );
-    // should always return one solution...
-    try {
-      startAction = JSON.parse(startAction[0].Action);
-    } catch (e) {
-      throw `Failed to parse start action for flow "${flowName}": ${e}`;
-    }
-    await this.executeAction(startAction, exprAddr, undefined);
+    const flow = await this.getFlow(flowName);
+    if (!flow) throw `Flow "${flowName}" not found`;
+    if (flow.startAction.length === 0)
+      throw `Flow "${flowName}" has no start action`;
+    await this.executeAction(flow.startAction, exprAddr, undefined);
   }
 
   /** Returns all expressions in the given state of given Social DNA flow */
@@ -1190,40 +1218,81 @@ export class PerspectiveProxy {
     flowName: string,
     flowState: number,
   ): Promise<string[]> {
-    let expressions = await this.infer(
-      `register_sdna_flow("${flowName}", F), flow_state(X, ${flowState}, F)`,
+    const flow = await this.getFlow(flowName);
+    if (!flow) return [];
+    // Find the state with the matching value
+    const state = flow.states.find((s) => s.value === flowState);
+    if (!state) return [];
+    // Query for expressions matching this state's check pattern
+    const pattern = state.stateCheck;
+    const links = await this.get(
+      new LinkQuery({
+        predicate: pattern.predicate,
+        target: pattern.target,
+      }),
     );
-    return expressions.map((r) => r.X);
+    // Return the sources (expression addresses) - use source if pattern has no explicit source
+    return links.map((l) => (pattern.source ? l.data.target : l.data.source));
   }
 
   /** Returns the given expression's flow state with regard to given Social DNA flow */
   async flowState(flowName: string, exprAddr: string): Promise<number> {
-    let state = await this.infer(
-      `register_sdna_flow("${flowName}", F), flow_state("${exprAddr}", X, F)`,
-    );
-    return state[0].X;
+    const flow = await this.getFlow(flowName);
+    if (!flow) throw `Flow "${flowName}" not found`;
+    // Check each state to find which one the expression is in
+    for (const state of flow.states) {
+      const pattern = state.stateCheck;
+      const source = pattern.source || exprAddr;
+      const links = await this.get(
+        new LinkQuery({
+          source,
+          predicate: pattern.predicate,
+          target: pattern.target,
+        }),
+      );
+      if (links.length > 0) return state.value;
+    }
+    throw `Expression "${exprAddr}" is not in any state of flow "${flowName}"`;
   }
 
   /** Returns available action names, with regard to Social DNA flow and expression's flow state */
   async flowActions(flowName: string, exprAddr: string): Promise<string[]> {
-    let actionNames = await this.infer(
-      `register_sdna_flow("${flowName}", Flow), flow_state("${exprAddr}", State, Flow), action(State, Name, _, _)`,
-    );
-    return actionNames.map((r) => r.Name);
+    const flow = await this.getFlow(flowName);
+    if (!flow) return [];
+    // Determine current state
+    let currentStateName: string | null = null;
+    for (const state of flow.states) {
+      const pattern = state.stateCheck;
+      const source = pattern.source || exprAddr;
+      const links = await this.get(
+        new LinkQuery({
+          source,
+          predicate: pattern.predicate,
+          target: pattern.target,
+        }),
+      );
+      if (links.length > 0) {
+        currentStateName = state.name;
+        break;
+      }
+    }
+    if (!currentStateName) return [];
+    // Return transitions available from current state
+    return flow.transitions
+      .filter((t) => t.fromState === currentStateName)
+      .map((t) => t.actionName);
   }
 
   /** Runs given Social DNA flow action */
   async runFlowAction(flowName: string, exprAddr: string, actionName: string) {
-    let action = await this.infer(
-      `register_sdna_flow("${flowName}", Flow), flow_state("${exprAddr}", State, Flow), action(State, "${actionName}", _, Action)`,
+    const flow = await this.getFlow(flowName);
+    if (!flow) throw `Flow "${flowName}" not found`;
+    const transition = flow.transitions.find(
+      (t) => t.actionName === actionName,
     );
-    // should find only one
-    try {
-      action = JSON.parse(action[0].Action);
-    } catch (e) {
-      throw `Failed to parse flow action "${actionName}" for flow "${flowName}": ${e}`;
-    }
-    await this.executeAction(action, exprAddr, undefined);
+    if (!transition)
+      throw `Action "${actionName}" not found in flow "${flowName}"`;
+    await this.executeAction(transition.actions, exprAddr, undefined);
   }
 
   /** Returns the perspective's Social DNA code

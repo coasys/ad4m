@@ -350,8 +350,11 @@ export class SHACLShape {
       }
     }
 
-    // Constructor actions
-    if (this.constructor_actions && this.constructor_actions.length > 0) {
+    // Constructor actions – always emit this link (even for an empty array)
+    // so the Rust backend can distinguish "class registered but no init steps"
+    // from "class not registered", and create_subject can succeed with 0
+    // commands for classes that have no @Flag / initial-valued properties.
+    if (this.constructor_actions !== undefined) {
       links.push({
         source: this.nodeShapeUri,
         predicate: "ad4m://constructor",

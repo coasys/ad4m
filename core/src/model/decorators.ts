@@ -664,10 +664,12 @@ export function Model(opts: ModelConfig) {
         shape.addProperty(collShape);
       }
 
-      // Set constructor and destructor actions on the shape
-      if (constructorActions.length > 0) {
-        shape.setConstructorActions(constructorActions);
-      }
+      // Set constructor and destructor actions on the shape.
+      // Always set constructor actions (even empty array) so Rust's
+      // get_constructor_actions finds the link and returns [] rather than
+      // throwing "No SHACL constructor found" for classes without @Flag or
+      // initial-valued properties.
+      shape.setConstructorActions(constructorActions);
       if (destructorActions.length > 0) {
         shape.setDestructorActions(destructorActions);
       }
