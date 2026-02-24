@@ -11,10 +11,7 @@ import {
   runHcLocalServices,
 } from "../../utils/utils";
 import { ChildProcess } from "node:child_process";
-import fetch from "node-fetch";
 
-//@ts-ignore
-global.fetch = fetch;
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);

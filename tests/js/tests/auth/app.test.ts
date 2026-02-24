@@ -5,11 +5,8 @@ import { fileURLToPath } from "url";
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep, startExecutor } from "../../utils/utils";
-import fetch from "node-fetch";
 import { ChildProcess } from "child_process";
 
-//@ts-ignore
-global.fetch = fetch;
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);

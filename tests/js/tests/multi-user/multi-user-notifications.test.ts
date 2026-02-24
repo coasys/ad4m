@@ -4,13 +4,10 @@ import { fileURLToPath } from "url";
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep } from "../../utils/utils";
-import fetch from "node-fetch";
 import { startAgent } from "../../helpers/executor";
 import type { AgentHandle } from "../../helpers/executor";
 import { NotificationInput } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
 
-//@ts-ignore
-global.fetch = fetch;
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);

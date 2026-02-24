@@ -135,7 +135,6 @@ export default function expressionTests(testContext: TestContext) {
           } as LanguageMetaInput,
         );
 
-        //@ts-ignore
         const testLangAddress = publish.address;
 
         const exprAddr = await ad4mClient.expression.create(

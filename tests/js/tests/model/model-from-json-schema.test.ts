@@ -11,12 +11,9 @@
 
 import { expect } from "chai";
 import { Ad4mClient, PerspectiveProxy, Ad4mModel } from "@coasys/ad4m";
-import fetch from "node-fetch";
 import { startAgent } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 
-//@ts-ignore
-global.fetch = fetch;
 
 describe("Ad4mModel.fromJSONSchema", () => {
   let ownStop: (() => Promise<void>) | null = null;

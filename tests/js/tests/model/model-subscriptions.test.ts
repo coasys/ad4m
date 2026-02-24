@@ -14,14 +14,11 @@
 
 import { expect } from "chai";
 import { Ad4mClient, PerspectiveProxy } from "@coasys/ad4m";
-import fetch from "node-fetch";
 import { startAgent, waitUntil } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 import { wipePerspective } from "../../utils/utils.js";
 import { TestPost } from "./models.js";
 
-//@ts-ignore
-global.fetch = fetch;
 
 // ── Helper ────────────────────────────────────────────────────────────────────
 

@@ -17,13 +17,10 @@ import {
   PerspectiveProxy,
   generatePrologFacts,
 } from "@coasys/ad4m";
-import fetch from "node-fetch";
 import { startAgent } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 import { TestPost, TestTag } from "./models.js";
 
-//@ts-ignore
-global.fetch = fetch;
 
 // ── Pure function tests (no executor) ─────────────────────────────────────────
 //

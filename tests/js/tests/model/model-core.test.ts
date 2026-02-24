@@ -13,14 +13,11 @@
 
 import { expect } from "chai";
 import { Ad4mClient, LinkQuery, PerspectiveProxy } from "@coasys/ad4m";
-import fetch from "node-fetch";
 import { startAgent, waitUntil } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 import { wipePerspective } from "../../utils/utils.js";
 import { TestComment, TestPost, TestTag } from "./models.js";
 
-//@ts-ignore
-global.fetch = fetch;
 
 describe("Ad4mModel — Core CRUD", function () {
   this.timeout(120_000);

@@ -26,10 +26,7 @@ import runtimeTests from "./runtime";
 import agentLanguageTests from "./agent-language";
 import socialDNATests from "./social-dna-flow";
 import tripleAgentTests from "./triple-agent-test";
-import fetch from "node-fetch";
 
-//@ts-ignore
-global.fetch = fetch;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

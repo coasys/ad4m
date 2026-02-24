@@ -9,12 +9,9 @@ import {
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient } from "../../utils/utils";
-import fetch from "node-fetch";
 import { startAgent } from "../../helpers/executor";
 import type { AgentHandle } from "../../helpers/executor";
 
-//@ts-ignore
-global.fetch = fetch;
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);

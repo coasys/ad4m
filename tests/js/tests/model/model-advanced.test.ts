@@ -23,13 +23,10 @@ import {
   PerspectiveProxy,
   Property,
 } from "@coasys/ad4m";
-import fetch from "node-fetch";
 import { startAgent } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 import { sleep } from "../../utils/utils.js";
 
-//@ts-ignore
-global.fetch = fetch;
 
 describe("Ad4mModel — Advanced Features", function () {
   this.timeout(120_000);

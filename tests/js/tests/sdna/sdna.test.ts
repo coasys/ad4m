@@ -13,10 +13,7 @@ import {
 } from "@coasys/ad4m";
 import { startAgent } from "../../helpers/executor";
 import type { AgentHandle } from "../../helpers/executor";
-import fetch from "node-fetch";
 
-//@ts-ignore
-global.fetch = fetch;
 
 describe("SDNA", () => {
   let ad4m: Ad4mClient | null = null;

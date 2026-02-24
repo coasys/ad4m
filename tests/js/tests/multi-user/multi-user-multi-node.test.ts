@@ -18,11 +18,8 @@ import {
 } from "../../utils/utils";
 import { getFreePorts } from "../../helpers/ports";
 import { ChildProcess } from "node:child_process";
-import fetch from "node-fetch";
 import { v4 as uuidv4 } from "uuid";
 
-//@ts-ignore
-global.fetch = fetch;
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);

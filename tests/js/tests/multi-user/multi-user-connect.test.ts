@@ -7,10 +7,7 @@ import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep, startExecutor } from "../../utils/utils";
 import { ChildProcess } from "node:child_process";
-import fetch from "node-fetch";
 
-//@ts-ignore
-global.fetch = fetch;
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
