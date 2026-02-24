@@ -607,6 +607,11 @@ impl Ad4mMcpHandler {
                     Err(e) => return format!("Authentication error: {}", e),
                 };
 
+                let capabilities = self.get_capabilities().await;
+                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+                    return format!("Capability error: {}", e);
+                }
+
                 let subject_class: SubjectClassOption = match serde_json::from_value(json!({
                     "className": p.class_name
                 })) {
@@ -663,6 +668,11 @@ impl Ad4mMcpHandler {
                     Ok(ctx) => ctx,
                     Err(e) => return format!("Authentication error: {}", e),
                 };
+
+                let capabilities = self.get_capabilities().await;
+                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+                    return format!("Capability error: {}", e);
+                }
 
                 // Parse commands from JSON string
                 let commands: Vec<Command> = match serde_json::from_str(&p.commands) {
@@ -746,6 +756,11 @@ impl Ad4mMcpHandler {
                     Ok(ctx) => ctx,
                     Err(e) => return format!("Authentication error: {}", e),
                 };
+
+                let capabilities = self.get_capabilities().await;
+                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+                    return format!("Capability error: {}", e);
+                }
 
                 let link = Link {
                     source: p.source.clone(),
@@ -834,6 +849,11 @@ impl Ad4mMcpHandler {
                     Err(e) => return format!("Authentication error: {}", e),
                 };
 
+                let capabilities = self.get_capabilities().await;
+                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+                    return format!("Capability error: {}", e);
+                }
+
                 match perspective
                     .add_sdna(
                         p.class_name.clone(),
@@ -916,6 +936,11 @@ impl Ad4mMcpHandler {
                     Ok(ctx) => ctx,
                     Err(e) => return format!("Authentication error: {}", e),
                 };
+
+                let capabilities = self.get_capabilities().await;
+                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+                    return format!("Capability error: {}", e);
+                }
 
                 // Look up the SHACL property path for this property name
                 // SHACL properties are stored as links: propertyShapeUri --sh://name--> "propertyName"
@@ -1040,6 +1065,11 @@ impl Ad4mMcpHandler {
                     Err(e) => return format!("Authentication error: {}", e),
                 };
 
+                let capabilities = self.get_capabilities().await;
+                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+                    return format!("Capability error: {}", e);
+                }
+
                 let predicate = match self
                     .resolve_collection_predicate(&perspective, &p.class_name, &p.collection_name)
                     .await
@@ -1089,6 +1119,11 @@ impl Ad4mMcpHandler {
                     Ok(ctx) => ctx,
                     Err(e) => return format!("Authentication error: {}", e),
                 };
+
+                let capabilities = self.get_capabilities().await;
+                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+                    return format!("Capability error: {}", e);
+                }
 
                 let predicate = match self
                     .resolve_collection_predicate(&perspective, &p.class_name, &p.collection_name)

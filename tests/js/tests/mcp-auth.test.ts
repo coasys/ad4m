@@ -5,11 +5,11 @@ import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep, startExecutor } from "../utils/utils";
-import { ChildProcess, spawn } from 'node:child_process';
-import fetch from 'node-fetch'
+import { ChildProcess } from 'node:child_process';
+import fetch from 'node-fetch';
 
 //@ts-ignore
-global.fetch = fetch
+global.fetch = fetch;
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -18,228 +18,362 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /**
- * MCP Authentication Integration Tests
- * 
- * These tests verify that the MCP server's authentication tools work correctly
- * for both local executor (admin credential) and remote multi-user executor (email/password).
- * 
- * Note: The MCP server uses stdio transport, so we test it by:
- * 1. Starting an executor with multi-user mode enabled
- * 2. Creating users via GraphQL
- * 3. Spawning the MCP server as a subprocess
- * 4. Sending MCP tool calls via stdin and reading responses from stdout
+ * MCP Authentication Integration Tests (HTTP-only)
+ *
+ * Tests MCP auth tools via raw HTTP requests to the MCP Streamable HTTP server.
+ * Verifies: login_email, set_token, auth_status, and unauthenticated rejection.
  */
 
-// Helper to send MCP request and get response
-async function mcpRequest(process: ChildProcess, method: string, params: any = {}): Promise<any> {
-    return new Promise((resolve, reject) => {
-        const request = JSON.stringify({
-            jsonrpc: "2.0",
-            id: Date.now(),
-            method,
-            params
-        }) + "\n";
+// ============================================================================
+// MCP HTTP Client Helpers (same pattern as mcp-http.test.ts)
+// ============================================================================
 
-        let response = "";
-        
-        const onData = (data: Buffer) => {
-            response += data.toString();
-            try {
-                // Try to parse complete JSON responses
-                const lines = response.split('\n').filter(l => l.trim());
-                for (const line of lines) {
-                    const parsed = JSON.parse(line);
-                    if (parsed.result || parsed.error) {
-                        process.stdout?.off('data', onData);
-                        resolve(parsed);
-                        return;
+const MCP_PORT = 3001;
+const MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
+
+interface McpResponse {
+    jsonrpc: string;
+    id: number;
+    result?: any;
+    error?: { code: number; message: string; data?: any };
+}
+
+async function parseSSEStream(response: any): Promise<McpResponse> {
+    return new Promise(function(resolve, reject) {
+        var buffer = '';
+        var resolved = false;
+        var timeout = setTimeout(function() {
+            if (!resolved) {
+                resolved = true;
+                reject(new Error('SSE stream timeout — no JSON data received within 30s. Buffer: ' + buffer));
+            }
+        }, 30000);
+
+        var body = response.body;
+        if (!body) {
+            clearTimeout(timeout);
+            reject(new Error('No response body'));
+            return;
+        }
+
+        body.on('data', function(chunk: Buffer) {
+            buffer += chunk.toString();
+            var lines = buffer.split('\n');
+            for (var i = 0; i < lines.length - 1; i++) {
+                var line = lines[i].trim();
+                if (line.indexOf('data:') === 0) {
+                    var payload = line.substring(5).trim();
+                    if (payload.length > 0 && !resolved) {
+                        try {
+                            var parsed = JSON.parse(payload);
+                            if (parsed.jsonrpc) {
+                                resolved = true;
+                                clearTimeout(timeout);
+                                resolve(parsed as McpResponse);
+                                body.destroy();
+                                return;
+                            }
+                        } catch (e) {
+                            // Not valid JSON, continue
+                        }
                     }
                 }
-            } catch (e) {
-                // Not complete yet, continue reading
             }
-        };
+            buffer = lines[lines.length - 1];
+        });
 
-        process.stdout?.on('data', onData);
-        process.stdin?.write(request);
+        body.on('end', function() {
+            if (!resolved) {
+                resolved = true;
+                clearTimeout(timeout);
+                var lines = buffer.split('\n');
+                for (var i = 0; i < lines.length; i++) {
+                    var line = lines[i].trim();
+                    if (line.indexOf('data:') === 0) {
+                        var payload = line.substring(5).trim();
+                        if (payload.length > 0) {
+                            try {
+                                resolve(JSON.parse(payload) as McpResponse);
+                                return;
+                            } catch (e) { /* skip */ }
+                        }
+                    }
+                }
+                reject(new Error('SSE stream ended without JSON data'));
+            }
+        });
 
-        // Timeout after 10 seconds
-        setTimeout(() => {
-            process.stdout?.off('data', onData);
-            reject(new Error(`MCP request timeout for ${method}`));
-        }, 10000);
+        body.on('error', function(err: Error) {
+            if (!resolved) {
+                resolved = true;
+                clearTimeout(timeout);
+                reject(err);
+            }
+        });
     });
 }
 
-describe("MCP Authentication Integration Tests", function() {
-    this.timeout(120000); // 2 minute timeout for each test
+let requestIdCounter = 0;
 
-    describe("Multi-user mode with email/password login", () => {
-        const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
-        const appDataPath = path.join(TEST_DIR, "agents", "mcp-auth-test");
-        const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-        const gqlPort = 15700;
-        const hcAdminPort = 15701;
-        const hcAppPort = 15702;
+async function mcpHttpRequest(
+    method: string,
+    params: any = {},
+    sessionId?: string
+): Promise<McpResponse> {
+    const id = ++requestIdCounter;
+    const request = { jsonrpc: "2.0", id, method, params };
 
-        let executorProcess: ChildProcess | null = null;
-        let adminAd4mClient: Ad4mClient | null = null;
-        let testUserEmail = "mcp-test@ad4m.dev";
-        let testUserPassword = "testpassword123";
+    const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/event-stream'
+    };
+    if (sessionId) {
+        headers['Mcp-Session-Id'] = sessionId;
+    }
 
-        before(async () => {
-            // Clean up and create test directory
-            if (!fs.existsSync(appDataPath)) {
-                fs.mkdirSync(appDataPath, { recursive: true });
+    const response = await fetch(MCP_BASE_URL, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(request)
+    });
+
+    if (!response.ok) {
+        throw new Error('HTTP error: ' + response.status + ' ' + response.statusText);
+    }
+
+    const ct = response.headers.get('content-type') || '';
+    if (ct.indexOf('text/event-stream') >= 0) {
+        return await parseSSEStream(response);
+    }
+
+    return await response.json() as McpResponse;
+}
+
+async function callMcpTool(
+    toolName: string,
+    args: Record<string, any>,
+    sessionId?: string
+): Promise<any> {
+    const response = await mcpHttpRequest("tools/call", {
+        name: toolName,
+        arguments: args
+    }, sessionId);
+
+    if (response.error) {
+        throw new Error('MCP tool error [' + toolName + ']: ' + response.error.message);
+    }
+
+    const content = response.result && response.result.content;
+    if (content && content[0] && content[0].text) {
+        try {
+            return JSON.parse(content[0].text);
+        } catch (e) {
+            return content[0].text;
+        }
+    }
+    return response.result;
+}
+
+async function initializeMcp(): Promise<{ sessionId: string; serverInfo: any }> {
+    const id = ++requestIdCounter;
+    const request = {
+        jsonrpc: "2.0",
+        id,
+        method: "initialize",
+        params: {
+            protocolVersion: "2024-11-05",
+            capabilities: { roots: { listChanged: false } },
+            clientInfo: { name: "ad4m-auth-test-client", version: "1.0.0" }
+        }
+    };
+
+    const resp = await fetch(MCP_BASE_URL, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json, text/event-stream'
+        },
+        body: JSON.stringify(request)
+    });
+
+    if (!resp.ok) {
+        throw new Error('MCP initialize HTTP error: ' + resp.status);
+    }
+
+    const sid = resp.headers.get('mcp-session-id') || "test-session";
+    var result = await parseSSEStream(resp);
+
+    if (result.error) {
+        throw new Error('MCP initialize error: ' + result.error.message);
+    }
+
+    // Send notifications/initialized to complete the handshake
+    await fetch(MCP_BASE_URL, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json, text/event-stream',
+            'Mcp-Session-Id': sid
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })
+    });
+
+    return { sessionId: sid, serverInfo: result.result };
+}
+
+// ============================================================================
+// Test Suite
+// ============================================================================
+
+describe("MCP Authentication HTTP Tests", function() {
+    this.timeout(180000);
+
+    const TEST_DIR = path.join(__dirname + "/../tst-tmp");
+    const appDataPath = path.join(TEST_DIR, "agents", "mcp-auth-test");
+    const bootstrapSeedPath = path.join(__dirname + "/../bootstrapSeed.json");
+    const gqlPort = 15700;
+    const hcAdminPort = 15701;
+    const hcAppPort = 15702;
+    const adminCredential = "mcp-auth-test-admin";
+
+    let executorProcess: ChildProcess | null = null;
+    let mcpSessionId: string = "";
+
+    before(async () => {
+        // Clean up and create test directory
+        if (fs.existsSync(appDataPath)) {
+            fs.rmSync(appDataPath, { recursive: true });
+        }
+        fs.mkdirSync(appDataPath, { recursive: true });
+
+        // Start executor with MCP enabled
+        executorProcess = await startExecutor(
+            appDataPath,
+            bootstrapSeedPath,
+            gqlPort,
+            hcAdminPort,
+            hcAppPort,
+            true,               // languageLanguageOnly
+            adminCredential,
+            undefined,
+            undefined,
+            undefined,
+            true,               // enableMcp
+        );
+
+        await sleep(3000);
+
+        // Generate agent via GraphQL (no MCP equivalent)
+        const adminClient = new Ad4mClient(apolloClient(gqlPort, adminCredential), false);
+        await adminClient.agent.generate("test-passphrase");
+        console.log("Agent generated via GraphQL");
+    });
+
+    after(async () => {
+        if (executorProcess) {
+            var attempts = 0;
+            while (!executorProcess.killed && attempts < 10) {
+                executorProcess.kill();
+                await sleep(500);
+                attempts++;
             }
-
-            // Start executor with multi-user mode and admin credential
-            executorProcess = await startExecutor(
-                appDataPath,
-                bootstrapSeedPath,
-                gqlPort,
-                hcAdminPort,
-                hcAppPort,
-                false, // run holochain
-                "mcp-test-admin-credential" // admin credential
-            );
-
-            adminAd4mClient = new Ad4mClient(apolloClient(gqlPort, "mcp-test-admin-credential"), false);
-            
-            // Generate initial admin agent
-            await adminAd4mClient.agent.generate("passphrase");
-
-            // Enable multi-user mode via runtime
-            await adminAd4mClient.runtime.setMultiUserEnabled(true);
-
-            // Create a test user via agent client
-            const userResult = await adminAd4mClient.agent.createUser(testUserEmail, testUserPassword);
-            expect(userResult.success).to.be.true;
-            console.log(`Created test user with DID: ${userResult.did}`);
-        });
-
-        after(async () => {
-            if (executorProcess) {
-                while (!executorProcess?.killed) {
-                    executorProcess?.kill();
-                    await sleep(500);
-                }
+            if (!executorProcess.killed) {
+                executorProcess.kill('SIGKILL');
             }
-        });
+        }
+    });
 
-        it("should verify test user was created successfully", async () => {
-            // Verify user exists by trying to login via GraphQL
-            // loginUser is in AgentClient, not RuntimeClient
-            const token = await adminAd4mClient!.agent.loginUser(testUserEmail, testUserPassword);
-            expect(token).to.be.a('string');
-            expect(token.length).to.be.greaterThan(0);
-        });
+    // ========================================================================
+    // 1. MCP Session Initialization
+    // ========================================================================
 
-        it("should be able to set admin token via MCP", async () => {
-            // This test verifies the set_token tool works with admin credentials
-            // We'd need to spawn the MCP server as a subprocess to test this properly
-            // For now, just verify the GraphQL-based admin access works
-            const status = await adminAd4mClient!.agent.status();
-            expect(status.isUnlocked).to.be.true;
-        });
-
-        it("should be able to login via GraphQL and use the token", async () => {
-            // Login as test user (loginUser is in AgentClient)
-            const token = await adminAd4mClient!.agent.loginUser(testUserEmail, testUserPassword);
-            expect(token).to.be.a('string');
-            
-            // Create a new client with the user token
-            const userClient = new Ad4mClient(apolloClient(gqlPort, token), false);
-            
-            // User should be able to access their own data
-            const status = await userClient.agent.status();
-            expect(status.isUnlocked).to.be.true;
-        });
-
-        it("should reject login with invalid credentials", async () => {
-            const call = async () => {
-                return await adminAd4mClient!.agent.loginUser(testUserEmail, "wrongpassword");
-            };
-
-            await expect(call()).to.be.rejectedWith("Invalid credentials");
-        });
-
-        it("should reject login for non-existent user", async () => {
-            const call = async () => {
-                return await adminAd4mClient!.agent.loginUser("nonexistent@ad4m.dev", "anypassword");
-            };
-
-            await expect(call()).to.be.rejectedWith(/Invalid credentials|User key not found/);
+    describe("1. Session Init", function() {
+        it("should initialize MCP connection", async function() {
+            const init = await initializeMcp();
+            mcpSessionId = init.sessionId;
+            expect(init.serverInfo).to.exist;
+            console.log("MCP initialized, session:", mcpSessionId);
         });
     });
 
-    describe("Local executor with admin credential", () => {
-        const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
-        const appDataPath = path.join(TEST_DIR, "agents", "mcp-local-test");
-        const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-        const gqlPort = 15800;
-        const hcAdminPort = 15801;
-        const hcAppPort = 15802;
+    // ========================================================================
+    // 2. Unauthenticated Rejection
+    // ========================================================================
 
-        let executorProcess: ChildProcess | null = null;
-        let adminAd4mClient: Ad4mClient | null = null;
-        const adminCredential = "local-admin-secret-123";
-
-        before(async () => {
-            if (!fs.existsSync(appDataPath)) {
-                fs.mkdirSync(appDataPath, { recursive: true });
-            }
-
-            // Start executor with admin credential but WITHOUT multi-user mode
-            executorProcess = await startExecutor(
-                appDataPath,
-                bootstrapSeedPath,
-                gqlPort,
-                hcAdminPort,
-                hcAppPort,
-                false,
-                adminCredential
-            );
-
-            adminAd4mClient = new Ad4mClient(apolloClient(gqlPort, adminCredential), false);
-            await adminAd4mClient.agent.generate("passphrase");
+    describe("2. Unauthenticated Rejection", function() {
+        it("should report unauthenticated status before login", async function() {
+            const status = await callMcpTool('auth_status', {}, mcpSessionId);
+            expect(status.authenticated).to.be.false;
+            expect(status.message).to.include("Not authenticated");
+            console.log("Auth status (before login):", JSON.stringify(status));
         });
 
-        after(async () => {
-            if (executorProcess) {
-                while (!executorProcess?.killed) {
-                    executorProcess?.kill();
-                    await sleep(500);
-                }
-            }
+        it("should reject list_perspectives without auth", async function() {
+            const result = await callMcpTool('list_perspectives', {}, mcpSessionId);
+            // The tool returns an error string when not authenticated
+            expect(typeof result).to.equal('string');
+            expect(result).to.include("Authentication");
+            console.log("Unauthenticated list_perspectives:", result);
+        });
+    });
+
+    // ========================================================================
+    // 3. set_token Authentication
+    // ========================================================================
+
+    describe("3. set_token Tool", function() {
+        it("should authenticate with admin credential via set_token", async function() {
+            const result = await callMcpTool('set_token', { token: adminCredential }, mcpSessionId);
+            expect(result.success).to.be.true;
+            expect(result.is_admin).to.be.true;
+            console.log("set_token result:", JSON.stringify(result));
         });
 
-        it("should allow admin access with correct credential", async () => {
-            const status = await adminAd4mClient!.agent.status();
-            expect(status.isUnlocked).to.be.true;
+        it("should confirm authenticated status after set_token", async function() {
+            const status = await callMcpTool('auth_status', {}, mcpSessionId);
+            expect(status.authenticated).to.be.true;
+            expect(status.is_admin).to.be.true;
+            console.log("Auth status (after set_token):", JSON.stringify(status));
         });
 
-        it("should reject access without admin credential", async () => {
-            const unauthClient = new Ad4mClient(apolloClient(gqlPort), false);
-            const call = async () => {
-                return await unauthClient.agent.status();
-            };
-
-            await expect(call()).to.be.rejectedWith("Capability is not matched");
+        it("should allow list_perspectives after authentication", async function() {
+            const result = await callMcpTool('list_perspectives', {}, mcpSessionId);
+            expect(result).to.be.an('array');
+            console.log("Authenticated list_perspectives:", JSON.stringify(result));
         });
 
-        it("should reject access with wrong credential", async () => {
-            const wrongClient = new Ad4mClient(apolloClient(gqlPort, "wrong-credential"), false);
-            const call = async () => {
-                return await wrongClient.agent.status();
-            };
-
-            await expect(call()).to.be.rejectedWith(/InvalidToken|Capability is not matched/);
+        it("should reject empty token", async function() {
+            // Start a fresh session to test empty token
+            const init = await initializeMcp();
+            const freshSession = init.sessionId;
+            const result = await callMcpTool('set_token', { token: "" }, freshSession);
+            expect(result.success).to.be.false;
+            expect(result.error).to.include("empty");
         });
 
-        it("should report multi-user mode as disabled", async () => {
-            const enabled = await adminAd4mClient!.runtime.multiUserEnabled();
-            expect(enabled).to.be.false;
+        it("should reject invalid token", async function() {
+            const init = await initializeMcp();
+            const freshSession = init.sessionId;
+            const result = await callMcpTool('set_token', { token: "not-a-valid-token-or-credential" }, freshSession);
+            expect(result.success).to.be.false;
+        });
+    });
+
+    // ========================================================================
+    // 4. login_email Tool (multi-user mode not enabled — should fail gracefully)
+    // ========================================================================
+
+    describe("4. login_email Tool", function() {
+        it("should reject login_email when multi-user mode is not enabled", async function() {
+            const init = await initializeMcp();
+            const freshSession = init.sessionId;
+            const result = await callMcpTool('login_email', {
+                email: "test@ad4m.dev",
+                password: "password123"
+            }, freshSession);
+            expect(result.success).to.be.false;
+            expect(result.error).to.include("Multi-user mode");
+            console.log("login_email (no multi-user):", JSON.stringify(result));
         });
     });
 });
