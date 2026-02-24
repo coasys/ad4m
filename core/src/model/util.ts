@@ -35,11 +35,12 @@ export function collectionToAdderName(collection: string): string {
     return `add${capitalize(pluralToSingular(collection))}`
 }
 
-// e.g. "addEntry" -> "entries"
+// e.g. "addComments" -> "comments"
 export function collectionAdderToName(adderName: string): string {
-    let singular = adderName.substring(3)
-    let plural = singularToPlural(singular)
-    return plural.charAt(0).toLowerCase() + plural.slice(1)
+    // Extract the collection name after "add" and lowercase first char
+    // The method name already has the plural collection name (e.g., "addComments")
+    let collectionName = adderName.substring(3)
+    return collectionName.charAt(0).toLowerCase() + collectionName.slice(1)
 }
 
 // e.g. "comments" -> "removeComment"
@@ -47,17 +48,19 @@ export function collectionToRemoverName(collection: string): string {
     return `remove${capitalize(pluralToSingular(collection))}`
 }
 
-// e.g. "removeEntry" -> "entries"
+// e.g. "removeComments" -> "comments"  
 export function collectionRemoverToName(removerName: string): string {
-    let singular = removerName.substring(6)
-    let plural = singularToPlural(singular)
-    return plural.charAt(0).toLowerCase() + plural.slice(1)
+    // Extract the collection name after "remove" and lowercase first char
+    // The method name already has the plural collection name (e.g., "removeComments")
+    let collectionName = removerName.substring(6)
+    return collectionName.charAt(0).toLowerCase() + collectionName.slice(1)
 }
 
-export function collectionSetterToName(adderName: string): string {
-    let singular = adderName.substring(13)
-    let plural = singularToPlural(singular)
-    return plural.charAt(0).toLowerCase() + plural.slice(1)
+export function collectionSetterToName(setterName: string): string {
+    // Extract the collection name after "setCollection" and lowercase first char
+    // The method name already has the plural collection name (e.g., "setCollectionComments")
+    let collectionName = setterName.substring(13)
+    return collectionName.charAt(0).toLowerCase() + collectionName.slice(1)
 }
 
 // e.g. "comments" -> "addComment"
