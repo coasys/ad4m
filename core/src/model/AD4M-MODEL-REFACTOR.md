@@ -14,7 +14,7 @@ That PR already completed the foundational migration:
 
 ---
 
-## Current Status (as of 2026-02-23)
+## Current Status (as of 2026-02-24)
 
 ### Completed
 
@@ -60,14 +60,16 @@ That PR already completed the foundational migration:
 
 ### Pending — Phases 3–5
 
-| Phase                       | Status         |
-| --------------------------- | -------------- |
-| 3a File decomposition       | ✅ COMPLETE    |
-| 3b Transaction API          | ✅ COMPLETE    |
-| 3c IncludeMap eager loading | ✅ COMPLETE    |
-| 3d Subscriptions            | ✅ COMPLETE    |
-| 4 Model inheritance         | ✅ COMPLETE    |
-| 5 CRDT ordering             | ⏳ NOT STARTED |
+| Phase                         | Status         |
+| ----------------------------- | -------------- |
+| 3a File decomposition         | ✅ COMPLETE    |
+| 3b Transaction API            | ✅ COMPLETE    |
+| 3c IncludeMap eager loading   | ✅ COMPLETE    |
+| 3d Subscriptions              | ✅ COMPLETE    |
+| 3e Subscription infra cleanup | ⏳ PENDING     |
+| 4 Model inheritance           | ✅ COMPLETE    |
+| 5 CRDT ordering               | ⏳ NOT STARTED |
+| 0 tests/js migration          | ⏳ PENDING     |
 
 ---
 
@@ -847,7 +849,9 @@ same class appears twice, that branch stops.
 **Lazy by default:** Without `include`, relationship properties remain `string[]`.
 No automatic eager loading. P2P bandwidth is a first-class concern.
 
-### 3d — Subscriptions ⏳ NEXT
+### 3d — Subscriptions ✅ COMPLETE
+
+**Implementation note:** The approach below was fully implemented in `subscription.ts` and wired into `Ad4mModel.subscribe()` and `ModelQueryBuilder.subscribe()`. Key architectural decision: subscriptions are **client-side only** — they attach to PerspectiveProxy's link-added/link-removed listeners and re-run a SurrealQL query locally on each relevant change. There is no server-side subscription state, no keepalive loop, and no GraphQL subscription channel involved. See [Phase 3e](#3e--subscription-infrastructure-cleanup) for removal of the old server-push system this replaces.
 
 > Not a flag on `Query<T>`. Mixing it into the
 
@@ -960,6 +964,66 @@ export type Subscription = {
 
 This means a UI component can show a "reconnecting…" state without needing to wire up
 an `onError` callback just to track whether the subscription is healthy.
+
+---
+
+### 3e — Subscription Infrastructure Cleanup ⏳ PENDING
+
+The old server-push subscription system predates the client-side `Ad4mModel.subscribe()` approach. Now that 3d is complete and all consumers have migrated, the old machinery can be removed. It is dead code from the `Ad4mModel` perspective — zero external callers for `subscribeSurrealDB`.
+
+**What it was:** `PerspectiveProxy.subscribeSurrealDB()` / `subscribeInfer()` (SurrealDB path only) used a round-trip GraphQL architecture:
+
+1. Client calls `perspectiveSubscribeSurrealQuery` mutation → Rust registers a `SurrealSubscribedQuery` entry
+2. Rust re-runs the query on every link change, pushes result via pubsub → `perspectiveQuerySubscription` GQL subscription
+3. `QuerySubscriptionProxy` receives updates + sends a keepalive mutation every 30s to prevent timeout
+4. On dispose, client calls `perspectiveDisposeSurrealQuerySubscription` mutation
+
+**Why the client-side approach is better:**
+
+- No server state: no keepalive loop, no timeout/cleanup complexity, no subscription ID management
+- No round-trip latency: re-query runs immediately in the same process that received the link event
+- Simpler failure modes: if the client disconnects, there is nothing to clean up on the server
+- Composable with `IncludeMap`: include hydration runs client-side anyway — the server never had visibility into it
+
+**What `subscribeInfer` is NOT:** `subscribeInfer` is the Prolog query subscription system. It is completely separate, actively used in `tests/js`, and **must not be touched**. Only the SurrealDB branch of `QuerySubscriptionProxy` is dead.
+
+**Scaling considerations for the future:**
+
+- The client-side approach works well for a single connected client with a persistent WebSocket to the executor. For multi-client server deployments (e.g. a REST API serving many agents), the link-listener approach cannot work — each HTTP request has no persistent connection. In that scenario, the server-push model is correct. The right path is to reintroduce server-side SurrealDB LIVE queries (native SurrealDB feature) rather than the polling loop we're removing.
+- Debounce is the main scaling knob for busy perspectives. `createSubscription()` shares a single listener entry per unique query fingerprint across all subscribers — adding 10 React components subscribed to the same query does not add 10 listeners.
+- If CPU becomes a concern (many concurrent subscriptions × large perspectives), the fix is to make `checkPredicateRelevance()` more precise before re-running the query. Currently it checks if any changed link predicate appears in the query's known predicates. A Bloom-filter variant or predicate index could reduce false positives.
+
+**TypeScript removals (PerspectiveProxy.ts / PerspectiveClient.ts):**
+
+| Symbol                                                             | File                     | Action                                  |
+| ------------------------------------------------------------------ | ------------------------ | --------------------------------------- |
+| `subscribeSurrealDB()`                                             | `PerspectiveProxy.ts`    | Delete                                  |
+| `isSurrealDB` field                                                | `QuerySubscriptionProxy` | Delete — Prolog path doesn't need it    |
+| SurrealDB branches in `subscribe()` / `dispose()` / keepalive loop | `QuerySubscriptionProxy` | Delete `if (this.isSurrealDB)` branches |
+| `perspectiveSubscribeSurrealQuery()`                               | `PerspectiveClient.ts`   | Delete                                  |
+| `perspectiveKeepAliveSurrealQuery()`                               | `PerspectiveClient.ts`   | Delete                                  |
+| `perspectiveDisposeSurrealQuerySubscription()`                     | `PerspectiveClient.ts`   | Delete                                  |
+
+**Rust removals (perspective_instance.rs / mutation_resolvers.rs):**
+
+| Symbol                                                             | File                         | Action |
+| ------------------------------------------------------------------ | ---------------------------- | ------ |
+| `SurrealSubscribedQuery` struct                                    | `perspective_instance.rs`    | Delete |
+| `surreal_subscribed_queries` field                                 | `PerspectiveInstance` struct | Delete |
+| `trigger_surreal_subscription_check` field                         | `PerspectiveInstance` struct | Delete |
+| `subscribe_and_query_surreal()`                                    | `perspective_instance.rs`    | Delete |
+| `keepalive_surreal_query()`                                        | `perspective_instance.rs`    | Delete |
+| `dispose_surreal_query_subscription()`                             | `perspective_instance.rs`    | Delete |
+| `surreal_subscription_cleanup_loop()`                              | `perspective_instance.rs`    | Delete |
+| `check_surreal_subscribed_queries()`                               | `perspective_instance.rs`    | Delete |
+| `trigger_surreal_subscription_check` setter lines (×2)             | `perspective_instance.rs`    | Delete |
+| `perspective_subscribe_surreal_query` mutation resolver            | `mutation_resolvers.rs`      | Delete |
+| `perspective_keep_alive_surreal_query` mutation resolver           | `mutation_resolvers.rs`      | Delete |
+| `perspective_dispose_surreal_query_subscription` mutation resolver | `mutation_resolvers.rs`      | Delete |
+
+**`surreal_subscription_cleanup_loop` in `run_background_tasks`:** The loop is spawned alongside `subscribed_queries_loop` in the instance background task start. Removing the loop also removes the `surreal_subscription_cleanup_loop()` spawn line.
+
+**`PerspectiveQuerySubscriptionFilter` / `PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC` / `send_subscription_update`:** These are still used by the Prolog `subscribeInfer` path — do NOT remove them.
 
 ---
 
@@ -1200,24 +1264,30 @@ the playground scenarios should be renamed to reflect their `we`-specific purpos
 ## Execution Order
 
 ```
-0   [POST-MERGE] tests/js refactor + model-decorator-api.test.ts port
-      ← clean up deprecated imports in prolog-and-literals.test.ts
+0   [POST-MERGE] tests/js refactor + model-decorator-api.test.ts port  ⏳ PENDING
+      ← fix deprecated imports in prolog-and-literals.test.ts and multi-user-simple.test.ts
       ← establish consistent port allocation and setup pattern
-      ← port scenario 08 models + 13 tests into model-decorator-api.test.ts
+      ← port scenario 08 models + 14 tests into model-decorator-api.test.ts
+      ← add subscription lifecycle tests (3d coverage at executor level)
       ← write remaining scenarios (01–07, 09–10) directly in tests/js
-1a  generatePrologFacts.ts                              ← first real code; verified by scenario 07
-1b  Remove dead Prolog paths                            ← delete after 1a verified
-1c  Delete Subject.ts                                   ← delete after 1b complete (removes eval())
-2   Decorator cleanup (@Property, @Flag, @HasMany, etc.)   ← can overlap with 1b/1c
-    + WeakMap metadata registry (moved from Phase 4a)  ← correctness fix, not deferrable
-    + update @we/models (5 files) in same PR            ← verified by we playground 08-we-models.ts
+1a  generatePrologFacts.ts ✅                           ← committed on ad4m-model-refactor
+1b  Remove dead Prolog paths ✅                         ← committed on ad4m-model-refactor
+1c  Delete Subject.ts ✅                                ← committed on ad4m-model-refactor
+2   Decorator cleanup (@Property, @Flag, @HasMany, etc.) ✅
+    + WeakMap metadata registry ✅
+    + update @we/models (5 files) ✅
 3a  File decomposition ✅                               ← `eb2f4b4b` → `6dcc5283`
     + shared hydrateInstance() in hydration.ts ✅      ← eliminates dual hydration impls
     + parameterized SurrealQL queries throughout ⏳     ← still uses string interpolation
 3b  Transaction API ✅                                  ← `a66d833b`
 3c  Include / eager loading (IncludeMap) ✅             ← `6d02ad2d`
-3d  Subscriptions ⏳ ← NEXT                             ← verified by scenario 05
-4   Model inheritance (WeakMap already done in Phase 2) ← verified by scenario 09
-5   CRDT ordering                                       ← after 3; fills in scenario 10
+3d  Subscriptions ✅                                    ← client-side link listener approach
+3e  Subscription infrastructure cleanup ⏳ ← NEXT       ← remove old server-push SurrealDB path
+      ← delete subscribeSurrealDB + QuerySubscriptionProxy isSurrealDB branches (TS)
+      ← delete SurrealSubscribedQuery, 5 Rust methods, 3 mutation resolvers
+      ← write SUBSCRIPTION-ARCHITECTURE.md (why client-side, scaling notes)
+Merge origin/dev (SHACL/Prolog PR #654) ✅             ← `9c6c57c0`
+4   Model inheritance (WeakMap already done in Phase 2) ✅  ← verified by scenario 09
+5   CRDT ordering ⏳                                    ← after 3e; fills in scenario 10
 F   Flux decorator rename (~15 files in packages/api)   ← after test app validates Phase 2
 ```
