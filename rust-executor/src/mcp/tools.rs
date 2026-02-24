@@ -169,6 +169,64 @@ pub struct AddPerspectiveParams {
     pub name: String,
 }
 
+/// Parameters for setting a property on a subject instance
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SetSubjectPropertyParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+    /// Subject class name (e.g., "Channel", "Message")
+    pub class_name: String,
+    /// Expression address of the subject instance
+    pub expression_address: String,
+    /// Property name to set (e.g., "name", "body")
+    pub property_name: String,
+    /// Value to set (will be wrapped as literal if needed)
+    pub value: String,
+}
+
+/// Parameters for getting a collection from a subject instance
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GetSubjectCollectionParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+    /// Subject class name
+    pub class_name: String,
+    /// Expression address of the subject instance
+    pub expression_address: String,
+    /// Collection name (e.g., "messages", "members")
+    pub collection_name: String,
+}
+
+/// Parameters for adding an item to a subject collection
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct AddToCollectionParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+    /// Subject class name
+    pub class_name: String,
+    /// Expression address of the subject instance (parent)
+    pub expression_address: String,
+    /// Collection name
+    pub collection_name: String,
+    /// Expression address of the item to add
+    pub item_address: String,
+}
+
+/// Parameters for removing an item from a subject collection
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RemoveFromCollectionParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+    /// Subject class name
+    pub class_name: String,
+    /// Expression address of the subject instance (parent)
+    pub expression_address: String,
+    /// Collection name
+    pub collection_name: String,
+    /// Expression address of the item to remove
+    pub item_address: String,
+}
+
 // ============================================================================
 // MCP Handler
 // ============================================================================
@@ -250,6 +308,11 @@ impl Ad4mMcpHandler {
     /// List all perspectives available to the current user
     #[tool(description = "List all AD4M perspectives available to the current user")]
     async fn list_perspectives(&self, _params: Parameters<ListPerspectivesParams>) -> String {
+        let _agent_context = match self.get_agent_context().await {
+            Ok(ctx) => ctx,
+            Err(e) => return format!("Authentication error: {}", e),
+        };
+
         let perspectives = all_perspectives();
         let mut result: Vec<serde_json::Value> = Vec::new();
         for p in perspectives.iter() {
@@ -658,6 +721,342 @@ impl Ad4mMcpHandler {
             }
             Err(e) => format!("Error creating perspective: {}", e),
         }
+    }
+
+    // ========================================================================
+    // SUBJECT PROPERTY & COLLECTION TOOLS (Ad4mModel parity)
+    // ========================================================================
+
+    /// Set a property value on a subject instance (like `instance.name = "value"` in JS Ad4mModel)
+    #[tool(
+        description = "Set a property on a subject instance. Works at the model level — you provide the property name (e.g. 'name', 'body') and the tool handles the underlying link operations. No need to know predicates or link structure."
+    )]
+    async fn set_subject_property(&self, params: Parameters<SetSubjectPropertyParams>) -> String {
+        let p = &params.0;
+
+        match get_perspective(&p.perspective_id) {
+            Some(mut perspective) => {
+                let agent_context = match self.get_agent_context().await {
+                    Ok(ctx) => ctx,
+                    Err(e) => return format!("Authentication error: {}", e),
+                };
+
+                // Look up the SHACL property path for this property name
+                // SHACL properties are stored as links: propertyShapeUri --sh://name--> "propertyName"
+                // and propertyShapeUri --sh://path--> "predicateUri"
+                let predicate = match self
+                    .resolve_property_predicate(&perspective, &p.class_name, &p.property_name)
+                    .await
+                {
+                    Ok(pred) => pred,
+                    Err(e) => {
+                        return format!("Error resolving property '{}': {}", p.property_name, e)
+                    }
+                };
+
+                // Use setSingleTarget pattern: remove old, add new
+                // First remove existing links with this predicate
+                let existing = perspective
+                    .get_links(&LinkQuery {
+                        source: Some(p.expression_address.clone()),
+                        predicate: Some(predicate.clone()),
+                        ..Default::default()
+                    })
+                    .await;
+
+                if let Ok(links) = existing {
+                    for link in links {
+                        let _ = perspective.remove_link(link.into(), None).await;
+                    }
+                }
+
+                // Add new link with the value
+                let target = if p.value.starts_with("literal://") || p.value.contains("://") {
+                    p.value.clone()
+                } else {
+                    format!("literal://string:{}", p.value)
+                };
+
+                let link = Link {
+                    source: p.expression_address.clone(),
+                    predicate: Some(predicate),
+                    target,
+                };
+
+                match perspective
+                    .add_link(link, LinkStatus::Shared, None, &agent_context)
+                    .await
+                {
+                    Ok(_) => serde_json::to_string_pretty(&json!({
+                        "success": true,
+                        "property": p.property_name,
+                        "value": p.value,
+                    }))
+                    .unwrap_or_else(|e| format!("Error: {}", e)),
+                    Err(e) => format!("Error setting property: {}", e),
+                }
+            }
+            None => format!("Perspective not found: {}", p.perspective_id),
+        }
+    }
+
+    /// Get all items in a named collection on a subject instance
+    #[tool(
+        description = "Get all items in a collection property of a subject instance (e.g., all messages in a channel). Returns a list of expression addresses. Works at the model level — just provide the collection name."
+    )]
+    async fn get_subject_collection(
+        &self,
+        params: Parameters<GetSubjectCollectionParams>,
+    ) -> String {
+        let p = &params.0;
+
+        match get_perspective(&p.perspective_id) {
+            Some(perspective) => {
+                let _agent_context = self.get_agent_context_for_read().await;
+
+                let predicate = match self
+                    .resolve_collection_predicate(&perspective, &p.class_name, &p.collection_name)
+                    .await
+                {
+                    Ok(pred) => pred,
+                    Err(e) => {
+                        return format!("Error resolving collection '{}': {}", p.collection_name, e)
+                    }
+                };
+
+                let links = perspective
+                    .get_links(&LinkQuery {
+                        source: Some(p.expression_address.clone()),
+                        predicate: Some(predicate),
+                        ..Default::default()
+                    })
+                    .await;
+
+                match links {
+                    Ok(items) => {
+                        let targets: Vec<String> =
+                            items.iter().map(|l| l.data.target.clone()).collect();
+                        serde_json::to_string_pretty(&json!({
+                            "collection": p.collection_name,
+                            "items": targets,
+                            "count": targets.len(),
+                        }))
+                        .unwrap_or_else(|e| format!("Error: {}", e))
+                    }
+                    Err(e) => format!("Error querying collection: {}", e),
+                }
+            }
+            None => format!("Perspective not found: {}", p.perspective_id),
+        }
+    }
+
+    /// Add an item to a collection on a subject instance
+    #[tool(
+        description = "Add an item to a collection on a subject instance (e.g., add a message to a channel). Creates the link between parent and child using the correct predicate for the collection."
+    )]
+    async fn add_to_collection(&self, params: Parameters<AddToCollectionParams>) -> String {
+        let p = &params.0;
+
+        match get_perspective(&p.perspective_id) {
+            Some(mut perspective) => {
+                let agent_context = match self.get_agent_context().await {
+                    Ok(ctx) => ctx,
+                    Err(e) => return format!("Authentication error: {}", e),
+                };
+
+                let predicate = match self
+                    .resolve_collection_predicate(&perspective, &p.class_name, &p.collection_name)
+                    .await
+                {
+                    Ok(pred) => pred,
+                    Err(e) => {
+                        return format!("Error resolving collection '{}': {}", p.collection_name, e)
+                    }
+                };
+
+                let link = Link {
+                    source: p.expression_address.clone(),
+                    predicate: Some(predicate),
+                    target: p.item_address.clone(),
+                };
+
+                match perspective
+                    .add_link(link, LinkStatus::Shared, None, &agent_context)
+                    .await
+                {
+                    Ok(_) => serde_json::to_string_pretty(&json!({
+                        "success": true,
+                        "collection": p.collection_name,
+                        "item": p.item_address,
+                    }))
+                    .unwrap_or_else(|e| format!("Error: {}", e)),
+                    Err(e) => format!("Error adding to collection: {}", e),
+                }
+            }
+            None => format!("Perspective not found: {}", p.perspective_id),
+        }
+    }
+
+    /// Remove an item from a collection on a subject instance
+    #[tool(
+        description = "Remove an item from a collection on a subject instance. Removes the link between parent and child."
+    )]
+    async fn remove_from_collection(
+        &self,
+        params: Parameters<RemoveFromCollectionParams>,
+    ) -> String {
+        let p = &params.0;
+
+        match get_perspective(&p.perspective_id) {
+            Some(mut perspective) => {
+                let agent_context = match self.get_agent_context().await {
+                    Ok(ctx) => ctx,
+                    Err(e) => return format!("Authentication error: {}", e),
+                };
+
+                let predicate = match self
+                    .resolve_collection_predicate(&perspective, &p.class_name, &p.collection_name)
+                    .await
+                {
+                    Ok(pred) => pred,
+                    Err(e) => {
+                        return format!("Error resolving collection '{}': {}", p.collection_name, e)
+                    }
+                };
+
+                // Find and remove the specific link
+                let links = perspective
+                    .get_links(&LinkQuery {
+                        source: Some(p.expression_address.clone()),
+                        predicate: Some(predicate),
+                        target: Some(p.item_address.clone()),
+                        ..Default::default()
+                    })
+                    .await;
+
+                match links {
+                    Ok(found) => {
+                        let mut removed = 0;
+                        for link in found {
+                            if let Ok(_) = perspective.remove_link(link.into(), None).await {
+                                removed += 1;
+                            }
+                        }
+                        serde_json::to_string_pretty(&json!({
+                            "success": true,
+                            "removed": removed,
+                            "collection": p.collection_name,
+                            "item": p.item_address,
+                        }))
+                        .unwrap_or_else(|e| format!("Error: {}", e))
+                    }
+                    Err(e) => format!("Error finding link to remove: {}", e),
+                }
+            }
+            None => format!("Perspective not found: {}", p.perspective_id),
+        }
+    }
+
+    // ========================================================================
+    // SHACL Property/Collection Resolution Helpers
+    // ========================================================================
+
+    /// Resolve a property name to its predicate URI using SHACL shape links
+    async fn resolve_property_predicate(
+        &self,
+        perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+        class_name: &str,
+        property_name: &str,
+    ) -> Result<String, String> {
+        // SHACL shapes are stored as links in the perspective.
+        // The pattern is:
+        //   literal://string:shacl://{ClassName} --ad4m://shacl_shape_uri--> {shapeUri}
+        //   {shapeUri} --sh://property--> {propertyShapeUri}
+        //   {propertyShapeUri} --sh://name--> literal://string:{propertyName}
+        //   {propertyShapeUri} --sh://path--> {predicateUri}
+
+        // Step 1: Find shape URI for class
+        let name_literal = format!("literal://string:shacl://{}", class_name);
+        let shape_links = perspective
+            .get_links(&LinkQuery {
+                source: Some(name_literal),
+                predicate: Some("ad4m://shacl_shape_uri".to_string()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| format!("Error querying SHACL shape: {}", e))?;
+
+        if shape_links.is_empty() {
+            return Err(format!("No SHACL shape found for class '{}'", class_name));
+        }
+
+        let shape_uri = &shape_links[0].data.target;
+
+        // Step 2: Find all property shape URIs
+        let prop_links = perspective
+            .get_links(&LinkQuery {
+                source: Some(shape_uri.clone()),
+                predicate: Some("sh://property".to_string()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| format!("Error querying properties: {}", e))?;
+
+        // Step 3: For each property shape, check if its name matches
+        for prop_link in &prop_links {
+            let prop_uri = &prop_link.data.target;
+
+            // Get the name of this property
+            let name_links = perspective
+                .get_links(&LinkQuery {
+                    source: Some(prop_uri.clone()),
+                    predicate: Some("sh://name".to_string()),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| format!("Error querying property name: {}", e))?;
+
+            for name_link in &name_links {
+                let name = name_link
+                    .data
+                    .target
+                    .strip_prefix("literal://string:")
+                    .unwrap_or(&name_link.data.target);
+                if name == property_name {
+                    // Found it — get the path (predicate)
+                    let path_links = perspective
+                        .get_links(&LinkQuery {
+                            source: Some(prop_uri.clone()),
+                            predicate: Some("sh://path".to_string()),
+                            ..Default::default()
+                        })
+                        .await
+                        .map_err(|e| format!("Error querying property path: {}", e))?;
+
+                    if let Some(path_link) = path_links.first() {
+                        return Ok(path_link.data.target.clone());
+                    }
+                }
+            }
+        }
+
+        Err(format!(
+            "Property '{}' not found in class '{}'",
+            property_name, class_name
+        ))
+    }
+
+    /// Resolve a collection name to its predicate URI using SHACL shape links
+    async fn resolve_collection_predicate(
+        &self,
+        perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+        class_name: &str,
+        collection_name: &str,
+    ) -> Result<String, String> {
+        // Same as resolve_property_predicate but looks for collection=true properties
+        // For now, use the same resolution — collections are also properties with a path
+        self.resolve_property_predicate(perspective, class_name, collection_name)
+            .await
     }
 
     // ========================================================================
