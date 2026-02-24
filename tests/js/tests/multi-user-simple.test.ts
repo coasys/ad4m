@@ -476,7 +476,7 @@ describe("Multi-User Simple integration tests", () => {
             const p1 = await client1.perspective.add("User 1 Test Perspective");
             // @ts-ignore - Suppress Apollo type mismatch
             const link1 = await client1.perspective.addLink(p1.uuid, {
-                source: "root",
+                source: "ad4m://root",
                 target: "test://target1",
                 predicate: "test://predicate"
             });
@@ -494,7 +494,7 @@ describe("Multi-User Simple integration tests", () => {
             const p2 = await client2.perspective.add("User 2 Test Perspective");
             // @ts-ignore - Suppress Apollo type mismatch
             const link2 = await client2.perspective.addLink(p2.uuid, {
-                source: "root",
+                source: "ad4m://root",
                 target: "test://target2",
                 predicate: "test://predicate"
             });
@@ -1567,6 +1567,116 @@ describe("Multi-User Simple integration tests", () => {
             expect(user1Signal.data.links[0].data.predicate).to.equal("test://user2_to_user1");
 
             console.log("✅ Neighbourhood signals working between managed users (Flux scenario)");
+        });
+
+        it("should exchange neighbourhood signals between main agent and managed user", async () => {
+            console.log("\n=== Testing signals between main agent and managed user ===");
+
+            // The admin client (empty/admin-credential token) IS the main agent.
+            // A managed user joins the same neighbourhood.  Signals must work both ways.
+            const mainAgentStatus = await adminAd4mClient!.agent.status();
+            const mainAgentDid = mainAgentStatus.did!;
+            console.log("Main agent DID:", mainAgentDid);
+
+            // Create and login a managed user
+            await adminAd4mClient!.agent.createUser("main_agent_signal@example.com", "password");
+            const userToken = await adminAd4mClient!.agent.loginUser("main_agent_signal@example.com", "password");
+            // @ts-ignore
+            const userClient = new Ad4mClient(apolloClient(gqlPort, userToken), false);
+
+            const userStatus = await userClient.agent.me();
+            const userDid = userStatus.did!;
+            console.log("Managed user DID:", userDid);
+
+            // Main agent creates the neighbourhood
+            const mainPerspective = await adminAd4mClient!.perspective.add("Main-Agent Neighbourhood");
+            const linkLanguage = await adminAd4mClient!.languages.applyTemplateAndPublish(
+                DIFF_SYNC_OFFICIAL,
+                JSON.stringify({ uid: uuidv4(), name: "Main-Agent Signal Test" })
+            );
+            const neighbourhoodUrl = await adminAd4mClient!.neighbourhood.publishFromPerspective(
+                mainPerspective.uuid,
+                linkLanguage.address,
+                new Perspective([])
+            );
+            console.log("Main agent created neighbourhood:", neighbourhoodUrl);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            // Managed user joins the neighbourhood
+            await userClient.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            const userPerspectives = await userClient.perspective.all();
+            const userSharedPerspective = userPerspectives.find(p => p.sharedUrl === neighbourhoodUrl);
+            expect(userSharedPerspective).to.not.be.null;
+            console.log("Managed user joined neighbourhood");
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            // Get neighbourhood proxies for both sides
+            const mainAgentNH = await mainPerspective.getNeighbourhoodProxy();
+            const userNH = await userSharedPerspective!.getNeighbourhoodProxy();
+            expect(mainAgentNH).to.not.be.null;
+            expect(userNH).to.not.be.null;
+
+            // Register signal listeners on both sides
+            const mainAgentReceivedSignals: any[] = [];
+            const userReceivedSignals: any[] = [];
+
+            mainAgentNH!.addSignalHandler((signal) => {
+                console.log("✉️ Main agent received signal:", JSON.stringify(signal));
+                mainAgentReceivedSignals.push(signal);
+            });
+            userNH!.addSignalHandler((signal) => {
+                console.log("✉️ Managed user received signal:", JSON.stringify(signal));
+                userReceivedSignals.push(signal);
+            });
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            // --- Test 1: main agent sends signal to managed user ---
+            console.log("\n--- Main agent sending signal to managed user ---");
+            await mainAgentNH!.sendSignalU(userDid, new PerspectiveUnsignedInput([
+                new Link({ source: "test://signal", predicate: "test://main_to_user", target: mainAgentDid })
+            ]));
+
+            const maxWait = 5000;
+            let start = Date.now();
+            while (userReceivedSignals.length === 0 && Date.now() - start < maxWait) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+            expect(userReceivedSignals.length).to.be.greaterThan(0, "Managed user should receive signal from main agent");
+            expect(userReceivedSignals[0].data.links[0].data.predicate).to.equal("test://main_to_user");
+            console.log("✅ Managed user received signal from main agent");
+
+            // --- Test 2: managed user sends signal to main agent ---
+            console.log("\n--- Managed user sending signal to main agent ---");
+            await userNH!.sendSignalU(mainAgentDid, new PerspectiveUnsignedInput([
+                new Link({ source: "test://signal", predicate: "test://user_to_main", target: userDid })
+            ]));
+
+            start = Date.now();
+            while (mainAgentReceivedSignals.length === 0 && Date.now() - start < maxWait) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+            expect(mainAgentReceivedSignals.length).to.be.greaterThan(0, "Main agent should receive signal from managed user");
+            expect(mainAgentReceivedSignals[0].data.links[0].data.predicate).to.equal("test://user_to_main");
+            console.log("✅ Main agent received signal from managed user");
+
+            // --- Test 3: managed user broadcasts, main agent receives ---
+            console.log("\n--- Managed user broadcasting, main agent should receive ---");
+            const mainAgentCountBefore = mainAgentReceivedSignals.length;
+            await userNH!.sendBroadcastU(new PerspectiveUnsignedInput([
+                new Link({ source: "test://broadcast", predicate: "test://user_broadcast", target: userDid })
+            ]));
+
+            start = Date.now();
+            while (mainAgentReceivedSignals.length === mainAgentCountBefore && Date.now() - start < maxWait) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+            expect(mainAgentReceivedSignals.length).to.be.greaterThan(mainAgentCountBefore, "Main agent should receive broadcast from managed user");
+            const broadcastSignal = mainAgentReceivedSignals[mainAgentReceivedSignals.length - 1];
+            expect(broadcastSignal.data.links[0].data.predicate).to.equal("test://user_broadcast");
+            console.log("✅ Main agent received broadcast from managed user");
+
+            console.log("✅ Signal exchange between main agent and managed user works correctly");
         });
     });
 

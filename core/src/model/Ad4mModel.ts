@@ -1671,8 +1671,12 @@ WHERE ${whereConditions.join(' AND ')}
                 
                 // Only process if target has a value
                 if (target !== undefined && target !== null && target !== '') {
-                  // Check if we need to resolve a non-literal language expression
-                  if (propMeta.resolveLanguage != undefined && propMeta.resolveLanguage !== 'literal' && typeof target === 'string') {
+                  // Check if we need to resolve a non-literal language expression.
+                  // resolveLanguage must be defined and not 'literal' to trigger expression resolution.
+                  // Also skip if the target itself is a literal:// URI — those are handled by the
+                  // literal-parsing branch below (avoids calling getExpression on empty literals like
+                  // "literal://string:" which would cause a deserialization error).
+                  if (propMeta.resolveLanguage != undefined && propMeta.resolveLanguage !== 'literal' && typeof target === 'string' && !target.startsWith('literal://')) {
                     // For non-literal languages, resolve the expression via perspective.getExpression()
                     // Note: Literals are already parsed by SurrealDB's fn::parse_literal()
                     try {
@@ -2236,6 +2240,11 @@ WHERE ${whereConditions.join(' AND ')}
     // Get resolve language from metadata (replaces Prolog query)
     let resolveLanguage = metadata.resolveLanguage;
 
+    // Skip storing empty/null/undefined values to avoid invalid empty literals (e.g. literal://string:)
+    if (value === undefined || value === null || value === "") {
+      return;
+    }
+
     if (resolveLanguage) {
       value = await this.#perspective.createExpression(value, resolveLanguage);
     }
@@ -2355,9 +2364,12 @@ WHERE ${whereConditions.join(' AND ')}
       }
     }
 
+    // Get the class name instead of passing the instance to avoid Prolog query generation
+    const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
+
     // Create the subject with the initial values
     await this.perspective.createSubject(
-      this,
+      className,
       this.#baseExpression,
       initialValues,
       batchId

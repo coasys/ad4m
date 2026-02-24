@@ -1439,7 +1439,8 @@ impl Ad4mDb {
             Ok((link_expression, status))
         })?;
         let links: Result<Vec<_>, _> = link_iter.collect();
-        Ok(links?)
+        let result = links?;
+        Ok(result)
     }
 
     pub fn get_links_by_predicate(

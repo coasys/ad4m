@@ -167,7 +167,7 @@ describe("Integration tests", function () {
           let link = new LinkExpression();
           link.author = "did:test";
           link.timestamp = new Date().toISOString();
-          link.data = new Link({source: "src", target: "target", predicate: "pred"});
+          link.data = new Link({source: "ad4m://src", target: "test://target", predicate: "ad4m://pred"});
           link.proof = new ExpressionProof("sig", "key")
 
           await testContext.bob.agent.updatePublicPerspective(new Perspective([link]))
