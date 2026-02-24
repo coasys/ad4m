@@ -37,20 +37,18 @@ function stableQueryKey(query: Query): string {
 /**
  * Stable fingerprint for an array of model instances.
  *
- * Sorted by `baseExpression` so result ordering doesn't cause false positives.
- * `baseExpression` is a prototype getter and therefore not serialised by
+ * Sorted by `id` so result ordering doesn't cause false positives.
+ * `id` is a prototype getter and therefore not serialised by
  * `JSON.stringify` automatically — it is extracted explicitly before spreading
  * the instance's own enumerable properties.
  */
 function stableFingerprint(results: any[]): string {
   const sorted = [...results].sort((a, b) => {
-    const aId: string = a.baseExpression ?? "";
-    const bId: string = b.baseExpression ?? "";
+    const aId: string = a.id ?? "";
+    const bId: string = b.id ?? "";
     return aId < bId ? -1 : aId > bId ? 1 : 0;
   });
-  return JSON.stringify(
-    sorted.map((r) => ({ baseExpression: r.baseExpression, ...r })),
-  );
+  return JSON.stringify(sorted.map((r) => ({ id: r.id, ...r })));
 }
 
 // ─── Subscription registry ────────────────────────────────────────────────────

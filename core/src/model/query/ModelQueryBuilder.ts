@@ -111,11 +111,6 @@ export class ModelQueryBuilder<T extends import("../Ad4mModel").Ad4mModel> {
     >;
   }
 
-  /** Alias for {@link get} — preferred terminal method in fluent chains. */
-  async run(): Promise<T[]> {
-    return this.get();
-  }
-
   /** Returns the first matching instance, or `null` if none found. */
   async first(): Promise<T | null> {
     return this.ctor.findOne(
