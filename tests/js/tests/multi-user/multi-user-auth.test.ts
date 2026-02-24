@@ -1,65 +1,30 @@
-import path from "path";
 import { Ad4mClient } from "@coasys/ad4m";
-import fs from "fs-extra";
-import { fileURLToPath } from "url";
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor } from "../../utils/utils";
-import { ChildProcess } from "node:child_process";
-
+import { apolloClient } from "../../utils/utils";
+import { startAgent, AgentHandle } from "../../helpers/executor";
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 describe("Multi-User integration tests", () => {
-  const TEST_DIR = path.join(`${__dirname}/../../tst-tmp`);
-  const appDataPath = path.join(TEST_DIR, "agents", "multi-user-agent");
-  const bootstrapSeedPath = path.join(`${__dirname}/../../bootstrapSeed.json`);
-  const gqlPort = 15500;
-  const hcAdminPort = 15501;
-  const hcAppPort = 15502;
-
-  let executorProcess: ChildProcess | null = null;
-  let adminAd4mClient: Ad4mClient | null = null;
+  let agent: AgentHandle;
+  let adminAd4mClient: Ad4mClient;
 
   before(async () => {
-    if (!fs.existsSync(appDataPath)) {
-      fs.mkdirSync(appDataPath, { recursive: true });
-    }
-
-    // Start executor with multi-user mode enabled
-    executorProcess = await startExecutor(
-      appDataPath,
-      bootstrapSeedPath,
-      gqlPort,
-      hcAdminPort,
-      hcAppPort,
-      false,
-      "admin123",
-    );
-
-    adminAd4mClient = new Ad4mClient(apolloClient(gqlPort, "admin123"), false);
-
-    // Generate initial admin agent
-    await adminAd4mClient.agent.generate("passphrase");
+    agent = await startAgent("multi-user-agent", {
+      adminCredential: "admin123",
+    });
+    adminAd4mClient = agent.client;
   });
 
   after(async () => {
-    if (executorProcess) {
-      while (!executorProcess?.killed) {
-        let status = executorProcess?.kill();
-        console.log("killed executor with", status);
-        await sleep(500);
-      }
-    }
+    await agent.stop();
   });
 
   describe("User Registration and Authentication", () => {
     it("should create a new user with username and password", async () => {
-      const result = await adminAd4mClient!.agent.createUser(
+      const result = await adminAd4mClient.agent.createUser(
         "alice",
         "password123",
       );
@@ -70,14 +35,14 @@ describe("Multi-User integration tests", () => {
 
     it("should return existing user if already exists", async () => {
       // Create user first time
-      const result1 = await adminAd4mClient!.agent.createUser(
+      const result1 = await adminAd4mClient.agent.createUser(
         "bob",
         "password456",
       );
       expect(result1.success).to.be.true;
 
       // Try to create same user again
-      const result2 = await adminAd4mClient!.agent.createUser(
+      const result2 = await adminAd4mClient.agent.createUser(
         "bob",
         "password456",
       );
@@ -87,10 +52,10 @@ describe("Multi-User integration tests", () => {
 
     it("should fail to create user with wrong password for existing username", async () => {
       // Create user first
-      await adminAd4mClient!.agent.createUser("charlie", "correctpassword");
+      await adminAd4mClient.agent.createUser("charlie", "correctpassword");
 
       // Try with wrong password
-      const result = await adminAd4mClient!.agent.createUser(
+      const result = await adminAd4mClient.agent.createUser(
         "charlie",
         "wrongpassword",
       );
@@ -100,21 +65,24 @@ describe("Multi-User integration tests", () => {
 
     it("should generate a JWT token for a specific user via login", async () => {
       // Create user
-      const userResult = await adminAd4mClient!.agent.createUser(
+      const userResult = await adminAd4mClient.agent.createUser(
         "dave",
         "password789",
       );
       expect(userResult.success).to.be.true;
 
       // Login as the user to get a JWT token
-      const token = await adminAd4mClient!.agent.loginUser(
+      const token = await adminAd4mClient.agent.loginUser(
         "dave",
         "password789",
       );
       expect(token).to.match(/.+/);
 
       // Create a client with the user's token and verify DID
-      const userClient = new Ad4mClient(apolloClient(gqlPort, token), false);
+      const userClient = new Ad4mClient(
+        apolloClient(agent.gqlPort, token),
+        false,
+      );
       const me = await userClient.agent.me();
       expect(me.did).to.equal(userResult.did);
     });
@@ -128,11 +96,11 @@ describe("Multi-User integration tests", () => {
 
     before(async () => {
       // Create users and get their tokens via loginUser
-      const aliceResult = await adminAd4mClient!.agent.createUser(
+      const aliceResult = await adminAd4mClient.agent.createUser(
         "alice_persp",
         "password123",
       );
-      const bobResult = await adminAd4mClient!.agent.createUser(
+      const bobResult = await adminAd4mClient.agent.createUser(
         "bob_persp",
         "password456",
       );
@@ -140,17 +108,20 @@ describe("Multi-User integration tests", () => {
       aliceDid = aliceResult.did;
       bobDid = bobResult.did;
 
-      const aliceToken = await adminAd4mClient!.agent.loginUser(
+      const aliceToken = await adminAd4mClient.agent.loginUser(
         "alice_persp",
         "password123",
       );
-      const bobToken = await adminAd4mClient!.agent.loginUser(
+      const bobToken = await adminAd4mClient.agent.loginUser(
         "bob_persp",
         "password456",
       );
 
-      aliceClient = new Ad4mClient(apolloClient(gqlPort, aliceToken), false);
-      bobClient = new Ad4mClient(apolloClient(gqlPort, bobToken), false);
+      aliceClient = new Ad4mClient(
+        apolloClient(agent.gqlPort, aliceToken),
+        false,
+      );
+      bobClient = new Ad4mClient(apolloClient(agent.gqlPort, bobToken), false);
     });
 
     it("should create perspectives scoped to specific users", async () => {
@@ -247,18 +218,18 @@ describe("Multi-User integration tests", () => {
 
     before(async () => {
       // Create user and get token via loginUser
-      const userResult = await adminAd4mClient!.agent.createUser(
+      const userResult = await adminAd4mClient.agent.createUser(
         "test_user_ops",
         "password123",
       );
       userDid = userResult.did;
 
-      const token = await adminAd4mClient!.agent.loginUser(
+      const token = await adminAd4mClient.agent.loginUser(
         "test_user_ops",
         "password123",
       );
 
-      userClient = new Ad4mClient(apolloClient(gqlPort, token), false);
+      userClient = new Ad4mClient(apolloClient(agent.gqlPort, token), false);
     });
 
     it("should return correct agent status for user", async () => {

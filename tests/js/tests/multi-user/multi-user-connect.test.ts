@@ -1,60 +1,23 @@
-import path from "path";
 import { Ad4mClient } from "@coasys/ad4m";
 import { getAd4mClient } from "@coasys/ad4m-connect";
-import fs from "fs-extra";
-import { fileURLToPath } from "url";
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor } from "../../utils/utils";
-import { ChildProcess } from "node:child_process";
-
+import { startAgent, AgentHandle } from "../../helpers/executor";
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 describe("Multi-User Ad4m-Connect integration tests", () => {
-  const TEST_DIR = path.join(`${__dirname}/../../tst-tmp`);
-  const appDataPath = path.join(TEST_DIR, "agents", "multi-user-connect-agent");
-  const bootstrapSeedPath = path.join(`${__dirname}/../../bootstrapSeed.json`);
-  const gqlPort = 15800;
-  const hcAdminPort = 15801;
-  const hcAppPort = 15802;
-
-  let executorProcess: ChildProcess | null = null;
-  let adminAd4mClient: Ad4mClient | null = null;
+  let agent: AgentHandle;
+  let adminAd4mClient: Ad4mClient;
 
   before(async () => {
-    if (!fs.existsSync(appDataPath)) {
-      fs.mkdirSync(appDataPath, { recursive: true });
-    }
-
-    // Start executor with multi-user mode enabled (no admin credential for this test)
-    executorProcess = await startExecutor(
-      appDataPath,
-      bootstrapSeedPath,
-      gqlPort,
-      hcAdminPort,
-      hcAppPort,
-      false,
-    );
-
-    adminAd4mClient = new Ad4mClient(apolloClient(gqlPort), false);
-
-    // Generate initial admin agent (needed for JWT signing)
-    await adminAd4mClient.agent.generate("passphrase");
+    agent = await startAgent("multi-user-connect-agent");
+    adminAd4mClient = agent.client;
   });
 
   after(async () => {
-    if (executorProcess) {
-      while (!executorProcess?.killed) {
-        let status = executorProcess?.kill();
-        console.log("killed executor with", status);
-        await sleep(500);
-      }
-    }
+    await agent.stop();
   });
 
   describe("Multi-User Connect Flow", () => {
@@ -69,7 +32,7 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
         },
         capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
         multiUser: true,
-        remoteUrl: `ws://localhost:${gqlPort}/graphql`,
+        remoteUrl: `ws://localhost:${agent.gqlPort}/graphql`,
         userEmail: "test@example.com",
         userPassword: "password123",
       });
@@ -84,15 +47,15 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
       expect(status.did).to.match(/^did:key:.+/);
 
       // Verify the agent.me returns the correct user DID
-      const agent = await client.agent.me();
-      expect(agent.did).to.equal(status.did);
+      const me = await client.agent.me();
+      expect(me.did).to.equal(status.did);
 
-      console.log("Successfully connected as user:", agent.did);
+      console.log("Successfully connected as user:", me.did);
     });
 
     it("should login existing user via ad4m-connect", async () => {
       // First, create a user directly via admin client
-      const userResult = await adminAd4mClient!.agent.createUser(
+      const userResult = await adminAd4mClient.agent.createUser(
         "existing@example.com",
         "password456",
       );
@@ -108,7 +71,7 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
         },
         capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
         multiUser: true,
-        remoteUrl: `ws://localhost:${gqlPort}/graphql`,
+        remoteUrl: `ws://localhost:${agent.gqlPort}/graphql`,
         userEmail: "existing@example.com",
         userPassword: "password456",
       });
@@ -117,10 +80,10 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
       expect(client).to.be.ok;
 
       // Verify we're logged in as the correct user
-      const agent = await client.agent.me();
-      expect(agent.did).to.equal(userResult.did);
+      const ag = await client.agent.me();
+      expect(ag.did).to.equal(userResult.did);
 
-      console.log("Successfully logged in existing user:", agent.did);
+      console.log("Successfully logged in existing user:", ag.did);
     });
 
     it("should fail with wrong password", async () => {
@@ -134,7 +97,7 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
         },
         capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
         multiUser: true,
-        remoteUrl: `ws://localhost:${gqlPort}/graphql`,
+        remoteUrl: `ws://localhost:${agent.gqlPort}/graphql`,
         userEmail: "existing@example.com",
         userPassword: "wrongpassword",
       });

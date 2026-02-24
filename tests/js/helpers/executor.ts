@@ -35,6 +35,9 @@ export async function startAgent(
   opts: {
     passphrase?: string;
     bootstrapSeedPath?: string;
+    /** When set, starts the executor in admin-credential mode and connects
+     *  the returned client using that credential as the bearer token. */
+    adminCredential?: string;
   } = {},
 ): Promise<AgentHandle> {
   const [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
@@ -48,10 +51,11 @@ export async function startAgent(
     gqlPort,
     hcAdminPort,
     hcAppPort,
+    false,
+    opts.adminCredential,
   );
 
-  // @ts-ignore — Apollo Client version mismatch between dependencies
-  const client = new Ad4mClient(apolloClient(gqlPort));
+  const client = new Ad4mClient(apolloClient(gqlPort, opts.adminCredential));
   await client.agent.generate(opts.passphrase ?? "test-passphrase");
 
   async function stop(): Promise<void> {
@@ -71,7 +75,6 @@ export async function startAgent(
  * without spawning an extra executor process.
  */
 export function connectClient(gqlPort: number, token?: string): Ad4mClient {
-  // @ts-ignore — Apollo Client version mismatch between dependencies
   return new Ad4mClient(apolloClient(gqlPort, token));
 }
 
