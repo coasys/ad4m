@@ -16,17 +16,16 @@ import {
   sleep,
 } from "../../utils/utils";
 import { ChildProcess } from "child_process";
-import perspectiveTests from "./perspective";
-import agentTests from "./agent";
-import aiTests from "./ai";
-import languageTests from "./language";
-import expressionTests from "./expression";
-import neighbourhoodTests from "./neighbourhood";
-import runtimeTests from "./runtime";
-import agentLanguageTests from "./agent-language";
-import socialDNATests from "./social-dna-flow";
-import tripleAgentTests from "./triple-agent-test";
-
+import perspectiveTests from "./perspective.suite";
+import agentTests from "./agent.suite";
+import aiTests from "./ai.suite";
+import languageTests from "./language.suite";
+import expressionTests from "./expression.suite";
+import neighbourhoodTests from "./neighbourhood.suite";
+import runtimeTests from "./runtime.suite";
+import agentLanguageTests from "./agent-language.suite";
+import socialDNATests from "./social-dna-flow.suite";
+import tripleAgentTests from "./triple-agent-test.suite";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
