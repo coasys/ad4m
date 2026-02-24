@@ -26,6 +26,7 @@ use crate::{
         sign_device_key,
     },
     holochain_service::get_holochain_service,
+    languages::LanguageController,
     pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC},
 };
 use base64::prelude::*;
@@ -1318,19 +1319,78 @@ impl Mutation {
         template_data: String,
     ) -> FieldResult<LanguageRef> {
         check_capability(&context.capabilities, &LANGUAGE_CREATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "languageApplyTemplateAndPublish",
-                {{ sourceLanguageHash: "{}", templateData: JSON.stringify({}) }},
-            ))"#,
-            source_language_hash, template_data
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<LanguageRef> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        // Check if the language language is loaded on the Rust side
+        let controller = LanguageController::global_instance();
+        let language_language_loaded = {
+            let sys = controller.system_addresses.lock().await;
+            sys.language_language.is_some()
+        };
+
+        if language_language_loaded {
+            // Rust-side implementation
+            let template_map: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(&template_data).map_err(|e| {
+                    FieldError::new(
+                        format!("Invalid template_data JSON: {}", e),
+                        graphql_value!(null),
+                    )
+                })?;
+
+            let input = controller
+                .language_apply_template_on_source(&source_language_hash, template_map)
+                .await
+                .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+
+            let input_name = input.meta.name.clone();
+
+            let language_language_address = {
+                let sys = controller.system_addresses.lock().await;
+                sys.language_language.clone().unwrap()
+            };
+
+            let input_json = serde_json::to_string(&input).map_err(|e| {
+                FieldError::new(
+                    format!("Failed to serialize language input: {}", e),
+                    graphql_value!(null),
+                )
+            })?;
+
+            let publish_script = format!(
+                r#"await globalThis.__ad4m_language_instance__.expressionAdapter.putAdapter.createPublic({})"#,
+                input_json
+            );
+
+            let address = controller
+                .execute_on_language(&language_language_address, &publish_script)
+                .await
+                .map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to publish language: {}", e),
+                        graphql_value!(null),
+                    )
+                })?;
+
+            Ok(LanguageRef {
+                address,
+                name: input_name,
+            })
+        } else {
+            // Fallback to JS implementation
+            let mut js = context.js_handle.clone();
+            let script = format!(
+                r#"JSON.stringify(
+                await core.callResolver(
+                    "Mutation",
+                    "languageApplyTemplateAndPublish",
+                    {{ sourceLanguageHash: "{}", templateData: JSON.stringify({}) }},
+                ))"#,
+                source_language_hash, template_data
+            );
+            let result = js.execute(script).await?;
+            let result: JsResultType<LanguageRef> = serde_json::from_str(&result)?;
+            result.get_graphql_result()
+        }
     }
 
     async fn language_publish(
@@ -1365,19 +1425,12 @@ impl Mutation {
         address: String,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &LANGUAGE_DELETE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "languageRemove",
-                {{ address: "{}" }},
-            ))"#,
-            address
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let mut controller = LanguageController::global_instance();
+        controller
+            .language_remove(&address)
+            .await
+            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+        Ok(true)
     }
 
     async fn language_write_settings(

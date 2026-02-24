@@ -9,19 +9,26 @@ use deno_core::error::AnyError;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+use crate::graphql::graphql_types::{
+    DecoratedNeighbourhoodExpression, ExceptionInfo, ExceptionType, LanguageLanguageInput,
+    LanguageMeta, Neighbourhood,
+};
+use crate::holochain_service::maybe_get_holochain_service;
+use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
 use crate::runtime_service::RuntimeService;
 use crate::types::Address;
 use crate::{
-    agent::{did_for_context, signing_key_id_for_context, AgentContext},
-    graphql::graphql_types::{DecoratedNeighbourhoodExpression, Neighbourhood},
+    agent::{did, did_for_context, signing_key_id_for_context, AgentContext},
     js_core::JsCoreHandle,
     utils::{language_storage_directory, languages_directory},
 };
+use base64::prelude::*;
 use error::LanguageError;
 use language::Language;
 use language_context::LanguageContext;
 use language_runtime_handle::LanguageRuntimeHandle;
 use log::{error, info, warn};
+use regex::Regex;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::fs;
@@ -52,7 +59,10 @@ pub struct LanguageController {
     runtimes: Arc<TokioMutex<HashMap<String, LanguageRuntimeHandle>>>,
 
     // System language address tracking
-    system_addresses: Arc<TokioMutex<SystemLanguageAddresses>>,
+    pub system_addresses: Arc<TokioMutex<SystemLanguageAddresses>>,
+
+    // Language address aliases (e.g. "lang" -> actual address)
+    language_aliases: Arc<TokioMutex<HashMap<String, String>>>,
 
     // Watch channel for signaling when all languages are ready
     languages_ready_tx: Arc<tokio::sync::watch::Sender<bool>>,
@@ -80,6 +90,7 @@ impl LanguageController {
             js_core,
             runtimes: Arc::new(TokioMutex::new(HashMap::new())),
             system_addresses: Arc::new(TokioMutex::new(SystemLanguageAddresses::default())),
+            language_aliases: Arc::new(TokioMutex::new(HashMap::new())),
             languages_ready_tx: Arc::new(languages_ready_tx),
             languages_ready_rx,
         }
@@ -586,24 +597,115 @@ impl LanguageController {
         log::debug!("install_language called for: {}", language);
         let mut controller = Self::global_instance();
 
-        // Try to install/save the language bundle on the Rust side.
-        // This may fail if the language-language isn't loaded in Rust runtimes yet.
-        // That's OK — the JS side will handle it.
-        match controller.install_language_from_address(&language).await {
-            Ok(()) => {
-                log::debug!(
-                    "install_language: Rust-side install succeeded for {}",
-                    language
-                );
-            }
-            Err(e) => {
-                log::debug!("install_language: Rust-side install failed for {} ({}), falling through to JS side", language, e);
-            }
+        // Check if the language is already loaded in Rust runtimes
+        if controller.is_language_loaded(&language).await {
+            log::debug!("install_language: {} already loaded", language);
+            return Ok(());
         }
 
-        // Tell the JS-side LanguageController to install/load the language.
-        // This handles both the case where Rust saved the bundle and the case where
-        // the JS side needs to fetch and install it.
+        let language_dir = languages_directory().join(&language);
+        let meta_path = language_dir.join("meta.json");
+        let bundle_path = language_dir.join("bundle.js");
+
+        // Check if the language language is loaded on the Rust side
+        let language_language_address = {
+            let sys = controller.system_addresses.lock().await;
+            sys.language_language.clone()
+        };
+
+        // Get meta: from disk or from language language with retry
+        let meta: Option<JsonValue> = if meta_path.exists() {
+            let content = fs::read_to_string(&meta_path)?;
+            Some(serde_json::from_str(&content)?)
+        } else if let Some(ref ll_addr) = language_language_address {
+            // Fetch from language language with retry logic (up to 10 retries)
+            let meta_script = format!(
+                r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get("{}"))"#,
+                language
+            );
+
+            let mut meta_result = None;
+            for retry in 0..10 {
+                match controller.execute_on_language(ll_addr, &meta_script).await {
+                    Ok(result) => {
+                        if let Ok(val) = serde_json::from_str::<JsonValue>(&result) {
+                            if !val.is_null() {
+                                meta_result = Some(val);
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Error getting language meta from language language: {}\nRetrying...", e);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5000 * (retry + 1))).await;
+            }
+
+            meta_result.and_then(|expr| expr.get("data").cloned())
+        } else {
+            None
+        };
+
+        // Get bundle source: from disk or from language language
+        let source = if bundle_path.exists() {
+            Some(fs::read_to_string(&bundle_path)?)
+        } else if let Some(ref ll_addr) = language_language_address {
+            let source_script = format!(
+                r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource("{}")"#,
+                language
+            );
+
+            match controller.execute_on_language(ll_addr, &source_script).await {
+                Ok(s) if !s.is_empty() => Some(s),
+                Ok(_) => None,
+                Err(e) => {
+                    warn!("Error getting language source from language language: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // If we have source, do the Rust-side install
+        if let Some(source) = source {
+            // Compute hash and verify
+            let hash = controller.calculate_language_hash(&source);
+            if hash == "asdf" {
+                error!("install_language: COULDN'T VERIFY HASH OF LANGUAGE!");
+                error!("install_language: Address: {}", language);
+                error!("install_language: Computed hash: {}", hash);
+                error!("install_language: LANGUAGE WILL BE IGNORED");
+                return Ok(());
+            }
+
+            // Save language bundle to disk
+            let (_saved_hash, saved_bundle_path) =
+                controller.save_language_bundle(&source, meta.as_ref())?;
+            info!("install_language: saved language bundle for {}", language);
+
+            // Load the language into its own runtime
+            match controller.load_language(saved_bundle_path).await {
+                Ok(_) => {
+                    info!("install_language: loaded language {}", language);
+                }
+                Err(e) => {
+                    error!(
+                        "install_language: ERROR LOADING NEWLY INSTALLED LANGUAGE {}: {}",
+                        language, e
+                    );
+                }
+            }
+
+            return Ok(());
+        }
+
+        // Fall back to JS-side LanguageController for install
+        log::debug!(
+            "install_language: falling back to JS side for {}",
+            language
+        );
         let script = format!(
             r#"
             (async () => {{
@@ -731,5 +833,778 @@ impl LanguageController {
         }
 
         Ok(None)
+    }
+
+    /// Resolve a language for an expression reference, resolving aliases first
+    pub async fn language_for_expression(
+        &self,
+        address: &str,
+    ) -> Result<Language, LanguageError> {
+        // Resolve alias if present
+        let resolved_address = {
+            let aliases = self.language_aliases.lock().await;
+            aliases.get(address).cloned().unwrap_or_else(|| address.to_string())
+        };
+
+        // Look up in runtimes
+        let runtimes = self.runtimes.lock().await;
+        if runtimes.contains_key(&resolved_address) {
+            return Ok(Language::new(resolved_address, self.js_core.clone()));
+        }
+
+        Err(LanguageError::NotFound {
+            address: resolved_address,
+        })
+    }
+
+    /// Apply template data to source language lines.
+    /// Port of JS applyTemplateData method.
+    fn apply_template_data(
+        source_lines: &mut Vec<String>,
+        template_data: &serde_json::Map<String, JsonValue>,
+    ) {
+        let ad4m_template_pattern = "//!@ad4m-template-variable";
+
+        // Find all indexes where the template marker appears
+        let indexes: Vec<usize> = source_lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains(ad4m_template_pattern))
+            .map(|(i, _)| i)
+            .collect();
+
+        // Variable declaration patterns
+        let patterns = [
+            Regex::new(r"var ([a-zA-Z0-9_-]+)").unwrap(),
+            Regex::new(r"const ([a-zA-Z0-9_-]+)").unwrap(),
+            Regex::new(r"let ([a-zA-Z0-9_-]+)").unwrap(),
+        ];
+
+        // Process each template marker
+        for &marker_index in &indexes {
+            let variable_index = marker_index + 1;
+            if variable_index >= source_lines.len() {
+                continue;
+            }
+
+            let variable_line = source_lines[variable_index].clone();
+
+            for pattern in &patterns {
+                if let Some(captures) = pattern.captures(&variable_line) {
+                    let full_match = captures.get(0).unwrap().as_str();
+                    let parts: Vec<&str> = full_match.splitn(2, ' ').collect();
+                    if parts.len() != 2 {
+                        continue;
+                    }
+                    let variable_type = parts[0];
+                    let variable_name = parts[1];
+
+                    if let Some(value) = template_data.get(variable_name) {
+                        let replacement = match value {
+                            JsonValue::String(s) => {
+                                format!("{} {} = \"{}\"", variable_type, variable_name, s)
+                            }
+                            other => {
+                                format!("{} {} = {}", variable_type, variable_name, other)
+                            }
+                        };
+                        source_lines[variable_index] = replacement;
+                    }
+                }
+            }
+        }
+
+        // Handle special case for `var happ = "..."`
+        if let Some(happ_value) = template_data.get("happ") {
+            info!("applying happ template data...");
+            let happ_pattern = Regex::new(r"var (happ+)").unwrap();
+            let mut happ_index = 0;
+            for (i, line) in source_lines.iter().enumerate() {
+                if happ_pattern.is_match(line) {
+                    happ_index = i;
+                }
+            }
+            if let JsonValue::String(happ_str) = happ_value {
+                info!("happIndex: {}", happ_index);
+                source_lines[happ_index] = format!("var happ = \"{}\"", happ_str);
+            }
+        }
+    }
+
+    /// Read and template a Holochain DNA from language source lines.
+    /// Port of JS readAndTemplateHolochainDNA method.
+    async fn read_and_template_holochain_dna(
+        &self,
+        source_lines: &[String],
+        template_data: &serde_json::Map<String, JsonValue>,
+        source_language_hash: &str,
+    ) -> Result<Option<String>, LanguageError> {
+        // Look for `var happ = ` in source lines
+        let happ_index = source_lines
+            .iter()
+            .position(|line| line.contains("var happ = "));
+
+        let happ_index = match happ_index {
+            Some(idx) => idx,
+            None => return Ok(None),
+        };
+
+        // Create temp directory for DNA templating operations
+        let temp_templating_path =
+            std::env::temp_dir().join(source_language_hash);
+        if temp_templating_path.exists() {
+            let _ = fs::remove_dir_all(&temp_templating_path);
+        }
+        fs::create_dir_all(&temp_templating_path)?;
+
+        let temp_happ_path = temp_templating_path.join("happ.happ");
+
+        // Extract base64-encoded happ from the line
+        let happ_line = &source_lines[happ_index];
+        let happ_code = happ_line
+            .split("var happ = ")
+            .nth(1)
+            .unwrap_or("");
+
+        // Strip leading `"` and trailing `";`
+        let happ_code = happ_code.trim();
+        let happ_code = if happ_code.starts_with('"') && happ_code.ends_with("\";") {
+            &happ_code[1..happ_code.len() - 2]
+        } else if happ_code.starts_with('"') && happ_code.ends_with('"') {
+            &happ_code[1..happ_code.len() - 1]
+        } else {
+            happ_code
+        };
+
+        // Decode base64 and write to temp file
+        let happ_bytes = BASE64_STANDARD.decode(happ_code).map_err(|e| {
+            LanguageError::InvalidBundle {
+                message: format!("Failed to decode happ base64: {}", e),
+            }
+        })?;
+        fs::write(&temp_happ_path, &happ_bytes)?;
+
+        // Unpack hApp bundle
+        info!("readAndTemplateHolochainDna: unpacking hApp bundle");
+        let holochain_service = maybe_get_holochain_service().await.ok_or_else(|| {
+            LanguageError::RuntimeError {
+                address: source_language_hash.to_string(),
+                message: "Holochain service not available".to_string(),
+            }
+        })?;
+
+        let unpack_happ_path = holochain_service
+            .unpack_happ(temp_happ_path.to_string_lossy().to_string())
+            .await
+            .map_err(|e| LanguageError::RuntimeError {
+                address: source_language_hash.to_string(),
+                message: format!("Failed to unpack hApp: {}", e),
+            })?;
+        let unpack_happ_path = unpack_happ_path.trim().to_string();
+
+        // Delete the .happ file after unpacking
+        let _ = fs::remove_file(&temp_happ_path);
+
+        // Read happ.yaml
+        let happ_yaml_path =
+            PathBuf::from(&unpack_happ_path).join("happ.yaml");
+        if !happ_yaml_path.exists() {
+            return Err(LanguageError::InvalidBundle {
+                message: format!(
+                    "Expected to find happ.yaml at {} after unpacking but could not find it",
+                    happ_yaml_path.display()
+                ),
+            });
+        }
+
+        let happ_yaml_content = fs::read_to_string(&happ_yaml_path)?;
+        let happ_yaml: JsonValue =
+            serde_yaml::from_str(&happ_yaml_content).map_err(|e| {
+                LanguageError::SerializationError {
+                    message: format!("Failed to parse happ.yaml: {}", e),
+                }
+            })?;
+
+        // Extract roles[0].dna.path
+        let dna_rel_path = happ_yaml
+            .get("roles")
+            .and_then(|r| r.get(0))
+            .and_then(|r| r.get("dna"))
+            .and_then(|d| d.get("path"))
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| LanguageError::InvalidBundle {
+                message: "Could not find roles[0].dna.path in happ.yaml".to_string(),
+            })?;
+
+        let dna_bundle_path =
+            PathBuf::from(&unpack_happ_path).join(dna_rel_path);
+
+        // Unpack DNA
+        info!("readAndTemplateHolochainDna: unpacking DNA");
+        let unpack_dna_path = holochain_service
+            .unpack_dna(dna_bundle_path.to_string_lossy().to_string())
+            .await
+            .map_err(|e| LanguageError::RuntimeError {
+                address: source_language_hash.to_string(),
+                message: format!("Failed to unpack DNA: {}", e),
+            })?;
+        let unpack_dna_path = unpack_dna_path.trim().to_string();
+
+        // Read dna.yaml
+        let dna_yaml_path =
+            PathBuf::from(&unpack_dna_path).join("dna.yaml");
+        if !dna_yaml_path.exists() {
+            return Err(LanguageError::InvalidBundle {
+                message: format!(
+                    "Expected to find dna.yaml at {} after unpacking but could not find it",
+                    dna_yaml_path.display()
+                ),
+            });
+        }
+
+        let dna_yaml_content = fs::read_to_string(&dna_yaml_path)?;
+        let mut dna_yaml: JsonValue =
+            serde_yaml::from_str(&dna_yaml_content).map_err(|e| {
+                LanguageError::SerializationError {
+                    message: format!("Failed to parse dna.yaml: {}", e),
+                }
+            })?;
+
+        // Apply template data to DNA yaml
+        if let Some(uid) = template_data.get("uid") {
+            if let Some(integrity) = dna_yaml.get_mut("integrity") {
+                integrity["network_seed"] = uid.clone();
+            }
+        }
+
+        // Set properties for all template keys
+        for (key, value) in template_data {
+            if let Some(integrity) = dna_yaml.get_mut("integrity") {
+                if integrity.get("properties").is_none() {
+                    integrity["properties"] = JsonValue::Object(serde_json::Map::new());
+                }
+                if let Some(props) = integrity.get_mut("properties") {
+                    props[key] = value.clone();
+                }
+            }
+        }
+
+        // Write modified dna.yaml back
+        let dna_yaml_dump = serde_yaml::to_string(&dna_yaml).map_err(|e| {
+            LanguageError::SerializationError {
+                message: format!("Failed to serialize dna.yaml: {}", e),
+            }
+        })?;
+        fs::write(&dna_yaml_path, &dna_yaml_dump)?;
+
+        // Pack DNA
+        info!("readAndTemplateHolochainDna: packing DNA");
+        let pack_dna_path = holochain_service
+            .pack_dna(unpack_dna_path.clone())
+            .await
+            .map_err(|e| LanguageError::RuntimeError {
+                address: source_language_hash.to_string(),
+                message: format!("Failed to pack DNA: {}", e),
+            })?;
+        let pack_dna_path = pack_dna_path.trim().to_string();
+
+        // Copy packed DNA back into happ directory
+        let pack_dna_filename = PathBuf::from(&pack_dna_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let target = PathBuf::from(&unpack_happ_path).join(&pack_dna_filename);
+        info!(
+            "readAndTemplateHolochainDna: copying packed dna back to happ directory: {}",
+            target.display()
+        );
+        fs::copy(&pack_dna_path, &target)?;
+
+        // Pack hApp bundle
+        info!("readAndTemplateHolochainDna: packing hApp bundle");
+        let pack_happ_path = holochain_service
+            .pack_happ(unpack_happ_path.clone())
+            .await
+            .map_err(|e| LanguageError::RuntimeError {
+                address: source_language_hash.to_string(),
+                message: format!("Failed to pack hApp: {}", e),
+            })?;
+        let pack_happ_path = pack_happ_path.trim().to_string();
+
+        // Read packed happ as base64
+        let happ_bytes = fs::read(&pack_happ_path)?;
+        let base64_string = BASE64_STANDARD.encode(&happ_bytes);
+
+        // Cleanup temp directory
+        let _ = fs::remove_dir_all(&temp_templating_path);
+
+        Ok(Some(base64_string))
+    }
+
+    /// Apply template on source language and return the resulting LanguageLanguageInput.
+    /// Port of JS languageApplyTemplateOnSource method.
+    pub async fn language_apply_template_on_source(
+        &self,
+        source_language_hash: &str,
+        mut template_data: serde_json::Map<String, JsonValue>,
+    ) -> Result<LanguageLanguageInput, LanguageError> {
+        let language_language_address = {
+            let sys = self.system_addresses.lock().await;
+            sys.language_language
+                .clone()
+                .ok_or_else(|| LanguageError::LoadError {
+                    address: source_language_hash.to_string(),
+                    message: "Language language not loaded".to_string(),
+                })?
+        };
+
+        // Get the language expression (meta)
+        let meta_script = format!(
+            r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get("{}"))"#,
+            source_language_hash
+        );
+        let meta_result = self
+            .execute_on_language(&language_language_address, &meta_script)
+            .await?;
+
+        let meta_expression: JsonValue =
+            serde_json::from_str(&meta_result).map_err(|e| {
+                LanguageError::SerializationError {
+                    message: format!("Failed to parse language expression: {}", e),
+                }
+            })?;
+
+        if meta_expression.is_null() {
+            return Err(LanguageError::NotFound {
+                address: source_language_hash.to_string(),
+            });
+        }
+
+        // Get the language source
+        let source_script = format!(
+            r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource("{}")"#,
+            source_language_hash
+        );
+        let source_language = self
+            .execute_on_language(&language_language_address, &source_script)
+            .await?;
+
+        if source_language.is_empty() {
+            return Err(LanguageError::LoadError {
+                address: source_language_hash.to_string(),
+                message: "Could not get source language".to_string(),
+            });
+        }
+
+        let mut source_lines: Vec<String> =
+            source_language.split('\n').map(String::from).collect();
+
+        // Sort template_data keys (equivalent to JS orderObject)
+        let sorted_data: serde_json::Map<String, JsonValue> = {
+            let mut keys: Vec<String> = template_data.keys().cloned().collect();
+            keys.sort();
+            let mut sorted = serde_json::Map::new();
+            for key in keys {
+                if let Some(val) = template_data.remove(&key) {
+                    sorted.insert(key, val);
+                }
+            }
+            sorted
+        };
+        template_data = sorted_data;
+
+        // Read and template Holochain DNA
+        let happ_code = self
+            .read_and_template_holochain_dna(
+                &source_lines,
+                &template_data,
+                source_language_hash,
+            )
+            .await?;
+
+        if let Some(happ_code) = happ_code {
+            info!("setting happCode in templateData");
+            template_data.insert("happ".to_string(), JsonValue::String(happ_code));
+        }
+
+        // Re-sort after potentially adding "happ"
+        let sorted_data: serde_json::Map<String, JsonValue> = {
+            let mut keys: Vec<String> = template_data.keys().cloned().collect();
+            keys.sort();
+            let mut sorted = serde_json::Map::new();
+            for key in keys {
+                if let Some(val) = template_data.remove(&key) {
+                    sorted.insert(key, val);
+                }
+            }
+            sorted
+        };
+        template_data = sorted_data;
+
+        // Apply template data to source lines
+        Self::apply_template_data(&mut source_lines, &template_data);
+
+        // Remove happ from template_data before storing in meta
+        template_data.remove("happ");
+
+        // Build the updated LanguageMeta
+        let meta_data = meta_expression.get("data").cloned().unwrap_or(JsonValue::Object(serde_json::Map::new()));
+
+        let mut meta: LanguageMeta = serde_json::from_value(meta_data.clone()).unwrap_or_default();
+
+        // Override name and description if present in template_data
+        if let Some(JsonValue::String(name)) = template_data.get("name") {
+            meta.name = name.clone();
+        }
+        if let Some(JsonValue::String(desc)) = template_data.get("description") {
+            meta.description = Some(desc.clone());
+        }
+
+        meta.template_applied_params =
+            Some(serde_json::to_string(&JsonValue::Object(template_data)).unwrap_or_default());
+        meta.template_source_language_address = Some(source_language_hash.to_string());
+
+        // Compute hash of the joined lines
+        let language_data = source_lines.join("\n");
+        let language_hash = self.calculate_language_hash(&language_data);
+        meta.address = language_hash;
+
+        Ok(LanguageLanguageInput {
+            bundle: language_data,
+            meta,
+        })
+    }
+
+    /// Remove a language: unload runtime, remove Holochain app, delete files.
+    /// Port of JS languageRemove method.
+    pub async fn language_remove(&mut self, address: &str) -> Result<(), LanguageError> {
+        // Teardown the per-language Rust runtime (if loaded there).
+        // Errors here (e.g. runtime not loaded, teardown failure) must not abort
+        // the rest of the removal – the JS version always continued to remove the
+        // Holochain app and delete the language directory regardless.
+        if let Err(e) = self.unload_language(address).await {
+            warn!("language_remove: unload_language failed for {}: {} – continuing with cleanup", address, e);
+        }
+
+        // Delegate to JS side for full cleanup (teardown JS language, remove Holochain DNA, etc.)
+        // The JS languageRemove handles: teardown language instance, remove from maps,
+        // remove Holochain DNA, and remove language directory.
+        let script = format!(
+            r#"JSON.stringify(
+            await core.callResolver(
+                "Mutation",
+                "languageRemove",
+                {{ address: "{}" }},
+            ))"#,
+            address
+        );
+        match self.js_core.execute(script).await {
+            Ok(_) => {
+                info!("language_remove: JS-side removal succeeded for {}", address);
+            }
+            Err(e) => {
+                warn!("language_remove: JS-side removal failed for {}: {}", address, e);
+                // Still try Rust-side cleanup as fallback
+
+                // Remove Holochain DNA for this language
+                if let Some(holochain_service) = maybe_get_holochain_service().await {
+                    match holochain_service.remove_app(address.to_string()).await {
+                        Ok(()) => {
+                            info!("Removed Holochain app for language {}", address);
+                        }
+                        Err(e) => {
+                            warn!("No DNA found for language {}: {}", address, e);
+                        }
+                    }
+                }
+
+                // Remove language files from disk
+                let language_path = languages_directory().join(address);
+                if let Err(e) = fs::remove_dir_all(&language_path) {
+                    warn!(
+                        "Failed to remove language directory {}: {}",
+                        language_path.display(),
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get a language by reference, installing it if necessary.
+    /// Implements trust verification for untrusted authors.
+    /// Port of JS languageByRef method.
+    pub async fn language_by_ref(&self, address: &str) -> Result<Language, LanguageError> {
+        // Resolve alias if present
+        let resolved_address = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(address)
+                .cloned()
+                .unwrap_or_else(|| address.to_string())
+        };
+
+        // Check if already loaded
+        if self.is_language_loaded(&resolved_address).await {
+            return Ok(Language::new(
+                resolved_address,
+                self.js_core.clone(),
+            ));
+        }
+
+        // Get the language language address
+        let language_language_address = {
+            let sys = self.system_addresses.lock().await;
+            sys.language_language
+                .clone()
+                .ok_or_else(|| LanguageError::LoadError {
+                    address: resolved_address.clone(),
+                    message: "Language language not loaded".to_string(),
+                })?
+        };
+
+        // Fetch language expression (meta) from language language
+        let meta_script = format!(
+            r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get("{}"))"#,
+            resolved_address
+        );
+        let meta_result = self
+            .execute_on_language(&language_language_address, &meta_script)
+            .await?;
+
+        let language_meta: JsonValue =
+            serde_json::from_str(&meta_result).map_err(|e| {
+                LanguageError::SerializationError {
+                    message: format!("Failed to parse language meta: {}", e),
+                }
+            })?;
+
+        if language_meta.is_null() {
+            return Err(LanguageError::NotFound {
+                address: resolved_address,
+            });
+        }
+
+        // Validate proof
+        let proof_valid = language_meta
+            .get("proof")
+            .and_then(|p| p.get("valid"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if !proof_valid {
+            return Err(LanguageError::LoadError {
+                address: resolved_address,
+                message: "Language to be installed does not have valid proof".to_string(),
+            });
+        }
+
+        let language_author = language_meta
+            .get("author")
+            .and_then(|a| a.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let language_meta_data = language_meta
+            .get("data")
+            .cloned()
+            .unwrap_or(JsonValue::Object(serde_json::Map::new()));
+
+        // Get trusted agents
+        let trusted_agents =
+            RuntimeService::with_global_instance(|rs| rs.get_trusted_agents());
+        let agent_did = did();
+
+        // Check if author is trusted
+        if trusted_agents.contains(&language_author) || agent_did == language_author {
+            // Trusted author path: fetch source, verify hash, install
+            let source_script = format!(
+                r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource("{}")"#,
+                resolved_address
+            );
+            let language_source = self
+                .execute_on_language(&language_language_address, &source_script)
+                .await?;
+
+            if language_source.is_empty() {
+                return Err(LanguageError::LoadError {
+                    address: resolved_address,
+                    message: "Could not get language source".to_string(),
+                });
+            }
+
+            let language_hash = self.calculate_language_hash(&language_source);
+
+            let meta_address = language_meta_data
+                .get("address")
+                .and_then(|a| a.as_str())
+                .unwrap_or("");
+
+            if meta_address.is_empty() {
+                return Err(LanguageError::LoadError {
+                    address: resolved_address.clone(),
+                    message: format!(
+                        "Could not find 'address' value inside languageMetaData: {:?}",
+                        language_meta_data
+                    ),
+                });
+            }
+
+            if language_hash != meta_address {
+                return Err(LanguageError::LoadError {
+                    address: resolved_address,
+                    message: "Calculated language hash did not match address in meta".to_string(),
+                });
+            }
+
+            Self::install_language(resolved_address.clone())
+                .await
+                .map_err(|e| LanguageError::LoadError {
+                    address: resolved_address.clone(),
+                    message: format!("Failed to install language: {}", e),
+                })?;
+
+            Ok(Language::new(resolved_address, self.js_core.clone()))
+        } else {
+            // Untrusted author path: verify template params
+            let template_applied_params = language_meta_data
+                .get("templateAppliedParams")
+                .or_else(|| language_meta_data.get("template_applied_params"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let template_source_language_address = language_meta_data
+                .get("templateSourceLanguageAddress")
+                .or_else(|| language_meta_data.get("template_source_language_address"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            if template_applied_params.is_empty() || template_source_language_address.is_empty() {
+                let err_msg = format!(
+                    "Language not created by trusted agent: {} and is not templated... aborting language install. Language metadata: {:?}",
+                    language_author, language_meta_data
+                );
+                error!("{}", err_msg);
+
+                let exception = ExceptionInfo {
+                    title: "Failed to install language".to_string(),
+                    message: err_msg.clone(),
+                    r#type: ExceptionType::AgentIsUntrusted,
+                    addon: Some(language_author),
+                };
+                get_global_pubsub()
+                    .await
+                    .publish(
+                        &EXCEPTION_OCCURRED_TOPIC,
+                        &serde_json::to_string(&exception).unwrap_or_default(),
+                    )
+                    .await;
+
+                return Err(LanguageError::LoadError {
+                    address: resolved_address,
+                    message: err_msg,
+                });
+            }
+
+            // Get source language meta and verify its author is trusted
+            let source_meta_script = format!(
+                r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get("{}"))"#,
+                template_source_language_address
+            );
+            let source_meta_result = self
+                .execute_on_language(&language_language_address, &source_meta_script)
+                .await?;
+
+            let source_language_meta: JsonValue =
+                serde_json::from_str(&source_meta_result).map_err(|e| {
+                    LanguageError::SerializationError {
+                        message: format!("Failed to parse source language meta: {}", e),
+                    }
+                })?;
+
+            let source_author = source_language_meta
+                .get("author")
+                .and_then(|a| a.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if !trusted_agents.contains(&source_author) {
+                let err_msg = "Agent which created source language for language trying to be installed is not a trustedAgent... aborting language install".to_string();
+
+                let exception = ExceptionInfo {
+                    title: "Failed to install language".to_string(),
+                    message: err_msg.clone(),
+                    r#type: ExceptionType::AgentIsUntrusted,
+                    addon: Some(source_author),
+                };
+                get_global_pubsub()
+                    .await
+                    .publish(
+                        &EXCEPTION_OCCURRED_TOPIC,
+                        &serde_json::to_string(&exception).unwrap_or_default(),
+                    )
+                    .await;
+
+                return Err(LanguageError::LoadError {
+                    address: resolved_address,
+                    message: err_msg,
+                });
+            }
+
+            // Apply template on source and verify hash
+            let template_params: serde_json::Map<String, JsonValue> =
+                serde_json::from_str(template_applied_params).map_err(|e| {
+                    LanguageError::SerializationError {
+                        message: format!("Failed to parse template params: {}", e),
+                    }
+                })?;
+
+            let templated_input = self
+                .language_apply_template_on_source(
+                    template_source_language_address,
+                    template_params,
+                )
+                .await?;
+
+            // Fetch actual source of the language to install
+            let source_script = format!(
+                r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource("{}")"#,
+                resolved_address
+            );
+            let language_source = self
+                .execute_on_language(&language_language_address, &source_script)
+                .await?;
+
+            if language_source.is_empty() {
+                return Err(LanguageError::LoadError {
+                    address: resolved_address,
+                    message: "Could not get language source".to_string(),
+                });
+            }
+
+            let language_hash = self.calculate_language_hash(&language_source);
+
+            if templated_input.meta.address != language_hash {
+                return Err(LanguageError::LoadError {
+                    address: resolved_address,
+                    message: format!(
+                        "Templating of original source language did not result in the same language hash. Expected: {}. Got: {}",
+                        language_hash, templated_input.meta.address
+                    ),
+                });
+            }
+
+            Self::install_language(resolved_address.clone())
+                .await
+                .map_err(|e| LanguageError::LoadError {
+                    address: resolved_address.clone(),
+                    message: format!("Failed to install language: {}", e),
+                })?;
+
+            Ok(Language::new(resolved_address, self.js_core.clone()))
+        }
     }
 }

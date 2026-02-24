@@ -148,11 +148,16 @@ pub struct ExceptionInfo {
 
 #[derive(GraphQLEnum, Default, Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ExceptionType {
+    #[serde(alias = "LANGUAGE_IS_NOT_LOADED")]
     LanguageIsNotLoaded = 0,
+    #[serde(alias = "EXPRESSION_IS_NOT_VERIFIED")]
     ExpressionIsNotVerified = 1,
+    #[serde(alias = "AGENT_IS_UNTRUSTED")]
     AgentIsUntrusted = 2,
     #[default]
+    #[serde(alias = "CAPABILITY_REQUESTED")]
     CapabilityRequested = 3,
+    #[serde(alias = "INSTALL_NOTIFICATION_REQUEST")]
     InstallNotificationRequest = 4,
 }
 
@@ -236,6 +241,13 @@ pub struct LanguageMetaInput {
     pub name: String,
     pub possible_template_params: Option<Vec<String>>,
     pub source_code_link: Option<String>,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageLanguageInput {
+    pub bundle: String,
+    pub meta: LanguageMeta,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]

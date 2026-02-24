@@ -143,6 +143,7 @@ dependencies = [
  "semver 1.0.26",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.10.9",
  "signal-hook",
  "sodoken 0.1.0",

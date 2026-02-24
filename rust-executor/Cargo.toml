@@ -113,6 +113,7 @@ fake = { version = "2.9.2", features = ["derive"] }
 sha2 = "0.10.8"
 regex = "1.5.4"
 json5 = "0.4"
+serde_yaml = "0.9"
 rayon = "1.7.0"  # For parallel processing in filtering optimization
 lettre = "0.11"  # For sending verification emails via SMTP
 
