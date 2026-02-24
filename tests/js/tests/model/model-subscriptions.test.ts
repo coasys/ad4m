@@ -6,7 +6,7 @@
  * and ModelQueryBuilder.subscribe() / countSubscribe() / paginateSubscribe().
  *
  * Ported from playground scenario 05 (Subscriptions) and the subscription
- * sections of prolog-and-literals.test.ts.
+ * sections of sdna.test.ts.
  *
  * Run with:
  *   pnpm ts-mocha -p tsconfig.json --timeout 120000 --serial --exit tests/model/model-subscriptions.test.ts

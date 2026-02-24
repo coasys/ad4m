@@ -6,7 +6,7 @@
  * loading, and Query<T> composability.
  *
  * Ported from playground scenarios 02 (Querying), 03 (Collections),
- * 04 (Relationships & Include) and the query-heavy sections of prolog-and-literals.
+ * 04 (Relationships & Include). The query-heavy tests have been moved to model-query.test.ts.
  *
  * Run with:
  *   pnpm ts-mocha -p tsconfig.json --timeout 120000 --exit tests/model/model-query.test.ts
