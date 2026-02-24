@@ -6,7 +6,6 @@ import {
   LinkExpression,
   Perspective,
 } from "@coasys/ad4m";
-import { fileURLToPath } from "url";
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient } from "../../utils/utils";

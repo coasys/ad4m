@@ -11,6 +11,7 @@
     "test-integration": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/integration/integration.test.ts",
     "test-app": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/auth/app.test.ts",
     "test-auth": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/auth/authentication.test.ts",
+    "test-multi-user": "node scripts/cleanup.js && pnpm run test-multi-user-auth && node scripts/cleanup.js && pnpm run test-multi-user-connect && node scripts/cleanup.js && pnpm run test-multi-user-config && node scripts/cleanup.js && pnpm run test-multi-user-isolation && node scripts/cleanup.js && pnpm run test-multi-user-sdna && node scripts/cleanup.js && pnpm run test-multi-user-profiles && node scripts/cleanup.js && pnpm run test-multi-user-neighbourhood && node scripts/cleanup.js && pnpm run test-multi-user-multi-node && node scripts/cleanup.js && pnpm run test-multi-user-subscriptions && node scripts/cleanup.js && pnpm run test-multi-user-notifications",
     "test-multi-user-auth": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/multi-user/multi-user-auth.test.ts",
     "test-multi-user-connect": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/multi-user/multi-user-connect.test.ts",
     "test-multi-user-config": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/multi-user/multi-user-config.test.ts",

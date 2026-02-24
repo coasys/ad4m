@@ -1,6 +1,5 @@
 import fs from "fs-extra";
 import path from "path";
-import { isProcessRunning, sleep } from "../utils/utils";
 import {
   Ad4mClient,
   ExpressionProof,
@@ -14,6 +13,7 @@ import {
   startExecutor,
   apolloClient,
   runHcLocalServices,
+  sleep,
 } from "../../utils/utils";
 import { ChildProcess } from "child_process";
 import perspectiveTests from "./perspective";
@@ -23,10 +23,9 @@ import languageTests from "./language";
 import expressionTests from "./expression";
 import neighbourhoodTests from "./neighbourhood";
 import runtimeTests from "./runtime";
-//import { Crypto } from "@peculiar/webcrypto"
-import directMessageTests from "./direct-messages";
 import agentLanguageTests from "./agent-language";
 import socialDNATests from "./social-dna-flow";
+import tripleAgentTests from "./triple-agent-test";
 import fetch from "node-fetch";
 
 //@ts-ignore
@@ -35,18 +34,16 @@ global.fetch = fetch;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-//@ts-ignore
-//global.crypto = new Crypto();
-
 const TEST_DIR = `${__dirname}/../../tst-tmp`;
 
 export class TestContext {
-  //#ad4mClient: Ad4mClient | undefined
   #alice: Ad4mClient | undefined;
   #bob: Ad4mClient | undefined;
+  #jim: Ad4mClient | undefined;
 
   #aliceCore: ChildProcess | undefined;
   #bobCore: ChildProcess | undefined;
+  #jimCore: ChildProcess | undefined;
 
   get ad4mClient(): Ad4mClient {
     return this.#alice!;
@@ -60,12 +57,20 @@ export class TestContext {
     return this.#bob!;
   }
 
+  get jim(): Ad4mClient {
+    return this.#jim!;
+  }
+
   set alice(client: Ad4mClient) {
     this.#alice = client;
   }
 
   set bob(client: Ad4mClient) {
     this.#bob = client;
+  }
+
+  set jim(client: Ad4mClient) {
+    this.#jim = client;
   }
 
   set aliceCore(aliceCore: ChildProcess) {
@@ -76,6 +81,10 @@ export class TestContext {
     this.#bobCore = bobCore;
   }
 
+  set jimCore(jimCore: ChildProcess) {
+    this.#jimCore = jimCore;
+  }
+
   async makeAllNodesKnown() {
     const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
     const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
@@ -83,11 +92,23 @@ export class TestContext {
     await this.#alice!.runtime.hcAddAgentInfos(bobAgentInfo);
     await this.#bob!.runtime.hcAddAgentInfos(aliceAgentInfo);
   }
+
+  async makeAllThreeNodesKnown() {
+    const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
+    const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
+    const jimAgentInfo = await this.#jim!.runtime.hcAgentInfos();
+
+    await this.#alice!.runtime.hcAddAgentInfos(bobAgentInfo);
+    await this.#alice!.runtime.hcAddAgentInfos(jimAgentInfo);
+    await this.#bob!.runtime.hcAddAgentInfos(aliceAgentInfo);
+    await this.#bob!.runtime.hcAddAgentInfos(jimAgentInfo);
+    await this.#jim!.runtime.hcAddAgentInfos(aliceAgentInfo);
+    await this.#jim!.runtime.hcAddAgentInfos(bobAgentInfo);
+  }
 }
 let testContext: TestContext = new TestContext();
 
 describe("Integration tests", function () {
-  //@ts-ignore
   this.timeout(200000);
   const appDataPath = path.join(TEST_DIR, "agents", "alice");
   const bootstrapSeedPath = path.join(`${__dirname}/../../bootstrapSeed.json`);
@@ -227,5 +248,50 @@ describe("Integration tests", function () {
     describe("Language", languageTests(testContext));
     describe("Neighbourhood", neighbourhoodTests(testContext));
     //describe('Direct Messages', directMessageTests(testContext))
+
+    describe("with Alice, Bob and Jim", () => {
+      let jimExecutorProcess: ChildProcess | null = null;
+      before(async () => {
+        const jimAppDataPath = path.join(TEST_DIR, "agents", "jim");
+        const jimGqlPort = 15450;
+        const jimHcAdminPort = 15451;
+        const jimHcAppPort = 15452;
+
+        if (!fs.existsSync(jimAppDataPath)) fs.mkdirSync(jimAppDataPath);
+
+        jimExecutorProcess = await startExecutor(
+          jimAppDataPath,
+          bootstrapSeedPath,
+          jimGqlPort,
+          jimHcAdminPort,
+          jimHcAppPort,
+          false,
+          undefined,
+          proxyUrl!,
+          bootstrapUrl!,
+          relayUrl!,
+        );
+
+        testContext.jim = new Ad4mClient(apolloClient(jimGqlPort));
+        testContext.jimCore = jimExecutorProcess;
+        await testContext.jim.agent.generate("passphrase");
+
+        const status = await testContext.jim.agent.status();
+        expect(status.isInitialized).to.be.true;
+        expect(status.isUnlocked).to.be.true;
+      });
+
+      after(async () => {
+        if (jimExecutorProcess) {
+          while (!jimExecutorProcess?.killed) {
+            let status = jimExecutorProcess?.kill();
+            console.log("killed jim's executor with", status);
+            await sleep(500);
+          }
+        }
+      });
+
+      describe("Triple Agent", tripleAgentTests(testContext));
+    });
   });
 });

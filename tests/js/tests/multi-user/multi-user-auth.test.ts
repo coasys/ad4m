@@ -1,5 +1,5 @@
 import path from "path";
-import { Ad4mClient, AuthInfoInput, CapabilityInput } from "@coasys/ad4m";
+import { Ad4mClient } from "@coasys/ad4m";
 import fs from "fs-extra";
 import { fileURLToPath } from "url";
 import * as chai from "chai";
@@ -101,7 +101,7 @@ describe("Multi-User integration tests", () => {
       expect(result.error).to.include("Invalid credentials");
     });
 
-    it("should generate capability token for specific user", async () => {
+    it("should generate a JWT token for a specific user via login", async () => {
       // Create user
       const userResult = await adminAd4mClient!.agent.createUser(
         "dave",
@@ -109,45 +109,17 @@ describe("Multi-User integration tests", () => {
       );
       expect(userResult.success).to.be.true;
 
-      // Request capability for this user
-      const requestId = await adminAd4mClient!.agent.requestCapabilityForUser(
+      // Login as the user to get a JWT token
+      const token = await adminAd4mClient!.agent.loginUser(
         "dave",
-        {
-          appName: "test-app",
-          appDesc: "test-desc",
-          appDomain: "test.ad4m.org",
-          appUrl: "https://test-link",
-          capabilities: [
-            {
-              with: {
-                domain: "agent",
-                pointers: ["*"],
-              },
-              can: ["READ"],
-            },
-          ] as CapabilityInput[],
-        } as AuthInfoInput,
+        "password789",
       );
+      expect(token).to.match(/.+/);
 
-      expect(requestId).to.match(/.+/);
-
-      // Permit capability
-      const rand = await adminAd4mClient!.agent.permitCapability(
-        `{"requestId":"${requestId}","auth":{"appName":"test-app","appDesc":"test-desc","appUrl":"test-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]}}`,
-      );
-      expect(rand).to.match(/\d+/);
-
-      // Generate JWT for user
-      const jwt = await adminAd4mClient!.agent.generateJwtForUser(
-        "dave",
-        requestId,
-        rand,
-      );
-      expect(jwt).to.match(/.+/);
-
-      // Verify JWT contains user DID
-      const payload = JSON.parse(atob(jwt.split(".")[1]));
-      expect(payload.sub).to.equal(userResult.did);
+      // Create a client with the user's token and verify DID
+      const userClient = new Ad4mClient(apolloClient(gqlPort, token), false);
+      const me = await userClient.agent.me();
+      expect(me.did).to.equal(userResult.did);
     });
   });
 
@@ -158,7 +130,7 @@ describe("Multi-User integration tests", () => {
     let bobDid: string;
 
     before(async () => {
-      // Create users and get their capability tokens
+      // Create users and get their tokens via loginUser
       const aliceResult = await adminAd4mClient!.agent.createUser(
         "alice_persp",
         "password123",
@@ -171,55 +143,17 @@ describe("Multi-User integration tests", () => {
       aliceDid = aliceResult.did;
       bobDid = bobResult.did;
 
-      // Get capability tokens for both users
-      const aliceRequestId =
-        await adminAd4mClient!.agent.requestCapabilityForUser("alice_persp", {
-          appName: "perspective-app",
-          appDesc: "test perspectives",
-          appDomain: "test.ad4m.org",
-          appUrl: "https://test-link",
-          capabilities: [
-            {
-              with: { domain: "*", pointers: ["*"] },
-              can: ["*"],
-            },
-          ],
-        });
-
-      const bobRequestId =
-        await adminAd4mClient!.agent.requestCapabilityForUser("bob_persp", {
-          appName: "perspective-app",
-          appDesc: "test perspectives",
-          appDomain: "test.ad4m.org",
-          appUrl: "https://test-link",
-          capabilities: [
-            {
-              with: { domain: "*", pointers: ["*"] },
-              can: ["*"],
-            },
-          ],
-        });
-
-      const aliceRand = await adminAd4mClient!.agent.permitCapability(
-        `{"requestId":"${aliceRequestId}","auth":{"appName":"perspective-app","appDesc":"test perspectives","appUrl":"test-url","capabilities":[{"with":{"domain":"*","pointers":["*"]},"can":["*"]}]}}`,
-      );
-      const bobRand = await adminAd4mClient!.agent.permitCapability(
-        `{"requestId":"${bobRequestId}","auth":{"appName":"perspective-app","appDesc":"test perspectives","appUrl":"test-url","capabilities":[{"with":{"domain":"*","pointers":["*"]},"can":["*"]}]}}`,
-      );
-
-      const aliceJwt = await adminAd4mClient!.agent.generateJwtForUser(
+      const aliceToken = await adminAd4mClient!.agent.loginUser(
         "alice_persp",
-        aliceRequestId,
-        aliceRand,
+        "password123",
       );
-      const bobJwt = await adminAd4mClient!.agent.generateJwtForUser(
+      const bobToken = await adminAd4mClient!.agent.loginUser(
         "bob_persp",
-        bobRequestId,
-        bobRand,
+        "password456",
       );
 
-      aliceClient = new Ad4mClient(apolloClient(gqlPort, aliceJwt), false);
-      bobClient = new Ad4mClient(apolloClient(gqlPort, bobJwt), false);
+      aliceClient = new Ad4mClient(apolloClient(gqlPort, aliceToken), false);
+      bobClient = new Ad4mClient(apolloClient(gqlPort, bobToken), false);
     });
 
     it("should create perspectives scoped to specific users", async () => {
@@ -315,39 +249,19 @@ describe("Multi-User integration tests", () => {
     let userDid: string;
 
     before(async () => {
-      // Create user and get capability token
+      // Create user and get token via loginUser
       const userResult = await adminAd4mClient!.agent.createUser(
         "test_user_ops",
         "password123",
       );
       userDid = userResult.did;
 
-      const requestId = await adminAd4mClient!.agent.requestCapabilityForUser(
+      const token = await adminAd4mClient!.agent.loginUser(
         "test_user_ops",
-        {
-          appName: "user-ops-app",
-          appDesc: "test user operations",
-          appDomain: "test.ad4m.org",
-          appUrl: "https://test-link",
-          capabilities: [
-            {
-              with: { domain: "*", pointers: ["*"] },
-              can: ["*"],
-            },
-          ],
-        },
+        "password123",
       );
 
-      const rand = await adminAd4mClient!.agent.permitCapability(
-        `{"requestId":"${requestId}","auth":{"appName":"user-ops-app","appDesc":"test user operations","appUrl":"test-url","capabilities":[{"with":{"domain":"*","pointers":["*"]},"can":["*"]}]}}`,
-      );
-      const jwt = await adminAd4mClient!.agent.generateJwtForUser(
-        "test_user_ops",
-        requestId,
-        rand,
-      );
-
-      userClient = new Ad4mClient(apolloClient(gqlPort, jwt), false);
+      userClient = new Ad4mClient(apolloClient(gqlPort, token), false);
     });
 
     it("should return correct agent status for user", async () => {

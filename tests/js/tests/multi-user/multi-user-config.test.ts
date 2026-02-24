@@ -92,7 +92,6 @@ describe("Multi-User Configuration tests", () => {
         "stats1@example.com",
         "password1",
       );
-      // @ts-ignore
       const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
 
       // User 1 creates a perspective
@@ -158,7 +157,6 @@ describe("Multi-User Configuration tests", () => {
         "lastseen@example.com",
         "password",
       );
-      // @ts-ignore
       const userClient = new Ad4mClient(apolloClient(gqlPort, token), false);
 
       console.log(
@@ -279,7 +277,6 @@ describe("Multi-User Configuration tests", () => {
       );
 
       // Create authenticated client
-      // @ts-ignore - Suppress Apollo type mismatch
       const userClient = new Ad4mClient(
         apolloClient(gqlPort, userToken),
         false,
@@ -307,7 +304,6 @@ describe("Multi-User Configuration tests", () => {
         "dave@example.com",
         "passwordABC",
       );
-      // @ts-ignore - Suppress Apollo type mismatch
       const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
       const agent1 = await client1.agent.me();
 
@@ -316,7 +312,6 @@ describe("Multi-User Configuration tests", () => {
         "dave@example.com",
         "passwordABC",
       );
-      // @ts-ignore - Suppress Apollo type mismatch
       const client2 = new Ad4mClient(apolloClient(gqlPort, token2), false);
       const agent2 = await client2.agent.me();
 

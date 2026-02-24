@@ -1,6 +1,6 @@
 import path from "path";
 import { Ad4mClient } from "@coasys/ad4m";
-import Ad4mConnect from "../../../../connect/src/core.ts";
+import { getAd4mClient } from "@coasys/ad4m-connect";
 import fs from "fs-extra";
 import { fileURLToPath } from "url";
 import * as chai from "chai";
@@ -63,25 +63,21 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
   describe("Multi-User Connect Flow", () => {
     it("should create user and login via ad4m-connect", async () => {
       // Create ad4m-connect instance with multi-user options
-      const ui = new Ad4mConnect({
-        appName: "Multi-User Test App",
-        appDesc: "Testing multi-user functionality",
-        appDomain: "test.ad4m.org",
-        appIconPath: "https://example.com/icon.png",
-        capabilities: [
-          {
-            with: { domain: "*", pointers: ["*"] },
-            can: ["*"],
-          },
-        ],
+      const client = await getAd4mClient({
+        appInfo: {
+          name: "Multi-User Test App",
+          description: "Testing multi-user functionality",
+          url: "test.ad4m.org",
+          iconPath: "https://example.com/icon.png",
+        },
+        capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
         multiUser: true,
-        backendUrl: `ws://localhost:${gqlPort}/graphql`,
+        remoteUrl: `ws://localhost:${gqlPort}/graphql`,
         userEmail: "test@example.com",
         userPassword: "password123",
       });
 
       // Connect should handle user creation and login automatically
-      const client = await ui.connect();
       expect(client).to.be.ok;
 
       // Verify we have an authenticated client
@@ -106,24 +102,21 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
       expect(userResult.success).to.be.true;
 
       // Now try to connect via ad4m-connect with existing user credentials
-      const ui = new Ad4mConnect({
-        appName: "Multi-User Test App",
-        appDesc: "Testing multi-user functionality",
-        appDomain: "test.ad4m.org",
-        capabilities: [
-          {
-            with: { domain: "*", pointers: ["*"] },
-            can: ["*"],
-          },
-        ],
+      const client = await getAd4mClient({
+        appInfo: {
+          name: "Multi-User Test App",
+          description: "Testing multi-user functionality",
+          url: "test.ad4m.org",
+          iconPath: "https://example.com/icon.png",
+        },
+        capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
         multiUser: true,
-        backendUrl: `ws://localhost:${gqlPort}/graphql`,
+        remoteUrl: `ws://localhost:${gqlPort}/graphql`,
         userEmail: "existing@example.com",
         userPassword: "password456",
       });
 
       // Connect should login the existing user
-      const client = await ui.connect();
       expect(client).to.be.ok;
 
       // Verify we're logged in as the correct user
@@ -135,25 +128,23 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
 
     it("should fail with wrong password", async () => {
       // Try to connect with wrong password
-      const ui = new Ad4mConnect({
-        appName: "Multi-User Test App",
-        appDesc: "Testing multi-user functionality",
-        appDomain: "test.ad4m.org",
-        capabilities: [
-          {
-            with: { domain: "*", pointers: ["*"] },
-            can: ["*"],
-          },
-        ],
+      const client = await getAd4mClient({
+        appInfo: {
+          name: "Multi-User Test App",
+          description: "Testing multi-user functionality",
+          url: "test.ad4m.org",
+          iconPath: "https://example.com/icon.png",
+        },
+        capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
         multiUser: true,
-        backendUrl: `ws://localhost:${gqlPort}/graphql`,
+        remoteUrl: `ws://localhost:${gqlPort}/graphql`,
         userEmail: "existing@example.com",
         userPassword: "wrongpassword",
       });
 
       // Connect should fail
       const call = async () => {
-        return await ui.connect();
+        return client;
       };
 
       await expect(call()).to.be.rejected;
