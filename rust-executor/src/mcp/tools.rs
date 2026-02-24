@@ -969,10 +969,12 @@ impl Ad4mMcpHandler {
         property_name: &str,
     ) -> Result<String, String> {
         // SHACL shapes are stored as links in the perspective.
-        // The pattern is:
+        // Property shape URIs encode the name: {namespace}{ClassName}.{propertyName}
+        // e.g. "flux://Channel.name", "flux://Channel.messages"
+        //
+        // Resolution:
         //   literal://string:shacl://{ClassName} --ad4m://shacl_shape_uri--> {shapeUri}
-        //   {shapeUri} --sh://property--> {propertyShapeUri}
-        //   {propertyShapeUri} --sh://name--> literal://string:{propertyName}
+        //   {shapeUri} --sh://property--> {propertyShapeUri}  (URI contains ".{propName}")
         //   {propertyShapeUri} --sh://path--> {predicateUri}
 
         // Step 1: Find shape URI for class
@@ -1002,40 +1004,30 @@ impl Ad4mMcpHandler {
             .await
             .map_err(|e| format!("Error querying properties: {}", e))?;
 
-        // Step 3: For each property shape, check if its name matches
+        // Step 3: Match property by name extracted from URI
+        // Property shape URIs are like "flux://Channel.name" — name is after the last dot
         for prop_link in &prop_links {
             let prop_uri = &prop_link.data.target;
 
-            // Get the name of this property
-            let name_links = perspective
-                .get_links(&LinkQuery {
-                    source: Some(prop_uri.clone()),
-                    predicate: Some("sh://name".to_string()),
-                    ..Default::default()
-                })
-                .await
-                .map_err(|e| format!("Error querying property name: {}", e))?;
+            // Extract property name from URI: "flux://Channel.name" -> "name"
+            let prop_name_from_uri = prop_uri
+                .rsplit_once('.')
+                .map(|(_, name)| name)
+                .unwrap_or("");
 
-            for name_link in &name_links {
-                let name = name_link
-                    .data
-                    .target
-                    .strip_prefix("literal://string:")
-                    .unwrap_or(&name_link.data.target);
-                if name == property_name {
-                    // Found it — get the path (predicate)
-                    let path_links = perspective
-                        .get_links(&LinkQuery {
-                            source: Some(prop_uri.clone()),
-                            predicate: Some("sh://path".to_string()),
-                            ..Default::default()
-                        })
-                        .await
-                        .map_err(|e| format!("Error querying property path: {}", e))?;
+            if prop_name_from_uri == property_name {
+                // Found it — get the path (predicate)
+                let path_links = perspective
+                    .get_links(&LinkQuery {
+                        source: Some(prop_uri.clone()),
+                        predicate: Some("sh://path".to_string()),
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(|e| format!("Error querying property path: {}", e))?;
 
-                    if let Some(path_link) = path_links.first() {
-                        return Ok(path_link.data.target.clone());
-                    }
+                if let Some(path_link) = path_links.first() {
+                    return Ok(path_link.data.target.clone());
                 }
             }
         }

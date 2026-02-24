@@ -280,7 +280,7 @@ const CHANNEL_SHACL = JSON.stringify({
         {
             path: "flux://channel_name",
             name: "name",
-            datatype: "string",
+            datatype: "xsd:string",
             min_count: 1,
             max_count: 1,
             writable: true,
@@ -315,7 +315,7 @@ const MESSAGE_SHACL = JSON.stringify({
         {
             path: "flux://body",
             name: "body",
-            datatype: "string",
+            datatype: "xsd:string",
             min_count: 1,
             max_count: 1,
             writable: true,

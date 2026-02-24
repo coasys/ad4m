@@ -122,6 +122,16 @@ jobs:
           command: cd ./tests/js && ./email-verification-test-with-setup.sh
           no_output_timeout: 30m
 
+  integration-tests-mcp:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - setup_integration_test_environment
+      - run:
+          name: Run MCP integration tests
+          command: cd ./tests/js && pnpm run test-mcp
+          no_output_timeout: 30m
+
   integration-tests-cli:
     machine: true
     resource_class: coasys/marvin
@@ -152,5 +162,8 @@ workflows:
           requires:
             - build-and-test
       - integration-tests-email-verification:
+          requires:
+            - build-and-test
+      - integration-tests-mcp:
           requires:
             - build-and-test
