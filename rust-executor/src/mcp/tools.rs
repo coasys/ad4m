@@ -229,6 +229,30 @@ pub struct RemoveFromCollectionParams {
     pub item_address: String,
 }
 
+/// Parameters for getting children of a subject instance
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GetSubjectChildrenParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+    /// Subject class name of the parent
+    pub class_name: String,
+    /// Expression address of the parent subject
+    pub expression_address: String,
+    /// Optional: filter children to only this class name
+    pub child_class_name: Option<String>,
+}
+
+/// Parameters for deleting a subject instance
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct DeleteSubjectParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+    /// Subject class name
+    pub class_name: String,
+    /// Expression address of the subject to delete
+    pub expression_address: String,
+}
+
 // ============================================================================
 // MCP Handler
 // ============================================================================
@@ -1163,6 +1187,149 @@ impl Ad4mMcpHandler {
                     }
                     Err(e) => format!("Error finding link to remove: {}", e),
                 }
+            }
+            None => format!("Perspective not found: {}", p.perspective_id),
+        }
+    }
+
+    // ========================================================================
+    // SUBJECT CHILDREN & DELETE TOOLS
+    // ========================================================================
+
+    /// Get all children of a subject instance (linked via ad4m://has_child)
+    #[tool(
+        description = "Get all subjects that are children of a given subject (linked via ad4m://has_child). Optionally filter by child class name. Returns a list of child addresses."
+    )]
+    async fn get_subject_children(
+        &self,
+        params: Parameters<GetSubjectChildrenParams>,
+    ) -> String {
+        let p = &params.0;
+
+        match get_perspective(&p.perspective_id) {
+            Some(perspective) => {
+                let _agent_context = self.get_agent_context_for_read().await;
+
+                // Query has_child links from the parent
+                let links = perspective
+                    .get_links(&LinkQuery {
+                        source: Some(p.expression_address.clone()),
+                        predicate: Some("ad4m://has_child".to_string()),
+                        ..Default::default()
+                    })
+                    .await;
+
+                match links {
+                    Ok(child_links) => {
+                        let mut children: Vec<serde_json::Value> = Vec::new();
+
+                        for link in &child_links {
+                            let child_addr = &link.data.target;
+
+                            // If child_class_name filter is specified, check the child's rdf://type
+                            if let Some(ref filter_class) = p.child_class_name {
+                                let type_links = perspective
+                                    .get_links(&LinkQuery {
+                                        source: Some(child_addr.clone()),
+                                        predicate: Some("rdf://type".to_string()),
+                                        ..Default::default()
+                                    })
+                                    .await;
+
+                                let matches = match type_links {
+                                    Ok(tl) => tl.iter().any(|l| {
+                                        l.data
+                                            .target
+                                            .split("://")
+                                            .last()
+                                            .unwrap_or("")
+                                            == filter_class.as_str()
+                                    }),
+                                    Err(_) => false,
+                                };
+
+                                if !matches {
+                                    continue;
+                                }
+                            }
+
+                            children.push(json!({
+                                "address": child_addr,
+                            }));
+                        }
+
+                        serde_json::to_string_pretty(&json!({
+                            "parent": p.expression_address,
+                            "children": children,
+                            "count": children.len(),
+                        }))
+                        .unwrap_or_else(|e| format!("Error: {}", e))
+                    }
+                    Err(e) => format!("Error querying children: {}", e),
+                }
+            }
+            None => format!("Perspective not found: {}", p.perspective_id),
+        }
+    }
+
+    /// Delete a subject instance by running its destructor actions and removing all associated links
+    #[tool(
+        description = "Delete a subject instance. Removes all links where the subject is the source (its properties, type markers, and collection links). This effectively removes the subject from the perspective."
+    )]
+    async fn delete_subject(&self, params: Parameters<DeleteSubjectParams>) -> String {
+        let p = &params.0;
+
+        match get_perspective(&p.perspective_id) {
+            Some(mut perspective) => {
+                let agent_context = match self.get_agent_context().await {
+                    Ok(ctx) => ctx,
+                    Err(e) => return format!("Authentication error: {}", e),
+                };
+
+                let capabilities = self.get_capabilities().await;
+                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+                    return format!("Capability error: {}", e);
+                }
+
+                // Remove all links where this subject is the source
+                let source_links = perspective
+                    .get_links(&LinkQuery {
+                        source: Some(p.expression_address.clone()),
+                        ..Default::default()
+                    })
+                    .await;
+
+                let mut removed = 0;
+                if let Ok(links) = source_links {
+                    for link in links {
+                        if perspective.remove_link(link.into(), None).await.is_ok() {
+                            removed += 1;
+                        }
+                    }
+                }
+
+                // Also remove links where this subject is the target (e.g. has_child links pointing to it)
+                let target_links = perspective
+                    .get_links(&LinkQuery {
+                        target: Some(p.expression_address.clone()),
+                        ..Default::default()
+                    })
+                    .await;
+
+                if let Ok(links) = target_links {
+                    for link in links {
+                        if perspective.remove_link(link.into(), None).await.is_ok() {
+                            removed += 1;
+                        }
+                    }
+                }
+
+                serde_json::to_string_pretty(&json!({
+                    "success": true,
+                    "deleted": p.expression_address,
+                    "links_removed": removed,
+                }))
+                .unwrap_or_else(|e| format!("Error: {}", e))
             }
             None => format!("Perspective not found: {}", p.perspective_id),
         }
