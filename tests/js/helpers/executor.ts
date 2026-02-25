@@ -19,15 +19,23 @@ const _activeExecutors = new Set<ChildProcess>();
 function _killAll() {
   for (const p of _activeExecutors) {
     if (!p.killed) {
-      try { p.kill("SIGTERM"); } catch {}
+      try {
+        p.kill("SIGTERM");
+      } catch {}
     }
   }
 }
 
 // Register once at module load time — safe to call process.exit() inside these
 // because once/exit handlers won't re-enter.
-process.once("SIGTERM", () => { _killAll(); process.exit(0); });
-process.once("SIGINT",  () => { _killAll(); process.exit(0); });
+process.once("SIGTERM", () => {
+  _killAll();
+  process.exit(0);
+});
+process.once("SIGINT", () => {
+  _killAll();
+  process.exit(0);
+});
 process.once("exit", _killAll);
 
 const TEST_DIR = path.join(__dirname, "..", "tst-tmp");
@@ -80,6 +88,7 @@ export async function startAgent(
 
   const client = new Ad4mClient(apolloClient(gqlPort, opts.adminCredential));
   await client.agent.generate(opts.passphrase ?? "test-passphrase");
+  await client.runtime.setMultiUserEnabled(true);
 
   async function stop(): Promise<void> {
     if (!executorProcess) return;

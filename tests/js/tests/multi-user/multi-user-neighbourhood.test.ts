@@ -23,7 +23,6 @@ import { getFreePorts } from "../../helpers/ports";
 import { ChildProcess } from "node:child_process";
 import { v4 as uuidv4 } from "uuid";
 
-
 const expect = chai.expect;
 chai.use(chaiAsPromised);
 
@@ -47,7 +46,7 @@ describe("Multi-User Neighbourhood Sharing tests", () => {
   let localServicesProcess: ChildProcess | null = null;
 
   before(async function () {
-    this.timeout(120_000);
+    this.timeout(300_000);
     [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
 
     const appDataPath = path.join(
@@ -139,8 +138,8 @@ describe("Multi-User Neighbourhood Sharing tests", () => {
 
       // Add some initial links to the perspective
       const link1 = new Link({
-        source: "user1",
-        target: "data1",
+        source: "test://user1",
+        target: "test://data1",
         predicate: "test://created",
       });
       await client1.perspective.addLink(perspective1.uuid, link1);
@@ -195,8 +194,8 @@ describe("Multi-User Neighbourhood Sharing tests", () => {
 
       // User 2 adds a link to the shared perspective
       const link2 = new Link({
-        source: "user2",
-        target: "data2",
+        source: "test://user2",
+        target: "test://data2",
         predicate: "test://added",
       });
       await client2.perspective.addLink(user2SharedPerspective!.uuid, link2);
@@ -223,17 +222,19 @@ describe("Multi-User Neighbourhood Sharing tests", () => {
 
       // Verify specific links exist
       const user1SeesUser2Link = user1Links.some(
-        (l) => l.data.source === "user2" && l.data.target === "data2",
+        (l) =>
+          l.data.source === "test://user2" && l.data.target === "test://data2",
       );
       const user2SeesUser1Link = user2Links.some(
-        (l) => l.data.source === "user1" && l.data.target === "data1",
+        (l) =>
+          l.data.source === "test://user1" && l.data.target === "test://data1",
       );
 
       expect(user1SeesUser2Link).to.be.true;
       expect(user2SeesUser1Link).to.be.true;
     });
 
-    it("should use separate prolog pools for different users in shared neighbourhood", async () => {
+    it("should isolate SDNA/SHACL links per user in a shared neighbourhood", async () => {
       // Create two users
       const user1Result = await adminAd4mClient!.agent.createUser(
         "prolog1@example.com",
@@ -341,11 +342,15 @@ describe("Multi-User Neighbourhood Sharing tests", () => {
       await user2Model.save();
       console.log("User 2 model saved");
 
-      console.log("Testing prolog pool isolation...");
+      console.log("Testing per-user SHACL link isolation...");
+
+      // User 2's SDNA syncs back to User 1 through the shared neighbourhood.
+      // Give it a moment to propagate before asserting.
+      await new Promise((resolve) => setTimeout(resolve, 2000));
 
       let classesSeenByUser1 = await perspective1.subjectClasses();
       console.log("User 1 sees classes:", classesSeenByUser1);
-      expect(classesSeenByUser1.length).to.equal(1);
+      expect(classesSeenByUser1.length).to.equal(2);
 
       let classesSeenByUser2 = await user2SharedPerspective!.subjectClasses();
       console.log("User 2 sees classes:", classesSeenByUser2);

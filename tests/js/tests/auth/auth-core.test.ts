@@ -281,12 +281,12 @@ describe("Authentication integration tests", () => {
         excpetions.push(e);
         return null;
       });
-      adminAd4mClient.runtime.subscribeExceptionOccurred();
+      // Note: subscribeExceptionOccurred() is already called by the Ad4mClient
+      // constructor — calling it again creates a second subscription and doubles
+      // every event delivery.
 
-      // Wait for any in-flight exceptions from previous tests to drain,
-      // then reset before triggering the one we actually want to observe.
-      await sleep(1000);
-      excpetions = [];
+      // Allow in-flight events to settle before making our call
+      await sleep(500);
 
       let requestId =
         await unAuthenticatedAppAd4mClient.agent.requestCapability({
@@ -307,9 +307,20 @@ describe("Authentication integration tests", () => {
 
       await sleep(1000);
 
-      expect(excpetions.length).to.be.equal(1);
-      expect(excpetions[0].type).to.be.equal("CAPABILITY_REQUESTED");
-      let auth_info = JSON.parse(excpetions[0].addon!);
+      // Filter to only exceptions matching this specific request — stale
+      // CAPABILITY_REQUESTED events from previous tests are ignored.
+      const matching = excpetions.filter((e) => {
+        if (e.type !== "CAPABILITY_REQUESTED") return false;
+        try {
+          return JSON.parse(e.addon!).requestId === requestId;
+        } catch {
+          return false;
+        }
+      });
+
+      expect(matching.length).to.be.equal(1);
+      expect(matching[0].type).to.be.equal("CAPABILITY_REQUESTED");
+      let auth_info = JSON.parse(matching[0].addon!);
       expect(auth_info.requestId).to.be.equal(requestId);
     });
   });

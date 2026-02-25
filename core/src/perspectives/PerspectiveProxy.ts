@@ -1823,11 +1823,20 @@ export class PerspectiveProxy {
         batchId,
       );
     } else {
-      let query = this.buildQueryFromTemplate(subjectClass as object);
+      const o = subjectClass as any;
+      const className =
+        o.className ||
+        o.constructor?.className ||
+        o.constructor?.prototype?.className;
+      if (!className) {
+        throw new Error(
+          `createSubject: could not resolve className from subject class object. Ensure the class is decorated with @Model.`,
+        );
+      }
       await this.#client.createSubject(
         this.#handle.uuid,
         JSON.stringify({
-          query,
+          className,
           initialValues,
         }),
         exprAddr,
@@ -1856,11 +1865,20 @@ export class PerspectiveProxy {
         ),
       );
     }
-    let query = this.buildQueryFromTemplate(subjectClass as object);
+    const o = subjectClass as any;
+    const className =
+      o.className ||
+      o.constructor?.className ||
+      o.constructor?.prototype?.className;
+    if (!className) {
+      throw new Error(
+        `getSubjectData: could not resolve className from subject class object. Ensure the class is decorated with @Model.`,
+      );
+    }
     return JSON.parse(
       await this.#client.getSubjectData(
         this.#handle.uuid,
-        JSON.stringify({ query }),
+        JSON.stringify({ className }),
         exprAddr,
       ),
     );

@@ -1,15 +1,23 @@
-import path from "path";
 import { Ad4mClient, LinkQuery, Model, Property } from "@coasys/ad4m";
-import { fileURLToPath } from "url";
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient } from "../../utils/utils";
 import { startAgent } from "../../helpers/executor";
 import type { AgentHandle } from "../../helpers/executor";
 
-
 const expect = chai.expect;
 chai.use(chaiAsPromised);
+
+@Model({ name: "TestSubject" })
+class TestSubject {
+  @Property({
+    through: "test://name",
+    writable: true,
+    initial: "test://initial",
+    resolveLanguage: "literal",
+  })
+  name: string = "";
+}
 
 describe("Multi-User SDNA Operations tests", () => {
   let agentHandle: AgentHandle | null = null;
@@ -29,30 +37,6 @@ describe("Multi-User SDNA Operations tests", () => {
   });
 
   describe("Subject Creation and SDNA Operations", () => {
-    // Define the test subject class outside the test function
-    let TestSubject: any;
-
-    before(async () => {
-      // Import necessary decorators and classes
-      const { Model, Property } = await import("@coasys/ad4m");
-
-      // Define a proper subject class with decorators
-      @Model({
-        name: "TestSubject",
-      })
-      class TestSubjectClass {
-        @Property({
-          through: "test://name",
-          writable: true,
-          initial: "test://initial",
-          resolveLanguage: "literal",
-        })
-        name: string = "";
-      }
-
-      TestSubject = TestSubjectClass;
-    });
-
     it("should have correct authors and valid signatures for subject operations", async () => {
       // Create two users
       const user1Result = await adminAd4mClient!.agent.createUser(

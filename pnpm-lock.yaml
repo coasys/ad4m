@@ -860,7 +860,7 @@ importers:
   executor:
     dependencies:
       '@coasys/ad4m':
-        specifier: link:../core
+        specifier: workspace:*
         version: link:../core
       '@holochain/client':
         specifier: coasys/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b
@@ -963,8 +963,8 @@ importers:
   rust-executor:
     devDependencies:
       '@coasys/ad4m-executor':
-        specifier: link:../core
-        version: link:../core
+        specifier: workspace:*
+        version: link:../executor
 
   tests/js:
     dependencies:
@@ -979,11 +979,8 @@ importers:
         specifier: 3.7.10
         version: 3.7.10(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
       '@coasys/ad4m':
-        specifier: link:../../core
+        specifier: workspace:*
         version: link:../../core
-      '@coasys/ad4m-connect':
-        specifier: link:../../connect
-        version: link:../../connect
       '@peculiar/webcrypto':
         specifier: ^1.1.7
         version: 1.4.5(patch_hash=saeohqf4hlpnnys7brc6umjxqq)
@@ -16892,7 +16889,7 @@ snapshots:
       '@types/istanbul-lib-coverage': 2.0.6
       collect-v8-coverage: 1.0.2
 
-  '@jest/test-sequencer@26.6.3':
+  '@jest/test-sequencer@26.6.3(bufferutil@4.0.8)(ts-node@10.9.1(@types/node@16.18.76)(typescript@4.9.5))(utf-8-validate@5.0.10)':
     dependencies:
       '@jest/test-result': 26.6.2
       graceful-fs: 4.2.11
@@ -16900,7 +16897,11 @@ snapshots:
       jest-runner: 26.6.3(bufferutil@4.0.8)(ts-node@10.9.1(@types/node@16.18.76)(typescript@4.9.5))(utf-8-validate@5.0.10)
       jest-runtime: 26.6.3(bufferutil@4.0.8)(ts-node@10.9.1(@types/node@16.18.76)(typescript@4.9.5))(utf-8-validate@5.0.10)
     transitivePeerDependencies:
+      - bufferutil
+      - canvas
       - supports-color
+      - ts-node
+      - utf-8-validate
 
   '@jest/test-sequencer@27.5.1':
     dependencies:
@@ -24892,7 +24893,7 @@ snapshots:
   jest-config@26.6.3(bufferutil@4.0.8)(ts-node@10.9.1(@types/node@16.18.76)(typescript@4.9.5))(utf-8-validate@5.0.10):
     dependencies:
       '@babel/core': 7.23.9
-      '@jest/test-sequencer': 26.6.3
+      '@jest/test-sequencer': 26.6.3(bufferutil@4.0.8)(ts-node@10.9.1(@types/node@16.18.76)(typescript@4.9.5))(utf-8-validate@5.0.10)
       '@jest/types': 26.6.2
       babel-jest: 26.6.3(@babel/core@7.23.9)
       chalk: 4.1.2
@@ -24902,7 +24903,7 @@ snapshots:
       jest-environment-jsdom: 26.6.2(bufferutil@4.0.8)(utf-8-validate@5.0.10)
       jest-environment-node: 26.6.2
       jest-get-type: 26.3.0
-      jest-jasmine2: 26.6.3(bufferutil@4.0.8)(ts-node@10.9.1(@types/node@16.18.76)(typescript@4.9.5))(utf-8-validate@5.0.10)
+      jest-jasmine2: 26.6.3
       jest-regex-util: 26.0.0
       jest-resolve: 26.6.2
       jest-util: 26.6.2
@@ -25087,7 +25088,7 @@ snapshots:
     optionalDependencies:
       fsevents: 2.3.3
 
-  jest-jasmine2@26.6.3(bufferutil@4.0.8)(ts-node@10.9.1(@types/node@16.18.76)(typescript@4.9.5))(utf-8-validate@5.0.10):
+  jest-jasmine2@26.6.3:
     dependencies:
       '@babel/traverse': 7.23.9
       '@jest/environment': 26.6.2
@@ -25108,11 +25109,7 @@ snapshots:
       pretty-format: 26.6.2
       throat: 5.0.0
     transitivePeerDependencies:
-      - bufferutil
-      - canvas
       - supports-color
-      - ts-node
-      - utf-8-validate
 
   jest-jasmine2@27.5.1:
     dependencies:

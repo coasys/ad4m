@@ -56,7 +56,13 @@ That PR already completed the foundational migration:
 
 ### Pending — Phase 2
 
-**Phase 2 COMPLETE** ✅
+**Phase 2 MOSTLY COMPLETE** ✅ — one known gap (see below)
+
+### Known Gaps
+
+| Gap                              | Details                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Status                                                    |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `sh:inversePath` — Rust executor | `@BelongsToOne` / `@BelongsToMany` set `inversePath: true` on the SHACL shape in TypeScript. SurrealDB hydration works (reverse `WHERE out.uri = ...` query). However `shacl_parser.rs` has **zero handling** of `sh:inversePath` — it never emits reverse Prolog predicates, so Prolog-side lookups for reverse relations silently return nothing. `generatePrologFacts.ts` likewise has no reverse-predicate clause. Full fix scope documented in section 2c. | ⚠️ PARTIAL — TS side done, Rust + Prolog side not started |
 
 ### Pending — Phases 3–5
 

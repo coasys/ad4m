@@ -3,6 +3,7 @@
   "require": ["tests/setup.ts"],
   "timeout": 1200000,
   "exit": true,
+  "parallel": false,
   "node-option": [
     "experimental-specifier-resolution=node",
     "loader=ts-node/esm"

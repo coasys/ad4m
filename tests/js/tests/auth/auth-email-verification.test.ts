@@ -10,6 +10,7 @@ import {
   startExecutor,
   runHcLocalServices,
 } from "../../utils/utils";
+import { getFreePorts } from "../../helpers/ports";
 import { ChildProcess } from "node:child_process";
 
 const expect = chai.expect;
@@ -29,9 +30,9 @@ describe("Email Verification with Mock Service", () => {
   const TEST_DIR = path.join(`${__dirname}/../../tst-tmp`);
   const appDataPath = path.join(TEST_DIR, "agents", "email-verification-agent");
   const bootstrapSeedPath = path.join(`${__dirname}/../../bootstrapSeed.json`);
-  const gqlPort = 15920;
-  const hcAdminPort = 15921;
-  const hcAppPort = 15922;
+  let gqlPort: number;
+  let hcAdminPort: number;
+  let hcAppPort: number;
 
   let executorProcess: ChildProcess | null = null;
   let adminAd4mClient: Ad4mClient | null = null;
@@ -41,6 +42,8 @@ describe("Email Verification with Mock Service", () => {
   let localServicesProcess: ChildProcess | null = null;
 
   before(async () => {
+    [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+
     if (!fs.existsSync(appDataPath)) {
       fs.mkdirSync(appDataPath, { recursive: true });
     }

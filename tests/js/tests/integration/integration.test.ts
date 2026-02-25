@@ -16,6 +16,7 @@ import {
   sleep,
 } from "../../utils/utils";
 import { ChildProcess } from "child_process";
+import { getFreePorts } from "../../helpers/ports";
 import perspectiveTests from "./perspective.suite";
 import agentTests from "./agent.suite";
 import aiTests from "./ai.suite";
@@ -108,9 +109,9 @@ describe("Integration tests", function () {
   this.timeout(200000);
   const appDataPath = path.join(TEST_DIR, "agents", "alice");
   const bootstrapSeedPath = path.join(`${__dirname}/../../bootstrapSeed.json`);
-  const gqlPort = 15300;
-  const hcAdminPort = 15301;
-  const hcAppPort = 15302;
+  let gqlPort: number;
+  let hcAdminPort: number;
+  let hcAppPort: number;
 
   let executorProcess: ChildProcess | null = null;
 
@@ -120,6 +121,8 @@ describe("Integration tests", function () {
   let relayUrl: string | null = null;
 
   before(async () => {
+    [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+
     if (!fs.existsSync(TEST_DIR)) {
       throw Error(
         "Please ensure that prepare-test is run before running tests!",
@@ -183,9 +186,7 @@ describe("Integration tests", function () {
       const bobBootstrapSeedPath = path.join(
         `${__dirname}/../../bootstrapSeed.json`,
       );
-      const bobGqlPort = 15400;
-      const bobHcAdminPort = 15401;
-      const bobHcAppPort = 15402;
+      const [bobGqlPort, bobHcAdminPort, bobHcAppPort] = await getFreePorts(3);
 
       if (!fs.existsSync(path.join(TEST_DIR, "agents")))
         fs.mkdirSync(path.join(TEST_DIR, "agents"));
@@ -249,9 +250,8 @@ describe("Integration tests", function () {
       let jimExecutorProcess: ChildProcess | null = null;
       before(async () => {
         const jimAppDataPath = path.join(TEST_DIR, "agents", "jim");
-        const jimGqlPort = 15450;
-        const jimHcAdminPort = 15451;
-        const jimHcAppPort = 15452;
+        const [jimGqlPort, jimHcAdminPort, jimHcAppPort] =
+          await getFreePorts(3);
 
         if (!fs.existsSync(jimAppDataPath)) fs.mkdirSync(jimAppDataPath);
 

@@ -111,8 +111,9 @@ export async function runHcLocalServices(): Promise<{
         }
       }
 
-      // Resolve when we have both ports
-      if (bootstrapPort && relayPort && !resolved) {
+      // Bootstrap is sufficient — resolve as soon as it's ready.
+      // Relay is optional; capture it if it arrives but don't block on it.
+      if (bootstrapPort && !resolved) {
         resolved = true;
         cleanup();
         resolve();
@@ -218,18 +219,30 @@ export async function startExecutor(
   // orphan that holds ports and keeps Node's event loop alive.
   const spawnArgs = [
     "run",
-    "--app-data-path", dataPath,
-    "--gql-port", String(gqlPort),
-    "--hc-admin-port", String(hcAdminPort),
-    "--hc-app-port", String(hcAppPort),
-    "--hc-proxy-url", proxyUrl,
-    "--hc-bootstrap-url", bootstrapUrl,
-    "--hc-use-bootstrap", "true",
-    "--hc-use-proxy", "true",
-    "--hc-use-local-proxy", "true",
-    "--hc-use-mdns", "true",
-    "--language-language-only", String(languageLanguageOnly),
-    "--run-dapp-server", "false",
+    "--app-data-path",
+    dataPath,
+    "--gql-port",
+    String(gqlPort),
+    "--hc-admin-port",
+    String(hcAdminPort),
+    "--hc-app-port",
+    String(hcAppPort),
+    "--hc-proxy-url",
+    proxyUrl,
+    "--hc-bootstrap-url",
+    bootstrapUrl,
+    "--hc-use-bootstrap",
+    "true",
+    "--hc-use-proxy",
+    "true",
+    "--hc-use-local-proxy",
+    "true",
+    "--hc-use-mdns",
+    "true",
+    "--language-language-only",
+    String(languageLanguageOnly),
+    "--run-dapp-server",
+    "false",
   ];
   if (relayUrl) {
     spawnArgs.push("--hc-relay-url", relayUrl);
@@ -238,17 +251,23 @@ export async function startExecutor(
     spawnArgs.push("--admin-credential", adminCredential);
   }
   executorProcess = spawn(command, spawnArgs);
+  const EXECUTOR_READY_TIMEOUT_MS = 180_000;
   let executorReady = new Promise<void>((resolve, reject) => {
-    executorProcess!.stdout!.on("data", (data) => {
-      if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
+    const onData = (data: Buffer | string) => {
+      if (String(data).includes(`listening on http://127.0.0.1:${gqlPort}`)) {
+        clearTimeout(tid);
         resolve();
       }
-    });
-    executorProcess!.stderr!.on("data", (data) => {
-      if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
-        resolve();
-      }
-    });
+    };
+    executorProcess!.stdout!.on("data", onData);
+    executorProcess!.stderr!.on("data", onData);
+    const tid = setTimeout(() => {
+      reject(
+        new Error(
+          `Executor did not start within ${EXECUTOR_READY_TIMEOUT_MS}ms (port ${gqlPort})`,
+        ),
+      );
+    }, EXECUTOR_READY_TIMEOUT_MS);
   });
 
   executorProcess!.stdout!.on("data", (data) => {

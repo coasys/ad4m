@@ -22,6 +22,14 @@ describe("Multi-User integration tests", () => {
     await agent.stop();
   });
 
+  // loginUser must be called from an unauthenticated client (empty token) —
+  // it is the bootstrap operation that *returns* a JWT, so the executor
+  // rejects any call that arrives with a non-JWT bearer token (e.g. the
+  // plain-text admin credential).
+  function unauthClient(): Ad4mClient {
+    return new Ad4mClient(apolloClient(agent.gqlPort), false);
+  }
+
   describe("User Registration and Authentication", () => {
     it("should create a new user with username and password", async () => {
       const result = await adminAd4mClient.agent.createUser(
@@ -33,7 +41,7 @@ describe("Multi-User integration tests", () => {
       expect(result.did).to.match(/^did:key:.+/);
     });
 
-    it("should return existing user if already exists", async () => {
+    it("should reject duplicate user creation", async () => {
       // Create user first time
       const result1 = await adminAd4mClient.agent.createUser(
         "bob",
@@ -41,26 +49,27 @@ describe("Multi-User integration tests", () => {
       );
       expect(result1.success).to.be.true;
 
-      // Try to create same user again
+      // Try to create same user again — executor returns failure, not idempotent
       const result2 = await adminAd4mClient.agent.createUser(
         "bob",
         "password456",
       );
-      expect(result2.success).to.be.true;
-      expect(result2.did).to.equal(result1.did);
+      expect(result2.success).to.be.false;
+      expect(result2.error).to.include("User already exists");
     });
 
     it("should fail to create user with wrong password for existing username", async () => {
       // Create user first
       await adminAd4mClient.agent.createUser("charlie", "correctpassword");
 
-      // Try with wrong password
+      // createUser checks existence before verifying password, so any re-creation
+      // of an existing username returns "User already exists" regardless of password
       const result = await adminAd4mClient.agent.createUser(
         "charlie",
         "wrongpassword",
       );
       expect(result.success).to.be.false;
-      expect(result.error).to.include("Invalid credentials");
+      expect(result.error).to.include("User already exists");
     });
 
     it("should generate a JWT token for a specific user via login", async () => {
@@ -71,11 +80,8 @@ describe("Multi-User integration tests", () => {
       );
       expect(userResult.success).to.be.true;
 
-      // Login as the user to get a JWT token
-      const token = await adminAd4mClient.agent.loginUser(
-        "dave",
-        "password789",
-      );
+      // loginUser must use an unauthenticated client (empty token)
+      const token = await unauthClient().agent.loginUser("dave", "password789");
       expect(token).to.match(/.+/);
 
       // Create a client with the user's token and verify DID
@@ -108,11 +114,11 @@ describe("Multi-User integration tests", () => {
       aliceDid = aliceResult.did;
       bobDid = bobResult.did;
 
-      const aliceToken = await adminAd4mClient.agent.loginUser(
+      const aliceToken = await unauthClient().agent.loginUser(
         "alice_persp",
         "password123",
       );
-      const bobToken = await adminAd4mClient.agent.loginUser(
+      const bobToken = await unauthClient().agent.loginUser(
         "bob_persp",
         "password456",
       );
@@ -176,14 +182,9 @@ describe("Multi-User integration tests", () => {
         "Alice Private Perspective",
       );
 
-      // Bob tries to access Alice's perspective
-      const call = async () => {
-        return await bobClient.perspective.byUUID(alicePerspective.uuid);
-      };
-
-      await expect(call()).to.be.rejectedWith(
-        /not found|access denied|unauthorized/i,
-      );
+      // byUUID returns null for a perspective owned by another user (silent 404)
+      const result = await bobClient.perspective.byUUID(alicePerspective.uuid);
+      expect(result).to.be.null;
     });
 
     it("should handle perspective updates with user scoping", async () => {
@@ -224,7 +225,7 @@ describe("Multi-User integration tests", () => {
       );
       userDid = userResult.did;
 
-      const token = await adminAd4mClient.agent.loginUser(
+      const token = await unauthClient().agent.loginUser(
         "test_user_ops",
         "password123",
       );

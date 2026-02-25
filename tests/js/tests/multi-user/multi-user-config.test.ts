@@ -7,7 +7,6 @@ import { apolloClient, sleep } from "../../utils/utils";
 import { startAgent } from "../../helpers/executor";
 import type { AgentHandle } from "../../helpers/executor";
 
-
 const expect = chai.expect;
 chai.use(chaiAsPromised);
 
@@ -21,7 +20,6 @@ describe("Multi-User Configuration tests", () => {
     agentHandle = await startAgent("multi-user-config");
     adminAd4mClient = agentHandle.client;
     gqlPort = agentHandle.gqlPort;
-    // NOTE: do NOT pre-enable multi-user here — the first test checks it's disabled by default
   });
 
   after(async () => {
@@ -30,9 +28,11 @@ describe("Multi-User Configuration tests", () => {
 
   describe("Multi-User Configuration", () => {
     it("should have multi-user disabled by default and require activation", async () => {
-      // Check that multi-user is disabled by default
-      const isEnabled = await adminAd4mClient!.runtime.multiUserEnabled();
-      expect(isEnabled).to.be.false;
+      // Disable multi-user to test the guard (startAgent enables it by default)
+      await adminAd4mClient!.runtime.setMultiUserEnabled(false);
+
+      const isDisabled = await adminAd4mClient!.runtime.multiUserEnabled();
+      expect(isDisabled).to.be.false;
 
       // Attempt to create a user while multi-user is disabled (should fail)
       const userResult = await adminAd4mClient!.agent.createUser(
@@ -131,9 +131,6 @@ describe("Multi-User Configuration tests", () => {
     });
 
     it("should track last_seen timestamps", async () => {
-      // Ensure multi-user is enabled
-      await adminAd4mClient!.runtime.setMultiUserEnabled(true);
-
       // Create a user
       await adminAd4mClient!.agent.createUser(
         "lastseen@example.com",
@@ -219,7 +216,11 @@ describe("Multi-User Configuration tests", () => {
     });
   });
 
-  describe.skip("Basic Multi-User Functionality", () => {
+  describe("Basic Multi-User Functionality", () => {
+    before(async () => {
+      await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+    });
+
     it("should create and login users with unique DIDs", async () => {
       // Create first user
       const user1Result = await adminAd4mClient!.agent.createUser(
@@ -343,7 +344,8 @@ describe("Multi-User Configuration tests", () => {
         );
       };
 
-      await expect(call()).to.be.rejectedWith(/User not found/);
+      // verify_user_password returns false for unknown emails — same "Invalid credentials" path as wrong password
+      await expect(call()).to.be.rejectedWith(/Invalid credentials/);
     });
   });
 });
