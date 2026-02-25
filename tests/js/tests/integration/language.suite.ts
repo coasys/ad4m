@@ -48,7 +48,7 @@ export default function languageTests(testContext: TestContext) {
           path
             .join(
               __dirname,
-              "../tst-tmp/languages/perspective-diff-sync/build/bundle.js",
+              "../../tst-tmp/languages/perspective-diff-sync/build/bundle.js",
             )
             .replace(/\\/g, "/"),
           sourceLanguageMeta,
@@ -66,7 +66,7 @@ export default function languageTests(testContext: TestContext) {
           .readFileSync(
             path.join(
               __dirname,
-              "../tst-tmp/languages/perspective-diff-sync/build/bundle.js",
+              "../../tst-tmp/languages/perspective-diff-sync/build/bundle.js",
             ),
           )
           .toString();
@@ -103,7 +103,7 @@ export default function languageTests(testContext: TestContext) {
           path
             .join(
               __dirname,
-              "../tst-tmp/languages/perspective-language/build/bundle.js",
+              "../../tst-tmp/languages/perspective-language/build/bundle.js",
             )
             .replace(/\\/g, "/"),
           sourceLanguageMeta,
@@ -151,7 +151,7 @@ export default function languageTests(testContext: TestContext) {
         //Publish a source language without a holochain DNA
         const canPublishNonHolochainLang = await ad4mClient.languages.publish(
           path
-            .join(__dirname, "../languages/note-store/build/bundle.js")
+            .join(__dirname, "../../languages/note-store/build/bundle.js")
             .replace(/\\/g, "/"),
           noteMetaInfo,
         );

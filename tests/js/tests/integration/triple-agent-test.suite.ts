@@ -39,18 +39,18 @@ export default function tripleAgentTests(testContext: TestContext) {
       expect(bobP1!.name).not.to.be.undefined;
       expect(bobP1!.sharedUrl).to.be.equal(neighbourhoodUrl);
       expect(bobP1!.neighbourhood).not.to.be.undefined;
-      expect(bobP1!.neighbourhood!.linkLanguage).to.be.equal(
+      expect(bobP1!.neighbourhood!.data!.linkLanguage).to.be.equal(
         socialContext.address,
       );
-      expect(bobP1!.neighbourhood!.meta.links.length).to.be.equal(0);
+      expect(bobP1!.neighbourhood!.data!.meta.links.length).to.be.equal(0);
 
       expect(jimP1!.name).not.to.be.undefined;
       expect(jimP1!.sharedUrl).to.be.equal(neighbourhoodUrl);
       expect(jimP1!.neighbourhood).not.to.be.undefined;
-      expect(jimP1!.neighbourhood!.linkLanguage).to.be.equal(
+      expect(jimP1!.neighbourhood!.data!.linkLanguage).to.be.equal(
         socialContext.address,
       );
-      expect(jimP1!.neighbourhood!.meta.links.length).to.be.equal(0);
+      expect(jimP1!.neighbourhood!.data!.meta.links.length).to.be.equal(0);
 
       await sleep(1000);
 
