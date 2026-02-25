@@ -28,14 +28,14 @@ RUN apt-get update && sudo apt-get install -y \
     mesa-vulkan-drivers
 
 # Install Go
-ENV GO_VERSION 1.22.6
+ENV GO_VERSION=1.22.6
 RUN wget https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz -O go.tar.gz \
     && tar -C /usr/local -xzf go.tar.gz \
     && rm go.tar.gz
 
 # Set Go environment variables
-ENV GOPATH /go
-ENV PATH $GOPATH/bin:/usr/local/go/bin:$PATH
+ENV GOPATH=/go
+ENV PATH="$GOPATH/bin:/usr/local/go/bin:$PATH"
 
 # Install Node
 RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && apt-get install -y nodejs
@@ -96,6 +96,6 @@ RUN apt-get install -y gnupg2 wget && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ENV PATH="/usr/local/cuda-12.5/bin:${PATH}"
-ENV LD_LIBRARY_PATH="/usr/local/cuda-12.5/lib64:${LD_LIBRARY_PATH}"
+ENV LD_LIBRARY_PATH="/usr/local/cuda-12.5/lib64"
 
 USER circleci
