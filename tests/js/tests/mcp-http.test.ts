@@ -728,19 +728,22 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             const toolNames = tools.map(function(t: any) { return t.name; });
             console.log("Tools after SDNA registration:", toolNames);
 
-            // Dynamic tools for Channel
+            // Dynamic tools for Channel (CRUD + per-property + collections)
             expect(toolNames).to.include('channel_create');
             expect(toolNames).to.include('channel_query');
             expect(toolNames).to.include('channel_get');
-            expect(toolNames).to.include('channel_update');
             expect(toolNames).to.include('channel_delete');
+            expect(toolNames).to.include('channel_set_name');
+            expect(toolNames).to.include('channel_get_messages');
+            expect(toolNames).to.include('channel_add_messages');
+            expect(toolNames).to.include('channel_remove_messages');
 
-            // Dynamic tools for Message
+            // Dynamic tools for Message (CRUD + per-property)
             expect(toolNames).to.include('message_create');
             expect(toolNames).to.include('message_query');
             expect(toolNames).to.include('message_get');
-            expect(toolNames).to.include('message_update');
             expect(toolNames).to.include('message_delete');
+            expect(toolNames).to.include('message_set_body');
 
             // Static tools should still be present
             expect(toolNames).to.include('list_perspectives');
@@ -898,7 +901,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(toolNames).to.include('task_create');
             expect(toolNames).to.include('task_query');
             expect(toolNames).to.include('task_get');
-            expect(toolNames).to.include('task_update');
             expect(toolNames).to.include('task_delete');
             // Per-property set tools
             expect(toolNames).to.include('task_set_title');
