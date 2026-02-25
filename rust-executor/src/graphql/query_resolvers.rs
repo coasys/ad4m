@@ -221,7 +221,13 @@ impl Query {
                     Ok(Some(expr_json)) => {
                         return Ok(Some(build_expression_rendered(&expr_json, &lang_address)));
                     }
-                    Ok(None) => return Ok(None),
+                    Ok(None) => {
+                        // Fall through to JS — the JS runtime may have different state
+                        log::debug!(
+                            "Rust-side get_expression returned None for {}, trying JS fallback",
+                            url
+                        );
+                    }
                     Err(e) => {
                         log::warn!(
                             "Rust-side get_expression failed for {}: {}, falling back to JS",
@@ -305,8 +311,11 @@ impl Query {
                             continue;
                         }
                         Ok(None) => {
-                            results.push(None);
-                            continue;
+                            // Fall through to JS fallback — the JS runtime may have different state
+                            log::debug!(
+                                "Rust-side get_expression returned None for {}, trying JS fallback",
+                                url
+                            );
                         }
                         Err(e) => {
                             log::warn!(
@@ -372,7 +381,12 @@ impl Query {
                     Ok(Some(expr_json)) => {
                         return Ok(Some(serde_json::to_string(&expr_json)?));
                     }
-                    Ok(None) => return Ok(None),
+                    Ok(None) => {
+                        log::debug!(
+                            "Rust-side expression_raw returned None for {}, trying JS fallback",
+                            url
+                        );
+                    }
                     Err(e) => {
                         log::warn!(
                             "Rust-side expression_raw failed for {}: {}, falling back to JS",

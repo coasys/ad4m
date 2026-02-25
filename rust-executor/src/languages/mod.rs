@@ -193,20 +193,22 @@ impl LanguageController {
         runtimes.insert(language_address.clone(), runtime_handle.clone());
         drop(runtimes);
 
-        // Cache the language name
-        match runtime_handle.execute("language.name".to_string()).await {
-            Ok(name) => {
-                let name = name.trim().trim_matches('"').to_string();
-                let mut names = self.language_names.lock().await;
-                names.insert(language_address.clone(), name);
+        // Cache the language name in a non-blocking spawn so it doesn't delay bootstrap
+        let names = self.language_names.clone();
+        let addr = language_address.clone();
+        let handle = runtime_handle.clone();
+        tokio::spawn(async move {
+            match handle.execute("language.name".to_string()).await {
+                Ok(name) => {
+                    let name = name.trim().trim_matches('"').to_string();
+                    let mut names = names.lock().await;
+                    names.insert(addr, name);
+                }
+                Err(e) => {
+                    log::warn!("Failed to get language name for {}: {}", addr, e);
+                }
             }
-            Err(e) => {
-                warn!(
-                    "Failed to get language name for {}: {}",
-                    language_address, e
-                );
-            }
-        }
+        });
 
         info!("Successfully loaded language: {}", language_address);
         Ok(language_address)
@@ -1739,6 +1741,13 @@ impl LanguageController {
             });
         }
 
+        // Extract author from the expression envelope (not from data)
+        let author = meta_expression
+            .get("author")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
         let data = meta_expression
             .get("data")
             .cloned()
@@ -1751,7 +1760,15 @@ impl LanguageController {
             data
         };
 
-        let meta: LanguageMeta = serde_json::from_value(data).unwrap_or_default();
+        let mut meta: LanguageMeta = serde_json::from_value(data).unwrap_or_default();
+        // Override author from the expression envelope
+        meta.author = author;
+        // Set the address from the query parameter
+        meta.address = address.to_string();
+        // Default templated to false if not present in the data
+        if meta.templated.is_none() {
+            meta.templated = Some(false);
+        }
         Ok(meta)
     }
 
