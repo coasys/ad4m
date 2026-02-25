@@ -127,6 +127,7 @@ dependencies = [
  "multihash",
  "once_cell",
  "os_info",
+ "percent-encoding",
  "portpicker",
  "rand 0.8.5",
  "rayon",

@@ -4,14 +4,17 @@ pub mod language;
 pub mod language_context;
 pub mod language_runtime;
 pub mod language_runtime_handle;
+pub mod literal;
+
+pub use literal::{literal_decode, literal_encode};
 
 use deno_core::error::AnyError;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crate::graphql::graphql_types::{
-    DecoratedNeighbourhoodExpression, ExceptionInfo, ExceptionType, LanguageLanguageInput,
-    LanguageMeta, Neighbourhood,
+    DecoratedNeighbourhoodExpression, ExceptionInfo, ExceptionType, InteractionCall,
+    InteractionMeta, LanguageLanguageInput, LanguageMeta, LanguageRef, Neighbourhood,
 };
 use crate::holochain_service::maybe_get_holochain_service;
 use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
@@ -64,6 +67,9 @@ pub struct LanguageController {
     // Language address aliases (e.g. "lang" -> actual address)
     language_aliases: Arc<TokioMutex<HashMap<String, String>>>,
 
+    // Cached language names (address -> name)
+    language_names: Arc<TokioMutex<HashMap<String, String>>>,
+
     // Watch channel for signaling when all languages are ready
     languages_ready_tx: Arc<tokio::sync::watch::Sender<bool>>,
     languages_ready_rx: tokio::sync::watch::Receiver<bool>,
@@ -91,6 +97,7 @@ impl LanguageController {
             runtimes: Arc::new(TokioMutex::new(HashMap::new())),
             system_addresses: Arc::new(TokioMutex::new(SystemLanguageAddresses::default())),
             language_aliases: Arc::new(TokioMutex::new(HashMap::new())),
+            language_names: Arc::new(TokioMutex::new(HashMap::new())),
             languages_ready_tx: Arc::new(languages_ready_tx),
             languages_ready_rx,
         }
@@ -183,7 +190,23 @@ impl LanguageController {
 
         // Store the runtime handle
         let mut runtimes = self.runtimes.lock().await;
-        runtimes.insert(language_address.clone(), runtime_handle);
+        runtimes.insert(language_address.clone(), runtime_handle.clone());
+        drop(runtimes);
+
+        // Cache the language name
+        match runtime_handle.execute("language.name".to_string()).await {
+            Ok(name) => {
+                let name = name.trim().trim_matches('"').to_string();
+                let mut names = self.language_names.lock().await;
+                names.insert(language_address.clone(), name);
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to get language name for {}: {}",
+                    language_address, e
+                );
+            }
+        }
 
         info!("Successfully loaded language: {}", language_address);
         Ok(language_address)
@@ -204,6 +227,11 @@ impl LanguageController {
                     message: format!("Failed to teardown runtime: {}", e),
                 })?;
         }
+        drop(runtimes);
+
+        // Remove cached name
+        let mut names = self.language_names.lock().await;
+        names.remove(language_address);
 
         info!("Successfully unloaded language: {}", language_address);
         Ok(())
@@ -1610,5 +1638,436 @@ impl LanguageController {
 
             Ok(Language::new(resolved_address, self.js_core.clone()))
         }
+    }
+
+    // ─── Parse expression URL utility ───────────────────────────────────
+
+    /// Parse an expression URL of the form `<scheme>://<path>` into (scheme, path).
+    /// The scheme is the language address; the path is the expression address.
+    /// Handles the `literal://` case where the path may contain `://` itself.
+    pub fn parse_expr_url(url: &str) -> Result<(String, String), LanguageError> {
+        if let Some(rest) = url.strip_prefix("literal://") {
+            return Ok(("literal".to_string(), rest.to_string()));
+        }
+        match url.find("://") {
+            Some(idx) => {
+                let scheme = &url[..idx];
+                let path = &url[idx + 3..];
+                Ok((scheme.to_string(), path.to_string()))
+            }
+            None => Err(LanguageError::InvalidBundle {
+                message: format!("Invalid expression URL (missing ://): {}", url),
+            }),
+        }
+    }
+
+    // ─── Query/getter methods ───────────────────────────────────────────
+
+    /// Get installed languages, optionally filtered by a property name.
+    pub async fn get_installed_languages(&self, filter: Option<&str>) -> Vec<LanguageRef> {
+        let runtimes = self.runtimes.lock().await;
+        let names = self.language_names.lock().await;
+        let mut result = Vec::new();
+
+        for (address, handle) in runtimes.iter() {
+            // Check filter if provided
+            if let Some(prop) = filter {
+                let check_script = format!(
+                    r#"JSON.stringify(Object.keys(language).includes("{}"))"#,
+                    prop
+                );
+                match handle.execute(check_script).await {
+                    Ok(res) => {
+                        let trimmed = res.trim().trim_matches('"');
+                        if trimmed != "true" {
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to check filter '{}' on language {}: {}",
+                            prop, address, e
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            let name = names.get(address).cloned().unwrap_or_default();
+
+            result.push(LanguageRef {
+                address: address.clone(),
+                name,
+            });
+        }
+
+        result
+    }
+
+    /// Get language expression (meta) from the language language.
+    pub async fn get_language_expression(
+        &self,
+        address: &str,
+    ) -> Result<LanguageMeta, LanguageError> {
+        let language_language_address = {
+            let sys = self.system_addresses.lock().await;
+            sys.language_language
+                .clone()
+                .ok_or_else(|| LanguageError::LoadError {
+                    address: address.to_string(),
+                    message: "Language language not loaded".to_string(),
+                })?
+        };
+
+        let meta_script = format!(
+            r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get("{}"))"#,
+            address
+        );
+
+        let meta_result = self
+            .execute_on_language(&language_language_address, &meta_script)
+            .await?;
+
+        let meta_expression: JsonValue =
+            serde_json::from_str(&meta_result).map_err(|e| LanguageError::SerializationError {
+                message: format!("Failed to parse language expression: {}", e),
+            })?;
+
+        if meta_expression.is_null() {
+            return Err(LanguageError::NotFound {
+                address: address.to_string(),
+            });
+        }
+
+        let data = meta_expression
+            .get("data")
+            .cloned()
+            .unwrap_or(JsonValue::Object(serde_json::Map::new()));
+
+        // If data is a string, parse it as JSON first
+        let data = if let JsonValue::String(s) = &data {
+            serde_json::from_str::<JsonValue>(s).unwrap_or(data)
+        } else {
+            data
+        };
+
+        let meta: LanguageMeta = serde_json::from_value(data).unwrap_or_default();
+        Ok(meta)
+    }
+
+    /// Get language source from the language language.
+    pub async fn get_language_source(&self, address: &str) -> Result<String, LanguageError> {
+        let language_language_address = {
+            let sys = self.system_addresses.lock().await;
+            sys.language_language
+                .clone()
+                .ok_or_else(|| LanguageError::LoadError {
+                    address: address.to_string(),
+                    message: "Language language not loaded".to_string(),
+                })?
+        };
+
+        let source_script = format!(
+            r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource("{}")"#,
+            address
+        );
+
+        self.execute_on_language(&language_language_address, &source_script)
+            .await
+    }
+
+    /// Get the agent language
+    pub async fn get_agent_language(&self) -> Result<Language, LanguageError> {
+        let sys = self.system_addresses.lock().await;
+        let address = sys
+            .agent_language
+            .clone()
+            .ok_or_else(|| LanguageError::NotFound {
+                address: "agent_language".to_string(),
+            })?;
+        Ok(Language::new(address, self.js_core.clone()))
+    }
+
+    /// Get the language language
+    pub async fn get_language_language(&self) -> Result<Language, LanguageError> {
+        let sys = self.system_addresses.lock().await;
+        let address = sys
+            .language_language
+            .clone()
+            .ok_or_else(|| LanguageError::NotFound {
+                address: "language_language".to_string(),
+            })?;
+        Ok(Language::new(address, self.js_core.clone()))
+    }
+
+    /// Get the neighbourhood language
+    pub async fn get_neighbourhood_language(&self) -> Result<Language, LanguageError> {
+        let sys = self.system_addresses.lock().await;
+        let address =
+            sys.neighbourhood_language
+                .clone()
+                .ok_or_else(|| LanguageError::NotFound {
+                    address: "neighbourhood_language".to_string(),
+                })?;
+        Ok(Language::new(address, self.js_core.clone()))
+    }
+
+    /// Get the perspective language
+    pub async fn get_perspective_language(&self) -> Result<Language, LanguageError> {
+        let sys = self.system_addresses.lock().await;
+        let address = sys
+            .perspective_language
+            .clone()
+            .ok_or_else(|| LanguageError::NotFound {
+                address: "perspective_language".to_string(),
+            })?;
+        Ok(Language::new(address, self.js_core.clone()))
+    }
+
+    /// Get settings for a language (public accessor)
+    pub fn get_settings_public(&self, language_address: &str) -> JsonValue {
+        self.get_settings(language_address)
+            .unwrap_or(JsonValue::Null)
+    }
+
+    /// Get cached language name for an address
+    pub async fn get_language_name(&self, address: &str) -> String {
+        let names = self.language_names.lock().await;
+        names.get(address).cloned().unwrap_or_default()
+    }
+
+    // ─── Expression handling methods ────────────────────────────────────
+
+    /// Check if an expression is immutable (cacheable).
+    pub async fn is_immutable_expression(
+        &self,
+        lang_address: &str,
+        expression_address: &str,
+    ) -> Result<bool, LanguageError> {
+        if lang_address == "literal" {
+            return Ok(true);
+        }
+
+        let script = format!(
+            r#"language.isImmutableExpression ? await language.isImmutableExpression("{}") : false"#,
+            expression_address
+        );
+
+        let result = self.execute_on_language(lang_address, &script).await?;
+        let trimmed = result.trim();
+        Ok(trimmed == "true")
+    }
+
+    /// Get an expression from a language.
+    pub async fn get_expression(
+        &self,
+        lang_address: &str,
+        expression_address: &str,
+    ) -> Result<Option<JsonValue>, LanguageError> {
+        // Handle literal language
+        if lang_address == "literal" {
+            let mut decoded = literal_decode(expression_address)?;
+            // Verify signature on literal expressions too
+            Self::verify_expression_proof(&mut decoded);
+            return Ok(Some(decoded));
+        }
+
+        // Check immutability for caching
+        let immutable = self
+            .is_immutable_expression(lang_address, expression_address)
+            .await
+            .unwrap_or(false);
+
+        // Check cache for immutable expressions
+        if immutable {
+            let cached = crate::db::Ad4mDb::with_global_instance(|db| {
+                db._get_expression(expression_address)
+            });
+            if let Ok(Some(expr)) = cached {
+                let mut expr_json = serde_json::to_value(&expr).unwrap_or(JsonValue::Null);
+                // Verify and set proof.valid
+                Self::verify_expression_proof(&mut expr_json);
+                return Ok(Some(expr_json));
+            }
+        }
+
+        // Fetch from the language runtime
+        let script = format!(
+            r#"JSON.stringify(await language.expressionAdapter.get("{}"))"#,
+            expression_address
+        );
+
+        let result = self.execute_on_language(lang_address, &script).await?;
+
+        if result.trim() == "null" || result.trim() == "undefined" || result.is_empty() {
+            return Ok(None);
+        }
+
+        let mut expr_json: JsonValue =
+            serde_json::from_str(&result).map_err(|e| LanguageError::SerializationError {
+                message: format!("Failed to parse expression: {}", e),
+            })?;
+
+        if expr_json.is_null() {
+            return Ok(None);
+        }
+
+        // Cache immutable expressions
+        if immutable {
+            if let Ok(expr) =
+                serde_json::from_value::<crate::types::Expression<JsonValue>>(expr_json.clone())
+            {
+                let _ = crate::db::Ad4mDb::with_global_instance(|db| {
+                    db._add_expression(expression_address, &expr)
+                });
+            }
+        }
+
+        // Verify signature
+        Self::verify_expression_proof(&mut expr_json);
+
+        Ok(Some(expr_json))
+    }
+
+    /// Verify an expression's proof and set the `valid` field.
+    fn verify_expression_proof(expr_json: &mut JsonValue) {
+        if let Ok(expr) =
+            serde_json::from_value::<crate::types::Expression<JsonValue>>(expr_json.clone())
+        {
+            let valid = crate::agent::signatures::verify(&expr).unwrap_or(false);
+            if let Some(proof) = expr_json.get_mut("proof") {
+                proof["valid"] = JsonValue::Bool(valid);
+                proof["invalid"] = JsonValue::Bool(!valid);
+            }
+        }
+    }
+
+    /// Create an expression in a language.
+    pub async fn expression_create(
+        &self,
+        lang_address: &str,
+        content: JsonValue,
+        agent_context: &AgentContext,
+    ) -> Result<String, LanguageError> {
+        // Handle literal language
+        if lang_address == "literal" {
+            let signed_expr = crate::agent::create_signed_expression(content, agent_context)
+                .map_err(|e| LanguageError::RuntimeError {
+                    address: "literal".to_string(),
+                    message: format!("Failed to create signed expression: {}", e),
+                })?;
+
+            let signed_expr_json = serde_json::to_value(&signed_expr).map_err(|e| {
+                LanguageError::SerializationError {
+                    message: format!("Failed to serialize signed expression: {}", e),
+                }
+            })?;
+
+            let expression_part = literal_encode(&signed_expr_json);
+            return Ok(format!("literal://{}", expression_part));
+        }
+
+        // Resolve alias: check if any alias maps to this address
+        let effective_lang_address = {
+            let aliases = self.language_aliases.lock().await;
+            let mut effective = lang_address.to_string();
+            for (alias, target) in aliases.iter() {
+                if target == lang_address {
+                    effective = alias.clone();
+                    break;
+                }
+            }
+            effective
+        };
+
+        let content_json =
+            serde_json::to_string(&content).map_err(|e| LanguageError::SerializationError {
+                message: format!("Failed to serialize content: {}", e),
+            })?;
+
+        let script = format!(
+            r#"JSON.stringify(
+                language.expressionAdapter.putAdapter.createPublic
+                    ? await language.expressionAdapter.putAdapter.createPublic({})
+                    : await language.expressionAdapter.putAdapter.addressOf({})
+            )"#,
+            content_json, content_json
+        );
+
+        let result = self.execute_on_language(lang_address, &script).await?;
+
+        // Strip surrounding quotes from the result (it's a JSON-encoded string)
+        let expression_address = result.trim().trim_matches('"').to_string();
+
+        Ok(format!(
+            "{}://{}",
+            effective_lang_address, expression_address
+        ))
+    }
+
+    /// Get expression interactions for a URL.
+    pub async fn expression_interactions(
+        &self,
+        url: &str,
+    ) -> Result<Vec<InteractionMeta>, LanguageError> {
+        let (lang_address, expression_address) = Self::parse_expr_url(url)?;
+
+        let script = format!(
+            r#"JSON.stringify(
+                language.interactions("{}").map(ic => ({{
+                    label: ic.label, name: ic.name, parameters: ic.parameters
+                }}))
+            )"#,
+            expression_address
+        );
+
+        let result = self.execute_on_language(&lang_address, &script).await?;
+
+        serde_json::from_str(&result).map_err(|e| LanguageError::SerializationError {
+            message: format!("Failed to parse interactions: {}", e),
+        })
+    }
+
+    /// Execute an interaction on an expression.
+    pub async fn expression_interact(
+        &self,
+        url: &str,
+        call: &InteractionCall,
+    ) -> Result<Option<String>, LanguageError> {
+        let (lang_address, expression_address) = Self::parse_expr_url(url)?;
+
+        let script = format!(
+            r#"JSON.stringify(
+                await (async () => {{
+                    const interaction = language.interactions("{}")
+                        .find(i => i.name === "{}");
+                    if (!interaction) throw new Error("No interaction named '{}'");
+                    return await interaction.execute({});
+                }})()
+            )"#,
+            expression_address, call.name, call.name, call.parameters_stringified
+        );
+
+        let result = self.execute_on_language(&lang_address, &script).await?;
+
+        if result.trim() == "null" || result.trim() == "undefined" {
+            Ok(None)
+        } else {
+            Ok(Some(result))
+        }
+    }
+
+    // ─── Reload language ────────────────────────────────────────────────
+
+    /// Reload a language: unload and re-load from disk.
+    pub async fn reload_language(&self, address: &str) -> Result<(), LanguageError> {
+        self.unload_language(address).await?;
+
+        let bundle_path = languages_directory().join(address).join("bundle.js");
+        if bundle_path.exists() {
+            self.load_language(bundle_path).await?;
+        }
+
+        Ok(())
     }
 }

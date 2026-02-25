@@ -1223,15 +1223,16 @@ impl Mutation {
         language_address: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &EXPRESSION_CREATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
 
         // Get user context from JWT token
         let user_email =
             crate::agent::capabilities::user_email_from_token(context.auth_token.clone());
 
-        let script = if let Some(user_email) = user_email {
-            // User context: set agent service context temporarily
-            format!(
+        // For multi-user context, use the JS path (user-context signing not yet ported)
+        if user_email.is_some() {
+            let mut js = context.js_handle.clone();
+            let user_email_str = user_email.as_ref().unwrap();
+            let script = format!(
                 r#"JSON.stringify(
                     await (async () => {{
                         const originalContext = core.agentService.getUserContext();
@@ -1243,18 +1244,46 @@ impl Mutation {
                         }}
                     }})()
                 )"#,
-                user_email, content, language_address
-            )
-        } else {
-            // Main agent context: call directly
-            format!(
-                r#"JSON.stringify(
-                    await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }})
-                )"#,
-                content, language_address
-            )
-        };
+                user_email_str, content, language_address
+            );
+            let result = js.execute(script).await?;
+            let result: JsResultType<String> = serde_json::from_str(&result)?;
+            return result.get_graphql_result();
+        }
 
+        // Main agent path: try Rust-side
+        let controller = LanguageController::global_instance();
+        let is_literal = language_address == "literal";
+        let is_loaded = is_literal || controller.is_language_loaded(&language_address).await;
+
+        if is_loaded {
+            let content_json: serde_json::Value = serde_json::from_str(&content)
+                .unwrap_or(serde_json::Value::String(content.clone()));
+            let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+
+            match controller
+                .expression_create(&language_address, content_json, &agent_context)
+                .await
+            {
+                Ok(url) => return Ok(url),
+                Err(e) => {
+                    log::warn!(
+                        "Rust-side expression_create failed for {}: {}, falling back to JS",
+                        language_address,
+                        e
+                    );
+                }
+            }
+        }
+
+        // Fall back to JS
+        let mut js = context.js_handle.clone();
+        let script = format!(
+            r#"JSON.stringify(
+                await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }})
+            )"#,
+            content, language_address
+        );
         let result = js.execute(script).await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
         result.get_graphql_result()
@@ -1267,16 +1296,17 @@ impl Mutation {
         url: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &EXPRESSION_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
 
         // Get user context from JWT token
         let user_email =
             crate::agent::capabilities::user_email_from_token(context.auth_token.clone());
 
-        let interaction_call_json = serde_json::to_string(&interaction_call)?;
-        let script = if let Some(user_email) = user_email {
-            // User context: set agent service context temporarily
-            format!(
+        // For multi-user context, use the JS path
+        if user_email.is_some() {
+            let mut js = context.js_handle.clone();
+            let user_email_str = user_email.as_ref().unwrap();
+            let interaction_call_json = serde_json::to_string(&interaction_call)?;
+            let script = format!(
                 r#"JSON.stringify(
                     await (async () => {{
                         const originalContext = core.agentService.getUserContext();
@@ -1292,21 +1322,46 @@ impl Mutation {
                         }}
                     }})()
                 )"#,
-                user_email, interaction_call_json, url
-            )
-        } else {
-            // Main agent context: call directly
-            format!(
-                r#"JSON.stringify(
-                await core.callResolver(
-                    "Mutation",
-                    "expressionInteract",
-                    {{ interactionCall: {}, url: "{}" }},
-                ))"#,
-                interaction_call_json, url
-            )
-        };
+                user_email_str, interaction_call_json, url
+            );
+            let result = js.execute(script).await?;
+            let result: JsResultType<String> = serde_json::from_str(&result)?;
+            return result.get_graphql_result();
+        }
 
+        // Main agent path: try Rust-side
+        let controller = LanguageController::global_instance();
+        if let Ok((lang_address, _)) = LanguageController::parse_expr_url(&url) {
+            if controller.is_language_loaded(&lang_address).await {
+                match controller
+                    .expression_interact(&url, &interaction_call)
+                    .await
+                {
+                    Ok(Some(result)) => return Ok(result),
+                    Ok(None) => return Ok("null".to_string()),
+                    Err(e) => {
+                        log::warn!(
+                            "Rust-side expression_interact failed for {}: {}, falling back to JS",
+                            url,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Fall back to JS
+        let mut js = context.js_handle.clone();
+        let interaction_call_json = serde_json::to_string(&interaction_call)?;
+        let script = format!(
+            r#"JSON.stringify(
+            await core.callResolver(
+                "Mutation",
+                "expressionInteract",
+                {{ interactionCall: {}, url: "{}" }},
+            ))"#,
+            interaction_call_json, url
+        );
         let result = js.execute(script).await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
         result.get_graphql_result()
@@ -1440,6 +1495,36 @@ impl Mutation {
         settings: String,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &LANGUAGE_UPDATE_CAPABILITY)?;
+
+        let controller = LanguageController::global_instance();
+        if controller.is_language_loaded(&language_address).await {
+            let settings_json: serde_json::Value = serde_json::from_str(&settings)
+                .unwrap_or(serde_json::Value::String(settings.clone()));
+
+            controller
+                .write_settings(&language_address, settings_json)
+                .await
+                .map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to write settings: {}", e),
+                        graphql_value!(null),
+                    )
+                })?;
+
+            controller
+                .reload_language(&language_address)
+                .await
+                .map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to reload language after settings change: {}", e),
+                        graphql_value!(null),
+                    )
+                })?;
+
+            return Ok(true);
+        }
+
+        // Fall back to JS
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(

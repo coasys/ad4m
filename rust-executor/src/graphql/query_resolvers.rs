@@ -2,7 +2,8 @@
 use super::graphql_types::*;
 use crate::agent::{capabilities::*, did_document_for_context, signatures, AgentContext};
 use crate::ai_service::AIService;
-use crate::types::{AITask, ModelType};
+use crate::languages::LanguageController;
+use crate::types::{AITask, DecoratedExpressionProof, ModelType};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
 use crate::{
     db::Ad4mDb,
@@ -204,6 +205,35 @@ impl Query {
         url: String,
     ) -> FieldResult<Option<ExpressionRendered>> {
         check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)?;
+
+        let controller = LanguageController::global_instance();
+        let parsed = LanguageController::parse_expr_url(&url);
+
+        if let Ok((lang_address, expression_address)) = parsed {
+            let is_literal = lang_address == "literal";
+            let is_loaded = is_literal || controller.is_language_loaded(&lang_address).await;
+
+            if is_loaded {
+                match controller
+                    .get_expression(&lang_address, &expression_address)
+                    .await
+                {
+                    Ok(Some(expr_json)) => {
+                        return Ok(Some(build_expression_rendered(&expr_json, &lang_address)));
+                    }
+                    Ok(None) => return Ok(None),
+                    Err(e) => {
+                        log::warn!(
+                            "Rust-side get_expression failed for {}: {}, falling back to JS",
+                            url,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Fall back to JS
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
@@ -221,6 +251,20 @@ impl Query {
         url: String,
     ) -> FieldResult<Vec<InteractionMeta>> {
         check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)?;
+
+        let controller = LanguageController::global_instance();
+        if let Ok((lang_address, _)) = LanguageController::parse_expr_url(&url) {
+            if controller.is_language_loaded(&lang_address).await {
+                match controller.expression_interactions(&url).await {
+                    Ok(interactions) => return Ok(interactions),
+                    Err(e) => {
+                        log::warn!("Rust-side expression_interactions failed for {}: {}, falling back to JS", url, e);
+                    }
+                }
+            }
+        }
+
+        // Fall back to JS
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
@@ -237,21 +281,75 @@ impl Query {
         context: &RequestContext,
         urls: Vec<String>,
     ) -> FieldResult<Vec<Option<ExpressionRendered>>> {
-        let urls_string = urls
-            .into_iter()
-            .map(|url| format!("\"{}\"", url))
-            .collect::<Vec<String>>()
-            .join(",");
         check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "expressionMany", {{ urls: [{}] }}))"#,
-                urls_string,
-            ))
-            .await?;
-        let result: JsResultType<Vec<Option<ExpressionRendered>>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let controller = LanguageController::global_instance();
+        let mut results = Vec::new();
+        let mut js_fallback_urls = Vec::new();
+        let mut js_fallback_indices = Vec::new();
+
+        for (i, url) in urls.iter().enumerate() {
+            if let Ok((lang_address, expression_address)) = LanguageController::parse_expr_url(url)
+            {
+                let is_literal = lang_address == "literal";
+                let is_loaded = is_literal || controller.is_language_loaded(&lang_address).await;
+
+                if is_loaded {
+                    match controller
+                        .get_expression(&lang_address, &expression_address)
+                        .await
+                    {
+                        Ok(Some(expr_json)) => {
+                            results
+                                .push(Some(build_expression_rendered(&expr_json, &lang_address)));
+                            continue;
+                        }
+                        Ok(None) => {
+                            results.push(None);
+                            continue;
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "Rust-side get_expression failed for {}: {}, falling back to JS",
+                                url,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+            // Need JS fallback for this URL
+            results.push(None); // placeholder
+            js_fallback_urls.push(url.clone());
+            js_fallback_indices.push(i);
+        }
+
+        // Fall back to JS for URLs that couldn't be handled
+        if !js_fallback_urls.is_empty() {
+            let urls_string = js_fallback_urls
+                .iter()
+                .map(|url| format!("\"{}\"", url))
+                .collect::<Vec<String>>()
+                .join(",");
+            let mut js = context.js_handle.clone();
+            let js_result = js
+                .execute(format!(
+                    r#"JSON.stringify(await core.callResolver("Query", "expressionMany", {{ urls: [{}] }}))"#,
+                    urls_string,
+                ))
+                .await?;
+            let js_result: JsResultType<Vec<Option<ExpressionRendered>>> =
+                serde_json::from_str(&js_result)?;
+            if let Ok(js_expressions) = js_result.get_graphql_result() {
+                for (j, idx) in js_fallback_indices.iter().enumerate() {
+                    if let Some(expr) = js_expressions.get(j) {
+                        results[*idx] = expr.clone();
+                    }
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     async fn expression_raw(
@@ -260,6 +358,33 @@ impl Query {
         url: String,
     ) -> FieldResult<Option<String>> {
         check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)?;
+
+        let controller = LanguageController::global_instance();
+        if let Ok((lang_address, expression_address)) = LanguageController::parse_expr_url(&url) {
+            let is_literal = lang_address == "literal";
+            let is_loaded = is_literal || controller.is_language_loaded(&lang_address).await;
+
+            if is_loaded {
+                match controller
+                    .get_expression(&lang_address, &expression_address)
+                    .await
+                {
+                    Ok(Some(expr_json)) => {
+                        return Ok(Some(serde_json::to_string(&expr_json)?));
+                    }
+                    Ok(None) => return Ok(None),
+                    Err(e) => {
+                        log::warn!(
+                            "Rust-side expression_raw failed for {}: {}, falling back to JS",
+                            url,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Fall back to JS
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
@@ -289,6 +414,28 @@ impl Query {
         address: String,
     ) -> FieldResult<LanguageHandle> {
         check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)?;
+
+        let controller = LanguageController::global_instance();
+        if controller.is_language_loaded(&address).await {
+            let name = controller.get_language_name(&address).await;
+            let settings = controller.get_settings_public(&address);
+            let settings_str = if settings.is_null() {
+                None
+            } else {
+                Some(serde_json::to_string(&settings).unwrap_or_default())
+            };
+
+            return Ok(LanguageHandle {
+                address,
+                name,
+                settings: settings_str,
+                constructor_icon: None,
+                icon: None,
+                settings_icon: None,
+            });
+        }
+
+        // Fall back to JS
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
@@ -306,6 +453,31 @@ impl Query {
         address: String,
     ) -> FieldResult<LanguageMeta> {
         check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)?;
+
+        let controller = LanguageController::global_instance();
+        let ll_loaded = {
+            let sys = controller.system_addresses.lock().await;
+            if let Some(ll_addr) = &sys.language_language {
+                controller.is_language_loaded(ll_addr).await
+            } else {
+                false
+            }
+        };
+
+        if ll_loaded {
+            match controller.get_language_expression(&address).await {
+                Ok(meta) => return Ok(meta),
+                Err(e) => {
+                    log::warn!(
+                        "Rust-side language_meta failed for {}: {}, falling back to JS",
+                        address,
+                        e
+                    );
+                }
+            }
+        }
+
+        // Fall back to JS
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
@@ -323,6 +495,31 @@ impl Query {
         address: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)?;
+
+        let controller = LanguageController::global_instance();
+        let ll_loaded = {
+            let sys = controller.system_addresses.lock().await;
+            if let Some(ll_addr) = &sys.language_language {
+                controller.is_language_loaded(ll_addr).await
+            } else {
+                false
+            }
+        };
+
+        if ll_loaded {
+            match controller.get_language_source(&address).await {
+                Ok(source) => return Ok(source),
+                Err(e) => {
+                    log::warn!(
+                        "Rust-side language_source failed for {}: {}, falling back to JS",
+                        address,
+                        e
+                    );
+                }
+            }
+        }
+
+        // Fall back to JS
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
@@ -339,8 +536,35 @@ impl Query {
         context: &RequestContext,
         filter: Option<String>,
     ) -> FieldResult<Vec<LanguageHandle>> {
-        let filter_string = filter.map_or("null".to_string(), |f| f.to_string());
         check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)?;
+
+        let controller = LanguageController::global_instance();
+        let refs = controller.get_installed_languages(filter.as_deref()).await;
+
+        if !refs.is_empty() {
+            let mut handles = Vec::new();
+            for lang_ref in refs {
+                let settings = controller.get_settings_public(&lang_ref.address);
+                let settings_str = if settings.is_null() {
+                    None
+                } else {
+                    Some(serde_json::to_string(&settings).unwrap_or_default())
+                };
+
+                handles.push(LanguageHandle {
+                    address: lang_ref.address,
+                    name: lang_ref.name,
+                    settings: settings_str,
+                    constructor_icon: None,
+                    icon: None,
+                    settings_icon: None,
+                });
+            }
+            return Ok(handles);
+        }
+
+        // Fall back to JS if no languages are loaded in Rust runtimes
+        let filter_string = filter.map_or("null".to_string(), |f| f.to_string());
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
@@ -860,5 +1084,60 @@ impl Query {
             Ok(status) => Ok(status),
             Err(e) => Err(FieldError::new(e.to_string(), Value::null())),
         }
+    }
+}
+
+/// Build an ExpressionRendered from a raw JsonValue expression and language address.
+fn build_expression_rendered(
+    expr_json: &serde_json::Value,
+    lang_address: &str,
+) -> ExpressionRendered {
+    let author = expr_json
+        .get("author")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let timestamp = expr_json
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let data = match expr_json.get("data") {
+        Some(d) if d.is_string() => d.as_str().unwrap_or("").to_string(),
+        Some(d) => serde_json::to_string(d).unwrap_or_default(),
+        None => String::new(),
+    };
+
+    let proof = if let Some(p) = expr_json.get("proof") {
+        DecoratedExpressionProof {
+            key: p
+                .get("key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            signature: p
+                .get("signature")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            valid: p.get("valid").and_then(|v| v.as_bool()),
+            invalid: p.get("invalid").and_then(|v| v.as_bool()),
+        }
+    } else {
+        DecoratedExpressionProof::default()
+    };
+
+    ExpressionRendered {
+        author,
+        timestamp,
+        data,
+        proof,
+        language: LanguageRef {
+            address: lang_address.to_string(),
+            name: String::new(),
+        },
+        icon: Icon { code: None },
     }
 }
