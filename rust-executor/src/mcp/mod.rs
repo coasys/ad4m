@@ -6,5 +6,6 @@
 pub mod server;
 pub mod shacl;
 mod tools;
+pub mod user_management;
 
 pub use server::{start_mcp_server, McpServerConfig};

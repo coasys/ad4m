@@ -7,10 +7,10 @@ use super::server::McpContext;
 use crate::agent::capabilities::{
     capabilities_from_token, check_capability,
     defs::{ALL_CAPABILITY, PERSPECTIVE_CREATE_CAPABILITY},
-    generate_capability_token, get_user_default_capabilities, permit_capability,
+    generate_capability_token, permit_capability,
     request_capability as cap_request_capability,
-    token::{decode_jwt, generate_jwt as generate_jwt_token},
-    AuthInfo, AuthInfoExtended, Capability, DEFAULT_TOKEN_VALID_PERIOD,
+    token::decode_jwt,
+    AuthInfo, AuthInfoExtended, Capability,
 };
 use crate::agent::{AgentContext, AgentService};
 use crate::db::Ad4mDb;
@@ -1774,19 +1774,12 @@ impl Ad4mMcpHandler {
     async fn login_email(&self, params: Parameters<LoginEmailParams>) -> String {
         let p = &params.0;
 
-        // Normalize email
+        use super::user_management as um;
+
         let email = p.email.trim().to_lowercase();
 
-        // Check if multi-user mode is enabled
-        let multi_user_enabled =
-            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
-
-        if !multi_user_enabled {
-            return json!({
-                "success": false,
-                "error": "Multi-user mode is not enabled. Use request_capability + generate_jwt instead."
-            })
-            .to_string();
+        if !um::is_multi_user_enabled() {
+            return json!({"success": false, "error": "Multi-user mode is not enabled. Use request_capability + generate_jwt instead."}).to_string();
         }
 
         // Verify user credentials
@@ -1796,41 +1789,15 @@ impl Ad4mMcpHandler {
         });
 
         if !password_valid {
-            return json!({
-                "success": false,
-                "error": "Invalid credentials"
-            })
-            .to_string();
+            return json!({"success": false, "error": "Invalid credentials"}).to_string();
         }
 
-        // Check user exists in agent service
         if !AgentService::user_exists(&email) {
-            return json!({
-                "success": false,
-                "error": "User key not found on executor"
-            })
-            .to_string();
+            return json!({"success": false, "error": "User key not found on executor"}).to_string();
         }
 
-        // Create auth info with user-scoped capabilities
-        let auth_info = AuthInfo {
-            app_name: "mcp-agent".to_string(),
-            app_desc: "MCP AI Agent".to_string(),
-            app_domain: Some("mcp".to_string()),
-            app_url: Some("https://ad4m.dev/mcp".to_string()),
-            app_icon_path: None,
-            capabilities: Some(get_user_default_capabilities()),
-            user_email: Some(email.clone()),
-        };
-
-        // Generate JWT token
-        match generate_jwt_token(
-            auth_info.app_name.clone(),
-            DEFAULT_TOKEN_VALID_PERIOD,
-            auth_info,
-        ) {
+        match um::generate_user_jwt(&email, "mcp-agent") {
             Ok(cap_token) => {
-                // Store the token in context for subsequent operations
                 let mut token_guard = self.context.auth_token.write().await;
                 *token_guard = Some(cap_token.clone());
 
@@ -1842,11 +1809,7 @@ impl Ad4mMcpHandler {
                 })
                 .to_string()
             }
-            Err(e) => json!({
-                "success": false,
-                "error": format!("Failed to generate token: {}", e)
-            })
-            .to_string(),
+            Err(e) => json!({"success": false, "error": e}).to_string(),
         }
     }
 
@@ -1924,126 +1887,27 @@ impl Ad4mMcpHandler {
         description = "Create a new user account (multi-user mode). Sends a verification email with a code. Use verify_email_code to complete signup."
     )]
     async fn signup(&self, params: Parameters<SignupParams>) -> String {
+        use super::user_management as um;
+
         let p = &params.0;
         let email = p.email.trim().to_lowercase();
 
-        // Check if multi-user mode is enabled
-        let multi_user_enabled =
-            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
-
-        if !multi_user_enabled {
-            return json!({
-                "success": false,
-                "error": "Multi-user mode is not enabled."
-            })
-            .to_string();
+        if !um::is_multi_user_enabled() {
+            return json!({"success": false, "error": "Multi-user mode is not enabled."}).to_string();
         }
 
-        // Ensure user key exists in AgentService
-        if let Err(e) = AgentService::ensure_user_key_exists(&email) {
-            return json!({
-                "success": false,
-                "error": format!("Failed to create user key: {}", e)
-            })
-            .to_string();
-        }
-
-        // Get DID for the user
-        let did = match AgentService::get_user_did_by_email(&email) {
+        let did = match um::create_user(&email, &p.password) {
             Ok(d) => d,
-            Err(e) => {
-                return json!({
-                    "success": false,
-                    "error": format!("Failed to get user DID: {}", e)
-                })
-                .to_string()
-            }
+            Err(e) => return json!({"success": false, "error": e}).to_string(),
         };
 
-        // Save wallet
-        AgentService::with_global_instance(|s| {
-            if let Some(p) = &s.passphrase {
-                s.save(p.clone());
-            }
-        });
-
-        // Check if user already exists in DB
-        let user_exists = Ad4mDb::with_global_instance(|db| db.get_user(&email).is_ok());
-        if user_exists {
-            return json!({
-                "success": false,
-                "error": "User already exists"
-            })
-            .to_string();
-        }
-
-        // Add user to DB
-        {
-            let db = Ad4mDb::global_instance();
-            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-            if let Err(e) = db_ref.add_user(&email, &did, &p.password) {
-                return json!({
-                    "success": false,
-                    "error": format!("Failed to add user: {}", e)
-                })
-                .to_string();
-            }
-        }
-
-        // Create verification code
-        let code = {
-            let db = Ad4mDb::global_instance();
-            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-            match db_ref.create_verification_code(&email, "signup") {
-                Ok(c) => c,
-                Err(e) => {
-                    return json!({
-                        "success": false,
-                        "error": format!("Failed to create verification code: {}", e)
-                    })
-                    .to_string()
-                }
-            }
+        let code = match um::create_verification_code(&email, "signup") {
+            Ok(c) => c,
+            Err(e) => return json!({"success": false, "error": e}).to_string(),
         };
 
-        // Send verification email
-        let smtp_config_opt = crate::config::SMTP_CONFIG
-            .lock()
-            .ok()
-            .and_then(|cfg| cfg.clone())
-            .filter(|config| config.enabled);
-        let test_mode = crate::email_service::EMAIL_TEST_MODE
-            .lock()
-            .ok()
-            .map(|mode| *mode)
-            .unwrap_or(false);
-
-        if test_mode || smtp_config_opt.is_some() {
-            let smtp_config = if test_mode && smtp_config_opt.is_none() {
-                crate::config::SmtpConfig {
-                    enabled: true,
-                    host: "test.localhost".to_string(),
-                    port: 587,
-                    username: "test".to_string(),
-                    password: "test".to_string(),
-                    from_address: "test@localhost".to_string(),
-                }
-            } else {
-                smtp_config_opt.unwrap()
-            };
-            let email_service = crate::email_service::EmailService::new(smtp_config);
-            if let Err(e) = email_service
-                .send_verification_email(&email, &code, "signup", Some("MCP Agent"), None)
-                .await
-            {
-                return json!({
-                    "success": false,
-                    "error": format!("Failed to send verification email: {}", e)
-                })
-                .to_string();
-            }
+        if let Err(e) = um::send_verification_email(&email, &code, "signup", Some("MCP Agent")).await {
+            return json!({"success": false, "error": e}).to_string();
         }
 
         json!({
@@ -2062,92 +1926,25 @@ impl Ad4mMcpHandler {
         &self,
         params: Parameters<RequestLoginVerificationParams>,
     ) -> String {
+        use super::user_management as um;
+
         let email = params.0.email.trim().to_lowercase();
 
-        // Check if multi-user mode is enabled
-        let multi_user_enabled =
-            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
-
-        if !multi_user_enabled {
-            return json!({
-                "success": false,
-                "error": "Multi-user mode is not enabled."
-            })
-            .to_string();
+        if !um::is_multi_user_enabled() {
+            return json!({"success": false, "error": "Multi-user mode is not enabled."}).to_string();
         }
 
-        // Check user exists in DB
-        let user_exists = Ad4mDb::with_global_instance(|db| db.get_user(&email).is_ok());
-        if !user_exists {
-            return json!({
-                "success": false,
-                "error": "User not found"
-            })
-            .to_string();
+        if let Err(e) = um::user_exists(&email) {
+            return json!({"success": false, "error": e}).to_string();
         }
 
-        // Check user key exists in AgentService
-        if !AgentService::user_exists(&email) {
-            return json!({
-                "success": false,
-                "error": "User key not found on executor"
-            })
-            .to_string();
-        }
-
-        // Create verification code
-        let code = {
-            let db = Ad4mDb::global_instance();
-            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-            match db_ref.create_verification_code(&email, "login") {
-                Ok(c) => c,
-                Err(e) => {
-                    return json!({
-                        "success": false,
-                        "error": format!("Failed to create verification code: {}", e)
-                    })
-                    .to_string()
-                }
-            }
+        let code = match um::create_verification_code(&email, "login") {
+            Ok(c) => c,
+            Err(e) => return json!({"success": false, "error": e}).to_string(),
         };
 
-        // Send verification email
-        let smtp_config_opt = crate::config::SMTP_CONFIG
-            .lock()
-            .ok()
-            .and_then(|cfg| cfg.clone())
-            .filter(|config| config.enabled);
-        let test_mode = crate::email_service::EMAIL_TEST_MODE
-            .lock()
-            .ok()
-            .map(|mode| *mode)
-            .unwrap_or(false);
-
-        if test_mode || smtp_config_opt.is_some() {
-            let smtp_config = if test_mode && smtp_config_opt.is_none() {
-                crate::config::SmtpConfig {
-                    enabled: true,
-                    host: "test.localhost".to_string(),
-                    port: 587,
-                    username: "test".to_string(),
-                    password: "test".to_string(),
-                    from_address: "test@localhost".to_string(),
-                }
-            } else {
-                smtp_config_opt.unwrap()
-            };
-            let email_service = crate::email_service::EmailService::new(smtp_config);
-            if let Err(e) = email_service
-                .send_verification_email(&email, &code, "login", Some("MCP Agent"), None)
-                .await
-            {
-                return json!({
-                    "success": false,
-                    "error": format!("Failed to send verification email: {}", e)
-                })
-                .to_string();
-            }
+        if let Err(e) = um::send_verification_email(&email, &code, "login", Some("MCP Agent")).await {
+            return json!({"success": false, "error": e}).to_string();
         }
 
         json!({
@@ -2162,73 +1959,30 @@ impl Ad4mMcpHandler {
         description = "Verify an email code to complete signup or login. Returns a JWT token on success. The verification_type must be 'signup' or 'login'."
     )]
     async fn verify_email_code(&self, params: Parameters<VerifyEmailCodeParams>) -> String {
+        use super::user_management as um;
+
         let p = &params.0;
         let email = p.email.trim().to_lowercase();
 
-        // Check if multi-user mode is enabled
-        let multi_user_enabled =
-            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
-
-        if !multi_user_enabled {
-            return json!({
-                "success": false,
-                "error": "Multi-user mode is not enabled."
-            })
-            .to_string();
+        if !um::is_multi_user_enabled() {
+            return json!({"success": false, "error": "Multi-user mode is not enabled."}).to_string();
         }
 
-        // Verify the code
-        let verified = {
-            let db = Ad4mDb::global_instance();
-            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-            match db_ref.verify_code(&email, &p.code, &p.verification_type) {
-                Ok(v) => v,
-                Err(e) => {
-                    return json!({
-                        "success": false,
-                        "error": format!("Verification failed: {}", e)
-                    })
-                    .to_string()
-                }
-            }
+        let verified = match um::verify_code(&email, &p.code, &p.verification_type) {
+            Ok(v) => v,
+            Err(e) => return json!({"success": false, "error": e}).to_string(),
         };
 
         if !verified {
-            return json!({
-                "success": false,
-                "error": "Invalid verification code"
-            })
-            .to_string();
+            return json!({"success": false, "error": "Invalid verification code"}).to_string();
         }
 
-        // Check user exists in AgentService
         if !AgentService::user_exists(&email) {
-            return json!({
-                "success": false,
-                "error": "User key not found on executor"
-            })
-            .to_string();
+            return json!({"success": false, "error": "User key not found on executor"}).to_string();
         }
 
-        // Generate JWT with user capabilities
-        let auth_info = AuthInfo {
-            app_name: "mcp-agent".to_string(),
-            app_desc: "MCP AI Agent".to_string(),
-            app_domain: Some("mcp".to_string()),
-            app_url: Some("https://ad4m.dev/mcp".to_string()),
-            app_icon_path: None,
-            capabilities: Some(get_user_default_capabilities()),
-            user_email: Some(email.clone()),
-        };
-
-        match generate_jwt_token(
-            auth_info.app_name.clone(),
-            DEFAULT_TOKEN_VALID_PERIOD,
-            auth_info,
-        ) {
+        match um::generate_user_jwt(&email, "mcp-agent") {
             Ok(cap_token) => {
-                // Store in session
                 let mut token_guard = self.context.auth_token.write().await;
                 *token_guard = Some(cap_token.clone());
 
@@ -2240,11 +1994,7 @@ impl Ad4mMcpHandler {
                 })
                 .to_string()
             }
-            Err(e) => json!({
-                "success": false,
-                "error": format!("Failed to generate token: {}", e)
-            })
-            .to_string(),
+            Err(e) => json!({"success": false, "error": e}).to_string(),
         }
     }
 
