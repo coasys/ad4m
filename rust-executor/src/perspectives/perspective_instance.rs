@@ -3381,8 +3381,7 @@ impl PerspectiveInstance {
                         let mut batches = self.batch_store.write().await;
                         if let Some(diff) = batches.get_mut(bid) {
                             diff.additions.retain(|link| {
-                                !(link.data.source == source
-                                    && link.data.predicate == predicate)
+                                !(link.data.source == source && link.data.predicate == predicate)
                             });
                         }
                     }
