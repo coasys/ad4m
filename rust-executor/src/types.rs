@@ -128,7 +128,8 @@ impl Link {
             if value.is_empty() {
                 return Err(anyhow!(
                     "Link {} must not be empty. Link: {}",
-                    field, link_desc
+                    field,
+                    link_desc
                 ));
             }
             if !re.is_match(value) {
