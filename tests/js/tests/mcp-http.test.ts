@@ -431,7 +431,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
             // Subject class tools (higher-level)
             expect(toolNames).to.include('add_model');
-            expect(toolNames).to.include('list_subject_classes');
+            expect(toolNames).to.include('get_models');
             expect(toolNames).to.include('create_subject');
             expect(toolNames).to.include('query_subjects');
             expect(toolNames).to.include('get_subject_data');
@@ -585,7 +585,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         });
 
         it("should discover subject classes (understand the data model)", async function() {
-            const classes = await callMcpTool('list_subject_classes', {
+            const classes = await callMcpTool('get_models', {
                 perspective_id: perspectiveUuid,
             }, mcpSessionId);
             var classStr = typeof classes === 'string' ? classes : JSON.stringify(classes);

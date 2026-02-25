@@ -484,11 +484,11 @@ impl Ad4mMcpHandler {
         serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
     }
 
-    /// List all subject classes (model types) defined in a perspective
+    /// Get all models (subject classes) defined in a perspective
     #[tool(
-        description = "List all subject classes (model types) defined in a perspective. Returns the available models you can query and create instances of."
+        description = "Get all models (subject class types) defined in a perspective. Returns the available models you can query and create instances of."
     )]
-    async fn list_subject_classes(&self, params: Parameters<ListSubjectClassesParams>) -> String {
+    async fn get_models(&self, params: Parameters<ListSubjectClassesParams>) -> String {
         let uuid = &params.0.perspective_id;
 
         match get_perspective(uuid) {
