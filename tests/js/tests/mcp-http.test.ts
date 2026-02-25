@@ -442,13 +442,25 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(toolNames).to.include('remove_from_collection');
 
             // Auth tools
-            expect(toolNames).to.include('set_token');
+            expect(toolNames).to.include('request_capability');
+            expect(toolNames).to.include('generate_jwt');
             expect(toolNames).to.include('auth_status');
         });
 
-        it("should authenticate with admin credential", async function() {
-            const result = await callMcpTool('set_token', { token: adminCredential }, mcpSessionId);
-            expect(result.success).to.be.true;
+        it("should authenticate with admin credential via request_capability", async function() {
+            const capResult = await callMcpTool('request_capability', {
+                app_name: "mcp-test",
+                app_desc: "MCP Integration Test"
+            }, mcpSessionId);
+            expect(capResult.request_id).to.be.a('string');
+            expect(capResult.code).to.be.a('string');
+
+            const jwtResult = await callMcpTool('generate_jwt', {
+                request_id: capResult.request_id,
+                code: capResult.code,
+            }, mcpSessionId);
+            expect(jwtResult.success).to.be.true;
+            expect(jwtResult.token).to.be.a('string');
         });
 
         it("should confirm auth status", async function() {

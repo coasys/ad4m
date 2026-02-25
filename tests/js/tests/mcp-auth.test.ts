@@ -21,7 +21,7 @@ const __dirname = path.dirname(__filename);
  * MCP Authentication Integration Tests (HTTP-only)
  *
  * Tests MCP auth tools via raw HTTP requests to the MCP Streamable HTTP server.
- * Verifies: login_email, set_token, auth_status, and unauthenticated rejection.
+ * Verifies: login_email, request_capability + generate_jwt, auth_status, and unauthenticated rejection.
  */
 
 // ============================================================================
@@ -318,22 +318,41 @@ describe("MCP Authentication HTTP Tests", function() {
     });
 
     // ========================================================================
-    // 3. set_token Authentication
+    // 3. request_capability + generate_jwt Authentication
     // ========================================================================
 
-    describe("3. set_token Tool", function() {
-        it("should authenticate with admin credential via set_token", async function() {
-            const result = await callMcpTool('set_token', { token: adminCredential }, mcpSessionId);
-            expect(result.success).to.be.true;
-            expect(result.is_admin).to.be.true;
-            console.log("set_token result:", JSON.stringify(result));
+    describe("3. request_capability + generate_jwt", function() {
+        it("should get request_id and code from request_capability", async function() {
+            const result = await callMcpTool('request_capability', {
+                app_name: "auth-test",
+                app_desc: "MCP Auth Test"
+            }, mcpSessionId);
+            expect(result.request_id).to.be.a('string');
+            expect(result.code).to.be.a('string');
+            console.log("request_capability result:", JSON.stringify(result));
         });
 
-        it("should confirm authenticated status after set_token", async function() {
+        it("should authenticate via request_capability + generate_jwt", async function() {
+            const capResult = await callMcpTool('request_capability', {
+                app_name: "auth-test",
+                app_desc: "MCP Auth Test"
+            }, mcpSessionId);
+            expect(capResult.request_id).to.be.a('string');
+            expect(capResult.code).to.be.a('string');
+
+            const jwtResult = await callMcpTool('generate_jwt', {
+                request_id: capResult.request_id,
+                code: capResult.code,
+            }, mcpSessionId);
+            expect(jwtResult.success).to.be.true;
+            expect(jwtResult.token).to.be.a('string');
+            console.log("generate_jwt result:", JSON.stringify(jwtResult));
+        });
+
+        it("should confirm authenticated status after generate_jwt", async function() {
             const status = await callMcpTool('auth_status', {}, mcpSessionId);
             expect(status.authenticated).to.be.true;
-            expect(status.is_admin).to.be.true;
-            console.log("Auth status (after set_token):", JSON.stringify(status));
+            console.log("Auth status (after generate_jwt):", JSON.stringify(status));
         });
 
         it("should allow list_perspectives after authentication", async function() {
@@ -342,19 +361,13 @@ describe("MCP Authentication HTTP Tests", function() {
             console.log("Authenticated list_perspectives:", JSON.stringify(result));
         });
 
-        it("should reject empty token", async function() {
-            // Start a fresh session to test empty token
+        it("should reject generate_jwt with invalid request_id/code", async function() {
             const init = await initializeMcp();
             const freshSession = init.sessionId;
-            const result = await callMcpTool('set_token', { token: "" }, freshSession);
-            expect(result.success).to.be.false;
-            expect(result.error).to.include("empty");
-        });
-
-        it("should reject invalid token", async function() {
-            const init = await initializeMcp();
-            const freshSession = init.sessionId;
-            const result = await callMcpTool('set_token', { token: "not-a-valid-token-or-credential" }, freshSession);
+            const result = await callMcpTool('generate_jwt', {
+                request_id: "invalid-request-id",
+                code: "000000",
+            }, freshSession);
             expect(result.success).to.be.false;
         });
     });
