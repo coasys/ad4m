@@ -1904,7 +1904,7 @@ impl Ad4mMcpHandler {
 // Dynamic SHACL Tool Generation
 // ============================================================================
 
-use super::shacl::{self, ShaclClass, ShaclProperty};
+use super::shacl::{self, ShaclProperty};
 
 impl Ad4mMcpHandler {
     /// Generate dynamic MCP tools from SHACL subject classes across all perspectives
