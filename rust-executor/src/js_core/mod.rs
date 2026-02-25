@@ -171,7 +171,11 @@ impl JsCore {
         module_loader: Rc<string_module_loader::StringModuleLoader>,
         worker_options: WorkerOptions,
     ) -> Self {
-        deno_core::v8::V8::set_flags_from_string("--no-opt");
+        use std::sync::Once;
+        static V8_FLAGS_INIT: Once = Once::new();
+        V8_FLAGS_INIT.call_once(|| {
+            deno_core::v8::V8::set_flags_from_string("--no-opt");
+        });
         let fs = Arc::new(RealFs);
         let permission_desc_parser = Arc::new(RuntimePermissionDescriptorParser::new(
             sys_traits::impls::RealSys,

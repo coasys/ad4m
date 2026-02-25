@@ -681,24 +681,15 @@ impl LanguageController {
             }
 
             // Save language bundle to disk
-            let (_saved_hash, saved_bundle_path) =
+            let (_saved_hash, _saved_bundle_path) =
                 controller.save_language_bundle(&source, meta.as_ref())?;
             info!("install_language: saved language bundle for {}", language);
 
-            // Load the language into its own runtime
-            match controller.load_language(saved_bundle_path).await {
-                Ok(_) => {
-                    info!("install_language: loaded language {}", language);
-                }
-                Err(e) => {
-                    error!(
-                        "install_language: ERROR LOADING NEWLY INSTALLED LANGUAGE {}: {}",
-                        language, e
-                    );
-                }
-            }
-
-            return Ok(());
+            // Don't load into a per-language Deno runtime here.
+            // Creating additional V8 isolates at this point causes segfaults
+            // in the forked deno_core. Instead, fall through to the JS-side
+            // installLanguage which uses the main JsCore worker.
+            info!("install_language: bundle saved, delegating runtime loading to JS side for {}", language);
         }
 
         // Fall back to JS-side LanguageController for install
