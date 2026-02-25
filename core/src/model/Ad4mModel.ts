@@ -1695,8 +1695,10 @@ WHERE ${whereConditions.join(' AND ')}
                       console.warn("Falling back to raw value");
                       convertedValue = target; // Fall back to raw value
                     }
-                  } else if (typeof target === 'string' && target.startsWith('literal://')) {
-                    // Fallback: If we somehow got a literal URL that wasn't parsed by SurrealDB, parse it now
+                  } else if (propMeta.resolveLanguage === 'literal' && typeof target === 'string' && target.startsWith('literal://')) {
+                    // Only parse literal URIs when resolveLanguage is explicitly set to 'literal'.
+                    // Without this check, properties pointing to baseExpressions of other models
+                    // (which may be literal:// strings) would get unwrapped, breaking link URI validation.
                     try {
                       const parsed = Literal.fromUrl(target).get();
                       if(parsed.data !== undefined) {
