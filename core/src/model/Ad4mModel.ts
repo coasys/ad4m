@@ -844,8 +844,10 @@ export class Ad4mModel {
               } catch (e) {
                 console.warn(`Failed to resolve expression for ${propName}:`, e);
               }
-            } else if (typeof value === 'string' && value.startsWith('literal://')) {
-              // Parse literal URL
+            } else if (propMeta.resolveLanguage === 'literal' && typeof value === 'string' && value.startsWith('literal://')) {
+              // Only parse literal URIs when resolveLanguage is explicitly 'literal'.
+              // Without this guard, properties pointing to baseExpressions of other models
+              // (which may be literal:// strings) would get unwrapped, breaking link URI validation.
               try {
                 const parsed = Literal.fromUrl(value).get();
                 value = parsed.data !== undefined ? parsed.data : parsed;
