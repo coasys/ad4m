@@ -221,7 +221,7 @@ pub struct LanguageHandle {
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct LanguageMeta {
     pub address: String,
     pub author: String,

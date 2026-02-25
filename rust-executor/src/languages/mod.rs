@@ -1245,13 +1245,27 @@ impl LanguageController {
         // Apply template data to source lines
         Self::apply_template_data(&mut source_lines, &template_data);
 
-        // Remove happ from template_data before storing in meta
-        template_data.remove("happ");
+        // Remove happ from template_data before storing in meta.
+        // Use shift_remove (not remove/swap_remove) to preserve sorted key order.
+        template_data.shift_remove("happ");
 
         // Build the updated LanguageMeta
         let meta_data = meta_expression.get("data").cloned().unwrap_or(JsonValue::Object(serde_json::Map::new()));
 
-        let mut meta: LanguageMeta = serde_json::from_value(meta_data.clone()).unwrap_or_default();
+        // If data is a string, parse it as JSON first
+        let meta_data = if let JsonValue::String(s) = &meta_data {
+            serde_json::from_str::<JsonValue>(s).unwrap_or(meta_data)
+        } else {
+            meta_data
+        };
+
+        let mut meta: LanguageMeta = match serde_json::from_value(meta_data.clone()) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("Failed to deserialize LanguageMeta from expression data: {}. Data: {:?}", e, &meta_data.to_string()[..meta_data.to_string().len().min(500)]);
+                LanguageMeta::default()
+            }
+        };
 
         // Override name and description if present in template_data
         if let Some(JsonValue::String(name)) = template_data.get("name") {
