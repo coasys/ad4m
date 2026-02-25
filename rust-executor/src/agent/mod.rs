@@ -554,7 +554,88 @@ impl AgentService {
         )
         .expect("Failed to write agent profile file");
 
-        // TODO: once language controller is moved add updating agent profile here
+        // Note: callers who need the agent published to the agent language
+        // should call publish_main_agent_to_language() separately (this method
+        // is sync and cannot await).
+    }
+
+    /// Publish the main agent's profile to the agent language (decentralized storage).
+    /// Mirrors publish_user_agent_to_language() but for the main agent context.
+    pub async fn publish_main_agent_to_language(
+        js_handle: &mut crate::js_core::JsCoreHandle,
+    ) -> Result<(), AnyError> {
+        let script = r#"
+            (async () => {
+                const agentLanguage = core.languageController.getAgentLanguage();
+                if (!agentLanguage || !agentLanguage.expressionAdapter) {
+                    throw new Error("Agent language not available");
+                }
+
+                const putAdapter = agentLanguage.expressionAdapter.putAdapter;
+                if (!putAdapter) {
+                    throw new Error("No putAdapter found in agent language");
+                }
+
+                await putAdapter.createPublic(AGENT.agent());
+                return "success";
+            })()
+        "#
+        .to_string();
+
+        let result = js_handle.execute(script).await;
+
+        match result {
+            Ok(_) => {
+                log::info!("Successfully published main agent to agent language");
+                Ok(())
+            }
+            Err(e) => {
+                log::error!("Failed to publish main agent to agent language: {}", e);
+                Err(anyhow!("Failed to publish main agent to language: {}", e))
+            }
+        }
+    }
+
+    /// Ensure the main agent has an expression in the agent language.
+    /// If no expression is found for the agent's DID, publishes it.
+    pub async fn ensure_agent_expression(
+        js_handle: &mut crate::js_core::JsCoreHandle,
+    ) -> Result<(), AnyError> {
+        let script = r#"
+            (async () => {
+                const agentLanguage = core.languageController.getAgentLanguage();
+                if (!agentLanguage || !agentLanguage.expressionAdapter) {
+                    throw new Error("Agent language not available");
+                }
+
+                const existing = await agentLanguage.expressionAdapter.get(AGENT.did());
+                if (existing) {
+                    return "already_exists";
+                }
+
+                const putAdapter = agentLanguage.expressionAdapter.putAdapter;
+                if (!putAdapter) {
+                    throw new Error("No putAdapter found in agent language");
+                }
+
+                await putAdapter.createPublic(AGENT.agent());
+                return "created";
+            })()
+        "#
+        .to_string();
+
+        let result = js_handle.execute(script).await;
+
+        match result {
+            Ok(val) => {
+                log::info!("ensure_agent_expression result: {}", val);
+                Ok(())
+            }
+            Err(e) => {
+                log::error!("Failed to ensure agent expression: {}", e);
+                Err(anyhow!("Failed to ensure agent expression: {}", e))
+            }
+        }
     }
 
     pub fn save_agent_profile(&mut self, agent: Agent) {

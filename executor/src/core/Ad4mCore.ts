@@ -5,7 +5,6 @@ import * as Config from './Config'
 import * as Db from './db'
 import type { Ad4mDb } from './db'
 import HolochainService, { HolochainConfiguration } from './storage-services/Holochain/HolochainService';
-import AgentService from './agent/AgentService'
 import LanguageController from './LanguageController'
 import * as DIDs from './agent/DIDs'
 import type { DIDResolver } from './agent/DIDs'
@@ -16,9 +15,6 @@ import { v4 as uuidv4 } from 'uuid';
 import { MainConfig } from './Config'
 import { getPubSub, sleep } from "./utils";
 
-export interface InitServicesParams {
-    agentService: AgentService,
-}
 export interface InitIPFSParams {
     ipfsSwarmPort?: number,
     ipfsRepoPath?: string,
@@ -51,7 +47,6 @@ export default class Ad4mCore {
     #holochain?: HolochainService
     //#IPFS?: IPFSType
 
-    #agentService: AgentService
     #db: Ad4mDb
     #didResolver: DIDResolver
 
@@ -65,7 +60,6 @@ export default class Ad4mCore {
     constructor(config: Config.CoreConfig) {
         this.#config = Config.init(config);
 
-        this.#agentService = new AgentService(this.#config.rootConfigPath, this.#config.adminCredential)
         const agent = AGENT.load();
         this.#db = Db.init(this.#config.dataPath)
         this.#didResolver = DIDs.init(this.#config.dataPath)
@@ -109,10 +103,6 @@ export default class Ad4mCore {
 
     get holochainService(): HolochainService | undefined {
         return this.#holochain
-    }
-
-    get agentService(): AgentService {
-        return this.#agentService
     }
 
     get languageController(): LanguageController {
@@ -177,7 +167,10 @@ export default class Ad4mCore {
 
     initControllers() {
         this.#languageController = new LanguageController({
-            agent: this.#agentService,
+            agent: {
+                get did() { return AGENT.did(); },
+                createSignedExpression(data: any) { return AGENT.createSignedExpression(data); }
+            },
             //IPFS: this.#IPFS,
             ad4mSignal: this.languageSignal,
             config: this.#config,
@@ -276,7 +269,12 @@ export default class Ad4mCore {
         await this.#languageController?.languageByRef(createdDmLang)
         console.debug("DM Language installed...")
         agent.directMessageLanguage = createdDmLang.address
-        await this.#agentService.updateAgent(agent)
+        AGENT.save_agent_profile(agent);
+        // Re-fetch from Rust side to match old storeAgentProfile() behavior
+        const savedAgent = AGENT.agent();
+        await this.#languageController!.getAgentLanguage().expressionAdapter!.putAdapter.createPublic(savedAgent);
+        let pubSub = getPubSub();
+        await pubSub.publish(PubSubDefinitions.AGENT_UPDATED, savedAgent);
         console.debug("DM Language published...")
         console.log("Agent's direct message language successfully cloned, installed and published!")
     }

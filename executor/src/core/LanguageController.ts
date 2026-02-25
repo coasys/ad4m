@@ -9,7 +9,6 @@ import fs from 'node:fs'
 import path from 'node:path'
 import * as Config from './Config'
 import type HolochainService from './storage-services/Holochain/HolochainService';
-import type AgentService from './agent/AgentService'
 import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import yaml from "js-yaml";
 import { v4 as uuidv4 } from 'uuid';
@@ -132,7 +131,6 @@ export default class LanguageController {
             }
             const agentLanguage = await this.installLanguage(this.#config.languageAliases[Config.agentLanguageAlias], null);
             this.#agentLanguage = agentLanguage!;
-            ((this.#context as LanguageContext).agent as unknown as AgentService).setAgentLanguage(agentLanguage!)
 
             //Install the neighbourhood language and set
             if (this.#config.neighbourhoodLanguageSettings) {
@@ -287,8 +285,7 @@ export default class LanguageController {
             })
         }
 
-        //@ts-ignore
-        if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
+        if(language.directMessageAdapter && language.directMessageAdapter.recipient() == AGENT.did()) {
             language.directMessageAdapter.addMessageCallback(async (message: PerspectiveExpression) => {
                 await this.#pubSub.publish(PubSubDefinitions.RUNTIME_MESSAGED_RECEIVED_TOPIC, message)
             })
@@ -336,8 +333,7 @@ export default class LanguageController {
             })
         }
 
-        //@ts-ignore
-        if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
+        if(language.directMessageAdapter && language.directMessageAdapter.recipient() == AGENT.did()) {
             language.directMessageAdapter.addMessageCallback(async (message: PerspectiveExpression) => {
                 await this.#pubSub.publish(PubSubDefinitions.RUNTIME_MESSAGED_RECEIVED_TOPIC, message)
             })
@@ -515,7 +511,6 @@ export default class LanguageController {
             const languageMetaData = languageMeta.data as LanguageExpression;
             const languageAuthor = languageMeta.author;
             const trustedAgents: string[] = await RUNTIME_SERVICE.getTrustedAgents();
-            const agentService = (this.#context as LanguageContext).agent as AgentService;
             //Check if the author of the language is in the trusted agent list the current agent holds, if so then go ahead and install
             if (trustedAgents.find((agent) => agent === languageAuthor) || AGENT.did() === languageAuthor) {
                 //Get the language source so we can generate a hash and check against the hash given in the language meta information

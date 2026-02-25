@@ -7,6 +7,18 @@ import { OuterConfig } from '../../main';
 import { getPubSub, tagExpressionSignatureStatus } from '../utils';
 
 
+function getTaggedAgentCopy(): Agent {
+    const agent = AGENT.agent();
+    if (!agent) throw new Error("No agent");
+    const copy = JSON.parse(JSON.stringify(agent));
+    if(copy.perspective) {
+        for(let link of copy.perspective.links) {
+            tagExpressionSignatureStatus(link)
+        }
+    }
+    return copy;
+}
+
 export function createResolvers(core: Ad4mCore, config: OuterConfig) {
 
     return {
@@ -14,7 +26,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             //@ts-ignore
             agentByDID: async (args, context) => {
                 const { did } = args;
-                if (did != core.agentService.did) {
+                if (did != AGENT.did()) {
                     const agentLanguage = core.languageController.getAgentLanguage().expressionAdapter;
                     if (!agentLanguage) {
                         throw Error("Agent language does not have an expression adapter")
@@ -30,7 +42,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                         return null
                     }
                 } else {
-                    return core.agentService.agent
+                    return AGENT.agent()
                 }
             },
             //@ts-ignore
@@ -246,13 +258,9 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             },
             //@ts-ignore
             agentUnlock: async (args, context) => {
-                try {
-                    await core.agentService.unlock(args.passphrase)
-                } catch(e) {
-                    console.log("Error unlocking agent: ", e)
-                }
-
-                if(core.agentService.isUnlocked()) {
+                // Unlock is now handled by Rust side before this resolver is called.
+                // We only need to initialize holochain, controllers, and languages.
+                if(AGENT.isUnlocked()) {
                     if(!core.holochainService) {
                         console.log("Holochain service not initialized. Initializing...")
                         // @ts-ignore
@@ -271,11 +279,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
 
                     console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
 
-                    try {
-                        await core.agentService.ensureAgentExpression();
-                    } catch (e) {
-                        console.log("Error ensuring public agent expression: ", e)
-                    }
+                    // ensureAgentExpression is now handled by Rust side after this resolver returns
                 }
             },
             //@ts-ignore
@@ -286,8 +290,11 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                     throw Error("No current agent init'd")
                 }
                 currentAgent.directMessageLanguage = directMessageLanguage;
-                await core.agentService.updateAgent(currentAgent);
-                return core.agentService.agent;
+                AGENT.save_agent_profile(currentAgent);
+                await core.languageController.getAgentLanguage().expressionAdapter.putAdapter.createPublic(AGENT.agent());
+                const pubSub = getPubSub();
+                await pubSub.publish(PubSubDefinitions.AGENT_UPDATED, getTaggedAgentCopy());
+                return getTaggedAgentCopy();
             },
             //@ts-ignore
             agentUpdatePublicPerspective: async (args, context) => {
@@ -307,8 +314,11 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                     })
                 };
 
-                await core.agentService.updateAgent(currentAgent);
-                return core.agentService.agent;
+                AGENT.save_agent_profile(currentAgent);
+                await core.languageController.getAgentLanguage().expressionAdapter.putAdapter.createPublic(AGENT.agent());
+                const pubSub = getPubSub();
+                await pubSub.publish(PubSubDefinitions.AGENT_UPDATED, getTaggedAgentCopy());
+                return getTaggedAgentCopy();
             },
             //@ts-ignore
             expressionCreate: async (args, context) => {

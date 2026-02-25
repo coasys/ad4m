@@ -183,6 +183,10 @@ impl Mutation {
         );
         js.execute(script).await?;
 
+        // Note: agent expression is published in the JS resolver via
+        // initializeAgentsDirectMessageLanguage() -> putAdapter.createPublic().
+        // No need for ensure_agent_expression here.
+
         get_global_pubsub()
             .await
             .publish(
@@ -323,6 +327,13 @@ impl Mutation {
                 passphrase, holochain
             );
             js.execute(script).await?;
+
+            // Ensure agent expression exists in the agent language (was previously
+            // done inside JS agentService.ensureAgentExpression())
+            let mut js_handle = context.js_handle.clone();
+            if let Err(e) = AgentService::ensure_agent_expression(&mut js_handle).await {
+                log::warn!("Error ensuring public agent expression: {}", e);
+            }
         }
 
         let mut agent = {
