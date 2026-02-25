@@ -8,6 +8,28 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ---------------------------------------------------------------------------
+// Global cleanup registry
+// When the Mocha extension (or any signal) terminates the Node process we must
+// kill any executor child-processes we spawned, otherwise they stay alive,
+// hold ports, and keep Node's event-loop running (making "stop" appear broken).
+// ---------------------------------------------------------------------------
+const _activeExecutors = new Set<ChildProcess>();
+
+function _killAll() {
+  for (const p of _activeExecutors) {
+    if (!p.killed) {
+      try { p.kill("SIGTERM"); } catch {}
+    }
+  }
+}
+
+// Register once at module load time — safe to call process.exit() inside these
+// because once/exit handlers won't re-enter.
+process.once("SIGTERM", () => { _killAll(); process.exit(0); });
+process.once("SIGINT",  () => { _killAll(); process.exit(0); });
+process.once("exit", _killAll);
+
 const TEST_DIR = path.join(__dirname, "..", "tst-tmp");
 const BOOTSTRAP_SEED = path.join(__dirname, "..", "bootstrapSeed.json");
 
@@ -54,12 +76,14 @@ export async function startAgent(
     false,
     opts.adminCredential,
   );
+  _activeExecutors.add(executorProcess);
 
   const client = new Ad4mClient(apolloClient(gqlPort, opts.adminCredential));
   await client.agent.generate(opts.passphrase ?? "test-passphrase");
 
   async function stop(): Promise<void> {
     if (!executorProcess) return;
+    _activeExecutors.delete(executorProcess);
     while (!executorProcess.killed) {
       executorProcess.kill();
       await new Promise((r) => setTimeout(r, 200));

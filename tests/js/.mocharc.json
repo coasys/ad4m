@@ -1,6 +1,10 @@
 {
-    "node-option": [
-        "experimental-specifier-resolution=node",
-        "loader=ts-node/esm"
-    ]
+  "spec": "tests/**/*.test.ts",
+  "require": ["tests/setup.ts"],
+  "timeout": 1200000,
+  "exit": true,
+  "node-option": [
+    "experimental-specifier-resolution=node",
+    "loader=ts-node/esm"
+  ]
 }

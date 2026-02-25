@@ -3,6 +3,7 @@ import {
   exec,
   ExecException,
   execSync,
+  spawn,
 } from "node:child_process";
 import { rmSync } from "node:fs";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions/index.js";
@@ -212,23 +213,31 @@ export async function startExecutor(
     console.log("USING RELAY URL: ", relayUrl);
   }
 
-  const execOptions = {
-    maxBuffer: 100 * 1024 * 1024, // 100MB instead of 1MB
-  };
-
-  const relayUrlArg = relayUrl ? `--hc-relay-url ${relayUrl}` : "";
-
-  if (!adminCredential) {
-    executorProcess = exec(
-      `${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} ${relayUrlArg} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --run-dapp-server false`,
-      execOptions,
-    );
-  } else {
-    executorProcess = exec(
-      `${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} ${relayUrlArg} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${adminCredential} --run-dapp-server false`,
-      execOptions,
-    );
+  // Build args array so spawn() targets the binary directly — exec() wraps in
+  // a shell, meaning kill() only kills the shell and the executor becomes an
+  // orphan that holds ports and keeps Node's event loop alive.
+  const spawnArgs = [
+    "run",
+    "--app-data-path", dataPath,
+    "--gql-port", String(gqlPort),
+    "--hc-admin-port", String(hcAdminPort),
+    "--hc-app-port", String(hcAppPort),
+    "--hc-proxy-url", proxyUrl,
+    "--hc-bootstrap-url", bootstrapUrl,
+    "--hc-use-bootstrap", "true",
+    "--hc-use-proxy", "true",
+    "--hc-use-local-proxy", "true",
+    "--hc-use-mdns", "true",
+    "--language-language-only", String(languageLanguageOnly),
+    "--run-dapp-server", "false",
+  ];
+  if (relayUrl) {
+    spawnArgs.push("--hc-relay-url", relayUrl);
   }
+  if (adminCredential) {
+    spawnArgs.push("--admin-credential", adminCredential);
+  }
+  executorProcess = spawn(command, spawnArgs);
   let executorReady = new Promise<void>((resolve, reject) => {
     executorProcess!.stdout!.on("data", (data) => {
       if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
