@@ -645,10 +645,10 @@ export function Model(opts: ModelConfig) {
       }
 
       // Set constructor and destructor actions on the shape.
-      // Always set constructor actions (even empty array) so Rust's
-      // get_constructor_actions finds the link and returns [] rather than
-      // throwing "No SHACL constructor found" for classes without @Flag or
-      // initial-valued properties.
+      // Always set constructor actions (even if empty) so the Rust SHACL parser
+      // emits an ad4m://constructor link — without it get_constructor_actions()
+      // throws "No SHACL constructor found" for classes with no @Flag or initial
+      // properties. An empty constructor is valid: it means "do nothing on creation".
       shape.setConstructorActions(constructorActions);
       if (destructorActions.length > 0) {
         shape.setDestructorActions(destructorActions);

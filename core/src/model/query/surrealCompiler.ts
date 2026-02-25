@@ -202,13 +202,39 @@ export function buildSurrealQuery(
     }
   }
 
+  // Last-resort fallback: require at least one link with any of the model's
+  // own declared predicates (properties OR relations). This prevents matching
+  // SDNA registration nodes (which use sh://, ad4m://, rdf:// predicates) for
+  // models that have no @Flag, no required, and no initial-valued properties.
+  if (graphTraversalFilters.length === 0) {
+    const allPredicates = [
+      ...Object.values(metadata.properties).map((p) => p.predicate),
+      ...Object.values(metadata.relations).map((r) => r.predicate),
+    ].filter(Boolean);
+
+    if (allPredicates.length > 0) {
+      const predicateConditions = allPredicates
+        .map(
+          (p) =>
+            `count(->link[WHERE predicate = '${escapeSurrealString(p)}']) > 0`,
+        )
+        .join(" OR ");
+      graphTraversalFilters.push(`(${predicateConditions})`);
+    }
+  }
+
   const userWhereClause = buildGraphTraversalWhereClause(metadata, where);
 
   const whereConditions: string[] = [
     ...graphTraversalFilters,
     ...(userWhereClause ? [userWhereClause] : []),
-    `count(->link) > 0`,
   ];
+
+  // Ensure we always have at least one condition to produce valid SurrealQL
+  const whereClause =
+    whereConditions.length > 0
+      ? whereConditions.join(" AND ")
+      : "count(->link) > 0";
 
   return `
 SELECT
@@ -216,7 +242,7 @@ SELECT
     uri AS source_uri,
     (SELECT predicate, out.uri AS target, author, timestamp FROM link WHERE in = $parent.id ORDER BY timestamp ASC) AS links
 FROM node
-WHERE ${whereConditions.join(" AND ")}
+WHERE ${whereClause}
   `.trim();
 }
 

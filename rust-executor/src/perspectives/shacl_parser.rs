@@ -322,8 +322,11 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         target: shape.target_class.clone(),
     });
 
-    // Constructor actions (stored as JSON in literal)
-    if !shape.constructor_actions.is_empty() {
+    // Constructor actions (stored as JSON in literal).
+    // Always emit this link even for an empty list so get_constructor_actions()
+    // can distinguish "class registered with no-op constructor" from
+    // "class not registered at all".
+    {
         let constructor_json =
             serde_json::to_string(&shape.constructor_actions).unwrap_or_else(|_| "[]".to_string());
         links.push(Link {

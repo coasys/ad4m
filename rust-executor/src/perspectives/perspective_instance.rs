@@ -3528,12 +3528,10 @@ impl PerspectiveInstance {
     }
 
     async fn get_constructor_actions(&self, class_name: &str) -> Result<Vec<Command>, AnyError> {
-        self.get_shape_actions_from_shacl(class_name, "ad4m://constructor")
+        Ok(self
+            .get_shape_actions_from_shacl(class_name, "ad4m://constructor")
             .await?
-            .ok_or(anyhow!(
-                "No SHACL constructor found for class: {}. Ensure the class has SHACL definitions.",
-                class_name
-            ))
+            .unwrap_or_default())
     }
 
     async fn get_destructor_actions(&self, class_name: &str) -> Result<Vec<Command>, AnyError> {

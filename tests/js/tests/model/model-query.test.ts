@@ -13,12 +13,22 @@
  */
 
 import { expect } from "chai";
-import { Ad4mClient, PerspectiveProxy } from "@coasys/ad4m";
+import {
+  Ad4mClient,
+  Ad4mModel,
+  Flag,
+  HasMany,
+  HasManyMethods,
+  Link,
+  Literal,
+  Model,
+  PerspectiveProxy,
+  Property,
+} from "@coasys/ad4m";
 import { startAgent } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
-import { wipePerspective } from "../../utils/utils.js";
+import { wipePerspective, sleep } from "../../utils/utils.js";
 import { TestComment, TestPost, TestTag } from "./models.js";
-
 
 describe("Ad4mModel — Query API", function () {
   this.timeout(120_000);
@@ -312,5 +322,131 @@ describe("Ad4mModel — Query API", function () {
       .true;
     expect(found!.posts.some((p) => (p as TestPost).id === post2.id)).to.be
       .true;
+  });
+
+  // ── include: edge cases — non-conforming linked nodes ─────────────────────
+  //
+  // These tests verify that when using include: { rel: true }, only nodes that
+  // actually conform to the related model's SDNA class are hydrated; bare URIs
+  // or nodes of a different type are silently dropped.
+
+  describe("include: edge cases — non-conforming linked nodes", () => {
+    @Model({ name: "EdgeComment" })
+    class EdgeComment extends Ad4mModel {
+      @Flag({ through: "ad4m://type", value: "ad4m://edge-comment" })
+      type!: string;
+
+      @Property({ through: "comment://text", resolveLanguage: "literal" })
+      text: string = "";
+    }
+
+    @Model({ name: "EdgeArticle" })
+    class EdgeArticle extends Ad4mModel {
+      @Property({ through: "article://title", resolveLanguage: "literal" })
+      title: string = "";
+
+      @HasMany(() => EdgeComment, { through: "article://has_comment" })
+      comments: EdgeComment[] = [];
+    }
+    interface EdgeArticle extends HasManyMethods<"comments"> {}
+
+    let edgePerspective: PerspectiveProxy;
+
+    beforeEach(async () => {
+      if (edgePerspective) {
+        await ad4m.perspective.remove(edgePerspective.uuid);
+      }
+      edgePerspective = await ad4m.perspective.add("include-edge-test");
+      await edgePerspective.ensureSDNASubjectClass(EdgeComment);
+      await edgePerspective.ensureSDNASubjectClass(EdgeArticle);
+      await sleep(200);
+    });
+
+    afterEach(async () => {
+      if (edgePerspective) {
+        await ad4m.perspective.remove(edgePerspective.uuid);
+        (edgePerspective as any) = null;
+      }
+    });
+
+    it("include hydrates only conforming nodes — bare URIs are dropped", async () => {
+      const article = await EdgeArticle.create(edgePerspective, {
+        title: "Article with mixed links",
+      });
+      const validComment = await EdgeComment.create(edgePerspective, {
+        text: "Valid",
+      });
+      const invalidItem = Literal.from("not-a-comment").toUrl();
+
+      await article.addComments(validComment);
+      // Manually add a link to a non-EdgeComment target
+      await edgePerspective.add(
+        new Link({
+          source: article.id,
+          predicate: "article://has_comment",
+          target: invalidItem,
+        }),
+      );
+
+      const retrieved = await EdgeArticle.findOne(edgePerspective, {
+        where: { id: article.id },
+        include: { comments: true },
+      });
+
+      expect(retrieved).to.not.be.null;
+      expect(retrieved!.comments).to.have.lengthOf(1);
+      expect(retrieved!.comments[0].id).to.equal(validComment.id);
+    });
+
+    it("findAll() with include drops non-conforming nodes across multiple instances", async () => {
+      const article1 = await EdgeArticle.create(edgePerspective, {
+        title: "Article 1",
+      });
+      const article2 = await EdgeArticle.create(edgePerspective, {
+        title: "Article 2",
+      });
+
+      const c1 = await EdgeComment.create(edgePerspective, {
+        text: "Comment on 1",
+      });
+      const c2 = await EdgeComment.create(edgePerspective, {
+        text: "Comment on 2",
+      });
+
+      await article1.addComments(c1);
+      await article2.addComments(c2);
+      // Add non-conforming links to both
+      await edgePerspective.add(
+        new Link({
+          source: article1.id,
+          predicate: "article://has_comment",
+          target: Literal.from("not-a-comment-1").toUrl(),
+        }),
+      );
+      await edgePerspective.add(
+        new Link({
+          source: article2.id,
+          predicate: "article://has_comment",
+          target: Literal.from("not-a-comment-2").toUrl(),
+        }),
+      );
+
+      const articles = await EdgeArticle.findAll(edgePerspective, {
+        include: { comments: true },
+      });
+
+      expect(articles).to.have.lengthOf(2);
+
+      const found1 = articles.find((a) => a.title === "Article 1");
+      const found2 = articles.find((a) => a.title === "Article 2");
+
+      expect(found1!.comments).to.have.lengthOf(1);
+      expect(found1!.comments[0]).to.be.instanceOf(EdgeComment);
+      expect(found1!.comments[0].id).to.equal(c1.id);
+
+      expect(found2!.comments).to.have.lengthOf(1);
+      expect(found2!.comments[0]).to.be.instanceOf(EdgeComment);
+      expect(found2!.comments[0].id).to.equal(c2.id);
+    });
   });
 });

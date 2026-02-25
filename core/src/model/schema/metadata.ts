@@ -72,7 +72,6 @@ export function getModelMetadata(ctor: any): ModelMetadata {
     relationsMetadata[relationName] = {
       name: relationName,
       predicate: options.through || "",
-      ...(options.where !== undefined && { where: options.where }),
       ...(options.local !== undefined && { local: options.local }),
       ...(options.getter !== undefined && { getter: options.getter }),
       ...((opts as any).direction !== undefined && {

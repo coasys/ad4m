@@ -283,7 +283,10 @@ describe("Authentication integration tests", () => {
       });
       adminAd4mClient.runtime.subscribeExceptionOccurred();
 
+      // Wait for any in-flight exceptions from previous tests to drain,
+      // then reset before triggering the one we actually want to observe.
       await sleep(1000);
+      excpetions = [];
 
       let requestId =
         await unAuthenticatedAppAd4mClient.agent.requestCapability({
