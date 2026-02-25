@@ -60,17 +60,11 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.type.initial).toBe("test://flag");
   });
 
-  it("should extract collection metadata with where clauses", () => {
+  it("should extract collection metadata", () => {
     @Model({ name: "CollectionModel" })
     class CollectionModel extends Ad4mModel {
       @HasMany({ through: "test://items" })
       items: string[] = [];
-
-      @HasMany({
-        through: "test://filtered",
-        where: { condition: "triple(Target, 'test://active', 'true')" },
-      })
-      filtered: string[] = [];
 
       @HasMany({ through: "test://local", local: true })
       local: string[] = [];
@@ -78,18 +72,11 @@ describe("Ad4mModel.getModelMetadata()", () => {
 
     const metadata = CollectionModel.getModelMetadata();
 
-    // Should have 3 collections
-    expect(Object.keys(metadata.relations)).toHaveLength(3);
+    // Should have 2 collections
+    expect(Object.keys(metadata.relations)).toHaveLength(2);
 
     // Verify "items" collection
     expect(metadata.relations.items.predicate).toBe("test://items");
-    expect(metadata.relations.items.where).toBeUndefined();
-
-    // Verify "filtered" collection
-    expect(metadata.relations.filtered.predicate).toBe("test://filtered");
-    expect(metadata.relations.filtered.where?.condition).toBe(
-      "triple(Target, 'test://active', 'true')",
-    );
 
     // Verify "local" collection
     expect(metadata.relations.local.predicate).toBe("test://local");
@@ -132,23 +119,21 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.computed.getter).toContain("test://value");
   });
 
-  it("should handle collection with isInstance where clause", () => {
+  it("should register relatedModel factory for typed @HasMany", () => {
     @Model({ name: "Comment" })
     class Comment extends Ad4mModel {}
 
     @Model({ name: "Post" })
     class Post extends Ad4mModel {
-      @HasMany({
-        through: "post://comment",
-        where: { isInstance: Comment },
-      })
-      comments: string[] = [];
+      @HasMany(() => Comment, { through: "post://comment" })
+      comments: Comment[] = [];
     }
 
     const metadata = Post.getModelMetadata();
 
-    // Assert isInstance is defined
-    expect(metadata.relations.comments.where?.isInstance).toBeDefined();
+    // relatedModel factory should be registered and return Comment
+    expect(metadata.relations.comments.relatedModel).toBeDefined();
+    expect(metadata.relations.comments.relatedModel!()).toBe(Comment);
   });
 
   it("should throw error for class without @ModelOptions decorator", () => {

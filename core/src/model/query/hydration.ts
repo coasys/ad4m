@@ -119,7 +119,6 @@ async function resolveValue(
  * - Reverse relations — require a separate `WHERE out.uri = $base` query.
  * - Custom getter evaluation — call `evaluateCustomGetters()` afterwards.
  * - `relatedModel` eager hydration — do that in a batch pass afterwards.
- * - `where.condition` / `where.isInstance` post-filters.
  */
 export async function hydrateInstanceFromLinks(
   instance: any,
@@ -186,7 +185,7 @@ export async function hydrateInstanceFromLinks(
     // maxCount === 1: take first value (oldest) — "@HasOne" has only one link
     // in the happy path; "first" vs "last" only differs in error/corrupt state.
     instance[relationName] =
-      relMeta.maxCount === 1 ? values[0] ?? null : values;
+      relMeta.maxCount === 1 ? (values[0] ?? null) : values;
   }
 
   // ── Author & timestamps ──────────────────────────────────────────────────────

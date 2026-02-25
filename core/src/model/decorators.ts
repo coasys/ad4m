@@ -209,22 +209,11 @@ export function Flag(opts: FlagOptions) {
   };
 }
 
-interface WhereOptions {
-  isInstance?: any;
-  prologCondition?: string;
-  condition?: string;
-}
-
 export interface RelationOptions {
   /**
    * The predicate of the property. All properties must have this option.
    */
   through: string;
-
-  /**
-   * An object representing the WHERE clause of the query.
-   */
-  where?: WhereOptions;
 
   /**
    * Custom SurrealQL getter to resolve the collection values. Use this for custom graph traversals.
@@ -608,17 +597,8 @@ export function Model(opts: ModelConfig) {
           // minCount defaults to 0 (optional)
         };
 
-        // Determine if it's a reference (IRI) or literal
-        // Collections typically contain references (IRIs) to other entities
-        // They're literals only if explicitly marked or contain primitive values
-        if (collMeta.where?.isInstance) {
-          // Collection of typed entities - definitely IRIs
-          collShape.nodeKind = "IRI";
-        } else {
-          // Default to IRI for collections (most common case)
-          // Literal collections are rare and would need explicit marking
-          collShape.nodeKind = "IRI";
-        }
+        // Collections contain references (IRIs) to other entities
+        collShape.nodeKind = "IRI";
 
         // AD4M-specific metadata
         if (collMeta.local !== undefined) {

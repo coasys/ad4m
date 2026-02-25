@@ -3,7 +3,7 @@
  *
  * Covers:
  *   - @Property(getter:) and @HasMany(getter:) — custom SurrealQL getters
- *   - @HasMany(where: { isInstance: ... }) — relation filtering by subject class
+ *   - @HasMany(() => Model, ...) — typed relation with eager hydration via include
  *
  * Extracted from sdna.test.ts as part of the test suite restructure.
  *
@@ -17,6 +17,7 @@ import {
   Ad4mModel,
   Flag,
   HasMany,
+  HasManyMethods,
   Link,
   Literal,
   Model,
@@ -26,7 +27,6 @@ import {
 import { startAgent } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 import { sleep } from "../../utils/utils.js";
-
 
 describe("Ad4mModel — Advanced Features", function () {
   this.timeout(120_000);
@@ -165,9 +165,9 @@ describe("Ad4mModel — Advanced Features", function () {
     });
   });
 
-  // ── isInstance filtering tests ─────────────────────────────────────────────
+  // ── Typed relation hydration tests ────────────────────────────────────────
 
-  describe("isInstance filtering tests", () => {
+  describe("typed relation hydration tests", () => {
     @Model({ name: "Comment" })
     class Comment extends Ad4mModel {
       @Flag({ through: "ad4m://type", value: "ad4m://comment" })
@@ -182,197 +182,125 @@ describe("Ad4mModel — Advanced Features", function () {
       @Property({ through: "article://title", resolveLanguage: "literal" })
       title: string = "";
 
-      @HasMany({
-        through: "article://has_comment",
-        where: { isInstance: Comment },
-      })
-      comments: string[] = [];
+      @HasMany(() => Comment, { through: "article://has_comment" })
+      comments: Comment[] = [];
     }
-
-    @Model({ name: "ArticleWithString" })
-    class ArticleWithString extends Ad4mModel {
-      @Property({ through: "article://title", resolveLanguage: "literal" })
-      title: string = "";
-
-      @HasMany({
-        through: "article://has_comment",
-        where: { isInstance: "Comment" },
-      })
-      comments: string[] = [];
-    }
+    interface Article extends HasManyMethods<"comments"> {}
 
     beforeEach(async () => {
       if (perspective) {
         await ad4m.perspective.remove(perspective.uuid);
       }
-      perspective = await ad4m.perspective.add("isInstance-test");
+      perspective = await ad4m.perspective.add("typed-relation-test");
       await perspective.ensureSDNASubjectClass(Comment);
       await perspective.ensureSDNASubjectClass(Article);
-      await perspective.ensureSDNASubjectClass(ArticleWithString);
       await sleep(200);
     });
 
-    it("should filter relation by isInstance with class reference", async () => {
-      const articleRoot = Literal.from("Article for isInstance test").toUrl();
-      const validComment1 = Literal.from("Valid comment 1").toUrl();
-      const validComment2 = Literal.from("Valid comment 2").toUrl();
-      const invalidItem = Literal.from("Invalid item").toUrl();
+    it("include: { comments: true } hydrates linked Comments as typed instances", async () => {
+      const article = await Article.create(perspective, {
+        title: "Test Article",
+      });
+      const comment1 = await Comment.create(perspective, {
+        text: "First comment",
+      });
+      const comment2 = await Comment.create(perspective, {
+        text: "Second comment",
+      });
 
-      const article = new Article(perspective, articleRoot);
-      article.title = "Test Article";
-      await article.save();
+      await article.addComments(comment1);
+      await article.addComments(comment2);
 
-      const comment1 = new Comment(perspective, validComment1);
-      comment1.text = "This is a valid comment";
-      await comment1.save();
+      const retrieved = await Article.findOne(perspective, {
+        where: { id: article.id },
+        include: { comments: true },
+      });
 
-      const comment2 = new Comment(perspective, validComment2);
-      comment2.text = "This is another valid comment";
-      await comment2.save();
-
-      await sleep(1500);
-
-      await perspective.add(
-        new Link({
-          source: articleRoot,
-          predicate: "article://has_comment",
-          target: validComment1,
-        }),
-      );
-      await perspective.add(
-        new Link({
-          source: articleRoot,
-          predicate: "article://has_comment",
-          target: invalidItem,
-        }),
-      );
-      await perspective.add(
-        new Link({
-          source: articleRoot,
-          predicate: "article://has_comment",
-          target: validComment2,
-        }),
-      );
-
-      const retrievedArticle = new Article(perspective, articleRoot);
-      await retrievedArticle.get();
-
-      expect(retrievedArticle.comments).to.have.lengthOf(2);
-      expect(retrievedArticle.comments).to.include(validComment1);
-      expect(retrievedArticle.comments).to.include(validComment2);
-      expect(retrievedArticle.comments).to.not.include(invalidItem);
+      expect(retrieved).to.not.be.null;
+      expect(retrieved!.comments).to.have.lengthOf(2);
+      expect(retrieved!.comments[0]).to.be.instanceOf(Comment);
+      expect(retrieved!.comments.some((c) => c.id === comment1.id)).to.be.true;
+      expect(retrieved!.comments.some((c) => c.id === comment2.id)).to.be.true;
     });
 
-    it("should filter relation by isInstance with string class name", async () => {
-      const articleRoot = Literal.from(
-        "Article for string isInstance test",
-      ).toUrl();
-      const validComment = Literal.from("Valid comment").toUrl();
-      const invalidItem = Literal.from("Invalid item").toUrl();
+    it("links to non-Comment nodes are excluded when hydrating with include", async () => {
+      const article = await Article.create(perspective, {
+        title: "Article with mixed links",
+      });
+      const validComment = await Comment.create(perspective, { text: "Valid" });
+      // A bare URI with no Comment SDNA — adding the link manually
+      const invalidItem = Literal.from("not-a-comment").toUrl();
 
-      const article = new ArticleWithString(perspective, articleRoot);
-      article.title = "Test Article with String";
-      await article.save();
-
-      const comment = new Comment(perspective, validComment);
-      comment.text = "Valid comment text";
-      await comment.save();
-
+      await article.addComments(validComment);
+      // Manually add a link to a non-Comment target
       await perspective.add(
         new Link({
-          source: articleRoot,
-          predicate: "article://has_comment",
-          target: validComment,
-        }),
-      );
-      await perspective.add(
-        new Link({
-          source: articleRoot,
+          source: article.id,
           predicate: "article://has_comment",
           target: invalidItem,
         }),
       );
 
-      const retrievedArticle = new ArticleWithString(perspective, articleRoot);
-      await retrievedArticle.get();
+      const retrieved = await Article.findOne(perspective, {
+        where: { id: article.id },
+        include: { comments: true },
+      });
 
-      expect(retrievedArticle.comments).to.have.lengthOf(1);
-      expect(retrievedArticle.comments[0]).to.equal(validComment);
+      expect(retrieved).to.not.be.null;
+      expect(retrieved!.comments).to.have.lengthOf(1);
+      expect(retrieved!.comments[0].id).to.equal(validComment.id);
     });
 
-    it("should filter results in findAll() by isInstance", async () => {
-      const article1Root = Literal.from(
-        "Article 1 for findAll isInstance",
-      ).toUrl();
-      const article2Root = Literal.from(
-        "Article 2 for findAll isInstance",
-      ).toUrl();
+    it("findAll() with include hydrates comments across multiple articles", async () => {
+      const article1 = await Article.create(perspective, {
+        title: "Article 1",
+      });
+      const article2 = await Article.create(perspective, {
+        title: "Article 2",
+      });
 
-      const comment1 = Literal.from("Comment 1").toUrl();
-      const invalid1 = Literal.from("Invalid 1").toUrl();
-      const comment2 = Literal.from("Comment 2").toUrl();
-      const invalid2 = Literal.from("Invalid 2").toUrl();
+      const c1 = await Comment.create(perspective, { text: "Comment on 1" });
+      const c2 = await Comment.create(perspective, { text: "Comment on 2" });
+      const invalid1 = Literal.from("not-a-comment-1").toUrl();
+      const invalid2 = Literal.from("not-a-comment-2").toUrl();
 
-      const article1 = new Article(perspective, article1Root);
-      article1.title = "Article 1";
-      await article1.save();
-
-      const article2 = new Article(perspective, article2Root);
-      article2.title = "Article 2";
-      await article2.save();
-
-      const c1 = new Comment(perspective, comment1);
-      c1.text = "Comment 1 text";
-      await c1.save();
-
-      const c2 = new Comment(perspective, comment2);
-      c2.text = "Comment 2 text";
-      await c2.save();
-
+      await article1.addComments(c1);
+      await article2.addComments(c2);
+      // Manually add non-Comment links to both
       await perspective.add(
         new Link({
-          source: article1Root,
-          predicate: "article://has_comment",
-          target: comment1,
-        }),
-      );
-      await perspective.add(
-        new Link({
-          source: article1Root,
+          source: article1.id,
           predicate: "article://has_comment",
           target: invalid1,
         }),
       );
       await perspective.add(
         new Link({
-          source: article2Root,
-          predicate: "article://has_comment",
-          target: comment2,
-        }),
-      );
-      await perspective.add(
-        new Link({
-          source: article2Root,
+          source: article2.id,
           predicate: "article://has_comment",
           target: invalid2,
         }),
       );
 
-      const articles = await Article.findAll(perspective);
+      const articles = await Article.findAll(perspective, {
+        include: { comments: true },
+      });
 
       expect(articles).to.have.lengthOf(2);
 
-      const foundArticle1 = articles.find((a) => a.title === "Article 1");
-      const foundArticle2 = articles.find((a) => a.title === "Article 2");
+      const found1 = articles.find((a) => a.title === "Article 1");
+      const found2 = articles.find((a) => a.title === "Article 2");
 
-      expect(foundArticle1).to.not.be.undefined;
-      expect(foundArticle2).to.not.be.undefined;
+      expect(found1).to.not.be.undefined;
+      expect(found2).to.not.be.undefined;
 
-      expect(foundArticle1!.comments).to.have.lengthOf(1);
-      expect(foundArticle1!.comments[0]).to.equal(comment1);
+      expect(found1!.comments).to.have.lengthOf(1);
+      expect(found1!.comments[0]).to.be.instanceOf(Comment);
+      expect(found1!.comments[0].id).to.equal(c1.id);
 
-      expect(foundArticle2!.comments).to.have.lengthOf(1);
-      expect(foundArticle2!.comments[0]).to.equal(comment2);
+      expect(found2!.comments).to.have.lengthOf(1);
+      expect(found2!.comments[0]).to.be.instanceOf(Comment);
+      expect(found2!.comments[0].id).to.equal(c2.id);
     });
   });
 });

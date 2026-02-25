@@ -69,9 +69,8 @@ export async function countQueryToSurrealQL(
  *  3. Fetches reverse-relation links in one batch query
  *  4. Batch-hydrates nested `relatedModel` relations (no N+1)
  *  5. Evaluates custom SurrealQL getters
- *  6. Applies `where.isInstance` filtering on relations
- *  7. Post-filters and sorts in JS for operators that SurrealDB can't handle
- *  8. Applies offset/limit pagination
+ *  6. Post-filters and sorts in JS for operators that SurrealDB can't handle
+ *  7. Applies offset/limit pagination
  *
  * @internal
  */
@@ -152,7 +151,7 @@ export async function instancesFromSurrealResult<T>(
           );
           const values = matching.map((l: any) => l.source);
           (instance as any)[relationName] =
-            (relationMeta as any).maxCount === 1 ? values[0] ?? null : values;
+            (relationMeta as any).maxCount === 1 ? (values[0] ?? null) : values;
         }
       }
     } catch (e) {
@@ -169,9 +168,7 @@ export async function instancesFromSurrealResult<T>(
     const includeMap = query.include;
     const hydrateEntries = Object.entries(metadata.relations).filter(
       ([name, m]: [string, any]) =>
-        !m.getter &&
-        name in includeMap &&
-        !!(m.relatedModel || m.where?.isInstance),
+        !m.getter && name in includeMap && !!m.relatedModel,
     );
     for (const [relationName, relationMeta] of hydrateEntries) {
       const allIds = Array.from(
@@ -185,10 +182,8 @@ export async function instancesFromSurrealResult<T>(
       ) as string[];
       if (allIds.length === 0) continue;
       try {
-        // Resolve the model class from relatedModel factory or where.isInstance.
-        const RelatedModel = (relationMeta as any).relatedModel
-          ? (relationMeta as any).relatedModel()
-          : (relationMeta as any).where?.isInstance;
+        // Resolve the model class from the relatedModel factory.
+        const RelatedModel = (relationMeta as any).relatedModel();
         // Merge caller's sub-query with the id pre-filter.
         const entry = includeMap[relationName];
         const subQuery: Query =
@@ -226,40 +221,7 @@ export async function instancesFromSurrealResult<T>(
     await evaluateCustomGetters(instance as any, perspective, metadata);
   }
 
-  // ── 5. where.isInstance filtering on relations ────────────────────────────
-  for (const instance of instances) {
-    for (const [relationName, relationMeta] of Object.entries(
-      metadata.relations,
-    )) {
-      if (
-        (relationMeta as any).where?.isInstance &&
-        (instance as any)[relationName]?.length > 0
-      ) {
-        try {
-          const targetClass = (relationMeta as any).where.isInstance;
-          const subjects = (instance as any)[relationName];
-          const targetClassName =
-            typeof targetClass === "string"
-              ? targetClass
-              : (targetClass as any).prototype?.className || targetClass.name;
-          const classMetadata =
-            await perspective.getSubjectClassMetadataFromSDNA(targetClassName);
-
-          if (!classMetadata) continue;
-
-          const validSubjects = await perspective.batchCheckSubjectInstances(
-            subjects,
-            classMetadata,
-          );
-          (instance as any)[relationName] = validSubjects;
-        } catch {
-          // On error, leave the relation unfiltered rather than breaking everything
-        }
-      }
-    }
-  }
-
-  // ── 6. Post-filter: where conditions that SurrealDB can't handle in SQL ───
+  // ── 5. Post-filter: where conditions that SurrealDB can't handle in SQL ───
   //    • author / timestamp (computed from grouped links)
   //    • Comparison operators: gt, gte, lt, lte, between, contains
   let filteredInstances = instances;

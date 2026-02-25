@@ -160,7 +160,6 @@ class Channel extends Ad4mModel {
   // HasMany with filters
   @HasMany(() => Comment, {
     through: "ad4m://has_child",
-    where: { isInstance: Comment },
     order: { timestamp: "DESC" },
   })
   comments: Comment[] = [];
@@ -453,11 +452,10 @@ export class Channel extends Ad4mModel {
   })
   description: string;
 
-  @Collection({
+  @HasMany(() => Message, {
     through: "ad4m://has_child",
-    where: { isInstance: Message },
   })
-  messages: string[] = []; // Just IDs!
+  messages: Message[] = [];
 
   @Collection({
     through: "flux://has_participant",

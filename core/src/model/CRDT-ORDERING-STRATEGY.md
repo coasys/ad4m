@@ -18,9 +18,8 @@ Abstract P2P-safe ordering strategies into the `@Collection` decorator to make c
 ### Developer-Facing API
 
 ```typescript
-@Collection({
+@HasMany(() => Task, {
   through: 'ad4m://has_child',
-  where: { isInstance: Task },
   ordering: {
     strategy: 'linkedList',  // 'linkedList' | 'fractionalIndex' | 'timestamp' | 'manual'
     sortBy: 'taskName',      // Fallback for ties (optional)
@@ -48,9 +47,9 @@ await column.update(); // Framework generates CRDT links
 ```typescript
 // In @coasys/ad4m package
 interface OrderingConfig {
-  strategy: 'linkedList' | 'fractionalIndex' | 'timestamp' | 'manual';
+  strategy: "linkedList" | "fractionalIndex" | "timestamp" | "manual";
   sortBy?: string; // Property name for tiebreaker
-  conflictResolution?: 'lww' | 'merge'; // Last-write-wins or merge
+  conflictResolution?: "lww" | "merge"; // Last-write-wins or merge
 }
 
 interface CollectionOptions {
@@ -70,7 +69,7 @@ function Collection(options: CollectionOptions) {
       orderingStrategy: OrderingStrategyFactory.create(options.ordering),
     };
 
-    Reflect.defineMetadata('collection:ordered', metadata, target, propertyKey);
+    Reflect.defineMetadata("collection:ordered", metadata, target, propertyKey);
   };
 }
 ```
@@ -84,14 +83,18 @@ interface OrderingStrategy {
   reconstruct(items: Ad4mModel[], links: Link[]): Ad4mModel[];
 
   // Called when array is modified
-  generateLinks(items: Ad4mModel[], operation: Operation, context: OperationContext): Link[];
+  generateLinks(
+    items: Ad4mModel[],
+    operation: Operation,
+    context: OperationContext,
+  ): Link[];
 
   // Called to clean up tombstones/old data
   garbageCollect?(links: Link[], cutoffDate: Date): Link[];
 }
 
 interface Operation {
-  type: 'insert' | 'delete' | 'move' | 'reorder';
+  type: "insert" | "delete" | "move" | "reorder";
   index: number;
   item?: Ad4mModel;
   targetIndex?: number; // For moves
@@ -111,27 +114,32 @@ interface OperationContext {
 ```typescript
 class LinkedListStrategy implements OrderingStrategy {
   private readonly predicates = {
-    after: 'ad4m://ordered_after',
-    positionId: 'ad4m://position_id',
-    deleted: 'ad4m://position_deleted',
+    after: "ad4m://ordered_after",
+    positionId: "ad4m://position_id",
+    deleted: "ad4m://position_deleted",
   };
 
   reconstruct(items: Ad4mModel[], links: Link[]): Ad4mModel[] {
     // Build afterMap from links
-    const afterMap = new Map<string | null, Array<{ item: Ad4mModel; positionId: string }>>();
+    const afterMap = new Map<
+      string | null,
+      Array<{ item: Ad4mModel; positionId: string }>
+    >();
 
     links.forEach((link) => {
       if (link.data.predicate === this.predicates.after) {
         const item = items.find((i) => i.baseExpression === link.data.source);
         const positionIdLink = links.find(
-          (l) => l.data.source === item.baseExpression && l.data.predicate === this.predicates.positionId,
+          (l) =>
+            l.data.source === item.baseExpression &&
+            l.data.predicate === this.predicates.positionId,
         );
 
         if (item && !this.isDeleted(item, links)) {
-          const afterId = link.data.target === 'null' ? null : link.data.target;
+          const afterId = link.data.target === "null" ? null : link.data.target;
           afterMap.set(afterId, [
             ...(afterMap.get(afterId) || []),
-            { item, positionId: positionIdLink?.data.target || '' },
+            { item, positionId: positionIdLink?.data.target || "" },
           ]);
         }
       }
@@ -155,19 +163,26 @@ class LinkedListStrategy implements OrderingStrategy {
     return result;
   }
 
-  generateLinks(items: Ad4mModel[], operation: Operation, context: OperationContext): Link[] {
+  generateLinks(
+    items: Ad4mModel[],
+    operation: Operation,
+    context: OperationContext,
+  ): Link[] {
     const links: Link[] = [];
     const positionId = `${context.timestamp}_${context.agentDID}`;
 
     switch (operation.type) {
-      case 'insert': {
-        const afterId = operation.index === 0 ? null : items[operation.index - 1]?.baseExpression;
+      case "insert": {
+        const afterId =
+          operation.index === 0
+            ? null
+            : items[operation.index - 1]?.baseExpression;
 
         links.push(
           new Link({
             source: operation.item!.baseExpression,
             predicate: this.predicates.after,
-            target: afterId || 'null',
+            target: afterId || "null",
           }),
           new Link({
             source: operation.item!.baseExpression,
@@ -178,31 +193,31 @@ class LinkedListStrategy implements OrderingStrategy {
         break;
       }
 
-      case 'delete': {
+      case "delete": {
         links.push(
           new Link({
             source: operation.item!.baseExpression,
             predicate: this.predicates.deleted,
-            target: 'literal://boolean:true',
+            target: "literal://boolean:true",
           }),
         );
         break;
       }
 
-      case 'move': {
+      case "move": {
         // Move = delete + insert with new position
         links.push(
           // Mark old position as deleted
           new Link({
             source: operation.item!.baseExpression,
             predicate: this.predicates.deleted,
-            target: 'literal://boolean:true',
+            target: "literal://boolean:true",
           }),
           // Create new position
           new Link({
             source: operation.item!.baseExpression,
             predicate: this.predicates.after,
-            target: items[operation.targetIndex! - 1]?.baseExpression || 'null',
+            target: items[operation.targetIndex! - 1]?.baseExpression || "null",
           }),
           new Link({
             source: operation.item!.baseExpression,
@@ -218,8 +233,8 @@ class LinkedListStrategy implements OrderingStrategy {
   }
 
   private comparePositionIds(a: string, b: string): number {
-    const [tsA, didA] = a.split('_');
-    const [tsB, didB] = b.split('_');
+    const [tsA, didA] = a.split("_");
+    const [tsB, didB] = b.split("_");
     return Number(tsA) - Number(tsB) || didA.localeCompare(didB);
   }
 
@@ -228,7 +243,7 @@ class LinkedListStrategy implements OrderingStrategy {
       (l) =>
         l.data.source === item.baseExpression &&
         l.data.predicate === this.predicates.deleted &&
-        l.data.target === 'literal://boolean:true',
+        l.data.target === "literal://boolean:true",
     );
   }
 }
@@ -239,19 +254,21 @@ class LinkedListStrategy implements OrderingStrategy {
 ```typescript
 class FractionalIndexStrategy implements OrderingStrategy {
   private readonly predicates = {
-    position: 'ad4m://fractional_position',
-    positionId: 'ad4m://position_id',
+    position: "ad4m://fractional_position",
+    positionId: "ad4m://position_id",
   };
 
   reconstruct(items: Ad4mModel[], links: Link[]): Ad4mModel[] {
     // Map items to their fractional positions
     const itemPositions = items.map((item) => {
       const positionLink = links.find(
-        (l) => l.data.source === item.baseExpression && l.data.predicate === this.predicates.position,
+        (l) =>
+          l.data.source === item.baseExpression &&
+          l.data.predicate === this.predicates.position,
       );
       return {
         item,
-        position: positionLink?.data.target || '1.0',
+        position: positionLink?.data.target || "1.0",
       };
     });
 
@@ -269,12 +286,20 @@ class FractionalIndexStrategy implements OrderingStrategy {
     return itemPositions.map((p) => p.item);
   }
 
-  generateLinks(items: Ad4mModel[], operation: Operation, context: OperationContext): Link[] {
+  generateLinks(
+    items: Ad4mModel[],
+    operation: Operation,
+    context: OperationContext,
+  ): Link[] {
     const links: Link[] = [];
     const positionId = `${context.timestamp}_${context.agentDID}`;
 
-    if (operation.type === 'insert') {
-      const position = this.calculateFractionalPosition(items[operation.index - 1], items[operation.index], context);
+    if (operation.type === "insert") {
+      const position = this.calculateFractionalPosition(
+        items[operation.index - 1],
+        items[operation.index],
+        context,
+      );
 
       links.push(
         new Link({
@@ -302,8 +327,8 @@ class FractionalIndexStrategy implements OrderingStrategy {
     // Returns string like "1.5", "1.75", etc.
     // See: https://www.figma.com/blog/realtime-editing-of-ordered-sequences/
 
-    const beforePos = before ? this.getPosition(before) : '0';
-    const afterPos = after ? this.getPosition(after) : '2';
+    const beforePos = before ? this.getPosition(before) : "0";
+    const afterPos = after ? this.getPosition(after) : "2";
 
     return this.generateKeyBetween(beforePos, afterPos, context.agentDID);
   }
@@ -323,19 +348,21 @@ class FractionalIndexStrategy implements OrderingStrategy {
 
   private getPosition(item: Ad4mModel): string {
     // Would actually query links, simplified here
-    return '1.0';
+    return "1.0";
   }
 
   private getPositionId(item: Ad4mModel, links: Link[]): string {
     const link = links.find(
-      (l) => l.data.source === item.baseExpression && l.data.predicate === this.predicates.positionId,
+      (l) =>
+        l.data.source === item.baseExpression &&
+        l.data.predicate === this.predicates.positionId,
     );
-    return link?.data.target || '';
+    return link?.data.target || "";
   }
 
   private comparePositionIds(a: string, b: string): number {
-    const [tsA, didA] = a.split('_');
-    const [tsB, didB] = b.split('_');
+    const [tsA, didA] = a.split("_");
+    const [tsB, didB] = b.split("_");
     return Number(tsA) - Number(tsB) || didA.localeCompare(didB);
   }
 }
@@ -346,16 +373,16 @@ class FractionalIndexStrategy implements OrderingStrategy {
 ```typescript
 class OrderingStrategyFactory {
   static create(config?: OrderingConfig): OrderingStrategy {
-    if (!config || config.strategy === 'manual') {
+    if (!config || config.strategy === "manual") {
       return new ManualStrategy(); // Current behavior (stringified arrays)
     }
 
     switch (config.strategy) {
-      case 'linkedList':
+      case "linkedList":
         return new LinkedListStrategy();
-      case 'fractionalIndex':
+      case "fractionalIndex":
         return new FractionalIndexStrategy();
-      case 'timestamp':
+      case "timestamp":
         return new TimestampStrategy();
       default:
         throw new Error(`Unknown ordering strategy: ${config.strategy}`);
@@ -371,19 +398,28 @@ class OrderingStrategyFactory {
 class Ad4mModel {
   // ... existing code
 
-  protected wrapCollectionWithOrdering(propertyKey: string, items: any[], orderingStrategy: OrderingStrategy): any[] {
+  protected wrapCollectionWithOrdering(
+    propertyKey: string,
+    items: any[],
+    orderingStrategy: OrderingStrategy,
+  ): any[] {
     const self = this;
 
     // Create a proxy that intercepts array modifications
     return new Proxy(items, {
       get(target, prop) {
         // Intercept array methods that modify order
-        if (prop === 'push' || prop === 'unshift' || prop === 'splice') {
+        if (prop === "push" || prop === "unshift" || prop === "splice") {
           return function (...args: any[]) {
-            const operation = self.arrayOperationToOperation(prop, args, target);
+            const operation = self.arrayOperationToOperation(
+              prop,
+              args,
+              target,
+            );
 
             // Store pending operation for next update()
-            self._pendingOrderingOperations = self._pendingOrderingOperations || [];
+            self._pendingOrderingOperations =
+              self._pendingOrderingOperations || [];
             self._pendingOrderingOperations.push({
               propertyKey,
               strategy: orderingStrategy,
@@ -412,7 +448,11 @@ class Ad4mModel {
       };
 
       for (const pending of this._pendingOrderingOperations) {
-        const links = pending.strategy.generateLinks(this[pending.propertyKey], pending.operation, context);
+        const links = pending.strategy.generateLinks(
+          this[pending.propertyKey],
+          pending.operation,
+          context,
+        );
 
         await this.perspective.addLinks(links, batchId);
       }
@@ -423,18 +463,22 @@ class Ad4mModel {
     // ... rest of existing update logic
   }
 
-  private arrayOperationToOperation(method: string, args: any[], array: any[]): Operation {
+  private arrayOperationToOperation(
+    method: string,
+    args: any[],
+    array: any[],
+  ): Operation {
     // Convert array method calls to Operation objects
     switch (method) {
-      case 'push':
-        return { type: 'insert', index: array.length, item: args[0] };
-      case 'splice':
+      case "push":
+        return { type: "insert", index: array.length, item: args[0] };
+      case "splice":
         const [index, deleteCount, ...items] = args;
         if (deleteCount > 0 && items.length === 0) {
-          return { type: 'delete', index, item: array[index] };
+          return { type: "delete", index, item: array[index] };
         }
         if (items.length > 0) {
-          return { type: 'insert', index, item: items[0] };
+          return { type: "insert", index, item: items[0] };
         }
       // Handle moves, etc.
       // ... more cases
@@ -455,9 +499,8 @@ class Ad4mModel {
 orderedTaskIds: string;
 
 // New way opt-in
-@Collection({
+@HasMany(() => Task, {
   through: 'ad4m://has_child',
-  where: { isInstance: Task },
   ordering: { strategy: 'linkedList' }
 })
 orderedTasks: Task[] = [];
@@ -504,17 +547,16 @@ async migrateToOrderedCollection() {
 ### Kanban Column with Automatic Ordering
 
 ```typescript
-@ModelOptions({ name: 'TaskColumn' })
+@ModelOptions({ name: "TaskColumn" })
 export default class TaskColumn extends Ad4mModel {
-  @Property({ through: 'flux://column_name' })
+  @Property({ through: "flux://column_name" })
   columnName: string;
 
-  @Collection({
-    through: 'ad4m://has_child',
-    where: { isInstance: Task },
+  @HasMany(() => Task, {
+    through: "ad4m://has_child",
     ordering: {
-      strategy: 'linkedList',
-      sortBy: 'taskName', // Fallback for visual stability
+      strategy: "linkedList",
+      sortBy: "taskName", // Fallback for visual stability
     },
   })
   tasks: Task[] = [];
@@ -524,9 +566,16 @@ export default class TaskColumn extends Ad4mModel {
 ### In Component - Just Use Normal Array Methods
 
 ```typescript
-async function moveTask(task: Task, fromColumn: TaskColumn, toColumn: TaskColumn, index: number) {
+async function moveTask(
+  task: Task,
+  fromColumn: TaskColumn,
+  toColumn: TaskColumn,
+  index: number,
+) {
   // Remove from old column
-  const oldIndex = fromColumn.tasks.findIndex((t) => t.baseExpression === task.baseExpression);
+  const oldIndex = fromColumn.tasks.findIndex(
+    (t) => t.baseExpression === task.baseExpression,
+  );
   fromColumn.tasks.splice(oldIndex, 1);
 
   // Add to new column at specific position

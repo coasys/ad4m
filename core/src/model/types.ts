@@ -134,8 +134,6 @@ export interface RelationMetadata {
   name: string;
   /** The predicate URI (through value) */
   predicate: string;
-  /** Filter conditions */
-  where?: { isInstance?: any; prologCondition?: string; condition?: string };
   /** Custom SurrealQL getter code */
   getter?: string;
   /** Whether stored locally only */
