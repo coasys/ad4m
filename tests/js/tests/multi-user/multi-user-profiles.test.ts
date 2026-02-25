@@ -1,4 +1,3 @@
-import path from "path";
 import {
   Ad4mClient,
   ExpressionProof,
@@ -11,7 +10,6 @@ import chaiAsPromised from "chai-as-promised";
 import { apolloClient } from "../../utils/utils";
 import { startAgent } from "../../helpers/executor";
 import type { AgentHandle } from "../../helpers/executor";
-
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);

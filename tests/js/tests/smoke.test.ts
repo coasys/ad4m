@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ChildProcess } from "node:child_process";
 import { Ad4mClient } from "@coasys/ad4m";
-import { startExecutor, apolloClient, sleep } from "../utils/utils";
+import { startExecutor, apolloClient, waitForExit } from "../utils/utils";
 import { getFreePorts } from "../helpers/ports";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -38,13 +38,7 @@ describe("Integration", () => {
   });
 
   after(async () => {
-    if (executorProcess) {
-      while (!executorProcess?.killed) {
-        let status = executorProcess?.kill();
-        console.log("killed executor with", status);
-        await sleep(500);
-      }
-    }
+    await waitForExit(executorProcess);
   });
 
   it("should get agent status", async () => {

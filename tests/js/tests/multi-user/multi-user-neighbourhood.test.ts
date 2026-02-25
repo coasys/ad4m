@@ -15,9 +15,9 @@ import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import {
   apolloClient,
-  sleep,
   startExecutor,
   runHcLocalServices,
+  waitForExit,
 } from "../../utils/utils";
 import { getFreePorts } from "../../helpers/ports";
 import { ChildProcess } from "node:child_process";
@@ -82,18 +82,8 @@ describe("Multi-User Neighbourhood Sharing tests", () => {
   });
 
   after(async () => {
-    if (executorProcess) {
-      while (!executorProcess?.killed) {
-        executorProcess.kill();
-        await sleep(500);
-      }
-    }
-    if (localServicesProcess) {
-      while (!localServicesProcess?.killed) {
-        localServicesProcess.kill();
-        await sleep(500);
-      }
-    }
+    await waitForExit(executorProcess);
+    await waitForExit(localServicesProcess);
   });
 
   describe("Multi-User Neighbourhood Sharing", () => {

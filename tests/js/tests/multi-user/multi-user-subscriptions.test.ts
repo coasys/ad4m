@@ -1,12 +1,9 @@
-import path from "path";
 import { Ad4mClient } from "@coasys/ad4m";
-import { fileURLToPath } from "url";
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep } from "../../utils/utils";
 import { startAgent } from "../../helpers/executor";
 import type { AgentHandle } from "../../helpers/executor";
-
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);

@@ -3369,6 +3369,23 @@ impl PerspectiveInstance {
                         self.remove_link(link_expression.into(), batch_id.clone())
                             .await?;
                     }
+                    // When operating inside a batch, get_links() above only
+                    // sees committed SurrealDB state. If the same predicate
+                    // was already added in this (uncommitted) batch — e.g. a
+                    // second save() on the same instance within a transaction
+                    // — that pending addition is invisible to get_links() and
+                    // would survive alongside the new value after commit.
+                    // Evict any matching pending additions now so only the
+                    // final value ends up in the batch.
+                    if let Some(ref bid) = batch_id {
+                        let mut batches = self.batch_store.write().await;
+                        if let Some(diff) = batches.get_mut(bid) {
+                            diff.additions.retain(|link| {
+                                !(link.data.source == source
+                                    && link.data.predicate == predicate)
+                            });
+                        }
+                    }
                     self.add_link(
                         Link {
                             source,

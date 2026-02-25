@@ -288,6 +288,9 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
     createClient({
       url: `ws://127.0.0.1:${port}/graphql`,
       webSocketImpl: Websocket,
+      // Zero retries: a connection drop fires exactly one error per pending
+      // operation rather than an infinite retry storm.
+      retryAttempts: 0,
       connectionParams: () => {
         return {
           headers: {
@@ -326,6 +329,36 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
 
 export function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Kill a child process and wait for it to fully exit before resolving.
+ *
+ * `ChildProcess.killed` is set to `true` as soon as the kill signal is
+ * *delivered* (not when the process exits), so `while (!p.killed)` loops
+ * return almost immediately and the next test starts while the Rust executor
+ * still holds its SurrealDB lock / ports.
+ *
+ * This helper attaches an `'exit'` listener first, then sends SIGTERM.
+ * If the process hasn't exited after 10 s it escalates to SIGKILL.
+ */
+export function waitForExit(p: ChildProcess | null | undefined): Promise<void> {
+  if (!p) return Promise.resolve();
+  if (p.exitCode !== null || p.killed) {
+    // Already gone — wait one tick to let any pending close events fire
+    return new Promise((resolve) => setImmediate(resolve));
+  }
+  return new Promise<void>((resolve) => {
+    p.once("exit", resolve);
+    p.kill("SIGTERM");
+    // Escalate to SIGKILL after 10 s if SIGTERM is ignored
+    const tid = setTimeout(() => {
+      try {
+        p.kill("SIGKILL");
+      } catch {}
+    }, 10_000);
+    p.once("exit", () => clearTimeout(tid));
+  });
 }
 
 /**

@@ -93,10 +93,26 @@ export async function startAgent(
   async function stop(): Promise<void> {
     if (!executorProcess) return;
     _activeExecutors.delete(executorProcess);
-    while (!executorProcess.killed) {
-      executorProcess.kill();
-      await new Promise((r) => setTimeout(r, 200));
-    }
+    await new Promise<void>((resolve) => {
+      // Already exited?
+      if (executorProcess!.exitCode !== null) {
+        resolve();
+        return;
+      }
+      // Resolve when the process actually exits (not just when the signal is sent).
+      // This prevents the next test from starting while SurrealDB/HC ports are still held.
+      executorProcess!.once("exit", () => resolve());
+      if (!executorProcess!.killed) {
+        executorProcess!.kill("SIGTERM");
+      }
+      // Force-kill after 15 s if SIGTERM is ignored
+      setTimeout(() => {
+        try {
+          executorProcess!.kill("SIGKILL");
+        } catch {}
+        resolve();
+      }, 15_000);
+    });
   }
 
   return { client, gqlPort, stop };

@@ -14,6 +14,7 @@ import {
   apolloClient,
   runHcLocalServices,
   sleep,
+  waitForExit,
 } from "../../utils/utils";
 import { ChildProcess } from "child_process";
 import { getFreePorts } from "../../helpers/ports";
@@ -156,20 +157,8 @@ describe("Integration tests", function () {
   });
 
   after(async () => {
-    if (executorProcess) {
-      while (!executorProcess?.killed) {
-        let status = executorProcess?.kill();
-        console.log("killed executor with", status);
-        await sleep(500);
-      }
-    }
-    if (localServicesProcess) {
-      while (!localServicesProcess?.killed) {
-        let status = localServicesProcess?.kill();
-        console.log("killed local services with", status);
-        await sleep(500);
-      }
-    }
+    await waitForExit(executorProcess);
+    await waitForExit(localServicesProcess);
   });
 
   describe("Agent / Agent-Setup", agentTests(testContext));
@@ -232,13 +221,7 @@ describe("Integration tests", function () {
     });
 
     after(async () => {
-      if (executorProcess) {
-        while (!bobExecutorProcess?.killed) {
-          let status = bobExecutorProcess?.kill();
-          console.log("killed bobs executor with", status);
-          await sleep(500);
-        }
-      }
+      await waitForExit(bobExecutorProcess);
     });
 
     describe("Agent Language", agentLanguageTests(testContext));
@@ -278,13 +261,7 @@ describe("Integration tests", function () {
       });
 
       after(async () => {
-        if (jimExecutorProcess) {
-          while (!jimExecutorProcess?.killed) {
-            let status = jimExecutorProcess?.kill();
-            console.log("killed jim's executor with", status);
-            await sleep(500);
-          }
-        }
+        await waitForExit(jimExecutorProcess);
       });
 
       describe("Triple Agent", tripleAgentTests(testContext));

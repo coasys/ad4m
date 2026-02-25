@@ -1,7 +1,6 @@
 import path from "path";
 import {
   Ad4mClient,
-  Link,
   LinkQuery,
   Perspective,
   PerspectiveUnsignedInput,
@@ -15,11 +14,11 @@ import {
   sleep,
   startExecutor,
   runHcLocalServices,
+  waitForExit,
 } from "../../utils/utils";
 import { getFreePorts } from "../../helpers/ports";
 import { ChildProcess } from "node:child_process";
 import { v4 as uuidv4 } from "uuid";
-
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -76,18 +75,8 @@ describe("Multi-Node Multi-User Integration tests", () => {
   });
 
   after(async () => {
-    if (executorProcess) {
-      while (!executorProcess?.killed) {
-        executorProcess.kill();
-        await sleep(500);
-      }
-    }
-    if (localServicesProcess) {
-      while (!localServicesProcess?.killed) {
-        localServicesProcess.kill();
-        await sleep(500);
-      }
-    }
+    await waitForExit(executorProcess);
+    await waitForExit(localServicesProcess);
   });
 
   describe("Multi-Node Multi-User Integration", () => {
@@ -224,13 +213,7 @@ describe("Multi-Node Multi-User Integration tests", () => {
 
     after(async function () {
       this.timeout(20000);
-      if (node2ExecutorProcess) {
-        while (!node2ExecutorProcess?.killed) {
-          let status = node2ExecutorProcess?.kill();
-          console.log("killed node 2 executor with", status);
-          await sleep(500);
-        }
-      }
+      await waitForExit(node2ExecutorProcess);
     });
 
     it("should return all DIDs in 'others()' for each user", async function () {

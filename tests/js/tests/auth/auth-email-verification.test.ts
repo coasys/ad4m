@@ -9,6 +9,7 @@ import {
   sleep,
   startExecutor,
   runHcLocalServices,
+  waitForExit,
 } from "../../utils/utils";
 import { getFreePorts } from "../../helpers/ports";
 import { ChildProcess } from "node:child_process";
@@ -85,20 +86,8 @@ describe("Email Verification with Mock Service", () => {
       await adminAd4mClient.runtime.emailTestModeDisable();
     }
 
-    if (executorProcess) {
-      while (!executorProcess?.killed) {
-        let status = executorProcess?.kill();
-        console.log("killed executor with", status);
-        await sleep(500);
-      }
-    }
-    if (localServicesProcess) {
-      while (!localServicesProcess?.killed) {
-        let status = localServicesProcess?.kill();
-        console.log("killed local services with", status);
-        await sleep(500);
-      }
-    }
+    await waitForExit(executorProcess);
+    await waitForExit(localServicesProcess);
   });
 
   beforeEach(async () => {
