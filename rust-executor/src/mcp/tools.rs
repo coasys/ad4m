@@ -19,13 +19,19 @@ use crate::perspectives::utils::prolog_resolution_to_string;
 use crate::perspectives::{add_perspective, all_perspectives, get_perspective};
 use crate::types::Link;
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo, ToolsCapability},
-    tool, tool_handler, tool_router, ServerHandler,
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
+    model::{
+        CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult,
+        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+        ToolsCapability,
+    },
+    service::RequestContext,
+    tool, tool_router, ErrorData, RoleServer, ServerHandler,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::Arc;
 
 // ============================================================================
 // Tool Parameter Types
@@ -264,14 +270,13 @@ pub struct Ad4mMcpHandler {
     tool_router: ToolRouter<Self>,
 }
 
-#[tool_handler(router = self.tool_router)]
 impl ServerHandler for Ad4mMcpHandler {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::V_2024_11_05,
             capabilities: ServerCapabilities {
                 tools: Some(ToolsCapability {
-                    list_changed: Some(false),
+                    list_changed: Some(true),
                 }),
                 ..Default::default()
             },
@@ -285,6 +290,48 @@ impl ServerHandler for Ad4mMcpHandler {
             },
             ..Default::default()
         }
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        let mut tools = self.tool_router.list_all();
+        tools.extend(self.generate_dynamic_tools().await);
+        Ok(ListToolsResult {
+            tools,
+            meta: None,
+            next_cursor: None,
+        })
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let tool_name = request.name.to_string();
+
+        if self.tool_router.has_route(&tool_name) {
+            let peer = context.peer.clone();
+            let tcc = ToolCallContext::new(self, request, context);
+            let result = self.tool_router.call(tcc).await?;
+
+            // Notify clients about tool list changes after SDNA is added
+            if tool_name == "add_sdna" && result.is_error != Some(true) {
+                let _ = peer.notify_tool_list_changed().await;
+            }
+
+            return Ok(result);
+        }
+
+        // Handle dynamic SHACL-generated tools
+        self.handle_dynamic_tool(&tool_name, request.arguments).await
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        self.tool_router.get(name).cloned()
     }
 }
 
@@ -1614,6 +1661,767 @@ impl Ad4mMcpHandler {
             })
             .to_string(),
         }
+    }
+}
+
+// ============================================================================
+// Dynamic SHACL Tool Generation
+// ============================================================================
+
+/// Property info extracted from SHACL shapes
+struct ClassPropertyInfo {
+    name: String,
+    is_collection: bool,
+}
+
+impl Ad4mMcpHandler {
+    /// Generate dynamic MCP tools from SHACL subject classes across all perspectives
+    async fn generate_dynamic_tools(&self) -> Vec<Tool> {
+        let perspectives = all_perspectives();
+        let mut tools = Vec::new();
+        let mut seen_classes = std::collections::HashSet::new();
+
+        for p in perspectives.iter() {
+            let uuid = {
+                let handle = p.persisted.lock().await;
+                handle.uuid.clone()
+            };
+
+            let perspective = match get_perspective(&uuid) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let class_links = match perspective
+                .get_links(&LinkQuery {
+                    predicate: Some("rdf://type".to_string()),
+                    target: Some("ad4m://SubjectClass".to_string()),
+                    ..Default::default()
+                })
+                .await
+            {
+                Ok(links) => links,
+                Err(_) => continue,
+            };
+
+            for class_link in &class_links {
+                let class_uri = &class_link.data.source;
+                let class_name = class_uri
+                    .split("://")
+                    .last()
+                    .unwrap_or(class_uri)
+                    .to_string();
+                let class_name_lower = class_name.to_lowercase();
+
+                if !seen_classes.insert(class_name_lower.clone()) {
+                    continue;
+                }
+
+                let properties = Self::get_class_properties(&perspective, &class_name).await;
+
+                tools.push(Self::make_create_tool(&class_name, &properties));
+                tools.push(Self::make_query_tool(&class_name));
+                tools.push(Self::make_get_tool(&class_name));
+                tools.push(Self::make_update_tool(&class_name, &properties));
+                tools.push(Self::make_delete_tool(&class_name));
+            }
+        }
+
+        tools
+    }
+
+    /// Extract property information from a SHACL shape
+    async fn get_class_properties(
+        perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+        class_name: &str,
+    ) -> Vec<ClassPropertyInfo> {
+        let name_literal = format!("literal://string:shacl://{}", class_name);
+        let shape_links = match perspective
+            .get_links(&LinkQuery {
+                source: Some(name_literal),
+                predicate: Some("ad4m://shacl_shape_uri".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) => links,
+            Err(_) => return vec![],
+        };
+
+        if shape_links.is_empty() {
+            return vec![];
+        }
+
+        let shape_uri = &shape_links[0].data.target;
+        let prop_links = match perspective
+            .get_links(&LinkQuery {
+                source: Some(shape_uri.clone()),
+                predicate: Some("sh://property".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) => links,
+            Err(_) => return vec![],
+        };
+
+        let mut properties = Vec::new();
+        for prop_link in &prop_links {
+            let prop_uri = &prop_link.data.target;
+            let prop_name = prop_uri
+                .rsplit_once('.')
+                .map(|(_, name)| name.to_string())
+                .unwrap_or_else(|| prop_uri.clone());
+
+            let is_collection = match perspective
+                .get_links(&LinkQuery {
+                    source: Some(prop_uri.clone()),
+                    predicate: Some("rdf://type".to_string()),
+                    target: Some("ad4m://CollectionShape".to_string()),
+                    ..Default::default()
+                })
+                .await
+            {
+                Ok(links) => !links.is_empty(),
+                Err(_) => false,
+            };
+
+            properties.push(ClassPropertyInfo {
+                name: prop_name,
+                is_collection,
+            });
+        }
+
+        properties
+    }
+
+    fn make_tool_schema(
+        properties: Vec<(&str, &str)>,
+        required: Vec<&str>,
+    ) -> Arc<serde_json::Map<String, serde_json::Value>> {
+        let mut props = serde_json::Map::new();
+        for (name, desc) in properties {
+            props.insert(
+                name.to_string(),
+                json!({ "type": "string", "description": desc }),
+            );
+        }
+        let mut schema = serde_json::Map::new();
+        schema.insert("type".to_string(), json!("object"));
+        schema.insert("properties".to_string(), serde_json::Value::Object(props));
+        schema.insert("required".to_string(), json!(required));
+        Arc::new(schema)
+    }
+
+    fn make_create_tool(class_name: &str, properties: &[ClassPropertyInfo]) -> Tool {
+        let name_lower = class_name.to_lowercase();
+        let mut prop_entries: Vec<(String, String)> = vec![
+            ("perspective_id".to_string(), "Perspective UUID".to_string()),
+            (
+                "expression_address".to_string(),
+                format!("Address for the new {} instance", class_name),
+            ),
+        ];
+        for p in properties {
+            if !p.is_collection {
+                prop_entries.push((p.name.clone(), format!("{} property value", p.name)));
+            }
+        }
+        let props: Vec<(&str, &str)> = prop_entries
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let prop_names: Vec<&str> = properties
+            .iter()
+            .filter(|p| !p.is_collection)
+            .map(|p| p.name.as_str())
+            .collect();
+
+        Tool::new(
+            format!("create_{}", name_lower),
+            format!(
+                "Create a new {} instance. Properties: {}",
+                class_name,
+                prop_names.join(", ")
+            ),
+            Self::make_tool_schema(props, vec!["perspective_id", "expression_address"]),
+        )
+    }
+
+    fn make_query_tool(class_name: &str) -> Tool {
+        let name_lower = class_name.to_lowercase();
+        Tool::new(
+            format!("query_{}", name_lower),
+            format!(
+                "Query all {} instances in a perspective. Returns expression addresses.",
+                class_name
+            ),
+            Self::make_tool_schema(
+                vec![("perspective_id", "Perspective UUID")],
+                vec!["perspective_id"],
+            ),
+        )
+    }
+
+    fn make_get_tool(class_name: &str) -> Tool {
+        let name_lower = class_name.to_lowercase();
+        Tool::new(
+            format!("get_{}", name_lower),
+            format!(
+                "Get all properties of a {} instance by expression address.",
+                class_name
+            ),
+            Self::make_tool_schema(
+                vec![
+                    ("perspective_id", "Perspective UUID"),
+                    ("expression_address", "Expression address of the instance"),
+                ],
+                vec!["perspective_id", "expression_address"],
+            ),
+        )
+    }
+
+    fn make_update_tool(class_name: &str, properties: &[ClassPropertyInfo]) -> Tool {
+        let name_lower = class_name.to_lowercase();
+        let mut prop_entries: Vec<(String, String)> = vec![
+            ("perspective_id".to_string(), "Perspective UUID".to_string()),
+            (
+                "expression_address".to_string(),
+                "Expression address of the instance to update".to_string(),
+            ),
+        ];
+        for p in properties {
+            if !p.is_collection {
+                prop_entries.push((p.name.clone(), format!("{} property value", p.name)));
+            }
+        }
+        let props: Vec<(&str, &str)> = prop_entries
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let prop_names: Vec<&str> = properties
+            .iter()
+            .filter(|p| !p.is_collection)
+            .map(|p| p.name.as_str())
+            .collect();
+
+        Tool::new(
+            format!("update_{}", name_lower),
+            format!(
+                "Update properties of a {} instance. Updatable: {}",
+                class_name,
+                prop_names.join(", ")
+            ),
+            Self::make_tool_schema(props, vec!["perspective_id", "expression_address"]),
+        )
+    }
+
+    fn make_delete_tool(class_name: &str) -> Tool {
+        let name_lower = class_name.to_lowercase();
+        Tool::new(
+            format!("delete_{}", name_lower),
+            format!(
+                "Delete a {} instance and all its associated links.",
+                class_name
+            ),
+            Self::make_tool_schema(
+                vec![
+                    ("perspective_id", "Perspective UUID"),
+                    (
+                        "expression_address",
+                        "Expression address of the instance to delete",
+                    ),
+                ],
+                vec!["perspective_id", "expression_address"],
+            ),
+        )
+    }
+
+    /// Handle a dynamic SHACL tool call
+    async fn handle_dynamic_tool(
+        &self,
+        tool_name: &str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let args = arguments.unwrap_or_default();
+
+        // Parse tool name: {operation}_{class_name}
+        let (operation, class_name_lower) = match tool_name.split_once('_') {
+            Some((op, name)) => (op, name),
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown tool: {}",
+                    tool_name
+                ))]));
+            }
+        };
+
+        if !matches!(operation, "create" | "query" | "get" | "update" | "delete") {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Unknown tool: {}",
+                tool_name
+            ))]));
+        }
+
+        let perspective_id = match args.get("perspective_id").and_then(|v| v.as_str()) {
+            Some(id) => id.to_string(),
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Missing required parameter: perspective_id",
+                )]));
+            }
+        };
+
+        // Find actual class name (preserving original case)
+        let class_name = {
+            let perspective = match get_perspective(&perspective_id) {
+                Some(p) => p,
+                None => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Perspective not found: {}",
+                        perspective_id
+                    ))]));
+                }
+            };
+            match Self::find_class_name(&perspective, class_name_lower).await {
+                Some(name) => name,
+                None => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Subject class '{}' not found in perspective {}",
+                        class_name_lower, perspective_id
+                    ))]));
+                }
+            }
+        };
+
+        let result = match operation {
+            "create" => {
+                self.handle_dynamic_create(&perspective_id, &class_name, &args)
+                    .await
+            }
+            "query" => self.handle_dynamic_query(&perspective_id, &class_name).await,
+            "get" => {
+                self.handle_dynamic_get(&perspective_id, &class_name, &args)
+                    .await
+            }
+            "update" => {
+                self.handle_dynamic_update(&perspective_id, &class_name, &args)
+                    .await
+            }
+            "delete" => {
+                self.handle_dynamic_delete(&perspective_id, &class_name, &args)
+                    .await
+            }
+            _ => unreachable!(),
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    /// Find the actual class name (with original casing) from a lowercase name
+    async fn find_class_name(
+        perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+        class_name_lower: &str,
+    ) -> Option<String> {
+        let class_links = perspective
+            .get_links(&LinkQuery {
+                predicate: Some("rdf://type".to_string()),
+                target: Some("ad4m://SubjectClass".to_string()),
+                ..Default::default()
+            })
+            .await
+            .ok()?;
+
+        class_links.iter().find_map(|l| {
+            let name = l.data.source.split("://").last().unwrap_or("");
+            if name.to_lowercase() == class_name_lower {
+                Some(name.to_string())
+            } else {
+                None
+            }
+        })
+    }
+
+    async fn handle_dynamic_create(
+        &self,
+        perspective_id: &str,
+        class_name: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+    ) -> String {
+        let agent_context = match self.get_agent_context().await {
+            Ok(ctx) => ctx,
+            Err(e) => return format!("Authentication error: {}", e),
+        };
+
+        let capabilities = self.get_capabilities().await;
+        if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+            return format!("Capability error: {}", e);
+        }
+
+        let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
+            Some(addr) => addr.to_string(),
+            None => return "Missing required parameter: expression_address".to_string(),
+        };
+
+        // Build initial_values from property args
+        let mut initial_values = serde_json::Map::new();
+        for (key, value) in args {
+            if key != "perspective_id" && key != "expression_address" {
+                if let Some(v) = value.as_str() {
+                    initial_values.insert(key.clone(), serde_json::Value::String(v.to_string()));
+                }
+            }
+        }
+        let initial_values = if initial_values.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(initial_values))
+        };
+
+        let subject_class: SubjectClassOption = match serde_json::from_value(json!({
+            "className": class_name
+        })) {
+            Ok(sc) => sc,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let mut perspective = match get_perspective(perspective_id) {
+            Some(p) => p,
+            None => return format!("Perspective not found: {}", perspective_id),
+        };
+
+        match perspective
+            .create_subject(
+                subject_class,
+                expression_address.clone(),
+                initial_values,
+                None,
+                &agent_context,
+            )
+            .await
+        {
+            Ok(_) => serde_json::to_string_pretty(&json!({
+                "created": true,
+                "perspective_id": perspective_id,
+                "class_name": class_name,
+                "expression_address": expression_address
+            }))
+            .unwrap_or_else(|e| format!("Error: {}", e)),
+            Err(e) => format!("Error creating subject: {}", e),
+        }
+    }
+
+    async fn handle_dynamic_query(&self, perspective_id: &str, class_name: &str) -> String {
+        let perspective = match get_perspective(perspective_id) {
+            Some(p) => p,
+            None => return format!("Perspective not found: {}", perspective_id),
+        };
+
+        // Find target_class URI
+        let class_links = match perspective
+            .get_links(&LinkQuery {
+                predicate: Some("rdf://type".to_string()),
+                target: Some("ad4m://SubjectClass".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) => links,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let target_class = match class_links.iter().find_map(|l| {
+            let name = l.data.source.split("://").last().unwrap_or("");
+            if name == class_name {
+                Some(l.data.source.clone())
+            } else {
+                None
+            }
+        }) {
+            Some(tc) => tc,
+            None => return format!("Subject class '{}' not found", class_name),
+        };
+
+        // Find instances
+        let instance_links = match perspective
+            .get_links(&LinkQuery {
+                predicate: Some("rdf://type".to_string()),
+                target: Some(target_class),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) => links,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let instances: Vec<String> = instance_links.iter().map(|l| l.data.source.clone()).collect();
+        serde_json::to_string_pretty(&instances).unwrap_or_else(|e| format!("Error: {}", e))
+    }
+
+    async fn handle_dynamic_get(
+        &self,
+        perspective_id: &str,
+        class_name: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+    ) -> String {
+        let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
+            Some(addr) => addr.to_string(),
+            None => return "Missing required parameter: expression_address".to_string(),
+        };
+
+        let perspective = match get_perspective(perspective_id) {
+            Some(p) => p,
+            None => return format!("Perspective not found: {}", perspective_id),
+        };
+
+        // Reuse get_subject_data logic
+        let name_literal = format!("literal://string:shacl://{}", class_name);
+        let shape_links = match perspective
+            .get_links(&LinkQuery {
+                source: Some(name_literal),
+                predicate: Some("ad4m://shacl_shape_uri".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) => links,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        if shape_links.is_empty() {
+            return format!("No SHACL shape found for class '{}'", class_name);
+        }
+
+        let shape_uri = &shape_links[0].data.target;
+        let prop_links = match perspective
+            .get_links(&LinkQuery {
+                source: Some(shape_uri.clone()),
+                predicate: Some("sh://property".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) => links,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let mut data = serde_json::Map::new();
+        for prop_link in &prop_links {
+            let prop_uri = &prop_link.data.target;
+            let prop_name = prop_uri
+                .rsplit_once('.')
+                .map(|(_, name)| name.to_string())
+                .unwrap_or_else(|| prop_uri.clone());
+
+            let path_links = match perspective
+                .get_links(&LinkQuery {
+                    source: Some(prop_uri.clone()),
+                    predicate: Some("sh://path".to_string()),
+                    ..Default::default()
+                })
+                .await
+            {
+                Ok(links) => links,
+                Err(_) => continue,
+            };
+
+            if let Some(path_link) = path_links.first() {
+                let predicate = &path_link.data.target;
+
+                let is_collection = match perspective
+                    .get_links(&LinkQuery {
+                        source: Some(prop_uri.clone()),
+                        predicate: Some("rdf://type".to_string()),
+                        target: Some("ad4m://CollectionShape".to_string()),
+                        ..Default::default()
+                    })
+                    .await
+                {
+                    Ok(links) => !links.is_empty(),
+                    Err(_) => false,
+                };
+
+                let value_links = match perspective
+                    .get_links(&LinkQuery {
+                        source: Some(expression_address.clone()),
+                        predicate: Some(predicate.clone()),
+                        ..Default::default()
+                    })
+                    .await
+                {
+                    Ok(links) => links,
+                    Err(_) => continue,
+                };
+
+                if is_collection {
+                    let items: Vec<String> =
+                        value_links.iter().map(|l| l.data.target.clone()).collect();
+                    data.insert(
+                        prop_name,
+                        serde_json::Value::Array(
+                            items.into_iter().map(serde_json::Value::String).collect(),
+                        ),
+                    );
+                } else if let Some(link) = value_links.first() {
+                    let value = Self::resolve_literal_value(&link.data.target);
+                    data.insert(prop_name, serde_json::Value::String(value));
+                }
+            }
+        }
+
+        serde_json::to_string_pretty(&serde_json::Value::Object(data))
+            .unwrap_or_else(|e| format!("Error: {}", e))
+    }
+
+    async fn handle_dynamic_update(
+        &self,
+        perspective_id: &str,
+        class_name: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+    ) -> String {
+        let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
+            Some(addr) => addr.to_string(),
+            None => return "Missing required parameter: expression_address".to_string(),
+        };
+
+        let agent_context = match self.get_agent_context().await {
+            Ok(ctx) => ctx,
+            Err(e) => return format!("Authentication error: {}", e),
+        };
+
+        let capabilities = self.get_capabilities().await;
+        if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+            return format!("Capability error: {}", e);
+        }
+
+        let mut perspective = match get_perspective(perspective_id) {
+            Some(p) => p,
+            None => return format!("Perspective not found: {}", perspective_id),
+        };
+
+        let mut updated = Vec::new();
+        for (key, value) in args {
+            if key == "perspective_id" || key == "expression_address" {
+                continue;
+            }
+            let value_str = match value.as_str() {
+                Some(s) => s.to_string(),
+                None => value.to_string(),
+            };
+
+            let predicate = match self
+                .resolve_property_predicate(&perspective, class_name, key)
+                .await
+            {
+                Ok(pred) => pred,
+                Err(e) => return format!("Error resolving property '{}': {}", key, e),
+            };
+
+            // Remove old values
+            if let Ok(links) = perspective
+                .get_links(&LinkQuery {
+                    source: Some(expression_address.clone()),
+                    predicate: Some(predicate.clone()),
+                    ..Default::default()
+                })
+                .await
+            {
+                for link in links {
+                    let _ = perspective.remove_link(link.into(), None).await;
+                }
+            }
+
+            // Add new value
+            let target = if value_str.starts_with("literal://") || value_str.contains("://") {
+                value_str.clone()
+            } else {
+                format!("literal://string:{}", value_str)
+            };
+
+            let link = Link {
+                source: expression_address.clone(),
+                predicate: Some(predicate),
+                target,
+            };
+
+            match perspective
+                .add_link(link, LinkStatus::Shared, None, &agent_context)
+                .await
+            {
+                Ok(_) => updated.push(key.clone()),
+                Err(e) => return format!("Error setting property '{}': {}", key, e),
+            }
+        }
+
+        serde_json::to_string_pretty(&json!({
+            "success": true,
+            "updated_properties": updated,
+        }))
+        .unwrap_or_else(|e| format!("Error: {}", e))
+    }
+
+    async fn handle_dynamic_delete(
+        &self,
+        perspective_id: &str,
+        _class_name: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+    ) -> String {
+        let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
+            Some(addr) => addr.to_string(),
+            None => return "Missing required parameter: expression_address".to_string(),
+        };
+
+        let agent_context = match self.get_agent_context().await {
+            Ok(ctx) => ctx,
+            Err(e) => return format!("Authentication error: {}", e),
+        };
+
+        let capabilities = self.get_capabilities().await;
+        if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+            return format!("Capability error: {}", e);
+        }
+
+        let mut perspective = match get_perspective(perspective_id) {
+            Some(p) => p,
+            None => return format!("Perspective not found: {}", perspective_id),
+        };
+
+        let mut removed = 0;
+        if let Ok(links) = perspective
+            .get_links(&LinkQuery {
+                source: Some(expression_address.clone()),
+                ..Default::default()
+            })
+            .await
+        {
+            for link in links {
+                if perspective.remove_link(link.into(), None).await.is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+
+        if let Ok(links) = perspective
+            .get_links(&LinkQuery {
+                target: Some(expression_address.clone()),
+                ..Default::default()
+            })
+            .await
+        {
+            for link in links {
+                if perspective.remove_link(link.into(), None).await.is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+
+        serde_json::to_string_pretty(&json!({
+            "success": true,
+            "deleted": expression_address,
+            "links_removed": removed,
+        }))
+        .unwrap_or_else(|e| format!("Error: {}", e))
     }
 }
 

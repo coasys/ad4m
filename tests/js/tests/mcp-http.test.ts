@@ -717,4 +717,184 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             console.log("Bot verified #random has", collection.count, "message (separate from #general)");
         });
     });
+
+    // ========================================================================
+    // 4. Dynamic Tool Generation — verify SHACL classes produce typed tools
+    // ========================================================================
+
+    describe("4. Dynamic Tool Generation", function() {
+        it("should have generated typed tools for Channel and Message", async function() {
+            const tools = await listMcpTools(mcpSessionId);
+            const toolNames = tools.map(function(t: any) { return t.name; });
+            console.log("Tools after SDNA registration:", toolNames);
+
+            // Dynamic tools for Channel
+            expect(toolNames).to.include('create_channel');
+            expect(toolNames).to.include('query_channel');
+            expect(toolNames).to.include('get_channel');
+            expect(toolNames).to.include('update_channel');
+            expect(toolNames).to.include('delete_channel');
+
+            // Dynamic tools for Message
+            expect(toolNames).to.include('create_message');
+            expect(toolNames).to.include('query_message');
+            expect(toolNames).to.include('get_message');
+            expect(toolNames).to.include('update_message');
+            expect(toolNames).to.include('delete_message');
+
+            // Static tools should still be present
+            expect(toolNames).to.include('list_perspectives');
+            expect(toolNames).to.include('add_sdna');
+        });
+
+        it("should have correct schema for create_channel", async function() {
+            const tools = await listMcpTools(mcpSessionId);
+            var createChannel = tools.find(function(t: any) { return t.name === 'create_channel'; });
+            expect(createChannel).to.exist;
+            expect(createChannel.description).to.include('Channel');
+
+            // Check input schema has perspective_id and expression_address as required
+            var schema = createChannel.inputSchema;
+            expect(schema.properties).to.have.property('perspective_id');
+            expect(schema.properties).to.have.property('expression_address');
+            expect(schema.properties).to.have.property('name');
+            expect(schema.required).to.include('perspective_id');
+            expect(schema.required).to.include('expression_address');
+        });
+
+        it("should query channels via typed query_channel tool", async function() {
+            var channels = await callMcpTool('query_channel', {
+                perspective_id: perspectiveUuid,
+            }, mcpSessionId);
+            var channelStr = typeof channels === 'string' ? channels : JSON.stringify(channels);
+            expect(channelStr).to.include(channel1Addr);
+            expect(channelStr).to.include(channel2Addr);
+            console.log("query_channel result:", channelStr);
+        });
+
+        it("should get channel data via typed get_channel tool", async function() {
+            var data = await callMcpTool('get_channel', {
+                perspective_id: perspectiveUuid,
+                expression_address: channel1Addr,
+            }, mcpSessionId);
+            var dataStr = typeof data === 'string' ? data : JSON.stringify(data);
+            expect(dataStr).to.include("general-renamed"); // Was renamed in section 3
+            console.log("get_channel result:", dataStr);
+        });
+
+        it("should create a new channel via typed create_channel tool", async function() {
+            var newChannelAddr = "flux://channel-typed-" + Date.now();
+            var result = await callMcpTool('create_channel', {
+                perspective_id: perspectiveUuid,
+                expression_address: newChannelAddr,
+                name: "typed-test",
+            }, mcpSessionId);
+            var resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+            expect(resultStr).to.include('true');
+            console.log("create_channel result:", resultStr);
+
+            // Verify it appears in query
+            var channels = await callMcpTool('query_channel', {
+                perspective_id: perspectiveUuid,
+            }, mcpSessionId);
+            var channelStr = typeof channels === 'string' ? channels : JSON.stringify(channels);
+            expect(channelStr).to.include(newChannelAddr);
+        });
+
+        it("should update channel via typed update_channel tool", async function() {
+            var result = await callMcpTool('update_channel', {
+                perspective_id: perspectiveUuid,
+                expression_address: channel2Addr,
+                name: "random-updated",
+            }, mcpSessionId);
+            expect(result.success).to.be.true;
+            expect(result.updated_properties).to.include('name');
+
+            // Verify the update via get_channel
+            var data = await callMcpTool('get_channel', {
+                perspective_id: perspectiveUuid,
+                expression_address: channel2Addr,
+            }, mcpSessionId);
+            var dataStr = typeof data === 'string' ? data : JSON.stringify(data);
+            expect(dataStr).to.include("random-updated");
+            console.log("update_channel result:", dataStr);
+        });
+
+        it("should delete a message via typed delete_message tool", async function() {
+            var result = await callMcpTool('delete_message', {
+                perspective_id: perspectiveUuid,
+                expression_address: msg3Addr,
+            }, mcpSessionId);
+            expect(result.success).to.be.true;
+            expect(result.links_removed).to.be.greaterThan(0);
+            console.log("delete_message result: removed", result.links_removed, "links");
+
+            // Verify it's gone from query
+            var messages = await callMcpTool('query_message', {
+                perspective_id: perspectiveUuid,
+            }, mcpSessionId);
+            var msgStr = typeof messages === 'string' ? messages : JSON.stringify(messages);
+            expect(msgStr).to.not.include(msg3Addr);
+        });
+
+        it("should add new SDNA and see new tools appear", async function() {
+            // Define a new Task class
+            var taskShacl = JSON.stringify({
+                target_class: "ad4m://Task",
+                properties: [
+                    {
+                        path: "ad4m://task_title",
+                        name: "title",
+                        datatype: "xsd:string",
+                        min_count: 1,
+                        max_count: 1,
+                        writable: true,
+                        resolve_language: "literal",
+                        setter: [
+                            { action: "setSingleTarget", source: "this", predicate: "ad4m://task_title", target: "value", local: false }
+                        ]
+                    },
+                    {
+                        path: "ad4m://task_status",
+                        name: "status",
+                        datatype: "xsd:string",
+                        min_count: 0,
+                        max_count: 1,
+                        writable: true,
+                        resolve_language: "literal",
+                        setter: [
+                            { action: "setSingleTarget", source: "this", predicate: "ad4m://task_status", target: "value", local: false }
+                        ]
+                    }
+                ],
+                constructor_actions: [
+                    { action: "addLink", source: "this", predicate: "rdf://type", target: "ad4m://Task", local: false }
+                ],
+                destructor_actions: []
+            });
+
+            var result = await callMcpTool('add_sdna', {
+                perspective_id: perspectiveUuid,
+                class_name: "Task",
+                shacl_json: taskShacl,
+            }, mcpSessionId);
+            expect(result.success).to.be.true;
+
+            // New tools should now appear
+            var tools = await listMcpTools(mcpSessionId);
+            var toolNames = tools.map(function(t: any) { return t.name; });
+            expect(toolNames).to.include('create_task');
+            expect(toolNames).to.include('query_task');
+            expect(toolNames).to.include('get_task');
+            expect(toolNames).to.include('update_task');
+            expect(toolNames).to.include('delete_task');
+            console.log("New Task tools appeared after add_sdna:", toolNames.filter(function(n: string) { return n.includes('task'); }));
+
+            // Verify schema has the right properties
+            var createTask = tools.find(function(t: any) { return t.name === 'create_task'; });
+            expect(createTask).to.exist;
+            expect(createTask.inputSchema.properties).to.have.property('title');
+            expect(createTask.inputSchema.properties).to.have.property('status');
+        });
+    });
 });
