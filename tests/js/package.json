@@ -70,5 +70,5 @@
     "fluent-ffmpeg": "^2.1.3",
     "uuid": "*"
   },
-  "version": "0.12.0-rc1-dev"
+  "version": "0.12.0-rc1-dev.1"
 }
