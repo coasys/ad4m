@@ -1092,12 +1092,17 @@ impl Ad4mMcpHandler {
                     Ok(links) => {
                         // Check state check patterns against expression
                         for link in &links {
-                            if link.data.predicate.contains("stateCheck") {
+                            if link
+                                .data
+                                .predicate
+                                .as_ref()
+                                .map_or(false, |p| p.contains("stateCheck"))
+                            {
                                 // Check if expression matches this state
                                 if let Ok(state_links) = perspective
                                     .get_links(&LinkQuery {
                                         source: Some(p.expression_address.clone()),
-                                        predicate: Some(link.data.predicate.clone()),
+                                        predicate: link.data.predicate.clone(),
                                         target: Some(link.data.target.clone()),
                                         ..Default::default()
                                     })
@@ -2767,7 +2772,7 @@ impl Ad4mMcpHandler {
             .await
         {
             Ok(links) => {
-                let items: Vec<String> = links.iter().map(|l| l.target.clone()).collect();
+                let items: Vec<String> = links.iter().map(|l| l.data.target.clone()).collect();
                 serde_json::to_string_pretty(&json!({
                     "expression_address": expression_address,
                     "collection": collection_name,
