@@ -282,8 +282,9 @@ pub struct RemoveFromCollectionParams {
 pub struct GetSubjectChildrenParams {
     /// Perspective UUID
     pub perspective_id: String,
-    /// Subject class name of the parent
-    pub class_name: String,
+    /// Subject class name of the parent (optional)
+    #[serde(default)]
+    pub class_name: Option<String>,
     /// Expression address of the parent subject
     pub expression_address: String,
     /// Optional: filter children to only this class name
