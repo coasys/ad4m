@@ -2041,6 +2041,7 @@ impl Ad4mMcpHandler {
     fn make_set_property_tool(class_name: &str, property_name: &str) -> Tool {
         let name_lower = class_name.to_lowercase();
         let prop_lower = property_name.to_lowercase();
+        let value_desc = format!("New value for {}", property_name);
         Tool::new(
             format!("{}_set_{}", name_lower, prop_lower),
             format!(
@@ -2051,7 +2052,7 @@ impl Ad4mMcpHandler {
                 vec![
                     ("perspective_id", "Perspective UUID"),
                     ("expression_address", "Expression address of the instance"),
-                    ("value", &format!("New value for {}", property_name)),
+                    ("value", &value_desc),
                 ],
                 vec!["perspective_id", "expression_address", "value"],
             ),
