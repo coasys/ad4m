@@ -150,7 +150,7 @@ jobs:
   build-launcher-binary-linux-cuda:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest
+      image: coasys/ad4m-ci-linux-cuda:latest
 
     needs:
       - create-release
