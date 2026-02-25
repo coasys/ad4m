@@ -119,14 +119,22 @@ impl Link {
         static URI_SCHEME_RE: OnceLock<Regex> = OnceLock::new();
         let re = URI_SCHEME_RE.get_or_init(|| Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-._]*:").unwrap());
 
+        let link_desc = format!(
+            "source='{}', target='{}', predicate='{:?}'",
+            self.source, self.target, self.predicate
+        );
+
         let check = |field: &str, value: &str| -> Result<(), AnyError> {
             if value.is_empty() {
-                return Err(anyhow!("Link {} must not be empty", field));
+                return Err(anyhow!(
+                    "Link {} must not be empty. Link: {}",
+                    field, link_desc
+                ));
             }
             if !re.is_match(value) {
                 return Err(anyhow!(
-                    "Link {} is not a valid URI (must start with a scheme like 'did:', 'expression://', etc.): '{}'",
-                    field, value
+                    "Link {} is not a valid URI (must start with a scheme like 'did:', 'expression://', etc.): '{}'. Link: {}",
+                    field, value, link_desc
                 ));
             }
             Ok(())
