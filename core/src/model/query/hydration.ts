@@ -88,8 +88,18 @@ async function resolveValue(
     return raw;
   }
 
-  // Literal URL: parse inline
-  if (typeof raw === "string" && raw.startsWith("literal://")) {
+  // Literal URL: parse inline — only when resolveLanguage is 'literal' or unset.
+  // A property with a non-literal resolveLanguage whose stored target happens to
+  // start with 'literal://' (e.g. a model baseExpression URI stored as a string
+  // property value) must NOT be unwrapped here, or the URI itself is destroyed.
+  // Note: unlike the old monolithic Ad4mModel.ts, ALL scalar values in our
+  // mutation layer are stored as literal:// (when they have no URI scheme), so
+  // resolveLanguage === undefined is the normal case for plain string/number props.
+  if (
+    (resolveLanguage === "literal" || resolveLanguage === undefined) &&
+    typeof raw === "string" &&
+    raw.startsWith("literal://")
+  ) {
     try {
       const parsed = Literal.fromUrl(raw).get();
       return parsed.data !== undefined ? parsed.data : parsed;
