@@ -12,6 +12,7 @@ pub mod mcp;
 mod prolog_service;
 pub mod runtime_service;
 mod surreal_service;
+pub mod user_management;
 pub mod utils;
 mod wallet;
 

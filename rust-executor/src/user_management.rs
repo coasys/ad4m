@@ -3,9 +3,8 @@
 //! Extracted to avoid code duplication between MCP tools and GraphQL mutation resolvers.
 
 use crate::agent::capabilities::{
-    get_user_default_capabilities,
-    token::generate_jwt as generate_jwt_token,
-    AuthInfo, DEFAULT_TOKEN_VALID_PERIOD,
+    get_user_default_capabilities, token::generate_jwt as generate_jwt_token, AuthInfo,
+    DEFAULT_TOKEN_VALID_PERIOD,
 };
 use crate::agent::AgentService;
 use crate::db::Ad4mDb;

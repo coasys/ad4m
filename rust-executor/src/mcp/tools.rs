@@ -7,8 +7,7 @@ use super::server::McpContext;
 use crate::agent::capabilities::{
     capabilities_from_token, check_capability,
     defs::{ALL_CAPABILITY, PERSPECTIVE_CREATE_CAPABILITY},
-    generate_capability_token, permit_capability,
-    request_capability as cap_request_capability,
+    generate_capability_token, permit_capability, request_capability as cap_request_capability,
     token::decode_jwt,
     AuthInfo, AuthInfoExtended, Capability,
 };
@@ -1774,7 +1773,7 @@ impl Ad4mMcpHandler {
     async fn login_email(&self, params: Parameters<LoginEmailParams>) -> String {
         let p = &params.0;
 
-        use super::user_management as um;
+        use crate::user_management as um;
 
         let email = p.email.trim().to_lowercase();
 
@@ -1793,7 +1792,8 @@ impl Ad4mMcpHandler {
         }
 
         if !AgentService::user_exists(&email) {
-            return json!({"success": false, "error": "User key not found on executor"}).to_string();
+            return json!({"success": false, "error": "User key not found on executor"})
+                .to_string();
         }
 
         match um::generate_user_jwt(&email, "mcp-agent") {
@@ -1887,13 +1887,14 @@ impl Ad4mMcpHandler {
         description = "Create a new user account (multi-user mode). Sends a verification email with a code. Use verify_email_code to complete signup."
     )]
     async fn signup(&self, params: Parameters<SignupParams>) -> String {
-        use super::user_management as um;
+        use crate::user_management as um;
 
         let p = &params.0;
         let email = p.email.trim().to_lowercase();
 
         if !um::is_multi_user_enabled() {
-            return json!({"success": false, "error": "Multi-user mode is not enabled."}).to_string();
+            return json!({"success": false, "error": "Multi-user mode is not enabled."})
+                .to_string();
         }
 
         let did = match um::create_user(&email, &p.password) {
@@ -1906,7 +1907,9 @@ impl Ad4mMcpHandler {
             Err(e) => return json!({"success": false, "error": e}).to_string(),
         };
 
-        if let Err(e) = um::send_verification_email(&email, &code, "signup", Some("MCP Agent")).await {
+        if let Err(e) =
+            um::send_verification_email(&email, &code, "signup", Some("MCP Agent")).await
+        {
             return json!({"success": false, "error": e}).to_string();
         }
 
@@ -1926,12 +1929,13 @@ impl Ad4mMcpHandler {
         &self,
         params: Parameters<RequestLoginVerificationParams>,
     ) -> String {
-        use super::user_management as um;
+        use crate::user_management as um;
 
         let email = params.0.email.trim().to_lowercase();
 
         if !um::is_multi_user_enabled() {
-            return json!({"success": false, "error": "Multi-user mode is not enabled."}).to_string();
+            return json!({"success": false, "error": "Multi-user mode is not enabled."})
+                .to_string();
         }
 
         if let Err(e) = um::user_exists(&email) {
@@ -1943,7 +1947,8 @@ impl Ad4mMcpHandler {
             Err(e) => return json!({"success": false, "error": e}).to_string(),
         };
 
-        if let Err(e) = um::send_verification_email(&email, &code, "login", Some("MCP Agent")).await {
+        if let Err(e) = um::send_verification_email(&email, &code, "login", Some("MCP Agent")).await
+        {
             return json!({"success": false, "error": e}).to_string();
         }
 
@@ -1959,13 +1964,14 @@ impl Ad4mMcpHandler {
         description = "Verify an email code to complete signup or login. Returns a JWT token on success. The verification_type must be 'signup' or 'login'."
     )]
     async fn verify_email_code(&self, params: Parameters<VerifyEmailCodeParams>) -> String {
-        use super::user_management as um;
+        use crate::user_management as um;
 
         let p = &params.0;
         let email = p.email.trim().to_lowercase();
 
         if !um::is_multi_user_enabled() {
-            return json!({"success": false, "error": "Multi-user mode is not enabled."}).to_string();
+            return json!({"success": false, "error": "Multi-user mode is not enabled."})
+                .to_string();
         }
 
         let verified = match um::verify_code(&email, &p.code, &p.verification_type) {
@@ -1978,7 +1984,8 @@ impl Ad4mMcpHandler {
         }
 
         if !AgentService::user_exists(&email) {
-            return json!({"success": false, "error": "User key not found on executor"}).to_string();
+            return json!({"success": false, "error": "User key not found on executor"})
+                .to_string();
         }
 
         match um::generate_user_jwt(&email, "mcp-agent") {
