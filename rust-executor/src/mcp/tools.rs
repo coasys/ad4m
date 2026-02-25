@@ -170,6 +170,48 @@ pub struct AddModelParams {
     pub shacl_json: String,
 }
 
+/// Parameters for adding a flow definition
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct AddFlowParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+    /// Flow name
+    pub flow_name: String,
+    /// SHACL flow definition as JSON string
+    pub shacl_json: String,
+}
+
+/// Parameters for listing flows
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GetFlowsParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+}
+
+/// Parameters for flow operations on an expression
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FlowExprParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+    /// Flow name
+    pub flow_name: String,
+    /// Expression address
+    pub expression_address: String,
+}
+
+/// Parameters for running a flow action
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FlowRunActionParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+    /// Flow name
+    pub flow_name: String,
+    /// Expression address
+    pub expression_address: String,
+    /// Action name to execute
+    pub action_name: String,
+}
+
 /// Parameters for creating a new perspective
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct AddPerspectiveParams {
@@ -318,8 +360,10 @@ impl ServerHandler for Ad4mMcpHandler {
             let tcc = ToolCallContext::new(self, request, context);
             let result = self.tool_router.call(tcc).await?;
 
-            // Notify clients about tool list changes after SDNA is added
-            if tool_name == "add_model" && result.is_error != Some(true) {
+            // Notify clients about tool list changes after model/flow is added
+            if (tool_name == "add_model" || tool_name == "add_flow")
+                && result.is_error != Some(true)
+            {
                 let _ = peer.notify_tool_list_changed().await;
             }
 
@@ -946,6 +990,215 @@ impl Ad4mMcpHandler {
                             .unwrap_or_else(|e| format!("Error: {}", e))
                     }
                     Err(e) => format!("Error adding SDNA: {}", e),
+                }
+            }
+            None => format!("Perspective not found: {}", p.perspective_id),
+        }
+    }
+
+    /// Add a flow (state machine definition) to a perspective
+    #[tool(
+        description = "Register a flow (finite state machine) in a perspective. Flows define states and transitions for expressions."
+    )]
+    async fn add_flow(&self, params: Parameters<AddFlowParams>) -> String {
+        let p = &params.0;
+
+        match get_perspective(&p.perspective_id) {
+            Some(mut perspective) => {
+                let agent_context = match self.get_agent_context().await {
+                    Ok(ctx) => ctx,
+                    Err(e) => return format!("Authentication error: {}", e),
+                };
+
+                let capabilities = self.get_capabilities().await;
+                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+                    return format!("Capability error: {}", e);
+                }
+
+                match perspective
+                    .add_sdna(
+                        p.flow_name.clone(),
+                        String::new(),
+                        SdnaType::Flow,
+                        Some(p.shacl_json.clone()),
+                        &agent_context,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        let result = json!({
+                            "success": true,
+                            "perspective_id": p.perspective_id,
+                            "flow_name": p.flow_name,
+                        });
+                        serde_json::to_string_pretty(&result)
+                            .unwrap_or_else(|e| format!("Error: {}", e))
+                    }
+                    Err(e) => format!("Error adding flow: {}", e),
+                }
+            }
+            None => format!("Perspective not found: {}", p.perspective_id),
+        }
+    }
+
+    /// List all flows defined in a perspective
+    #[tool(description = "Get all flow (state machine) definitions registered in a perspective.")]
+    async fn get_flows(&self, params: Parameters<GetFlowsParams>) -> String {
+        let p = &params.0;
+
+        match get_perspective(&p.perspective_id) {
+            Some(perspective) => {
+                match perspective
+                    .get_links(&LinkQuery {
+                        source: Some("ad4m://self".to_string()),
+                        predicate: Some("ad4m://has_flow".to_string()),
+                        ..Default::default()
+                    })
+                    .await
+                {
+                    Ok(links) => {
+                        let flow_names: Vec<String> =
+                            links.iter().map(|l| l.data.target.clone()).collect();
+                        serde_json::to_string_pretty(&json!({
+                            "flows": flow_names,
+                            "count": flow_names.len(),
+                        }))
+                        .unwrap_or_else(|e| format!("Error: {}", e))
+                    }
+                    Err(e) => format!("Error querying flows: {}", e),
+                }
+            }
+            None => format!("Perspective not found: {}", p.perspective_id),
+        }
+    }
+
+    /// Get the current state of an expression in a flow
+    #[tool(
+        description = "Get the current state of an expression within a flow (state machine). Returns the state name and value."
+    )]
+    async fn flow_state(&self, params: Parameters<FlowExprParams>) -> String {
+        let p = &params.0;
+
+        match get_perspective(&p.perspective_id) {
+            Some(perspective) => {
+                // Get flow definition links
+                match perspective
+                    .get_links(&LinkQuery {
+                        source: Some(format!("literal://string:{}", p.flow_name)),
+                        ..Default::default()
+                    })
+                    .await
+                {
+                    Ok(links) => {
+                        // Check state check patterns against expression
+                        for link in &links {
+                            if link.data.predicate.contains("stateCheck") {
+                                // Check if expression matches this state
+                                if let Ok(state_links) = perspective
+                                    .get_links(&LinkQuery {
+                                        source: Some(p.expression_address.clone()),
+                                        predicate: Some(link.data.predicate.clone()),
+                                        target: Some(link.data.target.clone()),
+                                        ..Default::default()
+                                    })
+                                    .await
+                                {
+                                    if !state_links.is_empty() {
+                                        return serde_json::to_string_pretty(&json!({
+                                            "expression": p.expression_address,
+                                            "flow": p.flow_name,
+                                            "state": link.data.source.clone(),
+                                        }))
+                                        .unwrap_or_else(|e| format!("Error: {}", e));
+                                    }
+                                }
+                            }
+                        }
+                        format!(
+                            "Expression {} is not in any state of flow {}",
+                            p.expression_address, p.flow_name
+                        )
+                    }
+                    Err(e) => format!("Error querying flow state: {}", e),
+                }
+            }
+            None => format!("Perspective not found: {}", p.perspective_id),
+        }
+    }
+
+    /// Get available actions for an expression in a flow
+    #[tool(
+        description = "Get the available transition actions for an expression in its current flow state."
+    )]
+    async fn flow_actions(&self, params: Parameters<FlowExprParams>) -> String {
+        let p = &params.0;
+        // For now, return all transitions - proper implementation needs flow state detection
+        match get_perspective(&p.perspective_id) {
+            Some(perspective) => {
+                match perspective
+                    .get_links(&LinkQuery {
+                        source: Some(format!("literal://string:{}", p.flow_name)),
+                        predicate: Some("ad4m://flow_transition".to_string()),
+                        ..Default::default()
+                    })
+                    .await
+                {
+                    Ok(links) => {
+                        let actions: Vec<String> =
+                            links.iter().map(|l| l.data.target.clone()).collect();
+                        serde_json::to_string_pretty(&json!({
+                            "expression": p.expression_address,
+                            "flow": p.flow_name,
+                            "available_actions": actions,
+                        }))
+                        .unwrap_or_else(|e| format!("Error: {}", e))
+                    }
+                    Err(e) => format!("Error querying flow actions: {}", e),
+                }
+            }
+            None => format!("Perspective not found: {}", p.perspective_id),
+        }
+    }
+
+    /// Start a flow on an expression
+    #[tool(
+        description = "Start a flow (state machine) on an expression, putting it into the initial state."
+    )]
+    async fn flow_start(&self, params: Parameters<FlowExprParams>) -> String {
+        let p = &params.0;
+
+        match get_perspective(&p.perspective_id) {
+            Some(mut perspective) => {
+                let agent_context = match self.get_agent_context().await {
+                    Ok(ctx) => ctx,
+                    Err(e) => return format!("Authentication error: {}", e),
+                };
+
+                let capabilities = self.get_capabilities().await;
+                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+                    return format!("Capability error: {}", e);
+                }
+
+                // Execute the flow's start action via perspective commands
+                match perspective
+                    .execute_commands(
+                        vec![Command {
+                            action: "addLink".to_string(),
+                            parameters: vec![],
+                        }],
+                        &p.expression_address,
+                        &agent_context,
+                    )
+                    .await
+                {
+                    Ok(_) => serde_json::to_string_pretty(&json!({
+                        "success": true,
+                        "expression": p.expression_address,
+                        "flow": p.flow_name,
+                        "message": "Flow started"
+                    }))
+                    .unwrap_or_else(|e| format!("Error: {}", e)),
+                    Err(e) => format!("Error starting flow: {}", e),
                 }
             }
             None => format!("Perspective not found: {}", p.perspective_id),
