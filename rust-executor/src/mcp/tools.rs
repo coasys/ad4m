@@ -161,7 +161,7 @@ pub struct QueryLinksParams {
 
 /// Parameters for adding SDNA (subject class definition) to a perspective
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct AddSdnaParams {
+pub struct AddModelParams {
     /// Perspective UUID
     pub perspective_id: String,
     /// Subject class name
@@ -319,7 +319,7 @@ impl ServerHandler for Ad4mMcpHandler {
             let result = self.tool_router.call(tcc).await?;
 
             // Notify clients about tool list changes after SDNA is added
-            if tool_name == "add_sdna" && result.is_error != Some(true) {
+            if tool_name == "add_model" && result.is_error != Some(true) {
                 let _ = peer.notify_tool_list_changed().await;
             }
 
@@ -907,11 +907,11 @@ impl Ad4mMcpHandler {
         }
     }
 
-    /// Add SDNA (subject class definition) to a perspective
+    /// Add a model (subject class definition) to a perspective
     #[tool(
-        description = "Register a subject class in a perspective using SHACL JSON definition. This defines the schema for typed model objects."
+        description = "Register a model (subject class) in a perspective using SHACL JSON definition. This defines the schema for typed model objects and generates dynamic tools."
     )]
-    async fn add_sdna(&self, params: Parameters<AddSdnaParams>) -> String {
+    async fn add_model(&self, params: Parameters<AddModelParams>) -> String {
         let p = &params.0;
 
         match get_perspective(&p.perspective_id) {
@@ -1716,8 +1716,17 @@ impl Ad4mMcpHandler {
                 tools.push(Self::make_create_tool(&class_name, &properties));
                 tools.push(Self::make_query_tool(&class_name));
                 tools.push(Self::make_get_tool(&class_name));
-                tools.push(Self::make_update_tool(&class_name, &properties));
                 tools.push(Self::make_delete_tool(&class_name));
+                // Per-property set tools and collection tools
+                for prop in &properties {
+                    if prop.is_collection {
+                        tools.push(Self::make_collection_get_tool(&class_name, &prop.name));
+                        tools.push(Self::make_collection_add_tool(&class_name, &prop.name));
+                        tools.push(Self::make_collection_remove_tool(&class_name, &prop.name));
+                    } else {
+                        tools.push(Self::make_set_property_tool(&class_name, &prop.name));
+                    }
+                }
             }
         }
 
@@ -1832,7 +1841,7 @@ impl Ad4mMcpHandler {
             .collect();
 
         Tool::new(
-            format!("create_{}", name_lower),
+            format!("{}_create", name_lower),
             format!(
                 "Create a new {} instance. Properties: {}",
                 class_name,
@@ -1845,7 +1854,7 @@ impl Ad4mMcpHandler {
     fn make_query_tool(class_name: &str) -> Tool {
         let name_lower = class_name.to_lowercase();
         Tool::new(
-            format!("query_{}", name_lower),
+            format!("{}_query", name_lower),
             format!(
                 "Query all {} instances in a perspective. Returns expression addresses.",
                 class_name
@@ -1860,7 +1869,7 @@ impl Ad4mMcpHandler {
     fn make_get_tool(class_name: &str) -> Tool {
         let name_lower = class_name.to_lowercase();
         Tool::new(
-            format!("get_{}", name_lower),
+            format!("{}_get", name_lower),
             format!(
                 "Get all properties of a {} instance by expression address.",
                 class_name
@@ -1875,45 +1884,89 @@ impl Ad4mMcpHandler {
         )
     }
 
-    fn make_update_tool(class_name: &str, properties: &[ClassPropertyInfo]) -> Tool {
+    fn make_set_property_tool(class_name: &str, property_name: &str) -> Tool {
         let name_lower = class_name.to_lowercase();
-        let mut prop_entries: Vec<(String, String)> = vec![
-            ("perspective_id".to_string(), "Perspective UUID".to_string()),
-            (
-                "expression_address".to_string(),
-                "Expression address of the instance to update".to_string(),
-            ),
-        ];
-        for p in properties {
-            if !p.is_collection {
-                prop_entries.push((p.name.clone(), format!("{} property value", p.name)));
-            }
-        }
-        let props: Vec<(&str, &str)> = prop_entries
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        let prop_names: Vec<&str> = properties
-            .iter()
-            .filter(|p| !p.is_collection)
-            .map(|p| p.name.as_str())
-            .collect();
-
+        let prop_lower = property_name.to_lowercase();
         Tool::new(
-            format!("update_{}", name_lower),
+            format!("{}_set_{}", name_lower, prop_lower),
             format!(
-                "Update properties of a {} instance. Updatable: {}",
-                class_name,
-                prop_names.join(", ")
+                "Set the '{}' property on a {} instance.",
+                property_name, class_name
             ),
-            Self::make_tool_schema(props, vec!["perspective_id", "expression_address"]),
+            Self::make_tool_schema(
+                vec![
+                    ("perspective_id", "Perspective UUID"),
+                    ("expression_address", "Expression address of the instance"),
+                    ("value", &format!("New value for {}", property_name)),
+                ],
+                vec!["perspective_id", "expression_address", "value"],
+            ),
+        )
+    }
+
+    fn make_collection_get_tool(class_name: &str, collection_name: &str) -> Tool {
+        let name_lower = class_name.to_lowercase();
+        let coll_lower = collection_name.to_lowercase();
+        Tool::new(
+            format!("{}_get_{}", name_lower, coll_lower),
+            format!(
+                "Get all items in the '{}' collection of a {} instance.",
+                collection_name, class_name
+            ),
+            Self::make_tool_schema(
+                vec![
+                    ("perspective_id", "Perspective UUID"),
+                    ("expression_address", "Expression address of the instance"),
+                ],
+                vec!["perspective_id", "expression_address"],
+            ),
+        )
+    }
+
+    fn make_collection_add_tool(class_name: &str, collection_name: &str) -> Tool {
+        let name_lower = class_name.to_lowercase();
+        let coll_lower = collection_name.to_lowercase();
+        Tool::new(
+            format!("{}_add_{}", name_lower, coll_lower),
+            format!(
+                "Add an item to the '{}' collection of a {} instance.",
+                collection_name, class_name
+            ),
+            Self::make_tool_schema(
+                vec![
+                    ("perspective_id", "Perspective UUID"),
+                    ("expression_address", "Expression address of the instance"),
+                    ("value", "Value to add to the collection"),
+                ],
+                vec!["perspective_id", "expression_address", "value"],
+            ),
+        )
+    }
+
+    fn make_collection_remove_tool(class_name: &str, collection_name: &str) -> Tool {
+        let name_lower = class_name.to_lowercase();
+        let coll_lower = collection_name.to_lowercase();
+        Tool::new(
+            format!("{}_remove_{}", name_lower, coll_lower),
+            format!(
+                "Remove an item from the '{}' collection of a {} instance.",
+                collection_name, class_name
+            ),
+            Self::make_tool_schema(
+                vec![
+                    ("perspective_id", "Perspective UUID"),
+                    ("expression_address", "Expression address of the instance"),
+                    ("value", "Value to remove from the collection"),
+                ],
+                vec!["perspective_id", "expression_address", "value"],
+            ),
         )
     }
 
     fn make_delete_tool(class_name: &str) -> Tool {
         let name_lower = class_name.to_lowercase();
         Tool::new(
-            format!("delete_{}", name_lower),
+            format!("{}_delete", name_lower),
             format!(
                 "Delete a {} instance and all its associated links.",
                 class_name
@@ -1939,9 +1992,9 @@ impl Ad4mMcpHandler {
     ) -> Result<CallToolResult, ErrorData> {
         let args = arguments.unwrap_or_default();
 
-        // Parse tool name: {operation}_{class_name}
-        let (operation, class_name_lower) = match tool_name.split_once('_') {
-            Some((op, name)) => (op, name),
+        // Parse tool name: {class_name}_{operation} or {class_name}_{operation}_{property}
+        let (class_name_lower, rest) = match tool_name.split_once('_') {
+            Some((cls, rest)) => (cls, rest),
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Unknown tool: {}",
@@ -1950,7 +2003,17 @@ impl Ad4mMcpHandler {
             }
         };
 
-        if !matches!(operation, "create" | "query" | "get" | "update" | "delete") {
+        // rest could be "create", "query", "get", "delete", "set_propname", "add_propname", "remove_propname", "get_propname"
+        let (operation, property_name) = if let Some((op, prop)) = rest.split_once('_') {
+            (op, Some(prop.to_string()))
+        } else {
+            (rest, None)
+        };
+
+        if !matches!(
+            operation,
+            "create" | "query" | "get" | "update" | "delete" | "set" | "add" | "remove"
+        ) {
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "Unknown tool: {}",
                 tool_name
@@ -1998,7 +2061,31 @@ impl Ad4mMcpHandler {
                     .await
             }
             "get" => {
-                self.handle_dynamic_get(&perspective_id, &class_name, &args)
+                if let Some(ref prop) = property_name {
+                    // {class}_get_{collection} — get collection items
+                    self.handle_dynamic_get_collection(&perspective_id, &class_name, prop, &args)
+                        .await
+                } else {
+                    self.handle_dynamic_get(&perspective_id, &class_name, &args)
+                        .await
+                }
+            }
+            "set" => {
+                // {class}_set_{property}
+                let prop = property_name.as_deref().unwrap_or("");
+                self.handle_dynamic_set_property(&perspective_id, &class_name, prop, &args)
+                    .await
+            }
+            "add" => {
+                // {class}_add_{collection}
+                let prop = property_name.as_deref().unwrap_or("");
+                self.handle_dynamic_add_collection(&perspective_id, &class_name, prop, &args)
+                    .await
+            }
+            "remove" => {
+                // {class}_remove_{collection}
+                let prop = property_name.as_deref().unwrap_or("");
+                self.handle_dynamic_remove_collection(&perspective_id, &class_name, prop, &args)
                     .await
             }
             "update" => {
@@ -2422,6 +2509,173 @@ impl Ad4mMcpHandler {
             "links_removed": removed,
         }))
         .unwrap_or_else(|e| format!("Error: {}", e))
+    }
+
+    /// Handle {class}_set_{property} — set a single property on a subject instance
+    async fn handle_dynamic_set_property(
+        &self,
+        perspective_id: &str,
+        class_name: &str,
+        property_name: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+    ) -> String {
+        let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
+            Some(addr) => addr.to_string(),
+            None => return "Missing required parameter: expression_address".to_string(),
+        };
+        let value = match args.get("value").and_then(|v| v.as_str()) {
+            Some(v) => v.to_string(),
+            None => return "Missing required parameter: value".to_string(),
+        };
+
+        let capabilities = self.get_capabilities().await;
+        if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+            return format!("Capability error: {}", e);
+        }
+
+        let mut perspective = match get_perspective(perspective_id) {
+            Some(p) => p,
+            None => return format!("Perspective not found: {}", perspective_id),
+        };
+
+        // Use the perspective's set_single_target to set property via SHACL actions
+        match perspective
+            .set_single_target(&expression_address, class_name, property_name, &value)
+            .await
+        {
+            Ok(_) => serde_json::to_string_pretty(&json!({
+                "success": true,
+                "expression_address": expression_address,
+                "property": property_name,
+                "value": value,
+            }))
+            .unwrap_or_else(|e| format!("Error: {}", e)),
+            Err(e) => format!("Error setting property '{}': {}", property_name, e),
+        }
+    }
+
+    /// Handle {class}_get_{collection} — get items in a collection
+    async fn handle_dynamic_get_collection(
+        &self,
+        perspective_id: &str,
+        class_name: &str,
+        collection_name: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+    ) -> String {
+        let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
+            Some(addr) => addr.to_string(),
+            None => return "Missing required parameter: expression_address".to_string(),
+        };
+
+        let capabilities = self.get_capabilities().await;
+        if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+            return format!("Capability error: {}", e);
+        }
+
+        let perspective = match get_perspective(perspective_id) {
+            Some(p) => p,
+            None => return format!("Perspective not found: {}", perspective_id),
+        };
+
+        match perspective
+            .get_collection(&expression_address, class_name, collection_name)
+            .await
+        {
+            Ok(items) => serde_json::to_string_pretty(&json!({
+                "expression_address": expression_address,
+                "collection": collection_name,
+                "items": items,
+            }))
+            .unwrap_or_else(|e| format!("Error: {}", e)),
+            Err(e) => format!("Error getting collection '{}': {}", collection_name, e),
+        }
+    }
+
+    /// Handle {class}_add_{collection} — add item to a collection
+    async fn handle_dynamic_add_collection(
+        &self,
+        perspective_id: &str,
+        class_name: &str,
+        collection_name: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+    ) -> String {
+        let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
+            Some(addr) => addr.to_string(),
+            None => return "Missing required parameter: expression_address".to_string(),
+        };
+        let value = match args.get("value").and_then(|v| v.as_str()) {
+            Some(v) => v.to_string(),
+            None => return "Missing required parameter: value".to_string(),
+        };
+
+        let capabilities = self.get_capabilities().await;
+        if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+            return format!("Capability error: {}", e);
+        }
+
+        let mut perspective = match get_perspective(perspective_id) {
+            Some(p) => p,
+            None => return format!("Perspective not found: {}", perspective_id),
+        };
+
+        match perspective
+            .add_to_collection(&expression_address, class_name, collection_name, &value)
+            .await
+        {
+            Ok(_) => serde_json::to_string_pretty(&json!({
+                "success": true,
+                "expression_address": expression_address,
+                "collection": collection_name,
+                "added": value,
+            }))
+            .unwrap_or_else(|e| format!("Error: {}", e)),
+            Err(e) => format!("Error adding to collection '{}': {}", collection_name, e),
+        }
+    }
+
+    /// Handle {class}_remove_{collection} — remove item from a collection
+    async fn handle_dynamic_remove_collection(
+        &self,
+        perspective_id: &str,
+        class_name: &str,
+        collection_name: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+    ) -> String {
+        let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
+            Some(addr) => addr.to_string(),
+            None => return "Missing required parameter: expression_address".to_string(),
+        };
+        let value = match args.get("value").and_then(|v| v.as_str()) {
+            Some(v) => v.to_string(),
+            None => return "Missing required parameter: value".to_string(),
+        };
+
+        let capabilities = self.get_capabilities().await;
+        if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+            return format!("Capability error: {}", e);
+        }
+
+        let mut perspective = match get_perspective(perspective_id) {
+            Some(p) => p,
+            None => return format!("Perspective not found: {}", perspective_id),
+        };
+
+        match perspective
+            .remove_from_collection(&expression_address, class_name, collection_name, &value)
+            .await
+        {
+            Ok(_) => serde_json::to_string_pretty(&json!({
+                "success": true,
+                "expression_address": expression_address,
+                "collection": collection_name,
+                "removed": value,
+            }))
+            .unwrap_or_else(|e| format!("Error: {}", e)),
+            Err(e) => format!(
+                "Error removing from collection '{}': {}",
+                collection_name, e
+            ),
+        }
     }
 }
 
