@@ -2669,9 +2669,49 @@ impl Ad4mMcpHandler {
             None => return format!("Perspective not found: {}", perspective_id),
         };
 
-        // Use the perspective's set_single_target to set property via SHACL actions
+        // Resolve property predicate via SHACL
+        let predicate = match self
+            .resolve_property_predicate(&perspective, class_name, property_name)
+            .await
+        {
+            Ok(pred) => pred,
+            Err(e) => return format!("Error resolving property '{}': {}", property_name, e),
+        };
+
+        // Remove existing links with this predicate (setSingleTarget pattern)
+        let existing = perspective
+            .get_links(&LinkQuery {
+                source: Some(expression_address.clone()),
+                predicate: Some(predicate.clone()),
+                ..Default::default()
+            })
+            .await;
+
+        if let Ok(links) = existing {
+            for link in links {
+                let _ = perspective.remove_link(link.into(), None).await;
+            }
+        }
+
+        let agent_context = match self.get_agent_context().await {
+            Ok(ctx) => ctx,
+            Err(e) => return format!("Authentication error: {}", e),
+        };
+
+        let target = if value.starts_with("literal://") || value.contains("://") {
+            value.clone()
+        } else {
+            format!("literal://string:{}", value)
+        };
+
+        let link = Link {
+            source: expression_address.clone(),
+            predicate: Some(predicate),
+            target,
+        };
+
         match perspective
-            .set_single_target(&expression_address, class_name, property_name, &value)
+            .add_link(link, LinkStatus::Shared, None, &agent_context)
             .await
         {
             Ok(_) => serde_json::to_string_pretty(&json!({
@@ -2708,16 +2748,33 @@ impl Ad4mMcpHandler {
             None => return format!("Perspective not found: {}", perspective_id),
         };
 
-        match perspective
-            .get_collection(&expression_address, class_name, collection_name)
+        // Resolve collection predicate via SHACL
+        let predicate = match self
+            .resolve_property_predicate(&perspective, class_name, collection_name)
             .await
         {
-            Ok(items) => serde_json::to_string_pretty(&json!({
-                "expression_address": expression_address,
-                "collection": collection_name,
-                "items": items,
-            }))
-            .unwrap_or_else(|e| format!("Error: {}", e)),
+            Ok(pred) => pred,
+            Err(e) => return format!("Error resolving collection '{}': {}", collection_name, e),
+        };
+
+        // Query all links with this predicate from the expression
+        match perspective
+            .get_links(&LinkQuery {
+                source: Some(expression_address.clone()),
+                predicate: Some(predicate),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) => {
+                let items: Vec<String> = links.iter().map(|l| l.target.clone()).collect();
+                serde_json::to_string_pretty(&json!({
+                    "expression_address": expression_address,
+                    "collection": collection_name,
+                    "items": items,
+                }))
+                .unwrap_or_else(|e| format!("Error: {}", e))
+            }
             Err(e) => format!("Error getting collection '{}': {}", collection_name, e),
         }
     }
@@ -2749,8 +2806,34 @@ impl Ad4mMcpHandler {
             None => return format!("Perspective not found: {}", perspective_id),
         };
 
+        // Resolve collection predicate via SHACL
+        let predicate = match self
+            .resolve_property_predicate(&perspective, class_name, collection_name)
+            .await
+        {
+            Ok(pred) => pred,
+            Err(e) => return format!("Error resolving collection '{}': {}", collection_name, e),
+        };
+
+        let agent_context = match self.get_agent_context().await {
+            Ok(ctx) => ctx,
+            Err(e) => return format!("Authentication error: {}", e),
+        };
+
+        let target = if value.starts_with("literal://") || value.contains("://") {
+            value.clone()
+        } else {
+            format!("literal://string:{}", value)
+        };
+
+        let link = Link {
+            source: expression_address.clone(),
+            predicate: Some(predicate),
+            target,
+        };
+
         match perspective
-            .add_to_collection(&expression_address, class_name, collection_name, &value)
+            .add_link(link, LinkStatus::Shared, None, &agent_context)
             .await
         {
             Ok(_) => serde_json::to_string_pretty(&json!({
@@ -2791,17 +2874,47 @@ impl Ad4mMcpHandler {
             None => return format!("Perspective not found: {}", perspective_id),
         };
 
-        match perspective
-            .remove_from_collection(&expression_address, class_name, collection_name, &value)
+        // Resolve collection predicate via SHACL
+        let predicate = match self
+            .resolve_property_predicate(&perspective, class_name, collection_name)
             .await
         {
-            Ok(_) => serde_json::to_string_pretty(&json!({
-                "success": true,
-                "expression_address": expression_address,
-                "collection": collection_name,
-                "removed": value,
-            }))
-            .unwrap_or_else(|e| format!("Error: {}", e)),
+            Ok(pred) => pred,
+            Err(e) => return format!("Error resolving collection '{}': {}", collection_name, e),
+        };
+
+        // Find and remove the link with matching target
+        let target = if value.starts_with("literal://") || value.contains("://") {
+            value.clone()
+        } else {
+            format!("literal://string:{}", value)
+        };
+
+        match perspective
+            .get_links(&LinkQuery {
+                source: Some(expression_address.clone()),
+                predicate: Some(predicate),
+                target: Some(target),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) => {
+                let mut removed = 0;
+                for link in links {
+                    if perspective.remove_link(link.into(), None).await.is_ok() {
+                        removed += 1;
+                    }
+                }
+                serde_json::to_string_pretty(&json!({
+                    "success": true,
+                    "expression_address": expression_address,
+                    "collection": collection_name,
+                    "removed": value,
+                    "links_removed": removed,
+                }))
+                .unwrap_or_else(|e| format!("Error: {}", e))
+            }
             Err(e) => format!(
                 "Error removing from collection '{}': {}",
                 collection_name, e
