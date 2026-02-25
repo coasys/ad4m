@@ -6,8 +6,8 @@
 use super::server::McpContext;
 use crate::agent::capabilities::{
     capabilities_from_token, check_capability,
-    defs::PERSPECTIVE_CREATE_CAPABILITY,
-    generate_capability_token, get_user_default_capabilities, permit_capability, ALL_CAPABILITY,
+    defs::{ALL_CAPABILITY, PERSPECTIVE_CREATE_CAPABILITY},
+    generate_capability_token, get_user_default_capabilities, permit_capability,
     request_capability as cap_request_capability,
     token::{decode_jwt, generate_jwt as generate_jwt_token},
     AuthInfo, AuthInfoExtended, Capability, DEFAULT_TOKEN_VALID_PERIOD,
