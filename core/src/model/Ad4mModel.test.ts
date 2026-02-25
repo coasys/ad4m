@@ -21,7 +21,6 @@ describe("Ad4mModel.getModelMetadata()", () => {
         resolveLanguage: "literal",
         required: true,
         writable: true,
-        initial: "literal://string:uninitialized",
       })
       name: string = "";
 
@@ -153,7 +152,6 @@ describe("Ad4mModel.getModelMetadata()", () => {
         resolveLanguage: "literal",
         required: true,
         writable: true,
-        initial: "literal://string:uninitialized",
       })
       name: string = "";
 
@@ -462,7 +460,6 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
       through: "recipe://name",
       required: true,
       writable: true,
-      initial: "literal://string:uninitialized",
     })
     name: string = "";
 
@@ -470,7 +467,6 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
       through: "recipe://rating",
       required: true,
       writable: true,
-      initial: "literal://string:uninitialized",
     })
     rating: number = 0;
 
@@ -920,7 +916,6 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
         through: "task://completed",
         required: true,
         writable: true,
-        initial: "literal://string:uninitialized",
       })
       completed: boolean = false;
     }
@@ -1007,7 +1002,6 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
       through: "recipe://name",
       required: true,
       writable: true,
-      initial: "literal://string:uninitialized",
     })
     name: string = "";
 
@@ -1015,7 +1009,6 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
       through: "recipe://rating",
       required: true,
       writable: true,
-      initial: "literal://string:uninitialized",
     })
     rating: number = 0;
 
@@ -1499,7 +1492,6 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
       through: "recipe://name",
       required: true,
       writable: true,
-      initial: "literal://string:uninitialized",
     })
     name: string = "";
 
@@ -1507,7 +1499,6 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
       through: "recipe://rating",
       required: true,
       writable: true,
-      initial: "literal://string:uninitialized",
     })
     rating: number = 0;
 

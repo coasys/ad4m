@@ -262,7 +262,6 @@ describe("Multi-User Neighbourhood Sharing tests", () => {
         @Property({
           through: "test://user1-property",
           writable: true,
-          initial: "test://user1-initial",
           resolveLanguage: "literal",
         })
         user1Property: string = "";
@@ -313,7 +312,6 @@ describe("Multi-User Neighbourhood Sharing tests", () => {
         @Property({
           through: "test://user2-property",
           writable: true,
-          initial: "test://user2-initial",
           resolveLanguage: "literal",
         })
         user2Property: string = "";

@@ -66,7 +66,14 @@ export interface PropertyOptions {
   through?: string;
 
   /**
-   * The initial value of the property. Required if the property is marked as required.
+   * The initial value written by the SHACL constructor action.
+   *
+   * For `writable: true` properties this is **optional** — Ad4mModel
+   * automatically derives a placeholder and overwrites it with the real
+   * instance field value when `save()` is called. Only set this explicitly
+   * when you need a specific non-literal default URI (e.g. a custom
+   * `resolveLanguage` address) or want a sentinel value if the property
+   * is never set.
    */
   initial?: string;
 
@@ -116,7 +123,7 @@ export interface PropertyOptions {
  * Declares a typed property backed by a single link triple in the perspective.
  *
  * @param opts.through        - Predicate URI (required)
- * @param opts.initial        - Default value written by the constructor action
+ * @param opts.initial        - Default value written by the constructor action (auto-derived for writable properties; only needed for custom URIs)
  * @param opts.required       - Adds `sh:minCount 1` to the SHACL shape
  * @param opts.writable       - Generates a setter action (default: `true` when `through` is set)
  * @param opts.resolveLanguage - Language for value resolution (`"literal"`, etc.)
@@ -495,12 +502,23 @@ export function Model(opts: ModelConfig) {
           path: propMeta.through,
         };
 
-        // Determine datatype from initial value or resolveLanguage
+        // Auto-derive a constructor placeholder for writable non-flag properties
+        // that don't have an explicit initial. The specific placeholder value
+        // doesn't matter — createSubject's initialValues mechanism overwrites it
+        // with the actual instance field value via the setter actions. We just
+        // need some valid URI so the predicate appears in the constructor actions.
+        const effectiveInitial: string | undefined =
+          propMeta.initial ??
+          (propMeta.writable && !propMeta.flag
+            ? "literal://string:"
+            : undefined);
+
+        // Determine datatype from TypeScript default value or resolveLanguage
         if (propMeta.resolveLanguage === "literal") {
-          // If it resolves via literal language, it's likely a string
+          // If it resolves via literal language, it's a string
           propShape.datatype = "xsd://string";
-        } else if (propMeta.initial) {
-          // Try to infer from initial value type
+        } else {
+          // Try to infer from the prototype's default value type
           const initialType = typeof obj[propName];
           if (initialType === "number") {
             propShape.datatype = "xsd://integer";
@@ -563,16 +581,21 @@ export function Model(opts: ModelConfig) {
           }
         }
 
-        // Add to constructor actions if property has initial value
-        if (propMeta.initial) {
+        // Add to constructor actions (always for writable non-flag, using the
+        // effective placeholder — createSubject's initialValues will override
+        // the target with the real instance value via the setter actions).
+        if (effectiveInitial) {
           constructorActions.push({
             action: "addLink",
             source: "this",
             predicate: propMeta.through,
-            target: propMeta.initial,
+            target: effectiveInitial,
           });
+        }
 
-          // Add to destructor actions
+        // Always add destructor action for writable non-flag properties so
+        // delete() cleans them up regardless of whether initial was explicit.
+        if (propMeta.writable && !propMeta.flag) {
           destructorActions.push({
             action: "removeLink",
             source: "this",

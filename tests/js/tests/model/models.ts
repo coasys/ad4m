@@ -28,12 +28,7 @@ export class TestComment extends Ad4mModel {
   @Flag({ through: "test://comment_type", value: "test://comment" })
   type = "test://comment";
 
-  @Property({
-    through: "test://body",
-    required: true,
-    writable: true,
-    initial: "literal://string:uninitialized",
-  })
+  @Property({ through: "test://body", required: true, writable: true })
   body: string = "";
 
   /** Reverse traversal — find the TestPost that has a test://has_comment link pointing to this */
@@ -56,7 +51,6 @@ export class TestTag extends Ad4mModel {
     through: "test://label",
     required: true,
     writable: true,
-    initial: "literal://string:uninitialized",
     resolveLanguage: "literal",
   })
   label: string = "";
@@ -77,7 +71,6 @@ export class TestPost extends Ad4mModel {
     through: "test://title",
     required: true,
     writable: true,
-    initial: "literal://string:uninitialized",
     resolveLanguage: "literal",
   })
   title: string = "";
@@ -97,8 +90,9 @@ export class TestPost extends Ad4mModel {
   @HasOne(() => TestComment, { through: "test://pinned_comment" })
   pinnedComment: TestComment | null = null;
 }
-export interface TestPost
-  extends HasManyMethods<"tags" | "comments" | "pinnedComment"> {}
+export interface TestPost extends HasManyMethods<
+  "tags" | "comments" | "pinnedComment"
+> {}
 
 // ── TestBaseModel ─────────────────────────────────────────────────────────────
 
@@ -116,11 +110,6 @@ export class TestDerivedModel extends TestBaseModel {
   @Flag({ through: "test://poll_type", value: "test://poll_block" })
   pollType = "test://poll_block";
 
-  @Property({
-    through: "test://poll_question",
-    required: true,
-    writable: true,
-    initial: "literal://string:untitled",
-  })
+  @Property({ through: "test://poll_question", required: true, writable: true })
   question: string = "";
 }
