@@ -1915,11 +1915,7 @@ impl Ad4mMcpHandler {
 // Dynamic SHACL Tool Generation
 // ============================================================================
 
-/// Property info extracted from SHACL shapes
-struct ClassPropertyInfo {
-    name: String,
-    is_collection: bool,
-}
+use super::shacl::{self, ShaclClass, ShaclProperty};
 
 impl Ad4mMcpHandler {
     /// Generate dynamic MCP tools from SHACL subject classes across all perspectives
@@ -1939,45 +1935,25 @@ impl Ad4mMcpHandler {
                 None => continue,
             };
 
-            let class_links = match perspective
-                .get_links(&LinkQuery {
-                    predicate: Some("rdf://type".to_string()),
-                    target: Some("ad4m://SubjectClass".to_string()),
-                    ..Default::default()
-                })
-                .await
-            {
-                Ok(links) => links,
-                Err(_) => continue,
-            };
+            let classes = shacl::load_classes(&perspective).await;
 
-            for class_link in &class_links {
-                let class_uri = &class_link.data.source;
-                let class_name = class_uri
-                    .split("://")
-                    .last()
-                    .unwrap_or(class_uri)
-                    .to_string();
-                let class_name_lower = class_name.to_lowercase();
-
-                if !seen_classes.insert(class_name_lower.clone()) {
+            for class in &classes {
+                if !seen_classes.insert(class.name_lower.clone()) {
                     continue;
                 }
 
-                let properties = Self::get_class_properties(&perspective, &class_name).await;
-
-                tools.push(Self::make_create_tool(&class_name, &properties));
-                tools.push(Self::make_query_tool(&class_name));
-                tools.push(Self::make_get_tool(&class_name));
-                tools.push(Self::make_delete_tool(&class_name));
+                tools.push(Self::make_create_tool(&class.name, &class.properties));
+                tools.push(Self::make_query_tool(&class.name));
+                tools.push(Self::make_get_tool(&class.name));
+                tools.push(Self::make_delete_tool(&class.name));
                 // Per-property set tools and collection tools
-                for prop in &properties {
+                for prop in &class.properties {
                     if prop.is_collection {
-                        tools.push(Self::make_collection_get_tool(&class_name, &prop.name));
-                        tools.push(Self::make_collection_add_tool(&class_name, &prop.name));
-                        tools.push(Self::make_collection_remove_tool(&class_name, &prop.name));
+                        tools.push(Self::make_collection_get_tool(&class.name, &prop.name));
+                        tools.push(Self::make_collection_add_tool(&class.name, &prop.name));
+                        tools.push(Self::make_collection_remove_tool(&class.name, &prop.name));
                     } else {
-                        tools.push(Self::make_set_property_tool(&class_name, &prop.name));
+                        tools.push(Self::make_set_property_tool(&class.name, &prop.name));
                     }
                 }
             }
@@ -1987,70 +1963,6 @@ impl Ad4mMcpHandler {
     }
 
     /// Extract property information from a SHACL shape
-    async fn get_class_properties(
-        perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
-        class_name: &str,
-    ) -> Vec<ClassPropertyInfo> {
-        let name_literal = format!("literal://string:shacl://{}", class_name);
-        let shape_links = match perspective
-            .get_links(&LinkQuery {
-                source: Some(name_literal),
-                predicate: Some("ad4m://shacl_shape_uri".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => links,
-            Err(_) => return vec![],
-        };
-
-        if shape_links.is_empty() {
-            return vec![];
-        }
-
-        let shape_uri = &shape_links[0].data.target;
-        let prop_links = match perspective
-            .get_links(&LinkQuery {
-                source: Some(shape_uri.clone()),
-                predicate: Some("sh://property".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => links,
-            Err(_) => return vec![],
-        };
-
-        let mut properties = Vec::new();
-        for prop_link in &prop_links {
-            let prop_uri = &prop_link.data.target;
-            let prop_name = prop_uri
-                .rsplit_once('.')
-                .map(|(_, name)| name.to_string())
-                .unwrap_or_else(|| prop_uri.clone());
-
-            let is_collection = match perspective
-                .get_links(&LinkQuery {
-                    source: Some(prop_uri.clone()),
-                    predicate: Some("rdf://type".to_string()),
-                    target: Some("ad4m://CollectionShape".to_string()),
-                    ..Default::default()
-                })
-                .await
-            {
-                Ok(links) => !links.is_empty(),
-                Err(_) => false,
-            };
-
-            properties.push(ClassPropertyInfo {
-                name: prop_name,
-                is_collection,
-            });
-        }
-
-        properties
-    }
-
     fn make_tool_schema(
         properties: Vec<(&str, &str)>,
         required: Vec<&str>,
@@ -2069,7 +1981,7 @@ impl Ad4mMcpHandler {
         Arc::new(schema)
     }
 
-    fn make_create_tool(class_name: &str, properties: &[ClassPropertyInfo]) -> Tool {
+    fn make_create_tool(class_name: &str, properties: &[ShaclProperty]) -> Tool {
         let name_lower = class_name.to_lowercase();
         let mut prop_entries: Vec<(String, String)> = vec![
             ("perspective_id".to_string(), "Perspective UUID".to_string()),
@@ -2293,7 +2205,7 @@ impl Ad4mMcpHandler {
                     ))]));
                 }
             };
-            match Self::find_class_name(&perspective, class_name_lower).await {
+            match shacl::find_class_name(&perspective, class_name_lower).await {
                 Some(name) => name,
                 None => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -2353,30 +2265,6 @@ impl Ad4mMcpHandler {
         };
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
-
-    /// Find the actual class name (with original casing) from a lowercase name
-    async fn find_class_name(
-        perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
-        class_name_lower: &str,
-    ) -> Option<String> {
-        let class_links = perspective
-            .get_links(&LinkQuery {
-                predicate: Some("rdf://type".to_string()),
-                target: Some("ad4m://SubjectClass".to_string()),
-                ..Default::default()
-            })
-            .await
-            .ok()?;
-
-        class_links.iter().find_map(|l| {
-            let name = l.data.source.split("://").last().unwrap_or("");
-            if name.to_lowercase() == class_name_lower {
-                Some(name.to_string())
-            } else {
-                None
-            }
-        })
     }
 
     async fn handle_dynamic_create(
