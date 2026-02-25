@@ -636,7 +636,10 @@ impl LanguageController {
                         }
                     }
                     Err(e) => {
-                        error!("Error getting language meta from language language: {}\nRetrying...", e);
+                        error!(
+                            "Error getting language meta from language language: {}\nRetrying...",
+                            e
+                        );
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5000 * (retry + 1))).await;
@@ -656,11 +659,17 @@ impl LanguageController {
                 language
             );
 
-            match controller.execute_on_language(ll_addr, &source_script).await {
+            match controller
+                .execute_on_language(ll_addr, &source_script)
+                .await
+            {
                 Ok(s) if !s.is_empty() => Some(s),
                 Ok(_) => None,
                 Err(e) => {
-                    warn!("Error getting language source from language language: {}", e);
+                    warn!(
+                        "Error getting language source from language language: {}",
+                        e
+                    );
                     None
                 }
             }
@@ -689,14 +698,14 @@ impl LanguageController {
             // Creating additional V8 isolates at this point causes segfaults
             // in the forked deno_core. Instead, fall through to the JS-side
             // installLanguage which uses the main JsCore worker.
-            info!("install_language: bundle saved, delegating runtime loading to JS side for {}", language);
+            info!(
+                "install_language: bundle saved, delegating runtime loading to JS side for {}",
+                language
+            );
         }
 
         // Fall back to JS-side LanguageController for install
-        log::debug!(
-            "install_language: falling back to JS side for {}",
-            language
-        );
+        log::debug!("install_language: falling back to JS side for {}", language);
         let script = format!(
             r#"
             (async () => {{
@@ -827,14 +836,14 @@ impl LanguageController {
     }
 
     /// Resolve a language for an expression reference, resolving aliases first
-    pub async fn language_for_expression(
-        &self,
-        address: &str,
-    ) -> Result<Language, LanguageError> {
+    pub async fn language_for_expression(&self, address: &str) -> Result<Language, LanguageError> {
         // Resolve alias if present
         let resolved_address = {
             let aliases = self.language_aliases.lock().await;
-            aliases.get(address).cloned().unwrap_or_else(|| address.to_string())
+            aliases
+                .get(address)
+                .cloned()
+                .unwrap_or_else(|| address.to_string())
         };
 
         // Look up in runtimes
@@ -941,8 +950,7 @@ impl LanguageController {
         };
 
         // Create temp directory for DNA templating operations
-        let temp_templating_path =
-            std::env::temp_dir().join(source_language_hash);
+        let temp_templating_path = std::env::temp_dir().join(source_language_hash);
         if temp_templating_path.exists() {
             let _ = fs::remove_dir_all(&temp_templating_path);
         }
@@ -952,10 +960,7 @@ impl LanguageController {
 
         // Extract base64-encoded happ from the line
         let happ_line = &source_lines[happ_index];
-        let happ_code = happ_line
-            .split("var happ = ")
-            .nth(1)
-            .unwrap_or("");
+        let happ_code = happ_line.split("var happ = ").nth(1).unwrap_or("");
 
         // Strip leading `"` and trailing `";`
         let happ_code = happ_code.trim();
@@ -968,21 +973,23 @@ impl LanguageController {
         };
 
         // Decode base64 and write to temp file
-        let happ_bytes = BASE64_STANDARD.decode(happ_code).map_err(|e| {
-            LanguageError::InvalidBundle {
-                message: format!("Failed to decode happ base64: {}", e),
-            }
-        })?;
+        let happ_bytes =
+            BASE64_STANDARD
+                .decode(happ_code)
+                .map_err(|e| LanguageError::InvalidBundle {
+                    message: format!("Failed to decode happ base64: {}", e),
+                })?;
         fs::write(&temp_happ_path, &happ_bytes)?;
 
         // Unpack hApp bundle
         info!("readAndTemplateHolochainDna: unpacking hApp bundle");
-        let holochain_service = maybe_get_holochain_service().await.ok_or_else(|| {
-            LanguageError::RuntimeError {
-                address: source_language_hash.to_string(),
-                message: "Holochain service not available".to_string(),
-            }
-        })?;
+        let holochain_service =
+            maybe_get_holochain_service()
+                .await
+                .ok_or_else(|| LanguageError::RuntimeError {
+                    address: source_language_hash.to_string(),
+                    message: "Holochain service not available".to_string(),
+                })?;
 
         let unpack_happ_path = holochain_service
             .unpack_happ(temp_happ_path.to_string_lossy().to_string())
@@ -997,8 +1004,7 @@ impl LanguageController {
         let _ = fs::remove_file(&temp_happ_path);
 
         // Read happ.yaml
-        let happ_yaml_path =
-            PathBuf::from(&unpack_happ_path).join("happ.yaml");
+        let happ_yaml_path = PathBuf::from(&unpack_happ_path).join("happ.yaml");
         if !happ_yaml_path.exists() {
             return Err(LanguageError::InvalidBundle {
                 message: format!(
@@ -1009,12 +1015,11 @@ impl LanguageController {
         }
 
         let happ_yaml_content = fs::read_to_string(&happ_yaml_path)?;
-        let happ_yaml: JsonValue =
-            serde_yaml::from_str(&happ_yaml_content).map_err(|e| {
-                LanguageError::SerializationError {
-                    message: format!("Failed to parse happ.yaml: {}", e),
-                }
-            })?;
+        let happ_yaml: JsonValue = serde_yaml::from_str(&happ_yaml_content).map_err(|e| {
+            LanguageError::SerializationError {
+                message: format!("Failed to parse happ.yaml: {}", e),
+            }
+        })?;
 
         // Extract roles[0].dna.path
         let dna_rel_path = happ_yaml
@@ -1027,8 +1032,7 @@ impl LanguageController {
                 message: "Could not find roles[0].dna.path in happ.yaml".to_string(),
             })?;
 
-        let dna_bundle_path =
-            PathBuf::from(&unpack_happ_path).join(dna_rel_path);
+        let dna_bundle_path = PathBuf::from(&unpack_happ_path).join(dna_rel_path);
 
         // Unpack DNA
         info!("readAndTemplateHolochainDna: unpacking DNA");
@@ -1042,8 +1046,7 @@ impl LanguageController {
         let unpack_dna_path = unpack_dna_path.trim().to_string();
 
         // Read dna.yaml
-        let dna_yaml_path =
-            PathBuf::from(&unpack_dna_path).join("dna.yaml");
+        let dna_yaml_path = PathBuf::from(&unpack_dna_path).join("dna.yaml");
         if !dna_yaml_path.exists() {
             return Err(LanguageError::InvalidBundle {
                 message: format!(
@@ -1054,12 +1057,11 @@ impl LanguageController {
         }
 
         let dna_yaml_content = fs::read_to_string(&dna_yaml_path)?;
-        let mut dna_yaml: JsonValue =
-            serde_yaml::from_str(&dna_yaml_content).map_err(|e| {
-                LanguageError::SerializationError {
-                    message: format!("Failed to parse dna.yaml: {}", e),
-                }
-            })?;
+        let mut dna_yaml: JsonValue = serde_yaml::from_str(&dna_yaml_content).map_err(|e| {
+            LanguageError::SerializationError {
+                message: format!("Failed to parse dna.yaml: {}", e),
+            }
+        })?;
 
         // Apply template data to DNA yaml
         if let Some(uid) = template_data.get("uid") {
@@ -1081,11 +1083,10 @@ impl LanguageController {
         }
 
         // Write modified dna.yaml back
-        let dna_yaml_dump = serde_yaml::to_string(&dna_yaml).map_err(|e| {
-            LanguageError::SerializationError {
+        let dna_yaml_dump =
+            serde_yaml::to_string(&dna_yaml).map_err(|e| LanguageError::SerializationError {
                 message: format!("Failed to serialize dna.yaml: {}", e),
-            }
-        })?;
+            })?;
         fs::write(&dna_yaml_path, &dna_yaml_dump)?;
 
         // Pack DNA
@@ -1160,10 +1161,8 @@ impl LanguageController {
             .await?;
 
         let meta_expression: JsonValue =
-            serde_json::from_str(&meta_result).map_err(|e| {
-                LanguageError::SerializationError {
-                    message: format!("Failed to parse language expression: {}", e),
-                }
+            serde_json::from_str(&meta_result).map_err(|e| LanguageError::SerializationError {
+                message: format!("Failed to parse language expression: {}", e),
             })?;
 
         if meta_expression.is_null() {
@@ -1188,8 +1187,7 @@ impl LanguageController {
             });
         }
 
-        let mut source_lines: Vec<String> =
-            source_language.split('\n').map(String::from).collect();
+        let mut source_lines: Vec<String> = source_language.split('\n').map(String::from).collect();
 
         // Sort template_data keys (equivalent to JS orderObject)
         let sorted_data: serde_json::Map<String, JsonValue> = {
@@ -1207,11 +1205,7 @@ impl LanguageController {
 
         // Read and template Holochain DNA
         let happ_code = self
-            .read_and_template_holochain_dna(
-                &source_lines,
-                &template_data,
-                source_language_hash,
-            )
+            .read_and_template_holochain_dna(&source_lines, &template_data, source_language_hash)
             .await?;
 
         if let Some(happ_code) = happ_code {
@@ -1241,7 +1235,10 @@ impl LanguageController {
         template_data.shift_remove("happ");
 
         // Build the updated LanguageMeta
-        let meta_data = meta_expression.get("data").cloned().unwrap_or(JsonValue::Object(serde_json::Map::new()));
+        let meta_data = meta_expression
+            .get("data")
+            .cloned()
+            .unwrap_or(JsonValue::Object(serde_json::Map::new()));
 
         // If data is a string, parse it as JSON first
         let meta_data = if let JsonValue::String(s) = &meta_data {
@@ -1253,7 +1250,11 @@ impl LanguageController {
         let mut meta: LanguageMeta = match serde_json::from_value(meta_data.clone()) {
             Ok(m) => m,
             Err(e) => {
-                warn!("Failed to deserialize LanguageMeta from expression data: {}. Data: {:?}", e, &meta_data.to_string()[..meta_data.to_string().len().min(500)]);
+                warn!(
+                    "Failed to deserialize LanguageMeta from expression data: {}. Data: {:?}",
+                    e,
+                    &meta_data.to_string()[..meta_data.to_string().len().min(500)]
+                );
                 LanguageMeta::default()
             }
         };
@@ -1289,7 +1290,10 @@ impl LanguageController {
         // the rest of the removal – the JS version always continued to remove the
         // Holochain app and delete the language directory regardless.
         if let Err(e) = self.unload_language(address).await {
-            warn!("language_remove: unload_language failed for {}: {} – continuing with cleanup", address, e);
+            warn!(
+                "language_remove: unload_language failed for {}: {} – continuing with cleanup",
+                address, e
+            );
         }
 
         // Delegate to JS side for full cleanup (teardown JS language, remove Holochain DNA, etc.)
@@ -1309,7 +1313,10 @@ impl LanguageController {
                 info!("language_remove: JS-side removal succeeded for {}", address);
             }
             Err(e) => {
-                warn!("language_remove: JS-side removal failed for {}: {}", address, e);
+                warn!(
+                    "language_remove: JS-side removal failed for {}: {}",
+                    address, e
+                );
                 // Still try Rust-side cleanup as fallback
 
                 // Remove Holochain DNA for this language
@@ -1354,10 +1361,7 @@ impl LanguageController {
 
         // Check if already loaded
         if self.is_language_loaded(&resolved_address).await {
-            return Ok(Language::new(
-                resolved_address,
-                self.js_core.clone(),
-            ));
+            return Ok(Language::new(resolved_address, self.js_core.clone()));
         }
 
         // Get the language language address
@@ -1381,10 +1385,8 @@ impl LanguageController {
             .await?;
 
         let language_meta: JsonValue =
-            serde_json::from_str(&meta_result).map_err(|e| {
-                LanguageError::SerializationError {
-                    message: format!("Failed to parse language meta: {}", e),
-                }
+            serde_json::from_str(&meta_result).map_err(|e| LanguageError::SerializationError {
+                message: format!("Failed to parse language meta: {}", e),
             })?;
 
         if language_meta.is_null() {
@@ -1419,8 +1421,7 @@ impl LanguageController {
             .unwrap_or(JsonValue::Object(serde_json::Map::new()));
 
         // Get trusted agents
-        let trusted_agents =
-            RuntimeService::with_global_instance(|rs| rs.get_trusted_agents());
+        let trusted_agents = RuntimeService::with_global_instance(|rs| rs.get_trusted_agents());
         let agent_did = did();
 
         // Check if author is trusted
@@ -1523,11 +1524,9 @@ impl LanguageController {
                 .execute_on_language(&language_language_address, &source_meta_script)
                 .await?;
 
-            let source_language_meta: JsonValue =
-                serde_json::from_str(&source_meta_result).map_err(|e| {
-                    LanguageError::SerializationError {
-                        message: format!("Failed to parse source language meta: {}", e),
-                    }
+            let source_language_meta: JsonValue = serde_json::from_str(&source_meta_result)
+                .map_err(|e| LanguageError::SerializationError {
+                    message: format!("Failed to parse source language meta: {}", e),
                 })?;
 
             let source_author = source_language_meta
