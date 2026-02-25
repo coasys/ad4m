@@ -1179,27 +1179,16 @@ impl Ad4mMcpHandler {
                     return format!("Capability error: {}", e);
                 }
 
-                // Execute the flow's start action via perspective commands
-                match perspective
-                    .execute_commands(
-                        vec![Command {
-                            action: "addLink".to_string(),
-                            parameters: vec![],
-                        }],
-                        &p.expression_address,
-                        &agent_context,
-                    )
-                    .await
-                {
-                    Ok(_) => serde_json::to_string_pretty(&json!({
-                        "success": true,
-                        "expression": p.expression_address,
-                        "flow": p.flow_name,
-                        "message": "Flow started"
-                    }))
-                    .unwrap_or_else(|e| format!("Error: {}", e)),
-                    Err(e) => format!("Error starting flow: {}", e),
-                }
+                // TODO: Proper flow start requires loading the flow definition
+                // and executing its start actions. For now, return a placeholder.
+                // The full implementation needs SHACLFlow parsing in Rust.
+                serde_json::to_string_pretty(&json!({
+                    "success": false,
+                    "expression": p.expression_address,
+                    "flow": p.flow_name,
+                    "message": "Flow start not yet fully implemented - requires SHACLFlow parsing"
+                }))
+                .unwrap_or_else(|e| format!("Error: {}", e))
             }
             None => format!("Perspective not found: {}", p.perspective_id),
         }
