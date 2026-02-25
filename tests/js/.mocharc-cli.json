@@ -4,6 +4,7 @@
     "loader=ts-node/esm"
   ],
   "project": "tsconfig.json",
+  "require": "tests/setup.ts",
   "exit": true,
   "timeout": 1200000
 }
