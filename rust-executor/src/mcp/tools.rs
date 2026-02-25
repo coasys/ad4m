@@ -7,7 +7,7 @@ use super::server::McpContext;
 use crate::agent::capabilities::{
     capabilities_from_token, check_capability,
     defs::PERSPECTIVE_CREATE_CAPABILITY,
-    generate_capability_token, get_user_default_capabilities, permit_capability,
+    generate_capability_token, get_user_default_capabilities, permit_capability, ALL_CAPABILITY,
     request_capability as cap_request_capability,
     token::{decode_jwt, generate_jwt as generate_jwt_token},
     AuthInfo, AuthInfoExtended, Capability, DEFAULT_TOKEN_VALID_PERIOD,
@@ -1863,7 +1863,7 @@ impl Ad4mMcpHandler {
             app_domain: p.app_domain.clone(),
             app_url: p.app_url.clone(),
             app_icon_path: None,
-            capabilities: None,
+            capabilities: Some(vec![ALL_CAPABILITY.clone()]),
             user_email: None,
         };
 
