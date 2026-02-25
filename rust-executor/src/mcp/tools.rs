@@ -327,7 +327,8 @@ impl ServerHandler for Ad4mMcpHandler {
         }
 
         // Handle dynamic SHACL-generated tools
-        self.handle_dynamic_tool(&tool_name, request.arguments).await
+        self.handle_dynamic_tool(&tool_name, request.arguments)
+            .await
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
@@ -1247,10 +1248,7 @@ impl Ad4mMcpHandler {
     #[tool(
         description = "Get all subjects that are children of a given subject (linked via ad4m://has_child). Optionally filter by child class name. Returns a list of child addresses."
     )]
-    async fn get_subject_children(
-        &self,
-        params: Parameters<GetSubjectChildrenParams>,
-    ) -> String {
+    async fn get_subject_children(&self, params: Parameters<GetSubjectChildrenParams>) -> String {
         let p = &params.0;
 
         match get_perspective(&p.perspective_id) {
@@ -1285,11 +1283,7 @@ impl Ad4mMcpHandler {
 
                                 let matches = match type_links {
                                     Ok(tl) => tl.iter().any(|l| {
-                                        l.data
-                                            .target
-                                            .split("://")
-                                            .last()
-                                            .unwrap_or("")
+                                        l.data.target.split("://").last().unwrap_or("")
                                             == filter_class.as_str()
                                     }),
                                     Err(_) => false,
@@ -1999,7 +1993,10 @@ impl Ad4mMcpHandler {
                 self.handle_dynamic_create(&perspective_id, &class_name, &args)
                     .await
             }
-            "query" => self.handle_dynamic_query(&perspective_id, &class_name).await,
+            "query" => {
+                self.handle_dynamic_query(&perspective_id, &class_name)
+                    .await
+            }
             "get" => {
                 self.handle_dynamic_get(&perspective_id, &class_name, &args)
                     .await
@@ -2155,7 +2152,10 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Error: {}", e),
         };
 
-        let instances: Vec<String> = instance_links.iter().map(|l| l.data.source.clone()).collect();
+        let instances: Vec<String> = instance_links
+            .iter()
+            .map(|l| l.data.source.clone())
+            .collect();
         serde_json::to_string_pretty(&instances).unwrap_or_else(|e| format!("Error: {}", e))
     }
 
