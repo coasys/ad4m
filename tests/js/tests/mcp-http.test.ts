@@ -838,7 +838,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         });
 
         it("should add new SDNA and see new tools appear", async function() {
-            // Define a new Task class
+            // Define a new Task class with a subtasks collection
             var taskShacl = JSON.stringify({
                 target_class: "ad4m://Task",
                 properties: [
@@ -865,6 +865,18 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                         setter: [
                             { action: "setSingleTarget", source: "this", predicate: "ad4m://task_status", target: "value", local: false }
                         ]
+                    },
+                    {
+                        path: "ad4m://has_child",
+                        name: "subtasks",
+                        collection: true,
+                        writable: true,
+                        adder: [
+                            { action: "addLink", source: "this", predicate: "ad4m://has_child", target: "value", local: false }
+                        ],
+                        remover: [
+                            { action: "removeLink", source: "this", predicate: "ad4m://has_child", target: "value", local: false }
+                        ]
                     }
                 ],
                 constructor_actions: [
@@ -888,6 +900,13 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(toolNames).to.include('task_get');
             expect(toolNames).to.include('task_update');
             expect(toolNames).to.include('task_delete');
+            // Per-property set tools
+            expect(toolNames).to.include('task_set_title');
+            expect(toolNames).to.include('task_set_status');
+            // Collection tools
+            expect(toolNames).to.include('task_get_subtasks');
+            expect(toolNames).to.include('task_add_subtasks');
+            expect(toolNames).to.include('task_remove_subtasks');
             console.log("New Task tools appeared after add_model:", toolNames.filter(function(n: string) { return n.includes('task'); }));
 
             // Verify schema has the right properties
@@ -895,6 +914,195 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(createTask).to.exist;
             expect(createTask.inputSchema.properties).to.have.property('title');
             expect(createTask.inputSchema.properties).to.have.property('status');
+        });
+    });
+
+    describe("5. Dynamic Collection & Per-Property Tools", function() {
+        var task1Addr: string;
+        var task2Addr: string;
+        var task3Addr: string;
+
+        it("should have generated per-property set tools for Channel", async function() {
+            var tools = await listMcpTools(mcpSessionId);
+            var toolNames = tools.map(function(t: any) { return t.name; });
+            // Channel has name (scalar) and messages (collection)
+            expect(toolNames).to.include('channel_set_name');
+            expect(toolNames).to.include('channel_get_messages');
+            expect(toolNames).to.include('channel_add_messages');
+            expect(toolNames).to.include('channel_remove_messages');
+            // Message has body (scalar)
+            expect(toolNames).to.include('message_set_body');
+            console.log("Channel dynamic tools:", toolNames.filter(function(n: string) { return n.includes('channel_'); }));
+            console.log("Message dynamic tools:", toolNames.filter(function(n: string) { return n.includes('message_'); }));
+        });
+
+        it("should set channel name via channel_set_name", async function() {
+            var result = await callMcpTool('channel_set_name', {
+                perspective_id: perspectiveUuid,
+                expression_address: channel1Addr,
+                value: "general-renamed",
+            }, mcpSessionId);
+            expect(result.success).to.be.true;
+            expect(result.property).to.equal("name");
+
+            // Verify via channel_get
+            var data = await callMcpTool('channel_get', {
+                perspective_id: perspectiveUuid,
+                expression_address: channel1Addr,
+            }, mcpSessionId);
+            console.log("Channel after set_name:", JSON.stringify(data));
+        });
+
+        it("should get messages collection via channel_get_messages", async function() {
+            var result = await callMcpTool('channel_get_messages', {
+                perspective_id: perspectiveUuid,
+                expression_address: channel1Addr,
+            }, mcpSessionId);
+            console.log("channel_get_messages result:", JSON.stringify(result));
+            expect(result.collection).to.equal("messages");
+            expect(result.items).to.be.an('array');
+            expect(result.items.length).to.be.at.least(2);
+        });
+
+        it("should create tasks and add them as children of #general", async function() {
+            // Create task 1
+            task1Addr = "ad4m://task-" + Date.now() + "-1";
+            var result = await callMcpTool('task_create', {
+                perspective_id: perspectiveUuid,
+                expression_address: task1Addr,
+                title: "Fix the login bug",
+                status: "open",
+            }, mcpSessionId);
+            console.log("task_create result:", JSON.stringify(result));
+            expect(result.created).to.be.true;
+
+            // Create task 2
+            task2Addr = "ad4m://task-" + Date.now() + "-2";
+            result = await callMcpTool('task_create', {
+                perspective_id: perspectiveUuid,
+                expression_address: task2Addr,
+                title: "Update documentation",
+                status: "in-progress",
+            }, mcpSessionId);
+            expect(result.created).to.be.true;
+
+            // Add tasks as children of #general channel
+            result = await callMcpTool('channel_add_messages', {
+                perspective_id: perspectiveUuid,
+                expression_address: channel1Addr,
+                value: task1Addr,
+            }, mcpSessionId);
+            expect(result.success).to.be.true;
+
+            result = await callMcpTool('channel_add_messages', {
+                perspective_id: perspectiveUuid,
+                expression_address: channel1Addr,
+                value: task2Addr,
+            }, mcpSessionId);
+            expect(result.success).to.be.true;
+            console.log("Added 2 tasks as children of #general");
+        });
+
+        it("should get all children of #general via get_subject_children", async function() {
+            var result = await callMcpTool('get_subject_children', {
+                perspective_id: perspectiveUuid,
+                expression_address: channel1Addr,
+            }, mcpSessionId);
+            console.log("get_subject_children result:", JSON.stringify(result));
+            expect(result.children).to.be.an('array');
+            // Should have original messages + the 2 tasks we just added
+            expect(result.children.length).to.be.at.least(4);
+        });
+
+        it("should get children filtered by Task class", async function() {
+            var result = await callMcpTool('get_subject_children', {
+                perspective_id: perspectiveUuid,
+                expression_address: channel1Addr,
+                child_class_name: "Task",
+            }, mcpSessionId);
+            console.log("get_subject_children (Task) result:", JSON.stringify(result));
+            expect(result.children).to.be.an('array');
+            // Only the 2 tasks should match (they have rdf://type -> ad4m://Task)
+            expect(result.children.length).to.equal(2);
+        });
+
+        it("should update task status via task_set_status", async function() {
+            var result = await callMcpTool('task_set_status', {
+                perspective_id: perspectiveUuid,
+                expression_address: task1Addr,
+                value: "completed",
+            }, mcpSessionId);
+            expect(result.success).to.be.true;
+            expect(result.property).to.equal("status");
+
+            // Verify via task_get
+            var data = await callMcpTool('task_get', {
+                perspective_id: perspectiveUuid,
+                expression_address: task1Addr,
+            }, mcpSessionId);
+            console.log("Task after set_status:", JSON.stringify(data));
+        });
+
+        it("should add subtasks to a task via task_add_subtasks", async function() {
+            task3Addr = "ad4m://subtask-" + Date.now();
+            var result = await callMcpTool('task_create', {
+                perspective_id: perspectiveUuid,
+                expression_address: task3Addr,
+                title: "Write unit tests",
+                status: "open",
+            }, mcpSessionId);
+            expect(result.created).to.be.true;
+
+            // Add as subtask of task1
+            result = await callMcpTool('task_add_subtasks', {
+                perspective_id: perspectiveUuid,
+                expression_address: task1Addr,
+                value: task3Addr,
+            }, mcpSessionId);
+            expect(result.success).to.be.true;
+            console.log("Added subtask to task1");
+        });
+
+        it("should get subtasks via task_get_subtasks", async function() {
+            var result = await callMcpTool('task_get_subtasks', {
+                perspective_id: perspectiveUuid,
+                expression_address: task1Addr,
+            }, mcpSessionId);
+            console.log("task_get_subtasks result:", JSON.stringify(result));
+            expect(result.collection).to.equal("subtasks");
+            expect(result.items).to.be.an('array');
+            expect(result.items.length).to.equal(1);
+        });
+
+        it("should remove a message from channel via channel_remove_messages", async function() {
+            // Remove task1 from channel's messages
+            var result = await callMcpTool('channel_remove_messages', {
+                perspective_id: perspectiveUuid,
+                expression_address: channel1Addr,
+                value: task1Addr,
+            }, mcpSessionId);
+            expect(result.success).to.be.true;
+            expect(result.links_removed).to.be.at.least(1);
+
+            // Verify it's gone from channel's messages
+            var messages = await callMcpTool('channel_get_messages', {
+                perspective_id: perspectiveUuid,
+                expression_address: channel1Addr,
+            }, mcpSessionId);
+            var items = messages.items || [];
+            expect(items).to.not.include(task1Addr);
+            console.log("Removed task1 from channel, remaining items:", items.length);
+        });
+
+        it("should set message body via message_set_body", async function() {
+            var result = await callMcpTool('message_set_body', {
+                perspective_id: perspectiveUuid,
+                expression_address: msg1Addr,
+                value: "Welcome to the channel! (edited)",
+            }, mcpSessionId);
+            expect(result.success).to.be.true;
+            expect(result.property).to.equal("body");
+            console.log("Updated message body via message_set_body");
         });
     });
 });
