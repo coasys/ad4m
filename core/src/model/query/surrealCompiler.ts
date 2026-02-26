@@ -280,21 +280,19 @@ export function matchesCondition(
   if (typeof condition === "object" && condition !== null) {
     const ops = condition as any;
 
-    if (ops.not !== undefined) {
-      return Array.isArray(ops.not)
-        ? !(ops.not as any[]).includes(value)
-        : value !== ops.not;
-    }
-
+    let allMet = true;
+    if (ops.not !== undefined)
+      allMet =
+        allMet &&
+        (Array.isArray(ops.not)
+          ? !(ops.not as any[]).includes(value)
+          : value !== ops.not);
     if (
       ops.between !== undefined &&
       Array.isArray(ops.between) &&
       ops.between.length === 2
-    ) {
-      return value >= ops.between[0] && value <= ops.between[1];
-    }
-
-    let allMet = true;
+    )
+      allMet = allMet && value >= ops.between[0] && value <= ops.between[1];
     if (ops.gt !== undefined) allMet = allMet && value > ops.gt;
     if (ops.gte !== undefined) allMet = allMet && value >= ops.gte;
     if (ops.lt !== undefined) allMet = allMet && value < ops.lt;
