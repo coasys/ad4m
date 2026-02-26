@@ -2,30 +2,34 @@
 /**
  * AD4M Waker — Node.js
  *
- * Watches AD4M perspectives for link changes via perspectiveLinkAdded
- * GraphQL subscription and wakes an OpenClaw agent when matching
- * links are detected.
+ * Watches AD4M perspectives via SurrealDB query subscriptions and wakes
+ * an OpenClaw agent when results change.
  *
- * Uses the graphql-ws protocol over WebSocket — no ad4m client dependency,
- * just raw GraphQL subscriptions (lighter, more portable).
+ * Uses the same mechanism as Flux UI:
+ * 1. perspectiveSubscribeSurrealQuery(uuid, query) → {subscriptionId, result}
+ * 2. perspectiveQuerySubscription(subscriptionId) → live updates via GraphQL sub
+ * 3. perspectiveKeepAliveSurrealQuery(uuid, subscriptionId) every 30s
  *
- * Subscriptions are defined by ID + match criteria (predicate, source, target).
- * When a match fires, the agent is woken with just the subscription ID.
- * The agent looks up context from its memory and uses MCP tools to fetch data.
+ * Only dependency: ws (WebSocket for Node.js)
  *
  * Usage:
  *   node ad4m-waker.js --config waker-config.json
  *
- * Or single subscription:
- *   node ad4m-waker.js \
- *     --executor-url ws://localhost:12100/graphql \
- *     --token <ad4m-token> \
- *     --wake-url http://localhost:18789/hooks/wake \
- *     --wake-token <hooks-token> \
- *     --perspective <uuid> \
- *     --id <subscription-id> \
- *     --match-predicate "ad4m://has_child" \
- *     --match-source "literal://string:<channel-id>"
+ * Config format:
+ *   {
+ *     "executorUrl": "ws://localhost:12100/graphql",
+ *     "token": "ad4m-admin-credential",
+ *     "wakeUrl": "http://localhost:18789/hooks/wake",
+ *     "wakeToken": "openclaw-wake-token",
+ *     "debounceMs": 2000,
+ *     "subscriptions": [
+ *       {
+ *         "id": "flux-messages",
+ *         "perspective": "perspective-uuid",
+ *         "query": "SELECT * FROM link WHERE source = 'literal://string:channel-id' AND predicate = 'ad4m://has_child'"
+ *       }
+ *     ]
+ *   }
  */
 
 const WebSocket = require("ws");
@@ -33,13 +37,6 @@ const http = require("http");
 const https = require("https");
 const fs = require("fs");
 const path = require("path");
-
-// ── Types (JSDoc) ──────────────────────────────────────────────────
-/**
- * @typedef {{ id: string, perspective: string, matchPredicate?: string, matchSource?: string, matchTarget?: string }} Subscription
- * @typedef {{ executorUrl: string, token?: string, wakeUrl: string, wakeToken: string, subscriptions: Subscription[], debounceMs?: number }} WakerConfig
- * @typedef {{ author: string, timestamp: number, status?: string, data: { source: string, predicate: string, target: string } }} LinkExpression
- */
 
 // ── GraphQL-over-WebSocket (graphql-transport-ws protocol) ─────────
 
@@ -58,8 +55,8 @@ class GraphQLWSClient {
     this.connectionParams = connectionParams || {};
     this.nextId = 1;
     this.handlers = new Map();
-    this._subscriptions = []; // for reconnect
     this._closed = false;
+    this._pendingReconnectSubs = [];
   }
 
   connect() {
@@ -114,8 +111,7 @@ class GraphQLWSClient {
     try {
       await this.connect();
       console.log("[waker] reconnected");
-      // Re-subscribe
-      for (const { query, variables, handler } of this._subscriptions) {
+      for (const { query, variables, handler } of this._pendingReconnectSubs) {
         this._doSubscribe(query, variables, handler);
       }
     } catch (e) {
@@ -136,8 +132,42 @@ class GraphQLWSClient {
   }
 
   subscribe(query, variables, handler) {
-    this._subscriptions.push({ query, variables, handler });
+    this._pendingReconnectSubs.push({ query, variables, handler });
     return this._doSubscribe(query, variables, handler);
+  }
+
+  // HTTP mutation/query (for subscribe + keepalive calls)
+  async httpQuery(query, variables) {
+    const httpUrl = this.url.replace("ws://", "http://").replace("wss://", "https://");
+    return new Promise((resolve, reject) => {
+      const body = JSON.stringify({ query, variables });
+      const url = new URL(httpUrl);
+      const mod = url.protocol === "https:" ? https : http;
+      const headers = {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+      };
+      if (this.connectionParams?.headers?.authorization) {
+        headers["Authorization"] = this.connectionParams.headers.authorization;
+      }
+      const req = mod.request({
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: "POST",
+        headers,
+      }, (res) => {
+        let data = "";
+        res.on("data", (c) => data += c);
+        res.on("end", () => {
+          try { resolve(JSON.parse(data)); }
+          catch (e) { reject(new Error(`Invalid JSON: ${data.substring(0, 200)}`)); }
+        });
+      });
+      req.on("error", reject);
+      req.write(body);
+      req.end();
+    });
   }
 
   close() {
@@ -146,23 +176,11 @@ class GraphQLWSClient {
   }
 }
 
-// ── Link matching ──────────────────────────────────────────────────
-
-function matchLink(sub, link) {
-  const { source, predicate, target } = link.data;
-  if (sub.matchPredicate && predicate !== sub.matchPredicate) return false;
-  if (sub.matchSource && !source.includes(sub.matchSource)) return false;
-  if (sub.matchTarget && !target.includes(sub.matchTarget)) return false;
-  // At least one filter must be set
-  if (!sub.matchPredicate && !sub.matchSource && !sub.matchTarget) return false;
-  return true;
-}
-
 // ── Wake poster ────────────────────────────────────────────────────
 
-function postWake(config, sub, link) {
+function postWake(config, sub, detail) {
   const body = JSON.stringify({
-    text: `[AD4M waker] subscription=${sub.id} | ${link.data.predicate} → ${link.data.target.substring(0, 80)} (by ${link.author.substring(0, 30)})`,
+    text: `[AD4M waker] subscription=${sub.id} | ${detail}`,
     mode: "now",
   });
 
@@ -208,50 +226,107 @@ async function startWaker(config) {
   await client.connect();
   console.log("[waker] connected");
 
-  // Group subscriptions by perspective
-  const byPerspective = new Map();
-  for (const sub of config.subscriptions) {
-    const list = byPerspective.get(sub.perspective) || [];
-    list.push(sub);
-    byPerspective.set(sub.perspective, list);
-  }
-
   // Per-subscription debounce state
   const debounceTimers = new Map();
+  const keepaliveTimers = [];
 
-  function onLink(link, subs) {
-    for (const sub of subs) {
-      if (!matchLink(sub, link)) continue;
+  for (const sub of config.subscriptions) {
+    console.log(`[waker] setting up subscription ${sub.id}: query=${sub.query.substring(0, 80)}...`);
 
-      console.log(`[waker] matched sub=${sub.id}: ${link.data.predicate} → ${link.data.target.substring(0, 60)}`);
+    // Step 1: Register the SurrealDB query subscription on the executor
+    const initResult = await client.httpQuery(
+      `mutation perspectiveSubscribeSurrealQuery($uuid: String!, $query: String!) {
+        perspectiveSubscribeSurrealQuery(uuid: $uuid, query: $query) {
+          subscriptionId
+          result
+        }
+      }`,
+      { uuid: sub.perspective, query: sub.query }
+    );
 
-      // Debounce per subscription
+    if (initResult.errors) {
+      console.error(`[waker] failed to subscribe ${sub.id}:`, initResult.errors);
+      continue;
+    }
+
+    const subResult = initResult.data.perspectiveSubscribeSurrealQuery;
+    const surrealSubId = subResult.subscriptionId;
+    let initialResult;
+    try { initialResult = JSON.parse(subResult.result); } catch (e) { initialResult = subResult.result; }
+    console.log(`[waker] subscription ${sub.id} registered (surreal ID: ${surrealSubId}), initial results: ${Array.isArray(initialResult) ? initialResult.length : '?'}`);
+
+    // Track previous result for change detection
+    let lastResultJSON = JSON.stringify(initialResult);
+
+    // Step 2: Subscribe to perspectiveQuerySubscription for live updates
+    const GQL_SUB_QUERY = `
+      subscription perspectiveQuerySubscription($subscriptionId: String!) {
+        perspectiveQuerySubscription(subscriptionId: $subscriptionId)
+      }
+    `;
+
+    client.subscribe(GQL_SUB_QUERY, { subscriptionId: surrealSubId }, (payload) => {
+      if (!payload?.data?.perspectiveQuerySubscription) return;
+
+      let resultStr = payload.data.perspectiveQuerySubscription;
+
+      // Strip #init# prefix (initial result echo)
+      if (resultStr.startsWith("#init#")) {
+        resultStr = resultStr.substring(6);
+        // Skip init messages if we already have a result
+        if (lastResultJSON) return;
+      }
+
+      // Parse the result
+      let result;
+      try { result = JSON.parse(resultStr); } catch (e) { result = resultStr; }
+
+      const resultJSON = JSON.stringify(result);
+      if (resultJSON === lastResultJSON) {
+        // No actual change
+        return;
+      }
+      lastResultJSON = resultJSON;
+
+      const count = Array.isArray(result) ? result.length : "?";
+      console.log(`[waker] ${sub.id}: query result changed (${count} items)`);
+
+      // Debounce the wake
       const existing = debounceTimers.get(sub.id);
       if (existing) clearTimeout(existing);
       debounceTimers.set(sub.id, setTimeout(() => {
-        postWake(config, sub, link);
+        postWake(config, sub, `query result changed (${count} items)`);
         debounceTimers.delete(sub.id);
       }, debounceMs));
-    }
-  }
-
-  // Subscribe to perspectiveLinkAdded for each perspective
-  const LINK_FIELDS = `author timestamp status data { source predicate target }`;
-
-  for (const [perspectiveUuid, subs] of byPerspective) {
-    const query = `subscription { perspectiveLinkAdded(uuid: "${perspectiveUuid}") { ${LINK_FIELDS} } }`;
-    client.subscribe(query, {}, (payload) => {
-      if (payload?.data?.perspectiveLinkAdded) {
-        onLink(payload.data.perspectiveLinkAdded, subs);
-      }
     });
-    console.log(`[waker] watching perspective ${perspectiveUuid.substring(0, 8)}... (${subs.length} subscription(s))`);
-    for (const sub of subs) {
-      console.log(`[waker]   - ${sub.id}: predicate=${sub.matchPredicate || "*"} source=${sub.matchSource?.substring(0, 40) || "*"} target=${sub.matchTarget || "*"}`);
-    }
+
+    // Step 3: Keepalive every 30s
+    const keepalive = async () => {
+      try {
+        await client.httpQuery(
+          `mutation perspectiveKeepAliveSurrealQuery($uuid: String!, $subscriptionId: String!) {
+            perspectiveKeepAliveSurrealQuery(uuid: $uuid, subscriptionId: $subscriptionId)
+          }`,
+          { uuid: sub.perspective, subscriptionId: surrealSubId }
+        );
+      } catch (e) {
+        console.error(`[waker] keepalive failed for ${sub.id}:`, e.message);
+      }
+    };
+
+    const timer = setInterval(keepalive, 30000);
+    keepaliveTimers.push(timer);
+
+    console.log(`[waker] ${sub.id} fully active (query sub + keepalive)`);
   }
 
-  return { close: () => { for (const t of debounceTimers.values()) clearTimeout(t); client.close(); } };
+  return {
+    close() {
+      for (const t of debounceTimers.values()) clearTimeout(t);
+      for (const t of keepaliveTimers) clearInterval(t);
+      client.close();
+    }
+  };
 }
 
 // ── CLI ────────────────────────────────────────────────────────────
@@ -279,12 +354,15 @@ async function main() {
 
   if (args.help) {
     console.log(`
-AD4M Waker — watches perspectives for link changes and wakes OpenClaw agent
+AD4M Waker — watches perspectives via SurrealDB query subscriptions
+
+Uses the same mechanism as Flux UI:
+  1. perspectiveSubscribeSurrealQuery → registers query on executor
+  2. perspectiveQuerySubscription → live updates via GraphQL subscription
+  3. perspectiveKeepAliveSurrealQuery → 30s keepalive
 
 Usage:
   node ad4m-waker.js --config <path>
-  node ad4m-waker.js --executor-url <ws-url> --wake-url <url> --wake-token <token> \\
-    --perspective <uuid> --id <sub-id> --match-predicate <pred> [--match-source <src>]
 
 Config file format (JSON):
   {
@@ -295,13 +373,15 @@ Config file format (JSON):
     "debounceMs": 2000,
     "subscriptions": [
       {
-        "id": "unique-sub-id",
+        "id": "flux-messages",
         "perspective": "perspective-uuid",
-        "matchPredicate": "ad4m://has_child",
-        "matchSource": "literal://string:channel-id"
+        "query": "SELECT * FROM link WHERE source = 'literal://string:channel-id' AND predicate = 'ad4m://has_child'"
       }
     ]
   }
+
+The SurrealQL query determines what you're watching. The MCP subscribe_to_model
+tool can generate appropriate queries for you.
 `);
     process.exit(0);
   }
@@ -313,25 +393,8 @@ Config file format (JSON):
     config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
     console.log(`[waker] loaded config from ${configPath}`);
   } else {
-    // Build config from CLI args
-    if (!args["executor-url"] || !args["wake-url"] || !args["wake-token"] || !args.perspective || !args.id) {
-      console.error("Error: provide --config or all of: --executor-url, --wake-url, --wake-token, --perspective, --id, --match-predicate");
-      process.exit(1);
-    }
-    config = {
-      executorUrl: args["executor-url"],
-      token: args.token,
-      wakeUrl: args["wake-url"],
-      wakeToken: args["wake-token"],
-      debounceMs: parseInt(args["debounce-ms"] || "2000"),
-      subscriptions: [{
-        id: args.id,
-        perspective: args.perspective,
-        matchPredicate: args["match-predicate"],
-        matchSource: args["match-source"],
-        matchTarget: args["match-target"],
-      }],
-    };
+    console.error("Error: provide --config <path>");
+    process.exit(1);
   }
 
   if (!config.subscriptions?.length) {
@@ -345,7 +408,7 @@ Config file format (JSON):
   process.on("SIGTERM", () => { waker.close(); process.exit(0); });
 }
 
-// Only run CLI when executed directly (not when required as module)
+// Only run CLI when executed directly
 if (require.main === module) {
   main().catch((err) => {
     console.error("[waker] fatal:", err);
@@ -353,4 +416,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { startWaker, matchLink };
+module.exports = { startWaker };

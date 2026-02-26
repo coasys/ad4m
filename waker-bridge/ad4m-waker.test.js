@@ -1,57 +1,101 @@
 #!/usr/bin/env node
 /**
- * AD4M Waker — Node.js integration tests
+ * AD4M Waker — integration tests
  *
- * Tests the waker by:
- * 1. Starting a mock GraphQL-over-WebSocket server
- * 2. Starting a mock wake HTTP server
- * 3. Running the waker pointed at both
- * 4. Simulating link events and verifying wake calls
+ * Tests the waker's SurrealDB query subscription flow:
+ * 1. Mock executor: handles perspectiveSubscribeSurrealQuery (HTTP) +
+ *    perspectiveQuerySubscription (WS subscription) + keepalive
+ * 2. Mock wake server: captures wake POST calls
+ * 3. Simulates query result changes via subscription pushes
  */
 
 const assert = require("assert");
 const http = require("http");
 const WebSocket = require("ws");
-const { startWaker, matchLink } = require("./ad4m-waker.js");
-
-const TEST_PERSPECTIVE = "test-perspective-uuid-1234";
-
-// ── Helpers ────────────────────────────────────────────────────────
+const { startWaker } = require("./ad4m-waker.js");
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ── Mock GraphQL WS server (graphql-transport-ws protocol) ─────────
+/**
+ * Mock AD4M executor that handles both HTTP (mutations) and WS (subscriptions).
+ * Simulates perspectiveSubscribeSurrealQuery + perspectiveQuerySubscription.
+ */
+function startMockExecutor(port) {
+  let surrealSubId = "mock-surreal-sub-" + Math.random().toString(36).slice(2);
+  const wsSubscribers = new Map(); // ws → { id, subscriptionId }
 
-function startMockGQLServer(port) {
-  const subscribers = new Map(); // ws → subscriptionId
-  const wss = new WebSocket.Server({ port });
+  // HTTP server for mutations (subscribe + keepalive)
+  const httpServer = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => body += c);
+    req.on("end", () => {
+      const { query, variables } = JSON.parse(body);
 
+      if (query.includes("perspectiveSubscribeSurrealQuery")) {
+        // Return subscription ID + initial results
+        const result = JSON.stringify({
+          subscriptionId: surrealSubId,
+          result: [{ source: "s", predicate: "p", target: "t" }]
+        });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          data: { perspectiveSubscribeSurrealQuery: result }
+        }));
+      } else if (query.includes("perspectiveKeepAliveSurrealQuery")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ data: { perspectiveKeepAliveSurrealQuery: true } }));
+      } else {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ data: null }));
+      }
+    });
+  });
+
+  // WebSocket server for subscriptions
+  const wss = new WebSocket.Server({ server: httpServer });
   wss.on("connection", (ws) => {
     ws.on("message", (raw) => {
       const msg = JSON.parse(String(raw));
       if (msg.type === "connection_init") {
         ws.send(JSON.stringify({ type: "connection_ack" }));
       } else if (msg.type === "subscribe") {
-        subscribers.set(ws, msg.id);
+        // Track subscriber
+        wsSubscribers.set(ws, { id: msg.id, subscriptionId: surrealSubId });
+        // Send init result
+        ws.send(JSON.stringify({
+          id: msg.id,
+          type: "next",
+          payload: {
+            data: {
+              perspectiveQuerySubscription: '#init#[{"source":"s","predicate":"p","target":"t"}]'
+            }
+          }
+        }));
       }
     });
-    ws.on("close", () => subscribers.delete(ws));
+    ws.on("close", () => wsSubscribers.delete(ws));
   });
 
-  function sendLink(link) {
-    for (const [ws, id] of subscribers) {
+  httpServer.listen(port);
+
+  function pushUpdate(resultArray) {
+    const resultStr = JSON.stringify(resultArray);
+    for (const [ws, info] of wsSubscribers) {
       ws.send(JSON.stringify({
-        id,
+        id: info.id,
         type: "next",
-        payload: { data: { perspectiveLinkAdded: link } },
+        payload: {
+          data: { perspectiveQuerySubscription: resultStr }
+        }
       }));
     }
   }
 
-  return { wss, sendLink, close: () => wss.close() };
+  return {
+    httpServer, wss, pushUpdate, surrealSubId,
+    close: () => { wss.close(); httpServer.close(); }
+  };
 }
-
-// ── Mock wake HTTP server ──────────────────────────────────────────
 
 function startMockWakeServer(port) {
   const calls = [];
@@ -59,10 +103,7 @@ function startMockWakeServer(port) {
     let body = "";
     req.on("data", (c) => body += c);
     req.on("end", () => {
-      calls.push({
-        body: JSON.parse(body),
-        token: req.headers.authorization || "",
-      });
+      calls.push({ body: JSON.parse(body), token: req.headers.authorization || "" });
       res.writeHead(200);
       res.end("ok");
     });
@@ -73,149 +114,132 @@ function startMockWakeServer(port) {
 
 // ── Tests ──────────────────────────────────────────────────────────
 
-async function testMatchLink() {
-  console.log("  matchLink: basic filtering...");
-
-  const sub = { id: "s1", perspective: "p1", matchPredicate: "ad4m://has_child", matchSource: "literal://string:chan1" };
-  const matching = { author: "did:test", timestamp: 0, data: { source: "literal://string:chan1", predicate: "ad4m://has_child", target: "literal://string:msg1" } };
-  const wrongPred = { author: "did:test", timestamp: 0, data: { source: "literal://string:chan1", predicate: "flux://body", target: "x" } };
-  const wrongSrc = { author: "did:test", timestamp: 0, data: { source: "literal://string:chan2", predicate: "ad4m://has_child", target: "x" } };
-
-  assert.strictEqual(matchLink(sub, matching), true, "should match");
-  assert.strictEqual(matchLink(sub, wrongPred), false, "wrong predicate should not match");
-  assert.strictEqual(matchLink(sub, wrongSrc), false, "wrong source should not match");
-
-  // No filters = no match
-  const emptySub = { id: "s2", perspective: "p1" };
-  assert.strictEqual(matchLink(emptySub, matching), false, "empty filter should not match");
-
-  console.log("  ✓ matchLink OK");
-}
-
-async function testWakeOnMatch() {
-  console.log("  wake on matching link...");
-  const GQL_PORT = 19876;
+async function testWakeOnQueryChange() {
+  console.log("  wake on SurrealDB query result change...");
+  const EXEC_PORT = 19876;
   const WAKE_PORT = 19877;
 
-  const gql = startMockGQLServer(GQL_PORT);
+  const exec = startMockExecutor(EXEC_PORT);
   const wake = startMockWakeServer(WAKE_PORT);
 
   try {
+    await delay(100); // let servers start
+
     const config = {
-      executorUrl: `ws://localhost:${GQL_PORT}`,
+      executorUrl: `ws://localhost:${EXEC_PORT}/graphql`,
+      token: "test-token",
       wakeUrl: `http://localhost:${WAKE_PORT}/hooks/wake`,
-      wakeToken: "test-token",
+      wakeToken: "test-wake-token",
       debounceMs: 100,
       subscriptions: [{
         id: "test-sub-1",
-        perspective: TEST_PERSPECTIVE,
-        matchPredicate: "ad4m://has_child",
-        matchSource: "literal://string:channel1",
+        perspective: "test-perspective",
+        query: "SELECT * FROM link WHERE predicate = 'ad4m://has_child'"
       }],
     };
 
     const waker = await startWaker(config);
-    await delay(300);
+    await delay(500);
 
-    gql.sendLink({
-      author: "did:test:author",
-      timestamp: Date.now(),
-      data: {
-        source: "literal://string:channel1",
-        predicate: "ad4m://has_child",
-        target: "literal://string:msg123",
-      },
-    });
+    // Push a changed result
+    exec.pushUpdate([
+      { source: "s", predicate: "p", target: "t" },
+      { source: "s2", predicate: "p2", target: "t2" }
+    ]);
 
     await delay(500);
     assert.strictEqual(wake.calls.length, 1, `Expected 1 wake call, got ${wake.calls.length}`);
-    assert.strictEqual(wake.calls[0].token, "Bearer test-token");
+    assert.strictEqual(wake.calls[0].token, "Bearer test-wake-token");
     assert.ok(wake.calls[0].body.text.includes("test-sub-1"), "wake text should include subscription ID");
 
     waker.close();
   } finally {
-    gql.close();
+    exec.close();
     wake.close();
   }
-  console.log("  ✓ wake on match OK");
+  console.log("  ✓ wake on query change OK");
 }
 
-async function testNoWakeOnMismatch() {
-  console.log("  no wake on non-matching link...");
-  const GQL_PORT = 19878;
+async function testNoWakeOnSameResult() {
+  console.log("  no wake when result unchanged...");
+  const EXEC_PORT = 19878;
   const WAKE_PORT = 19879;
 
-  const gql = startMockGQLServer(GQL_PORT);
+  const exec = startMockExecutor(EXEC_PORT);
   const wake = startMockWakeServer(WAKE_PORT);
 
   try {
+    await delay(100);
+
     const config = {
-      executorUrl: `ws://localhost:${GQL_PORT}`,
+      executorUrl: `ws://localhost:${EXEC_PORT}/graphql`,
+      token: "test-token",
       wakeUrl: `http://localhost:${WAKE_PORT}/hooks/wake`,
       wakeToken: "tok",
       debounceMs: 100,
       subscriptions: [{
         id: "test-sub-2",
-        perspective: TEST_PERSPECTIVE,
-        matchPredicate: "ad4m://has_child",
-        matchSource: "literal://string:channel1",
+        perspective: "test-perspective",
+        query: "SELECT * FROM link"
       }],
     };
 
     const waker = await startWaker(config);
-    await delay(300);
+    await delay(500);
 
-    // Wrong predicate
-    gql.sendLink({ author: "did:test", timestamp: Date.now(), data: { source: "literal://string:channel1", predicate: "flux://body", target: "x" } });
-    // Wrong source
-    gql.sendLink({ author: "did:test", timestamp: Date.now(), data: { source: "literal://string:channel2", predicate: "ad4m://has_child", target: "x" } });
+    // Push same result as initial
+    exec.pushUpdate([{ source: "s", predicate: "p", target: "t" }]);
 
     await delay(500);
     assert.strictEqual(wake.calls.length, 0, `Expected 0 wake calls, got ${wake.calls.length}`);
 
     waker.close();
   } finally {
-    gql.close();
+    exec.close();
     wake.close();
   }
-  console.log("  ✓ no wake on mismatch OK");
+  console.log("  ✓ no wake on same result OK");
 }
 
 async function testDebounce() {
-  console.log("  debounce collapses rapid links...");
-  const GQL_PORT = 19880;
+  console.log("  debounce collapses rapid changes...");
+  const EXEC_PORT = 19880;
   const WAKE_PORT = 19881;
 
-  const gql = startMockGQLServer(GQL_PORT);
+  const exec = startMockExecutor(EXEC_PORT);
   const wake = startMockWakeServer(WAKE_PORT);
 
   try {
+    await delay(100);
+
     const config = {
-      executorUrl: `ws://localhost:${GQL_PORT}`,
+      executorUrl: `ws://localhost:${EXEC_PORT}/graphql`,
+      token: "test-token",
       wakeUrl: `http://localhost:${WAKE_PORT}/hooks/wake`,
       wakeToken: "tok",
       debounceMs: 200,
       subscriptions: [{
         id: "test-sub-3",
-        perspective: TEST_PERSPECTIVE,
-        matchPredicate: "ad4m://has_child",
+        perspective: "test-perspective",
+        query: "SELECT * FROM link"
       }],
     };
 
     const waker = await startWaker(config);
-    await delay(300);
+    await delay(500);
 
+    // Push 5 different results rapidly
     for (let i = 0; i < 5; i++) {
-      gql.sendLink({ author: "did:test", timestamp: Date.now(), data: { source: "s", predicate: "ad4m://has_child", target: `t${i}` } });
+      exec.pushUpdate([{ source: "s", predicate: "p", target: `t${i}` }]);
       await delay(20);
     }
 
     await delay(600);
-    assert.strictEqual(wake.calls.length, 1, `Debounce should collapse 5 links into 1 wake, got ${wake.calls.length}`);
+    assert.strictEqual(wake.calls.length, 1, `Debounce should collapse to 1 wake, got ${wake.calls.length}`);
 
     waker.close();
   } finally {
-    gql.close();
+    exec.close();
     wake.close();
   }
   console.log("  ✓ debounce OK");
@@ -224,10 +248,9 @@ async function testDebounce() {
 // ── Runner ─────────────────────────────────────────────────────────
 
 async function run() {
-  console.log("AD4M Waker Tests\n");
-  await testMatchLink();
-  await testWakeOnMatch();
-  await testNoWakeOnMismatch();
+  console.log("AD4M Waker Tests (SurrealDB query subscription)\n");
+  await testWakeOnQueryChange();
+  await testNoWakeOnSameResult();
   await testDebounce();
   console.log("\n✅ All tests passed!");
 }

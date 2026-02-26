@@ -8,8 +8,7 @@
     {
       "id": "flux-messages",
       "perspective": "your-perspective-uuid",
-      "matchPredicate": "ad4m://has_child",
-      "matchSource": "literal://string:your-channel-id"
+      "query": "SELECT * FROM link WHERE source = 'literal://string:your-channel-id' AND predicate = 'ad4m://has_child'"
     }
   ]
 }
