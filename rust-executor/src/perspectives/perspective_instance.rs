@@ -3582,6 +3582,7 @@ impl PerspectiveInstance {
         class_name: &str,
         property: &str,
         value: &serde_json::Value,
+        context: &AgentContext,
     ) -> Result<String, AnyError> {
         // Get resolve language from SHACL links
         let resolve_language = self
@@ -3670,7 +3671,7 @@ impl PerspectiveInstance {
                         self.get_property_setter_actions(&class_name, prop).await?
                     {
                         let target_value = self
-                            .resolve_property_value(&class_name, prop, value)
+                            .resolve_property_value(&class_name, prop, value, context)
                             .await?;
 
                         //log::info!("🎯 CREATE SUBJECT: Property '{}' setter resolved in {:?}",
