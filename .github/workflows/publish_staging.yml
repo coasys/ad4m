@@ -46,7 +46,7 @@ jobs:
   build-launcher-binary-linux:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
+      image: coasys/ad4m-ci-linux:latest@sha256:0eddf04e4380f892968297a248da05c734f64d089e9e01cf7b89e3ff4328db4c
 
     needs:
       - create-release
@@ -145,6 +145,67 @@ jobs:
         asset_content_type: application/octet-stream
 
   # ============================================================================
+  # Linux CUDA Binary Build - Uses CUDA Docker container
+  # ============================================================================
+  build-launcher-binary-linux-cuda:
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:0eddf04e4380f892968297a248da05c734f64d089e9e01cf7b89e3ff4328db4c
+
+    needs:
+      - create-release
+
+    steps:
+    - name: Fetch source code
+      uses: actions/checkout@v3
+
+    - name: Extract version
+      id: extract_version
+      uses: Saionaro/extract-package-version@v1.1.1
+      with:
+        path: ui
+
+    - name: Verify Rust toolchain
+      run: rustc --version && cargo --version && rustup target list --installed | grep wasm
+
+    - name: Verify CUDA
+      run: nvcc --version
+
+    - name: pnpm Install
+      run: pnpm install --no-frozen-lockfile
+
+    - name: Install core dependencies
+      run: cd ./core && pnpm install --no-frozen-lockfile
+
+    - name: Build AD4M-CLI
+      run: pnpm build-libs
+
+    - name: Build Launcher binary with CUDA
+      run: pnpm run package-ad4m:cuda
+
+    - name: Upload Release AppImage CUDA Asset
+      id: upload-release-appimage-cuda-asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: target/release/bundle/appimage/ADAM Launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
+        asset_name: ADAM.Launcher_${{ steps.extract_version.outputs.version }}_amd64_CUDA.AppImage
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M CLI executor Linux CUDA Binary
+      id: upload-release-linux-ad4m-cli-executor-cuda-binary
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: target/release/ad4m-executor
+        asset_name: ad4m-cli-executor-linux-${{ steps.extract_version.outputs.version }}-x64-CUDA
+        asset_content_type: application/octet-stream
+
+  # ============================================================================
   # macOS Binary Build - Uses aggressive caching (Docker not available on macOS)
   # ============================================================================
   build-launcher-binary-macos:
@@ -164,6 +225,8 @@ jobs:
         targets: x86_64-apple-darwin,aarch64-apple-darwin
 
     # Aggressive Rust caching - biggest time saver for macOS
+    # shared-key includes package.json version so cache busts on version changes
+    # (env!("CARGO_PKG_VERSION") is baked in at compile time and won't update from stale cache)
     - name: Cache Rust dependencies
       uses: Swatinem/rust-cache@v2
       with:
@@ -172,6 +235,7 @@ jobs:
           ui/src-tauri
         cache-targets: true
         cache-all-crates: true
+        shared-key: "staging-v3-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
 
     - name: Install GO
       uses: actions/setup-go@v4
@@ -239,6 +303,10 @@ jobs:
     #    security unlock-keychain -p "actions" build.keychain
     #    mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
     #    security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "actions" build.keychain
+
+    - name: Update cargo git deps (ensure pre-built V8 from coasys/rusty_v8 tag)
+      working-directory: rust-executor
+      run: cargo update -p v8 2>/dev/null || cargo update 2>/dev/null || true
 
     - name: Build AD4M-CLI
       run: pnpm build-libs
@@ -311,81 +379,130 @@ jobs:
         asset_content_type: application/octet-stream
 
   # ============================================================================
-  # Windows Binary Build - Currently disabled
-  # To re-enable: add to matrix or create separate job with caching
+  # Windows Binary Build - Re-enabled now that V8 uses pre-built binaries
   # ============================================================================
-  #build-launcher-binary-windows:
-  #  runs-on: windows-latest
-  #  needs:
-  #    - create-release
-  #  steps:
-  #    # ... Windows build steps would go here
-  #
-  #  - name: Upload Release MSI Asset
-  #    id: upload-release-msi-asset
-  #    uses: actions/upload-release-asset@v1
-  #    env:
-  #      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  #    with:
-  #      upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-  #      asset_path: 'D:\a\ad4m\ad4m\target\release\bundle\msi\ADAM Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi'
-  #      asset_name: ADAM\ Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi
-  #      asset_content_type: application/octet-stream
-  #
-  #  #- name: Upload Release MSI update Asset
-  #  #  id: upload-release-msi-asset-update
-  #  #  uses: actions/upload-release-asset@v1
-  #  #  env:
-  #  #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  #  #  with:
-  #  #    upload_url: ${{ needs.create-release.outputs.upload_url }}
-  #  #    asset_path: 'D:\a\ad4m\ad4m\target\release\bundle\msi\ADAM Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi.zip'
-  #  #    asset_name: ADAM\ Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi.zip
-  #  #    asset_content_type: application/octet-stream
-  #
-  #  #- name: Upload Release MSI update sig Asset
-  #  #  id: upload-release-msi-asset-update-sig
-  #  #  uses: actions/upload-release-asset@v1
-  #  #  env:
-  #  #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  #  #  with:
-  #  #    upload_url: ${{ needs.create-release.outputs.upload_url }}
-  #  #    asset_path: 'D:\a\ad4m\ad4m\target\release\bundle\msi\ADAM Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi.zip.sig'
-  #  #    asset_name: ADAM\ Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi.zip.sig
-  #  #    asset_content_type: application/octet-stream
-  #
-  #  # - name: Upload Release AD4M CLI Windows Binary
-  #  #   id: upload-release-windows-ad4m-cli-binary
-  #  #   uses: actions/upload-release-asset@v1
-  #  #   env:
-  #  #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  #  #   with:
-  #  #     upload_url: ${{ needs.create-release.outputs.upload_url }}
-  #  #     asset_path: D:\a\ad4m\ad4m\target\release\ad4m-x64.exe
-  #  #     asset_name: ad4m-windows-${{ steps.extract_version.outputs.version }}-x64.exe
-  #  #     asset_content_type: application/octet-stream
-  #
-  #  - name: Upload Release AD4M CLI client Windows Binary
-  #    id: upload-release-windows-ad4m-cli-client-binary
-  #    uses: actions/upload-release-asset@v1
-  #    env:
-  #      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  #    with:
-  #      upload_url: ${{ needs.create-release.outputs.upload_url }}
-  #      asset_path: D:\a\ad4m\ad4m\target\release\ad4m-x64.exe
-  #      asset_name: ad4m-cli-client-windows-${{ steps.extract_version.outputs.version }}-x64.exe
-  #      asset_content_type: application/octet-stream
-  #
-  #  - name: Upload Release AD4M CLI executor Windows Binary
-  #    id: upload-release-windows-ad4m-cli-executor-binary
-  #    uses: actions/upload-release-asset@v1
-  #    env:
-  #      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  #    with:
-  #      upload_url: ${{ needs.create-release.outputs.upload_url }}
-  #      asset_path: D:\a\ad4m\ad4m\target\release\ad4m-executor-x64.exe
-  #      asset_name: ad4m-cli-executor-windows-${{ steps.extract_version.outputs.version }}-x64.exe
-  #      asset_content_type: application/octet-stream
+  build-launcher-binary-windows:
+    runs-on: windows-latest
+
+    needs:
+      - create-release
+
+    steps:
+    - name: Fetch source code
+      uses: actions/checkout@v3
+
+    # Rust toolchain configured via rust-toolchain.toml
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: x86_64-pc-windows-msvc
+
+    # Cache Rust deps - biggest time saver
+    # shared-key includes Cargo.toml hash so cache busts on version changes
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: |
+          rust-executor
+          ui/src-tauri
+        cache-targets: true
+        cache-all-crates: true
+        shared-key: "staging-windows-v2-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
+
+    - name: Install GO
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.24.6'
+        cache: true
+
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v2.x
+
+    - name: Use Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - uses: pnpm/action-setup@v4
+
+    - name: Use Node.js 18.x
+      uses: actions/setup-node@v3
+      with:
+        node-version: 18.x
+        cache: 'pnpm'
+
+    - name: Install protobuf compiler
+      run: choco install protoc -y
+
+    - name: Extract version
+      id: extract_version
+      uses: Saionaro/extract-package-version@v1.1.1
+      with:
+        path: ui
+
+    - name: pnpm Install
+      run: pnpm install
+
+    - name: Install core dependencies
+      run: cd ./core && pnpm install
+
+    - name: Update cargo git deps (ensure pre-built V8 from coasys/rusty_v8 tag)
+      working-directory: rust-executor
+      shell: bash
+      run: cargo update -p v8 2>/dev/null || cargo update 2>/dev/null || true
+
+    - name: Build AD4M-CLI
+      run: pnpm build-libs
+
+    - name: Build Launcher binary
+      run: pnpm run package-ad4m
+
+    - name: Upload Release MSI Asset
+      id: upload-release-msi-asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: 'target\release\bundle\msi\ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64_en-US.msi'
+        asset_name: ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64_en-US.msi
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release NSIS Asset
+      id: upload-release-nsis-asset
+      uses: actions/upload-release-asset@v1
+      continue-on-error: true  # NSIS might not be produced depending on tauri config
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: 'target\release\bundle\nsis\ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64-setup.exe'
+        asset_name: ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64-setup.exe
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M CLI client Windows Binary
+      id: upload-release-windows-ad4m-cli-client-binary
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: target\release\ad4m.exe
+        asset_name: ad4m-cli-client-windows-${{ steps.extract_version.outputs.version }}-x64.exe
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M CLI executor Windows Binary
+      id: upload-release-windows-ad4m-cli-executor-binary
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: target\release\ad4m-executor.exe
+        asset_name: ad4m-cli-executor-windows-${{ steps.extract_version.outputs.version }}-x64.exe
+        asset_content_type: application/octet-stream
 
   # ============================================================================
   # NPM Publish - Uses Docker container (all deps pre-installed)
@@ -393,7 +510,7 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:d0c3e9683811505955185782a5cd683952f846f1abc520c35c1293ad7f046593
+      image: coasys/ad4m-ci-linux:latest@sha256:0eddf04e4380f892968297a248da05c734f64d089e9e01cf7b89e3ff4328db4c
     steps:
       - uses: actions/checkout@v3
 
@@ -500,7 +617,7 @@ jobs:
   crates-publish:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
+      image: coasys/ad4m-ci-linux:latest@sha256:0eddf04e4380f892968297a248da05c734f64d089e9e01cf7b89e3ff4328db4c
     steps:
       - uses: actions/checkout@v3
 
