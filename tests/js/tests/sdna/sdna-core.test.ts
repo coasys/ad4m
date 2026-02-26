@@ -106,7 +106,7 @@ describe("SDNA", () => {
 
         @Property({
           through: "todo://has_title",
-          writable: true,
+          
         })
         title?: string;
 

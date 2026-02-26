@@ -1553,7 +1553,7 @@ export class PerspectiveProxy {
         "sh://minCount",
         "sh://maxCount",
         "ad4m://local",
-        "ad4m://writable",
+        "ad4m://readOnly",
         "ad4m://resolveLanguage",
         "ad4m://setter",
         "ad4m://adder",
@@ -2107,7 +2107,7 @@ export class PerspectiveProxy {
 
       // Get all property shapes FIRST to know which predicates are from properties vs flags
       const propertyPredicates = new Set<string>();
-      const writablePredicates = new Set<string>(); // Track which predicates are writable
+      const readOnlyPredicates = new Set<string>(); // Track which predicates are read-only
       const propertyLinks = await this.get(
         new LinkQuery({
           source: shapeUri,
@@ -2132,7 +2132,7 @@ export class PerspectiveProxy {
         let predicate: string | undefined;
         let resolveLanguage: string | undefined;
         let isCollection = false;
-        let isWritable = false;
+        let isReadOnly = false;
 
         for (const detail of propDetailLinks) {
           if (detail.data.predicate === "sh://path") {
@@ -2148,17 +2148,17 @@ export class PerspectiveProxy {
           ) {
             isCollection = true;
           } else if (
-            detail.data.predicate === "ad4m://writable" &&
+            detail.data.predicate === "ad4m://readOnly" &&
             detail.data.target === "literal://true"
           ) {
-            isWritable = true;
+            isReadOnly = true;
           }
         }
 
         if (predicate) {
           propertyPredicates.add(predicate); // Track predicates that come from properties
-          if (isWritable) {
-            writablePredicates.add(predicate); // Track which are writable
+          if (isReadOnly) {
+            readOnlyPredicates.add(predicate); // Track which are read-only
           }
           if (isCollection) {
             collections.set(propName, { predicate });
@@ -2191,10 +2191,10 @@ export class PerspectiveProxy {
             for (const action of actions) {
               if (action.predicate) {
                 requiredPredicates.push(action.predicate);
-                // Flags: fixed target value + in propertyPredicates + NOT writable -> require exact match
-                // Properties with initial: has target + in propertyPredicates + IS writable -> any value OK
+                // Flags: fixed target value + in propertyPredicates + IS readOnly -> require exact match
+                // Properties with initial: has target + in propertyPredicates + NOT readOnly -> any value OK
                 // Other: not in propertyPredicates -> require exact match if has target
-                const isWritableProperty = writablePredicates.has(
+                const isWritableProperty = !readOnlyPredicates.has(
                   action.predicate,
                 );
                 if (
@@ -2202,13 +2202,13 @@ export class PerspectiveProxy {
                   action.target !== "value" &&
                   !isWritableProperty
                 ) {
-                  // Either a flag (not writable) or not a property at all - require exact target
+                  // Either a flag (readOnly) or not a property at all - require exact target
                   requiredTriples.push({
                     predicate: action.predicate,
                     target: action.target,
                   });
                 } else {
-                  // Writable property with initial value - just require predicate exists
+                  // Non-readOnly property with initial value - just require predicate exists
                   requiredTriples.push({ predicate: action.predicate });
                 }
               }
@@ -2934,7 +2934,7 @@ export class PerspectiveProxy {
         datatype: p.datatype,
         min_count: p.minCount,
         max_count: p.maxCount,
-        writable: p.writable,
+        read_only: p.readOnly,
         local: p.local,
         resolve_language: p.resolveLanguage,
         node_kind: p.nodeKind,

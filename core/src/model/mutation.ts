@@ -53,7 +53,7 @@ export function generatePropertySetterAction(
       `Property "${key}" is a @Flag and cannot be set after creation`,
     );
   }
-  if (metadata.writable === false) {
+  if (metadata.readOnly === true) {
     throw new Error(`Property "${key}" is read-only and cannot be written`);
   }
   if (!metadata.through) {

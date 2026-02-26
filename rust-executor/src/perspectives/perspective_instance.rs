@@ -5518,14 +5518,12 @@ mod tests {
                     "path": "recipe://name",
                     "name": "name",
                     "datatype": "xsd://string",
-                    "writable": true,
                     "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "recipe://name", "target": "value"}]
                 },
                 {
                     "path": "recipe://rating",
                     "name": "rating",
                     "datatype": "xsd://string",
-                    "writable": true,
                     "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "recipe://rating", "target": "value"}]
                 }
             ]

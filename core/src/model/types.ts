@@ -110,8 +110,8 @@ export interface PropertyMetadata {
   predicate: string;
   /** Whether the property is required */
   required: boolean;
-  /** Whether the property is writable */
-  writable: boolean;
+  /** Whether the property is read-only (default: false, i.e. writable) */
+  readOnly?: boolean;
   /** Initial value if specified */
   initial?: string;
   /** Language for resolution (e.g., "literal") */

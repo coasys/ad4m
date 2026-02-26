@@ -68,7 +68,7 @@ export interface PropertyOptions {
   /**
    * The initial value written by the SHACL constructor action.
    *
-   * For `writable: true` properties this is **optional** — Ad4mModel
+   * For non-readOnly properties this is **optional** — Ad4mModel
    * automatically derives a placeholder and overwrites it with the real
    * instance field value when `save()` is called. Only set this explicitly
    * when you need a specific non-literal default URI (e.g. a custom
@@ -83,9 +83,11 @@ export interface PropertyOptions {
   required?: boolean;
 
   /**
-   * Indicates whether the property is writable. If true, a setter will be available in the prolog engine.
+   * Marks the property as read-only — no setter action will be generated and
+   * the property cannot be updated via the model layer. Defaults to false
+   * (writable) when `through` is set.
    */
-  writable?: boolean;
+  readOnly?: boolean;
 
   /**
    * The language used to resolve the stored expression into a JS value.
@@ -128,9 +130,9 @@ export interface PropertyOptions {
  * Declares a typed property backed by a single link triple in the perspective.
  *
  * @param opts.through        - Predicate URI (required)
- * @param opts.initial        - Default value written by the constructor action (auto-derived for writable properties; only needed for custom URIs)
+ * @param opts.initial        - Default value written by the constructor action (auto-derived for non-readOnly properties; only needed for custom URIs)
  * @param opts.required       - Adds `sh:minCount 1` to the SHACL shape
- * @param opts.writable       - Generates a setter action (default: `true` when `through` is set)
+ * @param opts.readOnly       - Skips setter generation; property cannot be updated after creation (default: false)
  * @param opts.resolveLanguage - Language for value resolution (`"literal"`, etc.)
  * @param opts.local          - Store only in local perspective, not shared with the network
  * @param opts.getter         - Custom SurrealQL expression for computed / read-only properties
@@ -138,10 +140,6 @@ export interface PropertyOptions {
  */
 export function Property(opts: PropertyOptions) {
   return function <T>(target: T, key: keyof T) {
-    if (typeof opts.writable === "undefined" && opts.through) {
-      opts.writable = true;
-    }
-
     if (!opts.through) {
       throw new Error("@Property requires a 'through' option");
     }
@@ -154,7 +152,7 @@ export function Property(opts: PropertyOptions) {
       [key as string]: { ..._propertyExistingKey, ...opts },
     });
 
-    if (opts.writable) {
+    if (!opts.readOnly) {
       const value = key as string;
       target[`set${capitalize(value)}`] = () => {};
     }
@@ -211,6 +209,7 @@ export function Flag(opts: FlagOptions) {
         required: true,
         initial: opts.value,
         flag: true,
+        readOnly: true, // Flags are always immutable after creation
       },
     });
 
@@ -507,7 +506,7 @@ export function Model(opts: ModelConfig) {
           path: propMeta.through,
         };
 
-        // Auto-derive a constructor placeholder for writable non-flag properties
+        // Auto-derive a constructor placeholder for non-readOnly, non-flag properties
         // that don't have an explicit initial. Only do this when the prototype
         // has a defined default value — optional fields (title?: string) have
         // no prototype default (undefined), and we must NOT write an empty
@@ -517,7 +516,7 @@ export function Model(opts: ModelConfig) {
         const protoDefault = obj[propName];
         const effectiveInitial: string | undefined =
           propMeta.initial ??
-          (propMeta.writable && !propMeta.flag && protoDefault !== undefined
+          (!propMeta.readOnly && !propMeta.flag && protoDefault !== undefined
             ? "literal://string:"
             : undefined);
 
@@ -555,8 +554,8 @@ export function Model(opts: ModelConfig) {
           propShape.local = propMeta.local;
         }
 
-        if (propMeta.writable !== undefined) {
-          propShape.writable = propMeta.writable;
+        if (propMeta.readOnly) {
+          propShape.readOnly = true;
         }
 
         if (propMeta.resolveLanguage) {
@@ -577,7 +576,7 @@ export function Model(opts: ModelConfig) {
               `The property will be created without setter actions. Consider using standard writable properties or provide explicit SHACL JSON.`,
           );
           // TODO: Parse custom Prolog setter to extract actions
-        } else if (propMeta.writable && propMeta.through) {
+        } else if (!propMeta.readOnly && propMeta.through) {
           let setter = obj[propertyNameToSetterName(propName)];
           if (typeof setter === "function") {
             propShape.setter = [
@@ -592,7 +591,7 @@ export function Model(opts: ModelConfig) {
           }
         }
 
-        // Add to constructor actions (always for writable non-flag, using the
+        // Add to constructor actions (always for non-readOnly, non-flag, using the
         // effective placeholder — createSubject's initialValues will override
         // the target with the real instance value via the setter actions).
         if (effectiveInitial) {
@@ -604,9 +603,9 @@ export function Model(opts: ModelConfig) {
           });
         }
 
-        // Always add destructor action for writable non-flag properties so
+        // Always add destructor action for non-readOnly, non-flag properties so
         // delete() cleans them up regardless of whether initial was explicit.
-        if (propMeta.writable && !propMeta.flag) {
+        if (!propMeta.readOnly && !propMeta.flag) {
           destructorActions.push({
             action: "removeLink",
             source: "this",
@@ -637,10 +636,6 @@ export function Model(opts: ModelConfig) {
         // AD4M-specific metadata
         if (collMeta.local !== undefined) {
           collShape.local = collMeta.local;
-        }
-
-        if (collMeta.writable !== undefined) {
-          collShape.writable = collMeta.writable;
         }
 
         // Relationship metadata

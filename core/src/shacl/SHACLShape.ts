@@ -133,8 +133,8 @@ export interface SHACLPropertyShape {
   /** AD4M-specific: Local-only property */
   local?: boolean;
 
-  /** AD4M-specific: Writable property */
-  writable?: boolean;
+  /** AD4M-specific: Read-only property (no setter actions) */
+  readOnly?: boolean;
 
   /** AD4M-specific: Language to resolve property values through */
   resolveLanguage?: string;
@@ -304,8 +304,8 @@ export class SHACLShape {
         turtle += `    ad4m:local ${prop.local} ;\n`;
       }
 
-      if (prop.writable !== undefined) {
-        turtle += `    ad4m:writable ${prop.writable} ;\n`;
+      if (prop.readOnly !== undefined) {
+        turtle += `    ad4m:readOnly ${prop.readOnly} ;\n`;
       }
 
       // Remove trailing semicolon and close bracket
@@ -476,11 +476,11 @@ export class SHACLShape {
         });
       }
 
-      if (prop.writable !== undefined) {
+      if (prop.readOnly !== undefined) {
         links.push({
           source: propShapeId,
-          predicate: "ad4m://writable",
-          target: `literal://${prop.writable}`,
+          predicate: "ad4m://readOnly",
+          target: `literal://${prop.readOnly}`,
         });
       }
 
@@ -670,14 +670,14 @@ export class SHACLShape {
         prop.local = val === "true";
       }
 
-      const writableLink = links.find(
-        (l) => l.source === propShapeId && l.predicate === "ad4m://writable",
+      const readOnlyLink = links.find(
+        (l) => l.source === propShapeId && l.predicate === "ad4m://readOnly",
       );
-      if (writableLink) {
+      if (readOnlyLink) {
         // Handle both formats: literal://true and literal://boolean:true
-        let val = writableLink.target.replace("literal://", "");
+        let val = readOnlyLink.target.replace("literal://", "");
         if (val.startsWith("boolean:")) val = val.substring(8);
-        prop.writable = val === "true";
+        prop.readOnly = val === "true";
       }
 
       const resolveLangLink = links.find(
@@ -756,7 +756,7 @@ export class SHACLShape {
         pattern: p.pattern,
         has_value: p.hasValue,
         local: p.local,
-        writable: p.writable,
+        read_only: p.readOnly,
         resolve_language: p.resolveLanguage,
         setter: p.setter,
         adder: p.adder,
@@ -788,7 +788,7 @@ export class SHACLShape {
         pattern: p.pattern,
         hasValue: p.has_value,
         local: p.local,
-        writable: p.writable,
+        readOnly: p.read_only,
         resolveLanguage: p.resolve_language,
         setter: p.setter,
         adder: p.adder,

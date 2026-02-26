@@ -34,7 +34,7 @@ pub struct PropertyShape {
     pub datatype: Option<String>,
     pub min_count: Option<u32>,
     pub max_count: Option<u32>,
-    pub writable: Option<bool>,
+    pub read_only: Option<bool>,
     pub local: Option<bool>,
     pub resolve_language: Option<String>,
     pub node_kind: Option<String>,
@@ -408,11 +408,11 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             });
         }
 
-        if let Some(writable) = prop.writable {
+        if let Some(read_only) = prop.read_only {
             links.push(Link {
                 source: prop_shape_uri.clone(),
-                predicate: Some("ad4m://writable".to_string()),
-                target: format!("literal://{}", writable),
+                predicate: Some("ad4m://readOnly".to_string()),
+                target: format!("literal://{}", read_only),
             });
         }
 
@@ -593,7 +593,6 @@ mod tests {
                     "datatype": "xsd://string",
                     "min_count": 1,
                     "max_count": 1,
-                    "writable": true,
                     "resolve_language": "literal"
                 }
             ]
@@ -631,7 +630,6 @@ mod tests {
                     "datatype": "xsd://string",
                     "min_count": 1,
                     "max_count": 1,
-                    "writable": true,
                     "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "recipe://name", "target": "value"}]
                 },
                 {

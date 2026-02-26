@@ -21,14 +21,13 @@ describe("Ad4mModel.getModelMetadata()", () => {
         through: "test://name",
         resolveLanguage: "literal",
         required: true,
-        writable: true,
       })
       name: string = "";
 
-      @Property({ through: "test://optional", writable: true })
+      @Property({ through: "test://optional" })
       optional: string = "";
 
-      @Property({ through: "test://readonly", writable: false })
+      @Property({ through: "test://readonly", readOnly: true })
       readonly: string = "";
 
       @Flag({ through: "test://type", value: "test://flag" })
@@ -43,16 +42,16 @@ describe("Ad4mModel.getModelMetadata()", () => {
     // Verify "name" property
     expect(metadata.properties.name.predicate).toBe("test://name");
     expect(metadata.properties.name.required).toBe(true);
-    expect(metadata.properties.name.writable).toBe(true);
+    expect(metadata.properties.name.readOnly).toBeFalsy();
     expect(metadata.properties.name.resolveLanguage).toBe("literal");
 
     // Verify "optional" property
     expect(metadata.properties.optional.predicate).toBe("test://optional");
-    expect(metadata.properties.optional.writable).toBe(true);
+    expect(metadata.properties.optional.readOnly).toBeFalsy();
 
     // Verify "readonly" property
     expect(metadata.properties.readonly.predicate).toBe("test://readonly");
-    expect(metadata.properties.readonly.writable).toBe(false);
+    expect(metadata.properties.readonly.readOnly).toBe(true);
 
     // Verify "type" property (flag)
     expect(metadata.properties.type.predicate).toBe("test://type");
@@ -151,7 +150,6 @@ describe("Ad4mModel.getModelMetadata()", () => {
       @Property({
         through: "recipe://name",
         required: true,
-        writable: true,
       })
       name: string = "";
 
@@ -161,7 +159,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
       @Property({
         through: "recipe://rating",
         getter: "avg_rating_surreal(Base, Value)",
-        writable: false,
+        readOnly: true,
       })
       rating: number = 0;
 
@@ -234,7 +232,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.properties.name).toBeDefined();
     expect(metadata.properties.name.predicate).toBe("product://name");
     expect(metadata.properties.name.required).toBe(true);
-    expect(metadata.properties.name.writable).toBe(true);
+    expect(metadata.properties.name.readOnly).toBeFalsy();
     expect(metadata.properties.name.resolveLanguage).toBeUndefined(); // implicit literal default
 
     expect(metadata.properties.price).toBeDefined();
@@ -303,7 +301,6 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
           type: "string",
           "x-ad4m": {
             through: "foaf://name",
-            writable: true,
           },
         },
         email: {
@@ -326,7 +323,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     // Verify x-ad4m metadata is respected
     expect(metadata.properties.name.predicate).toBe("foaf://name");
     expect(metadata.properties.name.resolveLanguage).toBeUndefined(); // implicit literal default
-    expect(metadata.properties.name.writable).toBe(true);
+    expect(metadata.properties.name.readOnly).toBeFalsy();
     expect(metadata.properties.name.required).toBe(true);
 
     expect(metadata.properties.email.predicate).toBe("foaf://mbox");
@@ -456,14 +453,12 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     @Property({
       through: "recipe://name",
       required: true,
-      writable: true,
     })
     name: string = "";
 
     @Property({
       through: "recipe://rating",
       required: true,
-      writable: true,
     })
     rating: number = 0;
 
@@ -912,7 +907,6 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
       @Property({
         through: "task://completed",
         required: true,
-        writable: true,
       })
       completed: boolean = false;
     }
@@ -998,14 +992,12 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     @Property({
       through: "recipe://name",
       required: true,
-      writable: true,
     })
     name: string = "";
 
     @Property({
       through: "recipe://rating",
       required: true,
-      writable: true,
     })
     rating: number = 0;
 
@@ -1488,14 +1480,12 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     @Property({
       through: "recipe://name",
       required: true,
-      writable: true,
     })
     name: string = "";
 
     @Property({
       through: "recipe://rating",
       required: true,
-      writable: true,
     })
     rating: number = 0;
 
@@ -1809,13 +1799,13 @@ describe("resolveLanguage implicit literal default", () => {
   // are unwrapped on read, and no createExpression call is made on write.
   @Model({ name: "ImplicitLiteralModel" })
   class ImplicitLiteralModel extends Ad4mModel {
-    @Property({ through: "test://name", writable: true })
+    @Property({ through: "test://name" })
     name: string = "";
 
-    @Property({ through: "test://count", writable: true })
+    @Property({ through: "test://count" })
     count: number = 0;
 
-    @Property({ through: "test://active", writable: true })
+    @Property({ through: "test://active" })
     active: boolean = false;
   }
 

@@ -12,7 +12,6 @@ chai.use(chaiAsPromised);
 class TestSubject {
   @Property({
     through: "test://name",
-    writable: true,
   })
   name: string = "";
 }

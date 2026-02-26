@@ -261,7 +261,6 @@ describe("Multi-User Neighbourhood Sharing tests", () => {
       class User1Model extends Ad4mModel {
         @Property({
           through: "test://user1-property",
-          writable: true,
         })
         user1Property: string = "";
       }
@@ -310,7 +309,6 @@ describe("Multi-User Neighbourhood Sharing tests", () => {
       class User2Model extends Ad4mModel {
         @Property({
           through: "test://user2-property",
-          writable: true,
         })
         user2Property: string = "";
       }

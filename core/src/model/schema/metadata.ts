@@ -52,7 +52,7 @@ export function getModelMetadata(ctor: any): ModelMetadata {
       name: propertyName,
       predicate: options.through || "",
       required: options.required || false,
-      writable: options.writable || false,
+      ...(options.readOnly !== undefined && { readOnly: options.readOnly }),
       ...(options.initial !== undefined && { initial: options.initial }),
       ...(options.resolveLanguage !== undefined && {
         resolveLanguage: options.resolveLanguage,
@@ -121,7 +121,9 @@ export function getModelMetadata(ctor: any): ModelMetadata {
             name: propertyName,
             predicate,
             required: schema.required?.includes(propertyName) || false,
-            writable: (propertySchema as any)["x-ad4m"]?.writable !== false,
+            ...((propertySchema as any)["x-ad4m"]?.readOnly && {
+              readOnly: true,
+            }),
             ...((propertySchema as any)["x-ad4m"]?.resolveLanguage && {
               resolveLanguage: (propertySchema as any)["x-ad4m"]
                 .resolveLanguage,

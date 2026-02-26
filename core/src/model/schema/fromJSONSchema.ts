@@ -26,7 +26,7 @@ export interface JSONSchemaProperty {
     through?: string;
     resolveLanguage?: string;
     local?: boolean;
-    writable?: boolean;
+    readOnly?: boolean;
     initial?: string;
   };
 }
@@ -307,12 +307,11 @@ export function createModelFromJSONSchema(
           options,
           "local",
         );
-        const writable = getPropertyOption(
+        const readOnly = getPropertyOption(
           propertyName,
           propertySchema,
           options,
-          "writable",
-          true,
+          "readOnly",
         );
         let initial = getPropertyOption(
           propertyName,
@@ -342,7 +341,7 @@ export function createModelFromJSONSchema(
         properties[propertyName] = {
           through: predicate,
           required: isRequired,
-          writable: writable,
+          ...(readOnly && { readOnly }),
           ...(resolveLanguage && { resolveLanguage }),
           ...(local !== undefined && { local }),
           ...(initial && { initial }),
@@ -354,7 +353,7 @@ export function createModelFromJSONSchema(
           value: getDefaultValueForType(propertyType),
         });
 
-        if (writable) {
+        if (!readOnly) {
           const setterName = propertyNameToSetterName(propertyName);
           (DynamicModelClass.prototype as any)[setterName] = function () {};
         }
@@ -383,7 +382,7 @@ export function createModelFromJSONSchema(
     properties["__ad4m_type"] = {
       through: typeProperty,
       required: true,
-      writable: false,
+      readOnly: true,
       initial: typeValue,
       flag: true,
     };
