@@ -2191,7 +2191,7 @@ impl Ad4mMcpHandler {
         Tool::new(
             format!("{}_get", name_lower),
             format!(
-                "Get all properties of a {} instance by expression address.",
+                "Get all properties and values of a {} instance. Returns a JSON object with property names as keys. Scalar properties return single values; collections return arrays.",
                 class_name
             ),
             Self::make_tool_schema(
