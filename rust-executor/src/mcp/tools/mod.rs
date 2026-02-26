@@ -570,18 +570,8 @@ impl Ad4mMcpHandler {
     async fn create_subject(&self, params: Parameters<CreateSubjectParams>) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(mut perspective) => {
-                let agent_context = match self.get_agent_context().await {
-                    Ok(ctx) => ctx,
-                    Err(e) => return format!("Authentication error: {}", e),
-                };
-
-                let capabilities = self.get_capabilities().await;
-                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
-                    return format!("Capability error: {}", e);
-                }
-
+        match self.get_writable_perspective(&p.perspective_id).await {
+            Ok((mut perspective, agent_context)) => {
                 let subject_class: SubjectClassOption = match serde_json::from_value(json!({
                     "className": p.class_name
                 })) {
@@ -621,7 +611,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error creating subject: {}", e),
                 }
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            Err(e) => e,
         }
     }
 
@@ -632,18 +622,8 @@ impl Ad4mMcpHandler {
     async fn execute_commands(&self, params: Parameters<ExecuteCommandsParams>) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(mut perspective) => {
-                let agent_context = match self.get_agent_context().await {
-                    Ok(ctx) => ctx,
-                    Err(e) => return format!("Authentication error: {}", e),
-                };
-
-                let capabilities = self.get_capabilities().await;
-                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
-                    return format!("Capability error: {}", e);
-                }
-
+        match self.get_writable_perspective(&p.perspective_id).await {
+            Ok((mut perspective, agent_context)) => {
                 // Parse commands from JSON string
                 let commands: Vec<Command> = match serde_json::from_str(&p.commands) {
                     Ok(cmds) => cmds,
@@ -681,7 +661,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error executing commands: {}", e),
                 }
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            Err(e) => e,
         }
     }
 
@@ -692,13 +672,8 @@ impl Ad4mMcpHandler {
     async fn infer(&self, params: Parameters<InferParams>) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(perspective) => {
-                let agent_context = match self.get_agent_context().await {
-                    Ok(ctx) => ctx,
-                    Err(e) => return format!("Authentication error: {}", e),
-                };
-
+        match self.get_writable_perspective(&p.perspective_id).await {
+            Ok((perspective, agent_context)) => {
                 match perspective
                     .prolog_query_with_context(p.query.clone(), &agent_context)
                     .await
@@ -707,7 +682,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error running query: {}", e),
                 }
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            Err(e) => e,
         }
     }
 
@@ -722,18 +697,8 @@ impl Ad4mMcpHandler {
     async fn add_link(&self, params: Parameters<AddLinkParams>) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(mut perspective) => {
-                let agent_context = match self.get_agent_context().await {
-                    Ok(ctx) => ctx,
-                    Err(e) => return format!("Authentication error: {}", e),
-                };
-
-                let capabilities = self.get_capabilities().await;
-                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
-                    return format!("Capability error: {}", e);
-                }
-
+        match self.get_writable_perspective(&p.perspective_id).await {
+            Ok((mut perspective, agent_context)) => {
                 let link = Link {
                     source: p.source.clone(),
                     predicate: Some(p.predicate.clone()),
@@ -760,7 +725,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error adding link: {}", e),
                 }
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            Err(e) => e,
         }
     }
 
@@ -814,18 +779,8 @@ impl Ad4mMcpHandler {
     async fn add_model(&self, params: Parameters<AddModelParams>) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(mut perspective) => {
-                let agent_context = match self.get_agent_context().await {
-                    Ok(ctx) => ctx,
-                    Err(e) => return format!("Authentication error: {}", e),
-                };
-
-                let capabilities = self.get_capabilities().await;
-                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
-                    return format!("Capability error: {}", e);
-                }
-
+        match self.get_writable_perspective(&p.perspective_id).await {
+            Ok((mut perspective, agent_context)) => {
                 match perspective
                     .add_sdna(
                         p.class_name.clone(),
@@ -848,7 +803,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error adding SDNA: {}", e),
                 }
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            Err(e) => e,
         }
     }
 
@@ -859,18 +814,8 @@ impl Ad4mMcpHandler {
     async fn add_flow(&self, params: Parameters<AddFlowParams>) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(mut perspective) => {
-                let agent_context = match self.get_agent_context().await {
-                    Ok(ctx) => ctx,
-                    Err(e) => return format!("Authentication error: {}", e),
-                };
-
-                let capabilities = self.get_capabilities().await;
-                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
-                    return format!("Capability error: {}", e);
-                }
-
+        match self.get_writable_perspective(&p.perspective_id).await {
+            Ok((mut perspective, agent_context)) => {
                 match perspective
                     .add_sdna(
                         p.flow_name.clone(),
@@ -893,7 +838,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error adding flow: {}", e),
                 }
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            Err(e) => e,
         }
     }
 
@@ -1028,18 +973,8 @@ impl Ad4mMcpHandler {
     async fn flow_start(&self, params: Parameters<FlowExprParams>) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(mut perspective) => {
-                let agent_context = match self.get_agent_context().await {
-                    Ok(ctx) => ctx,
-                    Err(e) => return format!("Authentication error: {}", e),
-                };
-
-                let capabilities = self.get_capabilities().await;
-                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
-                    return format!("Capability error: {}", e);
-                }
-
+        match self.get_writable_perspective(&p.perspective_id).await {
+            Ok((mut perspective, agent_context)) => {
                 // TODO: Proper flow start requires loading the flow definition
                 // and executing its start actions. For now, return a placeholder.
                 // The full implementation needs SHACLFlow parsing in Rust.
@@ -1051,7 +986,7 @@ impl Ad4mMcpHandler {
                 }))
                 .unwrap_or_else(|e| format!("Error: {}", e))
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            Err(e) => e,
         }
     }
 
@@ -1137,18 +1072,8 @@ impl Ad4mMcpHandler {
     async fn set_subject_property(&self, params: Parameters<SetSubjectPropertyParams>) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(mut perspective) => {
-                let agent_context = match self.get_agent_context().await {
-                    Ok(ctx) => ctx,
-                    Err(e) => return format!("Authentication error: {}", e),
-                };
-
-                let capabilities = self.get_capabilities().await;
-                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
-                    return format!("Capability error: {}", e);
-                }
-
+        match self.get_writable_perspective(&p.perspective_id).await {
+            Ok((mut perspective, agent_context)) => {
                 // Look up the SHACL property path for this property name
                 // SHACL properties are stored as links: propertyShapeUri --sh://name--> "propertyName"
                 // and propertyShapeUri --sh://path--> "predicateUri"
@@ -1204,7 +1129,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error setting property: {}", e),
                 }
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            Err(e) => e,
         }
     }
 
@@ -1265,18 +1190,8 @@ impl Ad4mMcpHandler {
     async fn add_to_collection(&self, params: Parameters<AddToCollectionParams>) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(mut perspective) => {
-                let agent_context = match self.get_agent_context().await {
-                    Ok(ctx) => ctx,
-                    Err(e) => return format!("Authentication error: {}", e),
-                };
-
-                let capabilities = self.get_capabilities().await;
-                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
-                    return format!("Capability error: {}", e);
-                }
-
+        match self.get_writable_perspective(&p.perspective_id).await {
+            Ok((mut perspective, agent_context)) => {
                 let predicate = match self
                     .resolve_property_predicate(&perspective, &p.class_name, &p.collection_name)
                     .await
@@ -1306,7 +1221,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error adding to collection: {}", e),
                 }
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            Err(e) => e,
         }
     }
 
@@ -1320,18 +1235,8 @@ impl Ad4mMcpHandler {
     ) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(mut perspective) => {
-                let agent_context = match self.get_agent_context().await {
-                    Ok(ctx) => ctx,
-                    Err(e) => return format!("Authentication error: {}", e),
-                };
-
-                let capabilities = self.get_capabilities().await;
-                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
-                    return format!("Capability error: {}", e);
-                }
-
+        match self.get_writable_perspective(&p.perspective_id).await {
+            Ok((mut perspective, agent_context)) => {
                 let predicate = match self
                     .resolve_property_predicate(&perspective, &p.class_name, &p.collection_name)
                     .await
@@ -1371,7 +1276,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error finding link to remove: {}", e),
                 }
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            Err(e) => e,
         }
     }
 
@@ -1455,18 +1360,8 @@ impl Ad4mMcpHandler {
     async fn delete_subject(&self, params: Parameters<DeleteSubjectParams>) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(mut perspective) => {
-                let agent_context = match self.get_agent_context().await {
-                    Ok(ctx) => ctx,
-                    Err(e) => return format!("Authentication error: {}", e),
-                };
-
-                let capabilities = self.get_capabilities().await;
-                if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
-                    return format!("Capability error: {}", e);
-                }
-
+        match self.get_writable_perspective(&p.perspective_id).await {
+            Ok((mut perspective, agent_context)) => {
                 // Remove all links where this subject is the source
                 let source_links = perspective
                     .get_links(&LinkQuery {
@@ -1507,7 +1402,7 @@ impl Ad4mMcpHandler {
                 }))
                 .unwrap_or_else(|e| format!("Error: {}", e))
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            Err(e) => e,
         }
     }
 
