@@ -17,8 +17,7 @@ use crate::agent::capabilities::{
     token::decode_jwt,
     AuthInfo, AuthInfoExtended, Capability,
 };
-use crate::agent::{AgentContext, AgentService};
-use crate::db::Ad4mDb;
+use crate::agent::AgentContext;
 use crate::graphql::graphql_types::{LinkQuery, LinkStatus, PerspectiveHandle, PerspectiveState};
 use crate::perspectives::perspective_instance::{Command, Parameter, SdnaType, SubjectClassOption};
 use crate::perspectives::utils::prolog_resolution_to_string;
