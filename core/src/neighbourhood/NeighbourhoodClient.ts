@@ -318,7 +318,9 @@ export class NeighbourhoodClient {
   dispatchSignal(perspectiveUUID: string, signal: any) {
     const handlers = this.#signalHandlers.get(perspectiveUUID);
     if (handlers) {
-      handlers.forEach((handler) => handler(signal));
+      handlers.forEach((handler) => {
+        handler(signal);
+      });
     }
   }
 
