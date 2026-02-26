@@ -1,7 +1,13 @@
-//! MCP Tools for AD4M Subject/Model operations
+//! MCP Tools for AD4M — Agent-Centric Distributed Application Meta-ontology
 //!
-//! These tools expose AD4M's Subject system via MCP, allowing AI agents to
-//! work with typed models (get properties, run actions) instead of raw links.
+//! AD4M provides a subjective graph database where data is stored as **links**
+//! (RDF-like triples: source → predicate → target) in **perspectives**
+//! (personal knowledge graphs). **Subject classes** (models) define typed
+//! schemas using SHACL, giving structure to the raw link graph. **Neighbourhoods**
+//! enable shared perspectives synced via Holochain for real-time P2P collaboration.
+//!
+//! This module exposes AD4M's functionality via MCP (Model Context Protocol),
+//! enabling AI agents to work with typed models instead of raw links.
 
 use super::server::McpContext;
 use crate::agent::capabilities::{
@@ -454,6 +460,27 @@ impl Ad4mMcpHandler {
         capabilities_from_token(token.unwrap_or_default(), admin_cred)
     }
 
+    /// Store an auth token in the session and return a success JSON response
+    async fn store_token_and_respond(
+        &self,
+        token: String,
+        email: Option<&str>,
+        message: &str,
+    ) -> String {
+        let mut token_guard = self.context.auth_token.write().await;
+        *token_guard = Some(token.clone());
+
+        let mut resp = json!({
+            "success": true,
+            "token": token,
+            "message": message,
+        });
+        if let Some(e) = email {
+            resp["user_email"] = json!(e);
+        }
+        resp.to_string()
+    }
+
     /// Get agent context for read operations - allows unauthenticated access for local/main agent
     async fn get_agent_context_for_read(&self) -> AgentContext {
         match self.get_auth_token().await {
@@ -508,7 +535,7 @@ impl Ad4mMcpHandler {
     // ========================================================================
 
     /// List all perspectives available to the current user
-    #[tool(description = "List all AD4M perspectives available to the current user")]
+    #[tool(description = "List all AD4M perspectives. A perspective is a subjective graph database — a personal collection of links (RDF-like triples: source → predicate → target) that can be queried, modified, and optionally shared as a 'neighbourhood' for real-time P2P collaboration. Each has a UUID and a human-readable name.")]
     async fn list_perspectives(&self, _params: Parameters<ListPerspectivesParams>) -> String {
         let _agent_context = match self.get_agent_context().await {
             Ok(ctx) => ctx,
@@ -907,7 +934,7 @@ impl Ad4mMcpHandler {
     // ========================================================================
 
     /// Add a link to a perspective
-    #[tool(description = "Add a link (source, predicate, target) to a perspective.")]
+    #[tool(description = "Add a link (RDF-like triple) to a perspective. Links are the fundamental data unit — all data (properties, type markers, collections) is stored as links. Example: source='did:key:abc' predicate='ad4m://name' target='literal://string:Alice'. In shared neighbourhoods, links sync to all members.")]
     async fn add_link(&self, params: Parameters<AddLinkParams>) -> String {
         let p = &params.0;
 
@@ -1245,7 +1272,7 @@ impl Ad4mMcpHandler {
     }
 
     /// Create a new perspective
-    #[tool(description = "Create a new perspective (local knowledge graph) with a given name.")]
+    #[tool(description = "Create a new perspective (local knowledge graph). Returns the UUID. You can then add links, register models (subject classes), and create typed instances within it. To share it for collaboration, convert it to a neighbourhood.")]
     async fn add_perspective(&self, params: Parameters<AddPerspectiveParams>) -> String {
         let p = &params.0;
 
@@ -1798,16 +1825,12 @@ impl Ad4mMcpHandler {
 
         match um::generate_user_jwt(&email, "mcp-agent") {
             Ok(cap_token) => {
-                let mut token_guard = self.context.auth_token.write().await;
-                *token_guard = Some(cap_token.clone());
-
-                json!({
-                    "success": true,
-                    "token": cap_token,
-                    "user_email": email,
-                    "message": "Login successful. Token stored for subsequent operations."
-                })
-                .to_string()
+                self.store_token_and_respond(
+                    cap_token,
+                    Some(&email),
+                    "Login successful. Token stored for subsequent operations.",
+                )
+                .await
             }
             Err(e) => json!({"success": false, "error": e}).to_string(),
         }
@@ -1863,16 +1886,12 @@ impl Ad4mMcpHandler {
 
         match generate_capability_token(p.request_id.clone(), p.code.clone()).await {
             Ok(cap_token) => {
-                // Store in session
-                let mut token_guard = self.context.auth_token.write().await;
-                *token_guard = Some(cap_token.clone());
-
-                json!({
-                    "success": true,
-                    "token": cap_token,
-                    "message": "JWT generated and stored. You are now authenticated."
-                })
-                .to_string()
+                self.store_token_and_respond(
+                    cap_token,
+                    None,
+                    "JWT generated and stored. You are now authenticated.",
+                )
+                .await
             }
             Err(e) => json!({
                 "success": false,
@@ -1990,16 +2009,12 @@ impl Ad4mMcpHandler {
 
         match um::generate_user_jwt(&email, "mcp-agent") {
             Ok(cap_token) => {
-                let mut token_guard = self.context.auth_token.write().await;
-                *token_guard = Some(cap_token.clone());
-
-                json!({
-                    "success": true,
-                    "token": cap_token,
-                    "user_email": email,
-                    "message": "Email verified. Token stored for subsequent operations."
-                })
-                .to_string()
+                self.store_token_and_respond(
+                    cap_token,
+                    Some(&email),
+                    "Email verified. Token stored for subsequent operations.",
+                )
+                .await
             }
             Err(e) => json!({"success": false, "error": e}).to_string(),
         }
