@@ -2079,9 +2079,18 @@ impl Ad4mMcpHandler {
 
         if let Some(links) = links {
             for link in links {
-                let source = link.pointer("/data/source").and_then(|v| v.as_str()).unwrap_or("");
-                let predicate = link.pointer("/data/predicate").and_then(|v| v.as_str()).unwrap_or("");
-                let target = link.pointer("/data/target").and_then(|v| v.as_str()).unwrap_or("");
+                let source = link
+                    .pointer("/data/source")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let predicate = link
+                    .pointer("/data/predicate")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let target = link
+                    .pointer("/data/target")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
                 if source == "flux://profile" {
                     for (pred_uri, field_name) in &predicates {
@@ -2119,7 +2128,11 @@ impl Ad4mMcpHandler {
             Err(e) => return json!({"error": format!("Failed to parse agent: {}", e)}).to_string(),
         };
 
-        let did = agent.get("did").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let did = agent
+            .get("did")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let current_links = agent
             .get("perspective")
             .and_then(|p| p.get("links"))
@@ -2140,9 +2153,18 @@ impl Ad4mMcpHandler {
         let mut preserved_links: Vec<serde_json::Value> = Vec::new();
 
         for link in &current_links {
-            let source = link.pointer("/data/source").and_then(|v| v.as_str()).unwrap_or("");
-            let predicate = link.pointer("/data/predicate").and_then(|v| v.as_str()).unwrap_or("");
-            let target = link.pointer("/data/target").and_then(|v| v.as_str()).unwrap_or("");
+            let source = link
+                .pointer("/data/source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let predicate = link
+                .pointer("/data/predicate")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let target = link
+                .pointer("/data/target")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
 
             if source == "flux://profile" && profile_text_predicates.contains(&predicate) {
                 current_values.insert(predicate.to_string(), target.to_string());
@@ -2196,11 +2218,21 @@ impl Ad4mMcpHandler {
         match js.execute(update_script).await {
             Ok(_) => {
                 let mut updated = json!({"success": true});
-                if let Some(u) = p.username.as_ref() { updated["username"] = json!(u); }
-                if let Some(g) = p.given_name.as_ref() { updated["given_name"] = json!(g); }
-                if let Some(f) = p.family_name.as_ref() { updated["family_name"] = json!(f); }
-                if let Some(e) = p.email.as_ref() { updated["email"] = json!(e); }
-                if let Some(b) = p.bio.as_ref() { updated["bio"] = json!(b); }
+                if let Some(u) = p.username.as_ref() {
+                    updated["username"] = json!(u);
+                }
+                if let Some(g) = p.given_name.as_ref() {
+                    updated["given_name"] = json!(g);
+                }
+                if let Some(f) = p.family_name.as_ref() {
+                    updated["family_name"] = json!(f);
+                }
+                if let Some(e) = p.email.as_ref() {
+                    updated["email"] = json!(e);
+                }
+                if let Some(b) = p.bio.as_ref() {
+                    updated["bio"] = json!(b);
+                }
                 updated.to_string()
             }
             Err(e) => json!({"error": format!("Failed to update profile: {}", e)}).to_string(),
@@ -2211,7 +2243,10 @@ impl Ad4mMcpHandler {
     #[tool(
         description = "Set the current agent's profile picture. Provide raw base64-encoded image data (NOT a data URI). The image will be uploaded to the centralized file store and linked in the agent's public profile. For best results, use a square image (Flux will display it as a circle)."
     )]
-    async fn set_agent_profile_picture(&self, params: Parameters<SetAgentProfilePictureParams>) -> String {
+    async fn set_agent_profile_picture(
+        &self,
+        params: Parameters<SetAgentProfilePictureParams>,
+    ) -> String {
         let _capabilities = match self.get_capabilities().await {
             Ok(c) => c,
             Err(e) => return format!("Authentication error: {}", e),
@@ -2238,7 +2273,9 @@ impl Ad4mMcpHandler {
                 let addr: String = serde_json::from_str(&r).unwrap_or(r);
                 addr
             }
-            Err(e) => return json!({"error": format!("Failed to upload image: {}", e)}).to_string(),
+            Err(e) => {
+                return json!({"error": format!("Failed to upload image: {}", e)}).to_string()
+            }
         };
 
         // Get current agent perspective
@@ -2248,7 +2285,11 @@ impl Ad4mMcpHandler {
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };
         let agent: serde_json::Value = serde_json::from_str(&result).unwrap_or(json!({}));
-        let did = agent.get("did").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let did = agent
+            .get("did")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let current_links = agent
             .get("perspective")
@@ -2260,12 +2301,23 @@ impl Ad4mMcpHandler {
         // Keep all links except image links
         let mut all_links: Vec<serde_json::Value> = Vec::new();
         for link in &current_links {
-            let predicate = link.pointer("/data/predicate").and_then(|v| v.as_str()).unwrap_or("");
-            if predicate == "sioc://has_profile_image" || predicate == "sioc://has_profile_thumbnail_image" {
+            let predicate = link
+                .pointer("/data/predicate")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if predicate == "sioc://has_profile_image"
+                || predicate == "sioc://has_profile_thumbnail_image"
+            {
                 continue;
             }
-            let source = link.pointer("/data/source").and_then(|v| v.as_str()).unwrap_or("");
-            let target = link.pointer("/data/target").and_then(|v| v.as_str()).unwrap_or("");
+            let source = link
+                .pointer("/data/source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let target = link
+                .pointer("/data/target")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             all_links.push(json!({
                 "author": did,
                 "timestamp": link.get("timestamp").and_then(|v| v.as_str()).unwrap_or(""),
@@ -2297,7 +2349,8 @@ impl Ad4mMcpHandler {
                 "success": true,
                 "profile_image": profile_img,
                 "message": "Profile picture updated. For best results in Flux, use a square image."
-            }).to_string(),
+            })
+            .to_string(),
             Err(e) => json!({"error": format!("Failed to update profile: {}", e)}).to_string(),
         }
     }
@@ -2320,7 +2373,8 @@ impl Ad4mMcpHandler {
 
         // Verify the perspective exists
         if get_perspective(&p.perspective_id).is_none() {
-            return json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string();
+            return json!({"error": format!("Perspective not found: {}", p.perspective_id)})
+                .to_string();
         }
 
         // Build SurrealQL query for the waker's perspectiveSubscribeSurrealQuery
