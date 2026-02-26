@@ -65,7 +65,7 @@ PerspectiveProxy (graph store)
   `@BelongsToOne`, `@BelongsToMany`; each generates `add*`, `remove*`, `set*` methods.
 - **Queries** — `findAll`, `findOne`, `query()` builder, `paginate`, `count` — all
   compiled to SurrealQL and executed against the perspective's local graph engine.
-- **Subscriptions** — `subscribe()` / `query().subscribe()` re-run the query on each
+- **Subscriptions** — `subscribe()` / `query().live()` re-run the query on each
   relevant link change and deliver fresh results via callback.
 
 > **Layer boundary**: `PerspectiveProxy` still uses `baseExpression` in its
@@ -197,10 +197,15 @@ const results = await Recipe.query(perspective)
   .where({ status: "recipe://published" })
   .order({ createdAt: "DESC" })
   .limit(10)
-  .run();
+  .get();
 
 // First match
 const one = await Recipe.query(perspective).where({ title: "Pasta" }).first();
+
+// Count matching records
+const n = await Recipe.query(perspective)
+  .where({ status: "recipe://draft" })
+  .count();
 ```
 
 ### Subscriptions
@@ -215,10 +220,11 @@ const sub = Recipe.subscribe(
 // Or via the builder:
 const sub2 = Recipe.query(perspective)
   .where({ status: "recipe://cooking" })
-  .subscribe((recipes) => setRecipes(recipes));
+  .live((recipes) => setRecipes(recipes));
 
 // Always clean up:
 sub.unsubscribe();
+sub2.unsubscribe();
 ```
 
 ---
