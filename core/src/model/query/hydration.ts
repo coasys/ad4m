@@ -139,20 +139,22 @@ export async function hydrateInstanceFromLinks(
   if (!links || links.length === 0) return;
 
   // ── Global timestamp / author tracking ─────────────────────────────────────
-  // Use String comparison so ISO dates and numeric strings both sort correctly.
-  let minTimestamp: any = null;
-  let maxTimestamp: any = null;
+  // Normalise to epoch-ms so numeric and ISO timestamps compare correctly.
+  let minTimestamp: number | null = null;
+  let maxTimestamp: number | null = null;
   let originalAuthor: string | null = null;
 
   for (const link of links) {
     const ts = link.timestamp;
     if (ts == null) continue;
-    if (minTimestamp === null || String(ts) < String(minTimestamp)) {
-      minTimestamp = ts;
+    const t = Number(normalizeTimestamp(ts));
+    if (isNaN(t)) continue;
+    if (minTimestamp === null || t < minTimestamp) {
+      minTimestamp = t;
       originalAuthor = link.author ?? null;
     }
-    if (maxTimestamp === null || String(ts) > String(maxTimestamp)) {
-      maxTimestamp = ts;
+    if (maxTimestamp === null || t > maxTimestamp) {
+      maxTimestamp = t;
     }
   }
 
