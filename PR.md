@@ -155,7 +155,7 @@ Net: –876 lines, +769 lines across 4 files (the `PerspectiveClient` additions 
 
 - Added `helpers/` directory: `ports.ts` (dynamic port allocation), `executor.ts` (`AgentHandle`), `assertions.ts` (`waitUntil`), `index.ts` (barrel)
 - Added `wipePerspective()` export to `utils/utils.ts`
-- Centralised `global.fetch` polyfill into `tests/setup.ts`
+- Centralized `global.fetch` polyfill into `tests/setup.ts`
 - Migrated auth and multi-user tests to a shared `startAgent` helper
 - Removed `findAndKillProcess` entirely — matched any process by name and could kill a live AD4M instance; teardown already uses `tree-kill` with the specific child PID
 
