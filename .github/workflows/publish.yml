@@ -461,14 +461,6 @@ jobs:
           tag: ${{ env.NPM_TAG }}
           access: public
 
-      - name: Publish executor
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: executor/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
-
       - name: Publish Test runner
         uses: JS-DevTools/npm-publish@v1
         with:
