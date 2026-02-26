@@ -473,7 +473,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     expect(query).toContain("uri AS source_uri");
     expect(query).toContain("FROM node");
     expect(query).toContain(
-      "->link[WHERE perspective = $perspective] AS links",
+      "(SELECT predicate, out.uri AS target, author, timestamp FROM link WHERE in = $parent.id ORDER BY timestamp ASC) AS links",
     );
     expect(query).toContain("WHERE");
     // Should have graph traversal filters for required properties
@@ -487,13 +487,13 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
     // Should have graph traversal filters for required properties and user filter
     expect(query).toContain(
-      "count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name']) > 0",
+      "count(->link[WHERE predicate = 'recipe://name']) > 0",
     );
     expect(query).toContain(
-      "count(->link[WHERE perspective = $perspective AND predicate = 'recipe://rating']) > 0",
+      "count(->link[WHERE predicate = 'recipe://rating']) > 0",
     );
     expect(query).toContain(
-      "count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Pasta']) > 0",
+      "count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0",
     );
   });
 
@@ -504,10 +504,10 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
     expect(query).toContain("WHERE");
     expect(query).toContain(
-      "count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Pasta']) > 0",
+      "count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0",
     );
     expect(query).toContain(
-      "count(->link[WHERE perspective = $perspective AND predicate = 'recipe://rating' AND out.uri = 5]) > 0",
+      "count(->link[WHERE predicate = 'recipe://rating' AND fn::parse_literal(out.uri) = 5]) > 0",
     );
     expect(query).toContain("AND");
   });
@@ -553,7 +553,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
     // Not operator uses graph traversal with count = 0
     expect(query).toContain(
-      "count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Salad']) = 0",
+      "count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Salad']) = 0",
     );
   });
 
@@ -564,7 +564,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
     // Not operator with array uses graph traversal with count = 0
     expect(query).toContain(
-      "count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri IN ['Salad', 'Soup']]) = 0",
+      "count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) IN ['Salad', 'Soup']]) = 0",
     );
   });
 
@@ -623,7 +623,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     });
 
     expect(query).toContain(
-      "count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri IN ['Pasta', 'Pizza']]) > 0",
+      "count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) IN ['Pasta', 'Pizza']]) > 0",
     );
   });
 
@@ -645,8 +645,9 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     });
 
     // ORDER BY is now handled in JavaScript post-query
+    // Note: the links correlated subquery uses ORDER BY timestamp ASC internally for link ordering
     expect(query).toContain("FROM node");
-    expect(query).not.toContain("ORDER BY");
+    expect(query).not.toContain("ORDER BY timestamp DESC");
   });
 
   it("should not generate LIMIT clause in SQL (handled in JavaScript)", async () => {
@@ -678,13 +679,14 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     // WHERE clause uses graph traversal filters
     expect(query).toContain("WHERE");
     expect(query).toContain(
-      "count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Pasta']) > 0",
+      "count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0",
     );
     // Comparison operators (gt) are filtered in JavaScript, not SQL
     expect(query).not.toContain("out.uri > 4");
     expect(query).not.toContain("target > 4");
     // ORDER BY, LIMIT, START are now handled in JavaScript post-query
-    expect(query).not.toContain("ORDER BY");
+    // Note: the links subquery uses ORDER BY timestamp ASC internally
+    expect(query).not.toContain("ORDER BY timestamp DESC");
     expect(query).not.toContain("LIMIT");
     expect(query).not.toContain("START");
   });
@@ -696,7 +698,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
     // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
     expect(query).toContain(
-      "->link[WHERE perspective = $perspective] AS links",
+      "(SELECT predicate, out.uri AS target, author, timestamp FROM link WHERE in = $parent.id ORDER BY timestamp ASC) AS links",
     );
   });
 
@@ -717,7 +719,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
     // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
     expect(query).toContain(
-      "->link[WHERE perspective = $perspective] AS links",
+      "(SELECT predicate, out.uri AS target, author, timestamp FROM link WHERE in = $parent.id ORDER BY timestamp ASC) AS links",
     );
   });
 
@@ -736,7 +738,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     });
 
     // Numeric values should not have quotes around them
-    expect(query).toContain("out.uri = 5");
+    expect(query).toContain("fn::parse_literal(out.uri) = 5");
     expect(query).not.toContain("out.uri = '5'");
   });
 
@@ -755,7 +757,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
     // Verify graph traversal filters are present
     expect(normalized).toContain(
-      "count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Pasta']) > 0",
+      "count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0",
     );
     // Comparison operators (gte, lte) are filtered in JavaScript, not SQL
     expect(normalized).not.toContain("out.uri >= 4");
@@ -766,7 +768,8 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     expect(normalized).not.toContain("author = 'did:key:alice'");
 
     // ORDER BY and LIMIT are handled in JavaScript post-query
-    expect(normalized).not.toContain("ORDER BY");
+    // Note: the links correlated subquery uses ORDER BY timestamp ASC internally
+    expect(normalized).not.toContain("ORDER BY rating");
     expect(normalized).not.toContain("LIMIT");
 
     // Verify query structure (FROM node, no GROUP BY)
@@ -784,12 +787,12 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     // Should have WHERE clause filtering for required properties using graph traversal
     expect(query).toContain("WHERE");
     expect(query).toContain(
-      "count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name']) > 0",
+      "count(->link[WHERE predicate = 'recipe://name']) > 0",
     );
     expect(query).toContain(
-      "count(->link[WHERE perspective = $perspective AND predicate = 'recipe://rating']) > 0",
+      "count(->link[WHERE predicate = 'recipe://rating']) > 0",
     );
-    expect(query).not.toContain("ORDER BY");
+    // No user-requested ORDER BY or START should appear at the top level
     expect(query).not.toContain("START");
   });
 
@@ -892,7 +895,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const normalized = normalizeQuery(query);
     // Regular properties use graph traversal filters
     expect(normalized).toContain(
-      "count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Pasta']) > 0",
+      "count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0",
     );
     // Comparison operators (gt) are filtered in JavaScript, not SQL
     expect(normalized).not.toContain("out.uri > 4");
@@ -914,7 +917,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
       where: { completed: true },
     });
 
-    expect(query).toContain("out.uri = true");
+    expect(query).toContain("fn::parse_literal(out.uri) = true");
   });
 
   it("should handle array of numbers", async () => {
@@ -923,7 +926,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     });
 
     expect(query).toContain(
-      "count(->link[WHERE perspective = $perspective AND predicate = 'recipe://rating' AND out.uri IN [4, 5]]) > 0",
+      "count(->link[WHERE predicate = 'recipe://rating' AND fn::parse_literal(out.uri) IN [4, 5]]) > 0",
     );
   });
 
@@ -958,8 +961,9 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     });
 
     // ORDER BY is now handled in JavaScript post-query
+    // Note: the links correlated subquery uses ORDER BY timestamp ASC internally
     expect(query).toContain("FROM node");
-    expect(query).not.toContain("ORDER BY");
+    expect(query).not.toContain("ORDER BY name");
   });
 
   it("should generate query with only fields, no relations", async () => {
@@ -969,7 +973,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
     // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
     expect(query).toContain(
-      "->link[WHERE perspective = $perspective] AS links",
+      "(SELECT predicate, out.uri AS target, author, timestamp FROM link WHERE in = $parent.id ORDER BY timestamp ASC) AS links",
     );
   });
 
@@ -980,7 +984,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
     // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
     expect(query).toContain(
-      "->link[WHERE perspective = $perspective] AS links",
+      "(SELECT predicate, out.uri AS target, author, timestamp FROM link WHERE in = $parent.id ORDER BY timestamp ASC) AS links",
     );
   });
 });
@@ -1044,7 +1048,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
           },
           {
             predicate: "recipe://rating",
-            target: "5",
+            target: Literal.from(5).toUrl(),
             author: "did:key:alice",
             timestamp: "2023-01-01T00:00:00Z",
           },
@@ -1080,7 +1084,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
           },
           {
             predicate: "recipe://rating",
-            target: "4",
+            target: Literal.from(4).toUrl(),
             author: "did:key:bob",
             timestamp: "2023-01-02T00:00:00Z",
           },

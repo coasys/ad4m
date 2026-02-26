@@ -64,43 +64,24 @@ That PR already completed the foundational migration:
 | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
 | `sh:inversePath` — Rust executor | `@BelongsToOne` / `@BelongsToMany` set `inversePath: true` on the SHACL shape in TypeScript. SurrealDB hydration works (reverse `WHERE out.uri = ...` query). However `shacl_parser.rs` has **zero handling** of `sh:inversePath` — it never emits reverse Prolog predicates, so Prolog-side lookups for reverse relations silently return nothing. `generatePrologFacts.ts` likewise has no reverse-predicate clause. Full fix scope documented in section 2c. | ⚠️ PARTIAL — TS side done, Rust + Prolog side not started |
 
-### Pending — Phases 3–5
+### Remaining — This PR
 
-| Phase                         | Status         |
-| ----------------------------- | -------------- |
-| 3a File decomposition         | ✅ COMPLETE    |
-| 3b Transaction API            | ✅ COMPLETE    |
-| 3c IncludeMap eager loading   | ✅ COMPLETE    |
-| 3d Subscriptions              | ✅ COMPLETE    |
-| 3e Subscription infra cleanup | ⏳ PENDING     |
-| 4 Model inheritance           | ✅ COMPLETE    |
-| 5 CRDT ordering               | ⏳ NOT STARTED |
-| 0 tests/js migration          | ⏳ PENDING     |
-| G External consumer migration | ⏳ NOT STARTED |
+| Phase                       | Status            |
+| --------------------------- | ----------------- |
+| 3a File decomposition       | ✅ COMPLETE       |
+| 3b Transaction API          | ✅ COMPLETE       |
+| 3c IncludeMap eager loading | ✅ COMPLETE       |
+| 3d Subscriptions            | ✅ COMPLETE       |
+| **3e Subscription cleanup** | ← **NEXT**        |
+| 4 Model inheritance         | ✅ COMPLETE       |
+| **F Flux decorator rename** | companion PR      |
+| 5, 0, G                     | → IMPROVEMENTS.md |
 
 ---
 
-## Future Work: SDNA Prolog predicate rename (`collection*` → `relation*`)
+## Future Work: SDNA Wire Protocol Rename → IMPROVEMENTS.md #15
 
-The SDNA wire protocol still uses `collection`-prefixed predicate names:
-
-- `collection/2`
-- `collection_getter/4`
-- `collection_adder/3`
-- `collection_remover/3`
-- `collection_setter/3`
-
-These are queried by name in the Rust executor (`engine_pool.rs`, `sdna.rs`, `perspective_instance.rs`) and appear in 78+ locations across the bootstrap languages. Renaming them is a **breaking change** to the SDNA wire protocol — any live perspective with existing SDNA (deployed apps, stored data) would stop working.
-
-**What's required for this rename:**
-
-1. Decide on new predicate names (e.g. `relation/2`, `relation_getter/4`, `relation_adder/3`, `relation_remover/3`, `relation_setter/3`)
-2. Update all Rust executor references: regex patterns, hardcoded query strings, `discontiguous` declarations, SHACL→SDNA generation in `sdna.rs`
-3. Update all bootstrap language `.pl` files (78+ occurrences)
-4. Update the test fixture at `tests/js/sdna/subject.pl`
-5. Write a migration strategy: either a versioned SDNA format, a compatibility shim that accepts both predicate names during a transition window, or a coordinated breaking release
-
-**Priority:** Not before Phase 3. Track as a major version (breaking) release item alongside any other SDNA wire-protocol changes.
+**Deferred.** The SDNA wire protocol still uses `collection`-prefixed predicate names (`collection/2`, `collection_getter/4`, etc.) across 78+ locations in bootstrap languages and the Rust executor. Renaming is a breaking wire-protocol change requiring a versioned migration strategy. See IMPROVEMENTS.md #15 for full scope.
 
 ---
 
@@ -128,11 +109,9 @@ perspective.querySurrealDB("SELECT ... FROM link WHERE in.uri = $base", {
 });
 ```
 
-This applies throughout `queryToSurrealQL`, `getData()`, and any other raw SurrealQL construction. Should be addressed in Phase 3a when `SurrealQueryBuilder.ts` is extracted as its own module — the right time to standardize the query construction pattern.
+This applies throughout `queryToSurrealQL`, `getData()`, and any other raw SurrealQL construction. **Deferred — see IMPROVEMENTS.md #14.**
 
-**Priority:** Phase 3a.
-
-### 🟡 `eval()` in `PerspectiveProxy` for setter actions
+### ✅ `eval()` in `PerspectiveProxy` — RESOLVED (Phase 1c complete)
 
 The rollup build already warns about it:
 
@@ -157,9 +136,7 @@ Phase 1c deletes `Subject.ts` entirely — this goes away then. This is an addit
 
 The Rust executor has `get_collection_adder_actions` that derives the same structure from SHACL. Two implementations of the same thing that must stay in sync. `save()` uses the SHACL-derived path (correct); collection mutations use the TypeScript-generated path (fragile).
 
-Long-term fix: have collection mutations also fetch SHACL-derived actions via the executor, the same way `createSubject` does. Short-term: add a comment in `generateCollectionAction` explicitly flagging the sync dependency so it's not silently broken by future SHACL changes.
-
-**Priority:** Phase 3 planning item (already noted in Architectural Notes below).
+Long-term fix: have relation mutations fetch SHACL-derived actions from the executor (same as `createSubject` does). **Deferred — see IMPROVEMENTS.md #16.**
 
 ---
 
@@ -1202,15 +1179,17 @@ constructor also exists in the WeakMap registry (i.e. is itself decorated with `
 
 ---
 
-## Phase 5 — CRDT Ordering ⏳ NOT STARTED
+## Phase 5 — CRDT Ordering → IMPROVEMENTS.md #11
 
-Implement deterministic ordering for concurrent link writes. Details in
-`CRDT-ORDERING-STRATEGY.md`. Depends on Phase 3 being complete (query layer needs
-to be cleanly separated before ordering logic can be injected cleanly).
+**Deferred post-merge.** See `CRDT-ORDERING-STRATEGY.md` for design detail and IMPROVEMENTS.md #11 for tracking. Phase 3 prerequisite is now complete.
 
 ---
 
-## Phase G — External Consumer Migration & Prolog Subject Proxy Cleanup ⏳ NOT STARTED
+## Phase G — External Consumer Migration → IMPROVEMENTS.md #12
+
+**Deferred post-merge.** See IMPROVEMENTS.md #12 for full scope. Gated on Flux Phase F (decorator rename) completing first. Historical planning detail preserved below for reference.
+
+---
 
 This phase is gated on **flux** and **ad4m-hooks** migrating their `SubjectRepository` implementations to the `Ad4mModel` API. It is not actionable on the `ad4m` side until that migration is complete, but the removal targets are well-understood now and are documented here so they don't get lost.
 
@@ -1343,37 +1322,38 @@ the playground scenarios should be renamed to reflect their `we`-specific purpos
 ## Execution Order
 
 ```
-0   [POST-MERGE] tests/js refactor + model-decorator-api.test.ts port  ⏳ PENDING
-      ← fix deprecated imports in prolog-and-literals.test.ts and multi-user-simple.test.ts
-      ← establish consistent port allocation and setup pattern
-      ← port scenario 08 models + 14 tests into model-decorator-api.test.ts
-      ← add subscription lifecycle tests (3d coverage at executor level)
-      ← write remaining scenarios (01–07, 09–10) directly in tests/js
-1a  generatePrologFacts.ts ✅                           ← committed on ad4m-model-refactor
-1b  Remove dead Prolog paths ✅                         ← committed on ad4m-model-refactor
-1c  Delete Subject.ts ✅                                ← committed on ad4m-model-refactor
-2   Decorator cleanup (@Property, @Flag, @HasMany, etc.) ✅
-    + WeakMap metadata registry ✅
-    + update @we/models (5 files) ✅
-3a  File decomposition ✅                               ← `eb2f4b4b` → `6dcc5283`
-    + shared hydrateInstance() in hydration.ts ✅      ← eliminates dual hydration impls
-    + parameterized SurrealQL queries throughout ⏳     ← still uses string interpolation
-3b  Transaction API ✅                                  ← `a66d833b`
-3c  Include / eager loading (IncludeMap) ✅             ← `6d02ad2d`
-3d  Subscriptions ✅                                    ← client-side link listener approach
-3e  Subscription infrastructure cleanup ⏳ ← NEXT       ← remove old server-push SurrealDB path
-      ← delete subscribeSurrealDB + QuerySubscriptionProxy isSurrealDB branches (TS)
-      ← delete SurrealSubscribedQuery, 5 Rust methods, 3 mutation resolvers
-      ← write SUBSCRIPTION-ARCHITECTURE.md (why client-side, scaling notes)
-Merge origin/dev (SHACL/Prolog PR #654) ✅             ← `9c6c57c0`
-4   Model inheritance (WeakMap already done in Phase 2) ✅  ← verified by scenario 09
-5   CRDT ordering ⏳                                    ← after 3e; fills in scenario 10
-F   Flux decorator rename (~15 files in packages/api)   ← after test app validates Phase 2
-G   External consumer migration ⏳                       ← gated on flux + hooks teams
-      ← flux/packages/api/SubjectRepository → rewrite using Ad4mModel.findAll()/save()
-      ← ad4m-hooks/helpers/SubjectRepository → rewrite using Ad4mModel + subscribe()
-      ← delete PerspectiveProxy.getSubjectData() + getSubjectProxy()
-      ← delete PerspectiveClient.getSubjectData()
-      ← delete Rust get_subject_data() + GQL resolver
-      ← prerequisite: Phase F (decorator rename) complete in flux
+── COMPLETE ─────────────────────────────────────────────────────────────────
+✅  1a  generatePrologFacts.ts
+✅  1b  Remove dead Prolog paths
+✅  1c  Delete Subject.ts
+✅  2   Decorator cleanup + WeakMap registry + @we/models migration
+✅  3a  File decomposition + shared hydrateInstance()
+✅  3b  Transaction API
+✅  3c  IncludeMap eager loading
+✅  3d  Subscriptions (client-side link listener)
+✅  4   Model inheritance (sh:node parent shapes)
+✅      readOnly rename, coll→rel cleanup, @Flag wiring, various polish
+
+── REMAINING — THIS PR ──────────────────────────────────────────────────────
+⏳  3e  Subscription infrastructure cleanup              ← NEXT
+          ← delete subscribeSurrealDB + QuerySubscriptionProxy isSurrealDB branches (TS)
+          ← delete SurrealSubscribedQuery, 5 Rust methods, 3 mutation resolvers
+          ← write SUBSCRIPTION-ARCHITECTURE.md (why client-side, scaling notes)
+
+🔀  MERGE
+
+── COMPANION PR (Flux repo) ─────────────────────────────────────────────────
+⏳  F   Flux decorator rename (~15 files in packages/api)
+          ← @Optional → @Property, @Collection → @HasMany, @ModelOptions → @Model
+          ← prerequisite for Phase G
+
+── POST-MERGE FOLLOW-UPS (see IMPROVEMENTS.md) ──────────────────────────────
+⏳  #10  tests/js migration (model-decorator-api.test.ts)
+⏳  #11  CRDT ordering (Phase 5)
+⏳  #12  External consumer migration — SubjectRepository (Phase G)
+⏳  #14  Parameterised SurrealQL queries
+⏳  #1   Dirty tracking
+⏳  #2   Range filter push-down
+⏳  #3   N+1 batching
+        ... (see full priority order in IMPROVEMENTS.md)
 ```

@@ -7,13 +7,9 @@ import {
 import { SHACLShape, SHACLPropertyShape } from "../shacl/SHACLShape";
 
 // Module-level WeakMaps keyed on the constructor function (not the prototype).
-// This eliminates the prototype-mutation inheritance bug: with the old
-// `target["__collections"] = target["__collections"] || {}` pattern, a subclass
-// decorator would find the parent prototype's object (truthy) and write into it,
-// silently corrupting the parent class's metadata.
-//
-// Each class constructor is a unique key, so BaseBlock and PollBlock get separate
-// entries even when PollBlock extends BaseBlock.
+// Each class constructor is a unique key, so subclass decorators write into their
+// own entry rather than the parent prototype's — preventing silent metadata corruption
+// across inherited classes (e.g. BaseBlock and PollBlock stay independent).
 export const propertyRegistry = new WeakMap<Function, Record<string, any>>();
 export const relationRegistry = new WeakMap<Function, Record<string, any>>();
 
@@ -227,7 +223,7 @@ export interface RelationOptions {
   through: string;
 
   /**
-   * Custom SurrealQL getter to resolve the collection values. Use this for custom graph traversals.
+   * Custom SurrealQL getter to resolve the related values. Use this for custom graph traversals.
    * The expression can reference 'Base' which will be replaced with the instance's base expression.
    * Example: "(<-link[WHERE predicate = 'flux://has_reply'].in.uri)"
    */
@@ -422,9 +418,9 @@ export function Model(opts: ModelConfig) {
       }
       // Fall back to relations if no fields
       else if (Object.keys(relations).length > 0) {
-        const firstColl = relations[Object.keys(relations)[0]];
-        if (firstColl.through) {
-          const match = firstColl.through.match(/^([^:]+:\/\/)/);
+        const firstRelation = relations[Object.keys(relations)[0]];
+        if (firstRelation.through) {
+          const match = firstRelation.through.match(/^([^:]+:\/\/)/);
           if (match) {
             namespace = match[1];
           }
@@ -538,11 +534,9 @@ export function Model(opts: ModelConfig) {
           propShape.minCount = 1;
         }
 
-        // Single-valued properties get maxCount 1
-        // (collections are handled separately below)
-        if (!propMeta.collection) {
-          propShape.maxCount = 1;
-        }
+        // @Property fields are always single-valued; maxCount 1 is unconditional.
+        // Multi-valued relations live in relationRegistry and are handled below.
+        propShape.maxCount = 1;
 
         // Flag properties have fixed value
         if (propMeta.flag && propMeta.initial) {
@@ -618,59 +612,59 @@ export function Model(opts: ModelConfig) {
       }
 
       // Convert relations to SHACL property shapes
-      for (const collName in shapeRelations) {
-        const collMeta = shapeRelations[collName];
+      for (const relName in shapeRelations) {
+        const relMeta = shapeRelations[relName];
 
-        if (!collMeta.through) continue;
+        if (!relMeta.through) continue;
 
-        const collShape: SHACLPropertyShape = {
-          name: collName, // Collection name for generating named URIs
-          path: collMeta.through,
-          // Collections have no maxCount (unlimited)
+        const relShape: SHACLPropertyShape = {
+          name: relName, // Relation name for generating named URIs
+          path: relMeta.through,
+          // Relations have no maxCount (unlimited)
           // minCount defaults to 0 (optional)
         };
 
-        // Collections contain references (IRIs) to other entities
-        collShape.nodeKind = "IRI";
+        // Relations contain references (IRIs) to other entities
+        relShape.nodeKind = "IRI";
 
         // AD4M-specific metadata
-        if (collMeta.local !== undefined) {
-          collShape.local = collMeta.local;
+        if (relMeta.local !== undefined) {
+          relShape.local = relMeta.local;
         }
 
         // Relationship metadata
-        if (collMeta.maxCount !== undefined) {
-          collShape.maxCount = collMeta.maxCount;
+        if (relMeta.maxCount !== undefined) {
+          relShape.maxCount = relMeta.maxCount;
         }
 
-        if (collMeta.direction === "reverse") {
-          collShape.inversePath = true;
+        if (relMeta.direction === "reverse") {
+          relShape.inversePath = true;
         }
 
-        // === Extract Collection Actions (adder/remover) ===
-        // Adder action - adds a link to the collection
-        collShape.adder = [
+        // === Extract Relation Actions (adder/remover) ===
+        // Adder action - adds a link to the relation
+        relShape.adder = [
           {
             action: "addLink",
             source: "this",
-            predicate: collMeta.through,
+            predicate: relMeta.through,
             target: "value",
-            ...(collMeta.local && { local: true }),
+            ...(relMeta.local && { local: true }),
           },
         ];
 
-        // Remover action - removes a link from the collection
-        collShape.remover = [
+        // Remover action - removes a link from the relation
+        relShape.remover = [
           {
             action: "removeLink",
             source: "this",
-            predicate: collMeta.through,
+            predicate: relMeta.through,
             target: "value",
-            ...(collMeta.local && { local: true }),
+            ...(relMeta.local && { local: true }),
           },
         ];
 
-        shape.addProperty(collShape);
+        shape.addProperty(relShape);
       }
 
       // Set constructor and destructor actions on the shape.
