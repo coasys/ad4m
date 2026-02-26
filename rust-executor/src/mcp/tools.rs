@@ -1809,39 +1809,13 @@ impl Ad4mMcpHandler {
         description = "Login to a multi-user AD4M executor using email and password. Returns a JWT token on success that will be used for subsequent operations."
     )]
     async fn login_email(&self, params: Parameters<LoginEmailParams>) -> String {
-        let p = &params.0;
-
         use crate::user_management as um;
+        let email = params.0.email.trim().to_lowercase();
 
-        let email = p.email.trim().to_lowercase();
-
-        if !um::is_multi_user_enabled() {
-            return json!({"success": false, "error": "Multi-user mode is not enabled. Use request_capability + generate_jwt instead."}).to_string();
-        }
-
-        // Verify user credentials
-        let password_valid = Ad4mDb::with_global_instance(|db| {
-            db.verify_user_password(&email, &p.password)
-                .unwrap_or(false)
-        });
-
-        if !password_valid {
-            return json!({"success": false, "error": "Invalid credentials"}).to_string();
-        }
-
-        if !AgentService::user_exists(&email) {
-            return json!({"success": false, "error": "User key not found on executor"})
-                .to_string();
-        }
-
-        match um::generate_user_jwt(&email, "mcp-agent") {
-            Ok(cap_token) => {
-                self.store_token_and_respond(
-                    cap_token,
-                    Some(&email),
-                    "Login successful. Token stored for subsequent operations.",
-                )
-                .await
+        match um::login_user(&email, &params.0.password, "mcp-agent") {
+            Ok(token) => {
+                self.store_token_and_respond(token, Some(&email), "Login successful.")
+                    .await
             }
             Err(e) => json!({"success": false, "error": e}).to_string(),
         }
@@ -1918,37 +1892,16 @@ impl Ad4mMcpHandler {
     )]
     async fn signup(&self, params: Parameters<SignupParams>) -> String {
         use crate::user_management as um;
+        let email = params.0.email.trim().to_lowercase();
 
-        let p = &params.0;
-        let email = p.email.trim().to_lowercase();
-
-        if !um::is_multi_user_enabled() {
-            return json!({"success": false, "error": "Multi-user mode is not enabled."})
-                .to_string();
+        match um::signup_user(&email, &params.0.password, Some("MCP Agent")).await {
+            Ok(did) => json!({
+                "success": true,
+                "did": did,
+                "message": "User created. Check your email for a verification code and call verify_email_code."
+            }).to_string(),
+            Err(e) => json!({"success": false, "error": e}).to_string(),
         }
-
-        let did = match um::create_user(&email, &p.password) {
-            Ok(d) => d,
-            Err(e) => return json!({"success": false, "error": e}).to_string(),
-        };
-
-        let code = match um::create_verification_code(&email, "signup") {
-            Ok(c) => c,
-            Err(e) => return json!({"success": false, "error": e}).to_string(),
-        };
-
-        if let Err(e) =
-            um::send_verification_email(&email, &code, "signup", Some("MCP Agent")).await
-        {
-            return json!({"success": false, "error": e}).to_string();
-        }
-
-        json!({
-            "success": true,
-            "did": did,
-            "message": "User created. Check your email for a verification code and call verify_email_code."
-        })
-        .to_string()
     }
 
     /// Request a login verification code (multi-user mode)
@@ -1960,33 +1913,15 @@ impl Ad4mMcpHandler {
         params: Parameters<RequestLoginVerificationParams>,
     ) -> String {
         use crate::user_management as um;
-
         let email = params.0.email.trim().to_lowercase();
 
-        if !um::is_multi_user_enabled() {
-            return json!({"success": false, "error": "Multi-user mode is not enabled."})
-                .to_string();
+        match um::request_login_code(&email, Some("MCP Agent")).await {
+            Ok(()) => json!({
+                "success": true,
+                "message": "Verification code sent. Use verify_email_code to complete login."
+            }).to_string(),
+            Err(e) => json!({"success": false, "error": e}).to_string(),
         }
-
-        if let Err(e) = um::user_exists(&email) {
-            return json!({"success": false, "error": e}).to_string();
-        }
-
-        let code = match um::create_verification_code(&email, "login") {
-            Ok(c) => c,
-            Err(e) => return json!({"success": false, "error": e}).to_string(),
-        };
-
-        if let Err(e) = um::send_verification_email(&email, &code, "login", Some("MCP Agent")).await
-        {
-            return json!({"success": false, "error": e}).to_string();
-        }
-
-        json!({
-            "success": true,
-            "message": "Verification code sent. Use verify_email_code to complete login."
-        })
-        .to_string()
     }
 
     /// Verify an email code for signup or login (multi-user mode)
@@ -1995,33 +1930,13 @@ impl Ad4mMcpHandler {
     )]
     async fn verify_email_code(&self, params: Parameters<VerifyEmailCodeParams>) -> String {
         use crate::user_management as um;
-
         let p = &params.0;
         let email = p.email.trim().to_lowercase();
 
-        if !um::is_multi_user_enabled() {
-            return json!({"success": false, "error": "Multi-user mode is not enabled."})
-                .to_string();
-        }
-
-        let verified = match um::verify_code(&email, &p.code, &p.verification_type) {
-            Ok(v) => v,
-            Err(e) => return json!({"success": false, "error": e}).to_string(),
-        };
-
-        if !verified {
-            return json!({"success": false, "error": "Invalid verification code"}).to_string();
-        }
-
-        if !AgentService::user_exists(&email) {
-            return json!({"success": false, "error": "User key not found on executor"})
-                .to_string();
-        }
-
-        match um::generate_user_jwt(&email, "mcp-agent") {
-            Ok(cap_token) => {
+        match um::verify_and_login(&email, &p.code, &p.verification_type, "mcp-agent") {
+            Ok(token) => {
                 self.store_token_and_respond(
-                    cap_token,
+                    token,
                     Some(&email),
                     "Email verified. Token stored for subsequent operations.",
                 )

@@ -131,6 +131,78 @@ pub fn generate_user_jwt(email: &str, app_name: &str) -> Result<String, String> 
     .map_err(|e| format!("Failed to generate token: {}", e))
 }
 
+/// Verify user credentials (email + password). Returns Ok(()) on success.
+pub fn verify_credentials(email: &str, password: &str) -> Result<(), String> {
+    let password_valid = Ad4mDb::with_global_instance(|db| {
+        db.verify_user_password(email, password).unwrap_or(false)
+    });
+    if !password_valid {
+        return Err("Invalid credentials".to_string());
+    }
+    if !AgentService::user_exists(email) {
+        return Err("User key not found on executor".to_string());
+    }
+    Ok(())
+}
+
+/// Full login flow: check multi-user, verify credentials, generate JWT.
+pub fn login_user(email: &str, password: &str, app_name: &str) -> Result<String, String> {
+    if !is_multi_user_enabled() {
+        return Err("Multi-user mode is not enabled".to_string());
+    }
+    verify_credentials(email, password)?;
+    generate_user_jwt(email, app_name)
+}
+
+/// Full signup flow: check multi-user, create user, generate verification code, send email.
+pub async fn signup_user(
+    email: &str,
+    password: &str,
+    app_name: Option<&str>,
+) -> Result<String, String> {
+    if !is_multi_user_enabled() {
+        return Err("Multi-user mode is not enabled".to_string());
+    }
+    let did = create_user(email, password)?;
+    let code = create_verification_code(email, "signup")?;
+    send_verification_email(email, &code, "signup", app_name).await?;
+    Ok(did)
+}
+
+/// Full login verification flow: check multi-user, create code, send email.
+pub async fn request_login_code(
+    email: &str,
+    app_name: Option<&str>,
+) -> Result<(), String> {
+    if !is_multi_user_enabled() {
+        return Err("Multi-user mode is not enabled".to_string());
+    }
+    user_exists(email)?;
+    let code = create_verification_code(email, "login")?;
+    send_verification_email(email, &code, "login", app_name).await?;
+    Ok(())
+}
+
+/// Full email verification flow: verify code, generate JWT.
+pub fn verify_and_login(
+    email: &str,
+    code: &str,
+    verification_type: &str,
+    app_name: &str,
+) -> Result<String, String> {
+    if !is_multi_user_enabled() {
+        return Err("Multi-user mode is not enabled".to_string());
+    }
+    let verified = verify_code(email, code, verification_type)?;
+    if !verified {
+        return Err("Invalid verification code".to_string());
+    }
+    if !AgentService::user_exists(email) {
+        return Err("User key not found on executor".to_string());
+    }
+    generate_user_jwt(email, app_name)
+}
+
 /// Check if a user exists in both DB and AgentService.
 pub fn user_exists(email: &str) -> Result<(), String> {
     let db_exists = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
