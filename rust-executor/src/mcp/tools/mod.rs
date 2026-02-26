@@ -220,17 +220,43 @@ impl Ad4mMcpHandler {
         }
     }
 
-    /// Get a perspective by ID after checking write capabilities.
-    /// Common pattern used by most dynamic tool handlers.
+    /// Get a perspective by ID, verifying the agent is authenticated and has the required capability.
+    /// This is the standard entry point for tool handlers — DRYs out the repeated
+    /// get_perspective + get_agent_context + check_capability pattern.
+    async fn get_perspective_with_auth(
+        &self,
+        perspective_id: &str,
+        required_capability: &Capability,
+    ) -> Result<
+        (
+            crate::perspectives::perspective_instance::PerspectiveInstance,
+            AgentContext,
+        ),
+        String,
+    > {
+        let agent_context = self.get_agent_context().await?;
+        let capabilities = self.get_capabilities().await;
+        check_capability(&capabilities, required_capability)
+            .map_err(|e| format!("Capability error: {}", e))?;
+        let perspective = get_perspective(perspective_id)
+            .ok_or_else(|| format!("Perspective not found: {}", perspective_id))?;
+        // TODO: check that this user/agent actually has access to this perspective
+        Ok((perspective, agent_context))
+    }
+
+    /// Convenience wrapper for write operations (most common case)
     async fn get_writable_perspective(
         &self,
         perspective_id: &str,
-    ) -> Result<crate::perspectives::perspective_instance::PerspectiveInstance, String> {
-        let capabilities = self.get_capabilities().await;
-        check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY)
-            .map_err(|e| format!("Capability error: {}", e))?;
-        get_perspective(perspective_id)
-            .ok_or_else(|| format!("Perspective not found: {}", perspective_id))
+    ) -> Result<
+        (
+            crate::perspectives::perspective_instance::PerspectiveInstance,
+            AgentContext,
+        ),
+        String,
+    > {
+        self.get_perspective_with_auth(perspective_id, &PERSPECTIVE_CREATE_CAPABILITY)
+            .await
     }
 
     /// Extract a required string argument from the args map
@@ -2101,7 +2127,3 @@ impl Ad4mMcpHandler {
         }).to_string()
     }
 }
-
-// ============================================================================
-// Dynamic SHACL Tool Generation
-// ============================================================================

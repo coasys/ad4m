@@ -68,3 +68,4 @@ rust-executor/test_data
 docs-src/
 .worktrees/
 CUSTOM_DENO_SNAPSHOT.bin
+rust-client/schema.gql

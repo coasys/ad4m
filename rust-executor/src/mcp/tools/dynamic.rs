@@ -405,10 +405,11 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Error: {}", e),
         };
 
-        let mut perspective = match self.get_writable_perspective(perspective_id).await {
-            Ok(p) => p,
-            Err(e) => return e,
-        };
+        let (mut perspective, _agent_ctx) =
+            match self.get_writable_perspective(perspective_id).await {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
 
         match perspective
             .create_subject(
@@ -613,10 +614,11 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Authentication error: {}", e),
         };
 
-        let mut perspective = match self.get_writable_perspective(perspective_id).await {
-            Ok(p) => p,
-            Err(e) => return e,
-        };
+        let (mut perspective, _agent_ctx) =
+            match self.get_writable_perspective(perspective_id).await {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
 
         let mut updated = Vec::new();
         for (key, value) in args {
@@ -695,10 +697,11 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Authentication error: {}", e),
         };
 
-        let mut perspective = match self.get_writable_perspective(perspective_id).await {
-            Ok(p) => p,
-            Err(e) => return e,
-        };
+        let (mut perspective, _agent_ctx) =
+            match self.get_writable_perspective(perspective_id).await {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
 
         let mut removed = 0;
         if let Ok(links) = perspective
@@ -754,10 +757,11 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let mut perspective = match self.get_writable_perspective(perspective_id).await {
-            Ok(p) => p,
-            Err(e) => return e,
-        };
+        let (mut perspective, _agent_ctx) =
+            match self.get_writable_perspective(perspective_id).await {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
 
         // Resolve property predicate via SHACL
         let predicate = match self
@@ -828,7 +832,7 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let perspective = match self.get_writable_perspective(perspective_id).await {
+        let (perspective, _agent_ctx) = match self.get_writable_perspective(perspective_id).await {
             Ok(p) => p,
             Err(e) => return e,
         };
@@ -880,10 +884,11 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let mut perspective = match self.get_writable_perspective(perspective_id).await {
-            Ok(p) => p,
-            Err(e) => return e,
-        };
+        let (mut perspective, _agent_ctx) =
+            match self.get_writable_perspective(perspective_id).await {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
 
         // Resolve collection predicate via SHACL
         let predicate = match self
@@ -943,10 +948,11 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let mut perspective = match self.get_writable_perspective(perspective_id).await {
-            Ok(p) => p,
-            Err(e) => return e,
-        };
+        let (mut perspective, _agent_ctx) =
+            match self.get_writable_perspective(perspective_id).await {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
 
         // Resolve collection predicate via SHACL
         let predicate = match self
