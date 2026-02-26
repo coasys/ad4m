@@ -21,6 +21,17 @@ import {
   Property,
 } from "@coasys/ad4m";
 
+// ── TestReaction ─────────────────────────────────────────────────────────────
+
+@Model({ name: "TestReaction" })
+export class TestReaction extends Ad4mModel {
+  @Flag({ through: "test://reaction_type", value: "test://reaction" })
+  type = "test://reaction";
+
+  @Property({ through: "test://emoji", required: true })
+  emoji: string = "";
+}
+
 // ── TestComment (declared first to avoid circular-ref issues at class level) ──
 
 @Model({ name: "TestComment" })
@@ -31,6 +42,9 @@ export class TestComment extends Ad4mModel {
   @Property({ through: "test://body", required: true })
   body: string = "";
 
+  @HasMany(() => TestReaction, { through: "test://has_reaction" })
+  reactions: TestReaction[] = [];
+
   /** Reverse traversal — find the TestPost that has a test://has_comment link pointing to this */
   @BelongsToOne(() => TestPost, { through: "test://has_comment" })
   post: TestPost | null = null;
@@ -39,6 +53,7 @@ export class TestComment extends Ad4mModel {
   @BelongsToOne(() => TestPost, { through: "test://pinned_comment" })
   pinnedBy: TestPost | null = null;
 }
+export interface TestComment extends HasManyMethods<"reactions"> {}
 
 // ── TestTag ───────────────────────────────────────────────────────────────────
 

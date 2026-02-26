@@ -28,7 +28,7 @@ import {
 import { startAgent } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 import { wipePerspective, sleep } from "../../utils/utils.js";
-import { TestComment, TestPost, TestTag } from "./models.js";
+import { TestComment, TestPost, TestTag, TestReaction } from "./models.js";
 
 describe("Ad4mModel — Query API", function () {
   this.timeout(120_000);
@@ -53,6 +53,7 @@ describe("Ad4mModel — Query API", function () {
     await TestPost.register(perspective);
     await TestComment.register(perspective);
     await TestTag.register(perspective);
+    await TestReaction.register(perspective);
   });
 
   after(async () => {
@@ -64,6 +65,7 @@ describe("Ad4mModel — Query API", function () {
     await TestPost.register(perspective);
     await TestComment.register(perspective);
     await TestTag.register(perspective);
+    await TestReaction.register(perspective);
     // Re-seed fresh posts for every test so tests are fully independent
     p1 = await TestPost.create(perspective, { title: "Alpha", body: "first" });
     p2 = await TestPost.create(perspective, { title: "Beta", body: "second" });
@@ -322,6 +324,120 @@ describe("Ad4mModel — Query API", function () {
       .true;
     expect(found!.posts.some((p) => (p as TestPost).id === post2.id)).to.be
       .true;
+  });
+
+  // ── Nested (multi-level) include ────────────────────────────────────────────
+
+  it("nested include: post → comments → reactions (2 levels)", async () => {
+    const comment = await TestComment.create(perspective, { body: "nested" });
+    const reaction = await TestReaction.create(perspective, { emoji: "👍" });
+    await comment.addReactions(reaction.id);
+    await p1.addComments(comment.id);
+
+    const found = await TestPost.findOne(perspective, {
+      where: { id: p1.id },
+      include: {
+        comments: {
+          include: { reactions: true },
+        },
+      },
+    });
+
+    expect(found).to.not.be.null;
+    expect(found!.comments.length).to.be.at.least(1);
+    const hydratedComment = found!.comments[0] as TestComment;
+    expect(hydratedComment).to.be.instanceOf(TestComment);
+    expect(hydratedComment.reactions.length).to.be.at.least(1);
+    expect(hydratedComment.reactions[0]).to.be.instanceOf(TestReaction);
+    expect((hydratedComment.reactions[0] as TestReaction).emoji).to.equal("👍");
+  });
+
+  it("nested include: findAll() post → comments → reactions across multiple posts", async () => {
+    const c1 = await TestComment.create(perspective, { body: "on alpha" });
+    const c2 = await TestComment.create(perspective, { body: "on beta" });
+    const r1 = await TestReaction.create(perspective, { emoji: "❤️" });
+    const r2 = await TestReaction.create(perspective, { emoji: "🚂" });
+    await c1.addReactions(r1.id);
+    await c2.addReactions(r2.id);
+    await p1.addComments(c1.id);
+    await p2.addComments(c2.id);
+
+    const posts = await TestPost.findAll(perspective, {
+      where: { id: [p1.id, p2.id] },
+      include: {
+        comments: {
+          include: { reactions: true },
+        },
+      },
+    });
+
+    expect(posts).to.have.length(2);
+    const alpha = posts.find((p) => p.title === "Alpha")!;
+    const beta = posts.find((p) => p.title === "Beta")!;
+
+    expect(alpha.comments[0]).to.be.instanceOf(TestComment);
+    expect((alpha.comments[0] as TestComment).reactions[0]).to.be.instanceOf(
+      TestReaction,
+    );
+    expect(
+      ((alpha.comments[0] as TestComment).reactions[0] as TestReaction).emoji,
+    ).to.equal("❤️");
+
+    expect(beta.comments[0]).to.be.instanceOf(TestComment);
+    expect((beta.comments[0] as TestComment).reactions[0]).to.be.instanceOf(
+      TestReaction,
+    );
+    expect(
+      ((beta.comments[0] as TestComment).reactions[0] as TestReaction).emoji,
+    ).to.equal("🚂");
+  });
+
+  it("nested include with sub-query filter: post → comments (body filter) → reactions", async () => {
+    const keep = await TestComment.create(perspective, { body: "keep" });
+    const drop = await TestComment.create(perspective, { body: "drop" });
+    const reaction = await TestReaction.create(perspective, { emoji: "🔥" });
+    await keep.addReactions(reaction.id);
+    await p1.addComments(keep.id);
+    await p1.addComments(drop.id);
+
+    const found = await TestPost.findOne(perspective, {
+      where: { id: p1.id },
+      include: {
+        comments: {
+          where: { body: "keep" },
+          include: { reactions: true },
+        },
+      },
+    });
+
+    expect(found).to.not.be.null;
+    expect(found!.comments).to.have.length(1);
+    expect((found!.comments[0] as TestComment).body).to.equal("keep");
+    expect((found!.comments[0] as TestComment).reactions[0]).to.be.instanceOf(
+      TestReaction,
+    );
+    expect(
+      ((found!.comments[0] as TestComment).reactions[0] as TestReaction).emoji,
+    ).to.equal("🔥");
+  });
+
+  it("nested include without inner include leaves reactions as string[]", async () => {
+    const comment = await TestComment.create(perspective, { body: "no-nest" });
+    const reaction = await TestReaction.create(perspective, { emoji: "🌟" });
+    await comment.addReactions(reaction.id);
+    await p1.addComments(comment.id);
+
+    // include comments but do NOT include reactions within them
+    const found = await TestPost.findOne(perspective, {
+      where: { id: p1.id },
+      include: { comments: true },
+    });
+
+    expect(found).to.not.be.null;
+    const hydratedComment = found!.comments[0] as TestComment;
+    expect(hydratedComment).to.be.instanceOf(TestComment);
+    // reactions not requested — should stay as string[]
+    expect(typeof hydratedComment.reactions[0]).to.equal("string");
   });
 
   // ── include: edge cases — non-conforming linked nodes ─────────────────────

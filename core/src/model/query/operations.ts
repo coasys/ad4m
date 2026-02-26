@@ -190,11 +190,14 @@ export async function instancesFromSurrealResult<T>(
           entry === true
             ? { where: { id: allIds } }
             : { ...entry, where: { id: allIds, ...(entry as Query).where } };
+        // Pass _hydrateRelations=true when the sub-entry itself carries an
+        // include map (nested eager loading); otherwise false to stop recursion.
+        const nestedHydrate = entry !== true && !!(entry as Query).include;
         const allHydrated = await _findAllInternal(
           RelatedModel,
           perspective,
           subQuery,
-          false, // depth guard — no recursive nested-model hydration
+          nestedHydrate,
         );
         const hydratedMap = new Map<string, any>(
           allHydrated.map((h: any) => [h.id, h]),
