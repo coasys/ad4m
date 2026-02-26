@@ -1,6 +1,5 @@
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::agent::signatures::verify;
-use crate::js_core::JsCoreHandle;
 use crate::types::{
     AIPromptExamples, AITask, DecoratedExpressionProof, DecoratedLinkExpression, Expression,
     ExpressionProof, Link, ModelType, Notification, TriggeredNotification,
@@ -15,7 +14,6 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 #[derive(Clone)]
 pub struct RequestContext {
     pub capabilities: Result<Vec<Capability>, String>,
-    pub js_handle: JsCoreHandle,
     pub auto_permit_cap_requests: bool,
     pub auth_token: String,
     /// True when the request was authenticated with the launcher's admin_credential token.
