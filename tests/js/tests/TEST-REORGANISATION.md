@@ -4,7 +4,7 @@
 
 ## 1. Shared executor architecture (future)
 
-Currently each suite spawns and kills a fresh executor process. This is the dominant cost per run and also prevents building a browser-based interactive test harness (like the we test app).
+Currently each suite spawns and kills a fresh executor process. This is the dominant cost per run and also prevents building a browser-based interactive test harness (like the We test app).
 
 **The opportunity:** AD4M's multi-user mode already supports multiple agent identities on a single executor. The `startAgent` helper already allocates unique ports and data dirs per agent — the missing piece is a persistent executor that hosts all of them.
 
@@ -23,4 +23,4 @@ Currently each suite spawns and kills a fresh executor process. This is the domi
 - `multi-user-multi-node` — tests inter-executor DHT connectivity
 - `integration` — Alice/Bob/Jim need separate Holochain nodes
 
-**Why it matters:** Shared executor would make the full suite dramatically faster, and would unlock a browser-based test harness using the same pattern as the we test app (connect once, run scenarios against live perspectives).
+**Why it matters:** Shared executor would make the full suite dramatically faster, and would unlock a browser-based test harness using the same pattern as the We test app (connect once, run scenarios against live perspectives).
