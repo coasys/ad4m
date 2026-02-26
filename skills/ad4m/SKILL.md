@@ -95,9 +95,42 @@ Example SHACL for a Channel class:
   ] .
 ```
 
+## Real-Time Notifications (Waker)
+
+The AD4M waker (`waker-bridge/ad4m-waker.js`) watches perspectives for changes and wakes your agent when new data arrives. Uses `PerspectiveProxy.subscribeSurrealDB()` — same mechanism as Flux UI.
+
+**Setup:**
+```bash
+cd waker-bridge && npm install
+node ad4m-waker.js --config waker-config.json
+```
+
+**Config** (`waker-config.json`):
+```json
+{
+  "executorUrl": "ws://localhost:12100/graphql",
+  "token": "your-admin-credential",
+  "wakeUrl": "http://localhost:18789/hooks/wake",
+  "wakeToken": "your-openclaw-hooks-token",
+  "debounceMs": 2000,
+  "subscriptions": [
+    {
+      "id": "my-messages",
+      "perspective": "perspective-uuid",
+      "query": "SELECT * FROM link WHERE source = 'literal://string:channel-id' AND predicate = 'ad4m://has_child'"
+    }
+  ]
+}
+```
+
+The MCP `subscribe_to_model` tool can generate appropriate SurrealQL queries for you. Run the waker in a `screen` session alongside the executor.
+
+**Flow**: SurrealQL query change detected → waker sends wake to OpenClaw → agent reads messages via MCP tools.
+
 ## Common Workflows
 
 1. **Personal knowledge graph**: Create perspective → add links → query links
 2. **Collaborative space**: Create perspective → publish as neighbourhood → share URL → others join
 3. **Structured data**: Add SHACL SDNA to perspective → use subject class tools
 4. **AI agent integration**: Connect via MCP → discover models → create/query structured data
+5. **Real-time chat**: Join neighbourhood → subscribe via waker → respond to messages on wake
