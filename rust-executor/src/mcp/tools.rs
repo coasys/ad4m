@@ -581,7 +581,7 @@ impl Ad4mMcpHandler {
 
     /// Get all models (subject classes) defined in a perspective
     #[tool(
-        description = "Get all models (subject class types) defined in a perspective. Returns the available models you can query and create instances of."
+        description = "Get all models (SHACL subject classes) defined in a perspective. Models are schemas that give structure to the raw link graph — like database table definitions. Each model defines typed properties and collections. Use query_subjects to find instances, get_subject_data to read them, or use the dynamic per-class tools (e.g. channel_create, message_get)."
     )]
     async fn get_models(&self, params: Parameters<ListSubjectClassesParams>) -> String {
         let uuid = &params.0.perspective_id;
@@ -928,7 +928,7 @@ impl Ad4mMcpHandler {
 
     /// Run a Prolog query for complex reasoning
     #[tool(
-        description = "Run a Prolog query on a perspective for complex reasoning and custom queries. Use this for advanced queries not covered by other tools. Note: Query is executed as raw Prolog."
+        description = "Run a Prolog query on a perspective for complex reasoning. The link graph is exposed as Prolog facts (triple/3), enabling pattern matching and inference beyond simple link queries. Example: 'triple(X, \"rdf://type\", \"ad4m://SubjectClass\")' finds all subject classes. Use for advanced queries not covered by other tools."
     )]
     async fn infer(&self, params: Parameters<InferParams>) -> String {
         let p = &params.0;
@@ -1005,7 +1005,7 @@ impl Ad4mMcpHandler {
 
     /// Query links in a perspective
     #[tool(
-        description = "Query links in a perspective with optional source, predicate, and target filters."
+        description = "Query links in a perspective. Links are RDF-like triples with source, predicate, and target. Filter by any combination — omit a filter to match all values for that field. Example: source='expr://abc' with no predicate/target returns all links from that address. Use predicate filter to find specific property values."
     )]
     async fn query_links(&self, params: Parameters<QueryLinksParams>) -> String {
         let p = &params.0;
@@ -1048,7 +1048,7 @@ impl Ad4mMcpHandler {
 
     /// Add a model (subject class definition) to a perspective
     #[tool(
-        description = "Register a model (subject class) in a perspective using SHACL JSON definition. This defines the schema for typed model objects and generates dynamic tools."
+        description = "Register a model (subject class) using a SHACL JSON definition. This defines the schema — properties, collections, types — for typed objects in the perspective. Once registered, dynamic MCP tools are auto-generated for the class: {class}_create, {class}_get, {class}_set_{property}, {class}_add_{collection}, etc. The tool list updates after registration."
     )]
     async fn add_model(&self, params: Parameters<AddModelParams>) -> String {
         let p = &params.0;
@@ -1849,7 +1849,7 @@ impl Ad4mMcpHandler {
 
     /// Request a capability token (local connect flow - step 1)
     #[tool(
-        description = "Request a capability token for authenticating an application. Returns a request_id and code. Use generate_jwt with these values to complete authentication."
+        description = "Request a capability token (step 1/2 of local auth flow). This is the primary way to authenticate with a local/single-user AD4M executor. Returns request_id and code — pass both to generate_jwt to get a JWT token. For multi-user executors, use login_email or signup instead."
     )]
     async fn request_capability(&self, params: Parameters<RequestCapabilityParams>) -> String {
         let p = &params.0;
@@ -1890,7 +1890,7 @@ impl Ad4mMcpHandler {
 
     /// Generate a JWT from a capability request (local connect flow - step 2)
     #[tool(
-        description = "Generate a JWT token from a capability request. Requires the request_id and code from a previous request_capability call. Stores the token in the session."
+        description = "Generate a JWT token (step 2/2 of local auth flow). Pass the request_id and code from request_capability. The JWT is stored in the session and used for all subsequent operations automatically."
     )]
     async fn generate_jwt(&self, params: Parameters<GenerateJwtParams>) -> String {
         let p = &params.0;
