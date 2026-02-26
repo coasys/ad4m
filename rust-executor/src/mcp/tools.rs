@@ -410,6 +410,18 @@ pub struct Ad4mMcpHandler {
     tool_router: ToolRouter<Self>,
 }
 
+/// Tool names that can be called without authentication.
+/// These are the auth bootstrapping tools for multi-user mode.
+const AUTH_TOOLS: &[&str] = &[
+    "login_email",
+    "signup",
+    "verify_email_code",
+    "request_login_verification",
+    "request_capability",
+    "generate_jwt",
+    "auth_status",
+];
+
 impl ServerHandler for Ad4mMcpHandler {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -452,6 +464,36 @@ impl ServerHandler for Ad4mMcpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let tool_name = request.name.to_string();
+
+        // Enforce authentication for non-auth tools
+        if !AUTH_TOOLS.contains(&tool_name.as_str()) {
+            let token = self.get_auth_token().await;
+            match &token {
+                Some(t) if !t.is_empty() => {
+                    // Validate the token is a real credential (admin or valid JWT)
+                    if let Some(admin) = &self.context.admin_credential {
+                        if t == admin {
+                            // Admin credential — full access
+                        } else {
+                            // Must be a valid JWT — verify it decodes
+                            if decode_jwt(t.clone()).is_err() {
+                                return Ok(CallToolResult::error(vec![Content::text(
+                                    "Authentication failed: invalid or expired token. Use login_email, signup, or request_capability to authenticate."
+                                )]));
+                            }
+                        }
+                    } else {
+                        // No admin credential configured — any non-empty token accepted
+                        // (single-user mode with capability token)
+                    }
+                }
+                _ => {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "Authentication required. Call login_email, signup, or request_capability first to obtain a token."
+                    )]));
+                }
+            }
+        }
 
         if self.tool_router.has_route(&tool_name) {
             let peer = context.peer.clone();
