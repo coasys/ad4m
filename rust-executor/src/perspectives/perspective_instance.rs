@@ -164,14 +164,6 @@ struct SubscribedQuery {
 }
 
 #[derive(Clone)]
-struct SurrealSubscribedQuery {
-    query: String,
-    last_result: String,
-    last_keepalive: Instant,
-    user_email: Option<String>,
-}
-
-#[derive(Clone)]
 pub struct PerspectiveInstance {
     pub persisted: Arc<Mutex<PerspectiveHandle>>,
 
@@ -185,11 +177,9 @@ pub struct PerspectiveInstance {
     link_language: Arc<RwLock<Option<Language>>>,
     trigger_notification_check: Arc<Mutex<bool>>,
     trigger_prolog_subscription_check: Arc<Mutex<bool>>,
-    trigger_surreal_subscription_check: Arc<Mutex<bool>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
-    surreal_subscribed_queries: Arc<Mutex<HashMap<String, SurrealSubscribedQuery>>>,
     batch_store: Arc<RwLock<HashMap<String, PerspectiveDiff>>>,
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
@@ -219,11 +209,9 @@ impl PerspectiveInstance {
             link_language: Arc::new(RwLock::new(None)),
             trigger_notification_check: Arc::new(Mutex::new(false)),
             trigger_prolog_subscription_check: Arc::new(Mutex::new(false)),
-            trigger_surreal_subscription_check: Arc::new(Mutex::new(false)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
-            surreal_subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
             batch_store: Arc::new(RwLock::new(HashMap::new())),
             // Initialize fallback sync tracking
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
@@ -240,7 +228,6 @@ impl PerspectiveInstance {
             self.nh_sync_loop(),
             self.pending_diffs_loop(),
             self.subscribed_queries_loop(),
-            self.surreal_subscription_cleanup_loop(),
             self.fallback_sync_loop()
         );
     }
@@ -2648,7 +2635,6 @@ impl PerspectiveInstance {
                 // Trigger notification, prolog subscription, and surreal subscription checks
                 *(self_clone.trigger_notification_check.lock().await) = true;
                 *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
-                *(self_clone.trigger_surreal_subscription_check.lock().await) = true;
 
                 self_clone.pubsub_publish_diff(diff).await;
 
@@ -2774,7 +2760,6 @@ impl PerspectiveInstance {
                 // Trigger notification and subscription checks after prolog facts are updated
                 *(self_clone.trigger_notification_check.lock().await) = true;
                 *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
-                *(self_clone.trigger_surreal_subscription_check.lock().await) = true;
             }
 
             //log::info!("🔧 PROLOG UPDATE: Total prolog update task took {:?}", spawn_start.elapsed());
@@ -4045,196 +4030,6 @@ impl PerspectiveInstance {
             Ok(true)
         } else {
             Ok(false)
-        }
-    }
-
-    pub async fn subscribe_and_query_surreal(
-        &self,
-        query: String,
-        user_email: Option<String>,
-    ) -> Result<(String, String), AnyError> {
-        // Check if we already have a subscription with the same query and user
-        let existing_subscription = {
-            let queries = self.surreal_subscribed_queries.lock().await;
-            queries
-                .iter()
-                .find(|(_, q)| q.query == query && q.user_email == user_email)
-                .map(|(id, _)| id.clone())
-        };
-
-        // Return existing subscription if found
-        if let Some(existing_id) = existing_subscription {
-            let existing_result = {
-                let queries = self.surreal_subscribed_queries.lock().await;
-                queries.get(&existing_id).map(|q| q.last_result.clone())
-            };
-
-            if let Some(last_result) = existing_result {
-                let result_string = format!("#init#{}", last_result);
-                for delay in [100, 500, 1000, 10000, 15000, 20000, 25000] {
-                    self.send_subscription_update(
-                        existing_id.clone(),
-                        result_string.clone(),
-                        Some(Duration::from_millis(delay)),
-                    )
-                    .await;
-                }
-                return Ok((existing_id, last_result));
-            }
-        }
-
-        let subscription_id = Uuid::new_v4().to_string();
-
-        // Execute surreal query with user context for $agentDid and $perspectiveId substitution
-        let initial_result_vec = self
-            .surreal_query_notification(query.clone(), user_email.clone())
-            .await?;
-        let result_string = serde_json::to_string(&initial_result_vec)?;
-
-        let subscribed_query = SurrealSubscribedQuery {
-            query,
-            last_result: result_string.clone(),
-            last_keepalive: Instant::now(),
-            user_email,
-        };
-
-        // Now insert the subscription
-        self.surreal_subscribed_queries
-            .lock()
-            .await
-            .insert(subscription_id.clone(), subscribed_query);
-
-        // Send initial result with #init# prefix for compatibility
-        let init_msg = format!("#init#{}", result_string);
-        // Send multiple updates to ensure client gets it (same as Prolog implementation)
-        for delay in [100, 500, 1000, 10000, 15000, 20000, 25000] {
-            self.send_subscription_update(
-                subscription_id.clone(),
-                init_msg.clone(),
-                Some(Duration::from_millis(delay)),
-            )
-            .await;
-        }
-
-        Ok((subscription_id, result_string))
-    }
-
-    pub async fn keepalive_surreal_query(&self, subscription_id: String) -> Result<(), AnyError> {
-        let mut queries = self.surreal_subscribed_queries.lock().await;
-        if let Some(query) = queries.get_mut(&subscription_id) {
-            query.last_keepalive = Instant::now();
-            Ok(())
-        } else {
-            Err(anyhow!("Surreal subscription not found"))
-        }
-    }
-
-    pub async fn dispose_surreal_query_subscription(
-        &self,
-        subscription_id: String,
-    ) -> Result<bool, AnyError> {
-        let mut queries = self.surreal_subscribed_queries.lock().await;
-        Ok(queries.remove(&subscription_id).is_some())
-    }
-
-    async fn surreal_subscription_cleanup_loop(&self) {
-        while !*self.is_teardown.lock().await {
-            // Check trigger without holding lock during the operation
-            let should_check = { *self.trigger_surreal_subscription_check.lock().await };
-
-            if should_check {
-                self.check_surreal_subscribed_queries().await;
-                *self.trigger_surreal_subscription_check.lock().await = false;
-            }
-            sleep(Duration::from_millis(QUERY_SUBSCRIPTION_CHECK_INTERVAL)).await;
-        }
-    }
-
-    async fn check_surreal_subscribed_queries(&self) {
-        let mut queries_to_remove = Vec::new();
-        let mut query_futures = Vec::new();
-        let now = Instant::now();
-
-        // Collect only the minimal data needed: ID, query string, user_email, and keepalive time
-        // DON'T clone the potentially huge last_result string
-        let queries = {
-            let queries_guard = self.surreal_subscribed_queries.lock().await;
-            queries_guard
-                .iter()
-                .map(|(id, query)| {
-                    (
-                        id.clone(),
-                        query.query.clone(),
-                        query.user_email.clone(),
-                        query.last_keepalive,
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-
-        // Create futures for each query check
-        for (id, query_string, user_email, last_keepalive) in queries {
-            // Check for timeout
-            if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
-                queries_to_remove.push(id);
-                continue;
-            }
-
-            // Spawn query check future
-            let self_clone = self.clone();
-            let query_future = async move {
-                match self_clone
-                    .surreal_query_notification(query_string, user_email)
-                    .await
-                {
-                    Ok(result_vec) => {
-                        if let Ok(result_string) = serde_json::to_string(&result_vec) {
-                            // Compare with stored last_result only now, avoiding the clone earlier
-                            let mut queries = self_clone.surreal_subscribed_queries.lock().await;
-                            if let Some(stored_query) = queries.get_mut(&id) {
-                                if result_string != stored_query.last_result {
-                                    // Release lock before sending update
-                                    drop(queries);
-                                    self_clone
-                                        .send_subscription_update(
-                                            id.clone(),
-                                            result_string.clone(),
-                                            None,
-                                        )
-                                        .await;
-                                    // Re-acquire lock to update the result
-                                    let mut queries =
-                                        self_clone.surreal_subscribed_queries.lock().await;
-                                    if let Some(stored_query) = queries.get_mut(&id) {
-                                        stored_query.last_result = result_string;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "SurrealDB subscription query failed for subscription {}: {}",
-                            id,
-                            e
-                        );
-                        // Note: We don't remove the subscription on query failure
-                        // to allow for transient errors. It will be removed on timeout.
-                    }
-                }
-            };
-            query_futures.push(query_future);
-        }
-
-        // Wait for all query futures to complete
-        future::join_all(query_futures).await;
-
-        // Remove timed out queries
-        if !queries_to_remove.is_empty() {
-            let mut queries = self.surreal_subscribed_queries.lock().await;
-            for id in queries_to_remove {
-                queries.remove(&id);
-            }
         }
     }
 

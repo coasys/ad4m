@@ -91,7 +91,6 @@ export class QuerySubscriptionProxy {
   #initReject?: (reason?: any) => void;
   #initTimeoutId?: NodeJS.Timeout;
   #query: string;
-  isSurrealDB: boolean = false;
 
   /** Creates a new query subscription
    * @param uuid - The UUID of the perspective
@@ -134,17 +133,10 @@ export class QuerySubscriptionProxy {
     try {
       // Initialize the query subscription
       let initialResult;
-      if (this.isSurrealDB) {
-        initialResult = await this.#client.perspectiveSubscribeSurrealQuery(
-          this.#uuid,
-          this.#query,
-        );
-      } else {
-        initialResult = await this.#client.subscribeQuery(
-          this.#uuid,
-          this.#query,
-        );
-      }
+      initialResult = await this.#client.subscribeQuery(
+        this.#uuid,
+        this.#query,
+      );
       this.#subscriptionId = initialResult.subscriptionId;
 
       // Process the initial result immediately for fast UX
@@ -211,14 +203,7 @@ export class QuerySubscriptionProxy {
       if (this.#disposed) return;
 
       try {
-        if (this.isSurrealDB) {
-          await this.#client.perspectiveKeepAliveSurrealQuery(
-            this.#uuid,
-            this.#subscriptionId,
-          );
-        } else {
-          await this.#client.keepAliveQuery(this.#uuid, this.#subscriptionId);
-        }
+        await this.#client.keepAliveQuery(this.#uuid, this.#subscriptionId);
       } catch (e) {
         console.error("Error in keepalive:", e);
         // try to reinitialize the subscription
@@ -351,22 +336,9 @@ export class QuerySubscriptionProxy {
 
     // Tell the backend to dispose of the subscription
     if (this.#subscriptionId) {
-      if (this.isSurrealDB) {
-        this.#client
-          .perspectiveDisposeSurrealQuerySubscription(
-            this.#uuid,
-            this.#subscriptionId,
-          )
-          .catch((e) =>
-            console.error("Error disposing surreal query subscription:", e),
-          );
-      } else {
-        this.#client
-          .disposeQuerySubscription(this.#uuid, this.#subscriptionId)
-          .catch((e) =>
-            console.error("Error disposing query subscription:", e),
-          );
-      }
+      this.#client
+        .disposeQuerySubscription(this.#uuid, this.#subscriptionId)
+        .catch((e) => console.error("Error disposing query subscription:", e));
     }
   }
 }
@@ -3017,42 +2989,6 @@ export class PerspectiveProxy {
       query,
       this.#client,
     );
-
-    // Start the subscription on the Rust side first to get the real subscription ID
-    await subscriptionProxy.subscribe();
-
-    // Wait for the initial result
-    await subscriptionProxy.initialized;
-
-    return subscriptionProxy;
-  }
-
-  /**
-   * Creates a subscription for a SurrealQL query that updates in real-time.
-   *
-   * This method:
-   * 1. Creates the subscription on the Rust side
-   * 2. Sets up the subscription callback
-   * 3. Waits for the initial result to come through the subscription channel
-   * 4. Returns a fully initialized QuerySubscriptionProxy
-   *
-   * The returned subscription is guaranteed to be ready to receive updates,
-   * as this method waits for the initialization process to complete.
-   *
-   * The subscription will be automatically cleaned up on both frontend and backend
-   * when dispose() is called. Make sure to call dispose() when you're done to
-   * prevent memory leaks and ensure proper cleanup of resources.
-   *
-   * @param query - SurrealQL query string
-   * @returns Initialized QuerySubscriptionProxy instance
-   */
-  async subscribeSurrealDB(query: string): Promise<QuerySubscriptionProxy> {
-    const subscriptionProxy = new QuerySubscriptionProxy(
-      this.uuid,
-      query,
-      this.#client,
-    );
-    subscriptionProxy.isSurrealDB = true;
 
     // Start the subscription on the Rust side first to get the real subscription ID
     await subscriptionProxy.subscribe();
