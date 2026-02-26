@@ -225,6 +225,8 @@ jobs:
         targets: x86_64-apple-darwin,aarch64-apple-darwin
 
     # Aggressive Rust caching - biggest time saver for macOS
+    # shared-key includes package.json version so cache busts on version changes
+    # (env!("CARGO_PKG_VERSION") is baked in at compile time and won't update from stale cache)
     - name: Cache Rust dependencies
       uses: Swatinem/rust-cache@v2
       with:
@@ -233,7 +235,7 @@ jobs:
           ui/src-tauri
         cache-targets: true
         cache-all-crates: true
-        shared-key: "staging-v2"  # bump to bust stale V8 cache
+        shared-key: "staging-v3-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
 
     - name: Install GO
       uses: actions/setup-go@v4
@@ -396,6 +398,7 @@ jobs:
         targets: x86_64-pc-windows-msvc
 
     # Cache Rust deps - biggest time saver
+    # shared-key includes Cargo.toml hash so cache busts on version changes
     - name: Cache Rust dependencies
       uses: Swatinem/rust-cache@v2
       with:
@@ -404,7 +407,7 @@ jobs:
           ui/src-tauri
         cache-targets: true
         cache-all-crates: true
-        shared-key: "staging-windows-v1"
+        shared-key: "staging-windows-v2-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
 
     - name: Install GO
       uses: actions/setup-go@v4
