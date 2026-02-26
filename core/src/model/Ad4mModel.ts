@@ -844,8 +844,10 @@ export class Ad4mModel {
               } catch (e) {
                 console.warn(`Failed to resolve expression for ${propName}:`, e);
               }
-            } else if (typeof value === 'string' && value.startsWith('literal://')) {
-              // Parse literal URL
+            } else if (propMeta.resolveLanguage === 'literal' && typeof value === 'string' && value.startsWith('literal://')) {
+              // Only parse literal URIs when resolveLanguage is explicitly 'literal'.
+              // Without this guard, properties pointing to baseExpressions of other models
+              // (which may be literal:// strings) would get unwrapped, breaking link URI validation.
               try {
                 const parsed = Literal.fromUrl(value).get();
                 value = parsed.data !== undefined ? parsed.data : parsed;
@@ -1671,8 +1673,12 @@ WHERE ${whereConditions.join(' AND ')}
                 
                 // Only process if target has a value
                 if (target !== undefined && target !== null && target !== '') {
-                  // Check if we need to resolve a non-literal language expression
-                  if (propMeta.resolveLanguage != undefined && propMeta.resolveLanguage !== 'literal' && typeof target === 'string') {
+                  // Check if we need to resolve a non-literal language expression.
+                  // resolveLanguage must be defined and not 'literal' to trigger expression resolution.
+                  // Also skip if the target itself is a literal:// URI — those are handled by the
+                  // literal-parsing branch below (avoids calling getExpression on empty literals like
+                  // "literal://string:" which would cause a deserialization error).
+                  if (propMeta.resolveLanguage != undefined && propMeta.resolveLanguage !== 'literal' && typeof target === 'string' && !target.startsWith('literal://')) {
                     // For non-literal languages, resolve the expression via perspective.getExpression()
                     // Note: Literals are already parsed by SurrealDB's fn::parse_literal()
                     try {
@@ -1691,8 +1697,10 @@ WHERE ${whereConditions.join(' AND ')}
                       console.warn("Falling back to raw value");
                       convertedValue = target; // Fall back to raw value
                     }
-                  } else if (typeof target === 'string' && target.startsWith('literal://')) {
-                    // Fallback: If we somehow got a literal URL that wasn't parsed by SurrealDB, parse it now
+                  } else if (propMeta.resolveLanguage === 'literal' && typeof target === 'string' && target.startsWith('literal://')) {
+                    // Only parse literal URIs when resolveLanguage is explicitly set to 'literal'.
+                    // Without this check, properties pointing to baseExpressions of other models
+                    // (which may be literal:// strings) would get unwrapped, breaking link URI validation.
                     try {
                       const parsed = Literal.fromUrl(target).get();
                       if(parsed.data !== undefined) {
@@ -2236,6 +2244,11 @@ WHERE ${whereConditions.join(' AND ')}
     // Get resolve language from metadata (replaces Prolog query)
     let resolveLanguage = metadata.resolveLanguage;
 
+    // Skip storing empty/null/undefined values to avoid invalid empty literals (e.g. literal://string:)
+    if (value === undefined || value === null || value === "") {
+      return;
+    }
+
     if (resolveLanguage) {
       value = await this.#perspective.createExpression(value, resolveLanguage);
     }
@@ -2355,9 +2368,12 @@ WHERE ${whereConditions.join(' AND ')}
       }
     }
 
+    // Get the class name instead of passing the instance to avoid Prolog query generation
+    const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
+
     // Create the subject with the initial values
     await this.perspective.createSubject(
-      this,
+      className,
       this.#baseExpression,
       initialValues,
       batchId

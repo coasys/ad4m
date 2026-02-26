@@ -48,7 +48,7 @@ pub enum PrologMode {
 // Set to Pooled for maximum query performance (multiple engines with caching)
 // Set to SdnaOnly for SDNA introspection without link data (minimal memory + SDNA queries work)
 // Set to Disabled to turn off Prolog completely
-pub static PROLOG_MODE: PrologMode = PrologMode::SdnaOnly;
+pub static PROLOG_MODE: PrologMode = PrologMode::Disabled;
 
 #[derive(Clone)]
 pub struct PrologService {
@@ -359,14 +359,14 @@ impl PrologService {
     ) -> Result<QueryResolution, Error> {
         use deno_core::anyhow::anyhow;
 
-        // Check if Prolog is disabled
+        // Check if Prolog is disabled - return empty matches but log warning
         if PROLOG_MODE == PrologMode::Disabled {
             log::warn!(
-                "⚠️ Prolog query received but Prolog is DISABLED (perspective: {}, query: {})",
+                "Prolog query received but Prolog is DISABLED (perspective: {}, query: {})",
                 perspective_id,
                 query
             );
-            return Err(anyhow!("Prolog is disabled"));
+            return Ok(QueryResolution::Matches(vec![]));
         }
 
         // Ensure engine is up to date
@@ -415,14 +415,14 @@ impl PrologService {
     ) -> Result<QueryResolution, Error> {
         use deno_core::anyhow::anyhow;
 
-        // Check if Prolog is disabled
+        // Check if Prolog is disabled - return empty matches but log warning
         if PROLOG_MODE == PrologMode::Disabled {
             log::warn!(
-                "⚠️ Prolog subscription query received but Prolog is DISABLED (perspective: {}, query: {})",
+                "Prolog subscription query received but Prolog is DISABLED (perspective: {}, query: {})",
                 perspective_id,
                 query
             );
-            return Err(anyhow!("Prolog is disabled"));
+            return Ok(QueryResolution::Matches(vec![]));
         }
 
         // Ensure engine is up to date

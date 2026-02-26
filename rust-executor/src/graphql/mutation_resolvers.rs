@@ -1656,7 +1656,7 @@ impl Mutation {
                 .links
                 .into_iter()
                 .map(Link::from)
-                .map(|l| create_signed_expression(l, &agent_context))
+                .map(|l| create_signed_expression(l.normalize(), &agent_context))
                 .filter_map(Result::ok)
                 .map(LinkExpression::from)
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
@@ -1712,7 +1712,7 @@ impl Mutation {
                 .links
                 .into_iter()
                 .map(Link::from)
-                .map(|l| create_signed_expression(l, &agent_context))
+                .map(|l| create_signed_expression(l.normalize(), &agent_context))
                 .filter_map(Result::ok)
                 .map(LinkExpression::from)
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
@@ -2014,8 +2014,9 @@ impl Mutation {
         context: &RequestContext,
         uuid: String,
         name: String,
-        sdna_code: String,
+        sdna_code: Option<String>,
         sdna_type: String,
+        shacl_json: Option<String>,
     ) -> FieldResult<bool> {
         check_capability(
             &context.capabilities,
@@ -2026,7 +2027,13 @@ impl Mutation {
         let sdna_type = SdnaType::from_string(&sdna_type)
             .map_err(|e| FieldError::new(e, graphql_value!({ "invalid_sdna_type": sdna_type })))?;
         perspective
-            .add_sdna(name, sdna_code, sdna_type, &agent_context)
+            .add_sdna(
+                name,
+                sdna_code.unwrap_or_default(),
+                sdna_type,
+                shacl_json,
+                &agent_context,
+            )
             .await?;
         Ok(true)
     }
