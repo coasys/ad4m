@@ -53,6 +53,8 @@ That PR already completed the foundational migration:
 | Phase 3a: file decomposition — `types.ts`, `SurrealQueryBuilder.ts`, `hydration.ts`, `operations.ts`, `QueryBuilder.ts`, `fetchInstance.ts`, `metadata.ts`, `fromJSONSchema.ts`, `mutation.ts` extracted; `Ad4mModel.ts` 3,917 → 759 lines | `eb2f4b4b` → `6dcc5283` (6 commits)                                              |
 | Phase 3b: Transaction API — `transaction.ts`, `runTransaction`, `TransactionContext`; `save()` / `delete()` accept `tx?: TransactionContext` instead of raw `batchId` string                                                               | `a66d833b`                                                                       |
 | Phase 3c: `IncludeMap` Prisma-style eager loading — absent = no hydration, present = exactly the named relations; `.include(map)` on `QueryBuilder`; `include?` param on `get()` / `getData()`                                             | `6d02ad2d`                                                                       |
+| Phase 3d: client-side subscription registry (`subscription.ts`); `Ad4mModel.subscribe()` + `ModelQueryBuilder.subscribe()`; `Subscription` type; shared entry / debounce / fingerprint de-dup                                              | `324e3083`                                                                       |
+| Phase 3e: delete server-push SurrealDB subscription infrastructure — `SurrealSubscribedQuery`, `subscribe_and_query_surreal`, 3 GraphQL mutation resolvers, `isSurrealDB` flag, `subscribeSurrealDB()`, 3 `PerspectiveClient` methods      | `be25aa79`                                                                       |
 
 ### Pending — Phase 2
 
@@ -60,9 +62,9 @@ That PR already completed the foundational migration:
 
 ### Known Gaps
 
-| Gap                              | Details                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Status                                                    |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| `sh:inversePath` — Rust executor | `@BelongsToOne` / `@BelongsToMany` set `inversePath: true` on the SHACL shape in TypeScript. SurrealDB hydration works (reverse `WHERE out.uri = ...` query). However `shacl_parser.rs` has **zero handling** of `sh:inversePath` — it never emits reverse Prolog predicates, so Prolog-side lookups for reverse relations silently return nothing. `generatePrologFacts.ts` likewise has no reverse-predicate clause. Full fix scope documented in section 2c. | ⚠️ PARTIAL — TS side done, Rust + Prolog side not started |
+| Gap                              | Details                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Status                                                                                                                                  |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `sh:inversePath` — Rust executor | `@BelongsToOne` / `@BelongsToMany` set `inversePath: true` on the SHACL shape in TypeScript. SurrealDB hydration works (reverse `WHERE out.uri = ...` query). However `shacl_parser.rs` has **zero handling** of `sh:inversePath` — it never emits reverse Prolog predicates, so Prolog-side lookups for reverse relations silently return nothing. `generatePrologFacts.ts` likewise has no reverse-predicate clause. Full fix scope documented in section 2c. | ⏭️ Deferred → IMPROVEMENTS.md #13 (low priority — only affects explicit Prolog queries against reverse relations; SurrealDB path works) |
 
 ### Remaining — This PR
 
@@ -72,7 +74,7 @@ That PR already completed the foundational migration:
 | 3b Transaction API          | ✅ COMPLETE       |
 | 3c IncludeMap eager loading | ✅ COMPLETE       |
 | 3d Subscriptions            | ✅ COMPLETE       |
-| **3e Subscription cleanup** | ← **NEXT**        |
+| 3e Subscription cleanup     | ✅ COMPLETE       |
 | 4 Model inheritance         | ✅ COMPLETE       |
 | **F Flux decorator rename** | companion PR      |
 | 5, 0, G                     | → IMPROVEMENTS.md |
@@ -951,7 +953,7 @@ an `onError` callback just to track whether the subscription is healthy.
 
 ---
 
-### 3e — Subscription Infrastructure Cleanup ⏳ PENDING
+### 3e — Subscription Infrastructure Cleanup ✅ COMPLETE (`be25aa79`)
 
 The old server-push subscription system predates the client-side `Ad4mModel.subscribe()` approach. Now that 3d is complete and all consumers have migrated, the old machinery can be removed. It is dead code from the `Ad4mModel` perspective — zero external callers for `subscribeSurrealDB`.
 
