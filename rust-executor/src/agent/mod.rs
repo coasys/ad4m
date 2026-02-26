@@ -232,6 +232,13 @@ lazy_static! {
 
 impl AgentService {
     pub fn init_global_instance(app_path: String) {
+        // Ensure the ad4m subdirectory exists before any save/load operations.
+        // init.rs creates app_data_path itself, but not the nested ad4m/ dir
+        // that agent.json and agentProfile.json live in.
+        let ad4m_dir = format!("{}/ad4m", app_path);
+        std::fs::create_dir_all(&ad4m_dir)
+            .expect("Failed to create agent data directory");
+
         let mut agent_instance = AGENT_SERVICE.lock().unwrap();
         *agent_instance = Some(AgentService::new(app_path));
     }
