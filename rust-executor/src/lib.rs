@@ -169,7 +169,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     find_and_set_port(&mut config.hc_app_port, 1337, "Holochain app");
 
     info!("Starting js_core...");
-    let mut js_core_handle = JsCore::start(config.clone()).await;
+    let mut js_core_handle = JsCore::start().await;
     js_core_handle.initialized().await;
     info!("js_core initialized.");
 

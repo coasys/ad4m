@@ -39,7 +39,6 @@ pub mod wallet_extension;
 
 use self::futures::{EventLoopFuture, SmartGlobalVariableFuture};
 use crate::holochain_service::maybe_get_holochain_service;
-use crate::Ad4mConfig;
 
 pub(crate) static JS_CORE_HANDLE: Lazy<Arc<TokioMutex<Option<JsCoreHandle>>>> =
     Lazy::new(|| Arc::new(TokioMutex::new(None)));
@@ -349,7 +348,7 @@ impl JsCore {
         }
     }
 
-    pub async fn start(config: Ad4mConfig) -> JsCoreHandle {
+    pub async fn start() -> JsCoreHandle {
         let (tx_inside, rx_outside) = broadcast::channel::<JsCoreResponse>(50);
         let (tx_outside, rx_inside) = mpsc::unbounded_channel::<JsCoreRequest>();
         let rx_inside = Arc::new(TokioMutex::new(rx_inside));
@@ -371,15 +370,9 @@ impl JsCore {
                 let result = js_core.init_engine().await;
                 info!("AD4M JS engine init completed, with result: {:?}", result);
 
-                let result = js_core
-                    .execute_async_smart(format!("initCore({})", config.get_json()))
-                    .await
-                    .expect("to be able to create js execution future")
-                    .await;
-
                 match result {
-                    Ok(res) => {
-                        info!("AD4M coreInit() completed Succesfully: {:?}", res);
+                    Ok(()) => {
+                        info!("AD4M JS engine initialized successfully");
                         tx_inside
                             .send(JsCoreResponse {
                                 result: Ok(String::from("initialized")),
@@ -387,10 +380,10 @@ impl JsCore {
                             .expect("couldn't send on channel");
                     }
                     Err(err) => {
-                        error!("Error executing coreInit(): {:?}", err);
+                        error!("Error initializing JS engine: {:?}", err);
                         tx_inside
                             .send(JsCoreResponse {
-                                result: Err(format!("Error executing coreInit(): {:?}", err)),
+                                result: Err(format!("Error initializing JS engine: {:?}", err)),
                             })
                             .expect("couldn't send on channel");
                     }
@@ -470,7 +463,7 @@ impl JsCore {
                                                 handlers.get(&cell_id_key).cloned()
                                             };
                                             if let Some(lang_address) = maybe_lang_address {
-                                                // Route to per-language runtime only
+                                                // Route to per-language runtime
                                                 let signal_script = format!(
                                                     "await globalThis.__handleHolochainSignal__({{cell_id: [{}, {}], zome_name: '{}', payload: {}}})",
                                                     dna_hash_dbg, agent_pubkey_dbg, zome_name, payload_str
@@ -483,21 +476,7 @@ impl JsCore {
                                                     }
                                                 });
                                             } else {
-                                                // No per-language runtime registered; fall back to legacy JS handler
-                                                let js_core_cloned = js_core.clone();
-                                                tokio::task::spawn_local(async move {
-                                                    let script = format!(
-                                                        "await core.holochainService.handleCallback({{cell_id: [{}, {}], zome_name: '{}', signal: {}}})",
-                                                        dna_hash_dbg, agent_pubkey_dbg, zome_name, payload_str
-                                                    );
-                                                    match js_core_cloned.execute_async_smart(script).await {
-                                                        Ok(_res) => {
-                                                        }
-                                                        Err(err) => {
-                                                            error!("Error executing callback: {:?}", err);
-                                                        }
-                                                    }
-                                                });
+                                                log::debug!("No per-language runtime registered for Holochain signal from cell {}", cell_id_key);
                                             }
                                         },
                                         Signal::System(_) => {
