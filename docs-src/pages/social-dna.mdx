@@ -75,15 +75,16 @@ AD4M implements Social DNA through two main mechanisms:
    - State transitions
    - Effects of actions
 
-Both are implemented using Prolog, a logical programming language perfect for:
-- Pattern matching in graphs
-- Declarative rules
-- Complex reasoning
+Subject Classes are defined using **SHACL** (Shapes Constraint Language), a W3C standard for describing and validating RDF graphs. SHACL is a natural fit for AD4M because:
+- It's a standard for describing graph shapes — exactly what perspectives are
+- It's declarative and machine-readable
+- It supports property constraints, cardinality, and data types
+- It enables interoperability with the broader semantic web ecosystem
 
 <Callout type="info" emoji="ℹ️">
-  Don't worry if you are unfamiliar with [Prolog](https://en.wikipedia.org/wiki/Prolog). You will normally either
-  use AI to write it for you, or you will use some of our abstraction layers to
-  avoid writing Prolog code yourself. (Think of ORMs vs raw SQL, AD4m comes with its own implementation [Model Classes](/developer-guides/model-classes)).
+  You typically won't write SHACL by hand. AD4M provides **Model Classes** — TypeScript decorators
+  that automatically generate SHACL definitions from your class declarations.
+  (Think of ORMs vs raw SQL. See [Model Classes](/developer-guides/model-classes) for details.)
 </Callout>
 
 ## Subject Classes: Defining Things
@@ -158,72 +159,114 @@ const todo = await perspective.getSubjectProxy<Todo>(baseExpr, "Todo");
 const post = await perspective.getSubjectProxy<Post>(baseExpr, "Post");
 ```
 
-Here's a complete example of a Todo class:
+### How Subject Classes are Defined (SHACL)
 
-```prolog
-// Define a Todo class
-subject_class("Todo", c).
+Subject Classes are stored as SHACL shapes in the perspective's link graph. A SHACL **NodeShape** describes a class, and **PropertyShapes** describe its properties.
 
-// Constructor - called when creating new instances
-constructor(c, '[{
-    action: "addLink", 
-    source: "this", 
-    predicate: "todo://state", 
-    target: "todo://ready"
-}]').
+Here's how a Todo class maps to SHACL:
 
-// Instance check - what makes something a Todo?
-instance(c, Base) :- triple(Base, "todo://state", _).
+<Tabs items={['TypeScript Model', 'Generated SHACL', 'Stored as Links']}>
+  <Tab>
+    ```typescript
+    @ModelOptions({ name: "Todo" })
+    class Todo extends Ad4mModel {
+      @Property({
+        through: "todo://state",
+        initial: "todo://ready"
+      })
+      state: string = "";
 
-// Properties
-property(c, "state").
-property_getter(c, Base, "state", Value) :- 
-    triple(Base, "todo://state", Value).
-property_setter(c, "state", '[{
-    action: "setSingleTarget", 
-    source: "this", 
-    predicate: "todo://state", 
-    target: "value"
-}]').
+      @Optional({
+        through: "todo://has_title",
+        writable: true,
+        resolveLanguage: "literal"
+      })
+      title?: string;
 
-// Resolvable properties (e.g., literal values)
-property(c, "title").
-property_resolve(c, "title").
-property_resolve_language(c, "title", "literal").
-property_getter(c, Base, "title", Value) :- 
-    triple(Base, "todo://has_title", Value).
+      @Collection({
+        through: "todo://comment"
+      })
+      comments: string[] = [];
+    }
+    ```
+  </Tab>
+  <Tab>
+    ```turtle
+    @prefix sh: <http://www.w3.org/ns/shacl#> .
+    @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+    @prefix ad4m: <ad4m://> .
 
-// Computed properties
-property(c, "isLiked").
-property_getter(c, Base, "isLiked", Value) :- 
-    triple(Base, "flux://has_reaction", "flux://thumbsup"), 
-    Value = true.
+    <todo://Todo> a sh:NodeShape ;
+      sh:targetClass <todo://Todo> ;
 
-// Collections
-collection(c, "comments").
-collection_getter(c, Base, "comments", List) :- 
-    findall(C, triple(Base, "todo://comment", C), List).
-collection_adder(c, "comments", '[{
-    action: "addLink", 
-    source: "this", 
-    predicate: "todo://comment", 
-    target: "value"
-}]').
-```
+      # Scalar property: state (required, has initial value)
+      sh:property [
+        sh:path <todo://state> ;
+        sh:datatype xsd:string ;
+        sh:maxCount 1 ;
+        sh:minCount 1 ;
+        ad4m:initial "todo://ready" ;
+      ] ;
 
-This defines:
-- What makes something a Todo
-- What properties it has
-- How to get and set those properties
-- What collections it contains
+      # Scalar property: title (optional, resolved via "literal" language)
+      sh:property [
+        sh:path <todo://has_title> ;
+        sh:datatype xsd:string ;
+        sh:maxCount 1 ;
+        ad4m:resolveLanguage "literal" ;
+        ad4m:writable true ;
+      ] ;
+
+      # Collection: comments (unbounded)
+      sh:property [
+        sh:path <todo://comment> ;
+        sh:datatype xsd:string ;
+      ] .
+    ```
+  </Tab>
+  <Tab>
+    ```
+    # SHACL shapes are stored as links in the perspective:
+
+    (ad4m://self) --ad4m://has_sdna--> (ad4m://sdna_Todo)
+    (ad4m://sdna_Todo) --ad4m://sdna_type--> (literal://string:subject_class)
+
+    # The shape URI and its properties:
+    (ad4m://sdna_Todo) --sh:targetClass--> (todo://Todo)
+    (ad4m://sdna_Todo) --sh:property--> (ad4m://sdna_Todo_prop_0)
+
+    # Property shape for "state":
+    (ad4m://sdna_Todo_prop_0) --sh:path--> (todo://state)
+    (ad4m://sdna_Todo_prop_0) --sh:datatype--> (xsd:string)
+    (ad4m://sdna_Todo_prop_0) --sh:maxCount--> (literal://number:1)
+    (ad4m://sdna_Todo_prop_0) --sh:minCount--> (literal://number:1)
+    (ad4m://sdna_Todo_prop_0) --ad4m://initial--> (todo://ready)
+
+    # ... and so on for each property
+    ```
+  </Tab>
+</Tabs>
+
+#### Key SHACL Concepts for AD4M
+
+| SHACL Constraint | AD4M Meaning | Example |
+|-----------------|--------------|---------|
+| `sh:maxCount 1` | Scalar property (single value) | `state`, `title`, `name` |
+| No `sh:maxCount` | Collection (multiple values) | `comments`, `tags`, `members` |
+| `sh:minCount 1` | Required property | Must be set on creation |
+| `sh:datatype xsd:string` | String value | Stored as `literal://string:...` |
+| `sh:class <uri>` | Reference to another Subject Class | Typed relationship |
+| `ad4m://initial` | Default value on creation | Initial state |
+| `ad4m://resolveLanguage` | Expression language for values | `"literal"` for inline values |
+| `ad4m://writable` | Property can be updated | Enables setter generation |
 
 ### Using Subject Classes in Code
 
-While the [PerspectiveProxy](/jsdoc/classes/PerspectiveProxy.html) provides low-level methods for working with Subject Classes, 
+While the [PerspectiveProxy](/jsdoc/classes/PerspectiveProxy.html) provides low-level methods for working with Subject Classes,
 we strongly recommend using our high-level [Ad4mModel](/jsdoc/classes/Ad4mModel.html) system
-(described in detail in the [Model Classes](/developer-guides/model-classes) guide). 
+(described in detail in the [Model Classes](/developer-guides/model-classes) guide).
 This TypeScript-based approach provides:
-- Automatic Prolog code generation from decorated classes
+- Automatic SHACL generation from decorated classes
 - Type safety and IDE support
 - Rich ActiveRecord-style semantics
 - Clean, declarative syntax
@@ -248,13 +291,7 @@ class Todo extends Ad4mModel {
   })
   title?: string;
 
-  @ReadOnly({
-    through: "flux://has_reaction",
-    getter: `triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true`
-  })
-  isLiked: boolean = false;
-
-  @Collection({ 
+  @Collection({
     through: "todo://comment"
   })
   comments: string[] = [];
@@ -267,6 +304,9 @@ class Todo extends Ad4mModel {
   static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 }
 
+// Register the class with a perspective
+await perspective.ensureSDNASubjectClass(Todo);
+
 // Use it with full type safety and ActiveRecord patterns
 const todo = new Todo(perspective);
 todo.state = "todo://doing";
@@ -277,15 +317,49 @@ const todos = await Todo.all(perspective);
 const doneTodos = await Todo.allDone(perspective);
 ```
 
-This approach automatically generates the Prolog code we saw earlier and provides a much richer development experience.
+This approach automatically generates SHACL and provides a rich development experience.
+
+#### Working with SHACL Directly
+
+For advanced use cases, you can work with SHACL shapes directly using the `SHACLShape` class:
+
+```typescript
+import { SHACLShape } from '@coasys/ad4m';
+
+// Create a shape programmatically
+const shape = new SHACLShape('recipe://Recipe');
+shape.addProperty({
+  path: 'recipe://name',
+  datatype: 'xsd:string',
+  maxCount: 1,
+  minCount: 1,
+});
+shape.addProperty({
+  path: 'recipe://ingredient',
+  datatype: 'xsd:string',
+  // No maxCount = collection
+});
+
+// Store in perspective
+await perspective.addShacl('Recipe', shape);
+
+// Retrieve
+const retrieved = await perspective.getShacl('Recipe');
+
+// List all shapes
+const allShapes = await perspective.getAllShacl();
+```
 
 #### Understanding the Lower Level
 
 For a complete understanding, here are the basic PerspectiveProxy methods that power the above abstractions:
 
 ```typescript
-// Add the subject class definition to a perspective
-await perspective.addSdna("Todo", classDefinition, "subject_class");
+// Add a subject class definition (SHACL) to a perspective
+await perspective.ensureSDNASubjectClass(Todo);
+
+// Or add SHACL directly
+await perspective.addShacl("Todo", shape);
 
 // List all available subject classes
 const classes = await perspective.subjectClasses();
@@ -314,64 +388,55 @@ While these methods are available, we recommend using the `Ad4mModel` system for
 
 ## Flows: Defining Actions
 
-Flows define what agents can do in a space and under what conditions. Here's a complete example of a Todo flow that manages state transitions:
+Flows define what agents can do in a space and under what conditions. They manage state machines over expressions — defining states, transitions, and the actions that trigger them.
 
-```prolog
-// Register this flow with a name and reference (t)
-register_sdna_flow("TODO", t).
+<Callout type="info" emoji="ℹ️">
+  Flows still use link-based state tracking internally. The flow state is determined
+  by querying links in the perspective, and actions modify links to change state.
+</Callout>
 
-// Define what expressions can enter this flow (all in this case)
-flowable(_, t).
+Here's a complete example of a Todo flow:
 
-// Define the possible states (using numbers)
-flow_state(ExprAddr, 0, t) :- triple(ExprAddr, "todo://state", "todo://ready").
-flow_state(ExprAddr, 0.5, t) :- triple(ExprAddr, "todo://state", "todo://doing").
-flow_state(ExprAddr, 1, t) :- triple(ExprAddr, "todo://state", "todo://done").
-
-// Initial action when starting the flow
-start_action('[{
-    action: "addLink", 
-    source: "this", 
-    predicate: "todo://state", 
-    target: "todo://ready"
-}]', t).
-
-// Define state transitions with actions
-action(0, "Start", 0.5, '[{
-    action: "addLink", 
-    source: "this", 
-    predicate: "todo://state", 
-    target: "todo://doing"
-}, {
-    action: "removeLink", 
-    source: "this", 
-    predicate: "todo://state", 
-    target: "todo://ready"
-}]').
-
-action(0.5, "Finish", 1, '[{
-    action: "addLink", 
-    source: "this", 
-    predicate: "todo://state", 
-    target: "todo://done"
-}, {
-    action: "removeLink", 
-    source: "this", 
-    predicate: "todo://state", 
-    target: "todo://doing"
-}]').
+```typescript
+// Define flow states and transitions
+const todoFlow = {
+  name: "TODO",
+  states: {
+    ready: 0,
+    doing: 0.5,
+    done: 1
+  },
+  // State is determined by todo://state links
+  stateQuery: (base) => `todo://state`,
+  transitions: [
+    {
+      from: "ready",
+      to: "doing",
+      action: "Start",
+      effects: [
+        { action: "addLink", source: "this", predicate: "todo://state", target: "todo://doing" },
+        { action: "removeLink", source: "this", predicate: "todo://state", target: "todo://ready" }
+      ]
+    },
+    {
+      from: "doing",
+      to: "done",
+      action: "Finish",
+      effects: [
+        { action: "addLink", source: "this", predicate: "todo://state", target: "todo://done" },
+        { action: "removeLink", source: "this", predicate: "todo://state", target: "todo://doing" }
+      ]
+    }
+  ]
+};
 ```
 
 This flow defines:
 1. A named flow ("TODO") with states (0 = ready, 0.5 = doing, 1 = done)
-2. What expressions can enter the flow (any expression)
-3. How states are determined (by checking todo://state links)
-4. Initial action when starting the flow
-5. Available actions for each state with their transitions
+2. How states are determined (by checking todo://state links)
+3. Available actions for each state with their transitions and effects
 
 ### Using Flows in Code
-
-You can work with flows using these methods:
 
 ```typescript
 // Get all flows defined in a perspective
@@ -380,15 +445,12 @@ const flows = await perspective.sdnaFlows();
 
 // Check what flows are available for an expression
 const availableFlows = await perspective.availableFlows("expression://123");
-// Returns flows that can be started on this expression
 
 // Start a flow on an expression
 await perspective.startFlow("TODO", "expression://123");
-// This runs the start_action, putting the expression in initial state
 
 // Get expressions in a specific flow state
 const readyTodos = await perspective.expressionsInFlowState("TODO", 0);
-// Returns expressions in the "ready" state
 
 // Get current state of an expression in a flow
 const state = await perspective.flowState("TODO", "expression://123");
@@ -405,13 +467,9 @@ await perspective.runFlowAction("TODO", "expression://123", "Start");
 
 ### Adding Flows to a Perspective
 
-To add a flow to your perspective:
-
 ```typescript
-// Add the flow definition
 await perspective.addSdna("Todo", flowDefinition, "flow");
 
-// Check if it was added
 const flows = await perspective.sdnaFlows();
 console.log(flows); // Should include "TODO"
 ```
@@ -439,24 +497,24 @@ const alicePosts = await perspective.querySurrealDB(
   "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'authored'"
 );
 
-// Graph traversal - find comments on a specific post
-const comments = await perspective.querySurrealDB(
-  "SELECT source, target FROM link WHERE in.uri = 'post://123' AND predicate = 'has_comment'"
-);
-
 // Aggregation - count by type
 const stats = await perspective.querySurrealDB(
   "SELECT predicate, count() as total FROM link GROUP BY predicate"
 );
 ```
 
-**Performance Tip**: Use `in.uri` (source) and `out.uri` (target) for graph traversal - they're indexed. Avoid subqueries as they're slow.
+**Performance Tip**: Use `in.uri` (source) and `out.uri` (target) for graph traversal - they're indexed.
 
 **Note**: `Ad4mModel` uses SurrealDB by default for `findAll()` and query builder operations. See the [SurrealDB Queries Guide](/developer-guides/surreal-queries) for comprehensive examples.
 
-### The Prolog Engine (For Advanced Logic & SDNA)
+### The Prolog Engine (Legacy)
 
-For custom Social DNA rules, complex logic programming, and backward compatibility, AD4M includes a Prolog engine:
+<Callout type="warning" emoji="⚠️">
+  The Prolog engine is maintained for backward compatibility. For new development,
+  use SurrealDB queries or the `Ad4mModel` system (which uses SurrealDB by default).
+</Callout>
+
+For custom logic programming and backward compatibility, AD4M includes a Prolog engine:
 
 #### Core Predicates
 ```prolog
@@ -466,48 +524,32 @@ link(Subject, Predicate, Object, Timestamp, Author).  // Access links with metad
 
 // Graph traversal
 reachable(A, B).  // True if B can be reached from A through any predicates
-
-// Expression metadata
-languageAddress(Expression, Address).  // Get language address for expression
-languageName(Expression, Name).        // Get language name for expression
-expressionAddress(Expression, Address). // Get expression address
-```
-
-#### Built-in Utilities
-```prolog
-// Pagination and sorting
-paginate(Data, PageNumber, PageSize, PageData).
-sort_instances(Instances, SortKey, Direction, Sorted).
-
-// String and data handling
-remove_html_tags(Input, Output).
-string_includes(String, Substring).
-literal_from_url(Url, Decoded, Scheme).
-json_property(JsonString, Property, Value).
 ```
 
 **When to use which?**
 - **Use SurrealDB** for: Fast queries, graph traversal, analytics (most use cases)
-- **Use Prolog** for: Custom SDNA rules, complex logic, backward compatibility
+- **Use Prolog** for: Complex logic rules, backward compatibility
 
 ## Using Social DNA in Your Space
 
 To add Social DNA to a Perspective:
 
-```js
-// Add a subject class definition
-perspective.addSDNA(classDefinition, "subject_class");
+```typescript
+// Recommended: Use Model Classes (auto-generates SHACL)
+await perspective.ensureSDNASubjectClass(Todo);
+
+// Or add SHACL shapes directly
+const shape = new SHACLShape('todo://Todo');
+shape.addProperty({ path: 'todo://state', datatype: 'xsd:string', maxCount: 1, minCount: 1 });
+await perspective.addShacl('Todo', shape);
 
 // Add a flow definition
-perspective.addSDNA(flowDefinition, "flow");
-
-// Add custom rules
-perspective.addSDNA(customRules, "custom");
+await perspective.addSdna("Todo", flowDefinition, "flow");
 ```
 
-Then query it using SurrealDB (fast) or Prolog (advanced logic):
+Then query your data:
 
-```js
+```typescript
 // Option 1: Use Ad4mModel with SurrealDB (recommended, 10-100x faster)
 const activeTodos = await Todo.findAll(perspective, {
   where: { state: "active" }
@@ -518,14 +560,9 @@ const todos = await perspective.querySurrealDB(
   "SELECT * FROM link WHERE predicate = 'todo://state' AND target = 'active'"
 );
 
-// Option 3: Prolog (for custom SDNA rules)
+// Option 3: Prolog (legacy, for backward compatibility)
 const todos = await perspective.infer(
   'instance(Todo, "Todo"), property_getter("Todo", Todo, "state", "active")'
-);
-
-// Check if an action is allowed (Prolog for complex logic)
-const canVote = await perspective.infer(
-  `can_vote("${agentDid}", "${proposalId}")`
 );
 ```
 
@@ -550,3 +587,8 @@ const canVote = await perspective.infer(
    - Start with basic patterns
    - Add complexity gradually
    - Use the high-level Model Classes when possible
+
+5. **Prefer SHACL over Prolog**
+   - SHACL is the standard for subject class definitions
+   - Model Classes generate SHACL automatically
+   - Prolog is maintained for backward compatibility only
