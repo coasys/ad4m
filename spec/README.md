@@ -32,7 +32,6 @@ AD4M has been demonstrated as a protocol (not just an implementation) through th
 ## References
 
 - [W3C Decentralized Identifiers (DIDs)](https://www.w3.org/TR/did-core/)
-- [W3C Verifiable Credentials](https://www.w3.org/TR/vc-data-model/)
 - [ZCAP-LD](https://w3c-ccg.github.io/zcap-spec/)
 - [Holochain](https://developer.holochain.org/)
 - [AD4M Source Repository](https://github.com/coasys/ad4m)
