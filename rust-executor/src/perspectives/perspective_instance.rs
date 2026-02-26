@@ -1,4 +1,5 @@
 use super::sdna::{generic_link_fact, is_sdna_link};
+use super::shacl_parser::parse_shacl_to_links;
 use super::update_perspective;
 use super::utils::{
     prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string,
@@ -34,7 +35,6 @@ use chrono::DateTime;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use futures::future;
-use json5;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -44,6 +44,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 use tokio::{join, time};
+use urlencoding;
 use uuid;
 use uuid::Uuid;
 
@@ -871,7 +872,7 @@ impl PerspectiveInstance {
         context: &AgentContext,
     ) -> Result<DecoratedLinkExpression, AnyError> {
         link.validate()?;
-        let link_expr: LinkExpression = create_signed_expression(link, context)?.into();
+        let link_expr: LinkExpression = create_signed_expression(link.normalize(), context)?.into();
         self.add_link_expression(link_expr, status, batch_id).await
     }
 
@@ -1086,7 +1087,7 @@ impl PerspectiveInstance {
         }
         let link_expressions: Result<Vec<_>, _> = links
             .into_iter()
-            .map(|l| create_signed_expression(l, context).map(LinkExpression::from))
+            .map(|l| create_signed_expression(l.normalize(), context).map(LinkExpression::from))
             .collect();
         let link_expressions = link_expressions?;
 
@@ -1142,7 +1143,7 @@ impl PerspectiveInstance {
         }
         let additions = addition_links
             .into_iter()
-            .map(|l| create_signed_expression(l, context))
+            .map(|l| create_signed_expression(l.normalize(), context))
             .map(|r| r.map(LinkExpression::from))
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
         let removals = mutations
@@ -1220,7 +1221,7 @@ impl PerspectiveInstance {
         };
 
         let new_link_expression =
-            LinkExpression::from(create_signed_expression(new_link, context)?);
+            LinkExpression::from(create_signed_expression(new_link.normalize(), context)?);
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
@@ -1425,6 +1426,69 @@ impl PerspectiveInstance {
         Ok(all_sdna_links)
     }
 
+    /// Get all subject class names from SHACL links (Prolog-free implementation)
+    ///
+    /// This queries links with:
+    /// - predicate = "rdf://type"
+    /// - target = "ad4m://SubjectClass"
+    ///
+    /// The source of these links is the class URI (e.g., "recipe://Recipe")
+    /// We extract the class name from the URI.
+    pub async fn get_subject_classes_from_shacl(&self) -> Result<Vec<String>, AnyError> {
+        let uuid = self.persisted.lock().await.uuid.clone();
+        log::debug!(
+            "🔶 get_subject_classes_from_shacl: uuid={}, Querying for SHACL class links",
+            uuid
+        );
+        // Query for SHACL class definition links
+        let shacl_class_links = self
+            .get_links_local(&LinkQuery {
+                predicate: Some("rdf://type".to_string()),
+                target: Some("ad4m://SubjectClass".to_string()),
+                ..Default::default()
+            })
+            .await?;
+        log::debug!(
+            "🔶 get_subject_classes_from_shacl: Found {} links",
+            shacl_class_links.len()
+        );
+        for (link, _status) in &shacl_class_links {
+            log::debug!(
+                "🔶 get_subject_classes_from_shacl: Link: {} -> {:?} -> {}",
+                link.data.source,
+                link.data.predicate,
+                link.data.target
+            );
+        }
+
+        // Extract class names from source URIs
+        let mut class_names: Vec<String> = shacl_class_links
+            .iter()
+            .filter_map(|(link, _status)| {
+                let source = &link.data.source;
+                // Class URI format: "namespace://ClassName" (e.g., "recipe://Recipe")
+                // We want to extract "ClassName"
+                if let Some(idx) = source.rfind("://") {
+                    let after_scheme = &source[idx + 3..];
+                    // Handle paths like "namespace://path/ClassName"
+                    if let Some(last_slash) = after_scheme.rfind('/') {
+                        Some(after_scheme[last_slash + 1..].to_string())
+                    } else {
+                        Some(after_scheme.to_string())
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Remove duplicates
+        class_names.sort();
+        class_names.dedup();
+
+        Ok(class_names)
+    }
+
     async fn get_links_local(
         &self,
         query: &LinkQuery,
@@ -1462,14 +1526,29 @@ impl PerspectiveInstance {
 
         if let Some(predicate) = &query.predicate {
             result.retain(|(link, _status)| link.data.predicate.as_ref() == Some(predicate));
+            log::debug!(
+                "get_links_local: after predicate filter ({}): {} links",
+                predicate,
+                result.len()
+            );
         }
 
         if let Some(target) = &query.target {
             result.retain(|(link, _status)| link.data.target == *target);
+            log::debug!(
+                "get_links_local: after target filter ({}): {} links",
+                target,
+                result.len()
+            );
         }
 
         if let Some(source) = &query.source {
             result.retain(|(link, _status)| link.data.source == *source);
+            log::debug!(
+                "get_links_local: after source filter ({}): {} links",
+                source,
+                result.len()
+            );
         }
 
         let until_date: Option<chrono::DateTime<chrono::Utc>> =
@@ -1553,11 +1632,13 @@ impl PerspectiveInstance {
     }
 
     /// Adds the given Social DNA code to the perspective's SDNA code
+    /// If shacl_json is provided, also stores SHACL as queryable RDF links
     pub async fn add_sdna(
         &mut self,
         name: String,
         mut sdna_code: String,
         sdna_type: SdnaType,
+        shacl_json: Option<String>,
         context: &AgentContext,
     ) -> Result<bool, AnyError> {
         //let mut added = false;
@@ -1570,11 +1651,48 @@ impl PerspectiveInstance {
             SdnaType::Custom => "ad4m://has_custom_sdna",
         };
 
-        let literal_name = Literal::from_string(name)
+        let literal_name = Literal::from_string(name.clone())
             .to_url()
             .expect("just initialized Literal couldn't be turned into URL");
 
         let mut sdna_links: Vec<Link> = Vec::new();
+
+        // Preserve original Prolog code for SHACL generation if needed
+        let original_prolog_code = sdna_code.clone();
+        let perspective_uuid = self.persisted.lock().await.uuid.clone();
+
+        // Check if SHACL definition already exists for this class BEFORE doing anything
+        if matches!(sdna_type, SdnaType::SubjectClass) {
+            // Check for any existing SubjectClass with this name, regardless of namespace
+            // We query by target (ad4m://SubjectClass) and then filter by class name
+            let all_class_links = self
+                .get_links_local(&LinkQuery {
+                    predicate: Some("rdf://type".to_string()),
+                    target: Some("ad4m://SubjectClass".to_string()),
+                    ..Default::default()
+                })
+                .await?;
+
+            // Check if any existing class matches this name
+            let exists = all_class_links.iter().any(|(link, _)| {
+                // Extract class name from source URI (e.g., "flux://Channel" -> "Channel")
+                link.data
+                    .source
+                    .split("://")
+                    .last()
+                    .and_then(|s| s.split('/').last())
+                    .map(|class_name| class_name == name)
+                    .unwrap_or(false)
+            });
+
+            if exists {
+                log::info!(
+                    "Class '{}' SHACL definition already exists, skipping duplicate",
+                    name
+                );
+                return Ok(true);
+            }
+        }
 
         if (Literal::from_url(sdna_code.clone())).is_err() {
             sdna_code = Literal::from_string(sdna_code)
@@ -1604,14 +1722,25 @@ impl PerspectiveInstance {
             target: literal_name.clone(),
         });
 
+        // Store the Prolog code for backward compatibility with getSdna()
+        // SHACL links are the source of truth for schema operations,
+        // but Prolog code is still stored for retrieval
         sdna_links.push(Link {
             source: literal_name.clone(),
             predicate: Some("ad4m://sdna".to_string()),
-            target: sdna_code,
+            target: sdna_code.clone(),
         });
 
         self.add_links(sdna_links, LinkStatus::Shared, None, context)
             .await?;
+
+        // Handle SHACL links if SHACL JSON provided explicitly
+        if let Some(shacl) = shacl_json {
+            let shacl_links = parse_shacl_to_links(&shacl, &name)?;
+            self.add_links(shacl_links, LinkStatus::Shared, None, context)
+                .await?;
+        }
+
         //added = true;
         //}
         // Mutex guard is automatically dropped here
@@ -1999,11 +2128,8 @@ impl PerspectiveInstance {
                 .await
             }
             PrologMode::Disabled => {
-                log::warn!(
-                    "⚠️ Prolog query received but Prolog is DISABLED (query: {})",
-                    query
-                );
-                Err(anyhow!("Prolog is disabled"))
+                // Return empty matches instead of False/Error to allow SHACL-based SDNA to work
+                Ok(QueryResolution::Matches(vec![]))
             }
         }
     }
@@ -2032,10 +2158,11 @@ impl PerspectiveInstance {
             }
             PrologMode::Disabled => {
                 log::warn!(
-                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {})",
+                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
                     query
                 );
-                Err(anyhow!("Prolog is disabled"))
+                // Return empty result instead of error to allow SHACL-based SDNA to work
+                Ok(QueryResolution::False)
             }
         }
     }
@@ -2070,10 +2197,11 @@ impl PerspectiveInstance {
             }
             PrologMode::Disabled => {
                 log::warn!(
-                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {})",
+                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
                     query
                 );
-                Err(anyhow!("Prolog is disabled"))
+                // Return empty result instead of error to allow SHACL-based SDNA to work
+                Ok(QueryResolution::False)
             }
         }
     }
@@ -2164,7 +2292,7 @@ impl PerspectiveInstance {
                 )
                 .await
             }
-            PrologMode::Disabled => Err(anyhow!("Prolog is disabled")),
+            PrologMode::Disabled => Ok(QueryResolution::Matches(vec![])),
         }
     }
 
@@ -2281,7 +2409,7 @@ impl PerspectiveInstance {
                 )
                 .await
             }
-            PrologMode::Disabled => Err(anyhow!("Prolog is disabled")),
+            PrologMode::Disabled => Ok(QueryResolution::Matches(vec![])),
         }
     }
 
@@ -2511,14 +2639,12 @@ impl PerspectiveInstance {
         let self_clone = self.clone();
 
         tokio::spawn(async move {
-            // In Simple or SdnaOnly mode, just trigger subscription checks
+            // In Disabled, Simple, or SdnaOnly mode, just trigger subscription checks
             // (Pooled mode prolog updates don't apply - run_query_all only works in Pooled mode)
-            if PROLOG_MODE == PrologMode::Simple || PROLOG_MODE == PrologMode::SdnaOnly {
-                log::debug!(
-                    "Prolog facts update ({:?} mode): triggering subscription checks",
-                    PROLOG_MODE
-                );
-
+            if PROLOG_MODE == PrologMode::Disabled
+                || PROLOG_MODE == PrologMode::Simple
+                || PROLOG_MODE == PrologMode::SdnaOnly
+            {
                 // Trigger notification, prolog subscription, and surreal subscription checks
                 *(self_clone.trigger_notification_check.lock().await) = true;
                 *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
@@ -3302,95 +3428,148 @@ impl PerspectiveInstance {
         //let method_start = std::time::Instant::now();
         //log::info!("🔍 SUBJECT CLASS: Starting class name resolution...");
 
-        Ok(if subject_class.class_name.is_some() {
-            //log::info!("🔍 SUBJECT CLASS: Using provided class name '{}' in {:?}", class_name, method_start.elapsed());
-            subject_class.class_name.unwrap()
+        Ok(if let Some(class_name) = subject_class.class_name {
+            class_name
         } else {
-            let query = subject_class.query.ok_or(anyhow!(
-                "SubjectClassOption needs to either have `name` or `query` set"
-            ))?;
-
-            //log::info!("🔍 SUBJECT CLASS: Running prolog query to resolve class name: {}", query);
-            //let query_start = std::time::Instant::now();
-
-            let result = self
-                .prolog_query_sdna_with_context(query.to_string(), context)
-                .await
-                .map_err(|e| {
-                    log::error!("Error creating subject: {:?}", e);
-                    e
-                })?;
-
-            //log::info!("🔍 SUBJECT CLASS: Prolog query completed in {:?}", query_start.elapsed());
-
-            prolog_get_first_string_binding(&result, "Class")
-                .ok_or(anyhow!("No matching subject class found!"))?
+            return Err(anyhow!(
+                "SubjectClassOption requires `className` to be set. Query-based lookup has been removed; resolve the class name client-side."
+            ));
         })
     }
 
-    async fn get_actions_from_prolog(
-        &self,
-        query: String,
-        context: &AgentContext,
-    ) -> Result<Option<Vec<Command>>, AnyError> {
-        let result = self.prolog_query_sdna_with_context(query, context).await?;
-
-        if let Some(actions_str) = prolog_get_first_string_binding(&result, "Actions") {
-            // json5 seems to have a bug, blocking when a property is set to undefined
-            let sanitized_str = actions_str.replace("undefined", "null");
-            json5::from_str(&sanitized_str)
-                .map(Some)
-                .map_err(|e| anyhow!("Failed to parse actions: {}", e))
-        } else {
-            Ok(None)
+    /// Parse actions JSON from a literal target (format: "literal://string:{json}")
+    fn parse_actions_from_literal(target: &str) -> Result<Vec<Command>, AnyError> {
+        let prefix = "literal://string:";
+        if !target.starts_with(prefix) {
+            return Err(anyhow!("Invalid literal format: {}", target));
         }
+        let json_str = &target[prefix.len()..];
+        // Decode URL-encoded characters if present
+        let decoded = urlencoding::decode(json_str)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| json_str.to_string());
+        serde_json::from_str(&decoded)
+            .map_err(|e| anyhow!("Failed to parse actions JSON: {} - input: {}", e, decoded))
     }
 
-    async fn get_constructor_actions(
+    /// Get actions from SHACL links for a shape-level predicate (constructor/destructor)
+    async fn get_shape_actions_from_shacl(
         &self,
         class_name: &str,
-        context: &AgentContext,
-    ) -> Result<Vec<Command>, AnyError> {
-        //let method_start = std::time::Instant::now();
-        //log::info!("🏗️ CONSTRUCTOR: Getting constructor actions for class '{}'", class_name);
+        predicate: &str,
+    ) -> Result<Option<Vec<Command>>, AnyError> {
+        // Query SurrealDB for links with the given predicate whose source ends with {ClassName}Shape
+        let shape_suffix = format!("{}Shape", class_name);
+        let uuid = self.persisted.lock().await.uuid.clone();
 
-        let query = format!(
-            r#"subject_class("{}", C), constructor(C, Actions)"#,
-            class_name
-        );
+        let links = self
+            .surreal_service
+            .get_links_by_predicate_and_source_suffix(&uuid, predicate, &shape_suffix)
+            .await?;
 
-        //log::info!("🏗️ CONSTRUCTOR: Running prolog query: {}", query);
-        //let query_start = std::time::Instant::now();
+        // Return the first match
+        if let Some(link) = links.first() {
+            return Self::parse_actions_from_literal(&link.data.target).map(Some);
+        }
 
-        //log::info!("🏗️ CONSTRUCTOR: Prolog query completed in {:?} (total: {:?})",
-        //    query_start.elapsed(), method_start.elapsed());
+        Ok(None)
+    }
 
-        self.get_actions_from_prolog(query, context)
+    /// Get actions from SHACL links for a property-level predicate (setter/adder/remover)
+    async fn get_property_actions_from_shacl(
+        &self,
+        class_name: &str,
+        property: &str,
+        predicate: &str,
+    ) -> Result<Option<Vec<Command>>, AnyError> {
+        // Property shape URI format: {namespace}{ClassName}.{propertyName}
+        let prop_suffix = format!("{}.{}", class_name, property);
+        let uuid = self.persisted.lock().await.uuid.clone();
+
+        let links = self
+            .surreal_service
+            .get_links_by_predicate_and_source_suffix(&uuid, predicate, &prop_suffix)
+            .await?;
+
+        // Return the first match
+        if let Some(link) = links.first() {
+            return Self::parse_actions_from_literal(&link.data.target).map(Some);
+        }
+
+        Ok(None)
+    }
+
+    /// Get resolve language from SHACL links
+    async fn get_resolve_language_from_shacl(
+        &self,
+        class_name: &str,
+        property: &str,
+    ) -> Result<Option<String>, AnyError> {
+        let prop_suffix = format!("{}.{}", class_name, property);
+        let uuid = self.persisted.lock().await.uuid.clone();
+
+        let links = self
+            .surreal_service
+            .get_links_by_predicate_and_source_suffix(&uuid, "ad4m://resolveLanguage", &prop_suffix)
+            .await?;
+
+        if let Some(link) = links.first() {
+            // Extract value from literal://string:{value}
+            let prefix = "literal://string:";
+            if link.data.target.starts_with(prefix) {
+                let encoded_value = &link.data.target[prefix.len()..];
+                let decoded = urlencoding::decode(encoded_value)
+                    .map_err(|e| anyhow!("Failed to decode resolve language value: {}", e))?;
+                return Ok(Some(decoded.to_string()));
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn get_constructor_actions(&self, class_name: &str) -> Result<Vec<Command>, AnyError> {
+        self.get_shape_actions_from_shacl(class_name, "ad4m://constructor")
             .await?
-            .ok_or(anyhow!("No constructor found for class: {}", class_name))
+            .ok_or(anyhow!(
+                "No SHACL constructor found for class: {}. Ensure the class has SHACL definitions.",
+                class_name
+            ))
+    }
+
+    async fn get_destructor_actions(&self, class_name: &str) -> Result<Vec<Command>, AnyError> {
+        self.get_shape_actions_from_shacl(class_name, "ad4m://destructor")
+            .await?
+            .ok_or(anyhow!(
+                "No SHACL destructor found for class: {}. Ensure the class has SHACL definitions.",
+                class_name
+            ))
     }
 
     async fn get_property_setter_actions(
         &self,
         class_name: &str,
         property: &str,
-        context: &AgentContext,
     ) -> Result<Option<Vec<Command>>, AnyError> {
-        //let method_start = std::time::Instant::now();
-        //log::info!("🔧 PROPERTY SETTER: Getting setter for class '{}', property '{}'", class_name, property);
+        self.get_property_actions_from_shacl(class_name, property, "ad4m://setter")
+            .await
+    }
 
-        let query = format!(
-            r#"subject_class("{}", C), property_setter(C, "{}", Actions)"#,
-            class_name, property
-        );
+    async fn get_collection_adder_actions(
+        &self,
+        class_name: &str,
+        collection: &str,
+    ) -> Result<Option<Vec<Command>>, AnyError> {
+        self.get_property_actions_from_shacl(class_name, collection, "ad4m://adder")
+            .await
+    }
 
-        //log::info!("🔧 PROPERTY SETTER: Running prolog query: {}", query);
-        //let query_start = std::time::Instant::now();
-
-        //log::info!("🔧 PROPERTY SETTER: Prolog query completed in {:?} (total: {:?})",
-        //    query_start.elapsed(), method_start.elapsed());
-
-        self.get_actions_from_prolog(query, context).await
+    async fn get_collection_remover_actions(
+        &self,
+        class_name: &str,
+        collection: &str,
+    ) -> Result<Option<Vec<Command>>, AnyError> {
+        self.get_property_actions_from_shacl(class_name, collection, "ad4m://remover")
+            .await
     }
 
     async fn resolve_property_value(
@@ -3398,15 +3577,13 @@ impl PerspectiveInstance {
         class_name: &str,
         property: &str,
         value: &serde_json::Value,
-        context: &AgentContext,
     ) -> Result<String, AnyError> {
-        let resolve_result = self.prolog_query_with_context(format!(
-            r#"subject_class("{}", C), property_resolve(C, "{}"), property_resolve_language(C, "{}", Language)"#,
-            class_name, property, property
-        ), context).await?;
+        // Get resolve language from SHACL links
+        let resolve_language = self
+            .get_resolve_language_from_shacl(class_name, property)
+            .await?;
 
-        if let Some(resolve_language) = prolog_get_first_string_binding(&resolve_result, "Language")
-        {
+        if let Some(resolve_language) = resolve_language {
             // Create an expression for the value
             let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
             let content = serde_json::to_string(value)
@@ -3475,7 +3652,7 @@ impl PerspectiveInstance {
         //log::info!("🎯 CREATE SUBJECT: Got class name '{}' in {:?}", class_name, class_name_start.elapsed());
 
         //let constructor_start = std::time::Instant::now();
-        let mut commands = self.get_constructor_actions(&class_name, context).await?;
+        let mut commands = self.get_constructor_actions(&class_name).await?;
         //log::info!("🎯 CREATE SUBJECT: Got {} constructor actions in {:?}",
         //    commands.len(), constructor_start.elapsed());
 
@@ -3486,12 +3663,11 @@ impl PerspectiveInstance {
             if let serde_json::Value::Object(obj) = obj {
                 for (prop, value) in obj.iter() {
                     //let prop_start = std::time::Instant::now();
-                    if let Some(setter_commands) = self
-                        .get_property_setter_actions(&class_name, prop, context)
-                        .await?
+                    if let Some(setter_commands) =
+                        self.get_property_setter_actions(&class_name, prop).await?
                     {
                         let target_value = self
-                            .resolve_property_value(&class_name, prop, value, context)
+                            .resolve_property_value(&class_name, prop, value)
                             .await?;
 
                         //log::info!("🎯 CREATE SUBJECT: Property '{}' setter resolved in {:?}",
@@ -4315,7 +4491,7 @@ impl PerspectiveInstance {
         // Process additions
         for link in diff.additions {
             let status = link.status.unwrap_or(LinkStatus::Shared);
-            let signed_expr = create_signed_expression(link.data, context)?;
+            let signed_expr = create_signed_expression(link.data.normalize(), context)?;
             let decorated =
                 DecoratedLinkExpression::from((LinkExpression::from(signed_expr), status.clone()));
 
@@ -5309,48 +5485,59 @@ mod tests {
 
         println!("\n=== Step 1: Adding Recipe SDNA ===");
 
-        // Step 1: Add Recipe SDNA with two required properties (matching subject.pl format exactly)
-        let recipe_sdna = r#"
-subject_class("Recipe", c).
-constructor(c, '[{action: "addLink", source: "this", predicate: "recipe://name", target: ""}, {action: "addLink", source: "this", predicate: "recipe://rating", target: "0"}]').
-instance(c, Base) :- 
-    triple(Base, "recipe://name", _),
-    triple(Base, "recipe://rating", _).
-property(c, "name").
-property_getter(c, Base, "name", Value) :- 
-    triple(Base, "recipe://name", Value).
-property_setter(c, "name", '[{action: "setSingleTarget", source: "this", predicate: "recipe://name", target: "value"}]').
-property(c, "rating").
-property_getter(c, Base, "rating", Value) :- 
-    triple(Base, "recipe://rating", Value).
-property_setter(c, "rating", '[{action: "setSingleTarget", source: "this", predicate: "recipe://rating", target: "value"}]').
-"#;
+        // Step 1: Add Recipe SDNA with SHACL JSON
+        let shacl_json = r#"{
+            "target_class": "recipe://Recipe",
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "recipe://name", "target": ""},
+                {"action": "addLink", "source": "this", "predicate": "recipe://rating", "target": "0"}
+            ],
+            "properties": [
+                {
+                    "path": "recipe://name",
+                    "name": "name",
+                    "datatype": "xsd://string",
+                    "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "recipe://name", "target": "value"}]
+                },
+                {
+                    "path": "recipe://rating",
+                    "name": "rating",
+                    "datatype": "xsd://string",
+                    "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "recipe://rating", "target": "value"}]
+                }
+            ]
+        }"#;
 
         perspective.ensure_prolog_engine_pool().await.unwrap();
         perspective
             .add_sdna(
                 "Recipe".to_string(),
-                recipe_sdna.to_string(),
+                "".to_string(), // Empty Prolog code
                 SdnaType::SubjectClass,
+                Some(shacl_json.to_string()), // SHACL JSON
                 &AgentContext::main_agent(),
             )
             .await
             .unwrap();
 
-        perspective.get_links(&LinkQuery::default()).await.unwrap();
+        // Verify SHACL links were added
         let links = perspective.get_links(&LinkQuery::default()).await.unwrap();
-        assert_eq!(links.len(), 2, "Expected 2 links");
+        println!("SHACL links added: {} links total", links.len());
 
-        let check = perspective
-            .prolog_query_with_context(
-                "subject_class(Name, _)".to_string(),
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-        println!("Check: {:?}", check);
+        // Verify we have the subject class link
+        let class_link_exists = links.iter().any(|l| {
+            l.data.source == "ad4m://self"
+                && l.data.predicate == Some("ad4m://has_subject_class".to_string())
+                && l.data.target == "literal://string:Recipe"
+        });
+        assert!(
+            class_link_exists,
+            "Expected ad4m://has_subject_class link for Recipe"
+        );
 
-        println!("✓ Recipe SDNA added, Prolog engine updated");
+        println!("✓ Recipe SDNA added with SHACL definitions");
 
         perspective
             .create_subject(
