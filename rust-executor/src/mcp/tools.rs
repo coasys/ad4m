@@ -2434,29 +2434,19 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Authentication error: {}", e),
         };
 
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
-            return format!("Capability error: {}", e);
-        }
-
         let expression_address = match Self::require_arg(args, "expression_address") {
             Ok(v) => v.to_string(),
             Err(e) => return e,
         };
 
-        // Build initial_values from property args
-        let mut initial_values = serde_json::Map::new();
-        for (key, value) in args {
-            if key != "perspective_id" && key != "expression_address" {
-                if let Some(v) = value.as_str() {
-                    initial_values.insert(key.clone(), serde_json::Value::String(v.to_string()));
-                }
-            }
-        }
-        let initial_values = if initial_values.is_empty() {
-            None
-        } else {
-            Some(serde_json::Value::Object(initial_values))
+        // Build initial_values from non-system property args
+        let initial_values: Option<serde_json::Value> = {
+            let props: serde_json::Map<String, serde_json::Value> = args
+                .iter()
+                .filter(|(k, _)| k.as_str() != "perspective_id" && k.as_str() != "expression_address")
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), json!(s))))
+                .collect();
+            if props.is_empty() { None } else { Some(serde_json::Value::Object(props)) }
         };
 
         let subject_class: SubjectClassOption = match serde_json::from_value(json!({
@@ -2466,9 +2456,9 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Error: {}", e),
         };
 
-        let mut perspective = match get_perspective(perspective_id) {
-            Some(p) => p,
-            None => return format!("Perspective not found: {}", perspective_id),
+        let mut perspective = match self.get_writable_perspective(perspective_id).await {
+            Ok(p) => p,
+            Err(e) => return e,
         };
 
         match perspective
