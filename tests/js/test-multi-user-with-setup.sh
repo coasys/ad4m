@@ -4,20 +4,21 @@
 echo "🚀 Multi-User Test with Setup"
 echo "============================="
 
-# Function to kill any running AD4M processes
+# Function to kill any AD4M processes belonging to THIS test run (by port, not by name).
+# Do NOT use pkill/killall by name — that would kill executors from other concurrent CI jobs
+# running on the same machine. Each test suite uses a unique port range.
 cleanup_processes() {
-    echo "🧹 Killing any existing AD4M processes..."
-    # Kill any processes using the AD4M ports
-    pkill -f "rust-executor" 2>/dev/null || true
-    pkill -f "ad4m" 2>/dev/null || true
-    
-    # Wait a moment for processes to die
-    sleep 2
-    
-    # Force kill if still running
-    lsof -ti:15700 | xargs kill -9 2>/dev/null || true
-    lsof -ti:15701 | xargs kill -9 2>/dev/null || true
-    lsof -ti:15702 | xargs kill -9 2>/dev/null || true
+    echo "🧹 Killing any existing AD4M processes on our ports..."
+    # Kill only processes on the ports used by this test suite
+    # setup (publishTestLangs): 15700-15702
+    lsof -ti:15700 | xargs -r kill -9 2>/dev/null || true
+    lsof -ti:15701 | xargs -r kill -9 2>/dev/null || true
+    lsof -ti:15702 | xargs -r kill -9 2>/dev/null || true
+    # multi-user-simple.test.ts: 15900-15902
+    lsof -ti:15900 | xargs -r kill -9 2>/dev/null || true
+    lsof -ti:15901 | xargs -r kill -9 2>/dev/null || true
+    lsof -ti:15902 | xargs -r kill -9 2>/dev/null || true
+    sleep 1
 }
 
 # Function to clean up test directories
