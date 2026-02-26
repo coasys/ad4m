@@ -2,6 +2,7 @@ import path from "path";
 import { Ad4mClient, LanguageMetaInput } from "@coasys/ad4m";
 import fs from "fs-extra";
 import { exit } from "process";
+import { execSync } from "child_process";
 import { fileURLToPath } from 'url';
 import { apolloClient, sleep, startExecutor } from "./utils";
 import fetch from 'node-fetch'
@@ -67,6 +68,15 @@ function injectLangAliasHashes() {
 }
 
 async function publish() {
+    // Pre-clean: kill any orphaned executor from a previous CI job that may be
+    // squatting on our ports. self-hosted runners reuse workdirs between jobs
+    // and don't clean up automatically.
+    console.log(`Pre-cleaning ports ${gqlPort}/${hcAdminPort}/${hcAppPort} before starting executor...`);
+    for (const port of [gqlPort, hcAdminPort, hcAppPort]) {
+        try { execSync(`lsof -ti:${port} | xargs -r kill -9`, { stdio: 'ignore' }); } catch(e) {}
+    }
+    await sleep(500);
+
     createTestingAgent();
 
     const executorProcess = await startExecutor(appDataPath, publishingBootstrapSeedPath, gqlPort, hcAdminPort, hcAppPort, true);
@@ -98,13 +108,16 @@ async function publish() {
     injectSystemLanguages()
     injectLangAliasHashes();
 
-    if (executorProcess) {
-        while (!executorProcess.killed){
-            let status = executorProcess.kill()
-            console.log("killed executor with", status);
-            await sleep(500); 
-        }
+    // Kill the executor by port, not by process object.
+    // exec() wraps the command in a shell; executorProcess.kill() only kills
+    // the shell — the actual ad4m-executor (grandchild) survives and becomes
+    // an orphan that blocks the port in future CI runs.
+    // Port-based kill hits the real process directly.
+    console.log(`Killing executor on ports ${gqlPort}/${hcAdminPort}/${hcAppPort}...`);
+    for (const port of [gqlPort, hcAdminPort, hcAppPort]) {
+        try { execSync(`lsof -ti:${port} | xargs -r kill -9`, { stdio: 'ignore' }); } catch(e) {}
     }
+    await sleep(1000);
 
     exit();
 }
