@@ -1,7 +1,7 @@
 # Batch Operations
 
 ## Overview
-Batch operations in AD4M allow you to group multiple perspective mutations into a single atomic transaction. This feature is particularly useful when you need to perform multiple related changes that should either all succeed or all fail together, or when you want to optimize performance by reducing the number of internal engine updates and network operations.
+Batch operations in AD4M allow you to group multiple perspective mutations into a single atomic transaction. This feature is particularly useful when you need to perform multiple related changes that should either all succeed or all fail together, or when you want to optimize performance by reducing the number of internal engine updates (SurrealDB indexing, and Prolog inference if activated) and network operations.
 
 ## Key Benefits
 
@@ -11,7 +11,7 @@ Batch operations in AD4M allow you to group multiple perspective mutations into 
 - Ideal for complex operations that require multiple related changes
 
 ### 2. Performance Optimization
-- Reduces the number of internal engine updates (SurrealDB indexing, query subscriptions)
+- Reduces the number of internal engine updates (SurrealDB indexing, query subscriptions, and Prolog inference if activated)
 - Minimizes the number of commits to the neighbourhood's link language
 - Batches network operations for shared perspectives
 - Improves overall system responsiveness when making multiple changes
@@ -125,7 +125,7 @@ await perspective.commitBatch(batchId);
 - Changes are tracked separately for shared and local links
 
 ### Engine Synchronization
-- Internal indexes (SurrealDB, query subscriptions) are updated only once per batch commit
+- Internal indexes (SurrealDB, query subscriptions, and Prolog facts if activated) are updated only once per batch commit
 - Updates are performed using a oneshot channel to ensure completion
 - The engine state remains consistent with all changes
 
