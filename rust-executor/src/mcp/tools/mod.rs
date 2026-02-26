@@ -1055,6 +1055,36 @@ impl Ad4mMcpHandler {
         }
     }
 
+    /// Execute a transition action on an expression in a flow
+    #[tool(
+        description = "Execute a transition action on an expression within a flow (state machine). The expression must be in a state that has the given action available. Use flow_actions to see available actions for the current state. Example: flow_run_action(perspective_id='abc', flow_name='MessageFlow', expression_address='literal://string:xyz', action_name='approve')."
+    )]
+    async fn flow_run_action(&self, params: Parameters<FlowRunActionParams>) -> String {
+        let p = &params.0;
+
+        match self.get_writable_perspective(&p.perspective_id).await {
+            Ok((_perspective, _agent_context)) => {
+                // TODO: Flow action execution requires running the action's commands
+                // on the perspective instance. The actions are defined in SHACL Flow SDNA
+                // and consist of add/remove link commands. Implementation needs:
+                // 1. Load flow definition from SDNA
+                // 2. Find current state of expression
+                // 3. Verify action is available in current state
+                // 4. Execute the action's commands (add/remove links)
+                // 5. Return new state
+                json!({
+                    "success": false,
+                    "expression": p.expression_address,
+                    "flow": p.flow_name,
+                    "action": p.action_name,
+                    "message": "Flow action execution not yet implemented — requires SHACL Flow command execution"
+                })
+                .to_string()
+            }
+            Err(e) => e,
+        }
+    }
+
     /// Create a new perspective
     #[tool(
         description = "Create a new perspective (local knowledge graph). Returns the UUID. You can then add links, register models (subject classes), and create typed instances within it. To share it for collaboration, convert it to a neighbourhood."
