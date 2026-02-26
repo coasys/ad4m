@@ -95,6 +95,27 @@ Removed the old `relations` field and `.relations()` fluent method.
 - 50 ms coalesce window (`SETTLE_MS`) to batch rapid link events from a single `save()` into one re-query
 - `.live(callback)` fluent terminal on `ModelQueryBuilder` alongside `.get()`
 
+**Server-push SurrealDB subscription removal (Phase 3e)**
+
+Deleted the legacy server-side SurrealDB subscription system that was made redundant by Phase 3d's client-side subscription registry:
+
+_TypeScript (client):_
+
+- Removed `isSurrealDB` field from `QuerySubscriptionProxy` and its `if/else` surreal branches in `subscribe()`, keepalive loop, and `dispose()`
+- Deleted `subscribeSurrealDB()` from `PerspectiveProxy`
+- Deleted `perspectiveSubscribeSurrealQuery()`, `perspectiveKeepAliveSurrealQuery()`, `perspectiveDisposeSurrealQuerySubscription()` from `PerspectiveClient`
+
+_Rust (server):_
+
+- Deleted `SurrealSubscribedQuery` struct
+- Dropped `trigger_surreal_subscription_check` and `surreal_subscribed_queries` fields + `Arc::new()` initialisers from `PerspectiveInstance`
+- Removed `surreal_subscription_cleanup_loop()` from `start_background_tasks()`
+- Deleted 5 functions: `subscribe_and_query_surreal`, `keepalive_surreal_query`, `dispose_surreal_query_subscription`, `surreal_subscription_cleanup_loop`, `check_surreal_subscribed_queries`
+- Deleted 3 GraphQL mutation resolvers: `perspective_subscribe_surreal_query`, `perspective_keep_alive_surreal_query`, `perspective_dispose_surreal_query_subscription`
+- Removed two `trigger_surreal_subscription_check` trigger lines from the link-added/link-removed update paths
+
+Net: –876 lines, +769 lines across 4 files (the `PerspectiveClient` additions are JSDoc and test-fixture refactoring).
+
 ---
 
 ### 🚀 Phase 4 — Advanced features
@@ -189,13 +210,14 @@ Removed the old `relations` field and `.relations()` fluent method.
 - Fixed quote escape no-op in `fetchInstance.ts` (`.replace(/'/g, "'")` replaced with same character)
 - Fixed `infer()` call in `perspective_instance.rs` not awaiting `findAndKillProcess` in error handlers
 - Multi-user test suite fixes: auth flow, error strings, URI validation, bootstrap timing
+- **Literal-guard fix (from `origin/dev` merge)** — dev commits `70d1d508` / `d7a2e708` added a `propMeta.resolveLanguage === 'literal'` guard before `literal://` URI parsing in the legacy monolithic `Ad4mModel.ts` to prevent crashing on non-literal string values; our decomposed `hydration.ts` (`resolveValue()`) already incorporates an equivalent and strictly-superior guard — `(resolveLanguage === "literal" || resolveLanguage === undefined)` — covering both explicit literal properties and plain undecorated string fields
 
 ---
 
 ### 📄 Documentation
 
 - Added `AD4M-MODEL-REFACTOR.md` refactor plan (continuously updated through 2026-02-24)
-- Added `core/src/model/README.md` — architecture overview, full Recipe example, decorator reference table, query API cheatsheet, transaction pattern, `fromJSONSchema` examples, inheritance notes
+- Added `core/src/model/README.md` — architecture overview, full Recipe example, decorator reference table, query API cheatsheet, transaction pattern, `fromJSONSchema` examples, inheritance notes; corrected two method name errors after initial authoring (`.run()` → `.get()`, `.subscribe()` → `.live()` on the fluent builder)
 - Added Phase G deprecation plan — documents what can be removed from `PerspectiveProxy` / Rust once Flux and `ad4m-hooks` migrate off the `Subject` proxy API to `Ad4mModel` (`getSubjectData`, `getSubjectProxy`, Rust `get_subject_data()`)
 - Added `SUBSCRIPTION_STRATEGY.md` — documents client-side subscription architecture, multi-user node compatibility, shared registry design
 - Trimmed JSDoc verbosity by 24–37% across `Ad4mModel.ts`, `decorators.ts`, `transaction.ts`, `types.ts`
