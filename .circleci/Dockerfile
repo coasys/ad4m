@@ -4,8 +4,28 @@ FROM cimg/base:edge-22.04
 USER root
 
 # Install system dependencies or any other tools you need
-RUN apt-get update && sudo apt-get install -y \
-    libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake gobjc clang gnustep-devel libobjc4 libgnustep-base-dev libasound2-dev pkg-config fuse libfuse2 mesa-utils mesa-vulkan-drivers
+RUN apt-get update && apt-get install -y software-properties-common && add-apt-repository universe && apt-get update && apt-get install -y \
+    libgtk-3-dev \
+    webkit2gtk-4.0 \
+    libwebkit2gtk-4.1-dev \
+    libjavascriptcoregtk-4.1-dev \
+    libappindicator3-dev \
+    librsvg2-dev \
+    patchelf \
+    protobuf-compiler \
+    cmake \
+    gobjc \
+    clang \
+    gnustep-devel \
+    libobjc4 \
+    libgnustep-base-dev \
+    libasound2-dev \
+    pkg-config \
+    fuse \
+    libfuse2 \
+    mesa-utils \
+    mesa-vulkan-drivers \
+    squashfs-tools
 
 # Install Go
 ENV GO_VERSION=1.24.6
