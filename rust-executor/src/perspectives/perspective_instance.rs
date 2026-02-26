@@ -88,7 +88,7 @@ pub enum Action {
     RemoveLink,
     #[serde(rename = "setSingleTarget")]
     SetSingleTarget,
-    #[serde(rename = "relationSetter")]
+    #[serde(rename = "relationSetter", alias = "collectionSetter")]
     RelationSetter,
 }
 
