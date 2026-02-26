@@ -2308,7 +2308,7 @@ impl Ad4mMcpHandler {
 
     /// Subscribe to model changes in a perspective
     #[tool(
-        description = "Create a watch configuration for a subject class in a perspective. Returns a subscription_id and waker_config with link matching criteria. The agent should: 1) Store the subscription_id with its semantic context in memory, 2) Pass the waker_config to the waker process, 3) The waker uses perspectiveLinkAdded to detect matching links and wakes the agent with the subscription_id, 4) On wake, the agent checks memory for context and uses MCP tools to fetch the latest data."
+        description = "Generate a SurrealQL query for watching changes to a subject class in a perspective. Returns a subscription_id and the query to pass to the waker process. The waker uses perspectiveSubscribeSurrealQuery (same mechanism as Flux UI) for live updates. Flow: 1) Call this tool to get the query, 2) Store subscription_id + context in memory, 3) Pass query + id to the waker, 4) When woken, use MCP tools to fetch the latest data."
     )]
     async fn subscribe_to_model(&self, params: Parameters<SubscribeToModelParams>) -> String {
         let _capabilities = match self.get_capabilities().await {
@@ -2323,15 +2323,12 @@ impl Ad4mMcpHandler {
             return json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string();
         }
 
-        // Build the matching criteria for the waker's perspectiveLinkAdded subscription.
-        // The waker subscribes to linkAdded events and filters by these predicates/sources.
-        // When a match is detected, the waker wakes the agent with the subscription ID.
-        let (match_predicate, match_source, match_target) = if let Some(ref parent) = p.parent_address {
+        // Build SurrealQL query for the waker's perspectiveSubscribeSurrealQuery
+        let query = if let Some(ref parent) = p.parent_address {
             // Watch for new children of a specific parent (e.g., messages in a channel)
-            (
-                "ad4m://has_child".to_string(),
-                Some(format!("literal://string:{}", parent)),
-                None,
+            format!(
+                "SELECT * FROM link WHERE source = 'literal://string:{}' AND predicate = 'ad4m://has_child'",
+                parent
             )
         } else {
             // Watch for all instances of a class by entry type
@@ -2350,10 +2347,9 @@ impl Ad4mMcpHandler {
                     }).to_string();
                 }
             };
-            (
-                "flux://entry_type".to_string(),
-                None,
-                Some(entry_type.to_string()),
+            format!(
+                "SELECT * FROM link WHERE predicate = 'flux://entry_type' AND target = '{}'",
+                entry_type
             )
         };
 
@@ -2365,13 +2361,14 @@ impl Ad4mMcpHandler {
             "perspective_id": p.perspective_id,
             "class_name": p.class_name,
             "parent_address": p.parent_address,
+            "surreal_query": query,
             "waker_config": {
-                "match_predicate": match_predicate,
-                "match_source": match_source,
-                "match_target": match_target,
+                "id": subscription_id,
+                "perspective": p.perspective_id,
+                "query": query,
             },
             "message": format!(
-                "Subscription {} created for {} changes{}. Pass the waker_config to the waker process along with the subscription_id. The waker will use perspectiveLinkAdded to detect changes and wake you with the subscription_id. Store this subscription_id and its context in your memory so you know what to do when woken.",
+                "Subscription {} created for {} changes{}. Add the waker_config entry to your waker's config file and restart it. The waker uses perspectiveSubscribeSurrealQuery (same as Flux UI) for live change detection. Store this subscription_id in your memory with its context so you know what to do when woken.",
                 subscription_id,
                 p.class_name,
                 p.parent_address.as_ref().map(|a| format!(" under parent {}", a)).unwrap_or_default()
