@@ -47,6 +47,10 @@ export class Literal {
       case "object":
         encoded = `json:${encodeRFC3986URIComponent(JSON.stringify(this.#literal))}`;
         break;
+      default:
+        throw new Error(
+          `Literal.toUrl(): unsupported type "${typeof this.#literal}" (value: ${String(this.#literal)})`,
+        );
     }
 
     return `literal://${encoded}`;
