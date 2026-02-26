@@ -24,6 +24,8 @@ pub struct ShaclProperty {
     pub name: String,
     /// Whether this is a collection (max_count > 1) or a scalar property
     pub is_collection: bool,
+    /// The predicate URI used in links for this property (from sh://path)
+    pub predicate: Option<String>,
 }
 
 impl ShaclClass {
@@ -140,9 +142,23 @@ pub async fn load_class_properties(
             Err(_) => false,
         };
 
+        // Get the predicate URI (sh://path link)
+        let predicate = match perspective
+            .get_links(&LinkQuery {
+                source: Some(prop_uri.clone()),
+                predicate: Some("sh://path".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) if !links.is_empty() => Some(links[0].data.target.clone()),
+            _ => None,
+        };
+
         properties.push(ShaclProperty {
             name: prop_name,
             is_collection,
+            predicate,
         });
     }
 
@@ -179,4 +195,34 @@ pub async fn find_class_name(
     }
 
     None
+}
+
+/// Resolve a property name to its predicate URI for a given class.
+/// This is the common operation needed by MCP tools to read/write properties.
+pub async fn resolve_property_predicate(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    property_name: &str,
+) -> Result<String, String> {
+    let properties = load_class_properties(perspective, class_name).await;
+    if properties.is_empty() {
+        return Err(format!("No SHACL shape found for class '{}'", class_name));
+    }
+    for prop in &properties {
+        if prop.name == property_name {
+            return prop.predicate.clone().ok_or_else(|| {
+                format!(
+                    "Property '{}' on class '{}' has no predicate URI",
+                    property_name, class_name
+                )
+            });
+        }
+    }
+    let available: Vec<&str> = properties.iter().map(|p| p.name.as_str()).collect();
+    Err(format!(
+        "Property '{}' not found on class '{}'. Available: {}",
+        property_name,
+        class_name,
+        available.join(", ")
+    ))
 }
