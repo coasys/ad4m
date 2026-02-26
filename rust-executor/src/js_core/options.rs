@@ -1,5 +1,5 @@
 use deno_runtime::worker::WorkerOptions;
-use std::{collections::HashMap, rc::Rc};
+use std::rc::Rc;
 use url::Url;
 
 use super::agent_extension::agent_service;
@@ -12,53 +12,6 @@ use super::wallet_extension::wallet_service;
 use crate::entanglement_service::entanglement_service_extension::entanglement_service;
 use crate::holochain_service::holochain_service_extension::holochain_service;
 use crate::runtime_service::runtime_service_extension::runtime_service;
-
-pub fn main_module_url() -> Url {
-    Url::parse("https://ad4m.runtime/main").unwrap()
-}
-pub fn module_map() -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    map.insert(
-        "https://ad4m.runtime/main".to_string(),
-        include_str!("main.js").to_string(),
-    );
-    map
-}
-
-pub fn module_loader() -> Rc<StringModuleLoader> {
-    let mut loader = StringModuleLoader::new();
-    for (specifier, code) in module_map() {
-        loader.add_module(specifier.as_str(), code.as_str());
-    }
-    Rc::new(loader)
-}
-
-pub fn main_worker_options() -> WorkerOptions {
-    WorkerOptions {
-        startup_snapshot: {
-            #[cfg(feature = "generate_snapshot")]
-            {
-                None
-            }
-            #[cfg(not(feature = "generate_snapshot"))]
-            {
-                Some(include_bytes!("../../CUSTOM_DENO_SNAPSHOT.bin"))
-            }
-        },
-        extensions: vec![
-            wallet_service::init(),
-            utils_service::init(),
-            pubsub_service::init(),
-            holochain_service::init(),
-            signature_service::init(),
-            agent_service::init(),
-            entanglement_service::init(),
-            runtime_service::init(),
-            language_service::init(),
-        ],
-        ..Default::default()
-    }
-}
 
 /// Create a minimal module loader for language runtimes.
 /// Maps the bootstrap URL so MainWorker::bootstrap_from_options() can resolve it.
@@ -77,8 +30,8 @@ pub fn language_main_module_url() -> Url {
     Url::parse("https://ad4m.language/bootstrap").unwrap()
 }
 
-/// Create worker options for language-specific runtimes
-/// These runtimes have the same Rust service extensions but minimal JS bootstrap
+/// Create worker options for language-specific runtimes.
+/// These runtimes have the same Rust service extensions but minimal JS bootstrap.
 pub fn language_worker_options() -> WorkerOptions {
     WorkerOptions {
         startup_snapshot: {

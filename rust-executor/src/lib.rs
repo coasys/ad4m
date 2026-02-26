@@ -33,8 +33,6 @@ use std::thread::JoinHandle;
 
 use log::{error, info, warn};
 
-use js_core::JsCore;
-
 use crate::{
     agent::AgentService, ai_service::AIService, dapp_server::serve_dapp, db::Ad4mDb,
     languages::LanguageController, prolog_service::init_prolog_service,
@@ -62,6 +60,85 @@ fn find_and_set_port(config_port: &mut Option<u16>, start_port: u16, service_nam
     }
 }
 
+/// Standalone holochain signal receiver task.
+/// Routes signals from Holochain to per-language runtimes.
+async fn holochain_signal_receiver() {
+    use holochain::prelude::Signal;
+
+    loop {
+        if let Some(holochain_service) = holochain_service::maybe_get_holochain_service().await {
+            let mut stream_receiver = holochain_service.stream_receiver.lock().await;
+            if let Some(signal) = stream_receiver.recv().await {
+                match signal.clone() {
+                    Signal::App {
+                        cell_id,
+                        zome_name,
+                        signal: payload,
+                    } => {
+                        let dna_hash_raw = cell_id.dna_hash().get_raw_39().to_vec();
+                        let agent_pubkey_raw = cell_id.agent_pubkey().get_raw_39().to_vec();
+                        let cell_id_key = format!(
+                            "{}:{}",
+                            dna_hash_raw
+                                .iter()
+                                .map(|b| format!("{:02x}", b))
+                                .collect::<String>(),
+                            agent_pubkey_raw
+                                .iter()
+                                .map(|b| format!("{:02x}", b))
+                                .collect::<String>()
+                        );
+
+                        let payload_str =
+                            format!("{}", js_core::ExternWrapper(payload.into_inner()));
+                        let dna_hash_dbg = format!("{:?}", dna_hash_raw);
+                        let agent_pubkey_dbg = format!("{:?}", agent_pubkey_raw);
+
+                        let maybe_lang_address: Option<String> = {
+                            let handlers = js_core::languages_extension::HOLOCHAIN_SIGNAL_HANDLERS
+                                .read()
+                                .await;
+                            handlers.get(&cell_id_key).cloned()
+                        };
+                        if let Some(lang_address) = maybe_lang_address {
+                            let signal_script = format!(
+                                "await globalThis.__handleHolochainSignal__({{cell_id: [{}, {}], zome_name: '{}', payload: {}}})",
+                                dna_hash_dbg, agent_pubkey_dbg, zome_name, payload_str
+                            );
+                            let lang_addr = lang_address.clone();
+                            tokio::spawn(async move {
+                                let controller = languages::LanguageController::global_instance();
+                                if let Err(e) = controller
+                                    .execute_on_language(&lang_addr, &signal_script)
+                                    .await
+                                {
+                                    log::warn!(
+                                        "Failed to route Holochain signal to language {}: {}",
+                                        lang_addr,
+                                        e
+                                    );
+                                }
+                            });
+                        } else {
+                            log::debug!(
+                                "No per-language runtime registered for Holochain signal from cell {}",
+                                cell_id_key
+                            );
+                        }
+                    }
+                    Signal::System(_) => {
+                        info!("Received system signal");
+                    }
+                }
+            } else {
+                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+            }
+        } else {
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    }
+}
+
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     unsafe {
@@ -79,6 +156,33 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     // Respects RUST_LOG environment variable if set
     crate::logging::init_cli_logging(None);
     config.prepare();
+
+    // Store config globally so services (e.g. agent mutation resolvers) can access it
+    crate::config::set_global_config(config.clone());
+
+    // Create data directories that were previously created by the JS executor's Config.init().
+    // These must exist before any service tries to write to them.
+    {
+        let app_data_path = config
+            .app_data_path
+            .as_ref()
+            .expect("App data path not set in Ad4mConfig");
+        let base = std::path::Path::new(app_data_path).join("ad4m");
+        let dirs = [
+            base.clone(),
+            base.join("data"),
+            base.join("languages"),
+            base.join("languages").join("temp"),
+            base.join("h"),
+            base.join("h").join("d"),
+            base.join("h").join("c"),
+        ];
+        for dir in &dirs {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                error!("Failed to create data directory {:?}: {}", dir, e);
+            }
+        }
+    }
 
     aws_lc_rs::default_provider()
         .install_default()
@@ -168,15 +272,20 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     find_and_set_port(&mut config.hc_admin_port, 2000, "Holochain admin");
     find_and_set_port(&mut config.hc_app_port, 1337, "Holochain app");
 
-    info!("Starting js_core...");
-    let mut js_core_handle = JsCore::start().await;
-    js_core_handle.initialized().await;
-    info!("js_core initialized.");
+    // Initialize V8 platform for multi-threaded use (must happen before any Deno workers)
+    {
+        use std::sync::Once;
+        static V8_FLAGS_INIT: Once = Once::new();
+        V8_FLAGS_INIT.call_once(|| {
+            deno_core::v8::V8::set_flags_from_string("--no-opt");
+            deno_core::JsRuntime::init_platform(None, false);
+        });
+    }
 
     // Set languages directory based on app data path (must be before LanguageController)
     crate::utils::set_languages_directory(config.app_data_path.as_ref().unwrap());
 
-    LanguageController::init_global_instance(js_core_handle.clone());
+    LanguageController::init_global_instance();
 
     // NOTE: load_system_languages() is triggered from the JS side via the
     // load_system_languages Deno op when agent.generate or agent.unlock is called.
@@ -208,6 +317,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         });
     };
 
+    // Start holochain signal receiver as standalone task
+    tokio::spawn(crate::holochain_signal_receiver());
+
     info!("Starting GraphQL...");
 
     std::thread::spawn(move || {
@@ -216,8 +328,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             .enable_all()
             .build()
             .unwrap();
-        runtime
-            .block_on(graphql::start_server(js_core_handle, config))
-            .unwrap();
+        runtime.block_on(graphql::start_server(config)).unwrap();
     })
 }

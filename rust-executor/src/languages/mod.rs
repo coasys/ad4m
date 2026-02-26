@@ -22,7 +22,6 @@ use crate::runtime_service::RuntimeService;
 use crate::types::Address;
 use crate::{
     agent::{did, did_for_context, signing_key_id_for_context, AgentContext},
-    js_core::JsCoreHandle,
     utils::{language_storage_directory, languages_directory},
 };
 use base64::prelude::*;
@@ -55,9 +54,6 @@ lazy_static! {
 
 #[derive(Clone)]
 pub struct LanguageController {
-    // Legacy field for backward compatibility (still used for neighbourhood operations)
-    js_core: JsCoreHandle,
-
     // Per-language runtime handles (isolated Deno instances per language)
     runtimes: Arc<TokioMutex<HashMap<String, LanguageRuntimeHandle>>>,
 
@@ -76,9 +72,9 @@ pub struct LanguageController {
 }
 
 impl LanguageController {
-    pub fn init_global_instance(js_core: JsCoreHandle) {
+    pub fn init_global_instance() {
         let mut instance = LANGUAGE_CONTROLLER_INSTANCE.lock().unwrap();
-        *instance = Some(LanguageController::new(js_core));
+        *instance = Some(LanguageController::new());
     }
 
     pub fn global_instance() -> LanguageController {
@@ -90,10 +86,9 @@ impl LanguageController {
             .clone()
     }
 
-    fn new(js_core: JsCoreHandle) -> Self {
+    fn new() -> Self {
         let (languages_ready_tx, languages_ready_rx) = tokio::sync::watch::channel(false);
         Self {
-            js_core,
             runtimes: Arc::new(TokioMutex::new(HashMap::new())),
             system_addresses: Arc::new(TokioMutex::new(SystemLanguageAddresses::default())),
             language_aliases: Arc::new(TokioMutex::new(HashMap::new())),
@@ -270,34 +265,9 @@ impl LanguageController {
             });
         }
 
-        // Fall back to JS-side execution for dynamically installed languages.
-        // The script references `language` as a bare variable, so we wrap it
-        // to get the language from the JS LanguageController first.
-        // Note: We wrap the script in parentheses for the return statement to
-        // avoid JavaScript ASI (automatic semicolon insertion) when the script
-        // starts with a newline.
-        log::debug!("execute_on_language: JS fallback for {}", language_address);
-        let js_script = format!(
-            r#"
-            (async () => {{
-                const language = await core.languageController.languageByRef({{ address: "{}", name: "" }});
-                if (!language) {{
-                    throw new Error("Language not loaded on JS side: {}");
-                }}
-                return ({});
-            }})()
-            "#,
-            language_address, language_address, script
-        );
-
-        let mut js_core = self.js_core.clone();
-        js_core
-            .execute(js_script)
-            .await
-            .map_err(|e| LanguageError::RuntimeError {
-                address: language_address.to_string(),
-                message: e.to_string(),
-            })
+        Err(LanguageError::NotFound {
+            address: language_address.to_string(),
+        })
     }
 
     /// Calculate IPFS hash for a language bundle using the same algorithm as utils_extension::hash()
@@ -388,14 +358,17 @@ impl LanguageController {
         Ok((hash, bundle_path))
     }
 
-    /// Ensure a language bundle is saved on disk, fetching from the language language if needed.
-    /// Does NOT spawn a per-language runtime — during the transition period, language operations
-    /// are handled by the JS-side LanguageController.
+    /// Ensure a language bundle is saved on disk (fetching from the language language if needed)
+    /// and then load it into a per-language runtime.
     async fn install_language_from_address(&self, address: &str) -> Result<(), LanguageError> {
         let bundle_path = languages_directory().join(address).join("bundle.js");
 
         if bundle_path.exists() {
             log::debug!("Language bundle already on disk: {}", address);
+            // Still need to load into runtime if not already loaded
+            if !self.is_language_loaded(address).await {
+                self.load_language(bundle_path).await?;
+            }
             return Ok(());
         }
 
@@ -454,8 +427,12 @@ impl LanguageController {
             });
         }
 
-        let (_hash, _saved_bundle_path) = self.save_language_bundle(&bundle_source, meta)?;
+        let (_hash, saved_bundle_path) = self.save_language_bundle(&bundle_source, meta)?;
         info!("Saved language bundle for: {}", address);
+
+        // Load into a per-language runtime
+        self.load_language(saved_bundle_path).await?;
+        info!("Loaded language runtime for: {}", address);
 
         Ok(())
     }
@@ -575,9 +552,7 @@ impl LanguageController {
         Ok(())
     }
 
-    /// Scan previously installed languages from the languages directory.
-    /// During the transition period, this only logs what's found.
-    /// The JS-side LanguageController handles loading these into runtimes.
+    /// Scan previously installed languages from the languages directory and load them into runtimes.
     async fn load_installed_languages(&self) -> Result<(), LanguageError> {
         let langs_dir = languages_directory();
         let system_set = {
@@ -614,9 +589,25 @@ impl LanguageController {
                 continue;
             }
 
+            // Skip temp directory
+            if dir_name == "temp" {
+                continue;
+            }
+
             let bundle_path = path.join("bundle.js");
             if bundle_path.exists() {
-                info!("Found installed language on disk: {}", dir_name);
+                if self.is_language_loaded(&dir_name).await {
+                    continue;
+                }
+                info!("Loading installed language from disk: {}", dir_name);
+                match self.load_language(bundle_path).await {
+                    Ok(_) => {
+                        info!("Successfully loaded language: {}", dir_name);
+                    }
+                    Err(e) => {
+                        warn!("Failed to load language {}: {}", dir_name, e);
+                    }
+                }
             }
         }
 
@@ -625,7 +616,7 @@ impl LanguageController {
 
     pub async fn install_language(language: Address) -> Result<(), AnyError> {
         log::debug!("install_language called for: {}", language);
-        let mut controller = Self::global_instance();
+        let controller = Self::global_instance();
 
         // Check if the language is already loaded in Rust runtimes
         if controller.is_language_loaded(&language).await {
@@ -707,7 +698,7 @@ impl LanguageController {
             None
         };
 
-        // If we have source, do the Rust-side install
+        // If we have source, save and load into a per-language runtime
         if let Some(source) = source {
             // Compute hash and verify
             let hash = controller.calculate_language_hash(&source);
@@ -720,40 +711,24 @@ impl LanguageController {
             }
 
             // Save language bundle to disk
-            let (_saved_hash, _saved_bundle_path) =
+            let (_saved_hash, saved_bundle_path) =
                 controller.save_language_bundle(&source, meta.as_ref())?;
             info!("install_language: saved language bundle for {}", language);
 
-            // Don't load into a per-language Deno runtime here.
-            // Creating additional V8 isolates at this point causes segfaults
-            // in the forked deno_core. Instead, fall through to the JS-side
-            // installLanguage which uses the main JsCore worker.
-            info!(
-                "install_language: bundle saved, delegating runtime loading to JS side for {}",
-                language
-            );
-        }
-
-        // Fall back to JS-side LanguageController for install
-        log::debug!("install_language: falling back to JS side for {}", language);
-        let script = format!(
-            r#"
-            (async () => {{
-                try {{
-                    await core.languageController.installLanguage("{}", null);
-                }} catch(e) {{
-                    console.error("JS-side installLanguage failed for {}: " + e);
-                }}
-            }})()
-            "#,
-            language, language
-        );
-        if let Err(e) = controller.js_core.execute(script).await {
-            log::warn!(
-                "Failed to trigger JS-side language install for {}: {}",
-                language,
-                e
-            );
+            // Load into a per-language Deno runtime
+            match controller.load_language(saved_bundle_path).await {
+                Ok(_) => {
+                    info!("install_language: loaded language runtime for {}", language);
+                }
+                Err(e) => {
+                    warn!(
+                        "install_language: failed to load language runtime for {}: {}",
+                        language, e
+                    );
+                }
+            }
+        } else {
+            warn!("install_language: no source available for {}", language);
         }
 
         Ok(())
@@ -771,95 +746,66 @@ impl LanguageController {
         neighbourhood: Neighbourhood,
         context: &crate::agent::AgentContext,
     ) -> Result<Address, AnyError> {
-        Self::global_instance()
-            .js_core
-            .execute("await core.waitForLanguages()".into())
-            .await?;
-
-        let neighbourhood_json = serde_json::to_string(&neighbourhood)?;
-
-        // Set user context for neighbourhood creation if it's a managed user
-        let script = if let Some(user_email) = &context.user_email {
-            format!(
-                r#"
-                (async () => {{
-                    const originalContext = core.agentService.getUserContext();
-                    core.agentService.setUserContext("{}");
-                    try {{
-                        return await core
-                                .languageController
-                                .getNeighbourhoodLanguage()
-                                .expressionAdapter
-                                .putAdapter
-                                .createPublic({});
-                    }} finally {{
-                        core.agentService.setUserContext(originalContext);
-                    }}
-                }})()
-                "#,
-                user_email, neighbourhood_json,
-            )
-        } else {
-            format!(
-                r#"
-                await core
-                        .languageController
-                        .getNeighbourhoodLanguage()
-                        .expressionAdapter
-                        .putAdapter
-                        .createPublic({})
-                "#,
-                neighbourhood_json,
-            )
+        let controller = Self::global_instance();
+        let neighbourhood_address = {
+            let sys = controller.system_addresses.lock().await;
+            sys.neighbourhood_language
+                .clone()
+                .ok_or_else(|| deno_core::anyhow::anyhow!("Neighbourhood language not loaded"))?
         };
 
-        let result: String = Self::global_instance().js_core.execute(script).await?;
+        let neighbourhood_json = serde_json::to_string(&neighbourhood)?;
+        let content: JsonValue = serde_json::from_str(&neighbourhood_json)?;
+
+        let result = controller
+            .expression_create(&neighbourhood_address, content, context)
+            .await
+            .map_err(|e| deno_core::anyhow::anyhow!("Failed to create neighbourhood: {}", e))?;
+
         Ok(result)
     }
 
     pub async fn get_neighbourhood(
         address: Address,
     ) -> Result<Option<DecoratedNeighbourhoodExpression>, AnyError> {
-        Self::global_instance()
-            .js_core
-            .execute("await core.waitForLanguages()".into())
-            .await?;
+        let controller = Self::global_instance();
+        let perspective_address = {
+            let sys = controller.system_addresses.lock().await;
+            sys.perspective_language
+                .clone()
+                .ok_or_else(|| deno_core::anyhow::anyhow!("Perspective language not loaded"))?
+        };
 
-        let script = format!(
-            r#"
-            JSON.stringify(
-                await core
-                    .languageController
-                    .getPerspective("{}")
-            )
-            "#,
-            address,
-        );
-        let result: String = Self::global_instance().js_core.execute(script).await?;
-        let neighbourhood: Option<DecoratedNeighbourhoodExpression> =
-            serde_json::from_str(&result)?;
-        Ok(neighbourhood)
+        match controller
+            .get_expression(&perspective_address, &address)
+            .await
+        {
+            Ok(Some(expr_json)) => {
+                let neighbourhood: Option<DecoratedNeighbourhoodExpression> =
+                    serde_json::from_value(expr_json)?;
+                Ok(neighbourhood)
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(deno_core::anyhow::anyhow!(
+                "Failed to get neighbourhood: {}",
+                e
+            )),
+        }
     }
 
     pub async fn language_by_address(address: Address) -> Result<Option<Language>, AnyError> {
         let controller = Self::global_instance();
 
-        // First check Rust-side runtimes (system languages loaded in per-language Deno runtimes)
+        // Check Rust-side runtimes
         if controller.is_language_loaded(&address).await {
-            let language = Language::new(address, controller.js_core.clone());
-            return Ok(Some(language));
+            return Ok(Some(Language::new(address)));
         }
 
-        // Fall back: check if the language bundle exists on disk.
-        // If it does, the language is either already loaded on the JS side
-        // (via applyTemplateAndPublish or loadInstalledLanguages) or will be loaded
-        // on-demand when accessed. The Language struct delegates all calls to the
-        // JS-side LanguageController which handles loading.
+        // Check if the language bundle exists on disk (installed but not loaded yet)
         let bundle_path = languages_directory().join(&address).join("bundle.js");
         if bundle_path.exists() {
             log::debug!("language_by_address: found bundle on disk for {}", address);
-            let language = Language::new(address, controller.js_core.clone());
-            return Ok(Some(language));
+            return Ok(Some(Language::new(address)));
         }
 
         Ok(None)
@@ -879,7 +825,7 @@ impl LanguageController {
         // Look up in runtimes
         let runtimes = self.runtimes.lock().await;
         if runtimes.contains_key(&resolved_address) {
-            return Ok(Language::new(resolved_address, self.js_core.clone()));
+            return Ok(Language::new(resolved_address));
         }
 
         Err(LanguageError::NotFound {
@@ -1326,51 +1272,26 @@ impl LanguageController {
             );
         }
 
-        // Delegate to JS side for full cleanup (teardown JS language, remove Holochain DNA, etc.)
-        // The JS languageRemove handles: teardown language instance, remove from maps,
-        // remove Holochain DNA, and remove language directory.
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "languageRemove",
-                {{ address: "{}" }},
-            ))"#,
-            address
-        );
-        match self.js_core.execute(script).await {
-            Ok(_) => {
-                info!("language_remove: JS-side removal succeeded for {}", address);
-            }
-            Err(e) => {
-                warn!(
-                    "language_remove: JS-side removal failed for {}: {}",
-                    address, e
-                );
-                // Still try Rust-side cleanup as fallback
-
-                // Remove Holochain DNA for this language
-                if let Some(holochain_service) = maybe_get_holochain_service().await {
-                    match holochain_service.remove_app(address.to_string()).await {
-                        Ok(()) => {
-                            info!("Removed Holochain app for language {}", address);
-                        }
-                        Err(e) => {
-                            warn!("No DNA found for language {}: {}", address, e);
-                        }
-                    }
+        // Remove Holochain DNA for this language
+        if let Some(holochain_service) = maybe_get_holochain_service().await {
+            match holochain_service.remove_app(address.to_string()).await {
+                Ok(()) => {
+                    info!("Removed Holochain app for language {}", address);
                 }
-
-                // Remove language files from disk
-                let language_path = languages_directory().join(address);
-                if let Err(e) = fs::remove_dir_all(&language_path) {
-                    warn!(
-                        "Failed to remove language directory {}: {}",
-                        language_path.display(),
-                        e
-                    );
+                Err(e) => {
+                    warn!("No DNA found for language {}: {}", address, e);
                 }
             }
+        }
+
+        // Remove language files from disk
+        let language_path = languages_directory().join(address);
+        if let Err(e) = fs::remove_dir_all(&language_path) {
+            warn!(
+                "Failed to remove language directory {}: {}",
+                language_path.display(),
+                e
+            );
         }
 
         Ok(())
@@ -1391,7 +1312,7 @@ impl LanguageController {
 
         // Check if already loaded
         if self.is_language_loaded(&resolved_address).await {
-            return Ok(Language::new(resolved_address, self.js_core.clone()));
+            return Ok(Language::new(resolved_address));
         }
 
         // Get the language language address
@@ -1503,7 +1424,7 @@ impl LanguageController {
                     message: format!("Failed to install language: {}", e),
                 })?;
 
-            Ok(Language::new(resolved_address, self.js_core.clone()))
+            Ok(Language::new(resolved_address))
         } else {
             // Untrusted author path: verify template params
             let template_applied_params = language_meta_data
@@ -1638,7 +1559,7 @@ impl LanguageController {
                     message: format!("Failed to install language: {}", e),
                 })?;
 
-            Ok(Language::new(resolved_address, self.js_core.clone()))
+            Ok(Language::new(resolved_address))
         }
     }
 
@@ -1802,7 +1723,7 @@ impl LanguageController {
             .ok_or_else(|| LanguageError::NotFound {
                 address: "agent_language".to_string(),
             })?;
-        Ok(Language::new(address, self.js_core.clone()))
+        Ok(Language::new(address))
     }
 
     /// Get the language language
@@ -1814,7 +1735,7 @@ impl LanguageController {
             .ok_or_else(|| LanguageError::NotFound {
                 address: "language_language".to_string(),
             })?;
-        Ok(Language::new(address, self.js_core.clone()))
+        Ok(Language::new(address))
     }
 
     /// Get the neighbourhood language
@@ -1826,7 +1747,7 @@ impl LanguageController {
                 .ok_or_else(|| LanguageError::NotFound {
                     address: "neighbourhood_language".to_string(),
                 })?;
-        Ok(Language::new(address, self.js_core.clone()))
+        Ok(Language::new(address))
     }
 
     /// Get the perspective language
@@ -1838,7 +1759,7 @@ impl LanguageController {
             .ok_or_else(|| LanguageError::NotFound {
                 address: "perspective_language".to_string(),
             })?;
-        Ok(Language::new(address, self.js_core.clone()))
+        Ok(Language::new(address))
     }
 
     /// Get settings for a language (public accessor)

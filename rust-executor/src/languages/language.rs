@@ -2,7 +2,6 @@ use super::byte_array::ByteArray;
 use super::LanguageController;
 use crate::{
     graphql::graphql_types::{OnlineAgent, PerspectiveExpression},
-    js_core::JsCoreHandle,
     types::{Perspective, PerspectiveDiff},
 };
 use base64::prelude::*;
@@ -11,9 +10,6 @@ use deno_core::error::AnyError;
 #[derive(Clone)]
 pub struct Language {
     address: String,
-    // Legacy field for backward compatibility - not used anymore
-    #[allow(dead_code)]
-    js_core: JsCoreHandle,
 }
 
 fn parse_revision(js_result: String) -> Result<Option<String>, AnyError> {
@@ -27,8 +23,12 @@ fn parse_revision(js_result: String) -> Result<Option<String>, AnyError> {
     }
 }
 impl Language {
-    pub fn new(address: String, js_core: JsCoreHandle) -> Self {
-        Self { address, js_core }
+    pub fn new(address: String) -> Self {
+        Self { address }
+    }
+
+    pub fn address(&self) -> &str {
+        &self.address
     }
 
     pub async fn sync(&mut self) -> Result<(), AnyError> {
