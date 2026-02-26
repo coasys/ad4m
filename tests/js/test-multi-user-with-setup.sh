@@ -9,17 +9,23 @@ echo "============================="
 # running on the same machine. Each test suite uses a unique port range.
 cleanup_processes() {
     echo "🧹 Killing any existing AD4M processes on our ports..."
-    # Kill only processes on the ports used by this test suite
-    # setup (publishTestLangs): 15700-15702
-    lsof -ti:15700 | xargs -r kill -9 2>/dev/null || true
-    lsof -ti:15701 | xargs -r kill -9 2>/dev/null || true
-    lsof -ti:15702 | xargs -r kill -9 2>/dev/null || true
+    # Kill only processes on the ports used by THIS test suite.
+    # setup (publishTestLangs): 15703-15705  ← unique to this job
+    lsof -ti:15703 | xargs -r kill -9 2>/dev/null || true
+    lsof -ti:15704 | xargs -r kill -9 2>/dev/null || true
+    lsof -ti:15705 | xargs -r kill -9 2>/dev/null || true
     # multi-user-simple.test.ts: 15900-15902
     lsof -ti:15900 | xargs -r kill -9 2>/dev/null || true
     lsof -ti:15901 | xargs -r kill -9 2>/dev/null || true
     lsof -ti:15902 | xargs -r kill -9 2>/dev/null || true
     sleep 1
 }
+
+# Unique setup port range for this CI job so it doesn't conflict with
+# integration-tests-js (15700-15702) or integration-tests-email-verification (15706-15708).
+export AD4M_SETUP_GQL_PORT=15703
+export AD4M_SETUP_HC_ADMIN_PORT=15704
+export AD4M_SETUP_HC_APP_PORT=15705
 
 # Function to clean up test directories
 cleanup_directories() {
