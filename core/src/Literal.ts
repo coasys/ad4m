@@ -82,7 +82,12 @@ export class Literal {
     }
 
     if (body.startsWith("boolean:")) {
-      return body.substring(8) === "true";
+      const boolStr = body.substring(8).trim();
+      if (boolStr === "true") return true;
+      if (boolStr === "false") return false;
+      throw new Error(
+        `Literal.get(): malformed boolean payload "${boolStr}" — expected "true" or "false"`,
+      );
     }
 
     if (body.startsWith("json:")) {
