@@ -91,27 +91,29 @@ export async function startAgent(
   await client.runtime.setMultiUserEnabled(true);
 
   async function stop(): Promise<void> {
-    if (!executorProcess) return;
     _activeExecutors.delete(executorProcess);
     await new Promise<void>((resolve) => {
       // Already exited?
-      if (executorProcess!.exitCode !== null) {
+      if (executorProcess.exitCode !== null) {
         resolve();
         return;
       }
       // Resolve when the process actually exits (not just when the signal is sent).
       // This prevents the next test from starting while SurrealDB/HC ports are still held.
-      executorProcess!.once("exit", () => resolve());
-      if (!executorProcess!.killed) {
-        executorProcess!.kill("SIGTERM");
-      }
-      // Force-kill after 15 s if SIGTERM is ignored
-      setTimeout(() => {
+      const fallbackTimer = setTimeout(() => {
         try {
-          executorProcess!.kill("SIGKILL");
+          executorProcess.kill("SIGKILL");
         } catch {}
         resolve();
       }, 15_000);
+      fallbackTimer.unref();
+      executorProcess.once("exit", () => {
+        clearTimeout(fallbackTimer);
+        resolve();
+      });
+      if (!executorProcess.killed) {
+        executorProcess.kill("SIGTERM");
+      }
     });
   }
 
