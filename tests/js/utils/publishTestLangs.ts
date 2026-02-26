@@ -18,9 +18,12 @@ const publishLanguagesPath = path.resolve(TEST_DIR, "languages");
 const publishingBootstrapSeedPath = path.resolve(__dirname, '..', 'publishBootstrapSeed.json');
 const bootstrapSeedPath = path.resolve(__dirname, '..', 'bootstrapSeed.json');
 const perspectiveDiffSyncHashPath = path.resolve(__dirname, '..', 'scripts', 'perspective-diff-sync-hash');
-const gqlPort = 15700;
-const hcAdminPort = 15701;
-const hcAppPort = 15702;
+// Allow env-var override so concurrent CI jobs can each use a unique port range
+// and avoid stomping on each other during the setup phase.
+// Defaults: 15700/15701/15702 (used by integration-tests-js / test-main)
+const gqlPort = parseInt(process.env.AD4M_SETUP_GQL_PORT || '15700', 10);
+const hcAdminPort = parseInt(process.env.AD4M_SETUP_HC_ADMIN_PORT || '15701', 10);
+const hcAppPort = parseInt(process.env.AD4M_SETUP_HC_APP_PORT || '15702', 10);
 
 //Update this as new languages are needed within testing code
 const languagesToPublish = {
