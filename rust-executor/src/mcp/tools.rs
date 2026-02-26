@@ -2927,8 +2927,8 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
         let value = match Self::require_arg(args, "value") {
-            Some(v) => v.to_string(),
-            None => return "Missing required parameter: value".to_string(),
+            Ok(v) => v.to_string(),
+            Err(e) => return e,
         };
 
         let mut perspective = match self.get_writable_perspective(perspective_id).await {
