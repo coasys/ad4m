@@ -143,7 +143,7 @@ Net: –876 lines, +769 lines across 4 files (the `PerspectiveClient` additions 
 - **Used `SHACLShape.toJSON()`** in `ensureSDNASubjectClass` instead of manual JSON; `getSubjectClassMetadataFromSDNA` now uses `getShacl()`/`SHACLShape.fromLinks()`
 - **Batched SHACL/Flow link writes** — `addShacl()`/`addFlow()` use `addLinks()` batch API; `getShacl()`/`getFlow()` use a single `querySurrealDB()` call instead of individual `get()` calls
 - **Converted `ends_with` filters** to SurrealDB `string::ends_with` queries (5 functions in `perspective_instance.rs` that previously fetched all and filtered in memory)
-- Fixed SurrealQL function name: `string::starts_with` not `starts::with`; replaced `SQL LIKE` with `string::starts::with` in `getFlow()`
+- Fixed SurrealQL function name: `string::starts_with` not `starts::with`; replaced `SQL LIKE` with `string::starts_with` in `getFlow()`
 - Fixed `sdnaCode` nullable in GraphQL schema — was `String!`, must be `String` since Prolog is now optional
 - **Executor commit ordering fix** — `update_prolog_engines()` (which spawns the pubsub `link-added` task) previously ran _before_ `persist_link_diff()` (the SurrealDB write); any subscriber calling `findAll()` immediately on `link-added` would read stale data; order swapped so SurrealDB is committed before pubsub fires
 
