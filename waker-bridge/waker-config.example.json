@@ -1,0 +1,15 @@
+{
+  "executorUrl": "ws://localhost:12100/graphql",
+  "token": "your-ad4m-admin-credential",
+  "wakeUrl": "http://localhost:18789/hooks/wake",
+  "wakeToken": "your-openclaw-wake-token",
+  "debounceMs": 2000,
+  "subscriptions": [
+    {
+      "id": "flux-messages",
+      "perspective": "your-perspective-uuid",
+      "matchPredicate": "ad4m://has_child",
+      "matchSource": "literal://string:your-channel-id"
+    }
+  ]
+}
