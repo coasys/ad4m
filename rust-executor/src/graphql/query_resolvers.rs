@@ -506,6 +506,7 @@ impl Query {
         ))
     }
 
+    /// Get all subject class names from SHACL links (Prolog-free implementation)
     async fn perspective_query_surreal_db(
         &self,
         context: &RequestContext,
