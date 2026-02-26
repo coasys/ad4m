@@ -13,6 +13,7 @@ import { NeighbourhoodProxy } from "./NeighbourhoodProxy";
 export class NeighbourhoodClient {
   #apolloClient: ApolloClient<any>;
   #signalHandlers: Map<string, TelepresenceSignalCallback[]> = new Map();
+  #signalSubscriptions: Map<string, { unsubscribe(): void }> = new Map();
 
   constructor(client: ApolloClient<any>) {
     this.#apolloClient = client;
@@ -326,7 +327,7 @@ export class NeighbourhoodClient {
 
   async subscribeToSignals(perspectiveUUID: string): Promise<void> {
     const that = this;
-    await this.#apolloClient
+    const sub = this.#apolloClient
       .subscribe({
         query: gql`
           subscription neighbourhoodSignal($perspectiveUUID: String!) {
@@ -369,6 +370,7 @@ export class NeighbourhoodClient {
         error: (e) =>
           console.error("neighbourhoodSignal subscription error:", e),
       });
+    this.#signalSubscriptions.set(perspectiveUUID, sub);
   }
 
   async addSignalHandler(
@@ -393,6 +395,11 @@ export class NeighbourhoodClient {
       const index = handlersForPerspective.indexOf(handler);
       if (index > -1) {
         handlersForPerspective.splice(index, 1);
+      }
+      if (handlersForPerspective.length === 0) {
+        this.#signalSubscriptions.get(perspectiveUUID)?.unsubscribe();
+        this.#signalSubscriptions.delete(perspectiveUUID);
+        this.#signalHandlers.delete(perspectiveUUID);
       }
     }
   }
