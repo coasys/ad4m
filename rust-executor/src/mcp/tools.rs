@@ -365,17 +365,6 @@ pub struct SubscribeToModelParams {
     /// Parent expression address to scope the subscription (e.g., a channel address).
     /// If provided, only watches for new instances that are children of this parent.
     pub parent_address: Option<String>,
-    /// Optional: webhook URL to call when changes detected
-    pub webhook_url: Option<String>,
-}
-
-/// Parameters for unsubscribing from model changes
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct UnsubscribeModelParams {
-    /// Perspective UUID
-    pub perspective_id: String,
-    /// Subscription ID to dispose
-    pub subscription_id: String,
 }
 
 // ============================================================================
@@ -2319,7 +2308,7 @@ impl Ad4mMcpHandler {
 
     /// Subscribe to model changes in a perspective
     #[tool(
-        description = "Subscribe to changes for a subject class in a perspective. For example, watch for new Messages in a channel, or new Channels in a community. Returns a subscription ID and the current results. The subscription triggers a notification via the perspectiveQuerySubscription GraphQL subscription whenever results change. Use with a waker/webhook to get notified of new data without polling."
+        description = "Create a watch configuration for a subject class in a perspective. Returns a subscription_id and waker_config with link matching criteria. The agent should: 1) Store the subscription_id with its semantic context in memory, 2) Pass the waker_config to the waker process, 3) The waker uses perspectiveLinkAdded to detect matching links and wakes the agent with the subscription_id, 4) On wake, the agent checks memory for context and uses MCP tools to fetch the latest data."
     )]
     async fn subscribe_to_model(&self, params: Parameters<SubscribeToModelParams>) -> String {
         let _capabilities = match self.get_capabilities().await {
@@ -2328,23 +2317,24 @@ impl Ad4mMcpHandler {
         };
 
         let p = &params.0;
-        let perspective = match get_perspective(&p.perspective_id) {
-            Some(p) => p,
-            None => return json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string(),
-        };
 
-        // Build SurrealDB query based on class and constraints
-        // Strategy: query for has_child links from parent (if provided),
-        // or for entry_type links matching the class pattern
-        let surreal_query = if let Some(ref parent) = p.parent_address {
-            // Watch for new children of a specific parent
-            format!(
-                r#"SELECT * FROM link WHERE predicate = "ad4m://has_child" AND source = "literal://string:{}" ORDER BY timestamp DESC LIMIT 50"#,
-                parent
+        // Verify the perspective exists
+        if get_perspective(&p.perspective_id).is_none() {
+            return json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string();
+        }
+
+        // Build the matching criteria for the waker's perspectiveLinkAdded subscription.
+        // The waker subscribes to linkAdded events and filters by these predicates/sources.
+        // When a match is detected, the waker wakes the agent with the subscription ID.
+        let (match_predicate, match_source, match_target) = if let Some(ref parent) = p.parent_address {
+            // Watch for new children of a specific parent (e.g., messages in a channel)
+            (
+                "ad4m://has_child".to_string(),
+                Some(format!("literal://string:{}", parent)),
+                None,
             )
         } else {
             // Watch for all instances of a class by entry type
-            // Map common Flux class names to their entry_type predicates
             let entry_type = match p.class_name.as_str() {
                 "Message" => "flux://has_message",
                 "Channel" => "flux://has_channel",
@@ -2352,77 +2342,41 @@ impl Ad4mMcpHandler {
                 "Conversation" => "flux://conversation",
                 "Topic" => "flux://has_topic",
                 _ => {
-                    // For unknown classes, try to find the SDNA entry_type pattern
-                    // by querying the class's constructor
                     return json!({
                         "error": format!(
-                            "Unknown class '{}'. For custom classes, provide a parent_address to watch for new children, or use the known classes: Message, Channel, Community, Conversation, Topic.",
+                            "Unknown class '{}'. Known classes: Message, Channel, Community, Conversation, Topic. For custom classes, provide a parent_address.",
                             p.class_name
                         )
                     }).to_string();
                 }
             };
-            format!(
-                r#"SELECT * FROM link WHERE predicate = "flux://entry_type" AND target = "{}" ORDER BY timestamp DESC LIMIT 50"#,
-                entry_type
+            (
+                "flux://entry_type".to_string(),
+                None,
+                Some(entry_type.to_string()),
             )
         };
 
-        // Create the subscription via the perspective's surreal query subscription
-        let agent_context = self.get_agent_context_for_read().await;
-        match perspective
-            .subscribe_and_query_surreal(surreal_query.clone(), agent_context.user_email)
-            .await
-        {
-            Ok((subscription_id, result_string)) => {
-                // Parse result to get count
-                let count = match serde_json::from_str::<Vec<serde_json::Value>>(&result_string) {
-                    Ok(v) => v.len(),
-                    Err(_) => 0,
-                };
+        // Generate a subscription ID
+        let subscription_id = uuid::Uuid::new_v4().to_string();
 
-                json!({
-                    "success": true,
-                    "subscription_id": subscription_id,
-                    "surreal_query": surreal_query,
-                    "current_count": count,
-                    "message": format!(
-                        "Subscribed to {} changes{}. Use the subscription_id with the perspectiveQuerySubscription GraphQL subscription to receive real-time updates, or configure a waker to poll for changes.",
-                        p.class_name,
-                        p.parent_address.as_ref().map(|a| format!(" under parent {}", a)).unwrap_or_default()
-                    ),
-                }).to_string()
-            }
-            Err(e) => json!({"error": format!("Failed to create subscription: {}", e)}).to_string(),
-        }
-    }
-
-    /// Unsubscribe from model changes
-    #[tool(
-        description = "Dispose a model subscription created by subscribe_to_model. Stops the SurrealDB query subscription and frees resources."
-    )]
-    async fn unsubscribe_model(&self, params: Parameters<UnsubscribeModelParams>) -> String {
-        let _capabilities = match self.get_capabilities().await {
-            Ok(c) => c,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
-        let p = &params.0;
-        let perspective = match get_perspective(&p.perspective_id) {
-            Some(p) => p,
-            None => return json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string(),
-        };
-
-        match perspective
-            .dispose_surreal_query_subscription(p.subscription_id.clone())
-            .await
-        {
-            Ok(_) => json!({
-                "success": true,
-                "message": format!("Subscription {} disposed.", p.subscription_id)
-            }).to_string(),
-            Err(e) => json!({"error": format!("Failed to dispose subscription: {}", e)}).to_string(),
-        }
+        json!({
+            "subscription_id": subscription_id,
+            "perspective_id": p.perspective_id,
+            "class_name": p.class_name,
+            "parent_address": p.parent_address,
+            "waker_config": {
+                "match_predicate": match_predicate,
+                "match_source": match_source,
+                "match_target": match_target,
+            },
+            "message": format!(
+                "Subscription {} created for {} changes{}. Pass the waker_config to the waker process along with the subscription_id. The waker will use perspectiveLinkAdded to detect changes and wake you with the subscription_id. Store this subscription_id and its context in your memory so you know what to do when woken.",
+                subscription_id,
+                p.class_name,
+                p.parent_address.as_ref().map(|a| format!(" under parent {}", a)).unwrap_or_default()
+            ),
+        }).to_string()
     }
 }
 
