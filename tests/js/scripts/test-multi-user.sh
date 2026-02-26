@@ -13,6 +13,9 @@ SUITES=(
   test-multi-user-notifications
 )
 
+# Guarantee cleanup runs even if a suite fails or the script is interrupted.
+trap 'node scripts/cleanup.js' EXIT
+
 for suite in "${SUITES[@]}"; do
   echo ""
   echo "▶ Running $suite..."
