@@ -170,10 +170,7 @@ pub async fn signup_user(
 }
 
 /// Full login verification flow: check multi-user, create code, send email.
-pub async fn request_login_code(
-    email: &str,
-    app_name: Option<&str>,
-) -> Result<(), String> {
+pub async fn request_login_code(email: &str, app_name: Option<&str>) -> Result<(), String> {
     if !is_multi_user_enabled() {
         return Err("Multi-user mode is not enabled".to_string());
     }

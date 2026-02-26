@@ -557,7 +557,9 @@ impl Ad4mMcpHandler {
     // ========================================================================
 
     /// List all perspectives available to the current user
-    #[tool(description = "List all AD4M perspectives. A perspective is a subjective graph database — a personal collection of links (RDF-like triples: source → predicate → target) that can be queried, modified, and optionally shared as a 'neighbourhood' for real-time P2P collaboration. Each has a UUID and a human-readable name.")]
+    #[tool(
+        description = "List all AD4M perspectives. A perspective is a subjective graph database — a personal collection of links (RDF-like triples: source → predicate → target) that can be queried, modified, and optionally shared as a 'neighbourhood' for real-time P2P collaboration. Each has a UUID and a human-readable name."
+    )]
     async fn list_perspectives(&self, _params: Parameters<ListPerspectivesParams>) -> String {
         let _agent_context = match self.get_agent_context().await {
             Ok(ctx) => ctx,
@@ -956,7 +958,9 @@ impl Ad4mMcpHandler {
     // ========================================================================
 
     /// Add a link to a perspective
-    #[tool(description = "Add a link (RDF-like triple) to a perspective. Links are the fundamental data unit — all data (properties, type markers, collections) is stored as links. Example: source='did:key:abc' predicate='ad4m://name' target='literal://string:Alice'. In shared neighbourhoods, links sync to all members.")]
+    #[tool(
+        description = "Add a link (RDF-like triple) to a perspective. Links are the fundamental data unit — all data (properties, type markers, collections) is stored as links. Example: source='did:key:abc' predicate='ad4m://name' target='literal://string:Alice'. In shared neighbourhoods, links sync to all members."
+    )]
     async fn add_link(&self, params: Parameters<AddLinkParams>) -> String {
         let p = &params.0;
 
@@ -1294,7 +1298,9 @@ impl Ad4mMcpHandler {
     }
 
     /// Create a new perspective
-    #[tool(description = "Create a new perspective (local knowledge graph). Returns the UUID. You can then add links, register models (subject classes), and create typed instances within it. To share it for collaboration, convert it to a neighbourhood.")]
+    #[tool(
+        description = "Create a new perspective (local knowledge graph). Returns the UUID. You can then add links, register models (subject classes), and create typed instances within it. To share it for collaboration, convert it to a neighbourhood."
+    )]
     async fn add_perspective(&self, params: Parameters<AddPerspectiveParams>) -> String {
         let p = &params.0;
 
@@ -1918,7 +1924,8 @@ impl Ad4mMcpHandler {
             Ok(()) => json!({
                 "success": true,
                 "message": "Verification code sent. Use verify_email_code to complete login."
-            }).to_string(),
+            })
+            .to_string(),
             Err(e) => json!({"success": false, "error": e}).to_string(),
         }
     }
@@ -2357,10 +2364,16 @@ impl Ad4mMcpHandler {
         let initial_values: Option<serde_json::Value> = {
             let props: serde_json::Map<String, serde_json::Value> = args
                 .iter()
-                .filter(|(k, _)| k.as_str() != "perspective_id" && k.as_str() != "expression_address")
+                .filter(|(k, _)| {
+                    k.as_str() != "perspective_id" && k.as_str() != "expression_address"
+                })
                 .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), json!(s))))
                 .collect();
-            if props.is_empty() { None } else { Some(serde_json::Value::Object(props)) }
+            if props.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(props))
+            }
         };
 
         let subject_class: SubjectClassOption = match serde_json::from_value(json!({
