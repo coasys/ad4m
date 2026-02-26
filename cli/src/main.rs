@@ -156,7 +156,9 @@ enum Domain {
         #[arg(short, long, action)]
         connect_holochain: Option<bool>,
         #[arg(long, action)]
-        admin_credential: Option<String>
+        admin_credential: Option<String>,
+        #[arg(long, action)]
+        enable_multi_user: bool
     },
     RunLocalHcServices {},
     Eve {
@@ -233,7 +235,8 @@ async fn main() -> Result<()> {
         hc_proxy_url,
         hc_bootstrap_url,
         connect_holochain,
-        admin_credential
+        admin_credential,
+        enable_multi_user
     } = args.domain
     {
         let _ = tokio::spawn(async move {
@@ -252,8 +255,13 @@ async fn main() -> Result<()> {
                 hc_proxy_url,
                 hc_bootstrap_url,
                 connect_holochain,
-                admin_credential
-            }).await;
+                admin_credential,
+                enable_multi_user,
+                localhost: None,
+                auto_permit_cap_requests: None,
+                tls: None,
+                log_holochain_metrics: None,
+            }).await
         }).await;
         
         let _ = ctrlc::set_handler(move || {
@@ -320,7 +328,8 @@ async fn main() -> Result<()> {
             hc_proxy_url: _,
             hc_bootstrap_url: _,
             connect_holochain: _,
-            admin_credential: _
+            admin_credential: _,
+            enable_multi_user: _
         } => unreachable!(),
         Domain::RunLocalHcServices {} => unreachable!(),
         Domain::Eve { command: _ } => unreachable!(),

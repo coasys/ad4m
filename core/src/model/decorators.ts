@@ -1,6 +1,7 @@
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { Subject } from "./Subject";
 import { capitalize, propertyNameToSetterName, singularToPlural, stringifyObjectLiteral } from "./util";
+import { SHACLShape, SHACLPropertyShape } from "../shacl/SHACLShape";
 
 export class PerspectiveAction {
     action: string
@@ -29,9 +30,9 @@ export interface InstanceQueryParams {
 where?: object;
 
 /**
- * A string representing the condition clause of the query.
+ * A string representing the Prolog condition clause of the query.
  */
-condition?: string;
+prologCondition?: string;
 }
 
 /**
@@ -65,14 +66,14 @@ condition?: string;
  *   static async findByName(perspective: PerspectiveProxy): Promise<Recipe[]> { return [] }
  * 
  *   // Get highly rated recipes using a custom condition
- *   @InstanceQuery({ condition: "triple(Instance, 'recipe://rating', Rating), Rating > 4" })
+ *   @InstanceQuery({ prologCondition: "triple(Instance, 'recipe://rating', Rating), Rating > 4" })
  *   static async topRated(perspective: PerspectiveProxy): Promise<Recipe[]> { return [] }
  * }
  * ```
  * 
  * @param {Object} [options] - Query options
  * @param {object} [options.where] - Object with property-value pairs to match
- * @param {string} [options.condition] - Custom Prolog condition for more complex queries
+ * @param {string} [options.prologCondition] - Custom Prolog condition for more complex queries
  */
 export function InstanceQuery(options?: InstanceQueryParams) {
     return function <T>(target: T, key: keyof T, descriptor: PropertyDescriptor) {
@@ -93,25 +94,52 @@ export function InstanceQuery(options?: InstanceQueryParams) {
                 }
             }
 
-            if(options && options.condition) {
-                query += ', ' + options.condition
+            if(options && options.prologCondition) {
+                query += ', ' + options.prologCondition
             }
 
-            let results = await perspective.infer(query)
-            if(results == false) {
-                return instances
-            }
-            if(typeof results == "string") {
-                throw results
-            }
-            for(let result of results) {
-                let instance = result.Instance
-                let subject = new Subject(perspective, instance, subjectClassName)
-                await subject.init()
-                instances.push(subject as T)
+            // Try Prolog first
+            try {
+                let results = await perspective.infer(query)
+                if(results && results !== false && typeof results !== "string" && results.length > 0) {
+                    for(let result of results) {
+                        let instance = result.Instance
+                        let subject = new Subject(perspective, instance, subjectClassName)
+                        await subject.init()
+                        instances.push(subject as T)
+                    }
+                    return instances
+                }
+            } catch (e) {
+                // Prolog failed, fall through to SurrealDB
             }
 
-            return instances
+            // Fallback to SurrealDB (SdnaOnly mode)
+            // Get all instances first - pass the class constructor, not just the name
+            let allInstances = await perspective.getAllSubjectInstances(target)
+
+            // Filter by where clause if provided
+            if(options && options.where) {
+                let filtered = []
+                for(let instance of allInstances) {
+                    let matches = true
+                    for(let prop in options.where) {
+                        let expectedValue = options.where[prop]
+                        //@ts-ignore
+                        let actualValue = await instance[prop]
+                        if(actualValue !== expectedValue) {
+                            matches = false
+                            break
+                        }
+                    }
+                    if(matches) {
+                        filtered.push(instance as T)
+                    }
+                }
+                return filtered
+            }
+
+            return allInstances as T[]
         }
     };
 }
@@ -144,14 +172,21 @@ export interface PropertyOptions {
     resolveLanguage?: string;
 
     /**
-     * Custom getter to get the value of the property in the prolog engine. If not provided, the default getter will be used.
+     * Custom Prolog getter to get the value of the property. If not provided, the default getter will be used.
      */
-    getter?: string;
+    prologGetter?: string;
 
     /**
-     * Custom setter to set the value of the property in the prolog engine. Only available if the property is writable.
+     * Custom Prolog setter to set the value of the property. Only available if the property is writable.
      */
-    setter?: string;
+    prologSetter?: string;
+
+    /**
+     * Custom SurrealQL getter to resolve the property value. Use this for custom graph traversals.
+     * The expression can reference 'Base' which will be replaced with the instance's base expression.
+     * Example: "(<-link[WHERE predicate = 'flux://has_reply'].in.uri)[0]"
+     */
+    getter?: string;
 
     /**
      * Indicates whether the property is stored locally in the perspective and not in the network. Useful for properties that are not meant to be shared with the network.
@@ -242,8 +277,8 @@ export interface PropertyOptions {
  * @param {boolean} [opts.required] - Whether the property must have a value
  * @param {boolean} [opts.writable=true] - Whether the property can be modified
  * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
- * @param {string} [opts.getter] - Custom Prolog code for getting the property value
- * @param {string} [opts.setter] - Custom Prolog code for setting the property value
+ * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
+ * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function Optional(opts: PropertyOptions) {
@@ -256,8 +291,8 @@ export function Optional(opts: PropertyOptions) {
             throw new Error("SubjectProperty requires an 'initial' option if 'required' is true");
         }
 
-        if (!opts.through && !opts.getter) {
-            throw new Error("SubjectProperty requires either 'through' or 'getter' option")
+        if (!opts.through && !opts.prologGetter) {
+            throw new Error("SubjectProperty requires either 'through' or 'prologGetter' option")
         }
 
         target["__properties"] = target["__properties"] || {};
@@ -371,6 +406,7 @@ export function Flag(opts: FlagOptions) {
 
 interface WhereOptions {
     isInstance?: any
+    prologCondition?: string
     condition?: string
 }
 
@@ -384,6 +420,13 @@ export interface CollectionOptions {
      * An object representing the WHERE clause of the query.
      */
     where?: WhereOptions;
+
+    /**
+     * Custom SurrealQL getter to resolve the collection values. Use this for custom graph traversals.
+     * The expression can reference 'Base' which will be replaced with the instance's base expression.
+     * Example: "(<-link[WHERE predicate = 'flux://has_reply'].in.uri)"
+     */
+    getter?: string;
 
     /**
      * Indicates whether the property is stored locally in the perspective and not in the network. Useful for properties that are not meant to be shared with the network.
@@ -427,12 +470,19 @@ export interface CollectionOptions {
  *   })
  *   comments: string[] = [];
  * 
- *   // Collection with custom filter condition
+ *   // Collection with custom Prolog filter condition
  *   @Collection({
  *     through: "recipe://step",
- *     where: { condition: `triple(Target, "step://order", Order), Order < 3` }
+ *     where: { prologCondition: `triple(Target, "step://order", Order), Order < 3` }
  *   })
  *   firstSteps: string[] = [];
+ * 
+ *   // Collection with custom SurrealDB filter condition
+ *   @Collection({
+ *     through: "recipe://entries",
+ *     where: { condition: `WHERE in.uri = Target AND predicate = 'recipe://has_ingredient' AND out.uri = 'recipe://test')`
+ *   })
+ *   ingredients: string[] = [];
  * 
  *   // Local-only collection not shared with network
  *   @Collection({
@@ -453,7 +503,7 @@ export interface CollectionOptions {
  * @param {string} opts.through - The predicate URI for collection links
  * @param {WhereOptions} [opts.where] - Filter conditions for collection values
  * @param {any} [opts.where.isInstance] - Model class to filter instances by
- * @param {string} [opts.where.condition] - Custom Prolog condition for filtering
+ * @param {string} [opts.where.prologCondition] - Custom Prolog condition for filtering
  * @param {boolean} [opts.local] - Whether collection links are stored locally only
  */
 export function Collection(opts: CollectionOptions) {
@@ -573,15 +623,15 @@ export function ModelOptions(opts: ModelOptionsOptions) {
             for(let property in properties) {
                 let propertyCode = `property(${uuid}, "${property}").\n`
 
-                let { through, initial, required, resolveLanguage, writable, flag, getter, setter, local } = properties[property]
+                let { through, initial, required, resolveLanguage, writable, flag, prologGetter, prologSetter, local } = properties[property]
 
                 if(resolveLanguage) {
                     propertyCode += `property_resolve(${uuid}, "${property}").\n`
                     propertyCode += `property_resolve_language(${uuid}, "${property}", "${resolveLanguage}").\n`
                 }
 
-                if(getter) {
-                    propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- ${getter}.\n`
+                if(prologGetter) {
+                    propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- ${prologGetter}.\n`
                 } else if(through) {
                     propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- triple(Base, "${through}", Value).\n`
 
@@ -594,8 +644,8 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                     }
                 }
 
-                if(setter) {
-                    propertyCode += `property_setter(${uuid}, "${property}", Actions) :- ${setter}.\n`
+                if(prologSetter) {
+                    propertyCode += `property_setter(${uuid}, "${property}", Actions) :- ${prologSetter}.\n`
                 } else if (writable && through) {
                     let setter = obj[propertyNameToSetterName(property)]
                     if(typeof setter === "function") {
@@ -638,8 +688,8 @@ export function ModelOptions(opts: ModelOptionsOptions) {
 
                 if(through) {
                     if(where) {
-                        if(!where.isInstance && !where.condition) {
-                            throw "'where' needs one of 'isInstance' or 'condition'"
+                        if(!where.isInstance && !where.prologCondition && !where.condition) {
+                            throw "'where' needs one of 'isInstance', 'prologCondition', or 'condition'"
                         }
 
                         let conditions = []
@@ -654,13 +704,19 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                             conditions.push(`instance(OtherClass, Target), subject_class("${otherClass}", OtherClass)`)
                         }
 
-                        if(where.condition) {
-                            conditions.push(where.condition)
+                        if(where.prologCondition) {
+                            conditions.push(where.prologCondition)
                         }
 
-                        const conditionString = conditions.join(", ")
-
-                        collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- setof(Target, (triple(Base, "${through}", Target), ${conditionString}), List).\n`
+                        // If there are Prolog conditions (isInstance or prologCondition), use setof with conditions
+                        // If only condition is present, use simple findall (SurrealDB will filter later)
+                        if(conditions.length > 0) {
+                            const conditionString = conditions.join(", ")
+                            collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- setof(Target, (triple(Base, "${through}", Target), ${conditionString}), List).\n`
+                        } else {
+                            // Only SurrealDB condition present (no Prolog filtering)
+                            collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
+                        }
                     } else {
                         collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
                     }
@@ -687,9 +743,9 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                         target: "value",
                         ...(local && { local: true })
                     }]
-                    collectionCode += `collection_adder(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(collectionAdderAction)}').\n`
-                    collectionCode += `collection_remover(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(collectionRemoverAction)}').\n`
-                    collectionCode += `collection_setter(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(collectionSetterAction)}').\n`
+                    collectionCode += `collection_adder(${uuid}, "${collection}", '${stringifyObjectLiteral(collectionAdderAction)}').\n`
+                    collectionCode += `collection_remover(${uuid}, "${collection}", '${stringifyObjectLiteral(collectionRemoverAction)}').\n`
+                    collectionCode += `collection_setter(${uuid}, "${collection}", '${stringifyObjectLiteral(collectionSetterAction)}').\n`
                 }
 
                 collectionsCode.push(collectionCode)
@@ -712,6 +768,221 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                 sdna,
                 name: subjectName
             }
+        }
+
+        // Generate SHACL shape (W3C standard + AD4M action definitions)
+        target.generateSHACL = function() {
+            const subjectName = opts.name;
+            const obj = target.prototype;
+
+            // Determine namespace from first property or collection, or use default
+            let namespace = "ad4m://";
+            const properties = obj.__properties || {};
+            const collections = obj.__collections || {};
+            
+            // Try properties first
+            if (Object.keys(properties).length > 0) {
+                const firstProp = properties[Object.keys(properties)[0]];
+                if (firstProp.through) {
+                    // Extract namespace from through predicate (e.g., "recipe://name" -> "recipe://")
+                    const match = firstProp.through.match(/^([^:]+:\/\/)/);
+                    if (match) {
+                        namespace = match[1];
+                    }
+                }
+            } 
+            // Fall back to collections if no properties
+            else if (Object.keys(collections).length > 0) {
+                const firstColl = collections[Object.keys(collections)[0]];
+                if (firstColl.through) {
+                    const match = firstColl.through.match(/^([^:]+:\/\/)/);
+                    if (match) {
+                        namespace = match[1];
+                    }
+                }
+            }
+
+            // Create SHACL shape
+            const shapeUri = `${namespace}${subjectName}Shape`;
+            const targetClass = `${namespace}${subjectName}`;
+            const shape = new SHACLShape(shapeUri, targetClass);
+
+            // === Extract Constructor Actions (same logic as generateSDNA) ===
+            let constructorActions = [];
+            if(obj.subjectConstructor && obj.subjectConstructor.length) {
+                constructorActions = constructorActions.concat(obj.subjectConstructor);
+            }
+
+            // === Extract Destructor Actions ===
+            let destructorActions = [];
+            
+            // Convert properties to SHACL property shapes
+            for (const propName in properties) {
+                const propMeta = properties[propName];
+
+                if (!propMeta.through) continue; // Skip properties without predicates
+
+                const propShape: SHACLPropertyShape = {
+                    name: propName, // Property name for generating named URIs
+                    path: propMeta.through,
+                };
+
+                // Determine datatype from initial value or resolveLanguage
+                if (propMeta.resolveLanguage === "literal") {
+                    // If it resolves via literal language, it's likely a string
+                    propShape.datatype = "xsd://string";
+                } else if (propMeta.initial) {
+                    // Try to infer from initial value type
+                    const initialType = typeof obj[propName];
+                    if (initialType === "number") {
+                        propShape.datatype = "xsd://integer";
+                    } else if (initialType === "boolean") {
+                        propShape.datatype = "xsd://boolean";
+                    } else if (initialType === "string") {
+                        propShape.datatype = "xsd://string";
+                    }
+                }
+
+                // Cardinality constraints
+                if (propMeta.required) {
+                    propShape.minCount = 1;
+                }
+
+                // Single-valued properties get maxCount 1
+                // (collections are handled separately below)
+                if (!propMeta.collection) {
+                    propShape.maxCount = 1;
+                }
+
+                // Flag properties have fixed value
+                if (propMeta.flag && propMeta.initial) {
+                    propShape.hasValue = propMeta.initial;
+                }
+
+                // AD4M-specific metadata
+                if (propMeta.local !== undefined) {
+                    propShape.local = propMeta.local;
+                }
+
+                if (propMeta.writable !== undefined) {
+                    propShape.writable = propMeta.writable;
+                }
+
+                if (propMeta.resolveLanguage) {
+                    propShape.resolveLanguage = propMeta.resolveLanguage;
+                }
+
+                // === Extract Setter Actions (same logic as generateSDNA) ===
+                if (propMeta.setter) {
+                    // Custom setter defined - not yet supported in SHACL
+                    console.warn(
+                        `[SHACL Generation] Custom Prolog setter for property '${propName}' in class '${subjectName}' is not yet supported. ` +
+                        `The property will be created without setter actions. Consider using standard writable properties or provide explicit SHACL JSON.`
+                    );
+                    // TODO: Parse custom Prolog setter to extract actions
+                } else if (propMeta.writable && propMeta.through) {
+                    let setter = obj[propertyNameToSetterName(propName)];
+                    if (typeof setter === "function") {
+                        propShape.setter = [{
+                            action: "setSingleTarget",
+                            source: "this",
+                            predicate: propMeta.through,
+                            target: "value",
+                            ...(propMeta.local && { local: true })
+                        }];
+                    }
+                }
+
+                // Add to constructor actions if property has initial value
+                if (propMeta.initial) {
+                    constructorActions.push({
+                        action: "addLink",
+                        source: "this",
+                        predicate: propMeta.through,
+                        target: propMeta.initial,
+                    });
+
+                    // Add to destructor actions
+                    destructorActions.push({
+                        action: "removeLink",
+                        source: "this",
+                        predicate: propMeta.through,
+                        target: "*",
+                    });
+                }
+
+                shape.addProperty(propShape);
+            }
+            
+            // Convert collections to SHACL property shapes
+            // (collections variable already declared above for namespace inference)
+            for (const collName in collections) {
+                const collMeta = collections[collName];
+                
+                if (!collMeta.through) continue;
+                
+                const collShape: SHACLPropertyShape = {
+                    name: collName, // Collection name for generating named URIs
+                    path: collMeta.through,
+                    // Collections have no maxCount (unlimited)
+                    // minCount defaults to 0 (optional)
+                };
+                
+                // Determine if it's a reference (IRI) or literal
+                // Collections typically contain references (IRIs) to other entities
+                // They're literals only if explicitly marked or contain primitive values
+                if (collMeta.where?.isInstance) {
+                    // Collection of typed entities - definitely IRIs
+                    collShape.nodeKind = 'IRI';
+                } else {
+                    // Default to IRI for collections (most common case)
+                    // Literal collections are rare and would need explicit marking
+                    collShape.nodeKind = 'IRI';
+                }
+                
+                // AD4M-specific metadata
+                if (collMeta.local !== undefined) {
+                    collShape.local = collMeta.local;
+                }
+
+                if (collMeta.writable !== undefined) {
+                    collShape.writable = collMeta.writable;
+                }
+
+                // === Extract Collection Actions (adder/remover) ===
+                // Adder action - adds a link to the collection
+                collShape.adder = [{
+                    action: "addLink",
+                    source: "this",
+                    predicate: collMeta.through,
+                    target: "value",
+                    ...(collMeta.local && { local: true })
+                }];
+
+                // Remover action - removes a link from the collection
+                collShape.remover = [{
+                    action: "removeLink",
+                    source: "this",
+                    predicate: collMeta.through,
+                    target: "value",
+                    ...(collMeta.local && { local: true })
+                }];
+
+                shape.addProperty(collShape);
+            }
+
+            // Set constructor and destructor actions on the shape
+            if (constructorActions.length > 0) {
+                shape.setConstructorActions(constructorActions);
+            }
+            if (destructorActions.length > 0) {
+                shape.setDestructorActions(destructorActions);
+            }
+
+            return {
+                shape,
+                name: subjectName
+            };
         }
 
         Object.defineProperty(target, 'type', {configurable: true});
@@ -769,8 +1040,8 @@ export function ModelOptions(opts: ModelOptionsOptions) {
  * @param {string} opts.through - The predicate URI for the property
  * @param {string} [opts.initial] - Initial value (defaults to "literal://string:uninitialized")
  * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
- * @param {string} [opts.getter] - Custom Prolog code for getting the property value
- * @param {string} [opts.setter] - Custom Prolog code for setting the property value
+ * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
+ * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function Property(opts: PropertyOptions) {
@@ -834,7 +1105,7 @@ export function Property(opts: PropertyOptions) {
  * @param {string} opts.through - The predicate URI for the property
  * @param {string} [opts.initial] - Initial value (if property should have one)
  * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
- * @param {string} [opts.getter] - Custom Prolog code for getting the property value
+ * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function ReadOnly(opts: PropertyOptions) {

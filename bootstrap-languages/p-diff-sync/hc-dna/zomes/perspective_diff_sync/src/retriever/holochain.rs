@@ -100,10 +100,7 @@ impl PerspectiveDiffRetreiver for HolochainRetreiver {
     fn latest_revision() -> SocialContextResult<Option<HashReference>> {
         let latest_root_entry = get_latest_revision_anchor();
         let latest_root_entry_hash = hash_entry(latest_root_entry.clone())?;
-        let query = LinkQuery::try_new(
-            latest_root_entry_hash,
-            LinkTypes::Index
-        )?;
+        let query = LinkQuery::try_new(latest_root_entry_hash, LinkTypes::Index)?;
         let mut latest_revision_links = get_links(query, GetStrategy::Network)?;
 
         latest_revision_links.sort_by(|link_a, link_b| {
@@ -167,11 +164,8 @@ pub fn get_active_agent_anchor() -> Anchor {
 }
 
 pub fn get_active_agents() -> SocialContextResult<Vec<AgentPubKey>> {
-    let query = LinkQuery::try_new(
-        hash_entry(get_active_agent_anchor())?,
-        LinkTypes::Index
-    )?
-    .tag_prefix(LinkTag::new("active_agent"));
+    let query = LinkQuery::try_new(hash_entry(get_active_agent_anchor())?, LinkTypes::Index)?
+        .tag_prefix(LinkTag::new("active_agent"));
     let recent_agents = get_links(query, GetStrategy::Local)?;
 
     let recent_agents = recent_agents

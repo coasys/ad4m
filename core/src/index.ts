@@ -31,3 +31,5 @@ export * from "./ai/AIClient"
 export * from "./ai/Tasks"
 export * from "./runtime/RuntimeResolver"
 export * from './model/Ad4mModel'
+export * from './shacl/SHACLShape'
+export { SHACLFlow, FlowState, FlowTransition, LinkPattern, FlowableCondition } from './shacl/SHACLFlow'

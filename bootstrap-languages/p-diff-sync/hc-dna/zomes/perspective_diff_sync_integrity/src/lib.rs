@@ -32,6 +32,12 @@ pub struct PerspectiveDiff {
     pub removals: Vec<LinkExpression>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes)]
+pub struct CommitInput {
+    pub diff: PerspectiveDiff,
+    pub my_did: String,
+}
+
 ///The reference that is sent to other agents, denotes the position in the DAG as well as the data at that position
 #[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes)]
 pub struct HashBroadcast {
@@ -70,6 +76,11 @@ pub struct PerspectiveDiffEntryReference {
     pub diff: PerspectiveDiff,
     pub parents: Option<Vec<HoloHash<holo_hash::hash_type::Action>>>,
     pub diffs_since_snapshot: usize,
+    /// Optional hashes of chunked diff entries for large diffs.
+    /// When this is Some and non-empty, the `diff` field should be empty/default
+    /// and the actual diff data is stored in separate chunk entries.
+    #[serde(default)]
+    pub diff_chunks: Option<Vec<HoloHash<holo_hash::hash_type::Action>>>,
 }
 
 app_entry!(PerspectiveDiffEntryReference);
@@ -117,6 +128,17 @@ pub struct PerspectiveExpression {
 }
 
 app_entry!(PerspectiveExpression);
+
+/// Signal payload that includes recipient DID for multi-user routing
+/// Flattened structure to avoid Holochain extracting nested PerspectiveExpression
+#[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes)]
+pub struct RoutedSignalPayload {
+    pub recipient_did: String,
+    pub author: String,
+    pub data: Perspective,
+    pub timestamp: DateTime<Utc>,
+    pub proof: ExpressionProof,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes)]
 pub struct OnlineAgent {
@@ -180,6 +202,13 @@ impl PerspectiveExpression {
     }
 }
 
+impl RoutedSignalPayload {
+    pub fn get_sb(self) -> ExternResult<SerializedBytes> {
+        self.try_into()
+            .map_err(|error| wasm_error!(WasmErrorInner::Host(String::from(error))))
+    }
+}
+
 impl HashBroadcast {
     pub fn get_sb(self) -> ExternResult<SerializedBytes> {
         self.try_into()
@@ -196,7 +225,27 @@ impl PerspectiveDiffEntryReference {
             diff: diff,
             parents: parents,
             diffs_since_snapshot: 0,
+            diff_chunks: None,
         }
+    }
+
+    /// Create a new entry reference with chunked diffs
+    pub fn new_chunked(
+        diff_chunks: Vec<HoloHash<holo_hash::hash_type::Action>>,
+        parents: Option<Vec<HoloHash<holo_hash::hash_type::Action>>>,
+        diffs_since_snapshot: usize,
+    ) -> Self {
+        Self {
+            diff: PerspectiveDiff::new(), // Empty diff when using chunks
+            parents: parents,
+            diffs_since_snapshot: diffs_since_snapshot,
+            diff_chunks: Some(diff_chunks),
+        }
+    }
+
+    /// Check if this entry uses chunked storage
+    pub fn is_chunked(&self) -> bool {
+        self.diff_chunks.as_ref().map_or(false, |chunks| !chunks.is_empty())
     }
 
     /// Backward compatibility method to extract the diff data
@@ -206,7 +255,7 @@ impl PerspectiveDiffEntryReference {
 
     /// Helper method to get the comparison key for ordering
     // Compare using tuple ordering: entries with parents come first,
-    // then by parent hashes, then by diffs_since_snapshot, 
+    // then by parent hashes, then by diffs_since_snapshot,
     // then by total diff count, then by diff contents
     fn comparison_key(&self) -> (bool, &Option<Vec<HoloHash<holo_hash::hash_type::Action>>>, usize, usize, &PerspectiveDiff) {
         let has_parents = self.parents.is_some();
@@ -243,17 +292,32 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
                 .to_app_option::<PerspectiveDiffEntryReference>();
 
             if let Ok(Some(pdiff_ref)) = maybe_entry {
+                let mut missing: Vec<AnyDhtHash> = Vec::new();
+
+                // Validate parent dependencies
                 if let Some(parents) = pdiff_ref.parents {
-                    let mut missing: Vec<AnyDhtHash> = Vec::new();
                     for parent_action_hash in parents {
                         // Ensure each declared parent exists and is valid in the source chain/DHT
                         if must_get_valid_record(parent_action_hash.clone()).is_err() {
                             missing.push(parent_action_hash.into());
                         }
                     }
-                    if !missing.is_empty() {
-                        return Ok(ValidateCallbackResult::UnresolvedDependencies(UnresolvedDependencies::Hashes(missing)));
+                }
+
+                // Validate chunk dependencies
+                // Chunks must be available before the parent entry can be validated.
+                // The commit flow ensures chunks are created and validated BEFORE the parent.
+                if let Some(diff_chunks) = pdiff_ref.diff_chunks {
+                    for chunk_action_hash in diff_chunks {
+                        // Ensure each chunk entry exists and is valid
+                        if must_get_valid_record(chunk_action_hash.clone()).is_err() {
+                            missing.push(chunk_action_hash.into());
+                        }
                     }
+                }
+
+                if !missing.is_empty() {
+                    return Ok(ValidateCallbackResult::UnresolvedDependencies(UnresolvedDependencies::Hashes(missing)));
                 }
             }
 

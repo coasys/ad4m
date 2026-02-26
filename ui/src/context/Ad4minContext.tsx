@@ -27,6 +27,7 @@ type State = {
   connected: boolean;
   connectedLoading: boolean;
   expertMode: boolean;
+  multiUserEnabled: boolean;
   notifications: NotificationType[];
 };
 
@@ -38,6 +39,7 @@ type ContextProps = {
     handleTrustAgent: (str: string) => void;
     handleLogin: (client: Ad4mClient, login: Boolean, did: string) => void;
     toggleExpertMode: () => void;
+    setMultiUserEnabled: (enabled: boolean) => void;
     handleNotification: (notification: NotificationType) => void;
   };
 };
@@ -55,6 +57,7 @@ const initialState: ContextProps = {
     connected: false,
     connectedLoading: true,
     expertMode: getForVersion("expertMode") === "true",
+    multiUserEnabled: false,
     notifications: [],
   },
   methods: {
@@ -63,6 +66,7 @@ const initialState: ContextProps = {
     handleTrustAgent: () => null,
     handleLogin: () => null,
     toggleExpertMode: () => null,
+    setMultiUserEnabled: () => null,
     handleNotification: () => null,
   },
 };
@@ -81,6 +85,21 @@ export function Ad4minProvider({ children }: any) {
       ...prevState,
       expertMode: !prevState.expertMode,
     }));
+  };
+
+  const setMultiUserEnabled = async (enabled: boolean) => {
+    if (state.client) {
+      try {
+        await state.client.runtime.setMultiUserEnabled(enabled);
+        setState((prevState) => ({
+          ...prevState,
+          multiUserEnabled: enabled,
+        }));
+      } catch (error) {
+        console.error("Failed to set multi-user mode:", error);
+        throw error;
+      }
+    }
   };
 
   const checkConnection = useCallback(
@@ -231,9 +250,11 @@ export function Ad4minProvider({ children }: any) {
         connect(localStorageURL);
       }
     } else {
-      invoke("get_port").then((message) => {
-        if (message) {
-          const url = `ws://localhost:${message}/graphql`;
+      invoke<{ port: number; tls_enabled: boolean }>("get_port").then((portInfo) => {
+        if (portInfo) {
+          // Always use ws://localhost since we run a plain HTTP server
+          // on localhost even when TLS is enabled (TLS runs on 0.0.0.0)
+          const url = `ws://localhost:${portInfo.port}/graphql`;
           connect(url);
         }
       });
@@ -242,9 +263,11 @@ export function Ad4minProvider({ children }: any) {
 
   useEffect(() => {
     appWindow.listen("ready", async () => {
-      const message = await invoke("get_port");
-      if (message) {
-        const url = `ws://localhost:${message}/graphql`;
+      const portInfo = await invoke<{ port: number; tls_enabled: boolean }>("get_port");
+      if (portInfo) {
+        // Always use ws://localhost since we run a plain HTTP server
+        // on localhost even when TLS is enabled (TLS runs on 0.0.0.0)
+        const url = `ws://localhost:${portInfo.port}/graphql`;
         connect(url);
       }
     });
@@ -306,6 +329,24 @@ export function Ad4minProvider({ children }: any) {
     }
   }, [state.url]);
 
+  // Load multi-user state when client is available
+  useEffect(() => {
+    const loadMultiUserState = async () => {
+      if (state.client) {
+        try {
+          const enabled = await state.client.runtime.multiUserEnabled();
+          setState((prev) => ({
+            ...prev,
+            multiUserEnabled: enabled,
+          }));
+        } catch (error) {
+          console.error("Failed to load multi-user state:", error);
+        }
+      }
+    };
+    loadMultiUserState();
+  }, [state.client]);
+
   return (
     <Ad4minContext.Provider
       value={{
@@ -316,6 +357,7 @@ export function Ad4minProvider({ children }: any) {
           resetEndpoint,
           handleLogin,
           toggleExpertMode,
+          setMultiUserEnabled,
           handleNotification,
         },
       }}

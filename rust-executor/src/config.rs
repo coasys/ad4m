@@ -1,11 +1,42 @@
 use crate::utils;
+use deno_core::error::AnyError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+lazy_static::lazy_static! {
+    /// Global SMTP configuration for sending emails
+    pub static ref SMTP_CONFIG: Arc<Mutex<Option<SmtpConfig>>> = Arc::new(Mutex::new(None));
+}
+
+/// Set the global SMTP config (called during server initialization)
+pub fn set_smtp_config(config: Option<SmtpConfig>) -> Result<(), AnyError> {
+    let mut smtp_config = SMTP_CONFIG.lock().map_err(|e| {
+        AnyError::from(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to acquire SMTP config mutex lock: {}", e),
+        ))
+    })?;
+    *smtp_config = config;
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlsConfig {
     pub cert_file_path: String,
     pub key_file_path: String,
+    pub tls_port: u16, // Port for the HTTPS/WSS server
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmtpConfig {
+    pub enabled: bool,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub from_address: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,12 +57,15 @@ pub struct Ad4mConfig {
     pub hc_use_bootstrap: Option<bool>,
     pub hc_proxy_url: Option<String>,
     pub hc_bootstrap_url: Option<String>,
+    pub hc_relay_url: Option<String>,
     pub connect_holochain: Option<bool>,
     pub admin_credential: Option<String>,
     pub localhost: Option<bool>,
     pub auto_permit_cap_requests: Option<bool>,
     pub tls: Option<TlsConfig>,
     pub log_holochain_metrics: Option<bool>,
+    pub enable_multi_user: Option<bool>,
+    pub smtp_config: Option<SmtpConfig>,
 }
 
 impl Ad4mConfig {
@@ -110,12 +144,15 @@ impl Default for Ad4mConfig {
             hc_use_bootstrap: None,
             hc_proxy_url: None,
             hc_bootstrap_url: None,
+            hc_relay_url: None,
             connect_holochain: None,
             admin_credential: None,
             localhost: None,
             auto_permit_cap_requests: None,
             tls: None,
             log_holochain_metrics: None,
+            enable_multi_user: None,
+            smtp_config: None,
         };
         config.prepare();
         config

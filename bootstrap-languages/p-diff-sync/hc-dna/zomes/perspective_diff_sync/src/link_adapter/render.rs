@@ -22,10 +22,10 @@ pub fn render<Retriever: PerspectiveDiffRetreiver>() -> SocialContextResult<Pers
     workspace.collect_only_from_latest::<Retriever>(current.hash)?;
 
     let mut perspective = Perspective { links: vec![] };
-    
+
     // Collect all removals into a HashSet for O(1) lookup
     let mut removals_set = HashSet::new();
-    
+
     for diff_node in workspace.entry_map {
         // Add all additions to the perspective
         for addition in diff_node.1.diff.additions {
@@ -36,9 +36,11 @@ pub fn render<Retriever: PerspectiveDiffRetreiver>() -> SocialContextResult<Pers
             removals_set.insert(removal);
         }
     }
-    
+
     // Remove all links that are in the removals set with a single retain call - O(N)
-    perspective.links.retain(|link| !removals_set.contains(link));
+    perspective
+        .links
+        .retain(|link| !removals_set.contains(link));
 
     let fn_end = get_now()?.time();
     debug!(

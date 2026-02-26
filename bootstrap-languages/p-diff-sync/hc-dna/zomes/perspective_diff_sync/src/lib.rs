@@ -6,8 +6,8 @@ use inputs::PullArguments;
 use lazy_static::lazy_static;
 
 use perspective_diff_sync_integrity::{
-    HashBroadcast, OnlineAgent, OnlineAgentAndAction, Perspective, PerspectiveDiff,
-    PerspectiveExpression, PullResult,
+    CommitInput, HashBroadcast, OnlineAgent, OnlineAgentAndAction, Perspective, PerspectiveDiff,
+    PerspectiveDiffEntryReference, PerspectiveExpression, PullResult, RoutedSignalPayload,
 };
 
 mod errors;
@@ -45,10 +45,11 @@ fn init(_: ()) -> ExternResult<InitCallbackResult> {
 /// LinkLanguage implementation
 
 #[hdk_extern]
-pub fn commit(diff: PerspectiveDiff) -> ExternResult<Hash> {
+pub fn commit(input: CommitInput) -> ExternResult<Hash> {
     debug!("commit");
-    let commit_result = link_adapter::commit::commit::<retriever::HolochainRetreiver>(diff)
-        .map_err(|error| utils::err(&format!("{}", error)));
+    let commit_result =
+        link_adapter::commit::commit::<retriever::HolochainRetreiver>(input.diff, input.my_did)
+            .map_err(|error| utils::err(&format!("{}", error)));
     debug!("commit_result: {:?}", commit_result);
     commit_result
 }
@@ -61,10 +62,11 @@ pub fn current_revision(_: ()) -> ExternResult<Option<Hash>> {
 }
 
 #[hdk_extern]
-pub fn sync(_: ()) -> ExternResult<Option<Hash>> {
+pub fn sync(my_did: String) -> ExternResult<Option<Hash>> {
     //info!("sync");
-    let broadcast_result = link_adapter::commit::broadcast_current::<retriever::HolochainRetreiver>()
-        .map_err(|error| utils::err(&format!("{}", error)));
+    let broadcast_result =
+        link_adapter::commit::broadcast_current::<retriever::HolochainRetreiver>(&my_did)
+            .map_err(|error| utils::err(&format!("{}", error)));
     //info!("broadcast_result: {:?}", broadcast_result);
     broadcast_result
 }
@@ -72,8 +74,9 @@ pub fn sync(_: ()) -> ExternResult<Option<Hash>> {
 #[hdk_extern]
 pub fn pull(args: PullArguments) -> ExternResult<PullResult> {
     debug!("pull");
-    let pull_result = link_adapter::pull::pull::<retriever::HolochainRetreiver>(true, args.hash, args.is_scribe)
-        .map_err(|error| utils::err(&format!("{}", error)));
+    let pull_result =
+        link_adapter::pull::pull::<retriever::HolochainRetreiver>(true, args.hash, args.is_scribe)
+            .map_err(|error| utils::err(&format!("{}", error)));
     //debug!("pull_result: {:?}", pull_result);
     pull_result
 }
@@ -101,21 +104,41 @@ pub fn update_current_revision(_hash: Hash) -> ExternResult<()> {
 
 #[hdk_extern]
 fn recv_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
-    //Check if its a normal diff expression signal
-    match HashBroadcast::try_from(signal.clone()) {
-        Ok(broadcast) => {
-            debug!("recv_remote_signal broadcast: {:?} from {}", broadcast.reference_hash, broadcast.broadcast_author);
-            link_adapter::pull::handle_broadcast::<retriever::HolochainRetreiver>(broadcast)
-                .map_err(|err| utils::err(&format!("{}", err)))?;
-        }
-        //Check if its a broadcast message
-        Err(_) => match PerspectiveExpression::try_from(signal.clone()) {
-            Ok(sig) => emit_signal(sig)?,
-            //Check if its an online ping
-            Err(_) => return Err(utils::err(&format!("Signal not recognized: {:?}", signal))),
-        },
-    };
-    Ok(())
+    debug!(
+        "recv_remote_signal called, signal size: {} bytes",
+        signal.bytes().len()
+    );
+
+    // Check if it's a RoutedSignalPayload (multi-user routing)
+    if let Ok(routed) = RoutedSignalPayload::try_from(signal.clone()) {
+        debug!(
+            "recv_remote_signal: Emitting RoutedSignalPayload for recipient: {}",
+            routed.recipient_did
+        );
+        emit_signal(routed)?;
+        return Ok(());
+    }
+
+    // Check if it's a HashBroadcast (link sync)
+    if let Ok(broadcast) = HashBroadcast::try_from(signal.clone()) {
+        debug!("recv_remote_signal: Handling HashBroadcast");
+        link_adapter::pull::handle_broadcast::<retriever::HolochainRetreiver>(broadcast)
+            .map_err(|err| utils::err(&format!("{}", err)))?;
+        return Ok(());
+    }
+
+    // Check if it's a regular PerspectiveExpression (broadcast telepresence)
+    if let Ok(sig) = PerspectiveExpression::try_from(signal.clone()) {
+        debug!(
+            "recv_remote_signal: Emitting broadcast PerspectiveExpression from {}",
+            sig.author
+        );
+        emit_signal(sig)?;
+        return Ok(());
+    }
+
+    debug!("recv_remote_signal: Signal not recognized");
+    Err(utils::err("Signal not recognized"))
 }
 
 // Telepresence implementation
@@ -182,6 +205,14 @@ pub fn get_others(_: ()) -> ExternResult<Vec<String>> {
         telepresence::status::get_others().map_err(|error| utils::err(&format!("{}", error)))?;
     info!("get_others res: {:?}", res);
     Ok(res)
+}
+
+/// Helper function for testing - get a PerspectiveDiffEntryReference by hash
+#[hdk_extern]
+pub fn get_diff_entry_reference(hash: Hash) -> ExternResult<PerspectiveDiffEntryReference> {
+    use retriever::PerspectiveDiffRetreiver;
+    retriever::HolochainRetreiver::get::<PerspectiveDiffEntryReference>(hash)
+        .map_err(|error| utils::err(&format!("{}", error)))
 }
 
 //not loading from DNA properies since dna zome properties is always null for some reason

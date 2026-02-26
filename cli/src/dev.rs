@@ -51,10 +51,13 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     admin_credential: Some(String::from("*")),
                     hc_proxy_url: None,
                     hc_bootstrap_url: None,
+                    hc_relay_url: None,
                     localhost: None,
                     auto_permit_cap_requests: Some(true),
                     tls: None,
                     log_holochain_metrics: None,
+                    enable_multi_user: None,
+                    smtp_config: None,
                 })
                 .await
                 .join()
@@ -202,10 +205,13 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     admin_credential: None,
                     hc_proxy_url: None,
                     hc_bootstrap_url: None,
+                    hc_relay_url: None,
                     localhost: None,
                     auto_permit_cap_requests: Some(true),
                     tls: None,
                     log_holochain_metrics: None,
+                    enable_multi_user: None,
+                    smtp_config: None,
                 })
                 .await
                 .join()
