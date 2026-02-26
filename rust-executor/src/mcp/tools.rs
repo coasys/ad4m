@@ -489,6 +489,29 @@ impl Ad4mMcpHandler {
         }
     }
 
+    /// Get a perspective by ID after checking write capabilities.
+    /// Common pattern used by most dynamic tool handlers.
+    async fn get_writable_perspective(
+        &self,
+        perspective_id: &str,
+    ) -> Result<crate::perspectives::perspective_instance::PerspectiveInstance, String> {
+        let capabilities = self.get_capabilities().await;
+        check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY)
+            .map_err(|e| format!("Capability error: {}", e))?;
+        get_perspective(perspective_id)
+            .ok_or_else(|| format!("Perspective not found: {}", perspective_id))
+    }
+
+    /// Extract a required string argument from the args map
+    fn require_arg<'a>(
+        args: &'a serde_json::Map<String, serde_json::Value>,
+        key: &str,
+    ) -> Result<&'a str, String> {
+        args.get(key)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("Missing required parameter: {}", key))
+    }
+
     /// Resolve a literal value from a link target URI.
     /// Handles: literal://string:X, literal://json:{signed expression with "data" field},
     /// and URL-encoded variants.
@@ -1407,7 +1430,7 @@ impl Ad4mMcpHandler {
                 let _agent_context = self.get_agent_context_for_read().await;
 
                 let predicate = match self
-                    .resolve_collection_predicate(&perspective, &p.class_name, &p.collection_name)
+                    .resolve_property_predicate(&perspective, &p.class_name, &p.collection_name)
                     .await
                 {
                     Ok(pred) => pred,
@@ -1462,7 +1485,7 @@ impl Ad4mMcpHandler {
                 }
 
                 let predicate = match self
-                    .resolve_collection_predicate(&perspective, &p.class_name, &p.collection_name)
+                    .resolve_property_predicate(&perspective, &p.class_name, &p.collection_name)
                     .await
                 {
                     Ok(pred) => pred,
@@ -1517,7 +1540,7 @@ impl Ad4mMcpHandler {
                 }
 
                 let predicate = match self
-                    .resolve_collection_predicate(&perspective, &p.class_name, &p.collection_name)
+                    .resolve_property_predicate(&perspective, &p.class_name, &p.collection_name)
                     .await
                 {
                     Ok(pred) => pred,
@@ -1777,18 +1800,6 @@ impl Ad4mMcpHandler {
     }
 
     /// Resolve a collection name to its predicate URI using SHACL shape links
-    async fn resolve_collection_predicate(
-        &self,
-        perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
-        class_name: &str,
-        collection_name: &str,
-    ) -> Result<String, String> {
-        // Same as resolve_property_predicate but looks for collection=true properties
-        // For now, use the same resolution — collections are also properties with a path
-        self.resolve_property_predicate(perspective, class_name, collection_name)
-            .await
-    }
-
     // ========================================================================
     // AUTHENTICATION TOOLS
     // ========================================================================
@@ -2428,9 +2439,9 @@ impl Ad4mMcpHandler {
             return format!("Capability error: {}", e);
         }
 
-        let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
-            Some(addr) => addr.to_string(),
-            None => return "Missing required parameter: expression_address".to_string(),
+        let expression_address = match Self::require_arg(args, "expression_address") {
+            Ok(v) => v.to_string(),
+            Err(e) => return e,
         };
 
         // Build initial_values from property args
@@ -2538,9 +2549,9 @@ impl Ad4mMcpHandler {
         class_name: &str,
         args: &serde_json::Map<String, serde_json::Value>,
     ) -> String {
-        let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
-            Some(addr) => addr.to_string(),
-            None => return "Missing required parameter: expression_address".to_string(),
+        let expression_address = match Self::require_arg(args, "expression_address") {
+            Ok(v) => v.to_string(),
+            Err(e) => return e,
         };
 
         let perspective = match get_perspective(perspective_id) {
@@ -2653,9 +2664,9 @@ impl Ad4mMcpHandler {
         class_name: &str,
         args: &serde_json::Map<String, serde_json::Value>,
     ) -> String {
-        let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
-            Some(addr) => addr.to_string(),
-            None => return "Missing required parameter: expression_address".to_string(),
+        let expression_address = match Self::require_arg(args, "expression_address") {
+            Ok(v) => v.to_string(),
+            Err(e) => return e,
         };
 
         let agent_context = match self.get_agent_context().await {
@@ -2663,14 +2674,9 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Authentication error: {}", e),
         };
 
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
-            return format!("Capability error: {}", e);
-        }
-
-        let mut perspective = match get_perspective(perspective_id) {
-            Some(p) => p,
-            None => return format!("Perspective not found: {}", perspective_id),
+        let mut perspective = match self.get_writable_perspective(perspective_id).await {
+            Ok(p) => p,
+            Err(e) => return e,
         };
 
         let mut updated = Vec::new();
@@ -2740,9 +2746,9 @@ impl Ad4mMcpHandler {
         _class_name: &str,
         args: &serde_json::Map<String, serde_json::Value>,
     ) -> String {
-        let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
-            Some(addr) => addr.to_string(),
-            None => return "Missing required parameter: expression_address".to_string(),
+        let expression_address = match Self::require_arg(args, "expression_address") {
+            Ok(v) => v.to_string(),
+            Err(e) => return e,
         };
 
         let agent_context = match self.get_agent_context().await {
@@ -2750,14 +2756,9 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Authentication error: {}", e),
         };
 
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
-            return format!("Capability error: {}", e);
-        }
-
-        let mut perspective = match get_perspective(perspective_id) {
-            Some(p) => p,
-            None => return format!("Perspective not found: {}", perspective_id),
+        let mut perspective = match self.get_writable_perspective(perspective_id).await {
+            Ok(p) => p,
+            Err(e) => return e,
         };
 
         let mut removed = 0;
@@ -2805,23 +2806,18 @@ impl Ad4mMcpHandler {
         property_name: &str,
         args: &serde_json::Map<String, serde_json::Value>,
     ) -> String {
-        let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
-            Some(addr) => addr.to_string(),
-            None => return "Missing required parameter: expression_address".to_string(),
+        let expression_address = match Self::require_arg(args, "expression_address") {
+            Ok(v) => v.to_string(),
+            Err(e) => return e,
         };
-        let value = match args.get("value").and_then(|v| v.as_str()) {
-            Some(v) => v.to_string(),
-            None => return "Missing required parameter: value".to_string(),
+        let value = match Self::require_arg(args, "value") {
+            Ok(v) => v.to_string(),
+            Err(e) => return e,
         };
 
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
-            return format!("Capability error: {}", e);
-        }
-
-        let mut perspective = match get_perspective(perspective_id) {
-            Some(p) => p,
-            None => return format!("Perspective not found: {}", perspective_id),
+        let mut perspective = match self.get_writable_perspective(perspective_id).await {
+            Ok(p) => p,
+            Err(e) => return e,
         };
 
         // Resolve property predicate via SHACL
@@ -2888,22 +2884,16 @@ impl Ad4mMcpHandler {
         collection_name: &str,
         args: &serde_json::Map<String, serde_json::Value>,
     ) -> String {
-        let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
-            Some(addr) => addr.to_string(),
-            None => return "Missing required parameter: expression_address".to_string(),
+        let expression_address = match Self::require_arg(args, "expression_address") {
+            Ok(v) => v.to_string(),
+            Err(e) => return e,
         };
 
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
-            return format!("Capability error: {}", e);
-        }
-
-        let perspective = match get_perspective(perspective_id) {
-            Some(p) => p,
-            None => return format!("Perspective not found: {}", perspective_id),
+        let perspective = match self.get_writable_perspective(perspective_id).await {
+            Ok(p) => p,
+            Err(e) => return e,
         };
 
-        // Resolve collection predicate via SHACL
         let predicate = match self
             .resolve_property_predicate(&perspective, class_name, collection_name)
             .await
@@ -2942,23 +2932,18 @@ impl Ad4mMcpHandler {
         collection_name: &str,
         args: &serde_json::Map<String, serde_json::Value>,
     ) -> String {
-        let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
-            Some(addr) => addr.to_string(),
-            None => return "Missing required parameter: expression_address".to_string(),
+        let expression_address = match Self::require_arg(args, "expression_address") {
+            Ok(v) => v.to_string(),
+            Err(e) => return e,
         };
-        let value = match args.get("value").and_then(|v| v.as_str()) {
+        let value = match Self::require_arg(args, "value") {
             Some(v) => v.to_string(),
             None => return "Missing required parameter: value".to_string(),
         };
 
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
-            return format!("Capability error: {}", e);
-        }
-
-        let mut perspective = match get_perspective(perspective_id) {
-            Some(p) => p,
-            None => return format!("Perspective not found: {}", perspective_id),
+        let mut perspective = match self.get_writable_perspective(perspective_id).await {
+            Ok(p) => p,
+            Err(e) => return e,
         };
 
         // Resolve collection predicate via SHACL
@@ -3010,23 +2995,18 @@ impl Ad4mMcpHandler {
         collection_name: &str,
         args: &serde_json::Map<String, serde_json::Value>,
     ) -> String {
-        let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
-            Some(addr) => addr.to_string(),
-            None => return "Missing required parameter: expression_address".to_string(),
+        let expression_address = match Self::require_arg(args, "expression_address") {
+            Ok(v) => v.to_string(),
+            Err(e) => return e,
         };
-        let value = match args.get("value").and_then(|v| v.as_str()) {
-            Some(v) => v.to_string(),
-            None => return "Missing required parameter: value".to_string(),
+        let value = match Self::require_arg(args, "value") {
+            Ok(v) => v.to_string(),
+            Err(e) => return e,
         };
 
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
-            return format!("Capability error: {}", e);
-        }
-
-        let mut perspective = match get_perspective(perspective_id) {
-            Some(p) => p,
-            None => return format!("Perspective not found: {}", perspective_id),
+        let mut perspective = match self.get_writable_perspective(perspective_id).await {
+            Ok(p) => p,
+            Err(e) => return e,
         };
 
         // Resolve collection predicate via SHACL
