@@ -127,9 +127,190 @@ rating: number = 0;
 
 **Background:** Concurrent link writes from multiple agents can produce non-deterministic ordering — last-writer-wins SurrealDB timestamp semantics may not match causal intent in a distributed graph.
 
-**Design:** See `CRDT-ORDERING-STRATEGY.md` for full detail. Phase 3 (query layer separation) is now complete so the prerequisite is met.
+**Goals:**
 
-**Scope:** Changes to `hydration.ts`, `SurrealQueryBuilder.ts`, possibly SHACL-level ordering predicates, and the Rust executor's link ordering. Fills in scenario 10 of the playground test harness.
+- Make P2P-safe ordering the default, not an afterthought
+- Eliminate boilerplate across all future list-based plugins
+- Provide clear migration path as algorithms improve
+- Enable A/B testing of different strategies
+
+---
+
+### Developer-Facing API
+
+```typescript
+@HasMany(() => Task, {
+  through: 'ad4m://has_child',
+  ordering: {
+    strategy: 'linkedList',  // 'linkedList' | 'fractionalIndex' | 'timestamp' | 'manual'
+    sortBy: 'taskName',      // Fallback for ties (optional)
+  }
+})
+orderedTasks: Task[] = [];
+```
+
+Developers use normal array operations — the framework generates CRDT links:
+
+```typescript
+column.orderedTasks.push(newTask); // Append
+column.orderedTasks.splice(2, 0, task); // Insert at index 2
+column.orderedTasks.splice(1, 1); // Remove at index 1
+await column.update(); // Framework generates CRDT links
+```
+
+---
+
+### Architecture
+
+**Layer 1 — Model Decorator (API Surface)**
+
+```typescript
+interface OrderingConfig {
+  strategy: "linkedList" | "fractionalIndex" | "timestamp" | "manual";
+  sortBy?: string; // Property name for tiebreaker
+  conflictResolution?: "lww" | "merge"; // Last-write-wins or merge
+}
+```
+
+**Layer 2 — Ordering Strategy Interface**
+
+```typescript
+interface OrderingStrategy {
+  reconstruct(items: Ad4mModel[], links: Link[]): Ad4mModel[];
+  generateLinks(
+    items: Ad4mModel[],
+    operation: Operation,
+    context: OperationContext,
+  ): Link[];
+  garbageCollect?(links: Link[], cutoffDate: Date): Link[];
+}
+
+interface Operation {
+  type: "insert" | "delete" | "move" | "reorder";
+  index: number;
+  item?: Ad4mModel;
+  targetIndex?: number; // For moves
+}
+
+interface OperationContext {
+  agentDID: string;
+  timestamp: number;
+  collectionId: string;
+}
+```
+
+**Layer 3 — Concrete Strategies**
+
+LinkedList Strategy (RGA-based) uses predicates `ad4m://ordered_after`, `ad4m://position_id`, `ad4m://position_deleted`. Reconstructs by building an `afterMap` from links, sorting same-position items by `${timestamp}_${agentDID}` positionId, then traversing the linked list from `null` head.
+
+Fractional Index Strategy uses predicates `ad4m://fractional_position`, `ad4m://position_id`. Reconstructs by sorting items lexicographically by their stored position string with positionId as tiebreaker. Generates new positions as the midpoint between neighbours.
+
+Strategy Factory:
+
+```typescript
+class OrderingStrategyFactory {
+  static create(config?: OrderingConfig): OrderingStrategy {
+    switch (config?.strategy) {
+      case "linkedList":
+        return new LinkedListStrategy();
+      case "fractionalIndex":
+        return new FractionalIndexStrategy();
+      case "timestamp":
+        return new TimestampStrategy();
+      default:
+        return new ManualStrategy(); // current behaviour
+    }
+  }
+}
+```
+
+Custom strategies are supported: `ordering: { strategy: new MyCustomStrategy() }`.
+
+**Layer 4 — Array Proxy**
+
+`wrapCollectionWithOrdering()` on `Ad4mModel` returns a `Proxy` that intercepts `push`, `unshift`, `splice` and records a pending `Operation`. On `update()`, pending operations are passed to the strategy's `generateLinks()` and the resulting links are batched into the perspective write.
+
+---
+
+### Migration Strategy
+
+Old string-array properties still work. Migration helper:
+
+```typescript
+async migrateToOrderedCollection() {
+  const oldIds = JSON.parse(this.orderedTaskIds);
+  const batchId = await this.perspective.createBatch();
+  let previousId = null;
+  for (const taskId of oldIds) {
+    await this.perspective.addLink({ source: taskId, predicate: 'ad4m://ordered_after', target: previousId || 'null' }, batchId);
+    await this.perspective.addLink({ source: taskId, predicate: 'ad4m://position_id', target: `literal://string:${Date.now()}_migration` }, batchId);
+    previousId = taskId;
+  }
+  await this.perspective.commitBatch(batchId);
+  this.orderedTaskIds = '[]';
+  await this.update();
+}
+```
+
+---
+
+### Strategy Comparison
+
+|                         | RGA (LinkedList) | YATA      | Fractional Index |
+| ----------------------- | ---------------- | --------- | ---------------- |
+| **Insert**              | O(n)             | O(1)\*    | O(1)             |
+| **Delete**              | O(n)             | O(1)      | O(n)             |
+| **Move**                | O(n)×2           | O(1)×2    | O(1)             |
+| **Memory/item**         | ~64 bytes        | ~96 bytes | ~64 bytes        |
+| **Links/item**          | 2                | 5         | 2                |
+| **Conflict resolution** | Good             | Excellent | Good             |
+
+\*Amortized
+
+**RGA/LinkedList** — recommended default. Simple, debuggable, natural for AD4M's triple store. Best for lists < 50 items.
+
+**Fractional Index** — simpler to understand, good for deterministic ordering, lists that don't change structure often. Position strings can grow over time and need occasional rebalancing.
+
+**YATA** — future option. 3× storage but O(1) amortised ops and best-in-class conflict semantics. Only worth it for heavy concurrent editing (document editors, etc.).
+
+---
+
+### Open Questions
+
+1. **Bulk replace** (`tasks = newArray`) — treat as diff of old vs new, generate appropriate insert/delete operations.
+2. **Custom strategies** — supported via plugin: `ordering: { strategy: new MyCustomStrategy() }`.
+3. **Conflict visualisation** — AD4M inspector extension showing link graph.
+4. **Garbage collection cadence** — run on perspective sync, configurable tombstone threshold (e.g. 30 days).
+5. **Lazy vs eager reconstruction** — lazy on read, cache result, invalidate on link change.
+
+---
+
+### Implementation Phases
+
+- [ ] Add `OrderingStrategy` interface + `LinkedListStrategy` (RGA)
+- [ ] Add `ordering` option to `@HasMany` decorator options type
+- [ ] Create Array Proxy layer in `Ad4mModel`
+- [ ] Update `update()` to flush pending ordering operations
+- [ ] Unit tests for each strategy in isolation
+- [ ] `FractionalIndexStrategy` + `TimestampStrategy`
+- [ ] Garbage collection
+- [ ] Migration helper utility
+- [ ] Integration tests (scenario 10 in playground)
+- [ ] Debugging tools / inspector
+
+---
+
+### References
+
+- [Figma's Fractional Indexing](https://www.figma.com/blog/realtime-editing-of-ordered-sequences/)
+- [CRDT Survey Paper](https://hal.inria.fr/hal-00932836/document)
+- [RGA Algorithm](https://pages.lip6.fr/Marc.Shapiro/papers/RGA-TPDS-2011.pdf)
+- [Yjs Documentation](https://docs.yjs.dev/)
+- [Automerge CRDT](https://automerge.org/)
+
+---
+
+**Scope:** Changes to `hydration.ts`, `SurrealQueryBuilder.ts`, `@HasMany` decorator options, possibly SHACL-level ordering predicates, and the Rust executor's link ordering. Fills in scenario 10 of the playground test harness.
 
 **Priority:** Post-merge. High impact for multi-user apps.
 
@@ -220,6 +401,63 @@ perspective.querySurrealDB("SELECT ... FROM link WHERE in.uri = $base", {
 
 ---
 
+## 17. Lifecycle Hooks
+
+**Problem:** No mechanism to run logic before/after model persistence operations. Common patterns (validation before save, cascading deletes, post-load transforms) require subclass overrides with manual `super` calls.
+
+**Proposed API:** Override async methods on the model class:
+
+```typescript
+@ModelOptions({ name: "Recipe" })
+class Recipe extends Ad4mModel {
+  async beforeSave() {
+    if (!this.name) throw new Error("Name required");
+  }
+
+  async afterLoad() {
+    // post-process after loading from perspective
+  }
+
+  async beforeDelete() {
+    // cascade deletes, cleanup, etc.
+    await Promise.all(this.ingredients.map((i) => i.delete()));
+  }
+}
+```
+
+**Scope:** `Ad4mModel.ts` — add protected no-op stub methods; call them at the appropriate points in `save()`, `getData()`/`findAll()`, and `delete()`. Hooks should be `async` and awaited so they can perform perspective operations.
+
+**Priority:** Medium. Low effort, high ergonomics win.
+
+---
+
+## 18. Auto-Inverse Relations
+
+**Problem:** Defining both sides of a bidirectional relationship is repetitive and error-prone. If the predicates or models diverge the relationship silently breaks.
+
+**Proposed API:** An `inverse` option on `@BelongsToOne` / `@BelongsToMany` that auto-registers the forward `@HasMany` on the related class:
+
+```typescript
+@ModelOptions({ name: "Message" })
+class Message extends Ad4mModel {
+  @BelongsToOne(() => Channel, {
+    through: "ad4m://has_child",
+    inverse: "messages", // auto-registers @HasMany on Channel
+  })
+  channel: Channel;
+}
+
+// Channel no longer needs to manually declare:
+// @HasMany(() => Message, { through: 'ad4m://has_child' })
+// messages: Message[] = [];
+```
+
+**Scope:** Decorator registration in `decorators.ts` — after `@BelongsToOne`/`@BelongsToMany` registers its own metadata, if `inverse` is set, call `registerRelation` on the related class's prototype for the forward side. Requires deferred resolution (the related class may not be fully defined yet) — use a post-decoration pass or lazy initialisation at first metadata read.
+
+**Priority:** Low-medium. Reduces boilerplate in bidirectional models but the manual two-sided declaration is clear and explicit.
+
+---
+
 ## Priority Order (suggested)
 
 | #   | Item                          | Impact | Effort |
@@ -239,4 +477,6 @@ perspective.querySurrealDB("SELECT ... FROM link WHERE in.uri = $base", {
 | 16  | Relation action duplication   | Low    | Medium |
 | 9   | Transaction abort             | Low    | Low    |
 | 15  | SDNA wire rename              | Low    | High   |
+| 17  | Lifecycle hooks               | Medium | Low    |
+| 18  | Auto-inverse relations        | Low    | Medium |
 | 7   | Stage 3 decorators            | Low    | High   |
