@@ -158,14 +158,8 @@ function buildMatcher(config: WakerConfig): (link: LinkExpression) => boolean {
 async function postWake(config: WakerConfig, link: LinkExpression): Promise<void> {
   try {
     const body = {
-      message: config.wakeMessage,
-      context: {
-        perspective: config.perspective,
-        class: config.className,
-        link: link.data,
-        author: link.author,
-        timestamp: link.timestamp,
-      },
+      text: `${config.wakeMessage} | ${link.data.predicate} -> ${link.data.target.substring(0, 100)} (by ${link.author.substring(0, 30)})`,
+      mode: "now",
     };
 
     const resp = await fetch(config.wakeUrl, {
