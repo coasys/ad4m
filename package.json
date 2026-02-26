@@ -101,5 +101,5 @@
       "safer-buffer@2.1.2": "patches/safer-buffer@2.1.2.patch"
     }
   },
-  "version": "0.12.0-rc1-dev.1"
+  "version": "0.12.0-rc1-dev.2"
 }

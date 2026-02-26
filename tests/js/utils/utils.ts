@@ -5,7 +5,7 @@ import {
   execSync,
   spawn,
 } from "node:child_process";
-import { rmSync } from "node:fs";
+import { rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions/index.js";
 import { ApolloClient, InMemoryCache } from "@apollo/client/core/index.js";
 import Websocket from "ws";
@@ -50,6 +50,20 @@ export async function runHcLocalServices(): Promise<{
   process: ChildProcess;
 }> {
   let servicesProcess = exec(`kitsune2-bootstrap-srv`);
+
+  // Write the PID to a known location so cleanup.js can kill this specific
+  // instance by PID — safe for concurrent CI jobs (each checkout has its own
+  // tst-tmp/, and each run overwrites the file before starting the next suite).
+  if (servicesProcess.pid !== undefined) {
+    try {
+      const tstTmpDir = path.join(__dirname, "..", "tst-tmp");
+      mkdirSync(tstTmpDir, { recursive: true });
+      writeFileSync(
+        path.join(tstTmpDir, "kitsune2-bootstrap.pid"),
+        String(servicesProcess.pid),
+      );
+    } catch (_) {}
+  }
 
   let proxyUrl: string | null = null;
   let bootstrapUrl: string | null = null;
