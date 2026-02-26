@@ -222,24 +222,21 @@ perspective.querySurrealDB("SELECT ... FROM link WHERE in.uri = $base", {
 
 ## Priority Order (suggested)
 
-| #   | Item                            | Impact | Effort |
-| --- | ------------------------------- | ------ | ------ |
-| 2   | Range filter push-down          | High   | Medium |
-| 1   | Dirty tracking                  | High   | Medium |
-| 3   | N+1 batching                    | High   | Medium |
-| 8   | `getter` N+1 / push-down        | High   | Medium |
-| 11  | CRDT ordering                   | High   | High   |
-| 4   | Runtime validation              | Medium | Low    |
-| 6   | Create-vs-update detection      | Medium | Low    |
-| 14  | Parameterised SurrealQL         | Medium | Medium |
-| 10  | tests/js migration              | Medium | Medium |
-| 12  | External consumer migration     | Medium | High   |
-| 5   | fromJSONSchema type inference   | Medium | High   |
-| 13  | sh:inversePath Rust side        | Low    | Low    |
-| 16  | Relation action duplication     | Low    | Medium |
-| 9   | Transaction abort               | Low    | Low    |
-| 15  | SDNA wire rename                | Low    | High   |
-| 7   | Stage 3 decorators              | Low    | High   |
-| 8   | Transaction abort               | Low    | Low    |
-| 5   | `fromJSONSchema` type inference | Medium | High   |
-| 7   | Stage 3 decorators              | Low    | High   |
+| #   | Item                          | Impact | Effort |
+| --- | ----------------------------- | ------ | ------ |
+| 2   | Range filter push-down        | High   | Medium |
+| 1   | Dirty tracking                | High   | Medium |
+| 3   | N+1 batching                  | High   | Medium |
+| 8   | `getter` N+1 / push-down      | High   | Medium |
+| 11  | CRDT ordering                 | High   | High   |
+| 4   | Runtime validation            | Medium | Low    |
+| 6   | Create-vs-update detection    | Medium | Low    |
+| 14  | Parameterised SurrealQL       | Medium | Medium |
+| 10  | tests/js migration            | Medium | Medium |
+| 12  | External consumer migration   | Medium | High   |
+| 5   | fromJSONSchema type inference | Medium | High   |
+| 13  | sh:inversePath Rust side      | Low    | Low    |
+| 16  | Relation action duplication   | Low    | Medium |
+| 9   | Transaction abort             | Low    | Low    |
+| 15  | SDNA wire rename              | Low    | High   |
+| 7   | Stage 3 decorators            | Low    | High   |
