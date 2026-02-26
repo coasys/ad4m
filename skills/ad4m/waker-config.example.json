@@ -1,0 +1,16 @@
+{
+  "url": "ws://localhost:12100/graphql",
+  "token": "data-secret-2026",
+  "perspectiveUuid": "ab232819-5b0f-45d4-aa6c-d7f63c78bbf1",
+  "openclawWakeFile": "/tmp/ad4m-waker-events.jsonl",
+  "gatewayUrl": "http://localhost:18789",
+  "gatewayToken": "34e28793f36f085b7173d59cb1ac08890f1d0a2fcade720d",
+  "subscriptions": [
+    {
+      "model": "Message",
+      "label": "Coasys channel messages",
+      "source": "jtccyeefatikhxznksxotcdi",
+      "query": null
+    }
+  ]
+}
