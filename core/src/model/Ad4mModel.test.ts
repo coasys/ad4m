@@ -430,6 +430,8 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
   });
 
   it("should handle models with only an auto-generated type flag", () => {
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+
     const schema = {
       title: "EmptyModel",
       type: "object",
@@ -451,6 +453,12 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.properties.__ad4m_type.predicate).toBe("ad4m://type");
     expect(metadata.properties.__ad4m_type.initial).toBe("empty://instance");
     expect(metadata.properties.__ad4m_type.flag).toBe(true);
+
+    // The warning is the expected fallback signal for empty schemas
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("No properties with initial values found"),
+    );
+    warnSpy.mockRestore();
   });
 });
 

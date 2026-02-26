@@ -19,7 +19,7 @@ describe("NeighbourhoodProxy", () => {
     const neighbourhoodClient = new NeighbourhoodClient(mockApolloClient);
     const neighbourhoodProxy = new NeighbourhoodProxy(
       neighbourhoodClient,
-      neighbourhoodURI
+      neighbourhoodURI,
     );
 
     let callbacks = 0;
@@ -47,11 +47,7 @@ describe("NeighbourhoodProxy", () => {
     const subscriptions = [];
     const subscribe = (args: { next: (result: any) => void }) => {
       subscriptions.push(args);
-      new Promise((resolve) => {
-        setTimeout(() => {
-          resolve({});
-        }, 10);
-      });
+      return { unsubscribe: () => {} };
     };
 
     const mockApolloClient = {
@@ -63,7 +59,7 @@ describe("NeighbourhoodProxy", () => {
     const neighbourhoodClient = new NeighbourhoodClient(mockApolloClient);
     const neighbourhoodProxy = new NeighbourhoodProxy(
       neighbourhoodClient,
-      neighbourhoodURI
+      neighbourhoodURI,
     );
 
     let callbacks1 = 0;

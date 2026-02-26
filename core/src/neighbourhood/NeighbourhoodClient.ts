@@ -396,11 +396,17 @@ export class NeighbourhoodClient {
       if (index > -1) {
         handlersForPerspective.splice(index, 1);
       }
-      if (handlersForPerspective.length === 0) {
-        this.#signalSubscriptions.get(perspectiveUUID)?.unsubscribe();
-        this.#signalSubscriptions.delete(perspectiveUUID);
-        this.#signalHandlers.delete(perspectiveUUID);
-      }
+      // Intentionally keep the Apollo subscription and the handlers-map entry alive
+      // even when the array becomes empty. This prevents an unnecessary re-subscription
+      // if a new handler is added shortly after (the empty array makes addSignalHandler
+      // skip subscribeToSignals). For explicit teardown use unsubscribeFromPerspective().
     }
+  }
+
+  /** Fully tears down the Apollo subscription for a perspective UUID. */
+  unsubscribeFromPerspective(perspectiveUUID: string): void {
+    this.#signalSubscriptions.get(perspectiveUUID)?.unsubscribe();
+    this.#signalSubscriptions.delete(perspectiveUUID);
+    this.#signalHandlers.delete(perspectiveUUID);
   }
 }
