@@ -194,6 +194,52 @@ This is a future item, not a current concern. The client-side approach is correc
 
 ---
 
+## AI Agents via MCP — Why This Is Not a Problem
+
+AI agents interacting with AD4M through a Model Context Protocol server are a **request-response client**, not a reactive subscriber. The concern — that removing the server-push SurrealDB system breaks MCP agent access — does not hold.
+
+### What MCP agents actually do
+
+Every MCP tool call is a discrete invocation:
+
+```
+Agent → MCP tool: listPosts(perspectiveId, { where: { status: "published" } })
+  MCP server → Ad4mModel.findAll(perspective, { where: { status: "published" } })
+    → SurrealQL query → results
+  MCP tool → Agent: [{ id, title, ... }, ...]
+```
+
+This is a plain `findAll()` call. Subscriptions never enter the picture. The agent queries when it needs data and receives an answer. There is no persistent listener to maintain, no keepalive to send, and nothing that requires the server-push infrastructure we deleted.
+
+### The right MCP server design
+
+An MCP server wrapping AD4M should be a **long-running process** that maintains a persistent `PerspectiveProxy` connection to the executor — the same as any other AD4M client (Flux, `we`, ad4m-connect). This means:
+
+- The WS connection for `perspectiveLinkAdded` / `perspectiveLinkRemoved` already exists
+- If a tool needs to watch for changes (e.g., `waitForNewMessage`), `Ad4mModel.subscribe()` works correctly — it piggybacks on that existing WS stream
+- `findAll()` tool calls are pure query → response, no subscription required
+
+A **stateless per-request** MCP server (Lambda-style, new connection per call) would make `Ad4mModel.subscribe()` pointless — a subscription that fires once and is then GC'd is just `findAll()`. But that design would have been equally broken with the old server-push system: the keepalive would never arrive, the `SurrealSubscribedQuery` entry would linger for 30 seconds, and the agent would have received zero change notifications anyway.
+
+### The old server-push was actually worse for agents
+
+An MCP server implementing "watch for changes" via the old `subscribeSurrealDB()` would have needed to:
+
+1. Call `perspectiveSubscribeSurrealQuery` mutation and store the `subscriptionId`
+2. Open a `perspectiveQuerySubscription` WebSocket stream to receive push updates
+3. Send `perspectiveKeepAliveSurrealQuery` every 30 seconds or lose the subscription
+4. Explicitly call `perspectiveDisposeSurrealQuerySubscription` on cleanup
+
+That's four separate concerns, a persistent timer, and a resource leak risk if any step fails. The client-side approach needs none of it — attaching a listener and calling `unsubscribe()` is the entire API.
+
+### If the MCP server is stateless (HTTP-only)
+
+If the MCP server is genuinely stateless and has no persistent connection to the executor, the correct pattern for agents is **polling** — the agent re-calls the query tool whenever it needs fresh data. This is a deliberate choice that matches how LLM agents actually work in practice: an agent re-queries between reasoning steps, not via a background push stream.
+
+The "HTTP-only / no subscriptions" limitation row in the summary table below applies equally to a stateless MCP server. The solution remains the same: SurrealDB native `LIVE SELECT` if a server-push path is ever needed for stateless HTTP clients.
+
+---
+
 ## Prolog Subscriptions (`subscribeInfer`) — Why They Stay Server-Side
 
 ### Are Prolog subscriptions still needed?
@@ -256,15 +302,16 @@ The server-push model for Prolog is _architecturally motivated_, not just legacy
 
 ## Summary
 
-| Property                                    | Old server-push                        | New client-side                        |
-| ------------------------------------------- | -------------------------------------- | -------------------------------------- |
-| Server state per subscription               | ✅ HashMap entry + keepalive timer     | ❌ none                                |
-| Keepalive required                          | ✅ every 30s                           | ❌ not needed                          |
-| Cleanup loop on server                      | ✅ ~150 lines Rust                     | ❌ deleted                             |
-| Extra round-trip per update                 | ✅ link event → server re-query → push | ❌ client re-queries directly          |
-| IncludeMap hydration                        | ❌ server only ran flat query          | ✅ full findAll() with includes        |
-| Shared registry (N components → 1 listener) | ❌ N server subscriptions              | ✅ 1 shared listener                   |
-| Debounce                                    | ❌ not supported                       | ✅ configurable                        |
-| Predicate relevance filtering               | ❌ re-queries on every link change     | ✅ skips irrelevant predicates         |
-| Multi-user node compatible                  | ✅                                     | ✅ (inherits WS-level DID filter)      |
-| HTTP-only compatible (future)               | ✅                                     | ❌ (SurrealDB LIVE SELECT when needed) |
+| Property                                    | Old server-push                        | New client-side                                                               |
+| ------------------------------------------- | -------------------------------------- | ----------------------------------------------------------------------------- |
+| Server state per subscription               | ✅ HashMap entry + keepalive timer     | ❌ none                                                                       |
+| Keepalive required                          | ✅ every 30s                           | ❌ not needed                                                                 |
+| Cleanup loop on server                      | ✅ ~150 lines Rust                     | ❌ deleted                                                                    |
+| Extra round-trip per update                 | ✅ link event → server re-query → push | ❌ client re-queries directly                                                 |
+| IncludeMap hydration                        | ❌ server only ran flat query          | ✅ full findAll() with includes                                               |
+| Shared registry (N components → 1 listener) | ❌ N server subscriptions              | ✅ 1 shared listener                                                          |
+| Debounce                                    | ❌ not supported                       | ✅ configurable                                                               |
+| Predicate relevance filtering               | ❌ re-queries on every link change     | ✅ skips irrelevant predicates                                                |
+| Multi-user node compatible                  | ✅                                     | ✅ (inherits WS-level DID filter)                                             |
+| HTTP-only compatible (future)               | ✅                                     | ❌ (SurrealDB LIVE SELECT when needed)                                        |
+| MCP / AI agent compatible                   | ⚠️ keepalive burden, 4-step lifecycle  | ✅ `findAll()` is plain query; `subscribe()` works in long-running MCP server |
