@@ -1,7 +1,7 @@
 {
   "name": "@coasys/ad4m-waker",
-  "version": "0.2.0",
-  "description": "AD4M Waker — watches perspectives for link changes and wakes OpenClaw agents",
+  "version": "0.3.0",
+  "description": "AD4M Waker — watches perspectives via subscribeSurrealDB and wakes OpenClaw agents",
   "main": "ad4m-waker.js",
   "bin": {
     "ad4m-waker": "./ad4m-waker.js"
@@ -11,6 +11,10 @@
     "test": "node ad4m-waker.test.js"
   },
   "dependencies": {
+    "@apollo/client": "^3.9.0",
+    "@coasys/ad4m": "^0.8.1",
+    "graphql": "^15.7.2",
+    "graphql-ws": "^5.14.0",
     "ws": "^8.16.0"
   },
   "engines": {
