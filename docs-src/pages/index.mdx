@@ -159,9 +159,9 @@ By rooting adaptability in the language-language, AD4M ensures its spanning laye
 
 
 ## Perspectives and Neighbourhoods
-The local AD4M node stores, manages and gives access to an arbitrary number of Perspectives-subjective knowledge graphs of RDF triples.
+The local AD4M node stores, manages and provides access to an arbitrary number of Perspectives-subjective knowledge graphs of RDF triples.
 Each Perspective is similar to a Solid Pod, in that it's a (private) collection of semantic associations.
-The main difference to semantic web style graphs is that each triple (called a `Link` in AD4M) is an Expression and thus has a cryptographic provenance.
+The main difference to semantic-web-style graphs is that each triple (called a `Link` in AD4M) is an Expression and thus has a cryptographic provenance.
 These triples, like `<subject> <predicate> <object>`, store data such as `<agent123> <posted> <QmXyz123://post456>`.
 
 Agents share these local graph databases in a collaberative way with other AD4M agents via Neighbourhoods, app-independent social contexts that act as shared,
@@ -289,7 +289,7 @@ class Todo extends Ad4mModel {
 
     @Collection({
         through: "flux://entry_type",
-        where: { condition: 'triple(Target, "flux://has_reaction", "flux://thumbsup")' }
+        where: { prologCondition: 'triple(Target, "flux://has_reaction", "flux://thumbsup")' }
     })
     likedMessages: string[] = [];
 
