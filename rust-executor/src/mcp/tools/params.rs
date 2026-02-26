@@ -368,3 +368,19 @@ pub struct SetAgentProfilePictureParams {
     /// Image MIME type (e.g. "image/png", "image/jpeg"). Defaults to "image/png"
     pub mime_type: Option<String>,
 }
+
+/// Parameters for getting an agent's public perspective (raw links)
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GetAgentPublicPerspectiveParams {
+    /// Agent DID to look up. If empty, returns your own public perspective.
+    pub did: Option<String>,
+}
+
+/// Parameters for setting the agent's public perspective (raw links)
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SetAgentPublicPerspectiveParams {
+    /// JSON array of links to set as the public perspective.
+    /// Each link: {"source": "...", "predicate": "...", "target": "..."}
+    /// WARNING: This replaces the entire public perspective — include ALL links you want to keep.
+    pub links_json: String,
+}

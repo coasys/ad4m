@@ -2095,6 +2095,76 @@ impl Ad4mMcpHandler {
     }
 
     // ========================================================================
+    // GENERIC AGENT PUBLIC PERSPECTIVE TOOLS
+    // ========================================================================
+
+    /// Get an agent's public perspective as raw links
+    #[tool(
+        description = "Get an agent's public perspective — the set of links they publish publicly via their DID. Contains profile info, capabilities, and any other public statements. Pass a DID to look up another agent, or omit to get your own. Returns a JSON array of links."
+    )]
+    async fn get_agent_public_perspective(
+        &self,
+        params: Parameters<GetAgentPublicPerspectiveParams>,
+    ) -> String {
+        let _agent_context = self.get_agent_context_for_read().await;
+
+        let mut js = self.context.js_handle.clone();
+
+        let js_code = if let Some(did) = &params.0.did {
+            format!(
+                "JSON.stringify(await core.callResolver(\"Query\", \"agentByDID\", {{ did: \"{}\" }}))",
+                did
+            )
+        } else {
+            "JSON.stringify(await core.callResolver(\"Query\", \"agent\", {}))".to_string()
+        };
+
+        match js.execute(js_code).await {
+            Ok(result) => result,
+            Err(e) => {
+                json!({"error": format!("Failed to get agent perspective: {}", e)}).to_string()
+            }
+        }
+    }
+
+    /// Set the agent's public perspective from raw links
+    #[tool(
+        description = "Set the current agent's public perspective — replaces ALL public links with the provided array. This is the low-level API; use set_agent_profile for structured profile updates. WARNING: This replaces the entire perspective, so include all links you want to keep. Format: [{\"source\": \"...\", \"predicate\": \"...\", \"target\": \"...\"}]."
+    )]
+    async fn set_agent_public_perspective(
+        &self,
+        params: Parameters<SetAgentPublicPerspectiveParams>,
+    ) -> String {
+        let _agent_context = match self.get_agent_context().await {
+            Ok(ctx) => ctx,
+            Err(e) => return format!("Authentication error: {}", e),
+        };
+
+        // Parse the links JSON
+        let links: Vec<serde_json::Value> = match serde_json::from_str(&params.0.links_json) {
+            Ok(l) => l,
+            Err(e) => return json!({"error": format!("Invalid links JSON: {}", e)}).to_string(),
+        };
+
+        // Convert to the format expected by agentUpdatePublicPerspective
+        let perspective = json!({ "links": links });
+
+        let mut js = self.context.js_handle.clone();
+
+        let js_code = format!(
+            "JSON.stringify(await core.callResolver(\"Mutation\", \"agentUpdatePublicPerspective\", {{ perspective: {} }}))",
+            perspective
+        );
+
+        match js.execute(js_code).await {
+            Ok(result) => result,
+            Err(e) => {
+                json!({"error": format!("Failed to update agent perspective: {}", e)}).to_string()
+            }
+        }
+    }
+
+    // ========================================================================
     // MODEL SUBSCRIPTION TOOLS
     // ========================================================================
 
