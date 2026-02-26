@@ -120,7 +120,7 @@ importers:
   ad4m-hooks/react:
     dependencies:
       '@coasys/ad4m':
-        specifier: workspace:0.12.0-rc1
+        specifier: workspace:0.12.0-rc1-dev.1
         version: link:../../core
       '@coasys/hooks-helpers':
         specifier: workspace:*
@@ -141,7 +141,7 @@ importers:
   ad4m-hooks/vue:
     dependencies:
       '@coasys/ad4m':
-        specifier: workspace:0.12.0-rc1
+        specifier: workspace:0.12.0-rc1-dev.1
         version: link:../../core
       '@coasys/hooks-helpers':
         specifier: workspace:*
@@ -660,7 +660,7 @@ importers:
         specifier: 3.7.10
         version: 3.7.10(graphql-ws@5.12.0(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
       '@coasys/ad4m':
-        specifier: workspace:0.12.0-rc1
+        specifier: workspace:0.12.0-rc1-dev.1
         version: link:../core
       '@types/node':
         specifier: ^16.11.11
@@ -19633,6 +19633,10 @@ snapshots:
     dependencies:
       acorn: 8.11.3
 
+  acorn-jsx@5.3.2(acorn@8.15.0):
+    dependencies:
+      acorn: 8.15.0
+
   acorn-node@1.8.2:
     dependencies:
       acorn: 7.4.1
@@ -22813,8 +22817,8 @@ snapshots:
 
   espree@9.6.1:
     dependencies:
-      acorn: 8.11.3
-      acorn-jsx: 5.3.2(acorn@8.11.3)
+      acorn: 8.15.0
+      acorn-jsx: 5.3.2(acorn@8.15.0)
       eslint-visitor-keys: 3.4.3
 
   esprima@1.2.2: {}
