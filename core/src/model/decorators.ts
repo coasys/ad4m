@@ -282,6 +282,11 @@ export function HasMany(
   const relatedModel: (() => any) | undefined =
     typeof relatedModelOrOpts === "function" ? relatedModelOrOpts : undefined;
   return function <T>(target: T, key: keyof T) {
+    if (!resolvedOpts?.through) {
+      throw new Error(
+        `@HasMany on "${String(key)}" requires a "through" predicate in RelationOptions`,
+      );
+    }
     const _hasManyExisting =
       relationRegistry.get((target as any).constructor) ?? {};
     relationRegistry.set((target as any).constructor, {
@@ -311,6 +316,11 @@ export function HasOne(
   const relatedModel: (() => any) | undefined =
     typeof relatedModelOrOpts === "function" ? relatedModelOrOpts : undefined;
   return function <T>(target: T, key: keyof T) {
+    if (!resolvedOpts?.through) {
+      throw new Error(
+        `@HasOne on "${String(key)}" requires a "through" predicate in RelationOptions`,
+      );
+    }
     const _hasOneExisting =
       relationRegistry.get((target as any).constructor) ?? {};
     relationRegistry.set((target as any).constructor, {
@@ -334,6 +344,11 @@ export function HasOne(
 
 export function BelongsToOne(relatedModel: () => any, opts: RelationOptions) {
   return function <T>(target: T, key: keyof T) {
+    if (!opts?.through) {
+      throw new Error(
+        `@BelongsToOne on "${String(key)}" requires a "through" predicate in RelationOptions`,
+      );
+    }
     const _b2oExisting =
       relationRegistry.get((target as any).constructor) ?? {};
     relationRegistry.set((target as any).constructor, {
@@ -352,6 +367,11 @@ export function BelongsToOne(relatedModel: () => any, opts: RelationOptions) {
 
 export function BelongsToMany(relatedModel: () => any, opts: RelationOptions) {
   return function <T>(target: T, key: keyof T) {
+    if (!opts?.through) {
+      throw new Error(
+        `@BelongsToMany on "${String(key)}" requires a "through" predicate in RelationOptions`,
+      );
+    }
     const _b2mExisting =
       relationRegistry.get((target as any).constructor) ?? {};
     relationRegistry.set((target as any).constructor, {
