@@ -69,11 +69,12 @@ function injectLangAliasHashes() {
 
 async function publish() {
     // Pre-clean: kill any orphaned executor from a previous CI job that may be
-    // squatting on our ports. self-hosted runners reuse workdirs between jobs
-    // and don't clean up automatically.
+    // squatting on our ports. Self-hosted runners reuse workdirs between jobs
+    // and don't clean up automatically. Use TCP:LISTEN so we only kill the
+    // server (executor), not any other process with a connection on those ports.
     console.log(`Pre-cleaning ports ${gqlPort}/${hcAdminPort}/${hcAppPort} before starting executor...`);
     for (const port of [gqlPort, hcAdminPort, hcAppPort]) {
-        try { execSync(`lsof -ti:${port} | xargs -r kill -9`, { stdio: 'ignore' }); } catch(e) {}
+        try { execSync(`lsof -ti TCP:${port} -s TCP:LISTEN | xargs -r kill -9`, { stdio: 'ignore' }); } catch(e) {}
     }
     await sleep(500);
 
@@ -108,14 +109,15 @@ async function publish() {
     injectSystemLanguages()
     injectLangAliasHashes();
 
-    // Kill the executor by port, not by process object.
+    // Kill the executor by port (LISTEN-state only), not by process object.
     // exec() wraps the command in a shell; executorProcess.kill() only kills
     // the shell — the actual ad4m-executor (grandchild) survives and becomes
     // an orphan that blocks the port in future CI runs.
-    // Port-based kill hits the real process directly.
+    // IMPORTANT: use TCP:LISTEN filter so we only kill the listening process
+    // (the executor), NOT this node process which has a connection TO the port.
     console.log(`Killing executor on ports ${gqlPort}/${hcAdminPort}/${hcAppPort}...`);
     for (const port of [gqlPort, hcAdminPort, hcAppPort]) {
-        try { execSync(`lsof -ti:${port} | xargs -r kill -9`, { stdio: 'ignore' }); } catch(e) {}
+        try { execSync(`lsof -ti TCP:${port} -s TCP:LISTEN | xargs -r kill -9`, { stdio: 'ignore' }); } catch(e) {}
     }
     await sleep(1000);
 
