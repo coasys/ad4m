@@ -446,7 +446,7 @@ impl Ad4mMcpHandler {
 
     /// Get all data (properties) for a specific subject instance
     #[tool(
-        description = "Get all data (properties and values) for a specific subject instance. Returns the complete state of the model instance as a JSON object with property names and values."
+        description = "Get all data (properties and values) for a specific subject instance. Returns the complete state of the model instance as a JSON object with property names and values. Example: get_subject_data(perspective_id='abc-123', class_name='Message', expression_address='literal://string:xyz') returns {body: 'Hello', author: 'did:key:...', timestamp: '2026-01-01'}."
     )]
     async fn get_subject_data(&self, params: Parameters<GetSubjectDataParams>) -> String {
         let p = &params.0;
@@ -565,7 +565,7 @@ impl Ad4mMcpHandler {
 
     /// Create a new subject instance
     #[tool(
-        description = "Create a new subject instance (model object) with optional initial property values."
+        description = "Create a new subject instance (model object) with optional initial property values. Example: create_subject(perspective_id='abc-123', class_name='Channel', initial_values='{\"name\": \"general\"}') creates a Channel with the given name. Returns the new instance's expression address."
     )]
     async fn create_subject(&self, params: Parameters<CreateSubjectParams>) -> String {
         let p = &params.0;
@@ -1102,7 +1102,7 @@ impl Ad4mMcpHandler {
 
     /// Set a property value on a subject instance (like `instance.name = "value"` in JS Ad4mModel)
     #[tool(
-        description = "Set a property on a subject instance. Works at the model level — you provide the property name (e.g. 'name', 'body') and the tool handles the underlying link operations. No need to know predicates or link structure."
+        description = "Set a property on a subject instance. Works at the model level — you provide the property name (e.g. 'name', 'body') and the tool handles the underlying link operations. No need to know predicates or link structure. Example: set_subject_property(perspective_id='abc-123', class_name='Channel', expression_address='literal://string:xyz', property_name='name', value='general')."
     )]
     async fn set_subject_property(&self, params: Parameters<SetSubjectPropertyParams>) -> String {
         let p = &params.0;
@@ -1585,7 +1585,7 @@ impl Ad4mMcpHandler {
 
     /// Request a capability token (local connect flow - step 1)
     #[tool(
-        description = "Request a capability token (step 1/2 of local auth flow). This is the primary way to authenticate with a local/single-user AD4M executor. Returns request_id and code — pass both to generate_jwt to get a JWT token. For multi-user executors, use login_email or signup instead."
+        description = "Request a capability token (step 1/2 of local auth flow). This is the primary way to authenticate with a local/single-user AD4M executor. Returns request_id and code — pass both to generate_jwt to get a JWT token. For multi-user executors, use login_email or signup instead. Note: when using the ad4m-executor CLI, the verification code is logged to stdout."
     )]
     async fn request_capability(&self, params: Parameters<RequestCapabilityParams>) -> String {
         let p = &params.0;
