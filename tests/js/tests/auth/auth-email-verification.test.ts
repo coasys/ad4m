@@ -83,7 +83,11 @@ describe("Email Verification with Mock Service", () => {
 
   after(async () => {
     if (adminAd4mClient) {
-      await adminAd4mClient.runtime.emailTestModeDisable();
+      try {
+        await adminAd4mClient.runtime.emailTestModeDisable();
+      } catch (e) {
+        console.error("Failed to disable email test mode:", e);
+      }
     }
 
     await waitForExit(executorProcess);
