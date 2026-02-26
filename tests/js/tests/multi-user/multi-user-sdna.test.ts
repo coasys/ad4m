@@ -13,7 +13,6 @@ class TestSubject {
   @Property({
     through: "test://name",
     writable: true,
-    resolveLanguage: "literal",
   })
   name: string = "";
 }

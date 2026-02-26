@@ -336,13 +336,13 @@ describe("Ad4mModel — Query API", function () {
       @Flag({ through: "ad4m://type", value: "ad4m://edge-comment" })
       type!: string;
 
-      @Property({ through: "comment://text", resolveLanguage: "literal" })
+      @Property({ through: "comment://text" })
       text: string = "";
     }
 
     @Model({ name: "EdgeArticle" })
     class EdgeArticle extends Ad4mModel {
-      @Property({ through: "article://title", resolveLanguage: "literal" })
+      @Property({ through: "article://title" })
       title: string = "";
 
       @HasMany(() => EdgeComment, { through: "article://has_comment" })

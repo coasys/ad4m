@@ -111,8 +111,11 @@ export function buildGraphTraversalWhereClause(
       if (!propMeta) continue;
 
       const predicate = escapeSurrealString(propMeta.predicate);
+      // Scalar properties (resolveLanguage === "literal" or unset) store values as
+      // literal:// URIs — use fn::parse_literal to unwrap before comparing.
+      // Only non-literal custom languages (e.g. IPFS) store raw expression URLs.
       const targetField =
-        propMeta.resolveLanguage === "literal"
+        !propMeta.resolveLanguage || propMeta.resolveLanguage === "literal"
           ? "fn::parse_literal(out.uri)"
           : "out.uri";
 

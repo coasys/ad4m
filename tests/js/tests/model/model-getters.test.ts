@@ -33,10 +33,7 @@ describe("Ad4mModel — Custom Getters", function () {
 
   @Model({ name: "BlogPost" })
   class BlogPost extends Ad4mModel {
-    @Property({
-      through: "blog://title",
-      resolveLanguage: "literal",
-    })
+    @Property({ through: "blog://title" })
     title: string = "";
 
     @Property({

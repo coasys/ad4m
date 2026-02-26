@@ -14,7 +14,6 @@ import { Ad4mClient, PerspectiveProxy, Ad4mModel } from "@coasys/ad4m";
 import { startAgent } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 
-
 describe("Ad4mModel.fromJSONSchema", () => {
   let ownStop: (() => Promise<void>) | null = null;
   let ad4m: Ad4mClient;
@@ -56,7 +55,6 @@ describe("Ad4mModel.fromJSONSchema", () => {
       const PersonClass = Ad4mModel.fromJSONSchema(schema, {
         name: "Person",
         namespace: "person://",
-        resolveLanguage: "literal",
       }) as any;
 
       expect(PersonClass).to.be.a("function");
@@ -125,7 +123,6 @@ describe("Ad4mModel.fromJSONSchema", () => {
           name: "foaf://name",
           email: "foaf://mbox",
         },
-        resolveLanguage: "literal",
       }) as any;
       expect(ContactClass.className).to.equal("Contact");
 
@@ -181,7 +178,6 @@ describe("Ad4mModel.fromJSONSchema", () => {
             type: "string",
             "x-ad4m": {
               through: "product://title",
-              resolveLanguage: "literal",
             },
           },
           price: {
@@ -192,9 +188,7 @@ describe("Ad4mModel.fromJSONSchema", () => {
           },
           description: {
             type: "string",
-            "x-ad4m": {
-              resolveLanguage: "literal",
-            },
+            "x-ad4m": {},
           },
         },
         required: ["name"],
@@ -275,7 +269,6 @@ describe("Ad4mModel.fromJSONSchema", () => {
 
       const BookClass = Ad4mModel.fromJSONSchema(schema, {
         name: "Book",
-        resolveLanguage: "literal",
       }) as any;
       expect(BookClass.className).to.equal("Book");
 
@@ -445,7 +438,6 @@ describe("Ad4mModel.fromJSONSchema", () => {
 
       const BlogPostClass = Ad4mModel.fromJSONSchema(schema, {
         name: "BlogPost",
-        resolveLanguage: "literal",
       }) as any;
       expect(BlogPostClass.className).to.equal("BlogPost");
 
@@ -556,7 +548,6 @@ describe("Ad4mModel.fromJSONSchema", () => {
       const PersonHolonClass = Ad4mModel.fromJSONSchema(holonSchema, {
         name: "PersonHolon",
         namespace: "holon://person/",
-        resolveLanguage: "literal",
       }) as any;
 
       await perspective!.ensureSDNASubjectClass(PersonHolonClass);

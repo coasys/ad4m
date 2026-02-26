@@ -328,12 +328,8 @@ export function createModelFromJSONSchema(
           );
         }
 
-        if (
-          (resolveLanguage === undefined || resolveLanguage === null) &&
-          isNumericType(propertySchema)
-        ) {
-          resolveLanguage = "literal";
-        }
+        // No auto-assignment for numeric types — resolveLanguage === undefined
+        // is now the implicit 'literal' default throughout the model layer.
 
         if (isRequired && !initial) {
           if (isObjectType(propertySchema)) {

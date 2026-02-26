@@ -14,7 +14,6 @@ import {
 import { startAgent } from "../../helpers/executor";
 import type { AgentHandle } from "../../helpers/executor";
 
-
 describe("SDNA", () => {
   let ad4m: Ad4mClient | null = null;
   let agent: AgentHandle | null = null;
@@ -108,7 +107,6 @@ describe("SDNA", () => {
         @Property({
           through: "todo://has_title",
           writable: true,
-          resolveLanguage: "literal",
         })
         title?: string;
 
@@ -160,7 +158,7 @@ describe("SDNA", () => {
           (p: any) => p.path === "todo://has_title",
         );
         expect(titleProp, "title property").to.exist;
-        expect(titleProp!.resolveLanguage).to.equal("literal");
+        expect(titleProp!.resolveLanguage).to.equal("literal"); // auto-injected into SHACL shape — users don't write it in @Property
 
         // --- Relations (formerly collections – HasMany generates adder/remover, no maxCount:1) ---
         const commentsColl = shape.properties.find(
@@ -306,8 +304,8 @@ describe("SDNA", () => {
           }),
         );
         expect(links.length).to.equal(1);
-        let literal = Literal.fromUrl(links[0].data.target).get();
-        expect(literal.data).to.equal("new title");
+        let literalValue = Literal.fromUrl(links[0].data.target).get();
+        expect(literalValue).to.equal("new title");
       });
 
       it("can easily be initialized with PerspectiveProxy.ensureSDNASubjectClass()", async () => {

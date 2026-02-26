@@ -88,7 +88,12 @@ export interface PropertyOptions {
   writable?: boolean;
 
   /**
-   * The language used to store the property. Can be the default `Literal` Language or a custom language address.
+   * The language used to resolve the stored expression into a JS value.
+   *
+   * Omitting this (the common case) is equivalent to `"literal"` — scalar values
+   * (string / number / boolean) are encoded as `literal://` URIs automatically.
+   * Only specify this when you need a non-literal language (e.g. a custom IPFS
+   * language address) or want to be explicit for documentation purposes.
    */
   resolveLanguage?: string;
 
@@ -503,30 +508,30 @@ export function Model(opts: ModelConfig) {
         };
 
         // Auto-derive a constructor placeholder for writable non-flag properties
-        // that don't have an explicit initial. The specific placeholder value
-        // doesn't matter — createSubject's initialValues mechanism overwrites it
-        // with the actual instance field value via the setter actions. We just
-        // need some valid URI so the predicate appears in the constructor actions.
+        // that don't have an explicit initial. Only do this when the prototype
+        // has a defined default value — optional fields (title?: string) have
+        // no prototype default (undefined), and we must NOT write an empty
+        // literal link for them. The specific placeholder value doesn't matter
+        // for fields with an actual default — createSubject's initialValues
+        // mechanism overwrites it with the real value via the setter actions.
+        const protoDefault = obj[propName];
         const effectiveInitial: string | undefined =
           propMeta.initial ??
-          (propMeta.writable && !propMeta.flag
+          (propMeta.writable && !propMeta.flag && protoDefault !== undefined
             ? "literal://string:"
             : undefined);
 
-        // Determine datatype from TypeScript default value or resolveLanguage
-        if (propMeta.resolveLanguage === "literal") {
-          // If it resolves via literal language, it's a string
+        // Determine datatype from the TypeScript default value type.
+        // resolveLanguage: "literal" is now the implicit default — literal://
+        // URIs can carry any type (string/number/boolean), so always infer
+        // from the prototype's default value rather than forcing xsd://string.
+        const initialType = typeof obj[propName];
+        if (initialType === "number") {
+          propShape.datatype = "xsd://integer";
+        } else if (initialType === "boolean") {
+          propShape.datatype = "xsd://boolean";
+        } else if (initialType === "string") {
           propShape.datatype = "xsd://string";
-        } else {
-          // Try to infer from the prototype's default value type
-          const initialType = typeof obj[propName];
-          if (initialType === "number") {
-            propShape.datatype = "xsd://integer";
-          } else if (initialType === "boolean") {
-            propShape.datatype = "xsd://boolean";
-          } else if (initialType === "string") {
-            propShape.datatype = "xsd://string";
-          }
         }
 
         // Cardinality constraints
@@ -556,6 +561,12 @@ export function Model(opts: ModelConfig) {
 
         if (propMeta.resolveLanguage) {
           propShape.resolveLanguage = propMeta.resolveLanguage;
+        } else if (!propMeta.flag) {
+          // resolveLanguage: "literal" is the implicit default for scalar properties.
+          // The Rust executor requires this to be explicit in the SHACL shape to
+          // configure fn::parse_literal correctly in SurrealDB. The user doesn't
+          // need to write it in their @Property decorator, but the shape must have it.
+          propShape.resolveLanguage = "literal";
         }
 
         // === Extract Setter Actions (same logic as generateSDNA) ===

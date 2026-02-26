@@ -47,12 +47,7 @@ export class TestTag extends Ad4mModel {
   @Flag({ through: "test://tag_type", value: "test://tag" })
   type = "test://tag";
 
-  @Property({
-    through: "test://label",
-    required: true,
-    writable: true,
-    resolveLanguage: "literal",
-  })
+  @Property({ through: "test://label", required: true, writable: true })
   label: string = "";
 
   /** Reverse traversal — all TestPosts that have a test://has_tag link pointing to this tag */
@@ -67,12 +62,7 @@ export class TestPost extends Ad4mModel {
   @Flag({ through: "test://post_type", value: "test://post" })
   type = "test://post";
 
-  @Property({
-    through: "test://title",
-    required: true,
-    writable: true,
-    resolveLanguage: "literal",
-  })
+  @Property({ through: "test://title", required: true, writable: true })
   title: string = "";
 
   @Property({ through: "test://body", writable: true })
