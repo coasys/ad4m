@@ -555,40 +555,34 @@ jobs:
           cd core
           sed -i 's/"private": true/"private": false/' package.json
 
-      - name: Publish core
-        run: cd core && npm publish --access public --tag ${{ env.NPM_TAG }}
+      - name: Publish all npm packages
+        run: |
+          # Write auth token via both methods to ensure npm/pnpm picks it up
+          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+          npm config set //registry.npmjs.org/:_authToken "${NPM_TOKEN}"
+          echo "npm version: $(npm --version), node: $(node --version)"
+          echo "Auth configured: $(npm config get //registry.npmjs.org/:_authToken | cut -c1-8)..."
+          TAG="${{ env.NPM_TAG }}"
+          echo "Publishing with tag: $TAG"
+          FAILED=0
+          for PKG in core connect ad4m-hooks/helpers ad4m-hooks/react ad4m-hooks/vue executor test-runner; do
+            echo "=== Publishing $PKG ==="
+            OUTPUT=$(cd "$PKG" && npm publish --access public --tag "$TAG" --registry https://registry.npmjs.org 2>&1); EXIT=$?
+            echo "$OUTPUT"
+            if [ $EXIT -ne 0 ]; then
+              if echo "$OUTPUT" | grep -qE "previously published|cannot publish over|already exists|E403.*cannot publish"; then
+                echo "SKIP: $PKG already published"
+              else
+                echo "FAIL: $PKG (exit $EXIT)"
+                FAILED=1
+              fi
+            else
+              echo "OK: $PKG published"
+            fi
+          done
+          exit $FAILED
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.COASYS_NPM_TOKEN }}
-
-      - name: Publish connect
-        run: cd connect && npm publish --access public --tag ${{ env.NPM_TAG }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.COASYS_NPM_TOKEN }}
-
-      - name: Publish ad4m hook helpers
-        run: cd ad4m-hooks/helpers && npm publish --access public --tag ${{ env.NPM_TAG }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.COASYS_NPM_TOKEN }}
-
-      - name: Publish ad4m react hooks
-        run: cd ad4m-hooks/react && npm publish --access public --tag ${{ env.NPM_TAG }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.COASYS_NPM_TOKEN }}
-
-      - name: Publish ad4m vue hooks
-        run: cd ad4m-hooks/vue && npm publish --access public --tag ${{ env.NPM_TAG }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.COASYS_NPM_TOKEN }}
-
-      - name: Publish executor
-        run: cd executor && npm publish --access public --tag ${{ env.NPM_TAG }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.COASYS_NPM_TOKEN }}
-
-      - name: Publish Test runner
-        run: cd test-runner && npm publish --access public --tag ${{ env.NPM_TAG }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.COASYS_NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.COASYS_NPM_TOKEN }}
 
   # ============================================================================
   # Crates Publish - Uses Docker container
@@ -610,4 +604,9 @@ jobs:
       - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
       - name: Publish ad4m-client crate
         working-directory: rust-client
-        run: cargo publish --allow-dirty
+        run: |
+          OUTPUT=$(cargo publish --allow-dirty 2>&1); EXIT=$?
+          echo "$OUTPUT"
+          if [ $EXIT -ne 0 ]; then
+            echo "$OUTPUT" | grep -q "already exists" && echo "Already published — OK" || exit $EXIT
+          fi
