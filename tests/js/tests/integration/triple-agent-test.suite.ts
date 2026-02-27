@@ -101,19 +101,31 @@ export default function tripleAgentTests(testContext: TestContext) {
         bobP1!.uuid,
         new LinkQuery({ source: "ad4m://root" }),
       );
-      let tries = 1;
+      // Increase retries and sleep for CI robustness
+      const MAX_RETRIES = process.env.CI ? 80 : 40;
+      const SLEEP_MS = process.env.CI ? 4000 : 3000;
 
-      while (bobLinks.length < 10 && tries < 40) {
-        console.log("Bob retrying getting links...");
-        await sleep(1000);
+      let tries = 1;
+      while (bobLinks.length < 10 && tries < MAX_RETRIES) {
+        console.log(
+          `Bob retrying getting links (attempt ${tries}/${MAX_RETRIES}, have ${bobLinks.length}/10)...`,
+        );
+        await sleep(SLEEP_MS);
         bobLinks = await bob.perspective.queryLinks(
           bobP1!.uuid,
           new LinkQuery({ source: "ad4m://root" }),
         );
         tries++;
       }
-
-      expect(bobLinks.length).to.be.equal(10);
+      if (bobLinks.length !== 10) {
+        console.error(
+          `Bob final: got ${bobLinks.length}/10 links after ${tries} tries`,
+        );
+      }
+      expect(bobLinks.length).to.be.equal(
+        10,
+        `Bob saw ${bobLinks.length}/10 links after ${tries} tries`,
+      );
 
       await bob.perspective.addLink(bobP1.uuid, {
         source: "ad4m://root",
@@ -169,20 +181,26 @@ export default function tripleAgentTests(testContext: TestContext) {
         new LinkQuery({ source: "ad4m://root" }),
       );
       let jimRetries = 1;
-
-      while (jimLinks.length < 20 && jimRetries < 40) {
+      while (jimLinks.length < 20 && jimRetries < MAX_RETRIES) {
         console.log(
-          `Jim retrying getting links (attempt ${jimRetries}/40, have ${jimLinks.length}/20)...`,
+          `Jim retrying getting links (attempt ${jimRetries}/${MAX_RETRIES}, have ${jimLinks.length}/20)...`,
         );
-        await sleep(3000);
+        await sleep(SLEEP_MS);
         jimLinks = await jim.perspective.queryLinks(
           jimP1!.uuid,
           new LinkQuery({ source: "ad4m://root" }),
         );
         jimRetries++;
       }
-
-      expect(jimLinks.length).to.be.equal(20);
+      if (jimLinks.length !== 20) {
+        console.error(
+          `Jim final: got ${jimLinks.length}/20 links after ${jimRetries} tries`,
+        );
+      }
+      expect(jimLinks.length).to.be.equal(
+        20,
+        `Jim saw ${jimLinks.length}/20 links after ${jimRetries} tries`,
+      );
 
       // Refresh routing tables again now that Jim has caught up, so that Jim's
       // phase-3 writes will propagate back to Alice and Bob (Jim was a slow peer
@@ -199,17 +217,26 @@ export default function tripleAgentTests(testContext: TestContext) {
         new LinkQuery({ source: "ad4m://root" }),
       );
       tries = 1;
-      while (aliceLinks.length < 20 && tries < 20) {
+      while (aliceLinks.length < 20 && tries < MAX_RETRIES) {
         console.log(
           `Alice pre-phase3 sync (attempt ${tries}/20, have ${aliceLinks.length}/20)...`,
         );
-        await sleep(3000);
+        await sleep(SLEEP_MS);
         aliceLinks = await alice.perspective.queryLinks(
           aliceP1!.uuid,
           new LinkQuery({ source: "ad4m://root" }),
         );
         tries++;
       }
+      if (aliceLinks.length !== 20) {
+        console.error(
+          `Alice final: got ${aliceLinks.length}/20 links after ${tries} tries`,
+        );
+      }
+      expect(aliceLinks.length).to.be.equal(
+        20,
+        `Alice saw ${aliceLinks.length}/20 links after ${tries} tries`,
+      );
 
       // Verify Bob also sees all 20 links before phase 3 begins.
       bobLinks = await bob.perspective.queryLinks(
@@ -217,17 +244,26 @@ export default function tripleAgentTests(testContext: TestContext) {
         new LinkQuery({ source: "ad4m://root" }),
       );
       tries = 1;
-      while (bobLinks.length < 20 && tries < 20) {
+      while (bobLinks.length < 20 && tries < MAX_RETRIES) {
         console.log(
           `Bob pre-phase3 sync (attempt ${tries}/20, have ${bobLinks.length}/20)...`,
         );
-        await sleep(3000);
+        await sleep(SLEEP_MS);
         bobLinks = await bob.perspective.queryLinks(
           bobP1!.uuid,
           new LinkQuery({ source: "ad4m://root" }),
         );
         tries++;
       }
+      if (bobLinks.length !== 20) {
+        console.error(
+          `Bob final: got ${bobLinks.length}/20 links after ${tries} tries`,
+        );
+      }
+      expect(bobLinks.length).to.be.equal(
+        20,
+        `Bob saw ${bobLinks.length}/20 links after ${tries} tries`,
+      );
 
       //Alice bob and jim all collectively add 10 links and then check can be received by all agents
       await alice.perspective.addLink(aliceP1.uuid, {
@@ -277,59 +313,72 @@ export default function tripleAgentTests(testContext: TestContext) {
       );
       tries = 1;
 
-      while (aliceLinks.length < 30 && tries < 40) {
+      while (aliceLinks.length < 30 && tries < MAX_RETRIES) {
         console.log(
-          `Alice retrying getting links (attempt ${tries}/40, have ${aliceLinks.length}/30)...`,
+          `Alice retrying getting links (attempt ${tries}/${MAX_RETRIES}, have ${aliceLinks.length}/30)...`,
         );
-        await sleep(3000);
+        await sleep(SLEEP_MS);
         aliceLinks = await alice.perspective.queryLinks(
           aliceP1!.uuid,
           new LinkQuery({ source: "ad4m://root" }),
         );
         tries++;
       }
-
-      expect(aliceLinks.length).to.be.equal(30);
-
-      bobLinks = await bob.perspective.queryLinks(
-        bobP1!.uuid,
-        new LinkQuery({ source: "ad4m://root" }),
-      );
-      tries = 1;
-
-      while (bobLinks.length < 30 && tries < 40) {
-        console.log(
-          `Bob retrying getting links (attempt ${tries}/40, have ${bobLinks.length}/30)...`,
+      if (aliceLinks.length !== 30) {
+        console.error(
+          `Alice final: got ${aliceLinks.length}/30 links after ${tries} tries`,
         );
-        await sleep(3000);
+      }
+      expect(aliceLinks.length).to.be.equal(
+        30,
+        `Alice saw ${aliceLinks.length}/30 links after ${tries} tries`,
+      );
+
+      // Bob waits for 30 links
+      tries = 1;
+      while (bobLinks.length < 30 && tries < MAX_RETRIES) {
+        console.log(
+          `Bob retrying getting links (attempt ${tries}/${MAX_RETRIES}, have ${bobLinks.length}/30)...`,
+        );
+        await sleep(SLEEP_MS);
         bobLinks = await bob.perspective.queryLinks(
           bobP1!.uuid,
           new LinkQuery({ source: "ad4m://root" }),
         );
         tries++;
       }
-
-      expect(bobLinks.length).to.be.equal(30);
-
-      jimLinks = await jim.perspective.queryLinks(
-        jimP1!.uuid,
-        new LinkQuery({ source: "ad4m://root" }),
-      );
-      tries = 1;
-
-      while (jimLinks.length < 30 && tries < 40) {
-        console.log(
-          `Jim retrying getting links (attempt ${tries}/40, have ${jimLinks.length}/30)...`,
+      if (bobLinks.length !== 30) {
+        console.error(
+          `Bob final: got ${bobLinks.length}/30 links after ${tries} tries`,
         );
-        await sleep(3000);
+      }
+      expect(bobLinks.length).to.be.equal(
+        30,
+        `Bob saw ${bobLinks.length}/30 links after ${tries} tries`,
+      );
+
+      // Jim waits for 30 links
+      tries = 1;
+      while (jimLinks.length < 30 && tries < MAX_RETRIES) {
+        console.log(
+          `Jim retrying getting links (attempt ${tries}/${MAX_RETRIES}, have ${jimLinks.length}/30)...`,
+        );
+        await sleep(SLEEP_MS);
         jimLinks = await jim.perspective.queryLinks(
           jimP1!.uuid,
           new LinkQuery({ source: "ad4m://root" }),
         );
         tries++;
       }
-
-      expect(jimLinks.length).to.be.equal(30);
+      if (jimLinks.length !== 30) {
+        console.error(
+          `Jim final: got ${jimLinks.length}/30 links after ${tries} tries`,
+        );
+      }
+      expect(jimLinks.length).to.be.equal(
+        30,
+        `Jim saw ${jimLinks.length}/30 links after ${tries} tries`,
+      );
     });
   };
 }
