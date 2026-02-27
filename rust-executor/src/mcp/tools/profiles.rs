@@ -212,7 +212,7 @@ impl Ad4mMcpHandler {
         let mut all_links = preserved_links;
         for (i, (predicate, new_value)) in fields.iter().enumerate() {
             let target = match new_value {
-                Some(v) => format!("literal://string:{}", v),
+                Some(v) => Self::encode_literal(v),
                 None => match current_values.get(*predicate) {
                     Some(existing) => existing.clone(),
                     None => continue,

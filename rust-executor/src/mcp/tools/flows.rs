@@ -139,7 +139,7 @@ impl Ad4mMcpHandler {
             Ok(perspective) => {
                 match perspective
                     .get_links(&LinkQuery {
-                        source: Some(format!("literal://string:{}", p.flow_name)),
+                        source: Some(Self::encode_literal(&p.flow_name)),
                         ..Default::default()
                     })
                     .await
@@ -195,7 +195,7 @@ impl Ad4mMcpHandler {
             Ok(perspective) => {
                 match perspective
                     .get_links(&LinkQuery {
-                        source: Some(format!("literal://string:{}", p.flow_name)),
+                        source: Some(Self::encode_literal(&p.flow_name)),
                         predicate: Some("ad4m://flow_transition".to_string()),
                         ..Default::default()
                     })

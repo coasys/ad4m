@@ -94,25 +94,35 @@ impl Ad4mMcpHandler {
         ];
         for p in properties {
             if !p.is_collection {
-                prop_entries.push((p.name.clone(), format!("{} property value", p.name)));
+                let required_marker = if p.is_required() { " (required)" } else { "" };
+                prop_entries.push((
+                    p.name.clone(),
+                    format!("{}{} ({})", p.name, required_marker, p.type_description()),
+                ));
             }
         }
         let props: Vec<(&str, &str)> = prop_entries
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
-        let prop_names: Vec<&str> = properties
+        let prop_descs: Vec<String> = properties
             .iter()
             .filter(|p| !p.is_collection)
-            .map(|p| p.name.as_str())
+            .map(|p| {
+                if p.is_required() {
+                    format!("{}* ({})", p.name, p.type_description())
+                } else {
+                    format!("{} ({})", p.name, p.type_description())
+                }
+            })
             .collect();
 
         Tool::new(
             format!("{}_create", name_lower),
             format!(
-                "Create a new {} instance. Properties: {}",
+                "Create a new {} instance. Properties: {} (* = required)",
                 class_name,
-                prop_names.join(", ")
+                prop_descs.join(", ")
             ),
             Self::make_tool_schema(props, vec!["perspective_id", "expression_address"]),
         )
@@ -504,7 +514,7 @@ impl Ad4mMcpHandler {
         };
 
         // Reuse get_subject_data logic
-        let name_literal = format!("literal://string:shacl://{}", class_name);
+        let name_literal = Self::encode_literal(&format!("shacl://{}", class_name));
         let shape_links = match perspective
             .get_links(&LinkQuery {
                 source: Some(name_literal),
@@ -660,7 +670,7 @@ impl Ad4mMcpHandler {
             let target = if value_str.starts_with("literal://") || value_str.contains("://") {
                 value_str.clone()
             } else {
-                format!("literal://string:{}", value_str)
+                Self::encode_literal(&value_str)
             };
 
             let link = Link {
@@ -799,7 +809,7 @@ impl Ad4mMcpHandler {
         let target = if value.starts_with("literal://") || value.contains("://") {
             value.clone()
         } else {
-            format!("literal://string:{}", value)
+            Self::encode_literal(&value)
         };
 
         let link = Link {
@@ -911,7 +921,7 @@ impl Ad4mMcpHandler {
         let target = if value.starts_with("literal://") || value.contains("://") {
             value.clone()
         } else {
-            format!("literal://string:{}", value)
+            Self::encode_literal(&value)
         };
 
         let link = Link {
@@ -971,7 +981,7 @@ impl Ad4mMcpHandler {
         let target = if value.starts_with("literal://") || value.contains("://") {
             value.clone()
         } else {
-            format!("literal://string:{}", value)
+            Self::encode_literal(&value)
         };
 
         match perspective

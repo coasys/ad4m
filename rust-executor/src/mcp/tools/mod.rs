@@ -395,9 +395,26 @@ impl Ad4mMcpHandler {
     }
 
     /// Resolve a literal value from a link target URI.
-    /// Delegates to the shared `crate::literal::decode_literal` implementation.
+    /// Delegates to rust-client's `Literal` implementation for proper URL decoding.
     pub(crate) fn resolve_literal_value(target: &str) -> String {
-        crate::literal::decode_literal(target)
+        use ad4m_client::literal::Literal;
+        if let Ok(literal) = Literal::from_url(target.to_string()) {
+            match literal.get() {
+                Ok(value) => value.to_string(),
+                Err(_) => target.to_string(),
+            }
+        } else {
+            target.to_string()
+        }
+    }
+
+    /// Encode a string value as a literal:// URL.
+    /// Uses rust-client's `Literal` for proper URL encoding.
+    pub(crate) fn encode_literal(value: &str) -> String {
+        use ad4m_client::literal::Literal;
+        Literal::from_string(value.to_string())
+            .to_url()
+            .unwrap_or_else(|_| format!("literal://string:{}", value))
     }
 
     /// Escape string for safe use in Prolog queries

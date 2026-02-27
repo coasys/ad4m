@@ -459,7 +459,7 @@ impl Ad4mMcpHandler {
                 let target = if p.value.starts_with("literal://") || p.value.contains("://") {
                     p.value.clone()
                 } else {
-                    crate::literal::encode_literal_string(&p.value)
+                    Self::encode_literal(&p.value)
                 };
 
                 let link = Link {

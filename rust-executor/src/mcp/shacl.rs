@@ -26,6 +26,14 @@ pub struct ShaclProperty {
     pub is_collection: bool,
     /// The predicate URI used in links for this property (from sh://path)
     pub predicate: Option<String>,
+    /// SHACL datatype constraint (e.g., "xsd://string", "xsd://dateTime")
+    pub datatype: Option<String>,
+    /// Minimum cardinality (sh://minCount)
+    pub min_count: Option<u32>,
+    /// Maximum cardinality (sh://maxCount)
+    pub max_count: Option<u32>,
+    /// Node kind (e.g., "sh://IRI", "sh://Literal")
+    pub node_kind: Option<String>,
 }
 
 impl ShaclClass {
@@ -40,6 +48,42 @@ impl ShaclClass {
     /// Get collection properties
     pub fn collection_properties(&self) -> Vec<&ShaclProperty> {
         self.properties.iter().filter(|p| p.is_collection).collect()
+    }
+
+    /// Get required properties (min_count >= 1)
+    pub fn required_properties(&self) -> Vec<&ShaclProperty> {
+        self.properties
+            .iter()
+            .filter(|p| p.min_count.unwrap_or(0) >= 1)
+            .collect()
+    }
+}
+
+impl ShaclProperty {
+    /// Whether this property is required (min_count >= 1)
+    pub fn is_required(&self) -> bool {
+        self.min_count.unwrap_or(0) >= 1
+    }
+
+    /// Human-readable type description for tool documentation
+    pub fn type_description(&self) -> String {
+        let base = if let Some(ref dt) = self.datatype {
+            dt.replace("xsd://", "").replace("xsd:", "")
+        } else if let Some(ref nk) = self.node_kind {
+            if nk.contains("IRI") {
+                "URI reference".to_string()
+            } else {
+                "value".to_string()
+            }
+        } else {
+            "string".to_string()
+        };
+
+        if self.is_collection {
+            format!("{} (collection)", base)
+        } else {
+            base
+        }
     }
 }
 
@@ -91,7 +135,9 @@ pub async fn load_class_properties(
     perspective: &PerspectiveInstance,
     class_name: &str,
 ) -> Vec<ShaclProperty> {
-    let name_literal = format!("literal://string:shacl://{}", class_name);
+    let name_literal = ad4m_client::literal::Literal::from_string(format!("shacl://{}", class_name))
+        .to_url()
+        .unwrap_or_else(|_| format!("literal://string:shacl://{}", class_name));
     let shape_links = match perspective
         .get_links(&LinkQuery {
             source: Some(name_literal),
@@ -155,10 +201,75 @@ pub async fn load_class_properties(
             _ => None,
         };
 
+        // Get datatype constraint (sh://datatype)
+        let datatype = match perspective
+            .get_links(&LinkQuery {
+                source: Some(prop_uri.clone()),
+                predicate: Some("sh://datatype".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) if !links.is_empty() => Some(links[0].data.target.clone()),
+            _ => None,
+        };
+
+        // Get min/max count (sh://minCount, sh://maxCount)
+        let min_count = match perspective
+            .get_links(&LinkQuery {
+                source: Some(prop_uri.clone()),
+                predicate: Some("sh://minCount".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) if !links.is_empty() => {
+                ad4m_client::literal::Literal::from_url(links[0].data.target.clone())
+                    .ok()
+                    .and_then(|l| l.get().ok())
+                    .and_then(|v| v.to_string().parse::<u32>().ok())
+            }
+            _ => None,
+        };
+
+        let max_count = match perspective
+            .get_links(&LinkQuery {
+                source: Some(prop_uri.clone()),
+                predicate: Some("sh://maxCount".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) if !links.is_empty() => {
+                ad4m_client::literal::Literal::from_url(links[0].data.target.clone())
+                    .ok()
+                    .and_then(|l| l.get().ok())
+                    .and_then(|v| v.to_string().parse::<u32>().ok())
+            }
+            _ => None,
+        };
+
+        // Get node kind (sh://nodeKind)
+        let node_kind = match perspective
+            .get_links(&LinkQuery {
+                source: Some(prop_uri.clone()),
+                predicate: Some("sh://nodeKind".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) if !links.is_empty() => Some(links[0].data.target.clone()),
+            _ => None,
+        };
+
         properties.push(ShaclProperty {
             name: prop_name,
             is_collection,
             predicate,
+            datatype,
+            min_count,
+            max_count,
+            node_kind,
         });
     }
 

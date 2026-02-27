@@ -23,10 +23,12 @@ pub struct SubscribeToModelParams {
     /// Parent expression address to scope the subscription (e.g., a channel address).
     /// If provided, only watches for new instances that are children of this parent.
     pub parent_address: Option<String>,
-    /// Entry type URI to filter by (e.g., "flux://has_message").
-    /// Use this instead of hardcoded class-to-type mappings.
-    /// If neither parent_address nor entry_type is provided, watches all new links.
-    pub entry_type: Option<String>,
+    /// Predicate URI to filter by (e.g., "ad4m://has_child", "flux://entry_type").
+    /// If neither parent_address nor predicate is provided, watches all new links.
+    pub predicate: Option<String>,
+    /// Target value to match when filtering by predicate.
+    /// Used together with `predicate` to narrow the subscription scope.
+    pub target_value: Option<String>,
 }
 
 // ============================================================================
@@ -52,14 +54,21 @@ impl Ad4mMcpHandler {
 
         let query = if let Some(ref parent) = p.parent_address {
             format!(
-                "SELECT * FROM link WHERE source = 'literal://string:{}' AND predicate = 'ad4m://has_child'",
-                parent
+                "SELECT * FROM link WHERE source = '{}' AND predicate = 'ad4m://has_child'",
+                Self::encode_literal(parent)
             )
-        } else if let Some(ref entry_type) = p.entry_type {
-            format!(
-                "SELECT * FROM link WHERE predicate = 'flux://entry_type' AND target = '{}'",
-                entry_type
-            )
+        } else if let Some(ref predicate) = p.predicate {
+            if let Some(ref target) = p.target_value {
+                format!(
+                    "SELECT * FROM link WHERE predicate = '{}' AND target = '{}'",
+                    predicate, target
+                )
+            } else {
+                format!(
+                    "SELECT * FROM link WHERE predicate = '{}'",
+                    predicate
+                )
+            }
         } else {
             "SELECT * FROM link ORDER BY timestamp DESC LIMIT 50".to_string()
         };
@@ -71,6 +80,8 @@ impl Ad4mMcpHandler {
             "perspective_id": p.perspective_id,
             "class_name": p.class_name,
             "parent_address": p.parent_address,
+            "predicate": p.predicate,
+            "target_value": p.target_value,
             "surreal_query": query,
             "waker_config": {
                 "id": subscription_id,
