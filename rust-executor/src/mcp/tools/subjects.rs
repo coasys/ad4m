@@ -162,8 +162,7 @@ impl Ad4mMcpHandler {
         match self.get_readable_perspective(&p.perspective_id).await {
             Ok(perspective) => {
                 // Strategy 1: Use SHACL constructor to find instance type marker
-                let shape_links =
-                    Self::get_shacl_shape_links(&perspective, &p.class_name).await;
+                let shape_links = Self::get_shacl_shape_links(&perspective, &p.class_name).await;
 
                 if let Some(shape_link) = shape_links.first() {
                     let shape_uri = &shape_link.data.target;
