@@ -88,10 +88,11 @@ import { createSubscription } from "./subscription";
  * See [README.md](./README.md) for a full worked example and decorator reference.
  */
 export class Ad4mModel {
-  #id: string;
-  #perspective: PerspectiveProxy;
+  // NOTE: Using TypeScript `private` (not JS `#`) so these properties work through Vue reactive Proxies.
+  private _id: string;
+  private _perspective: PerspectiveProxy;
   /** Tracks whether save() has ever been called on this instance (even in an uncommitted batch). */
-  #savedOnce: boolean = false;
+  private _savedOnce: boolean = false;
   author: string;
   createdAt: any;
   updatedAt: any;
@@ -180,8 +181,8 @@ export class Ad4mModel {
 
   /** @param id - Auto-generated from a random literal if omitted. */
   constructor(perspective: PerspectiveProxy, id?: string) {
-    this.#id = id ? id : Literal.from(makeRandomId(24)).toUrl();
-    this.#perspective = perspective;
+    this._id = id ? id : Literal.from(makeRandomId(24)).toUrl();
+    this._perspective = perspective;
 
     // Wire up real relation adder/remover/setter methods for decorator-based classes.
     // The @HasMany / @HasOne decorators place empty stubs on the prototype at class-definition
@@ -199,17 +200,17 @@ export class Ad4mModel {
 
       const cap = capitalize(key);
       this[`add${cap}`] = (value: any, batchId?: string) =>
-        mutation.setRelationAdder(this.#mutationContext(), key, value, batchId);
+        mutation.setRelationAdder(this._mutationContext(), key, value, batchId);
       this[`remove${cap}`] = (value: any, batchId?: string) =>
         mutation.setRelationRemover(
-          this.#mutationContext(),
+          this._mutationContext(),
           key,
           value,
           batchId,
         );
       this[`set${cap}`] = (value: any, batchId?: string) =>
         mutation.setRelationSetter(
-          this.#mutationContext(),
+          this._mutationContext(),
           key,
           value,
           batchId,
@@ -221,19 +222,19 @@ export class Ad4mModel {
    * The unique identifier (base expression URI) of this instance.
    */
   get id() {
-    return this.#id;
+    return this._id;
   }
 
   /** Read-only perspective access for subclasses. */
   protected get perspective(): PerspectiveProxy {
-    return this.#perspective;
+    return this._perspective;
   }
 
   /** Builds the context object for all mutation functions. */
-  #mutationContext(): mutation.MutationContext {
+  private _mutationContext(): mutation.MutationContext {
     return {
-      perspective: this.#perspective,
-      id: this.#id,
+      perspective: this._perspective,
+      id: this._id,
       instance: this,
     };
   }
@@ -394,8 +395,12 @@ export class Ad4mModel {
    * ```
    */
   async save(batchId?: string) {
-    await mutation.saveInstance(this.#mutationContext(), batchId, this.#savedOnce);
-    this.#savedOnce = true;
+    await mutation.saveInstance(
+      this._mutationContext(),
+      batchId,
+      this._savedOnce,
+    );
+    this._savedOnce = true;
   }
 
   /**
@@ -425,7 +430,13 @@ export class Ad4mModel {
    */
   async get(include?: IncludeMap): Promise<this> {
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
-    return fetchInstanceData(this, this.#perspective, this.#id, metadata, include);
+    return fetchInstanceData(
+      this,
+      this._perspective,
+      this._id,
+      metadata,
+      include,
+    );
   }
 
   /**
@@ -433,7 +444,7 @@ export class Ad4mModel {
    * @param batchId - Optional batch ID for batched operations
    */
   async delete(batchId?: string) {
-    await this.#perspective.removeSubject(this, this.#id, batchId);
+    await this._perspective.removeSubject(this, this._id, batchId);
   }
 
   /**
