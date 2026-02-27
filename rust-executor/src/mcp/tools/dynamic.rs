@@ -455,15 +455,7 @@ impl Ad4mMcpHandler {
         // Strategy 1: Find instances via SHACL constructor "type marker" link pattern.
         // The constructor's first addLink action typically defines the type marker
         // (e.g., flux://entry_type → flux://has_message for Message class).
-        let name_literal = Self::encode_literal(&format!("shacl://{}", class_name));
-        let shape_links = perspective
-            .get_links(&LinkQuery {
-                source: Some(name_literal),
-                predicate: Some("ad4m://shacl_shape_uri".to_string()),
-                ..Default::default()
-            })
-            .await
-            .unwrap_or_default();
+        let shape_links = Self::get_shacl_shape_links(&perspective, class_name).await;
 
         if let Some(shape_link) = shape_links.first() {
             let shape_uri = &shape_link.data.target;
@@ -581,19 +573,8 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        // Reuse get_subject_data logic
-        let name_literal = Self::encode_literal(&format!("shacl://{}", class_name));
-        let shape_links = match perspective
-            .get_links(&LinkQuery {
-                source: Some(name_literal),
-                predicate: Some("ad4m://shacl_shape_uri".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => links,
-            Err(e) => return format!("Error: {}", e),
-        };
+        // Reuse get_subject_data logic — try both encoded and raw SHACL name
+        let shape_links = Self::get_shacl_shape_links(&perspective, class_name).await;
 
         if shape_links.is_empty() {
             return format!("No SHACL shape found for class '{}'", class_name);

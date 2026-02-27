@@ -122,13 +122,15 @@ pub async fn load_class_properties(
     perspective: &PerspectiveInstance,
     class_name: &str,
 ) -> Vec<ShaclProperty> {
-    let name_literal =
+    // Try both URL-encoded and raw formats (Flux uses raw, Rust Literal encodes)
+    let encoded =
         ad4m_client::literal::Literal::from_string(format!("shacl://{}", class_name))
             .to_url()
             .unwrap_or_else(|_| format!("literal://string:shacl://{}", class_name));
-    let shape_links = match perspective
+    let raw = format!("literal://string:shacl://{}", class_name);
+    let mut shape_links = match perspective
         .get_links(&LinkQuery {
-            source: Some(name_literal),
+            source: Some(encoded),
             predicate: Some("ad4m://shacl_shape_uri".to_string()),
             ..Default::default()
         })
@@ -137,6 +139,19 @@ pub async fn load_class_properties(
         Ok(links) => links,
         Err(_) => return vec![],
     };
+    if shape_links.is_empty() {
+        shape_links = match perspective
+            .get_links(&LinkQuery {
+                source: Some(raw),
+                predicate: Some("ad4m://shacl_shape_uri".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) => links,
+            Err(_) => return vec![],
+        };
+    }
 
     if shape_links.is_empty() {
         return vec![];

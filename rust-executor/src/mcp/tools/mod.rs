@@ -417,6 +417,43 @@ impl Ad4mMcpHandler {
             .unwrap_or_else(|_| format!("literal://string:{}", value))
     }
 
+    /// Get the SHACL name literal for a class, trying both encoded and raw formats.
+    /// Flux's TypeScript Literal doesn't URL-encode inner URIs, producing
+    /// "literal://string:shacl://Class", while Rust's Literal produces
+    /// "literal://string:shacl%3A%2F%2FClass". Returns (encoded, raw).
+    pub(crate) fn shacl_name_variants(class_name: &str) -> (String, String) {
+        let encoded = Self::encode_literal(&format!("shacl://{}", class_name));
+        let raw = format!("literal://string:shacl://{}", class_name);
+        (encoded, raw)
+    }
+
+    /// Query SHACL shape links for a class, trying encoded then raw name format.
+    pub(crate) async fn get_shacl_shape_links(
+        perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+        class_name: &str,
+    ) -> Vec<crate::types::DecoratedLinkExpression> {
+        let (encoded, raw) = Self::shacl_name_variants(class_name);
+        let links = perspective
+            .get_links(&crate::graphql::graphql_types::LinkQuery {
+                source: Some(encoded),
+                predicate: Some("ad4m://shacl_shape_uri".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap_or_default();
+        if !links.is_empty() {
+            return links;
+        }
+        perspective
+            .get_links(&crate::graphql::graphql_types::LinkQuery {
+                source: Some(raw),
+                predicate: Some("ad4m://shacl_shape_uri".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap_or_default()
+    }
+
     /// Escape string for safe use in Prolog queries
     pub(crate) fn escape_prolog_string(s: &str) -> String {
         s.replace('\\', "\\\\")
