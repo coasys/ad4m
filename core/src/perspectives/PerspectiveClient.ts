@@ -18,20 +18,7 @@ import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from "./PerspectiveProxy";
 import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/Ad4mModel";
-
-/**
- * WebSocket close code 1006 (abnormal closure) is emitted on every active
- * subscription when the executor process is shut down — it simply means the
- * server didn't send a clean close frame.  This is expected at the end of
- * every test run (and whenever the executor is stopped) and must not be
- * treated as an application error.  Any other error is still surfaced.
- */
-function isSocketCloseError(e: any): boolean {
-  if (!e) return false;
-  if (typeof e.code === "number" && e.code === 1006) return true;
-  const msg = String(e?.message ?? e);
-  return msg.startsWith("Socket closed with event 1006");
-}
+import { isSocketCloseError } from "../utils";
 
 const LINK_EXPRESSION_FIELDS = `
 author

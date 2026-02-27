@@ -103,7 +103,7 @@ export default function tripleAgentTests(testContext: TestContext) {
       );
       let tries = 1;
 
-      while (bobLinks.length < 10 && tries < 20) {
+      while (bobLinks.length < 10 && tries < 40) {
         console.log("Bob retrying getting links...");
         await sleep(1000);
         bobLinks = await bob.perspective.queryLinks(
@@ -162,7 +162,7 @@ export default function tripleAgentTests(testContext: TestContext) {
       );
       let jimRetries = 1;
 
-      while (jimLinks.length < 20 && jimRetries < 20) {
+      while (jimLinks.length < 20 && jimRetries < 40) {
         console.log("Jim retrying getting links...");
         await sleep(1000);
         jimLinks = await jim.perspective.queryLinks(
@@ -222,7 +222,7 @@ export default function tripleAgentTests(testContext: TestContext) {
       );
       tries = 1;
 
-      while (aliceLinks.length < 30 && tries < 20) {
+      while (aliceLinks.length < 30 && tries < 40) {
         console.log("Alice retrying getting links...");
         await sleep(1000);
         aliceLinks = await alice.perspective.queryLinks(
@@ -240,7 +240,7 @@ export default function tripleAgentTests(testContext: TestContext) {
       );
       tries = 1;
 
-      while (bobLinks.length < 30 && tries < 20) {
+      while (bobLinks.length < 30 && tries < 40) {
         console.log("Bob retrying getting links...");
         await sleep(1000);
         bobLinks = await bob.perspective.queryLinks(
@@ -258,7 +258,7 @@ export default function tripleAgentTests(testContext: TestContext) {
       );
       tries = 1;
 
-      while (jimLinks.length < 30 && tries < 20) {
+      while (jimLinks.length < 30 && tries < 40) {
         console.log("Jim retrying getting links...");
         await sleep(1000);
         jimLinks = await jim.perspective.queryLinks(

@@ -1,6 +1,7 @@
 import { ApolloClient, gql } from "@apollo/client/core";
 import { PerspectiveInput } from "../perspectives/Perspective";
 import unwrapApolloResult from "../unwrapApolloResult";
+import { isSocketCloseError } from "../utils";
 import {
   Agent,
   Apps,
@@ -115,7 +116,7 @@ export class AgentClient {
     const { agent } = unwrapApolloResult(
       await this.#apolloClient.query({
         query: gql`query agent { agent { ${AGENT_SUBITEMS} } }`,
-      })
+      }),
     );
     let agentObject = new Agent(agent.did, agent.perspective);
     agentObject.directMessageLanguage = agent.directMessageLanguage;
@@ -130,7 +131,7 @@ export class AgentClient {
                     ${AGENT_STATUS_FIELDS}
                 }
             }`,
-      })
+      }),
     );
     return new AgentStatus(agentStatus);
   }
@@ -146,7 +147,7 @@ export class AgentClient {
                 }
             }`,
         variables: { passphrase },
-      })
+      }),
     );
     return new AgentStatus(agentGenerate);
   }
@@ -166,7 +167,7 @@ export class AgentClient {
                 }
             }`,
         variables: { did, didDocument, keystore, passphrase },
-      })
+      }),
     );
     return new AgentStatus(agentImport);
   }
@@ -180,7 +181,7 @@ export class AgentClient {
                 }
             }`,
         variables: { passphrase },
-      })
+      }),
     );
     return new AgentStatus(agentLock);
   }
@@ -194,7 +195,7 @@ export class AgentClient {
                 }
             }`,
         variables: { passphrase, holochain },
-      })
+      }),
     );
     return new AgentStatus(agentUnlock);
   }
@@ -208,7 +209,7 @@ export class AgentClient {
                 }
             }`,
         variables: { did },
-      })
+      }),
     );
     return agentByDID as Agent;
   }
@@ -231,7 +232,7 @@ export class AgentClient {
                 }
             }`,
         variables: { perspective: cleanedPerspective },
-      })
+      }),
     );
     const a = agentUpdatePublicPerspective;
     const agent = new Agent(a.did, a.perspective);
@@ -245,7 +246,7 @@ export class AgentClient {
 
     //Create the proxy perspective and load existing links
     const proxyPerspective = await perspectiveClient.add(
-      "Agent Perspective Proxy"
+      "Agent Perspective Proxy",
     );
     const agentMe = await agentClient.me();
 
@@ -271,7 +272,7 @@ export class AgentClient {
   }
 
   async updateDirectMessageLanguage(
-    directMessageLanguage: string
+    directMessageLanguage: string,
   ): Promise<Agent> {
     const { agentUpdateDirectMessageLanguage } = unwrapApolloResult(
       await this.#apolloClient.mutate({
@@ -281,7 +282,7 @@ export class AgentClient {
                 }
             }`,
         variables: { directMessageLanguage },
-      })
+      }),
     );
     const a = agentUpdateDirectMessageLanguage;
     const agent = new Agent(a.did, a.perspective);
@@ -290,7 +291,7 @@ export class AgentClient {
   }
 
   async addEntanglementProofs(
-    proofs: EntanglementProofInput[]
+    proofs: EntanglementProofInput[],
   ): Promise<EntanglementProof[]> {
     const { agentAddEntanglementProofs } = unwrapApolloResult(
       await this.#apolloClient.mutate({
@@ -300,13 +301,13 @@ export class AgentClient {
                 }
             }`,
         variables: { proofs },
-      })
+      }),
     );
     return agentAddEntanglementProofs;
   }
 
   async deleteEntanglementProofs(
-    proofs: EntanglementProofInput[]
+    proofs: EntanglementProofInput[],
   ): Promise<EntanglementProof[]> {
     const { agentDeleteEntanglementProofs } = unwrapApolloResult(
       await this.#apolloClient.mutate({
@@ -316,7 +317,7 @@ export class AgentClient {
                 }
             }`,
         variables: { proofs },
-      })
+      }),
     );
     return agentDeleteEntanglementProofs;
   }
@@ -329,14 +330,14 @@ export class AgentClient {
                     ${ENTANGLEMENT_PROOF_FIELDS}
                 }
             }`,
-      })
+      }),
     );
     return agentGetEntanglementProofs;
   }
 
   async entanglementProofPreFlight(
     deviceKey: string,
-    deviceKeyType: string
+    deviceKeyType: string,
   ): Promise<EntanglementProof> {
     const { agentEntanglementProofPreFlight } = unwrapApolloResult(
       await this.#apolloClient.mutate({
@@ -346,7 +347,7 @@ export class AgentClient {
                 }
             }`,
         variables: { deviceKey, deviceKeyType },
-      })
+      }),
     );
     return agentEntanglementProofPreFlight;
   }
@@ -374,7 +375,9 @@ export class AgentClient {
             cb(agent);
           });
         },
-        error: (e) => console.error(e),
+        error: (e) => {
+          if (!isSocketCloseError(e)) console.error(e);
+        },
       });
   }
 
@@ -394,7 +397,9 @@ export class AgentClient {
             cb();
           });
         },
-        error: (e) => console.error(e),
+        error: (e) => {
+          if (!isSocketCloseError(e)) console.error(e);
+        },
       });
   }
 
@@ -417,7 +422,9 @@ export class AgentClient {
             cb(agent);
           });
         },
-        error: (e) => console.error(e),
+        error: (e) => {
+          if (!isSocketCloseError(e)) console.error(e);
+        },
       });
   }
 
@@ -430,7 +437,7 @@ export class AgentClient {
           }
         `,
         variables: { authInfo },
-      })
+      }),
     );
     return agentRequestCapability;
   }
@@ -444,7 +451,7 @@ export class AgentClient {
           }
         `,
         variables: { auth },
-      })
+      }),
     );
     return agentPermitCapability;
   }
@@ -458,7 +465,7 @@ export class AgentClient {
           }
         `,
         variables: { requestId, rand },
-      })
+      }),
     );
     return agentGenerateJwt;
   }
@@ -471,7 +478,7 @@ export class AgentClient {
                     ${Apps_FIELDS}
                 }
             }`,
-      })
+      }),
     );
     return agentGetApps;
   }
@@ -485,7 +492,7 @@ export class AgentClient {
                 }
             }`,
         variables: { requestId },
-      })
+      }),
     );
     return agentRemoveApp;
   }
@@ -499,7 +506,7 @@ export class AgentClient {
                 }
             }`,
         variables: { requestId },
-      })
+      }),
     );
     return agentRevokeToken;
   }
@@ -512,7 +519,7 @@ export class AgentClient {
             agentIsLocked
           }
         `,
-      })
+      }),
     );
     return agentIsLocked;
   }
@@ -526,24 +533,38 @@ export class AgentClient {
           }
         }`,
         variables: { message },
-      })
+      }),
     );
     return agentSignMessage;
   }
 
   // Multi-user methods
-  async createUser(email: string, password: string, appInfo?: AuthInfoInput): Promise<UserCreationResult> {
+  async createUser(
+    email: string,
+    password: string,
+    appInfo?: AuthInfoInput,
+  ): Promise<UserCreationResult> {
     const { runtimeCreateUser } = unwrapApolloResult(
       await this.#apolloClient.mutate({
-        mutation: gql`mutation runtimeCreateUser($email: String!, $password: String!, $appInfo: AuthInfoInput) {
-          runtimeCreateUser(email: $email, password: $password, appInfo: $appInfo) {
-            did
-            success
-            error
+        mutation: gql`
+          mutation runtimeCreateUser(
+            $email: String!
+            $password: String!
+            $appInfo: AuthInfoInput
+          ) {
+            runtimeCreateUser(
+              email: $email
+              password: $password
+              appInfo: $appInfo
+            ) {
+              did
+              success
+              error
+            }
           }
-        }`,
+        `,
         variables: { email, password, appInfo },
-      })
+      }),
     );
     return runtimeCreateUser;
   }
@@ -551,40 +572,64 @@ export class AgentClient {
   async loginUser(email: string, password: string): Promise<string> {
     const { runtimeLoginUser } = unwrapApolloResult(
       await this.#apolloClient.mutate({
-        mutation: gql`mutation runtimeLoginUser($email: String!, $password: String!) {
-          runtimeLoginUser(email: $email, password: $password)
-        }`,
+        mutation: gql`
+          mutation runtimeLoginUser($email: String!, $password: String!) {
+            runtimeLoginUser(email: $email, password: $password)
+          }
+        `,
         variables: { email, password },
-      })
+      }),
     );
     return runtimeLoginUser;
   }
 
-  async requestLoginVerification(email: string, appInfo?: AuthInfoInput): Promise<VerificationRequestResult> {
+  async requestLoginVerification(
+    email: string,
+    appInfo?: AuthInfoInput,
+  ): Promise<VerificationRequestResult> {
     const { runtimeRequestLoginVerification } = unwrapApolloResult(
       await this.#apolloClient.mutate({
-        mutation: gql`mutation runtimeRequestLoginVerification($email: String!, $appInfo: AuthInfoInput) {
-          runtimeRequestLoginVerification(email: $email, appInfo: $appInfo) {
-            success
-            message
-            requiresPassword
-            isExistingUser
+        mutation: gql`
+          mutation runtimeRequestLoginVerification(
+            $email: String!
+            $appInfo: AuthInfoInput
+          ) {
+            runtimeRequestLoginVerification(email: $email, appInfo: $appInfo) {
+              success
+              message
+              requiresPassword
+              isExistingUser
+            }
           }
-        }`,
+        `,
         variables: { email, appInfo },
-      })
+      }),
     );
     return runtimeRequestLoginVerification;
   }
 
-  async verifyEmailCode(email: string, code: string, verificationType: string): Promise<string> {
+  async verifyEmailCode(
+    email: string,
+    code: string,
+    verificationType: string,
+  ): Promise<string> {
     const { runtimeVerifyEmailCode } = unwrapApolloResult(
       await this.#apolloClient.mutate({
-        mutation: gql`mutation runtimeVerifyEmailCode($email: String!, $code: String!, $verificationType: String!) {
-          runtimeVerifyEmailCode(email: $email, code: $code, verificationType: $verificationType)
-        }`,
+        mutation: gql`
+          mutation runtimeVerifyEmailCode(
+            $email: String!
+            $code: String!
+            $verificationType: String!
+          ) {
+            runtimeVerifyEmailCode(
+              email: $email
+              code: $code
+              verificationType: $verificationType
+            )
+          }
+        `,
         variables: { email, code, verificationType },
-      })
+      }),
     );
     return runtimeVerifyEmailCode;
   }
