@@ -1,10 +1,13 @@
-import { useState, useEffect, useMemo, useRef } from "react";
-import { PerspectiveProxy, Ad4mModel, Query, PaginationResult, ModelQueryBuilder } from "@coasys/ad4m";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { PerspectiveProxy, Ad4mModel, Query, Subscription } from "@coasys/ad4m";
+
+type ModelCtor<T extends Ad4mModel> = (new (...args: any[]) => T) & typeof Ad4mModel;
 
 type Props<T extends Ad4mModel> = {
   perspective: PerspectiveProxy;
-  model: string | ((new (...args: any[]) => T) & typeof Ad4mModel);
+  model: string | ModelCtor<T>;
   query?: Query;
+  /** When set, enables load-more / infinite-scroll mode. */
   pageSize?: number;
   preserveReferences?: boolean;
 };
@@ -19,83 +22,84 @@ type Result<T extends Ad4mModel> = {
 
 export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
   const { perspective, model, query = {}, preserveReferences = false, pageSize } = props;
-  const [subjectEnsured, setSubjectEnsured] = useState(false);
+
   const [loading, setLoading] = useState(true);
   const [entries, setEntries] = useState<T[]>([]);
   const [error, setError] = useState<string>("");
   const [pageNumber, setPageNumber] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
-  const modelQueryRef = useRef<ModelQueryBuilder<T|Ad4mModel> | null>(null);
 
-  async function ensureSubject() {
-    if (typeof model !== "string") await perspective.ensureSDNASubjectClass(model);
-    setSubjectEnsured(true);
+  // Stable ref to the active subscription — cleanup always has the right handle
+  const subRef = useRef<Subscription | null>(null);
+
+  // Stable serialisation for query object dependency
+  const queryKey = JSON.stringify(query);
+
+  function buildLiveQuery(): Query {
+    // Growing-window strategy for load-more: always fetch from the start up to
+    // the current limit so reactions/replies on earlier items stay live.
+    return pageSize ? { ...query, limit: pageSize * pageNumber } : query;
   }
 
-  function preserveEntryReferences(oldEntries: T[], newEntries: T[]): T[] {
-    // Merge new results into old results, preserving references for optimized rendering
-    const existingMap = new Map(oldEntries.map((entry) => [entry.baseExpression, entry]));
-    return newEntries.map((newEntry) => existingMap.get(newEntry.baseExpression) || newEntry);
+  function mergeEntries(oldEntries: T[], newEntries: T[]): T[] {
+    if (!preserveReferences) return newEntries;
+    const existingMap = new Map(oldEntries.map((e) => [e.id, e]));
+    return newEntries.map((n) => existingMap.get(n.id) ?? n);
   }
 
-  function handleNewEntires(newEntries: T[]) {
-    setEntries((oldEntries) => (preserveReferences ? preserveEntryReferences(oldEntries, newEntries) : newEntries));
+  function buildQueryBuilder(q: Query) {
+    return typeof model === "string"
+      ? Ad4mModel.query(perspective, q).overrideModelClassName(model)
+      : (model as ModelCtor<T>).query(perspective, q);
   }
 
-  function paginateSubscribeCallback({ results, totalCount: count }: PaginationResult<T>) {
-    handleNewEntires(results);
-    setTotalCount(count as number);
-  }
+  const subscribe = useCallback(() => {
+    if (!perspective) return;
 
-  async function subscribeToCollection() {
+    // Tear down previous subscription before creating a new one
+    subRef.current?.unsubscribe();
+    subRef.current = null;
+    setLoading(true);
+
     try {
-      if (modelQueryRef.current) modelQueryRef.current.dispose();
-
-      modelQueryRef.current =
-        typeof model === "string"
-          ? Ad4mModel.query(perspective, query).overrideModelClassName(model)
-          : model.query(perspective, query);
-
-      if (pageSize) {
-        // Handle paginated results
-        const totalPageSize = pageSize * pageNumber;
-        const { results, totalCount: count } = await modelQueryRef.current.paginateSubscribe(
-          totalPageSize,
-          1,
-          paginateSubscribeCallback as (results: PaginationResult<Ad4mModel>) => void
-        );
-        setEntries(results as T[]);
-        setTotalCount(count as number);
-      } else {
-        // Handle non-paginated results
-        const results = await modelQueryRef.current.subscribe(handleNewEntires as (results: Ad4mModel[]) => void);
-        setEntries(results as T[]);
-      }
+      subRef.current = buildQueryBuilder(buildLiveQuery()).live(
+        (results) => {
+          setEntries((old) => mergeEntries(old, results as T[]));
+          setLoading(false);
+        },
+        {
+          onError: (err) => {
+            setError(err.message);
+            setLoading(false);
+          },
+        }
+      );
     } catch (err) {
-      console.log("useAd4mModel error", err);
       setError(err instanceof Error ? err.message : String(err));
-    } finally {
       setLoading(false);
     }
-  }
 
-  function loadMore() {
+    // Fetch totalCount independently — only used in load-more UI ("X of Y")
     if (pageSize) {
-      setLoading(true);
-      setPageNumber((prevPage) => prevPage + 1);
+      buildQueryBuilder(query)
+        .count()
+        .then(setTotalCount)
+        .catch(console.error);
     }
-  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [perspective?.uuid, model, pageNumber, queryKey]);
 
   useEffect(() => {
-    ensureSubject();
-  }, []);
+    subscribe();
+    return () => {
+      subRef.current?.unsubscribe();
+      subRef.current = null;
+    };
+  }, [subscribe]);
 
-  useEffect(() => {
-    if (subjectEnsured) subscribeToCollection();
-  }, [subjectEnsured, model, JSON.stringify(query), pageNumber]);
+  const loadMore = useCallback(() => {
+    if (pageSize) setPageNumber((p) => p + 1);
+  }, [pageSize]);
 
-  return useMemo(
-    () => ({ entries, loading, error, totalCount, loadMore }),
-    [entries, loading, error, totalCount, loadMore]
-  );
+  return { entries, loading, error, totalCount, loadMore };
 }

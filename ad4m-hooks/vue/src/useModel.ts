@@ -1,10 +1,13 @@
-import { Ad4mModel, ModelQueryBuilder, PaginationResult, PerspectiveProxy, Query } from "@coasys/ad4m";
-import { ComputedRef, ref, Ref, shallowRef, watch } from "vue";
+import { Ad4mModel, PerspectiveProxy, Query, Subscription } from "@coasys/ad4m";
+import { ComputedRef, isRef, onUnmounted, ref, Ref, shallowRef, watch } from "vue";
+
+type ModelCtor<T extends Ad4mModel> = (new (...args: any[]) => T) & typeof Ad4mModel;
 
 type Props<T extends Ad4mModel> = {
   perspective: PerspectiveProxy | ComputedRef<PerspectiveProxy | null>;
-  model: string | ((new (...args: any[]) => T) & typeof Ad4mModel);
+  model: string | ModelCtor<T>;
   query?: Query;
+  /** When set, enables load-more / infinite-scroll mode. */
   pageSize?: number;
   preserveReferences?: boolean;
 };
@@ -19,133 +22,112 @@ type Result<T extends Ad4mModel> = {
 
 export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
   const { perspective, model, query = {}, preserveReferences = false, pageSize } = props;
+
   const entries = ref<T[]>([]) as Ref<T[]>;
   const loading = ref(true);
   const error = ref<string>("");
   const pageNumber = ref(1);
   const totalCount = ref(0);
-  let modelQuery: ModelQueryBuilder<T | Ad4mModel> | null = null;
 
-  // Handle perspective as a ref/computed or direct value
-  const isPerspectiveRef = perspective && typeof perspective === "object" && "value" in perspective;
-  const perspectiveValue = isPerspectiveRef ? (perspective as Ref<PerspectiveProxy | null>).value : perspective;
-  const perspectiveRef = shallowRef(perspectiveValue);
+  // Normalise: accept either a raw PerspectiveProxy or a ref/computed wrapping one
+  const perspectiveRef = shallowRef<PerspectiveProxy | null>(
+    isRef(perspective) ? (perspective as ComputedRef<PerspectiveProxy | null>).value : perspective
+  );
 
-  // Set up a watch if perspective is a ref/computed
-  if (isPerspectiveRef) {
-    watch(
-      () => (perspective as Ref<PerspectiveProxy | null>).value,
-      (newVal) => {
-        perspectiveRef.value = newVal;
-      },
-      { immediate: true }
-    );
-  }
-
-  function includeBaseExpressions(entries: T[]): T[] {
-    // Makes the baseExpression on each entry enumerable (while preserving the original instance)
-    return entries.map((entry) => {
-      if (entry.baseExpression !== undefined) {
-        Object.defineProperty(entry, "baseExpression", {
-          value: entry.baseExpression,
-          enumerable: true,
-        });
-      }
-      return entry;
+  if (isRef(perspective)) {
+    watch(perspective as ComputedRef<PerspectiveProxy | null>, (val) => {
+      perspectiveRef.value = val;
     });
   }
 
-  function preserveEntryReferences(oldEntries: T[], newEntries: T[]): T[] {
-    const existingMap = new Map(oldEntries.map((entry) => [entry.baseExpression, entry]));
-    return newEntries.map((newEntry) => existingMap.get(newEntry.baseExpression) || newEntry);
+  let activeSub: Subscription | null = null;
+
+  function buildLiveQuery(): Query {
+    // Growing-window strategy for load-more: always fetch from the start up to
+    // the current limit so reactions/replies on earlier items stay live.
+    return pageSize ? { ...query, limit: pageSize * pageNumber.value } : query;
   }
 
-  function handleNewEntires(newEntries: T[]) {
-    entries.value = includeBaseExpressions(
-      preserveReferences ? preserveEntryReferences(entries.value, newEntries) : newEntries
-    );
+  function mergeEntries(oldEntries: T[], newEntries: T[]): T[] {
+    if (!preserveReferences) return newEntries;
+    const existingMap = new Map(oldEntries.map((e) => [e.id, e]));
+    return newEntries.map((n) => existingMap.get(n.id) ?? n);
   }
 
-  function paginateSubscribeCallback(result: PaginationResult<Ad4mModel>) {
-    handleNewEntires(result.results as T[]);
-    totalCount.value = result.totalCount as number;
+  function buildQueryBuilder(p: PerspectiveProxy, q: Query) {
+    return typeof model === "string"
+      ? Ad4mModel.query(p, q).overrideModelClassName(model)
+      : (model as ModelCtor<T>).query(p, q);
   }
 
-  async function subscribeToCollection() {
+  function subscribe(p: PerspectiveProxy) {
+    // Tear down previous subscription before creating a new one
+    activeSub?.unsubscribe();
+    activeSub = null;
+    loading.value = true;
+
     try {
-      // Return early if no perspective
-      if (!perspectiveRef.value) {
-        loading.value = false;
-        return;
-      }
-
-      if (modelQuery) modelQuery.dispose();
-
-      modelQuery =
-        typeof model === "string"
-          ? Ad4mModel.query(perspectiveRef.value, query).overrideModelClassName(model)
-          : model.query(perspectiveRef.value, query);
-
-      if (pageSize) {
-        // Handle paginated results
-        const totalPageSize = pageSize * pageNumber.value;
-        const { results, totalCount: count } = await modelQuery.paginateSubscribe(
-          totalPageSize,
-          1,
-          paginateSubscribeCallback
-        );
-        entries.value = includeBaseExpressions(results as T[]);
-        totalCount.value = count as number;
-      } else {
-        // Handle non-paginated results
-        const results = await modelQuery.subscribe((results: Ad4mModel[]) => handleNewEntires(results as T[]));
-        entries.value = includeBaseExpressions(results as T[]);
-      }
+      activeSub = buildQueryBuilder(p, buildLiveQuery()).live(
+        (results) => {
+          entries.value = mergeEntries(entries.value, results as T[]);
+          loading.value = false;
+        },
+        {
+          onError: (err) => {
+            error.value = err.message;
+            loading.value = false;
+          },
+        }
+      );
     } catch (err) {
-      console.error("Error in subscribeToCollection:", err);
       error.value = err instanceof Error ? err.message : String(err);
-    } finally {
       loading.value = false;
     }
-  }
 
-  function loadMore() {
+    // Fetch totalCount independently — only used in load-more UI ("X of Y")
     if (pageSize) {
-      loading.value = true;
-      pageNumber.value += 1;
+      buildQueryBuilder(p, query)
+        .count()
+        .then((n) => { totalCount.value = n; })
+        .catch(console.error);
     }
   }
 
-  // Watch for perspective changes
+  // Re-subscribe when perspective identity changes
   watch(
     perspectiveRef,
-    async (newPerspective, oldPerspective) => {
-      if (!oldPerspective || newPerspective?.uuid !== oldPerspective?.uuid) {
-        loading.value = true;
+    (newP, oldP) => {
+      if (!newP) {
+        activeSub?.unsubscribe();
+        activeSub = null;
+        loading.value = false;
         entries.value = [];
-        if (newPerspective) {
-          try {
-            if (typeof model !== "string") {
-              await newPerspective.ensureSDNASubjectClass(model);
-            }
-            await subscribeToCollection();
-          } finally {
-            loading.value = false;
-          }
-        } else {
-          loading.value = false;
-        }
+        return;
       }
+      if (newP.uuid !== oldP?.uuid) {
+        entries.value = [];
+      }
+      subscribe(newP);
     },
     { immediate: true }
   );
 
-  // Watch for query/page changes
-  watch([() => JSON.stringify(query), pageNumber], async () => {
-    if (perspectiveRef.value) {
-      await subscribeToCollection();
+  // Re-subscribe when query or page changes
+  watch(
+    [() => JSON.stringify(query), pageNumber],
+    () => {
+      if (perspectiveRef.value) subscribe(perspectiveRef.value);
     }
+  );
+
+  onUnmounted(() => {
+    activeSub?.unsubscribe();
+    activeSub = null;
   });
+
+  function loadMore() {
+    if (pageSize) pageNumber.value += 1;
+  }
 
   return { entries, loading, error, totalCount, loadMore };
 }

@@ -14,7 +14,6 @@
   "license": "ISC",
   "dependencies": {
     "@coasys/ad4m": "workspace:0.12.0-rc1-dev.2",
-    "@coasys/hooks-helpers": "workspace:*",
     "@types/react": "^18.2.55",
     "@types/react-dom": "^18.2.19"
   },
@@ -24,8 +23,7 @@
   },
   "publishConfig": {
     "dependencies": {
-      "@coasys/ad4m": "*",
-      "@coasys/hooks-helpers": "*"
+      "@coasys/ad4m": "*"
     }
   },
   "version": "0.12.0-rc1-dev.2"
