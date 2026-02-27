@@ -391,6 +391,12 @@ jobs:
     - name: Fetch source code
       uses: actions/checkout@v3
 
+    - name: Enable long paths (Windows MAX_PATH workaround for deno git dep)
+      shell: powershell
+      run: |
+        git config --global core.longpaths true
+        reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
+
     # Rust toolchain configured via rust-toolchain.toml
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
@@ -555,61 +561,29 @@ jobs:
           cd core
           sed -i 's/"private": true/"private": false/' package.json
 
+      - name: Setup npm auth
+        run: echo "//registry.npmjs.org/:_authToken=${{ secrets.COASYS_NPM_TOKEN }}" > ~/.npmrc
+
       - name: Publish core
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: core/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd core && npm publish --access public --tag ${{ env.NPM_TAG }}
 
       - name: Publish connect
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: connect/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd connect && npm publish --access public --tag ${{ env.NPM_TAG }}
 
       - name: Publish ad4m hook helpers
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: ad4m-hooks/helpers/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd ad4m-hooks/helpers && npm publish --access public --tag ${{ env.NPM_TAG }}
 
       - name: Publish ad4m react hooks
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: ad4m-hooks/react/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd ad4m-hooks/react && npm publish --access public --tag ${{ env.NPM_TAG }}
 
       - name: Publish ad4m vue hooks
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: ad4m-hooks/vue/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd ad4m-hooks/vue && npm publish --access public --tag ${{ env.NPM_TAG }}
 
       - name: Publish executor
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: executor/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd executor && npm publish --access public --tag ${{ env.NPM_TAG }}
 
       - name: Publish Test runner
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: test-runner/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd test-runner && npm publish --access public --tag ${{ env.NPM_TAG }}
 
   # ============================================================================
   # Crates Publish - Uses Docker container
@@ -630,4 +604,4 @@ jobs:
       - run: ls -al executor/lib
       - run: cargo install cargo-workspaces || echo "cargo-workspaces already installed"
       - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - run: cargo workspaces publish --from-git
+      - run: cargo workspaces publish --from-git --allow-dirty
