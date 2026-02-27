@@ -161,6 +161,59 @@ impl Ad4mMcpHandler {
 
         match self.get_readable_perspective(&p.perspective_id).await {
             Ok(perspective) => {
+                // Strategy 1: Use SHACL constructor to find instance type marker
+                let shape_links =
+                    Self::get_shacl_shape_links(&perspective, &p.class_name).await;
+
+                if let Some(shape_link) = shape_links.first() {
+                    let shape_uri = &shape_link.data.target;
+                    let constructor_links = perspective
+                        .get_links(&LinkQuery {
+                            source: Some(shape_uri.clone()),
+                            predicate: Some("ad4m://constructor".to_string()),
+                            ..Default::default()
+                        })
+                        .await
+                        .unwrap_or_default();
+
+                    if let Some(constructor_link) = constructor_links.first() {
+                        let actions_str =
+                            Self::resolve_literal_value(&constructor_link.data.target);
+                        if let Ok(actions) =
+                            serde_json::from_str::<Vec<serde_json::Value>>(&actions_str)
+                        {
+                            if let Some(type_action) = actions.iter().find(|a| {
+                                a.get("action").and_then(|v| v.as_str()) == Some("addLink")
+                                    && a.get("source").and_then(|v| v.as_str()) == Some("this")
+                            }) {
+                                let pred = type_action
+                                    .get("predicate")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let tgt = type_action
+                                    .get("target")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                if !pred.is_empty() && !tgt.is_empty() {
+                                    let links = perspective
+                                        .get_links(&LinkQuery {
+                                            predicate: Some(pred.to_string()),
+                                            target: Some(tgt.to_string()),
+                                            ..Default::default()
+                                        })
+                                        .await
+                                        .unwrap_or_default();
+                                    let instances: Vec<String> =
+                                        links.iter().map(|l| l.data.source.clone()).collect();
+                                    return serde_json::to_string_pretty(&instances)
+                                        .unwrap_or_else(|e| format!("Error: {}", e));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Strategy 2: Fallback to rdf://type matching
                 let class_links = perspective
                     .get_links(&LinkQuery {
                         predicate: Some("rdf://type".to_string()),
