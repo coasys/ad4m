@@ -20,12 +20,19 @@ const PERSPECT3VISM_AGENT =
 const DIFF_SYNC_OFFICIAL = fs
   .readFileSync("./scripts/perspective-diff-sync-hash")
   .toString();
-const PUBLISHING_AGENT = JSON.parse(
-  fs.readFileSync("./tst-tmp/agents/p/ad4m/agent.json").toString(),
-)["did"];
+// PUBLISHING_AGENT is read lazily inside the suite (not at module load time)
+// because the file is created by injectPublishingAgent.js during test setup,
+// which runs after Mocha has already imported all suite modules.
+let PUBLISHING_AGENT: string;
 
 export default function runtimeTests(testContext: TestContext) {
   return () => {
+    before(() => {
+      PUBLISHING_AGENT = JSON.parse(
+        fs.readFileSync("./tst-tmp/agents/p/ad4m/agent.json").toString(),
+      )["did"];
+    });
+
     it("Trusted Agents CRUD", async () => {
       const ad4mClient = testContext.ad4mClient!;
       const { did } = await ad4mClient.agent.status();
