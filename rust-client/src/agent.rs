@@ -10,6 +10,12 @@ use futures::StreamExt;
 use graphql_client::{GraphQLQuery, Response};
 use graphql_ws_client::graphql::StreamingOperation;
 
+// Re-export GraphQL-derived types so callers don't need to navigate
+// through submodules that share a name with wrapper functions.
+pub use self::by_did::{ByDidAgentByDid, ByDidAgentByDidPerspectiveLinks};
+pub use self::me::{MeAgent, MeAgentPerspectiveLinks};
+pub use self::request_capability::{CapabilityInput, ResourceInput};
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "schema.gql",
