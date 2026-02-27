@@ -21,6 +21,7 @@ const TEST_PORTS = [
   15900, 15901, 15902,        // multi-user-simple.test.ts
   15920, 15921, 15922,        // email-verification.test.ts
   16600, 16601, 16602,        // prolog-and-literals.test.ts
+  3001,                       // MCP HTTP server (mcp-http.test.ts / mcp-auth.test.ts)
 ];
 
 async function cleanup() {
