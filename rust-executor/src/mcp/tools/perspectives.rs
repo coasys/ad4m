@@ -3,12 +3,12 @@
 //! Tools for managing perspectives (knowledge graphs) and raw links.
 
 use super::Ad4mMcpHandler;
+use crate::agent::capabilities::defs::PERSPECTIVE_CREATE_CAPABILITY;
 use crate::graphql::graphql_types::{LinkQuery, LinkStatus, PerspectiveHandle, PerspectiveState};
 use crate::perspectives::perspective_instance::{SdnaType, SubjectClassOption};
 use crate::perspectives::utils::prolog_resolution_to_string;
 use crate::perspectives::{add_perspective, all_perspectives, get_perspective};
 use crate::types::Link;
-use crate::agent::capabilities::defs::PERSPECTIVE_CREATE_CAPABILITY;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -164,7 +164,10 @@ impl Ad4mMcpHandler {
         };
 
         let capabilities = self.get_capabilities().await;
-        if let Err(e) = crate::agent::capabilities::check_capability(&capabilities, &PERSPECTIVE_CREATE_CAPABILITY) {
+        if let Err(e) = crate::agent::capabilities::check_capability(
+            &capabilities,
+            &PERSPECTIVE_CREATE_CAPABILITY,
+        ) {
             return format!("Capability error: {}", e);
         }
 

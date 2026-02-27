@@ -428,7 +428,10 @@ impl Ad4mMcpHandler {
     #[tool(
         description = "Set a property on a subject instance. Works at the model level — you provide the property name (e.g. 'name', 'body') and the tool handles the underlying link operations. No need to know predicates or link structure. Example: set_subject_property(perspective_id='abc-123', class_name='Channel', expression_address='literal://string:xyz', property_name='name', value='general')."
     )]
-    pub async fn set_subject_property(&self, params: Parameters<SetSubjectPropertyParams>) -> String {
+    pub async fn set_subject_property(
+        &self,
+        params: Parameters<SetSubjectPropertyParams>,
+    ) -> String {
         let p = &params.0;
 
         match self.get_writable_perspective(&p.perspective_id).await {
@@ -638,7 +641,10 @@ impl Ad4mMcpHandler {
     #[tool(
         description = "Get all subjects that are children of a given subject (linked via ad4m://has_child). Optionally filter by child class name. Returns a list of child addresses."
     )]
-    pub async fn get_subject_children(&self, params: Parameters<GetSubjectChildrenParams>) -> String {
+    pub async fn get_subject_children(
+        &self,
+        params: Parameters<GetSubjectChildrenParams>,
+    ) -> String {
         let p = &params.0;
 
         match get_perspective(&p.perspective_id) {

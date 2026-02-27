@@ -4,9 +4,8 @@
 
 use super::Ad4mMcpHandler;
 use crate::agent::capabilities::{
-    generate_capability_token, permit_capability, request_capability as cap_request_capability,
-    token::decode_jwt, AuthInfo, AuthInfoExtended,
-    defs::ALL_CAPABILITY,
+    defs::ALL_CAPABILITY, generate_capability_token, permit_capability,
+    request_capability as cap_request_capability, token::decode_jwt, AuthInfo, AuthInfoExtended,
 };
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;

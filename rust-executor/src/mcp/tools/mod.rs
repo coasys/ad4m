@@ -38,9 +38,7 @@ pub use subscriptions::*;
 
 use super::server::McpContext;
 use crate::agent::capabilities::{
-    capabilities_from_token, check_capability,
-    defs::PERSPECTIVE_CREATE_CAPABILITY,
-    Capability,
+    capabilities_from_token, check_capability, defs::PERSPECTIVE_CREATE_CAPABILITY, Capability,
 };
 use crate::agent::AgentContext;
 use crate::perspectives::get_perspective;
@@ -175,11 +173,23 @@ impl Ad4mMcpHandler {
             .with_route((Self::get_subject_data_tool_attr(), Self::get_subject_data))
             .with_route((Self::create_subject_tool_attr(), Self::create_subject))
             .with_route((Self::execute_commands_tool_attr(), Self::execute_commands))
-            .with_route((Self::set_subject_property_tool_attr(), Self::set_subject_property))
-            .with_route((Self::get_subject_collection_tool_attr(), Self::get_subject_collection))
+            .with_route((
+                Self::set_subject_property_tool_attr(),
+                Self::set_subject_property,
+            ))
+            .with_route((
+                Self::get_subject_collection_tool_attr(),
+                Self::get_subject_collection,
+            ))
             .with_route((Self::add_to_collection_tool_attr(), Self::add_to_collection))
-            .with_route((Self::remove_from_collection_tool_attr(), Self::remove_from_collection))
-            .with_route((Self::get_subject_children_tool_attr(), Self::get_subject_children))
+            .with_route((
+                Self::remove_from_collection_tool_attr(),
+                Self::remove_from_collection,
+            ))
+            .with_route((
+                Self::get_subject_children_tool_attr(),
+                Self::get_subject_children,
+            ))
             .with_route((Self::delete_subject_tool_attr(), Self::delete_subject))
             // flows.rs
             .with_route((Self::add_flow_tool_attr(), Self::add_flow))
@@ -190,20 +200,38 @@ impl Ad4mMcpHandler {
             .with_route((Self::flow_run_action_tool_attr(), Self::flow_run_action))
             // auth.rs
             .with_route((Self::login_email_tool_attr(), Self::login_email))
-            .with_route((Self::request_capability_tool_attr(), Self::request_capability))
+            .with_route((
+                Self::request_capability_tool_attr(),
+                Self::request_capability,
+            ))
             .with_route((Self::generate_jwt_tool_attr(), Self::generate_jwt))
             .with_route((Self::signup_tool_attr(), Self::signup))
-            .with_route((Self::request_login_verification_tool_attr(), Self::request_login_verification))
+            .with_route((
+                Self::request_login_verification_tool_attr(),
+                Self::request_login_verification,
+            ))
             .with_route((Self::verify_email_code_tool_attr(), Self::verify_email_code))
             .with_route((Self::auth_status_tool_attr(), Self::auth_status))
             // profiles.rs
             .with_route((Self::get_agent_profile_tool_attr(), Self::get_agent_profile))
             .with_route((Self::set_agent_profile_tool_attr(), Self::set_agent_profile))
-            .with_route((Self::set_agent_profile_picture_tool_attr(), Self::set_agent_profile_picture))
-            .with_route((Self::get_agent_public_perspective_tool_attr(), Self::get_agent_public_perspective))
-            .with_route((Self::set_agent_public_perspective_tool_attr(), Self::set_agent_public_perspective))
+            .with_route((
+                Self::set_agent_profile_picture_tool_attr(),
+                Self::set_agent_profile_picture,
+            ))
+            .with_route((
+                Self::get_agent_public_perspective_tool_attr(),
+                Self::get_agent_public_perspective,
+            ))
+            .with_route((
+                Self::set_agent_public_perspective_tool_attr(),
+                Self::set_agent_public_perspective,
+            ))
             // subscriptions.rs
-            .with_route((Self::generate_waker_query_tool_attr(), Self::generate_waker_query))
+            .with_route((
+                Self::generate_waker_query_tool_attr(),
+                Self::generate_waker_query,
+            ))
     }
 
     /// Dispatch a tool call to either the static router or dynamic SHACL tools
@@ -220,7 +248,8 @@ impl Ad4mMcpHandler {
             Ok(result)
         } else {
             // Try dynamic SHACL tools
-            self.handle_dynamic_tool(&tool_name, request.arguments).await
+            self.handle_dynamic_tool(&tool_name, request.arguments)
+                .await
         }
     }
 
@@ -289,8 +318,9 @@ impl Ad4mMcpHandler {
         perspective_id: &str,
         required_capability: &crate::agent::capabilities::Capability,
     ) -> Result<(PerspectiveInstance, AgentContext), String> {
-        let perspective = get_perspective(perspective_id)
-            .ok_or_else(|| json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string())?;
+        let perspective = get_perspective(perspective_id).ok_or_else(|| {
+            json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string()
+        })?;
 
         let agent_context = self.get_agent_context().await?;
 
