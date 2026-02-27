@@ -120,7 +120,7 @@ jobs:
       - run:
           name: Run multi-user-simple integration tests
           command: cd ./tests/js && pnpm run test-multi-user
-          no_output_timeout: 30m
+          no_output_timeout: 60m
 
   integration-tests-email-verification:
     machine: true

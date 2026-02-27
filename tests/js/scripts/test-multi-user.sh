@@ -16,6 +16,16 @@ SUITES=(
 # Guarantee cleanup runs even if a suite fails or the script is interrupted.
 trap 'node scripts/cleanup.js' EXIT
 
+# Run prepare-test once before any suite so that tst-tmp/languages/ is
+# populated with the language bundles (bundle-{hash}.js / meta-{hash}.json).
+# Without this, executors started by the multi-user tests can't install the
+# agent language via the language-language and byDID / updatePublicPerspective
+# calls fail with "No Agent Language installed!" on a fresh CI workdir.
+echo ""
+echo "▶ Running prepare-test..."
+node scripts/cleanup.js
+pnpm run prepare-test
+
 for suite in "${SUITES[@]}"; do
   echo ""
   echo "▶ Running $suite..."
