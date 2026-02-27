@@ -2,6 +2,7 @@ import path from "path";
 import { Ad4mClient, LanguageMetaInput } from "@coasys/ad4m";
 import fs from "fs-extra";
 import { exit } from "process";
+import { execSync } from "child_process";
 import { fileURLToPath } from 'url';
 import { apolloClient, sleep, startExecutor } from "./utils";
 import fetch from 'node-fetch'
@@ -42,6 +43,18 @@ const languageHashes = {
     "perspectiveDiffSync": ""
 }
 
+// Kill the listening process on each port (TCP:LISTEN filter ensures we only
+// kill the executor server, NOT this node process which has a *connection* to it).
+function killExecutorPorts(ports: number[]) {
+    for (const port of ports) {
+        try {
+            execSync(`lsof -ti TCP:${port} -s TCP:LISTEN | xargs -r kill -9`, { stdio: 'ignore' });
+        } catch (e) {
+            console.warn(`Port cleanup warning for ${port}:`, e);
+        }
+    }
+}
+
 function createTestingAgent() {
     if (!fs.existsSync(appDataPath)) {
         fs.mkdirSync(appDataPath);
@@ -67,43 +80,53 @@ function injectLangAliasHashes() {
 }
 
 async function publish() {
+    const setupPorts = [gqlPort, hcAdminPort, hcAppPort];
+
+    // Pre-clean: kill any orphaned executor from a previous CI job that may be
+    // squatting on our ports. Self-hosted runners reuse workdirs between jobs
+    // and don't clean up automatically.
+    console.log(`Pre-cleaning ports ${setupPorts.join('/')} before starting executor...`);
+    killExecutorPorts(setupPorts);
+    await sleep(500);
+
     createTestingAgent();
 
     const executorProcess = await startExecutor(appDataPath, publishingBootstrapSeedPath, gqlPort, hcAdminPort, hcAppPort, true);
-    
-    const ad4mClient = new Ad4mClient(apolloClient(gqlPort));
-    await ad4mClient.agent.generate("passphrase");
 
-    for (const [language, languageMeta] of Object.entries(languagesToPublish)) {
-        let bundlePath = path.join(publishLanguagesPath, language, "build", "bundle.js").replace(/\\/g, "/");
-        console.log("Attempting to publish language", bundlePath);
-        let publishedLang = await ad4mClient.languages.publish(bundlePath, languageMeta);
-        console.log("Published with result", publishedLang);
-        if (language === "agent-expression-store") {
-            languageHashes["agentLanguage"] = publishedLang.address;
-        }
-        if (language === "neighbourhood-store") {
-            languageHashes["neighbourhoodLanguage"] = publishedLang.address;
-        }
-        if (language === "direct-message-language") {
-            languageHashes["directMessageLanguage"] = publishedLang.address;
-        }
-        if (language === "perspective-language") {
-            languageHashes["perspectiveLanguage"] = publishedLang.address;
-        }
-        if (language === "perspective-diff-sync") {
-            languageHashes["perspectiveDiffSync"] = publishedLang.address;
-        }
-    }
-    injectSystemLanguages()
-    injectLangAliasHashes();
+    try {
+        const ad4mClient = new Ad4mClient(apolloClient(gqlPort));
+        await ad4mClient.agent.generate("passphrase");
 
-    if (executorProcess) {
-        while (!executorProcess.killed){
-            let status = executorProcess.kill()
-            console.log("killed executor with", status);
-            await sleep(500); 
+        for (const [language, languageMeta] of Object.entries(languagesToPublish)) {
+            let bundlePath = path.join(publishLanguagesPath, language, "build", "bundle.js").replace(/\\/g, "/");
+            console.log("Attempting to publish language", bundlePath);
+            let publishedLang = await ad4mClient.languages.publish(bundlePath, languageMeta);
+            console.log("Published with result", publishedLang);
+            if (language === "agent-expression-store") {
+                languageHashes["agentLanguage"] = publishedLang.address;
+            }
+            if (language === "neighbourhood-store") {
+                languageHashes["neighbourhoodLanguage"] = publishedLang.address;
+            }
+            if (language === "direct-message-language") {
+                languageHashes["directMessageLanguage"] = publishedLang.address;
+            }
+            if (language === "perspective-language") {
+                languageHashes["perspectiveLanguage"] = publishedLang.address;
+            }
+            if (language === "perspective-diff-sync") {
+                languageHashes["perspectiveDiffSync"] = publishedLang.address;
+            }
         }
+        injectSystemLanguages();
+        injectLangAliasHashes();
+    } finally {
+        // Always kill the executor on the way out — success or failure.
+        // Uses TCP:LISTEN filter so we only kill the listening server (the executor),
+        // NOT this node process which has an outbound connection to that port.
+        console.log(`Killing executor on ports ${setupPorts.join('/')}...`);
+        killExecutorPorts(setupPorts);
+        await sleep(1000);
     }
 
     exit();
