@@ -25,7 +25,7 @@ import {
   PerspectiveProxy,
   Property,
 } from "@coasys/ad4m";
-import { startAgent } from "../../helpers/index.js";
+import { startAgent, waitUntil } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 import { wipePerspective, sleep } from "../../utils/utils.js";
 import { TestComment, TestPost, TestTag, TestReaction } from "./models.js";
@@ -278,7 +278,20 @@ describe("Ad4mModel — Query API", function () {
     const tag = await TestTag.create(perspective, { label: "many" });
     await p1.addTags(tag.id);
     await p2.addTags(tag.id);
-    const found = await TestTag.findOne(perspective, { where: { id: tag.id } });
+    // Use waitUntil to tolerate SurrealDB eventual-consistency lag in CI:
+    // the link store is updated synchronously by addTags, but the SurrealDB
+    // read cache may take a moment to reflect those writes on slower machines.
+    let found: TestTag | null = null;
+    await waitUntil(
+      async () => {
+        found = await TestTag.findOne(perspective, { where: { id: tag.id } });
+        if (!found) return false;
+        const ids = found.posts as unknown as string[];
+        return ids.includes(p1.id) && ids.includes(p2.id);
+      },
+      5000,
+      "tag.posts to include both post IDs",
+    );
     expect(Array.isArray(found!.posts)).to.be.true;
     const postIds = found!.posts as unknown as string[];
     expect(postIds).to.include(p1.id);
