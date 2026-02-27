@@ -59,10 +59,12 @@ pub async fn start_mcp_server(
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
     info!("Starting AD4M MCP server on http://{}", addr);
 
+    let initial_token = auth_token;
+
     let context = McpContext {
         js_handle: js_core_handle,
         admin_credential,
-        auth_token: Arc::new(RwLock::new(auth_token)),
+        auth_token: Arc::new(RwLock::new(initial_token.clone())),
     };
 
     // Create the session manager for HTTP transport
@@ -72,9 +74,16 @@ pub async fn start_mcp_server(
     let http_config = StreamableHttpServerConfig::default();
 
     // Create the HTTP service with a factory that creates handlers
+    // Each session gets its own auth_token Arc to prevent cross-session token leaking.
     let context_clone = context.clone();
+    let initial_token_clone = initial_token.clone();
     let service = StreamableHttpService::new(
-        move || Ok(Ad4mMcpHandler::new(context_clone.clone())),
+        move || {
+            let mut ctx = context_clone.clone();
+            // Per-session auth token — prevents cross-session token leaking
+            ctx.auth_token = Arc::new(RwLock::new(initial_token_clone.clone()));
+            Ok(Ad4mMcpHandler::new(ctx))
+        },
         session_manager,
         http_config,
     );
@@ -83,8 +92,11 @@ pub async fn start_mcp_server(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("MCP HTTP server listening on {}", addr);
 
-    // Middleware to extract Authorization: Bearer <token> from HTTP headers
-    // and inject it into the shared MCP session context
+    // Middleware to extract Authorization: Bearer <token> from HTTP headers.
+    // TODO: Currently this writes to the shared context token, which means the last
+    // Bearer token seen wins across all sessions. For proper multi-session support,
+    // we need a per-session token registry keyed by session ID. For single-client use
+    // this is fine — each session also starts with its own token from the factory.
     let auth_token_ref = context.auth_token.clone();
     let auth_layer = middleware::from_fn(move |req: Request, next: middleware::Next| {
         let token_ref = auth_token_ref.clone();

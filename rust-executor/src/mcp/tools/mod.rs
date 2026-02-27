@@ -259,7 +259,7 @@ impl Ad4mMcpHandler {
             .await
     }
 
-    /// Extract a required string argument from the args map
+    /// Extract a required string argument from the args map (used by dynamic tools)
     fn require_arg<'a>(
         args: &'a serde_json::Map<String, serde_json::Value>,
         key: &str,
@@ -350,7 +350,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error listing subject classes: {}", e),
                 }
             }
-            None => format!("Perspective not found: {}", uuid),
+            None => json!({"error": format!("Perspective not found: {}", uuid)}).to_string(),
         }
     }
 
@@ -414,7 +414,9 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error querying instances: {}", e),
                 }
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            None => {
+                json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string()
+            }
         }
     }
 
@@ -533,7 +535,9 @@ impl Ad4mMcpHandler {
                 serde_json::to_string_pretty(&serde_json::Value::Object(data))
                     .unwrap_or_else(|e| format!("Error: {}", e))
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            None => {
+                json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string()
+            }
         }
     }
 
@@ -742,7 +746,9 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error querying links: {}", e),
                 }
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            None => {
+                json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string()
+            }
         }
     }
 
@@ -843,7 +849,9 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error querying flows: {}", e),
                 }
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            None => {
+                json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string()
+            }
         }
     }
 
@@ -902,7 +910,9 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error querying flow state: {}", e),
                 }
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            None => {
+                json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string()
+            }
         }
     }
 
@@ -936,62 +946,28 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error querying flow actions: {}", e),
                 }
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            None => {
+                json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string()
+            }
         }
     }
 
     /// Start a flow on an expression
     #[tool(
-        description = "Start a flow (state machine) on an expression, putting it into the initial state."
+        description = "[NOT YET IMPLEMENTED] Start a flow (state machine) on an expression, putting it into the initial state. Requires SHACLFlow parsing which is not yet available."
     )]
     async fn flow_start(&self, params: Parameters<FlowExprParams>) -> String {
         let p = &params.0;
-
-        match self.get_writable_perspective(&p.perspective_id).await {
-            Ok((mut perspective, agent_context)) => {
-                // TODO: Proper flow start requires loading the flow definition
-                // and executing its start actions. For now, return a placeholder.
-                // The full implementation needs SHACLFlow parsing in Rust.
-                serde_json::to_string_pretty(&json!({
-                    "success": false,
-                    "expression": p.expression_address,
-                    "flow": p.flow_name,
-                    "message": "Flow start not yet fully implemented - requires SHACLFlow parsing"
-                }))
-                .unwrap_or_else(|e| format!("Error: {}", e))
-            }
-            Err(e) => e,
-        }
+        json!({"error": "flow_start is not yet implemented — requires SHACLFlow parsing in Rust", "expression": p.expression_address, "flow": p.flow_name}).to_string()
     }
 
     /// Execute a transition action on an expression in a flow
     #[tool(
-        description = "Execute a transition action on an expression within a flow (state machine). The expression must be in a state that has the given action available. Use flow_actions to see available actions for the current state. Example: flow_run_action(perspective_id='abc', flow_name='MessageFlow', expression_address='literal://string:xyz', action_name='approve')."
+        description = "[NOT YET IMPLEMENTED] Execute a transition action on an expression within a flow (state machine). Requires SHACLFlow command execution which is not yet available."
     )]
     async fn flow_run_action(&self, params: Parameters<FlowRunActionParams>) -> String {
         let p = &params.0;
-
-        match self.get_writable_perspective(&p.perspective_id).await {
-            Ok((_perspective, _agent_context)) => {
-                // TODO: Flow action execution requires running the action's commands
-                // on the perspective instance. The actions are defined in SHACL Flow SDNA
-                // and consist of add/remove link commands. Implementation needs:
-                // 1. Load flow definition from SDNA
-                // 2. Find current state of expression
-                // 3. Verify action is available in current state
-                // 4. Execute the action's commands (add/remove links)
-                // 5. Return new state
-                json!({
-                    "success": false,
-                    "expression": p.expression_address,
-                    "flow": p.flow_name,
-                    "action": p.action_name,
-                    "message": "Flow action execution not yet implemented — requires SHACL Flow command execution"
-                })
-                .to_string()
-            }
-            Err(e) => e,
-        }
+        json!({"error": "flow_run_action is not yet implemented — requires SHACLFlow command execution", "expression": p.expression_address, "flow": p.flow_name, "action": p.action_name}).to_string()
     }
 
     /// Create a new perspective
@@ -1081,7 +1057,7 @@ impl Ad4mMcpHandler {
                 let target = if p.value.starts_with("literal://") || p.value.contains("://") {
                     p.value.clone()
                 } else {
-                    format!("literal://string:{}", p.value)
+                    crate::literal::encode_literal_string(&p.value)
                 };
 
                 let link = Link {
@@ -1153,7 +1129,9 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error querying collection: {}", e),
                 }
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            None => {
+                json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string()
+            }
         }
     }
 
@@ -1323,13 +1301,15 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error querying children: {}", e),
                 }
             }
-            None => format!("Perspective not found: {}", p.perspective_id),
+            None => {
+                json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string()
+            }
         }
     }
 
     /// Delete a subject instance by running its destructor actions and removing all associated links
     #[tool(
-        description = "Delete a subject instance. Removes all links where the subject is the source (its properties, type markers, and collection links). This effectively removes the subject from the perspective."
+        description = "Delete a subject instance. Removes all links where the subject is the source (its properties, type markers, and collection links) AND all inbound links from other subjects pointing to it (e.g., collection membership). ⚠️ This cascade-deletes references from other subjects — use with caution."
     )]
     async fn delete_subject(&self, params: Parameters<DeleteSubjectParams>) -> String {
         let p = &params.0;
@@ -1796,7 +1776,30 @@ impl Ad4mMcpHandler {
 
         let mut js = self.context.js_handle.clone();
         let mime = params.0.mime_type.as_deref().unwrap_or("image/png");
-        let file_storage_lang = "QmzSYwdjqeP9D13Sfmyc5HcabM9jL3DtPyhadnF6dQXu4FjVSbQ";
+
+        // Query file storage language address from the runtime instead of hardcoding
+        let get_file_storage_script = r#"
+            const langs = await core.callResolver("Query", "languages", { filter: "" });
+            const parsed = JSON.parse(langs);
+            const fileStorage = parsed.find(l => l.name && l.name.toLowerCase().includes("file-storage"));
+            JSON.stringify(fileStorage ? fileStorage.address : null)
+        "#;
+        let file_storage_lang = match js.execute(get_file_storage_script.to_string()).await {
+            Ok(r) => {
+                let addr: Option<String> = serde_json::from_str(&r).unwrap_or(None);
+                match addr {
+                    Some(a) => a,
+                    None => {
+                        return json!({"error": "File storage language not found in runtime"})
+                            .to_string()
+                    }
+                }
+            }
+            Err(e) => {
+                return json!({"error": format!("Failed to query file storage language: {}", e)})
+                    .to_string()
+            }
+        };
 
         // Upload image via expressionCreate
         let content = json!({
@@ -1971,11 +1974,11 @@ impl Ad4mMcpHandler {
     // MODEL SUBSCRIPTION TOOLS
     // ========================================================================
 
-    /// Subscribe to model changes in a perspective
+    /// Generate a waker query config for watching model changes in a perspective
     #[tool(
-        description = "Generate a SurrealQL query for watching changes to a subject class in a perspective. Returns a subscription_id and the query to pass to the waker process. The waker uses perspectiveSubscribeSurrealQuery (same mechanism as Flux UI) for live updates. Flow: 1) Call this tool to get the query, 2) Store subscription_id + context in memory, 3) Pass query + id to the waker, 4) When woken, use MCP tools to fetch the latest data."
+        description = "Generate a SurrealQL query config for watching changes to a subject class in a perspective. This does NOT create a live subscription — it returns a query and config that you pass to an external waker process. The waker uses perspectiveSubscribeSurrealQuery (same mechanism as Flux UI) for live updates. Flow: 1) Call this tool to get the query config, 2) Store subscription_id + context in memory, 3) Add waker_config to the waker's config file and restart it, 4) When woken, use MCP tools to fetch the latest data."
     )]
-    async fn subscribe_to_model(&self, params: Parameters<SubscribeToModelParams>) -> String {
+    async fn generate_waker_query(&self, params: Parameters<SubscribeToModelParams>) -> String {
         let _capabilities = match self.get_capabilities().await {
             Ok(c) => c,
             Err(e) => return format!("Authentication error: {}", e),
