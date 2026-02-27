@@ -480,9 +480,7 @@ impl Ad4mMcpHandler {
 
             if let Some(constructor_link) = constructor_links.first() {
                 let actions_str = Self::resolve_literal_value(&constructor_link.data.target);
-                if let Ok(actions) =
-                    serde_json::from_str::<Vec<serde_json::Value>>(&actions_str)
-                {
+                if let Ok(actions) = serde_json::from_str::<Vec<serde_json::Value>>(&actions_str) {
                     // Find the type marker action (first addLink with source="this")
                     if let Some(type_action) = actions.iter().find(|a| {
                         a.get("action").and_then(|v| v.as_str()) == Some("addLink")
