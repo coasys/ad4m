@@ -42,9 +42,12 @@ use crate::{
 };
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
+#[cfg(unix)]
 use libc::{sigaction, sigemptyset, sighandler_t, SA_ONSTACK, SIGURG};
+#[cfg(unix)]
 use std::ptr;
 
+#[cfg(unix)]
 extern "C" fn handle_sigurg(_: libc::c_int) {
     //println!("Received SIGURG signal, but ignoring it.");
 }
@@ -64,6 +67,7 @@ fn find_and_set_port(config_port: &mut Option<u16>, start_port: u16, service_nam
 
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
+    #[cfg(unix)]
     unsafe {
         let mut action: sigaction = std::mem::zeroed();
         action.sa_flags = SA_ONSTACK;
