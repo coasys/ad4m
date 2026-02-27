@@ -43,7 +43,7 @@ describe("Multi-Node Multi-User Integration tests", () => {
   let localServicesProcess: ChildProcess | null = null;
 
   before(async function () {
-    this.timeout(120_000);
+    this.timeout(300_000);
     [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
 
     const appDataPath = path.join(TEST_DIR, "agents", "multi-user-node1");

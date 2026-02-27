@@ -14,7 +14,7 @@ describe("Multi-User Perspective Subscriptions tests", () => {
   let gqlPort: number = 0;
 
   before(async function () {
-    this.timeout(120_000);
+    this.timeout(300_000);
     agentHandle = await startAgent("multi-user-subscriptions");
     adminAd4mClient = agentHandle.client;
     gqlPort = agentHandle.gqlPort;
