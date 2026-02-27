@@ -100,7 +100,13 @@ impl Ad4mMcpHandler {
         let perspectives = all_perspectives();
         let mut result: Vec<serde_json::Value> = Vec::new();
         for p in perspectives.iter() {
-            let handle = p.persisted.lock().await;
+            let handle = p.persisted.lock().await.clone();
+
+            // Multi-user isolation: only show perspectives the user can access
+            if !self.can_access_perspective(&handle).await {
+                continue;
+            }
+
             result.push(json!({
                 "uuid": handle.uuid,
                 "name": handle.name,
@@ -118,8 +124,8 @@ impl Ad4mMcpHandler {
     pub async fn get_models(&self, params: Parameters<ListSubjectClassesParams>) -> String {
         let uuid = &params.0.perspective_id;
 
-        match get_perspective(uuid) {
-            Some(perspective) => {
+        match self.get_readable_perspective(uuid).await {
+            Ok(perspective) => {
                 let links = perspective
                     .get_links(&LinkQuery {
                         predicate: Some("rdf://type".to_string()),
@@ -147,7 +153,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error listing subject classes: {}", e),
                 }
             }
-            None => json!({"error": format!("Perspective not found: {}", uuid)}).to_string(),
+            Err(e) => e,
         }
     }
 
@@ -240,8 +246,8 @@ impl Ad4mMcpHandler {
     pub async fn query_links(&self, params: Parameters<QueryLinksParams>) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(perspective) => {
+        match self.get_readable_perspective(&p.perspective_id).await {
+            Ok(perspective) => {
                 let _agent_context = self.get_agent_context_for_read().await;
 
                 let query = LinkQuery {
@@ -271,9 +277,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error querying links: {}", e),
                 }
             }
-            None => {
-                json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string()
-            }
+            Err(e) => e,
         }
     }
 

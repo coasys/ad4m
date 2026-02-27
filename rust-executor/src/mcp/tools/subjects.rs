@@ -159,8 +159,8 @@ impl Ad4mMcpHandler {
     pub async fn query_subjects(&self, params: Parameters<QuerySubjectsParams>) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(perspective) => {
+        match self.get_readable_perspective(&p.perspective_id).await {
+            Ok(perspective) => {
                 let class_links = perspective
                     .get_links(&LinkQuery {
                         predicate: Some("rdf://type".to_string()),
@@ -204,9 +204,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error querying instances: {}", e),
                 }
             }
-            None => {
-                json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string()
-            }
+            Err(e) => e,
         }
     }
 
@@ -217,8 +215,8 @@ impl Ad4mMcpHandler {
     pub async fn get_subject_data(&self, params: Parameters<GetSubjectDataParams>) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(perspective) => {
+        match self.get_readable_perspective(&p.perspective_id).await {
+            Ok(perspective) => {
                 let name_literal = format!("literal://string:shacl://{}", p.class_name);
                 let shape_links = match perspective
                     .get_links(&LinkQuery {
@@ -319,9 +317,7 @@ impl Ad4mMcpHandler {
                 serde_json::to_string_pretty(&serde_json::Value::Object(data))
                     .unwrap_or_else(|e| format!("Error: {}", e))
             }
-            None => {
-                json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string()
-            }
+            Err(e) => e,
         }
     }
 
@@ -499,8 +495,8 @@ impl Ad4mMcpHandler {
     ) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(perspective) => {
+        match self.get_readable_perspective(&p.perspective_id).await {
+            Ok(perspective) => {
                 let _agent_context = self.get_agent_context_for_read().await;
 
                 let predicate = match self
@@ -535,9 +531,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error querying collection: {}", e),
                 }
             }
-            None => {
-                json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string()
-            }
+            Err(e) => e,
         }
     }
 
@@ -647,8 +641,8 @@ impl Ad4mMcpHandler {
     ) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(perspective) => {
+        match self.get_readable_perspective(&p.perspective_id).await {
+            Ok(perspective) => {
                 let _agent_context = self.get_agent_context_for_read().await;
 
                 let links = perspective
@@ -703,9 +697,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error querying children: {}", e),
                 }
             }
-            None => {
-                json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string()
-            }
+            Err(e) => e,
         }
     }
 

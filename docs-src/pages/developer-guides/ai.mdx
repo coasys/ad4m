@@ -2,6 +2,10 @@ import { Callout } from "nextra-theme-docs";
 
 # AI in AD4M
 
+<Callout type="info">
+**Looking for AI agent integration?** This page covers running AI models *inside* AD4M. If you want AI agents to *use* AD4M — creating perspectives, managing data, joining neighbourhoods — see the [MCP Server guide](/developer-guides/mcp).
+</Callout>
+
 AD4M provides powerful AI capabilities through both local and remote model inference. This allows you to integrate various AI models into your applications, from language models to embedding models and speech recognition.
 
 ## Overview
@@ -384,9 +388,3 @@ Transcription streams are automatically cleaned up after 30 seconds of inactivit
 - No need to manually close streams if the client disconnects
 - Resources are freed automatically when streams are abandoned
 - Streams remain active as long as they receive audio data regularly
-
----
-
-<Callout type="info">
-**Looking for AI agent integration?** This page covers running AI models *inside* AD4M. If you want AI agents to *use* AD4M — creating perspectives, managing data, joining neighbourhoods — see the [MCP Server guide](/developer-guides/mcp).
-</Callout>

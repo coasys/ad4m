@@ -23,10 +23,14 @@ impl Ad4mMcpHandler {
         let mut seen_classes = std::collections::HashSet::new();
 
         for p in perspectives.iter() {
-            let uuid = {
-                let handle = p.persisted.lock().await;
-                handle.uuid.clone()
-            };
+            let handle = p.persisted.lock().await.clone();
+
+            // Multi-user isolation: skip perspectives the user can't access
+            if !self.can_access_perspective(&handle).await {
+                continue;
+            }
+
+            let uuid = handle.uuid.clone();
 
             let perspective = match get_perspective(&uuid) {
                 Some(p) => p,
@@ -295,9 +299,9 @@ impl Ad4mMcpHandler {
 
         // Find actual class name (preserving original case)
         let class_name = {
-            let perspective = match get_perspective(&perspective_id) {
-                Some(p) => p,
-                None => {
+            let perspective = match self.get_readable_perspective(&perspective_id).await {
+                Ok(p) => p,
+                Err(_) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
                         "Perspective not found: {}",
                         perspective_id
@@ -433,9 +437,9 @@ impl Ad4mMcpHandler {
     }
 
     async fn handle_dynamic_query(&self, perspective_id: &str, class_name: &str) -> String {
-        let perspective = match get_perspective(perspective_id) {
-            Some(p) => p,
-            None => return format!("Perspective not found: {}", perspective_id),
+        let perspective = match self.get_readable_perspective(perspective_id).await {
+            Ok(p) => p,
+            Err(e) => return e,
         };
 
         // Find target_class URI
@@ -494,9 +498,9 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let perspective = match get_perspective(perspective_id) {
-            Some(p) => p,
-            None => return format!("Perspective not found: {}", perspective_id),
+        let perspective = match self.get_readable_perspective(perspective_id).await {
+            Ok(p) => p,
+            Err(e) => return e,
         };
 
         // Reuse get_subject_data logic

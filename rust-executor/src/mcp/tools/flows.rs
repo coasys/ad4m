@@ -102,8 +102,8 @@ impl Ad4mMcpHandler {
     pub async fn get_flows(&self, params: Parameters<GetFlowsParams>) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(perspective) => {
+        match self.get_readable_perspective(&p.perspective_id).await {
+            Ok(perspective) => {
                 match perspective
                     .get_links(&LinkQuery {
                         source: Some("ad4m://self".to_string()),
@@ -124,9 +124,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error querying flows: {}", e),
                 }
             }
-            None => {
-                json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string()
-            }
+            Err(e) => e,
         }
     }
 
@@ -137,8 +135,8 @@ impl Ad4mMcpHandler {
     pub async fn flow_state(&self, params: Parameters<FlowExprParams>) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(perspective) => {
+        match self.get_readable_perspective(&p.perspective_id).await {
+            Ok(perspective) => {
                 match perspective
                     .get_links(&LinkQuery {
                         source: Some(format!("literal://string:{}", p.flow_name)),
@@ -182,9 +180,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error querying flow state: {}", e),
                 }
             }
-            None => {
-                json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string()
-            }
+            Err(e) => e,
         }
     }
 
@@ -195,8 +191,8 @@ impl Ad4mMcpHandler {
     pub async fn flow_actions(&self, params: Parameters<FlowExprParams>) -> String {
         let p = &params.0;
 
-        match get_perspective(&p.perspective_id) {
-            Some(perspective) => {
+        match self.get_readable_perspective(&p.perspective_id).await {
+            Ok(perspective) => {
                 match perspective
                     .get_links(&LinkQuery {
                         source: Some(format!("literal://string:{}", p.flow_name)),
@@ -218,9 +214,7 @@ impl Ad4mMcpHandler {
                     Err(e) => format!("Error querying flow actions: {}", e),
                 }
             }
-            None => {
-                json!({"error": format!("Perspective not found: {}", p.perspective_id)}).to_string()
-            }
+            Err(e) => e,
         }
     }
 

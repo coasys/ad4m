@@ -43,6 +43,7 @@ use crate::agent::capabilities::{
 use crate::agent::AgentContext;
 use crate::perspectives::get_perspective;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::graphql::graphql_types::PerspectiveHandle;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
     model::{
@@ -310,9 +311,27 @@ impl Ad4mMcpHandler {
         }
     }
 
-    /// Get a perspective by ID, verifying the agent is authenticated and has the required capability.
+    /// Get the user's email from the JWT token (for multi-user perspective isolation)
+    pub(crate) async fn get_user_email(&self) -> Option<String> {
+        let token = self.get_auth_token().await.unwrap_or_default();
+        crate::agent::capabilities::user_email_from_token(token)
+    }
+
+    /// Check if the current user can access a perspective.
+    /// In multi-user mode, only perspectives owned by the user (or unowned) are accessible.
+    /// In single-user mode, all perspectives are accessible.
+    pub(crate) async fn can_access_perspective(
+        &self,
+        perspective: &PerspectiveHandle,
+    ) -> bool {
+        let user_email = self.get_user_email().await;
+        crate::graphql::query_resolvers::can_access_perspective(&user_email, perspective)
+    }
+
+    /// Get a perspective by ID, verifying the agent is authenticated, has the required capability,
+    /// and has access to this perspective (multi-user isolation).
     /// This is the standard entry point for tool handlers — DRYs out the repeated
-    /// get_perspective + get_agent_context + check_capability pattern.
+    /// get_perspective + get_agent_context + check_capability + ownership check pattern.
     pub(crate) async fn get_perspective_with_auth(
         &self,
         perspective_id: &str,
@@ -322,6 +341,14 @@ impl Ad4mMcpHandler {
             json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string()
         })?;
 
+        // Check perspective ownership/access (multi-user isolation)
+        let handle = perspective.persisted.lock().await.clone();
+        if !self.can_access_perspective(&handle).await {
+            return Err(
+                json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string(),
+            );
+        }
+
         let agent_context = self.get_agent_context().await?;
 
         let capabilities = self.get_capabilities().await;
@@ -330,6 +357,25 @@ impl Ad4mMcpHandler {
         }
 
         Ok((perspective, agent_context))
+    }
+
+    /// Convenience wrapper for read operations — checks perspective access but no write capability
+    pub(crate) async fn get_readable_perspective(
+        &self,
+        perspective_id: &str,
+    ) -> Result<PerspectiveInstance, String> {
+        let perspective = get_perspective(perspective_id).ok_or_else(|| {
+            json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string()
+        })?;
+
+        let handle = perspective.persisted.lock().await.clone();
+        if !self.can_access_perspective(&handle).await {
+            return Err(
+                json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string(),
+            );
+        }
+
+        Ok(perspective)
     }
 
     /// Convenience wrapper for write operations (most common case)

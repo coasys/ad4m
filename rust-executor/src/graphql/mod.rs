@@ -1,6 +1,6 @@
 pub mod graphql_types;
 mod mutation_resolvers;
-mod query_resolvers;
+pub(crate) mod query_resolvers;
 mod subscription_resolvers;
 
 use graphql_types::RequestContext;

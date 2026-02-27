@@ -46,9 +46,8 @@ impl Ad4mMcpHandler {
 
         let p = &params.0;
 
-        if get_perspective(&p.perspective_id).is_none() {
-            return json!({"error": format!("Perspective not found: {}", p.perspective_id)})
-                .to_string();
+        if let Err(e) = self.get_readable_perspective(&p.perspective_id).await {
+            return e;
         }
 
         let query = if let Some(ref parent) = p.parent_address {
