@@ -69,3 +69,4 @@ docs-src/
 .worktrees/
 CUSTOM_DENO_SNAPSHOT.bin
 rust-client/schema.gql
+waker-bridge/package-lock.json
