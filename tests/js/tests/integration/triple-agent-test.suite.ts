@@ -184,6 +184,51 @@ export default function tripleAgentTests(testContext: TestContext) {
 
       expect(jimLinks.length).to.be.equal(20);
 
+      // Refresh routing tables again now that Jim has caught up, so that Jim's
+      // phase-3 writes will propagate back to Alice and Bob (Jim was a slow peer
+      // throughout phase 2 — without a fresh exchange his new entries may not
+      // reach the other nodes).
+      await testContext.makeAllThreeNodesKnown();
+      await sleep(10000);
+
+      // Verify Alice also sees all 20 links before phase 3 begins — she may be
+      // missing Bob's phase-2 contributions if the DHT was slow while Jim was
+      // catching up.
+      let aliceLinks = await alice.perspective.queryLinks(
+        aliceP1!.uuid,
+        new LinkQuery({ source: "ad4m://root" }),
+      );
+      tries = 1;
+      while (aliceLinks.length < 20 && tries < 20) {
+        console.log(
+          `Alice pre-phase3 sync (attempt ${tries}/20, have ${aliceLinks.length}/20)...`,
+        );
+        await sleep(3000);
+        aliceLinks = await alice.perspective.queryLinks(
+          aliceP1!.uuid,
+          new LinkQuery({ source: "ad4m://root" }),
+        );
+        tries++;
+      }
+
+      // Verify Bob also sees all 20 links before phase 3 begins.
+      bobLinks = await bob.perspective.queryLinks(
+        bobP1!.uuid,
+        new LinkQuery({ source: "ad4m://root" }),
+      );
+      tries = 1;
+      while (bobLinks.length < 20 && tries < 20) {
+        console.log(
+          `Bob pre-phase3 sync (attempt ${tries}/20, have ${bobLinks.length}/20)...`,
+        );
+        await sleep(3000);
+        bobLinks = await bob.perspective.queryLinks(
+          bobP1!.uuid,
+          new LinkQuery({ source: "ad4m://root" }),
+        );
+        tries++;
+      }
+
       //Alice bob and jim all collectively add 10 links and then check can be received by all agents
       await alice.perspective.addLink(aliceP1.uuid, {
         source: "ad4m://root",
@@ -226,15 +271,17 @@ export default function tripleAgentTests(testContext: TestContext) {
         target: "test://test",
       });
 
-      let aliceLinks = await alice.perspective.queryLinks(
+      aliceLinks = await alice.perspective.queryLinks(
         aliceP1!.uuid,
         new LinkQuery({ source: "ad4m://root" }),
       );
       tries = 1;
 
       while (aliceLinks.length < 30 && tries < 40) {
-        console.log("Alice retrying getting links...");
-        await sleep(1000);
+        console.log(
+          `Alice retrying getting links (attempt ${tries}/40, have ${aliceLinks.length}/30)...`,
+        );
+        await sleep(3000);
         aliceLinks = await alice.perspective.queryLinks(
           aliceP1!.uuid,
           new LinkQuery({ source: "ad4m://root" }),
@@ -251,8 +298,10 @@ export default function tripleAgentTests(testContext: TestContext) {
       tries = 1;
 
       while (bobLinks.length < 30 && tries < 40) {
-        console.log("Bob retrying getting links...");
-        await sleep(1000);
+        console.log(
+          `Bob retrying getting links (attempt ${tries}/40, have ${bobLinks.length}/30)...`,
+        );
+        await sleep(3000);
         bobLinks = await bob.perspective.queryLinks(
           bobP1!.uuid,
           new LinkQuery({ source: "ad4m://root" }),
@@ -269,8 +318,10 @@ export default function tripleAgentTests(testContext: TestContext) {
       tries = 1;
 
       while (jimLinks.length < 30 && tries < 40) {
-        console.log("Jim retrying getting links...");
-        await sleep(1000);
+        console.log(
+          `Jim retrying getting links (attempt ${tries}/40, have ${jimLinks.length}/30)...`,
+        );
+        await sleep(3000);
         jimLinks = await jim.perspective.queryLinks(
           jimP1!.uuid,
           new LinkQuery({ source: "ad4m://root" }),

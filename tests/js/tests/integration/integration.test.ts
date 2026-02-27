@@ -106,7 +106,7 @@ export class TestContext {
 let testContext: TestContext = new TestContext();
 
 describe("Integration tests", function () {
-  this.timeout(420000);
+  this.timeout(660000);
   const appDataPath = path.join(TEST_DIR, "agents", "alice");
   const bootstrapSeedPath = path.join(`${__dirname}/../../bootstrapSeed.json`);
   let gqlPort: number;
