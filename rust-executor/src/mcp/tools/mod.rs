@@ -41,9 +41,9 @@ use crate::agent::capabilities::{
     capabilities_from_token, check_capability, defs::PERSPECTIVE_CREATE_CAPABILITY, Capability,
 };
 use crate::agent::AgentContext;
+use crate::graphql::graphql_types::PerspectiveHandle;
 use crate::perspectives::get_perspective;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::graphql::graphql_types::PerspectiveHandle;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
     model::{
@@ -320,10 +320,7 @@ impl Ad4mMcpHandler {
     /// Check if the current user can access a perspective.
     /// In multi-user mode, only perspectives owned by the user (or unowned) are accessible.
     /// In single-user mode, all perspectives are accessible.
-    pub(crate) async fn can_access_perspective(
-        &self,
-        perspective: &PerspectiveHandle,
-    ) -> bool {
+    pub(crate) async fn can_access_perspective(&self, perspective: &PerspectiveHandle) -> bool {
         let user_email = self.get_user_email().await;
         crate::graphql::query_resolvers::can_access_perspective(&user_email, perspective)
     }
