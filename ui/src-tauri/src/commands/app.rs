@@ -361,7 +361,10 @@ pub fn set_smtp_config(config: SmtpConfigDto) -> Result<(), String> {
 #[tauri::command]
 pub fn get_mcp_config() -> (bool, u16) {
     if let Ok(state) = LauncherState::load() {
-        (state.mcp_enabled.unwrap_or(false), state.mcp_port.unwrap_or(3001))
+        (
+            state.mcp_enabled.unwrap_or(false),
+            state.mcp_port.unwrap_or(3001),
+        )
     } else {
         (false, 3001)
     }
