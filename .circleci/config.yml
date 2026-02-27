@@ -40,7 +40,6 @@ commands:
           name: Build bootstrap languages
           command: pnpm run build-languages
 
-
 jobs:
   build-and-test:
     machine: true
@@ -110,7 +109,7 @@ jobs:
             done
       - run:
           name: Run integration tests
-          command: cd ./tests/js && pnpm run test-main
+          command: cd ./tests/js && pnpm run test:ci
           no_output_timeout: 30m
 
   integration-tests-multi-user-simple:
@@ -120,7 +119,7 @@ jobs:
       - setup_integration_test_environment
       - run:
           name: Run multi-user-simple integration tests
-          command: cd ./tests/js && ./test-multi-user-with-setup.sh
+          command: cd ./tests/js && pnpm run test-multi-user
           no_output_timeout: 30m
 
   integration-tests-email-verification:
