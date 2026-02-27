@@ -569,10 +569,12 @@ jobs:
       - name: Publish all npm packages
         run: |
           # Write auth token via both methods to ensure npm/pnpm picks it up
-          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
-          npm config set //registry.npmjs.org/:_authToken "${NPM_TOKEN}"
+          # actions/setup-node sets NPM_CONFIG_USERCONFIG to a temp .npmrc — write auth there
+          TARGET_NPMRC="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$TARGET_NPMRC"
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
           echo "npm version: $(npm --version), node: $(node --version)"
-          echo "npmrc written: $(wc -c < ~/.npmrc) bytes"
+          echo "npmrc target: $TARGET_NPMRC ($(wc -c < "$TARGET_NPMRC") bytes)"
           TAG="${{ env.NPM_TAG }}"
           echo "Publishing with tag: $TAG"
           FAILED=0
@@ -593,7 +595,7 @@ jobs:
           done
           exit $FAILED
         env:
-          NPM_TOKEN: ${{ secrets.COASYS_NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.COASYS_NPM_TOKEN }}
 
   # ============================================================================
   # Crates Publish - Uses Docker container
