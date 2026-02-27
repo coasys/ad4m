@@ -87,31 +87,18 @@ impl ShaclProperty {
     }
 }
 
-/// Load all SHACL subject classes from a perspective
+/// Load all SHACL subject classes from a perspective.
+/// Reuses PerspectiveInstance::get_subject_classes_from_shacl() for class discovery,
+/// then enriches with property metadata from SHACL links.
 pub async fn load_classes(perspective: &PerspectiveInstance) -> Vec<ShaclClass> {
-    let class_links = match perspective
-        .get_links(&LinkQuery {
-            predicate: Some("rdf://type".to_string()),
-            target: Some("ad4m://SubjectClass".to_string()),
-            ..Default::default()
-        })
-        .await
-    {
-        Ok(links) => links,
+    let class_names = match perspective.get_subject_classes_from_shacl().await {
+        Ok(names) => names,
         Err(_) => return vec![],
     };
 
     let mut classes = Vec::new();
-    for class_link in &class_links {
-        let class_uri = &class_link.data.source;
-        let class_name = class_uri
-            .split("://")
-            .last()
-            .unwrap_or(class_uri)
-            .to_string();
-
+    for class_name in class_names {
         let properties = load_class_properties(perspective, &class_name).await;
-
         classes.push(ShaclClass {
             name_lower: class_name.to_lowercase(),
             name: class_name,
@@ -282,6 +269,18 @@ pub async fn find_class_name(
     perspective: &PerspectiveInstance,
     class_name_lower: &str,
 ) -> Option<String> {
+    let class_names = match perspective.get_subject_classes_from_shacl().await {
+        Ok(names) => names,
+        Err(_) => return None,
+    };
+
+    for name in &class_names {
+        if name.to_lowercase() == class_name_lower {
+            return Some(name.clone());
+        }
+    }
+
+    // Fallback: direct link query for non-standard URIs
     let class_links = match perspective
         .get_links(&LinkQuery {
             predicate: Some("rdf://type".to_string()),
