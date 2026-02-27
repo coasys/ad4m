@@ -156,6 +156,14 @@ export default function tripleAgentTests(testContext: TestContext) {
         target: "test://test",
       });
 
+      // Re-exchange agent infos so Jim's DHT routing table is fresh after Alice
+      // and Bob have made many new Holochain commits.  Without this, Jim's node
+      // can accumulate "Could not find entry" failures because it doesn't know
+      // which peers hold the new entries.
+      await testContext.makeAllThreeNodesKnown();
+
+      // Give the DHT time to gossip the new entries to Jim before the first check.
+      await sleep(10000);
       let jimLinks = await jim.perspective.queryLinks(
         jimP1!.uuid,
         new LinkQuery({ source: "ad4m://root" }),
@@ -163,8 +171,10 @@ export default function tripleAgentTests(testContext: TestContext) {
       let jimRetries = 1;
 
       while (jimLinks.length < 20 && jimRetries < 40) {
-        console.log("Jim retrying getting links...");
-        await sleep(1000);
+        console.log(
+          `Jim retrying getting links (attempt ${jimRetries}/40, have ${jimLinks.length}/20)...`,
+        );
+        await sleep(3000);
         jimLinks = await jim.perspective.queryLinks(
           jimP1!.uuid,
           new LinkQuery({ source: "ad4m://root" }),

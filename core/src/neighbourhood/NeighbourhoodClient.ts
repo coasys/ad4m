@@ -8,7 +8,7 @@ import {
 } from "../perspectives/Perspective";
 import { PerspectiveHandle } from "../perspectives/PerspectiveHandle";
 import unwrapApolloResult from "../unwrapApolloResult";
-import { NeighbourhoodProxy } from "./NeighbourhoodProxy";
+import { isSocketCloseError } from "../utils";
 
 export class NeighbourhoodClient {
   #apolloClient: ApolloClient<any>;
@@ -367,8 +367,10 @@ export class NeighbourhoodClient {
           const { neighbourhoodSignal } = unwrapApolloResult(result);
           that.dispatchSignal(perspectiveUUID, neighbourhoodSignal);
         },
-        error: (e) =>
-          console.error("neighbourhoodSignal subscription error:", e),
+        error: (e) => {
+          if (!isSocketCloseError(e))
+            console.error("neighbourhoodSignal subscription error:", e);
+        },
       });
     this.#signalSubscriptions.set(perspectiveUUID, sub);
   }

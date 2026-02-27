@@ -13,7 +13,6 @@ import {
   startExecutor,
   apolloClient,
   runHcLocalServices,
-  sleep,
   waitForExit,
 } from "../../utils/utils";
 import { ChildProcess } from "child_process";
@@ -107,7 +106,7 @@ export class TestContext {
 let testContext: TestContext = new TestContext();
 
 describe("Integration tests", function () {
-  this.timeout(360000);
+  this.timeout(420000);
   const appDataPath = path.join(TEST_DIR, "agents", "alice");
   const bootstrapSeedPath = path.join(`${__dirname}/../../bootstrapSeed.json`);
   let gqlPort: number;
