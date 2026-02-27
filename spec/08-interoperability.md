@@ -55,9 +55,9 @@ This section defines what an alternative AD4M implementation MUST and SHOULD sup
 
 ### 8.3.1 SDNA
 
-- **SHOULD** support Prolog-based SDNA for subject class queries.
-- **SHOULD** support the `subject_class`, `instance`, `property_getter`, `property_setter`, `collection`, `constructor`, `destructor` predicates.
-- **SHOULD** populate the Prolog knowledge base with `triple/3` and `link/5` facts from Perspective links.
+- **MUST** support SHACL-based SDNA for subject class definitions and instance resolution.
+- **SHOULD** support SurrealDB for performant queries over the link graph.
+- **MAY** support custom SHACL rules (SPARQL-based constraints) for advanced reasoning.
 
 ### 8.3.2 Capability Tokens
 

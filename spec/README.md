@@ -15,7 +15,7 @@ AD4M has been demonstrated as a protocol (not just an implementation) through th
 1. **[Core Data Model](./01-core-data-model.md)** — Links, Expressions, Perspectives, Neighbourhoods
 2. **[Agent Model](./02-agent-model.md)** — DID-based identity, key management, capability tokens
 3. **[Language Interface](./03-language-interface.md)** — Plugin architecture for Expression, Link, and Perspective languages
-4. **[Social DNA (SDNA)](./04-social-dna.md)** — Subject classes, flows, collections, and Prolog-based schemas
+4. **[Social DNA (SDNA)](./04-social-dna.md)** — Subject classes, flows, collections, and SHACL-based schemas
 5. **[P-Diff-Sync Protocol](./05-p-diff-sync.md)** — Neighbourhood synchronization via Holochain
 6. **[GraphQL API](./06-graphql-api.md)** — Executor API schema for clients
 7. **[Bootstrap & System Languages](./07-bootstrap-languages.md)** — System bootstrap and core language types
