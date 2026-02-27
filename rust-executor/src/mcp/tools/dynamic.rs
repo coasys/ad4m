@@ -452,7 +452,78 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        // Find target_class URI
+        // Strategy 1: Find instances via SHACL constructor "type marker" link pattern.
+        // The constructor's first addLink action typically defines the type marker
+        // (e.g., flux://entry_type → flux://has_message for Message class).
+        let name_literal = Self::encode_literal(&format!("shacl://{}", class_name));
+        let shape_links = perspective
+            .get_links(&LinkQuery {
+                source: Some(name_literal),
+                predicate: Some("ad4m://shacl_shape_uri".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap_or_default();
+
+        if let Some(shape_link) = shape_links.first() {
+            let shape_uri = &shape_link.data.target;
+
+            // Get constructor actions
+            let constructor_links = perspective
+                .get_links(&LinkQuery {
+                    source: Some(shape_uri.clone()),
+                    predicate: Some("ad4m://constructor".to_string()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_or_default();
+
+            if let Some(constructor_link) = constructor_links.first() {
+                let actions_str = Self::resolve_literal_value(&constructor_link.data.target);
+                if let Ok(actions) =
+                    serde_json::from_str::<Vec<serde_json::Value>>(&actions_str)
+                {
+                    // Find the type marker action (first addLink with source="this")
+                    if let Some(type_action) = actions.iter().find(|a| {
+                        a.get("action").and_then(|v| v.as_str()) == Some("addLink")
+                            && a.get("source").and_then(|v| v.as_str()) == Some("this")
+                    }) {
+                        let predicate = type_action
+                            .get("predicate")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let target = type_action
+                            .get("target")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        if !predicate.is_empty() && !target.is_empty() {
+                            // Query for all links matching this type marker pattern
+                            let instance_links = match perspective
+                                .get_links(&LinkQuery {
+                                    predicate: Some(predicate.to_string()),
+                                    target: Some(target.to_string()),
+                                    ..Default::default()
+                                })
+                                .await
+                            {
+                                Ok(links) => links,
+                                Err(e) => return format!("Error: {}", e),
+                            };
+
+                            let instances: Vec<String> = instance_links
+                                .iter()
+                                .map(|l| l.data.source.clone())
+                                .collect();
+                            return serde_json::to_string_pretty(&instances)
+                                .unwrap_or_else(|e| format!("Error: {}", e));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Strategy 2: Fallback to rdf://type matching (for classes that use standard RDF typing)
         let class_links = match perspective
             .get_links(&LinkQuery {
                 predicate: Some("rdf://type".to_string()),
@@ -477,7 +548,6 @@ impl Ad4mMcpHandler {
             None => return format!("Subject class '{}' not found", class_name),
         };
 
-        // Find instances
         let instance_links = match perspective
             .get_links(&LinkQuery {
                 predicate: Some("rdf://type".to_string()),
