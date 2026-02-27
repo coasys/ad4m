@@ -1,13 +1,31 @@
 # AD4M Executor Setup for AI Agents
 
-## Prerequisites
+## Getting the Executor
 
-- Rust toolchain (1.92+)
-- Deno runtime
-- Go (for holochain services)
-- `holochain_cli` v0.6.0 (for DNA bundling)
+### Option 1: Download from GitHub Releases (Recommended)
 
-## Build from Source
+Download pre-built binaries from [GitHub Releases](https://github.com/coasys/ad4m/releases):
+
+```bash
+# Linux x64
+curl -L -o ad4m-executor https://github.com/coasys/ad4m/releases/download/v0.12.0-rc1/ad4m-cli-executor-linux-0.12.0-rc1-x64
+curl -L -o ad4m https://github.com/coasys/ad4m/releases/download/v0.12.0-rc1/ad4m-cli-client-linux-0.12.0-rc1-x64
+chmod +x ad4m-executor ad4m
+sudo mv ad4m-executor ad4m /usr/local/bin/
+```
+
+Available assets per release:
+- `ad4m-cli-executor-linux-*-x64` — Executor binary (Linux)
+- `ad4m-cli-client-linux-*-x64` — CLI client (Linux)
+- `ADAM.Launcher_*_amd64.AppImage` — Desktop launcher (Linux)
+- `ADAM.Launcher_*_amd64.deb` — Desktop launcher (Debian/Ubuntu)
+- `ADAM_Launcher_*_aarch64.dmg` — Desktop launcher (macOS)
+
+Check the [releases page](https://github.com/coasys/ad4m/releases) for the latest version.
+
+### Option 2: Build from Source
+
+Requires: Rust 1.92+, Deno, Go, `holochain_cli`
 
 ```bash
 git clone https://github.com/coasys/ad4m.git

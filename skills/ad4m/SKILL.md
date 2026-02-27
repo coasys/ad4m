@@ -21,13 +21,19 @@ For deeper architecture details, see [references/architecture.md](references/arc
 
 See [references/setup.md](references/setup.md) for the full setup process.
 
+**Getting the executor:** Download pre-built binaries from [GitHub Releases](https://github.com/coasys/ad4m/releases), or build from source. See [references/setup.md](references/setup.md) for details.
+
 **Quick version:**
 ```bash
+# 0. Download executor from GitHub releases (Linux x64 example)
+curl -L -o ad4m-executor https://github.com/coasys/ad4m/releases/latest/download/ad4m-cli-executor-linux-x64
+chmod +x ad4m-executor
+
 # 1. Init (creates bootstrap seed — MUST run before first start)
-ad4m-executor init --data-path ~/.ad4m
+./ad4m-executor init --data-path ~/.ad4m
 
 # 2. Run executor
-ad4m-executor run --app-data-path ~/.ad4m --gql-port 12100 \
+./ad4m-executor run --app-data-path ~/.ad4m --gql-port 12100 \
   --admin-credential <secret> --enable-mcp true
 
 # 3. Generate agent (via CLI)
@@ -123,7 +129,16 @@ node ad4m-waker.js --config waker-config.json
 }
 ```
 
-The MCP `subscribe_to_model` tool can generate appropriate SurrealQL queries for you. Run the waker in a `screen` session alongside the executor.
+The MCP `subscribe_to_model` tool can generate appropriate SurrealQL queries for you.
+
+For full waker configuration and deployment details, see [references/waker.md](references/waker.md).
+
+**Source**: The waker is built from `waker-bridge/` in the [AD4M repository](https://github.com/coasys/ad4m/tree/dev/waker-bridge).
+
+**Running**: Use a `screen` session alongside the executor:
+```bash
+screen -dmS ad4m-waker bash -c 'node ad4m-waker.js --config waker-config.json 2>&1 | tee /tmp/ad4m-waker.log'
+```
 
 **Flow**: SurrealQL query change detected → waker sends wake to OpenClaw → agent reads messages via MCP tools.
 
