@@ -135,9 +135,10 @@ pub async fn load_class_properties(
     perspective: &PerspectiveInstance,
     class_name: &str,
 ) -> Vec<ShaclProperty> {
-    let name_literal = ad4m_client::literal::Literal::from_string(format!("shacl://{}", class_name))
-        .to_url()
-        .unwrap_or_else(|_| format!("literal://string:shacl://{}", class_name));
+    let name_literal =
+        ad4m_client::literal::Literal::from_string(format!("shacl://{}", class_name))
+            .to_url()
+            .unwrap_or_else(|_| format!("literal://string:shacl://{}", class_name));
     let shape_links = match perspective
         .get_links(&LinkQuery {
             source: Some(name_literal),

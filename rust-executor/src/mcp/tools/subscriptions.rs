@@ -64,10 +64,7 @@ impl Ad4mMcpHandler {
                     predicate, target
                 )
             } else {
-                format!(
-                    "SELECT * FROM link WHERE predicate = '{}'",
-                    predicate
-                )
+                format!("SELECT * FROM link WHERE predicate = '{}'", predicate)
             }
         } else {
             "SELECT * FROM link ORDER BY timestamp DESC LIMIT 50".to_string()
