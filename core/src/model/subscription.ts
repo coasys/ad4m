@@ -18,6 +18,7 @@ import type {
   Subscription,
   SubscribeOptions,
 } from "./types";
+import { instanceToSerializable } from "./decorators";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -39,8 +40,13 @@ function stableQueryKey(query: Query): string {
  *
  * Sorted by `id` so result ordering doesn't cause false positives.
  * `id` is a prototype getter and therefore not serialised by
- * `JSON.stringify` automatically — it is extracted explicitly before spreading
- * the instance's own enumerable properties.
+ * `JSON.stringify` automatically — it is extracted explicitly.
+ *
+ * Delegates to `instanceToSerializable` (from decorators.ts) which strips
+ * all non-decorator-registered fields — including the runtime-enumerable
+ * TypeScript `private _perspective` that would otherwise cause
+ * `JSON.stringify` to throw a circular-reference error via
+ * PerspectiveProxy → Apollo InMemoryCache.
  */
 function stableFingerprint(results: any[]): string {
   const sorted = [...results].sort((a, b) => {
@@ -48,7 +54,7 @@ function stableFingerprint(results: any[]): string {
     const bId: string = b.id ?? "";
     return aId < bId ? -1 : aId > bId ? 1 : 0;
   });
-  return JSON.stringify(sorted.map((r) => ({ id: r.id, ...r })));
+  return JSON.stringify(sorted.map(instanceToSerializable));
 }
 
 // ─── Subscription registry ────────────────────────────────────────────────────

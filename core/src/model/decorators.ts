@@ -31,6 +31,39 @@ export function getRelationsMetadata(ctor: Function): Record<string, any> {
   return { ...getRelationsMetadata(parent), ...own };
 }
 
+/**
+ * Builds a plain, JSON-safe object from a model instance.
+ *
+ * Only includes `id` (if present) and decorator-registered \@Property keys.
+ * All other own enumerable properties are stripped — most importantly the
+ * TypeScript `private _perspective` field which is stored as a regular
+ * enumerable property at runtime and holds a PerspectiveProxy whose Apollo
+ * InMemoryCache creates a circular reference in `JSON.stringify`.
+ *
+ * Falls back to a shallow spread for plain objects with no registered props
+ * (e.g. raw link objects passed through before model hydration).
+ */
+export function instanceToSerializable(instance: any): Record<string, unknown> {
+  if (!instance || typeof instance !== "object") return {};
+  const ctor = Object.getPrototypeOf(instance)?.constructor as
+    | Function
+    | undefined;
+  const registeredProps = ctor ? getPropertiesMetadata(ctor) : null;
+  const keys = registeredProps ? Object.keys(registeredProps) : null;
+  if (!keys || keys.length === 0) {
+    // Plain object / no @Property decorators — safe to spread.
+    return { ...(instance as object) };
+  }
+  const obj: Record<string, unknown> = {};
+  if ((instance as any).id !== undefined) {
+    obj.id = (instance as any).id;
+  }
+  for (const key of keys) {
+    obj[key] = (instance as any)[key];
+  }
+  return obj;
+}
+
 export class PerspectiveAction {
   action: string;
   source: string;
