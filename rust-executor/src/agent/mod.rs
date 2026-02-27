@@ -591,17 +591,11 @@ impl AgentService {
                 agent_json
             );
 
-            match controller
+            controller
                 .execute_on_language(agent_language.address(), &create_script)
                 .await
-            {
-                Ok(_) => {
-                    log::info!("Agent expression created successfully");
-                }
-                Err(e) => {
-                    log::warn!("Error creating agent expression: {:?}", e);
-                }
-            }
+                .map_err(|e| anyhow!("Error creating agent expression: {:?}", e))?;
+            log::info!("Agent expression created successfully");
         } else {
             log::warn!("No agent data available to publish");
         }

@@ -367,6 +367,21 @@ impl Query {
         check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)?;
 
         let controller = LanguageController::global_instance();
+
+        // If not already loaded, try to install/load it (includes trust verification)
+        if !controller.is_language_loaded(&address).await {
+            controller.language_by_ref(&address).await.map_err(|e| {
+                // Extract the inner message for LoadError to match expected API format
+                let msg = match &e {
+                    crate::languages::error::LanguageError::LoadError { message, .. } => {
+                        message.clone()
+                    }
+                    other => other.to_string(),
+                };
+                FieldError::new(msg, Value::null())
+            })?;
+        }
+
         if controller.is_language_loaded(&address).await {
             let name = controller.get_language_name(&address).await;
             let settings = controller.get_settings_public(&address);
@@ -973,7 +988,6 @@ pub fn build_expression_rendered(
         .to_string();
 
     let data = match expr_json.get("data") {
-        Some(d) if d.is_string() => d.as_str().unwrap_or("").to_string(),
         Some(d) => serde_json::to_string(d).unwrap_or_default(),
         None => String::new(),
     };

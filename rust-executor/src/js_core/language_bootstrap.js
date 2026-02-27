@@ -3,6 +3,61 @@
 // Bridges raw Deno ops (from registered extensions) and the LanguageContext
 // shape that language bundles expect.
 
+// Polyfill Node.js Buffer on globalThis – many language bundles depend on it.
+import { Buffer } from "node:buffer";
+globalThis.Buffer = Buffer;
+
+// Minimal DOM stubs – language bundles that include Svelte Icon components
+// reference HTMLElement, document, and customElements at module load time.
+// These stubs prevent "Class extends value undefined" errors without
+// needing a full DOM implementation (the Icon is never actually rendered).
+if (typeof globalThis.HTMLElement === "undefined") {
+    globalThis.HTMLElement = class HTMLElement {
+        constructor() { this.shadowRoot = { appendChild() {} }; }
+        attachShadow() { return this.shadowRoot; }
+        connectedCallback() {}
+        disconnectedCallback() {}
+        attributeChangedCallback() {}
+    };
+}
+if (typeof globalThis.document === "undefined") {
+    const noop = () => ({
+        textContent: "",
+        appendChild() {},
+        removeChild() {},
+        insertBefore() { return this; },
+        setAttribute() {},
+        removeAttribute() {},
+        addEventListener() {},
+        removeEventListener() {},
+        classList: { add() {}, remove() {}, toggle() {} },
+        style: {},
+        childNodes: [],
+        firstChild: null,
+        nextSibling: null,
+        parentNode: null,
+    });
+    globalThis.document = {
+        createElement: () => noop(),
+        createTextNode: (t) => ({ ...noop(), textContent: t }),
+        createElementNS: () => noop(),
+        createComment: () => noop(),
+        head: noop(),
+        body: noop(),
+        querySelector: () => null,
+        querySelectorAll: () => [],
+    };
+}
+if (typeof globalThis.customElements === "undefined") {
+    globalThis.customElements = {
+        define() {},
+        get() { return undefined; },
+    };
+}
+if (typeof globalThis.window === "undefined") {
+    globalThis.window = globalThis;
+}
+
 // Map of serialised cell_id key → signalCallback for Holochain signal routing.
 // Key format: `${hex(dnaHash)}:${hex(agentPubkey)}`
 globalThis.__holochainSignalCallbacks__ = new Map();
@@ -88,22 +143,49 @@ function createHolochainDelegate(languageAddress) {
             const results = [];
             for (const dna of dnas) {
                 const appId = `${languageAddress}-${dna.nick}`;
+
+                // Normalize source into the tagged enum format Rust expects:
+                //   { type: "path", value: "/path/to/happ" }
+                //   { type: "bytes", value: Uint8Array }
+                // Language bundles may pass various formats:
+                //   { file: Uint8Array, nick: ... } — raw hApp bytes
+                //   { path: "..." } — file path
+                //   { source: { path: "..." } } or { source: { bundle: ... } }
+                let source;
+                if (dna.source && dna.source.type) {
+                    // Already in correct tagged format
+                    source = dna.source;
+                } else if (dna.source && dna.source.path) {
+                    source = { type: "path", value: dna.source.path };
+                } else if (dna.source && dna.source.bundle) {
+                    source = { type: "bundle", value: dna.source.bundle };
+                } else if (dna.file) {
+                    // Raw hApp bytes (e.g. perspective-diff-sync passes { file: Uint8Array })
+                    source = { type: "bytes", value: new Uint8Array(dna.file) };
+                } else if (dna.path) {
+                    source = { type: "path", value: dna.path };
+                } else {
+                    source = dna.source;
+                }
+
                 const installPayload = {
                     installed_app_id: appId,
                     agent_key: await HOLOCHAIN_SERVICE.getAgentKey(),
                     membrane_proofs: {},
                     existing_cells: {},
                     network_seed: dna.network_seed || undefined,
-                    source: dna.source || { path: dna.path },
+                    source: source,
                 };
                 let appInfo;
                 try {
                     appInfo = await HOLOCHAIN_SERVICE.installApp(installPayload);
                 } catch (e) {
-                    // App may already be installed
+                    // App may already be installed (possibly under a different app_id
+                    // but with the same DNA+agent cell, e.g. when templating languages)
                     appInfo = await HOLOCHAIN_SERVICE.getAppInfo(appId);
                     if (!appInfo) {
-                        throw e;
+                        console.warn(`[registerDNAs] Failed to install app ${appId}: ${e.message || e}. Continuing without this DNA.`);
+                        continue;
                     }
                 }
                 results.push(appInfo);

@@ -6,12 +6,45 @@ use holochain::{
     },
 };
 use log::error;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::time::timeout;
 
 use super::get_holochain_service;
 use crate::holochain_service::{HolochainService, LocalConductorConfig};
 use crate::js_core::error::AnyhowWrapperError;
+
+/// A JS-friendly version of ZomeCallResponse that decodes ExternIO bytes to JSON.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum DecodedZomeCallResponse {
+    Ok { value: serde_json::Value },
+    NetworkError { value: String },
+    CountersigningSession { value: String },
+}
+
+impl DecodedZomeCallResponse {
+    fn from_zome_call_response(response: ZomeCallResponse) -> Result<Self, AnyhowWrapperError> {
+        match response {
+            ZomeCallResponse::Ok(extern_io) => {
+                let value: serde_json::Value = extern_io.decode().map_err(|e| {
+                    AnyhowWrapperError::from(anyhow!("Failed to decode ExternIO response: {}", e))
+                })?;
+                Ok(DecodedZomeCallResponse::Ok { value })
+            }
+            ZomeCallResponse::NetworkError(msg) => {
+                Ok(DecodedZomeCallResponse::NetworkError { value: msg })
+            }
+            ZomeCallResponse::CountersigningSession(msg) => {
+                Ok(DecodedZomeCallResponse::CountersigningSession { value: msg })
+            }
+            other => Err(AnyhowWrapperError::from(anyhow!(
+                "Unexpected ZomeCallResponse variant: {:?}",
+                other
+            ))),
+        }
+    }
+}
 
 // The duration to use for timeouts
 const TIMEOUT_DURATION: Duration = Duration::from_secs(90);
@@ -77,17 +110,30 @@ async fn call_zome_function(
     #[string] cell_name: String,
     #[string] zome_name: String,
     #[string] fn_name: String,
-    #[serde] payload: Option<ExternIO>,
-) -> Result<ZomeCallResponse, AnyhowWrapperError> {
-    timeout(TIMEOUT_DURATION, async {
+    #[serde] payload: Option<serde_json::Value>,
+) -> Result<DecodedZomeCallResponse, AnyhowWrapperError> {
+    // Convert the JSON value to ExternIO (msgpack-encoded bytes) that Holochain expects
+    let extern_payload = match payload {
+        Some(val) => {
+            let bytes = ExternIO::encode(val).map_err(|e| {
+                AnyhowWrapperError::from(anyhow!("Failed to encode payload: {}", e))
+            })?;
+            Some(bytes)
+        }
+        None => None,
+    };
+    let response = timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
         interface
-            .call_zome_function(app_id, cell_name, zome_name, fn_name, payload)
+            .call_zome_function(app_id, cell_name, zome_name, fn_name, extern_payload)
             .await
     })
     .await
     .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
-    .map_err(AnyhowWrapperError::from)
+    .map_err(AnyhowWrapperError::from)?;
+
+    // Decode ExternIO bytes to JSON before returning to JS
+    DecodedZomeCallResponse::from_zome_call_response(response)
 }
 
 #[op2(async)]

@@ -22,7 +22,17 @@ import {
             return get_app_info(app_id);
         },
         callZomeFunction: async (app_id, cell_name, zome_name, fn_name, payload) => {
-            return call_zome_function(app_id, cell_name, zome_name, fn_name, payload);
+            const response = await call_zome_function(app_id, cell_name, zome_name, fn_name, payload);
+            // Unwrap DecodedZomeCallResponse: { type: "Ok", value: ... }
+            if (response.type === "Ok") {
+                return response.value;
+            } else if (response.type === "NetworkError") {
+                throw new Error(`Holochain NetworkError: ${response.value}`);
+            } else if (response.type === "CountersigningSession") {
+                throw new Error(`Holochain CountersigningSession error: ${response.value}`);
+            } else {
+                throw new Error(`Unexpected ZomeCallResponse: ${JSON.stringify(response)}`);
+            }
         },
         agentInfos: async () => {
             return agent_infos();

@@ -236,8 +236,16 @@ impl LanguageController {
 
     /// Check if a language is loaded
     pub async fn is_language_loaded(&self, language_address: &str) -> bool {
+        // Resolve alias forward (e.g. "did" → actual hash)
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(language_address)
+                .cloned()
+                .unwrap_or_else(|| language_address.to_string())
+        };
         let runtimes = self.runtimes.lock().await;
-        runtimes.contains_key(language_address)
+        runtimes.contains_key(&resolved)
     }
 
     /// Execute a script on a specific language runtime
@@ -526,9 +534,20 @@ impl LanguageController {
                 sys.agent_language = Some(agent_language.clone());
                 sys.neighbourhood_language = Some(neighbourhood_language.clone());
                 sys.perspective_language = Some(perspective_language.clone());
-                sys.system_language_set.insert(agent_language);
-                sys.system_language_set.insert(neighbourhood_language);
-                sys.system_language_set.insert(perspective_language);
+                sys.system_language_set.insert(agent_language.clone());
+                sys.system_language_set
+                    .insert(neighbourhood_language.clone());
+                sys.system_language_set.insert(perspective_language.clone());
+            }
+
+            // Register language aliases matching the old JS executor convention
+            {
+                let mut aliases = self.language_aliases.lock().await;
+                aliases.insert("did".to_string(), agent_language);
+                aliases.insert("lang".to_string(), hash.clone());
+                aliases.insert("neighbourhood".to_string(), neighbourhood_language);
+                aliases.insert("perspective".to_string(), perspective_language);
+                info!("Registered language aliases: {:?}", *aliases);
             }
 
             // Step 3: Preload known link languages
@@ -700,9 +719,9 @@ impl LanguageController {
 
         // If we have source, save and load into a per-language runtime
         if let Some(source) = source {
-            // Compute hash and verify
+            // Compute hash and verify it matches the expected address
             let hash = controller.calculate_language_hash(&source);
-            if hash == "asdf" {
+            if hash != language {
                 error!("install_language: COULDN'T VERIFY HASH OF LANGUAGE!");
                 error!("install_language: Address: {}", language);
                 error!("install_language: Computed hash: {}", hash);
@@ -762,22 +781,30 @@ impl LanguageController {
             .await
             .map_err(|e| deno_core::anyhow::anyhow!("Failed to create neighbourhood: {}", e))?;
 
-        Ok(result)
+        // expression_create returns a full URL like "langAddr://exprAddr"
+        // We need to return just the expression address part
+        let expr_addr = if let Some(idx) = result.find("://") {
+            result[idx + 3..].to_string()
+        } else {
+            result
+        };
+
+        Ok(expr_addr)
     }
 
     pub async fn get_neighbourhood(
         address: Address,
     ) -> Result<Option<DecoratedNeighbourhoodExpression>, AnyError> {
         let controller = Self::global_instance();
-        let perspective_address = {
+        let neighbourhood_address = {
             let sys = controller.system_addresses.lock().await;
-            sys.perspective_language
+            sys.neighbourhood_language
                 .clone()
-                .ok_or_else(|| deno_core::anyhow::anyhow!("Perspective language not loaded"))?
+                .ok_or_else(|| deno_core::anyhow::anyhow!("Neighbourhood language not loaded"))?
         };
 
         match controller
-            .get_expression(&perspective_address, &address)
+            .get_expression(&neighbourhood_address, &address)
             .await
         {
             Ok(Some(expr_json)) => {
@@ -894,15 +921,15 @@ impl LanguageController {
         if let Some(happ_value) = template_data.get("happ") {
             info!("applying happ template data...");
             let happ_pattern = Regex::new(r"var (happ+)").unwrap();
-            let mut happ_index = 0;
+            let mut happ_index: Option<usize> = None;
             for (i, line) in source_lines.iter().enumerate() {
                 if happ_pattern.is_match(line) {
-                    happ_index = i;
+                    happ_index = Some(i);
                 }
             }
-            if let JsonValue::String(happ_str) = happ_value {
-                info!("happIndex: {}", happ_index);
-                source_lines[happ_index] = format!("var happ = \"{}\"", happ_str);
+            if let (Some(idx), JsonValue::String(happ_str)) = (happ_index, happ_value) {
+                info!("happIndex: {}", idx);
+                source_lines[idx] = format!("var happ = \"{}\"", happ_str);
             }
         }
     }
@@ -1335,7 +1362,7 @@ impl LanguageController {
             .execute_on_language(&language_language_address, &meta_script)
             .await?;
 
-        let language_meta: JsonValue =
+        let mut language_meta: JsonValue =
             serde_json::from_str(&meta_result).map_err(|e| LanguageError::SerializationError {
                 message: format!("Failed to parse language meta: {}", e),
             })?;
@@ -1345,6 +1372,9 @@ impl LanguageController {
                 address: resolved_address,
             });
         }
+
+        // Verify the expression proof (sets proof.valid / proof.invalid)
+        Self::verify_expression_proof(&mut language_meta);
 
         // Validate proof
         let proof_valid = language_meta
@@ -1440,9 +1470,10 @@ impl LanguageController {
                 .unwrap_or("");
 
             if template_applied_params.is_empty() || template_source_language_address.is_empty() {
+                let meta_json = serde_json::to_string(&language_meta_data).unwrap_or_default();
                 let err_msg = format!(
-                    "Language not created by trusted agent: {} and is not templated... aborting language install. Language metadata: {:?}",
-                    language_author, language_meta_data
+                    "Language not created by trusted agent: {} and is not templated... aborting language install. Language metadata: {}",
+                    language_author, meta_json
                 );
                 error!("{}", err_msg);
 
@@ -1802,6 +1833,16 @@ impl LanguageController {
         lang_address: &str,
         expression_address: &str,
     ) -> Result<Option<JsonValue>, LanguageError> {
+        // Resolve alias forward (e.g. "did" → actual hash)
+        let lang_address = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(lang_address)
+                .cloned()
+                .unwrap_or_else(|| lang_address.to_string())
+        };
+        let lang_address = lang_address.as_str();
+
         // Handle literal language
         if lang_address == "literal" {
             let mut decoded = literal_decode(expression_address)?;
@@ -1869,13 +1910,43 @@ impl LanguageController {
 
     /// Verify an expression's proof and set the `valid` field.
     fn verify_expression_proof(expr_json: &mut JsonValue) {
-        if let Ok(expr) =
-            serde_json::from_value::<crate::types::Expression<JsonValue>>(expr_json.clone())
-        {
-            let valid = crate::agent::signatures::verify(&expr).unwrap_or(false);
-            if let Some(proof) = expr_json.get_mut("proof") {
-                proof["valid"] = JsonValue::Bool(valid);
-                proof["invalid"] = JsonValue::Bool(!valid);
+        match serde_json::from_value::<crate::types::Expression<JsonValue>>(expr_json.clone()) {
+            Ok(expr) => match crate::agent::signatures::verify(&expr) {
+                Ok(valid) => {
+                    log::warn!(
+                        "verify_expression_proof: author={}, valid={}, sig={}",
+                        expr.author,
+                        valid,
+                        &expr.proof.signature[..20.min(expr.proof.signature.len())]
+                    );
+                    if let Some(proof) = expr_json.get_mut("proof") {
+                        proof["valid"] = JsonValue::Bool(valid);
+                        proof["invalid"] = JsonValue::Bool(!valid);
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "verify_expression_proof: verification error for author={}: {}",
+                        expr.author,
+                        e
+                    );
+                    if let Some(proof) = expr_json.get_mut("proof") {
+                        proof["valid"] = JsonValue::Bool(false);
+                        proof["invalid"] = JsonValue::Bool(true);
+                    }
+                }
+            },
+            Err(e) => {
+                log::warn!(
+                    "verify_expression_proof: failed to parse expression: {}. Keys: {:?}",
+                    e,
+                    expr_json.as_object().map(|o| o.keys().collect::<Vec<_>>())
+                );
+                // If we can't parse the expression, still try to set valid based on existing proof
+                if let Some(proof) = expr_json.get_mut("proof") {
+                    proof["valid"] = JsonValue::Bool(false);
+                    proof["invalid"] = JsonValue::Bool(true);
+                }
             }
         }
     }
@@ -1905,18 +1976,27 @@ impl LanguageController {
             return Ok(format!("literal://{}", expression_part));
         }
 
-        // Resolve alias: check if any alias maps to this address
-        let effective_lang_address = {
+        // Resolve aliases in both directions:
+        // 1. Forward: if lang_address is an alias name (e.g. "did"), resolve to hash
+        // 2. Reverse: if lang_address is a hash, find the alias name for URL scheme
+        let (resolved_address, alias_name) = {
             let aliases = self.language_aliases.lock().await;
-            let mut effective = lang_address.to_string();
-            for (alias, target) in aliases.iter() {
-                if target == lang_address {
-                    effective = alias.clone();
-                    break;
+            // Forward: alias → hash
+            if let Some(target) = aliases.get(lang_address) {
+                (target.clone(), Some(lang_address.to_string()))
+            } else {
+                // Reverse: hash → alias
+                let mut alias = None;
+                for (a, t) in aliases.iter() {
+                    if t == lang_address {
+                        alias = Some(a.clone());
+                        break;
+                    }
                 }
+                (lang_address.to_string(), alias)
             }
-            effective
         };
+        let effective_lang_address = alias_name.unwrap_or_else(|| resolved_address.clone());
 
         let content_json =
             serde_json::to_string(&content).map_err(|e| LanguageError::SerializationError {
@@ -1932,15 +2012,21 @@ impl LanguageController {
             content_json, content_json
         );
 
-        let result = self.execute_on_language(lang_address, &script).await?;
+        let result = self.execute_on_language(&resolved_address, &script).await?;
 
         // Strip surrounding quotes from the result (it's a JSON-encoded string)
         let expression_address = result.trim().trim_matches('"').to_string();
 
-        Ok(format!(
-            "{}://{}",
-            effective_lang_address, expression_address
-        ))
+        // Special case: for the "did" scheme, the expression address IS the full URL
+        // (e.g. "did:key:z6Mk..."), so don't prefix with "did://"
+        if effective_lang_address == "did" {
+            Ok(expression_address)
+        } else {
+            Ok(format!(
+                "{}://{}",
+                effective_lang_address, expression_address
+            ))
+        }
     }
 
     /// Get expression interactions for a URL.
@@ -1949,6 +2035,12 @@ impl LanguageController {
         url: &str,
     ) -> Result<Vec<InteractionMeta>, LanguageError> {
         let (lang_address, expression_address) = Self::parse_expr_url(url)?;
+
+        // Resolve alias forward (e.g. "did" → actual hash)
+        let lang_address = {
+            let aliases = self.language_aliases.lock().await;
+            aliases.get(&lang_address).cloned().unwrap_or(lang_address)
+        };
 
         let script = format!(
             r#"JSON.stringify(
@@ -1974,6 +2066,12 @@ impl LanguageController {
     ) -> Result<Option<String>, LanguageError> {
         let (lang_address, expression_address) = Self::parse_expr_url(url)?;
 
+        // Resolve alias forward (e.g. "did" → actual hash)
+        let lang_address = {
+            let aliases = self.language_aliases.lock().await;
+            aliases.get(&lang_address).cloned().unwrap_or(lang_address)
+        };
+
         let script = format!(
             r#"JSON.stringify(
                 await (async () => {{
@@ -1988,10 +2086,19 @@ impl LanguageController {
 
         let result = self.execute_on_language(&lang_address, &script).await?;
 
-        if result.trim() == "null" || result.trim() == "undefined" {
+        let trimmed = result.trim();
+        if trimmed == "null" || trimmed == "undefined" {
             Ok(None)
         } else {
-            Ok(Some(result))
+            // The result is JSON-encoded (via JSON.stringify). If it's a JSON string,
+            // unwrap the outer quotes so the GraphQL layer returns the raw value.
+            if let Ok(serde_json::Value::String(s)) =
+                serde_json::from_str::<serde_json::Value>(trimmed)
+            {
+                Ok(Some(s))
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
         }
     }
 
