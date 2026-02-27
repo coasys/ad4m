@@ -63,17 +63,17 @@ export type NotificationRequestedCallback = (
 ) => null;
 
 export class RuntimeClient {
-  #apolloClient: ApolloClient<any>;
-  #messageReceivedCallbacks: MessageCallback[];
-  #exceptionOccurredCallbacks: ExceptionCallback[];
-  #notificationTriggeredCallbacks: NotificationTriggeredCallback[];
-  #notificationRequestedCallbacks: NotificationRequestedCallback[];
+  private _apolloClient: ApolloClient<any>;
+  private _messageReceivedCallbacks: MessageCallback[];
+  private _exceptionOccurredCallbacks: ExceptionCallback[];
+  private _notificationTriggeredCallbacks: NotificationTriggeredCallback[];
+  private _notificationRequestedCallbacks: NotificationRequestedCallback[];
 
   constructor(client: ApolloClient<any>, subscribe: boolean = true) {
-    this.#apolloClient = client;
-    this.#messageReceivedCallbacks = [];
-    this.#exceptionOccurredCallbacks = [];
-    this.#notificationTriggeredCallbacks = [];
+    this._apolloClient = client;
+    this._messageReceivedCallbacks = [];
+    this._exceptionOccurredCallbacks = [];
+    this._notificationTriggeredCallbacks = [];
 
     if (subscribe) {
       this.subscribeMessageReceived();
@@ -84,7 +84,7 @@ export class RuntimeClient {
 
   async info(): Promise<RuntimeInfo> {
     const { runtimeInfo } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`
           query runtimeInfo {
             runtimeInfo {
@@ -101,7 +101,7 @@ export class RuntimeClient {
 
   async quit(): Promise<Boolean> {
     const result = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeQuit {
             runtimeQuit
@@ -115,7 +115,7 @@ export class RuntimeClient {
 
   async openLink(url: string): Promise<Boolean> {
     const { runtimeOpenLink } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeOpenLink($url: String!) {
             runtimeOpenLink(url: $url)
@@ -129,7 +129,7 @@ export class RuntimeClient {
 
   async addTrustedAgents(agents: string[]): Promise<string[]> {
     const { addTrustedAgents } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation addTrustedAgents($agents: [String!]!) {
             addTrustedAgents(agents: $agents)
@@ -143,7 +143,7 @@ export class RuntimeClient {
 
   async deleteTrustedAgents(agents: string[]): Promise<string[]> {
     const { deleteTrustedAgents } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation deleteTrustedAgents($agents: [String!]!) {
             deleteTrustedAgents(agents: $agents)
@@ -157,7 +157,7 @@ export class RuntimeClient {
 
   async getTrustedAgents(): Promise<string[]> {
     const { getTrustedAgents } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`
           query getTrustedAgents {
             getTrustedAgents
@@ -170,7 +170,7 @@ export class RuntimeClient {
 
   async addKnownLinkLanguageTemplates(addresses: string[]): Promise<string[]> {
     const { runtimeAddKnownLinkLanguageTemplates } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeAddKnownLinkLanguageTemplates(
             $addresses: [String!]!
@@ -188,7 +188,7 @@ export class RuntimeClient {
     addresses: string[],
   ): Promise<string[]> {
     const { runtimeRemoveKnownLinkLanguageTemplates } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeRemoveKnownLinkLanguageTemplates(
             $addresses: [String!]!
@@ -204,7 +204,7 @@ export class RuntimeClient {
 
   async knownLinkLanguageTemplates(): Promise<string[]> {
     const { runtimeKnownLinkLanguageTemplates } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`
           query runtimeKnownLinkLanguageTemplates {
             runtimeKnownLinkLanguageTemplates
@@ -217,7 +217,7 @@ export class RuntimeClient {
 
   async addFriends(dids: string[]): Promise<string[]> {
     const { runtimeAddFriends } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeAddFriends($dids: [String!]!) {
             runtimeAddFriends(dids: $dids)
@@ -231,7 +231,7 @@ export class RuntimeClient {
 
   async removeFriends(dids: string[]): Promise<string[]> {
     const { runtimeRemoveFriends } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeRemoveFriends($dids: [String!]!) {
             runtimeRemoveFriends(dids: $dids)
@@ -245,7 +245,7 @@ export class RuntimeClient {
 
   async friends(): Promise<string[]> {
     const { runtimeFriends } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`
           query runtimeFriends {
             runtimeFriends
@@ -258,7 +258,7 @@ export class RuntimeClient {
 
   async hcAgentInfos(): Promise<string> {
     const { runtimeHcAgentInfos } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`
           query runtimeHcAgentInfos {
             runtimeHcAgentInfos
@@ -271,7 +271,7 @@ export class RuntimeClient {
 
   async getNetworkMetrics(): Promise<string> {
     const { runtimeGetNetworkMetrics } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`
           query runtimeGetNetworkMetrics {
             runtimeGetNetworkMetrics
@@ -284,7 +284,7 @@ export class RuntimeClient {
 
   async restartHolochain(): Promise<boolean> {
     const { runtimeRestartHolochain } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeRestartHolochain {
             runtimeRestartHolochain
@@ -297,7 +297,7 @@ export class RuntimeClient {
 
   async hcAddAgentInfos(agentInfos: String): Promise<void> {
     const { runtimeHcAddAgentInfos } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeHcAddAgentInfos($agentInfos: String!) {
             runtimeHcAddAgentInfos(agentInfos: $agentInfos)
@@ -316,7 +316,7 @@ export class RuntimeClient {
     signedData: string,
   ): Promise<boolean> {
     const { runtimeVerifyStringSignedByDid } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           query runtimeVerifyStringSignedByDid(
             $did: String!
@@ -340,7 +340,7 @@ export class RuntimeClient {
 
   async setStatus(perspective: Perspective): Promise<boolean> {
     const { runtimeSetStatus } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeSetStatus($status: PerspectiveInput!) {
             runtimeSetStatus(status: $status)
@@ -354,7 +354,7 @@ export class RuntimeClient {
 
   async friendStatus(did: string): Promise<PerspectiveExpression> {
     const { runtimeFriendStatus } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`query runtimeFriendStatus($did: String!) {
                 runtimeFriendStatus(did: $did) { ${PERSPECTIVE_EXPRESSION_FIELDS} }
             }`,
@@ -366,7 +366,7 @@ export class RuntimeClient {
 
   async friendSendMessage(did: string, message: Perspective): Promise<boolean> {
     const { runtimeFriendSendMessage } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeFriendSendMessage(
             $did: String!
@@ -383,7 +383,7 @@ export class RuntimeClient {
 
   async messageInbox(filter?: string): Promise<PerspectiveExpression[]> {
     const { runtimeMessageInbox } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`query runtimeMessageInbox($filter: String) {
                 runtimeMessageInbox(filter: $filter) { ${PERSPECTIVE_EXPRESSION_FIELDS} }
             }`,
@@ -395,7 +395,7 @@ export class RuntimeClient {
 
   async messageOutbox(filter?: string): Promise<SentMessage[]> {
     const { runtimeMessageOutbox } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`query runtimeMessageOutbox($filter: String) {
                 runtimeMessageOutbox(filter: $filter) { 
                     recipient,
@@ -412,7 +412,7 @@ export class RuntimeClient {
 
   async requestInstallNotification(notification: NotificationInput) {
     const { runtimeRequestInstallNotification } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeRequestInstallNotification(
             $notification: NotificationInput!
@@ -428,7 +428,7 @@ export class RuntimeClient {
 
   async grantNotification(id: string): Promise<boolean> {
     const { runtimeGrantNotification } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeGrantNotification($id: String!) {
             runtimeGrantNotification(id: $id)
@@ -442,7 +442,7 @@ export class RuntimeClient {
 
   async exportDb(filePath: string): Promise<boolean> {
     const { runtimeExportDb } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeExportDb($filePath: String!) {
             runtimeExportDb(filePath: $filePath)
@@ -456,7 +456,7 @@ export class RuntimeClient {
 
   async importDb(filePath: string): Promise<ImportResult> {
     const { runtimeImportDb } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeImportDb($filePath: String!) {
             runtimeImportDb(filePath: $filePath) {
@@ -548,7 +548,7 @@ export class RuntimeClient {
 
   async notifications(): Promise<Notification[]> {
     const { runtimeNotifications } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`query runtimeNotifications {
                 runtimeNotifications { ${NOTIFICATION_FIELDS} }
             }`,
@@ -562,7 +562,7 @@ export class RuntimeClient {
     notification: NotificationInput,
   ): Promise<boolean> {
     const { runtimeUpdateNotification } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeUpdateNotification(
             $id: String!
@@ -579,7 +579,7 @@ export class RuntimeClient {
 
   async removeNotification(id: string): Promise<boolean> {
     const { runtimeRemoveNotification } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeRemoveNotification($id: String!) {
             runtimeRemoveNotification(id: $id)
@@ -593,7 +593,7 @@ export class RuntimeClient {
 
   async exportPerspective(uuid: string, filePath: string): Promise<boolean> {
     const { runtimeExportPerspective } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeExportPerspective(
             $perspectiveUuid: String!
@@ -613,7 +613,7 @@ export class RuntimeClient {
 
   async importPerspective(filePath: string): Promise<boolean> {
     const { runtimeImportPerspective } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeImportPerspective($filePath: String!) {
             runtimeImportPerspective(filePath: $filePath)
@@ -627,7 +627,7 @@ export class RuntimeClient {
 
   async multiUserEnabled(): Promise<boolean> {
     const { runtimeMultiUserEnabled } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`
           query runtimeMultiUserEnabled {
             runtimeMultiUserEnabled
@@ -640,7 +640,7 @@ export class RuntimeClient {
 
   async setMultiUserEnabled(enabled: boolean): Promise<boolean> {
     const { runtimeSetMultiUserEnabled } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeSetMultiUserEnabled($enabled: Boolean!) {
             runtimeSetMultiUserEnabled(enabled: $enabled)
@@ -654,7 +654,7 @@ export class RuntimeClient {
 
   async listUsers(): Promise<UserStatistics[]> {
     const { runtimeListUsers } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`
           query runtimeListUsers {
             runtimeListUsers {
@@ -672,7 +672,7 @@ export class RuntimeClient {
 
   async emailTestModeEnable(): Promise<boolean> {
     const { runtimeEmailTestModeEnable } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeEmailTestModeEnable {
             runtimeEmailTestModeEnable
@@ -685,7 +685,7 @@ export class RuntimeClient {
 
   async emailTestModeDisable(): Promise<boolean> {
     const { runtimeEmailTestModeDisable } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeEmailTestModeDisable {
             runtimeEmailTestModeDisable
@@ -698,7 +698,7 @@ export class RuntimeClient {
 
   async emailTestGetCode(email: string): Promise<string | null> {
     const { runtimeEmailTestGetCode } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeEmailTestGetCode($email: String!) {
             runtimeEmailTestGetCode(email: $email)
@@ -712,7 +712,7 @@ export class RuntimeClient {
 
   async emailTestClearCodes(): Promise<boolean> {
     const { runtimeEmailTestClearCodes } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeEmailTestClearCodes {
             runtimeEmailTestClearCodes
@@ -729,7 +729,7 @@ export class RuntimeClient {
     expiresAt: number,
   ): Promise<boolean> {
     const { runtimeEmailTestSetExpiry } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeEmailTestSetExpiry(
             $email: String!
@@ -750,11 +750,11 @@ export class RuntimeClient {
   }
 
   addNotificationTriggeredCallback(cb: NotificationTriggeredCallback) {
-    this.#notificationTriggeredCallbacks.push(cb);
+    this._notificationTriggeredCallbacks.push(cb);
   }
 
   subscribeNotificationTriggered() {
-    this.#apolloClient
+    this._apolloClient
       .subscribe({
         query: gql` subscription {
                 runtimeNotificationTriggered { ${TRIGGERED_NOTIFICATION_FIELDS} }
@@ -763,7 +763,7 @@ export class RuntimeClient {
       })
       .subscribe({
         next: (result) => {
-          this.#notificationTriggeredCallbacks.forEach((cb) => {
+          this._notificationTriggeredCallbacks.forEach((cb) => {
             cb(result.data.runtimeNotificationTriggered);
           });
         },
@@ -774,11 +774,11 @@ export class RuntimeClient {
   }
 
   addMessageCallback(cb: MessageCallback) {
-    this.#messageReceivedCallbacks.push(cb);
+    this._messageReceivedCallbacks.push(cb);
   }
 
   subscribeMessageReceived() {
-    this.#apolloClient
+    this._apolloClient
       .subscribe({
         query: gql` subscription {
                 runtimeMessageReceived { ${PERSPECTIVE_EXPRESSION_FIELDS} }
@@ -787,7 +787,7 @@ export class RuntimeClient {
       })
       .subscribe({
         next: (result) => {
-          this.#messageReceivedCallbacks.forEach((cb) => {
+          this._messageReceivedCallbacks.forEach((cb) => {
             cb(result.data.runtimeMessageReceived);
           });
         },
@@ -798,11 +798,11 @@ export class RuntimeClient {
   }
 
   addExceptionCallback(cb: ExceptionCallback) {
-    this.#exceptionOccurredCallbacks.push(cb);
+    this._exceptionOccurredCallbacks.push(cb);
   }
 
   subscribeExceptionOccurred() {
-    this.#apolloClient
+    this._apolloClient
       .subscribe({
         query: gql`
           subscription {
@@ -817,7 +817,7 @@ export class RuntimeClient {
       })
       .subscribe({
         next: (result) => {
-          this.#exceptionOccurredCallbacks.forEach((cb) => {
+          this._exceptionOccurredCallbacks.forEach((cb) => {
             cb(result.data.exceptionOccurred);
           });
         },

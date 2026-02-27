@@ -11,12 +11,14 @@ import unwrapApolloResult from "../unwrapApolloResult";
 import { isSocketCloseError } from "../utils";
 
 export class NeighbourhoodClient {
-  #apolloClient: ApolloClient<any>;
-  #signalHandlers: Map<string, TelepresenceSignalCallback[]> = new Map();
-  #signalSubscriptions: Map<string, { unsubscribe(): void }> = new Map();
+  private _apolloClient: ApolloClient<any>;
+  private _signalHandlers: Map<string, TelepresenceSignalCallback[]> =
+    new Map();
+  private _signalSubscriptions: Map<string, { unsubscribe(): void }> =
+    new Map();
 
   constructor(client: ApolloClient<any>) {
-    this.#apolloClient = client;
+    this._apolloClient = client;
   }
 
   async publishFromPerspective(
@@ -25,7 +27,7 @@ export class NeighbourhoodClient {
     meta: Perspective,
   ): Promise<string> {
     const { neighbourhoodPublishFromPerspective } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation neighbourhoodPublishFromPerspective(
             $linkLanguage: String!
@@ -47,7 +49,7 @@ export class NeighbourhoodClient {
 
   async joinFromUrl(url: string): Promise<PerspectiveHandle> {
     const { neighbourhoodJoinFromUrl } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation neighbourhoodJoinFromUrl($url: String!) {
             neighbourhoodJoinFromUrl(url: $url) {
@@ -89,7 +91,7 @@ export class NeighbourhoodClient {
 
   async otherAgents(perspectiveUUID: string): Promise<DID[]> {
     const { neighbourhoodOtherAgents } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`
           query neighbourhoodOtherAgents($perspectiveUUID: String!) {
             neighbourhoodOtherAgents(perspectiveUUID: $perspectiveUUID)
@@ -103,7 +105,7 @@ export class NeighbourhoodClient {
 
   async hasTelepresenceAdapter(perspectiveUUID: string): Promise<boolean> {
     const { neighbourhoodHasTelepresenceAdapter } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`
           query neighbourhoodHasTelepresenceAdapter($perspectiveUUID: String!) {
             neighbourhoodHasTelepresenceAdapter(
@@ -119,7 +121,7 @@ export class NeighbourhoodClient {
 
   async onlineAgents(perspectiveUUID: string): Promise<OnlineAgent[]> {
     const { neighbourhoodOnlineAgents } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`
           query neighbourhoodOnlineAgents($perspectiveUUID: String!) {
             neighbourhoodOnlineAgents(perspectiveUUID: $perspectiveUUID) {
@@ -165,7 +167,7 @@ export class NeighbourhoodClient {
     status: Perspective,
   ): Promise<boolean> {
     const { neighbourhoodSetOnlineStatus } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation neighbourhoodSetOnlineStatus(
             $perspectiveUUID: String!
@@ -189,7 +191,7 @@ export class NeighbourhoodClient {
     status: PerspectiveUnsignedInput,
   ): Promise<boolean> {
     const { neighbourhoodSetOnlineStatusU } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation neighbourhoodSetOnlineStatusU(
             $perspectiveUUID: String!
@@ -214,7 +216,7 @@ export class NeighbourhoodClient {
     payload: Perspective,
   ): Promise<boolean> {
     const { neighbourhoodSendSignal } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation neighbourhoodSendSignal(
             $perspectiveUUID: String!
@@ -241,7 +243,7 @@ export class NeighbourhoodClient {
     payload: PerspectiveUnsignedInput,
   ): Promise<boolean> {
     const { neighbourhoodSendSignalU } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation neighbourhoodSendSignalU(
             $perspectiveUUID: String!
@@ -268,7 +270,7 @@ export class NeighbourhoodClient {
     loopback: boolean = false,
   ): Promise<boolean> {
     const { neighbourhoodSendBroadcast } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation neighbourhoodSendBroadcast(
             $perspectiveUUID: String!
@@ -295,7 +297,7 @@ export class NeighbourhoodClient {
     loopback: boolean = false,
   ): Promise<boolean> {
     const { neighbourhoodSendBroadcastU } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation neighbourhoodSendBroadcastU(
             $perspectiveUUID: String!
@@ -317,7 +319,7 @@ export class NeighbourhoodClient {
   }
 
   dispatchSignal(perspectiveUUID: string, signal: any) {
-    const handlers = this.#signalHandlers.get(perspectiveUUID);
+    const handlers = this._signalHandlers.get(perspectiveUUID);
     if (handlers) {
       handlers.forEach((handler) => {
         handler(signal);
@@ -327,7 +329,7 @@ export class NeighbourhoodClient {
 
   async subscribeToSignals(perspectiveUUID: string): Promise<void> {
     const that = this;
-    const sub = this.#apolloClient
+    const sub = this._apolloClient
       .subscribe({
         query: gql`
           subscription neighbourhoodSignal($perspectiveUUID: String!) {
@@ -372,17 +374,17 @@ export class NeighbourhoodClient {
             console.error("neighbourhoodSignal subscription error:", e);
         },
       });
-    this.#signalSubscriptions.set(perspectiveUUID, sub);
+    this._signalSubscriptions.set(perspectiveUUID, sub);
   }
 
   async addSignalHandler(
     perspectiveUUID: string,
     handler: TelepresenceSignalCallback,
   ): Promise<void> {
-    let handlersForPerspective = this.#signalHandlers.get(perspectiveUUID);
+    let handlersForPerspective = this._signalHandlers.get(perspectiveUUID);
     if (!handlersForPerspective) {
       handlersForPerspective = [];
-      this.#signalHandlers.set(perspectiveUUID, handlersForPerspective);
+      this._signalHandlers.set(perspectiveUUID, handlersForPerspective);
       await this.subscribeToSignals(perspectiveUUID);
     }
     handlersForPerspective.push(handler);
@@ -392,7 +394,7 @@ export class NeighbourhoodClient {
     perspectiveUUID: string,
     handler: TelepresenceSignalCallback,
   ): void {
-    const handlersForPerspective = this.#signalHandlers.get(perspectiveUUID);
+    const handlersForPerspective = this._signalHandlers.get(perspectiveUUID);
     if (handlersForPerspective) {
       const index = handlersForPerspective.indexOf(handler);
       if (index > -1) {
@@ -407,8 +409,8 @@ export class NeighbourhoodClient {
 
   /** Fully tears down the Apollo subscription for a perspective UUID. */
   unsubscribeFromPerspective(perspectiveUUID: string): void {
-    this.#signalSubscriptions.get(perspectiveUUID)?.unsubscribe();
-    this.#signalSubscriptions.delete(perspectiveUUID);
-    this.#signalHandlers.delete(perspectiveUUID);
+    this._signalSubscriptions.get(perspectiveUUID)?.unsubscribe();
+    this._signalSubscriptions.delete(perspectiveUUID);
+    this._signalHandlers.delete(perspectiveUUID);
   }
 }

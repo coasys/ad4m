@@ -262,14 +262,17 @@ export interface Ad4mModelLike {
 export type HasManyMethods<Keys extends string> = {
   [K in Keys as `add${Capitalize<K>}`]: (
     value: string | Ad4mModelLike,
+    batchId?: string,
   ) => Promise<void>;
 } & {
   [K in Keys as `remove${Capitalize<K>}`]: (
     value: string | Ad4mModelLike,
+    batchId?: string,
   ) => Promise<void>;
 } & {
   [K in Keys as `set${Capitalize<K>}`]: (
     values: (string | Ad4mModelLike)[],
+    batchId?: string,
   ) => Promise<void>;
 };
 

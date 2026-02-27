@@ -9,5 +9,6 @@ esbuild
     sourcemap: false,
     outfile: "dist/utils.js",
     watch: process.env.NODE_ENV === "dev" ? true : false,
+    external: ["@coasys/ad4m"],
   })
   .catch(() => process.exit(1));

@@ -88,16 +88,16 @@ export type AgentAppsUpdatedCallback = () => null;
  * as well as updating the publicly shared Agent expression.
  */
 export class AgentClient {
-  #apolloClient: ApolloClient<any>;
-  #appsChangedCallback: AgentAppsUpdatedCallback[];
-  #updatedCallbacks: AgentUpdatedCallback[];
-  #agentStatusChangedCallbacks: AgentStatusChangedCallback[];
+  private _apolloClient: ApolloClient<any>;
+  private _appsChangedCallback: AgentAppsUpdatedCallback[];
+  private _updatedCallbacks: AgentUpdatedCallback[];
+  private _agentStatusChangedCallbacks: AgentStatusChangedCallback[];
 
   constructor(client: ApolloClient<any>, subscribe: boolean = true) {
-    this.#apolloClient = client;
-    this.#updatedCallbacks = [];
-    this.#agentStatusChangedCallbacks = [];
-    this.#appsChangedCallback = [];
+    this._apolloClient = client;
+    this._updatedCallbacks = [];
+    this._agentStatusChangedCallbacks = [];
+    this._appsChangedCallback = [];
 
     if (subscribe) {
       this.subscribeAgentUpdated();
@@ -114,7 +114,7 @@ export class AgentClient {
    */
   async me(): Promise<Agent> {
     const { agent } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`query agent { agent { ${AGENT_SUBITEMS} } }`,
       }),
     );
@@ -125,7 +125,7 @@ export class AgentClient {
 
   async status(): Promise<AgentStatus> {
     const { agentStatus } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`query agentStatus {
                 agentStatus {
                     ${AGENT_STATUS_FIELDS}
@@ -138,7 +138,7 @@ export class AgentClient {
 
   async generate(passphrase: string): Promise<AgentStatus> {
     const { agentGenerate } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`mutation agentGenerate(
                 $passphrase: String!
             ) {
@@ -155,7 +155,7 @@ export class AgentClient {
   async import(args: InitializeArgs): Promise<AgentStatus> {
     let { did, didDocument, keystore, passphrase } = args;
     const { agentImport } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`mutation agentImport(
                 $did: String!,
                 $didDocument: String!,
@@ -174,7 +174,7 @@ export class AgentClient {
 
   async lock(passphrase: string): Promise<AgentStatus> {
     const { agentLock } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`mutation agentLock($passphrase: String!) {
                 agentLock(passphrase: $passphrase) {
                     ${AGENT_STATUS_FIELDS}
@@ -188,7 +188,7 @@ export class AgentClient {
 
   async unlock(passphrase: string, holochain = true): Promise<AgentStatus> {
     const { agentUnlock } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`mutation agentUnlock($passphrase: String!, $holochain: Boolean!) {
                 agentUnlock(passphrase: $passphrase, holochain: $holochain) {
                     ${AGENT_STATUS_FIELDS}
@@ -202,7 +202,7 @@ export class AgentClient {
 
   async byDID(did: string): Promise<Agent> {
     const { agentByDID } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`query agentByDID($did: String!) {
                 agentByDID(did: $did) {
                     ${AGENT_SUBITEMS}
@@ -225,7 +225,7 @@ export class AgentClient {
     });
 
     const { agentUpdatePublicPerspective } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`mutation agentUpdatePublicPerspective($perspective: PerspectiveInput!) {
                 agentUpdatePublicPerspective(perspective: $perspective) {
                     ${AGENT_SUBITEMS}
@@ -241,8 +241,8 @@ export class AgentClient {
   }
 
   async mutatePublicPerspective(mutations: LinkMutations): Promise<Agent> {
-    const perspectiveClient = new PerspectiveClient(this.#apolloClient);
-    const agentClient = new AgentClient(this.#apolloClient);
+    const perspectiveClient = new PerspectiveClient(this._apolloClient);
+    const agentClient = new AgentClient(this._apolloClient);
 
     //Create the proxy perspective and load existing links
     const proxyPerspective = await perspectiveClient.add(
@@ -275,7 +275,7 @@ export class AgentClient {
     directMessageLanguage: string,
   ): Promise<Agent> {
     const { agentUpdateDirectMessageLanguage } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`mutation agentUpdateDirectMessageLanguage($directMessageLanguage: String!) {
                 agentUpdateDirectMessageLanguage(directMessageLanguage: $directMessageLanguage) {
                     ${AGENT_SUBITEMS}
@@ -294,7 +294,7 @@ export class AgentClient {
     proofs: EntanglementProofInput[],
   ): Promise<EntanglementProof[]> {
     const { agentAddEntanglementProofs } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`mutation agentAddEntanglementProofs($proofs: [EntanglementProofInput!]!) {
                 agentAddEntanglementProofs(proofs: $proofs) {
                     ${ENTANGLEMENT_PROOF_FIELDS}
@@ -310,7 +310,7 @@ export class AgentClient {
     proofs: EntanglementProofInput[],
   ): Promise<EntanglementProof[]> {
     const { agentDeleteEntanglementProofs } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`mutation agentDeleteEntanglementProofs($proofs: [EntanglementProofInput!]!) {
                 agentDeleteEntanglementProofs(proofs: $proofs) {
                     ${ENTANGLEMENT_PROOF_FIELDS}
@@ -324,7 +324,7 @@ export class AgentClient {
 
   async getEntanglementProofs(): Promise<string[]> {
     const { agentGetEntanglementProofs } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`query agentGetEntanglementProofs {
                 agentGetEntanglementProofs {
                     ${ENTANGLEMENT_PROOF_FIELDS}
@@ -340,7 +340,7 @@ export class AgentClient {
     deviceKeyType: string,
   ): Promise<EntanglementProof> {
     const { agentEntanglementProofPreFlight } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`mutation agentEntanglementProofPreFlight($deviceKey: String!, $deviceKeyType: String!) {
                 agentEntanglementProofPreFlight(deviceKey: $deviceKey, deviceKeyType: $deviceKeyType) {
                     ${ENTANGLEMENT_PROOF_FIELDS}
@@ -353,15 +353,15 @@ export class AgentClient {
   }
 
   addUpdatedListener(listener) {
-    this.#updatedCallbacks.push(listener);
+    this._updatedCallbacks.push(listener);
   }
 
   addAppChangedListener(listener) {
-    this.#appsChangedCallback.push(listener);
+    this._appsChangedCallback.push(listener);
   }
 
   subscribeAgentUpdated() {
-    this.#apolloClient
+    this._apolloClient
       .subscribe({
         query: gql` subscription {
                 agentUpdated { ${AGENT_SUBITEMS} }
@@ -371,7 +371,7 @@ export class AgentClient {
       .subscribe({
         next: (result) => {
           const agent = result.data.agentUpdated;
-          this.#updatedCallbacks.forEach((cb) => {
+          this._updatedCallbacks.forEach((cb) => {
             cb(agent);
           });
         },
@@ -382,7 +382,7 @@ export class AgentClient {
   }
 
   subscribeAppsChanged() {
-    this.#apolloClient
+    this._apolloClient
       .subscribe({
         query: gql` subscription {
                 agentAppsChanged { 
@@ -393,7 +393,7 @@ export class AgentClient {
       })
       .subscribe({
         next: (result) => {
-          this.#appsChangedCallback.forEach((cb) => {
+          this._appsChangedCallback.forEach((cb) => {
             cb();
           });
         },
@@ -404,11 +404,11 @@ export class AgentClient {
   }
 
   addAgentStatusChangedListener(listener) {
-    this.#agentStatusChangedCallbacks.push(listener);
+    this._agentStatusChangedCallbacks.push(listener);
   }
 
   subscribeAgentStatusChanged() {
-    this.#apolloClient
+    this._apolloClient
       .subscribe({
         query: gql` subscription {
                 agentStatusChanged { ${AGENT_STATUS_FIELDS} }
@@ -418,7 +418,7 @@ export class AgentClient {
       .subscribe({
         next: (result) => {
           const agent = result.data.agentStatusChanged;
-          this.#agentStatusChangedCallbacks.forEach((cb) => {
+          this._agentStatusChangedCallbacks.forEach((cb) => {
             cb(agent);
           });
         },
@@ -430,7 +430,7 @@ export class AgentClient {
 
   async requestCapability(authInfo: AuthInfoInput): Promise<string> {
     const { agentRequestCapability } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation agentRequestCapability($authInfo: AuthInfoInput!) {
             agentRequestCapability(authInfo: $authInfo)
@@ -444,7 +444,7 @@ export class AgentClient {
 
   async permitCapability(auth: string): Promise<string> {
     const { agentPermitCapability } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation agentPermitCapability($auth: String!) {
             agentPermitCapability(auth: $auth)
@@ -458,7 +458,7 @@ export class AgentClient {
 
   async generateJwt(requestId: string, rand: string): Promise<string> {
     const { agentGenerateJwt } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation agentGenerateJwt($requestId: String!, $rand: String!) {
             agentGenerateJwt(requestId: $requestId, rand: $rand)
@@ -472,7 +472,7 @@ export class AgentClient {
 
   async getApps(): Promise<Apps[]> {
     const { agentGetApps } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`query agentGetApps {
                 agentGetApps {
                     ${Apps_FIELDS}
@@ -485,7 +485,7 @@ export class AgentClient {
 
   async removeApp(requestId: string): Promise<Apps[]> {
     const { agentRemoveApp } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`mutation agentRemoveApp($requestId: String!) {
                 agentRemoveApp(requestId: $requestId) {
                     ${Apps_FIELDS}
@@ -499,7 +499,7 @@ export class AgentClient {
 
   async revokeToken(requestId: string): Promise<Apps[]> {
     const { agentRevokeToken } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`mutation agentRevokeToken($requestId: String!) {
                 agentRevokeToken(requestId: $requestId) {
                     ${Apps_FIELDS}
@@ -513,7 +513,7 @@ export class AgentClient {
 
   async isLocked(): Promise<boolean> {
     const { agentIsLocked } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           query agentIsLocked {
             agentIsLocked
@@ -526,7 +526,7 @@ export class AgentClient {
 
   async signMessage(message: string): Promise<string> {
     const { agentSignMessage } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`mutation agentSignMessage($message: String!) {
           agentSignMessage(message: $message) {
               ${AGENT_SIGNATURE_FIELDS}
@@ -545,7 +545,7 @@ export class AgentClient {
     appInfo?: AuthInfoInput,
   ): Promise<UserCreationResult> {
     const { runtimeCreateUser } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeCreateUser(
             $email: String!
@@ -571,7 +571,7 @@ export class AgentClient {
 
   async loginUser(email: string, password: string): Promise<string> {
     const { runtimeLoginUser } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeLoginUser($email: String!, $password: String!) {
             runtimeLoginUser(email: $email, password: $password)
@@ -588,7 +588,7 @@ export class AgentClient {
     appInfo?: AuthInfoInput,
   ): Promise<VerificationRequestResult> {
     const { runtimeRequestLoginVerification } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeRequestLoginVerification(
             $email: String!
@@ -614,7 +614,7 @@ export class AgentClient {
     verificationType: string,
   ): Promise<string> {
     const { runtimeVerifyEmailCode } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation runtimeVerifyEmailCode(
             $email: String!

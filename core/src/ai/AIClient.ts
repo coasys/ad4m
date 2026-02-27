@@ -7,15 +7,15 @@ import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
 import { ModelInput, Model, ModelType } from "./AIResolver";
 
 export class AIClient {
-  #apolloClient: ApolloClient<any>;
-  #transcriptionSubscriptions: Map<string, any> = new Map();
+  private _apolloClient: ApolloClient<any>;
+  private _transcriptionSubscriptions: Map<string, any> = new Map();
 
   constructor(apolloClient: ApolloClient<any>, subscribe: boolean = true) {
-    this.#apolloClient = apolloClient;
+    this._apolloClient = apolloClient;
   }
 
   async getModels(): Promise<Model[]> {
-    const result = await this.#apolloClient.query({
+    const result = await this._apolloClient.query({
       query: gql`
         query {
           aiGetModels {
@@ -46,7 +46,7 @@ export class AIClient {
   }
 
   async addModel(model: ModelInput): Promise<string> {
-    const result = await this.#apolloClient.mutate({
+    const result = await this._apolloClient.mutate({
       mutation: gql`
         mutation ($model: ModelInput!) {
           aiAddModel(model: $model)
@@ -58,7 +58,7 @@ export class AIClient {
   }
 
   async updateModel(modelId: string, model: ModelInput): Promise<boolean> {
-    const result = await this.#apolloClient.mutate({
+    const result = await this._apolloClient.mutate({
       mutation: gql`
         mutation ($modelId: String!, $model: ModelInput!) {
           aiUpdateModel(modelId: $modelId, model: $model)
@@ -70,7 +70,7 @@ export class AIClient {
   }
 
   async removeModel(modelId: string): Promise<boolean> {
-    const result = await this.#apolloClient.mutate({
+    const result = await this._apolloClient.mutate({
       mutation: gql`
         mutation ($modelId: String!) {
           aiRemoveModel(modelId: $modelId)
@@ -85,7 +85,7 @@ export class AIClient {
     modelType: ModelType,
     modelId: string,
   ): Promise<boolean> {
-    const result = await this.#apolloClient.mutate({
+    const result = await this._apolloClient.mutate({
       mutation: gql`
         mutation ($modelType: ModelType!, $modelId: String!) {
           aiSetDefaultModel(modelType: $modelType, modelId: $modelId)
@@ -97,7 +97,7 @@ export class AIClient {
   }
 
   async getDefaultModel(modelType: ModelType): Promise<Model> {
-    const result = await this.#apolloClient.query({
+    const result = await this._apolloClient.query({
       query: gql`
         query ($modelType: ModelType!) {
           aiGetDefaultModel(modelType: $modelType) {
@@ -130,7 +130,7 @@ export class AIClient {
 
   async tasks(): Promise<AITask[]> {
     const { aiTasks } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`
           query {
             aiTasks {
@@ -169,7 +169,7 @@ export class AIClient {
       metaData,
     );
     const { aiAddTask } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation AiAddTask($task: AITaskInput!) {
             aiAddTask(task: $task) {
@@ -198,7 +198,7 @@ export class AIClient {
 
   async removeTask(taskId: string): Promise<AITask> {
     const { aiRemoveTask } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation AiRemoveTask($taskId: String!) {
             aiRemoveTask(taskId: $taskId) {
@@ -227,7 +227,7 @@ export class AIClient {
 
   async updateTask(taskId: string, task: AITask): Promise<AITask> {
     const { aiUpdateTask } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation AiUpdateTask($taskId: String!, $task: AITaskInput!) {
             aiUpdateTask(taskId: $taskId, task: $task) {
@@ -262,7 +262,7 @@ export class AIClient {
 
   async modelLoadingStatus(model: string): Promise<AIModelLoadingStatus> {
     const { aiModelLoadingStatus } = unwrapApolloResult(
-      await this.#apolloClient.query({
+      await this._apolloClient.query({
         query: gql`
           query AiModelLoadingStatus($model: String!) {
             aiModelLoadingStatus(model: $model) {
@@ -285,7 +285,7 @@ export class AIClient {
 
   async prompt(taskId: string, prompt: string): Promise<string> {
     const { aiPrompt } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation AiPrompt($taskId: String!, $prompt: String!) {
             aiPrompt(taskId: $taskId, prompt: $prompt)
@@ -303,7 +303,7 @@ export class AIClient {
 
   async embed(modelId: string, text: string): Promise<Array<number>> {
     const { aiEmbed } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation aiEmbed($modelId: String!, $text: String!) {
             aiEmbed(modelId: $modelId, text: $text)
@@ -335,7 +335,7 @@ export class AIClient {
     },
   ): Promise<string> {
     const { aiOpenTranscriptionStream } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation AiOpenTranscriptionStream(
             $modelId: String!
@@ -351,7 +351,7 @@ export class AIClient {
       }),
     );
 
-    const subscription = this.#apolloClient
+    const subscription = this._apolloClient
       .subscribe({
         query: gql` subscription {
                 aiTranscriptionText(streamId: "${aiOpenTranscriptionStream}")
@@ -368,7 +368,7 @@ export class AIClient {
         },
       });
 
-    this.#transcriptionSubscriptions.set(
+    this._transcriptionSubscriptions.set(
       aiOpenTranscriptionStream,
       subscription,
     );
@@ -378,7 +378,7 @@ export class AIClient {
 
   async closeTranscriptionStream(streamId: string): Promise<void> {
     const { aiCloseTranscriptionStream } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation aiCloseTranscriptionStream($streamId: String!) {
             aiCloseTranscriptionStream(streamId: $streamId)
@@ -390,7 +390,7 @@ export class AIClient {
       }),
     );
 
-    const subscription = this.#transcriptionSubscriptions.get(streamId);
+    const subscription = this._transcriptionSubscriptions.get(streamId);
 
     if (!subscription.closed) {
       subscription.unsubscribe();
@@ -404,7 +404,7 @@ export class AIClient {
     audio: Float32Array,
   ): Promise<void> {
     const { aiFeedTranscriptionStream } = unwrapApolloResult(
-      await this.#apolloClient.mutate({
+      await this._apolloClient.mutate({
         mutation: gql`
           mutation AiFeedTranscriptionStream(
             $streamIds: [String!]!

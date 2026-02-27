@@ -5,108 +5,154 @@ import { ExpressionRendered } from "./Expression";
 import { Literal } from "../Literal";
 
 export class ExpressionClient {
-    #apolloClient: ApolloClient<any>
+  private _apolloClient: ApolloClient<any>;
 
-    constructor(client: ApolloClient<any>) {
-        this.#apolloClient = client
-    }
+  constructor(client: ApolloClient<any>) {
+    this._apolloClient = client;
+  }
 
-    async get(url: string, alwaysGet: boolean = false): Promise<ExpressionRendered> {
-        if(!alwaysGet){
-            try {
-                let literalValue = Literal.fromUrl(url).get();
-                if (typeof literalValue === 'object' && literalValue !== null) {
-                    if ('author' in literalValue && 'timestamp' in literalValue && 'data' in literalValue && 'proof' in literalValue) {
-                        return literalValue;
-                    }
-                }
-            } catch(e) {}
+  async get(
+    url: string,
+    alwaysGet: boolean = false,
+  ): Promise<ExpressionRendered> {
+    if (!alwaysGet) {
+      try {
+        let literalValue = Literal.fromUrl(url).get();
+        if (typeof literalValue === "object" && literalValue !== null) {
+          if (
+            "author" in literalValue &&
+            "timestamp" in literalValue &&
+            "data" in literalValue &&
+            "proof" in literalValue
+          ) {
+            return literalValue;
+          }
         }
-        
-
-        const { expression } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query expression($url: String!) {
-                expression(url: $url) {
-                    author
-                    timestamp
-                    data
-                    language {
-                        address
-                    }
-                    proof {
-                        valid
-                        invalid
-                    }
-                }
-            }`,
-            variables: { url }
-        }))
-        return expression
+      } catch (e) {}
     }
 
-    async getMany(urls: string[]): Promise<ExpressionRendered[]> {
-        const { expressionMany } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query expressionMany($urls: [String!]!) {
-                expressionMany(urls: $urls) {
-                    author
-                    timestamp
-                    data
-                    language {
-                        address
-                    }
-                    proof {
-                        valid
-                        invalid
-                    }
-                }
-            }`,
-            variables: { urls }
-        }))
-        return expressionMany
-    }
+    const { expression } = unwrapApolloResult(
+      await this._apolloClient.query({
+        query: gql`
+          query expression($url: String!) {
+            expression(url: $url) {
+              author
+              timestamp
+              data
+              language {
+                address
+              }
+              proof {
+                valid
+                invalid
+              }
+            }
+          }
+        `,
+        variables: { url },
+      }),
+    );
+    return expression;
+  }
 
-    async getRaw(url: string): Promise<string> {
-        const { expressionRaw } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query expressionRaw($url: String!) {
-                expressionRaw(url: $url)
-            }`,
-            variables: { url }
-        }))
-        return expressionRaw
-    }
+  async getMany(urls: string[]): Promise<ExpressionRendered[]> {
+    const { expressionMany } = unwrapApolloResult(
+      await this._apolloClient.query({
+        query: gql`
+          query expressionMany($urls: [String!]!) {
+            expressionMany(urls: $urls) {
+              author
+              timestamp
+              data
+              language {
+                address
+              }
+              proof {
+                valid
+                invalid
+              }
+            }
+          }
+        `,
+        variables: { urls },
+      }),
+    );
+    return expressionMany;
+  }
 
-    async create(content: any, languageAddress: string): Promise<string> {
-        content = JSON.stringify(content)
-        const { expressionCreate } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation expressionCreate($content: String!, $languageAddress: String!){
-                expressionCreate(content: $content, languageAddress: $languageAddress)
-            }`,
-            variables: { content, languageAddress }
-        }))
-        return expressionCreate
-    }
+  async getRaw(url: string): Promise<string> {
+    const { expressionRaw } = unwrapApolloResult(
+      await this._apolloClient.query({
+        query: gql`
+          query expressionRaw($url: String!) {
+            expressionRaw(url: $url)
+          }
+        `,
+        variables: { url },
+      }),
+    );
+    return expressionRaw;
+  }
 
-    async interactions(url: string): Promise<InteractionMeta[]> {
-        const { expressionInteractions } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query expressionInteractions($url: String!) {
-                expressionInteractions(url: $url) { 
-                    label
-                    name
-                    parameters { name, type }
-                }
-            }`,
-            variables: { url }
-        }))
-        return expressionInteractions
-    }
+  async create(content: any, languageAddress: string): Promise<string> {
+    content = JSON.stringify(content);
+    const { expressionCreate } = unwrapApolloResult(
+      await this._apolloClient.mutate({
+        mutation: gql`
+          mutation expressionCreate(
+            $content: String!
+            $languageAddress: String!
+          ) {
+            expressionCreate(
+              content: $content
+              languageAddress: $languageAddress
+            )
+          }
+        `,
+        variables: { content, languageAddress },
+      }),
+    );
+    return expressionCreate;
+  }
 
-    async interact(url: string, interactionCall: InteractionCall): Promise<string|null> {
-        const { expressionInteract } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation expressionInteract($url: String!, $interactionCall: InteractionCall!){
-                expressionInteract(url: $url, interactionCall: $interactionCall)
-            }`,
-            variables: { url, interactionCall }
-        }))
-        return expressionInteract
-    }
+  async interactions(url: string): Promise<InteractionMeta[]> {
+    const { expressionInteractions } = unwrapApolloResult(
+      await this._apolloClient.query({
+        query: gql`
+          query expressionInteractions($url: String!) {
+            expressionInteractions(url: $url) {
+              label
+              name
+              parameters {
+                name
+                type
+              }
+            }
+          }
+        `,
+        variables: { url },
+      }),
+    );
+    return expressionInteractions;
+  }
+
+  async interact(
+    url: string,
+    interactionCall: InteractionCall,
+  ): Promise<string | null> {
+    const { expressionInteract } = unwrapApolloResult(
+      await this._apolloClient.mutate({
+        mutation: gql`
+          mutation expressionInteract(
+            $url: String!
+            $interactionCall: InteractionCall!
+          ) {
+            expressionInteract(url: $url, interactionCall: $interactionCall)
+          }
+        `,
+        variables: { url, interactionCall },
+      }),
+    );
+    return expressionInteract;
+  }
 }

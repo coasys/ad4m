@@ -7,6 +7,7 @@ const buildOptions = {
   minify: true,
   sourcemap: false,
   outfile: "dist/index.js",
+  external: ["@coasys/ad4m"],
 };
 
 (async () => {

@@ -388,10 +388,22 @@ export async function saveInstance(
 
   if (isNew) {
     // ── CREATE PATH ─────────────────────────────────────────────────────────
-    // Build initialValues from scalar (non-relation, non-action) fields for
-    // createSubject, then use innerUpdate(false) for relations.
+    // Build initialValues from decorator-registered scalar properties only.
+    // We must NOT use Object.entries(ctx.instance) because TypeScript `private`
+    // fields (e.g. _perspective) are regular enumerable properties at runtime
+    // and would cause JSON.stringify to throw a circular-reference error when
+    // the PerspectiveProxy's Apollo InMemoryCache is encountered.
+    const proto = Object.getPrototypeOf(ctx.instance);
+    const ownPropKeys = new Set(
+      Object.keys(propertyRegistry.get(proto.constructor) ?? {}),
+    );
+    const allPropMeta = getPropertiesMetadata(proto.constructor);
     const initialValues: Record<string, any> = {};
-    for (const [key, value] of Object.entries(ctx.instance)) {
+    for (const key of ownPropKeys) {
+      const propMeta = allPropMeta[key];
+      if (!propMeta) continue;
+      if ((propMeta as PropertyOptions).flag) continue; // flags handled by constructor actions
+      const value = (ctx.instance as any)[key];
       if (
         value !== undefined &&
         value !== null &&
@@ -420,11 +432,6 @@ export async function saveInstance(
     // only writes properties defined in the derived shape. Inherited @Property fields
     // (registered on the parent constructor) are silently ignored by the Rust backend.
     // We detect them by comparing the full merged metadata against the own-only registry.
-    const proto = Object.getPrototypeOf(ctx.instance);
-    const ownPropKeys = new Set(
-      Object.keys(propertyRegistry.get(proto.constructor) ?? {}),
-    );
-    const allPropMeta = getPropertiesMetadata(proto.constructor);
     for (const [key, propMeta] of Object.entries(allPropMeta)) {
       if (ownPropKeys.has(key)) continue; // already handled by createSubject
       if ((propMeta as PropertyOptions).flag) continue; // flags are immutable

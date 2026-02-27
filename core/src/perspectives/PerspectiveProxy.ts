@@ -30,10 +30,8 @@ import {
 } from "../model/decorators";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
-import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
+import { LinkPattern } from "../shacl/SHACLFlow";
 import { AIClient } from "../ai/AIClient";
-import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
-import { gql } from "@apollo/client/core";
 import { AllInstancesResult } from "../model/Ad4mModel";
 import { escapeSurrealString } from "../utils";
 
@@ -78,19 +76,19 @@ interface Unsubscribable {
  * ```
  */
 export class QuerySubscriptionProxy {
-  #uuid: string;
-  #subscriptionId: string;
-  #client: PerspectiveClient;
-  #callbacks: Set<QueryCallback>;
-  #keepaliveTimer: number;
-  #unsubscribe?: () => void;
-  #latestResult: AllInstancesResult | null;
-  #disposed: boolean = false;
-  #initialized: Promise<boolean>;
-  #initResolve?: (value: boolean) => void;
-  #initReject?: (reason?: any) => void;
-  #initTimeoutId?: NodeJS.Timeout;
-  #query: string;
+  private _uuid: string;
+  private _subscriptionId: string;
+  private _client: PerspectiveClient;
+  private _callbacks: Set<QueryCallback>;
+  private _keepaliveTimer: number;
+  private _unsubscribe?: () => void;
+  private _latestResult: AllInstancesResult | null;
+  private _disposed: boolean = false;
+  private _initialized: Promise<boolean>;
+  private _initResolve?: (value: boolean) => void;
+  private _initReject?: (reason?: any) => void;
+  private _initTimeoutId?: NodeJS.Timeout;
+  private _query: string;
 
   /** Creates a new query subscription
    * @param uuid - The UUID of the perspective
@@ -98,57 +96,60 @@ export class QuerySubscriptionProxy {
    * @param client - The PerspectiveClient instance to use for communication
    */
   constructor(uuid: string, query: string, client: PerspectiveClient) {
-    this.#uuid = uuid;
-    this.#query = query;
-    this.#client = client;
-    this.#callbacks = new Set();
-    this.#latestResult = null;
+    // Prevent Vue / Proxy-based reactivity systems from wrapping this instance.
+    // QuerySubscriptionProxy manages its own internal state via #private fields
+    // and callbacks; wrapping it in a Proxy breaks WeakMap-based private field access.
+    this._uuid = uuid;
+    this._query = query;
+    this._client = client;
+    this._callbacks = new Set();
+    this._latestResult = null;
 
     // Create the promise once and store its resolve/reject
-    this.#initialized = new Promise<boolean>((resolve, reject) => {
-      this.#initResolve = resolve;
-      this.#initReject = reject;
+    this._initialized = new Promise<boolean>((resolve, reject) => {
+      this._initResolve = resolve;
+      this._initReject = reject;
     });
   }
 
   async subscribe() {
     // Clean up previous subscription attempt if retrying
-    if (this.#unsubscribe) {
-      this.#unsubscribe();
-      this.#unsubscribe = undefined;
+    if (this._unsubscribe) {
+      this._unsubscribe();
+      this._unsubscribe = undefined;
     }
 
     // Clear any existing timeout
-    if (this.#initTimeoutId) {
-      clearTimeout(this.#initTimeoutId);
-      this.#initTimeoutId = undefined;
+    if (this._initTimeoutId) {
+      clearTimeout(this._initTimeoutId);
+      this._initTimeoutId = undefined;
     }
 
     // Clear any existing keepalive timer to prevent accumulation
-    if (this.#keepaliveTimer) {
-      clearTimeout(this.#keepaliveTimer);
-      this.#keepaliveTimer = undefined;
+    if (this._keepaliveTimer) {
+      clearTimeout(this._keepaliveTimer);
+      this._keepaliveTimer = undefined;
     }
 
     try {
       // Initialize the query subscription
       let initialResult;
-      initialResult = await this.#client.subscribeQuery(
-        this.#uuid,
-        this.#query,
+      initialResult = await this._client.subscribeQuery(
+        this._uuid,
+        this._query,
       );
-      this.#subscriptionId = initialResult.subscriptionId;
+      this._subscriptionId = initialResult.subscriptionId;
 
       // Process the initial result immediately for fast UX
       if (initialResult.result) {
-        this.#latestResult = initialResult.result;
-        this.#notifyCallbacks(initialResult.result);
+        this._latestResult = initialResult.result;
+        this._notifyCallbacks(initialResult.result);
       } else {
         console.warn("⚠️ No initial result returned from subscribeQuery!");
       }
 
       // Set up timeout for retry
-      this.#initTimeoutId = setTimeout(() => {
+      this._initTimeoutId = setTimeout(() => {
         console.error(
           "Subscription initialization timed out after 30 seconds. Resubscribing...",
         );
@@ -162,37 +163,37 @@ export class QuerySubscriptionProxy {
       }, 30000);
 
       // Subscribe to query updates
-      this.#unsubscribe = this.#client.subscribeToQueryUpdates(
-        this.#subscriptionId,
+      this._unsubscribe = this._client.subscribeToQueryUpdates(
+        this._subscriptionId,
         (updateResult) => {
           // Clear timeout on first message
-          if (this.#initTimeoutId) {
-            clearTimeout(this.#initTimeoutId);
-            this.#initTimeoutId = undefined;
+          if (this._initTimeoutId) {
+            clearTimeout(this._initTimeoutId);
+            this._initTimeoutId = undefined;
           }
 
           // Resolve the initialization promise (only resolves once)
-          if (this.#initResolve) {
-            this.#initResolve(true);
-            this.#initResolve = undefined; // Prevent double-resolve
-            this.#initReject = undefined;
+          if (this._initResolve) {
+            this._initResolve(true);
+            this._initResolve = undefined; // Prevent double-resolve
+            this._initReject = undefined;
           }
 
           // Skip duplicate init messages
-          if (updateResult.isInit && this.#latestResult) return;
+          if (updateResult.isInit && this._latestResult) return;
 
-          this.#latestResult = updateResult;
-          this.#notifyCallbacks(updateResult);
+          this._latestResult = updateResult;
+          this._notifyCallbacks(updateResult);
         },
       );
     } catch (error) {
       console.error("Error setting up subscription:", error);
 
       // Reject the promise if this is the first attempt
-      if (this.#initReject) {
-        this.#initReject(error);
-        this.#initResolve = undefined;
-        this.#initReject = undefined;
+      if (this._initReject) {
+        this._initReject(error);
+        this._initResolve = undefined;
+        this._initReject = undefined;
       }
 
       throw error; // Re-throw so caller knows it failed
@@ -200,14 +201,14 @@ export class QuerySubscriptionProxy {
 
     // Start keepalive loop using platform-agnostic setTimeout
     const keepaliveLoop = async () => {
-      if (this.#disposed) return;
+      if (this._disposed) return;
 
       try {
-        await this.#client.keepAliveQuery(this.#uuid, this.#subscriptionId);
+        await this._client.keepAliveQuery(this._uuid, this._subscriptionId);
       } catch (e) {
         console.error("Error in keepalive:", e);
         // try to reinitialize the subscription
-        console.log("Reinitializing subscription for query:", this.#query);
+        console.log("Reinitializing subscription for query:", this._query);
         try {
           await this.subscribe();
           console.log("Subscription reinitialized");
@@ -222,8 +223,8 @@ export class QuerySubscriptionProxy {
       }
 
       // Schedule next keepalive if not disposed
-      if (!this.#disposed) {
-        this.#keepaliveTimer = setTimeout(
+      if (!this._disposed) {
+        this._keepaliveTimer = setTimeout(
           keepaliveLoop,
           30000,
         ) as unknown as number;
@@ -231,7 +232,7 @@ export class QuerySubscriptionProxy {
     };
 
     // Start the first keepalive loop
-    this.#keepaliveTimer = setTimeout(
+    this._keepaliveTimer = setTimeout(
       keepaliveLoop,
       30000,
     ) as unknown as number;
@@ -246,7 +247,7 @@ export class QuerySubscriptionProxy {
    * @returns The subscription ID string
    */
   get id(): string {
-    return this.#subscriptionId;
+    return this._subscriptionId;
   }
 
   /** Promise that resolves when the subscription has received its first result
@@ -261,7 +262,7 @@ export class QuerySubscriptionProxy {
    * creation methods (like subscribeInfer) already wait for initialization.
    */
   get initialized(): Promise<boolean> {
-    return this.#initialized;
+    return this._initialized;
   }
 
   /** Get the latest query result
@@ -273,7 +274,7 @@ export class QuerySubscriptionProxy {
    * @returns The latest query result as a string (usually a JSON array of bindings)
    */
   get result(): AllInstancesResult {
-    return this.#latestResult;
+    return this._latestResult;
   }
 
   /** Add a callback that will be called whenever new results arrive
@@ -296,13 +297,13 @@ export class QuerySubscriptionProxy {
    * ```
    */
   onResult(callback: QueryCallback): () => void {
-    this.#callbacks.add(callback);
-    return () => this.#callbacks.delete(callback);
+    this._callbacks.add(callback);
+    return () => this._callbacks.delete(callback);
   }
 
   /** Internal method to notify all callbacks of a new result */
-  #notifyCallbacks(result: AllInstancesResult) {
-    for (const callback of this.#callbacks) {
+  private _notifyCallbacks(result: AllInstancesResult) {
+    for (const callback of this._callbacks) {
       try {
         callback(result);
       } catch (e) {
@@ -323,21 +324,21 @@ export class QuerySubscriptionProxy {
    * will not receive any more updates. The instance should be discarded.
    */
   dispose() {
-    this.#disposed = true;
-    clearTimeout(this.#keepaliveTimer);
-    if (this.#unsubscribe) {
-      this.#unsubscribe();
+    this._disposed = true;
+    clearTimeout(this._keepaliveTimer);
+    if (this._unsubscribe) {
+      this._unsubscribe();
     }
-    this.#callbacks.clear();
-    if (this.#initTimeoutId) {
-      clearTimeout(this.#initTimeoutId);
-      this.#initTimeoutId = undefined;
+    this._callbacks.clear();
+    if (this._initTimeoutId) {
+      clearTimeout(this._initTimeoutId);
+      this._initTimeoutId = undefined;
     }
 
     // Tell the backend to dispose of the subscription
-    if (this.#subscriptionId) {
-      this.#client
-        .disposeQuerySubscription(this.#uuid, this.#subscriptionId)
+    if (this._subscriptionId) {
+      this._client
+        .disposeQuerySubscription(this._uuid, this._subscriptionId)
         .catch((e) => console.error("Error disposing query subscription:", e));
     }
   }
@@ -393,47 +394,47 @@ interface Parameter {
 
 /** Local (unexported) helper – was previously `core/src/model/Subject.ts` */
 class Subject {
-  #baseExpression: string;
-  #subjectClassName: string;
-  #perspective: PerspectiveProxy;
+  private _baseExpression: string;
+  private _subjectClassName: string;
+  private _perspective: PerspectiveProxy;
 
   constructor(
     perspective: PerspectiveProxy,
     baseExpression: string,
     subjectClassName: string,
   ) {
-    this.#baseExpression = baseExpression;
-    this.#subjectClassName = subjectClassName;
-    this.#perspective = perspective;
+    this._baseExpression = baseExpression;
+    this._subjectClassName = subjectClassName;
+    this._perspective = perspective;
   }
 
   get baseExpression() {
-    return this.#baseExpression;
+    return this._baseExpression;
   }
 
   async init() {
-    let isInstance = await this.#perspective.isSubjectInstance(
-      this.#baseExpression,
-      this.#subjectClassName,
+    let isInstance = await this._perspective.isSubjectInstance(
+      this._baseExpression,
+      this._subjectClassName,
     );
     if (!isInstance) {
-      throw `Not a valid subject instance of ${this.#subjectClassName} for ${this.#baseExpression}`;
+      throw `Not a valid subject instance of ${this._subjectClassName} for ${this._baseExpression}`;
     }
-    let results = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), property(C, Property)`,
+    let results = await this._perspective.infer(
+      `subject_class("${this._subjectClassName}", C), property(C, Property)`,
     );
     let properties = results.map((result) => result.Property);
     for (let p of properties) {
-      await this.#perspective.infer(
-        `subject_class("${this.#subjectClassName}", C), property_resolve(C, "${p}")`,
+      await this._perspective.infer(
+        `subject_class("${this._subjectClassName}", C), property_resolve(C, "${p}")`,
       );
       Object.defineProperty(this, p, {
         configurable: true,
         get: async () => {
           try {
-            return await this.#perspective.getPropertyValueViaSurreal(
-              this.#baseExpression,
-              this.#subjectClassName,
+            return await this._perspective.getPropertyValueViaSurreal(
+              this._baseExpression,
+              this._subjectClassName,
               p,
             );
           } catch (err) {
@@ -443,15 +444,15 @@ class Subject {
         },
       });
     }
-    const setters = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), property_setter(C, Property, Setter)`,
+    const setters = await this._perspective.infer(
+      `subject_class("${this._subjectClassName}", C), property_setter(C, Property, Setter)`,
     );
     for (let setter of setters ? setters : []) {
       if (setter) {
         const property = setter.Property;
         const actions = eval(setter.Setter);
-        const resolveLanguageResults = await this.#perspective.infer(
-          `subject_class("${this.#subjectClassName}", C), property_resolve_language(C, "${property}", Language)`,
+        const resolveLanguageResults = await this._perspective.infer(
+          `subject_class("${this._subjectClassName}", C), property_resolve_language(C, "${property}", Language)`,
         );
         let resolveLanguage;
         if (resolveLanguageResults && resolveLanguageResults.length > 0) {
@@ -459,19 +460,19 @@ class Subject {
         }
         this[propertyNameToSetterName(property)] = async (value: any) => {
           if (resolveLanguage) {
-            value = await this.#perspective.createExpression(
+            value = await this._perspective.createExpression(
               value,
               resolveLanguage,
             );
           }
-          await this.#perspective.executeAction(actions, this.#baseExpression, [
+          await this._perspective.executeAction(actions, this._baseExpression, [
             { name: "value", value },
           ]);
         };
       }
     }
-    let results2 = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), collection(C, Collection)`,
+    let results2 = await this._perspective.infer(
+      `subject_class("${this._subjectClassName}", C), collection(C, Collection)`,
     );
     if (!results2) results2 = [];
     let collections = results2.map((result) => result.Collection);
@@ -480,9 +481,9 @@ class Subject {
         configurable: true,
         get: async () => {
           try {
-            return await this.#perspective.getCollectionValuesViaSurreal(
-              this.#baseExpression,
-              this.#subjectClassName,
+            return await this._perspective.getCollectionValuesViaSurreal(
+              this._baseExpression,
+              this._subjectClassName,
               c,
             );
           } catch (err) {
@@ -492,8 +493,8 @@ class Subject {
         },
       });
     }
-    let adders = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), collection_adder(C, Collection, Adder)`,
+    let adders = await this._perspective.infer(
+      `subject_class("${this._subjectClassName}", C), collection_adder(C, Collection, Adder)`,
     );
     if (!adders) adders = [];
     for (let adder of adders) {
@@ -504,23 +505,23 @@ class Subject {
           if (Array.isArray(value)) {
             await Promise.all(
               value.map((v) =>
-                this.#perspective.executeAction(actions, this.#baseExpression, [
+                this._perspective.executeAction(actions, this._baseExpression, [
                   { name: "value", value: v },
                 ]),
               ),
             );
           } else {
-            await this.#perspective.executeAction(
+            await this._perspective.executeAction(
               actions,
-              this.#baseExpression,
+              this._baseExpression,
               [{ name: "value", value }],
             );
           }
         };
       }
     }
-    let removers = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), collection_remover(C, Collection, Remover)`,
+    let removers = await this._perspective.infer(
+      `subject_class("${this._subjectClassName}", C), collection_remover(C, Collection, Remover)`,
     );
     if (!removers) removers = [];
     for (let remover of removers) {
@@ -531,23 +532,23 @@ class Subject {
           if (Array.isArray(value)) {
             await Promise.all(
               value.map((v) =>
-                this.#perspective.executeAction(actions, this.#baseExpression, [
+                this._perspective.executeAction(actions, this._baseExpression, [
                   { name: "value", value: v },
                 ]),
               ),
             );
           } else {
-            await this.#perspective.executeAction(
+            await this._perspective.executeAction(
               actions,
-              this.#baseExpression,
+              this._baseExpression,
               [{ name: "value", value }],
             );
           }
         };
       }
     }
-    let collectionSetters = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), collection_setter(C, Collection, Setter)`,
+    let collectionSetters = await this._perspective.infer(
+      `subject_class("${this._subjectClassName}", C), collection_setter(C, Collection, Setter)`,
     );
     if (!collectionSetters) collectionSetters = [];
     for (let collectionSetter of collectionSetters) {
@@ -556,15 +557,15 @@ class Subject {
         const actions = eval(collectionSetter.Setter);
         this[collectionToSetterName(collection)] = async (value: any) => {
           if (Array.isArray(value)) {
-            await this.#perspective.executeAction(
+            await this._perspective.executeAction(
               actions,
-              this.#baseExpression,
+              this._baseExpression,
               value.map((v) => ({ name: "value", value: v })),
             );
           } else {
-            await this.#perspective.executeAction(
+            await this._perspective.executeAction(
               actions,
-              this.#baseExpression,
+              this._baseExpression,
               [{ name: "value", value }],
             );
           }
@@ -593,45 +594,49 @@ export class PerspectiveProxy {
   /** List of owners of this perspective */
   owners?: string[];
 
-  #handle: PerspectiveHandle;
-  #client: PerspectiveClient;
-  #perspectiveLinkAddedCallbacks: LinkCallback[];
-  #perspectiveLinkRemovedCallbacks: LinkCallback[];
-  #perspectiveLinkUpdatedCallbacks: LinkCallback[];
-  #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[];
+  private _handle: PerspectiveHandle;
+  private _client: PerspectiveClient;
+  private _perspectiveLinkAddedCallbacks: LinkCallback[];
+  private _perspectiveLinkRemovedCallbacks: LinkCallback[];
+  private _perspectiveLinkUpdatedCallbacks: LinkCallback[];
+  private _perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[];
 
   /**
    * Creates a new PerspectiveProxy instance.
    * Note: Don't create this directly, use ad4m.perspective.add() instead.
    */
   constructor(handle: PerspectiveHandle, ad4m: PerspectiveClient) {
-    this.#perspectiveLinkAddedCallbacks = [];
-    this.#perspectiveLinkRemovedCallbacks = [];
-    this.#perspectiveLinkUpdatedCallbacks = [];
-    this.#perspectiveSyncStateChangeCallbacks = [];
-    this.#handle = handle;
-    this.#client = ad4m;
-    this.uuid = this.#handle.uuid;
-    this.name = this.#handle.name;
-    this.owners = this.#handle.owners;
-    this.sharedUrl = this.#handle.sharedUrl;
-    this.neighbourhood = this.#handle.neighbourhood;
-    this.state = this.#handle.state;
-    this.#client.addPerspectiveLinkAddedListener(
-      this.#handle.uuid,
-      this.#perspectiveLinkAddedCallbacks,
+    // Prevent Vue (and other Proxy-based reactivity systems) from wrapping this
+    // instance. PerspectiveProxy manages its own internal state via subscriptions
+    // and #private fields; wrapping it in a Proxy breaks WeakMap-based private
+    // field access (TypeError: Cannot read private member).
+    this._perspectiveLinkAddedCallbacks = [];
+    this._perspectiveLinkRemovedCallbacks = [];
+    this._perspectiveLinkUpdatedCallbacks = [];
+    this._perspectiveSyncStateChangeCallbacks = [];
+    this._handle = handle;
+    this._client = ad4m;
+    this.uuid = this._handle.uuid;
+    this.name = this._handle.name;
+    this.owners = this._handle.owners;
+    this.sharedUrl = this._handle.sharedUrl;
+    this.neighbourhood = this._handle.neighbourhood;
+    this.state = this._handle.state;
+    this._client.addPerspectiveLinkAddedListener(
+      this._handle.uuid,
+      this._perspectiveLinkAddedCallbacks,
     );
-    this.#client.addPerspectiveLinkRemovedListener(
-      this.#handle.uuid,
-      this.#perspectiveLinkRemovedCallbacks,
+    this._client.addPerspectiveLinkRemovedListener(
+      this._handle.uuid,
+      this._perspectiveLinkRemovedCallbacks,
     );
-    this.#client.addPerspectiveLinkUpdatedListener(
-      this.#handle.uuid,
-      this.#perspectiveLinkUpdatedCallbacks,
+    this._client.addPerspectiveLinkUpdatedListener(
+      this._handle.uuid,
+      this._perspectiveLinkUpdatedCallbacks,
     );
-    this.#client.addPerspectiveSyncStateChangeListener(
-      this.#handle.uuid,
-      this.#perspectiveSyncStateChangeCallbacks,
+    this._client.addPerspectiveSyncStateChangeListener(
+      this._handle.uuid,
+      this._perspectiveSyncStateChangeCallbacks,
     );
   }
 
@@ -714,8 +719,8 @@ export class PerspectiveProxy {
     parameters: Parameter[],
     batchId?: string,
   ) {
-    return await this.#client.executeCommands(
-      this.#handle.uuid,
+    return await this._client.executeCommands(
+      this._handle.uuid,
       JSON.stringify(actions),
       expression,
       JSON.stringify(parameters),
@@ -745,7 +750,7 @@ export class PerspectiveProxy {
    * ```
    */
   async get(query: LinkQuery): Promise<LinkExpression[]> {
-    return await this.#client.queryLinks(this.#handle.uuid, query);
+    return await this._client.queryLinks(this._handle.uuid, query);
   }
 
   /**
@@ -772,7 +777,7 @@ export class PerspectiveProxy {
    * ```
    */
   async infer(query: string): Promise<any> {
-    return await this.#client.queryProlog(this.#handle.uuid, query);
+    return await this._client.queryProlog(this._handle.uuid, query);
   }
 
   /**
@@ -803,7 +808,7 @@ export class PerspectiveProxy {
    * ```
    */
   async querySurrealDB(query: string): Promise<any> {
-    return await this.#client.querySurrealDB(this.#handle.uuid, query);
+    return await this._client.querySurrealDB(this._handle.uuid, query);
   }
 
   /**
@@ -836,7 +841,7 @@ export class PerspectiveProxy {
     status: LinkStatus = "shared",
     batchId?: string,
   ): Promise<LinkExpression> {
-    return await this.#client.addLink(this.#handle.uuid, link, status, batchId);
+    return await this._client.addLink(this._handle.uuid, link, status, batchId);
   }
 
   /**
@@ -853,8 +858,8 @@ export class PerspectiveProxy {
     status: LinkStatus = "shared",
     batchId?: string,
   ): Promise<LinkExpression[]> {
-    return await this.#client.addLinks(
-      this.#handle.uuid,
+    return await this._client.addLinks(
+      this._handle.uuid,
       links,
       status,
       batchId,
@@ -872,7 +877,7 @@ export class PerspectiveProxy {
     links: LinkExpressionInput[],
     batchId?: string,
   ): Promise<LinkExpression[]> {
-    return await this.#client.removeLinks(this.#handle.uuid, links, batchId);
+    return await this._client.removeLinks(this._handle.uuid, links, batchId);
   }
 
   /**
@@ -887,8 +892,8 @@ export class PerspectiveProxy {
     mutations: LinkMutations,
     status: LinkStatus = "shared",
   ): Promise<LinkExpressionMutations> {
-    return await this.#client.linkMutations(
-      this.#handle.uuid,
+    return await this._client.linkMutations(
+      this._handle.uuid,
       mutations,
       status,
     );
@@ -907,8 +912,8 @@ export class PerspectiveProxy {
     status: LinkStatus = "shared",
     batchId?: string,
   ): Promise<LinkExpression> {
-    return await this.#client.addLinkExpression(
-      this.#handle.uuid,
+    return await this._client.addLinkExpression(
+      this._handle.uuid,
       link,
       status,
       batchId,
@@ -927,8 +932,8 @@ export class PerspectiveProxy {
     newLink: Link,
     batchId?: string,
   ): Promise<LinkExpression> {
-    return await this.#client.updateLink(
-      this.#handle.uuid,
+    return await this._client.updateLink(
+      this._handle.uuid,
       oldLink,
       newLink,
       batchId,
@@ -942,17 +947,17 @@ export class PerspectiveProxy {
    * @param batchId - Optional batch ID to group this operation with others
    */
   async remove(link: LinkExpressionInput, batchId?: string): Promise<boolean> {
-    return await this.#client.removeLink(this.#handle.uuid, link, batchId);
+    return await this._client.removeLink(this._handle.uuid, link, batchId);
   }
 
   /** Creates a new batch for grouping operations */
   async createBatch(): Promise<string> {
-    return await this.#client.createBatch(this.#handle.uuid);
+    return await this._client.createBatch(this._handle.uuid);
   }
 
   /** Commits a batch of operations */
   async commitBatch(batchId: string): Promise<LinkExpressionMutations> {
-    return await this.#client.commitBatch(this.#handle.uuid, batchId);
+    return await this._client.commitBatch(this._handle.uuid, batchId);
   }
   /**
    * Retrieves and renders an Expression referenced in this perspective.
@@ -961,7 +966,7 @@ export class PerspectiveProxy {
    * @returns The rendered Expression
    */
   async getExpression(expressionURI: string): Promise<ExpressionRendered> {
-    return await this.#client.getExpression(expressionURI);
+    return await this._client.getExpression(expressionURI);
   }
 
   /**
@@ -975,7 +980,7 @@ export class PerspectiveProxy {
     content: any,
     languageAddress: string,
   ): Promise<string> {
-    return await this.#client.createExpression(content, languageAddress);
+    return await this._client.createExpression(content, languageAddress);
   }
 
   /**
@@ -999,11 +1004,11 @@ export class PerspectiveProxy {
    */
   async addListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
     if (type === "link-added") {
-      this.#perspectiveLinkAddedCallbacks.push(cb);
+      this._perspectiveLinkAddedCallbacks.push(cb);
     } else if (type === "link-removed") {
-      this.#perspectiveLinkRemovedCallbacks.push(cb);
+      this._perspectiveLinkRemovedCallbacks.push(cb);
     } else if (type === "link-updated") {
-      this.#perspectiveLinkUpdatedCallbacks.push(cb);
+      this._perspectiveLinkUpdatedCallbacks.push(cb);
     }
   }
 
@@ -1020,7 +1025,7 @@ export class PerspectiveProxy {
    * ```
    */
   async addSyncStateChangeListener(cb: SyncStateChangeCallback) {
-    this.#perspectiveSyncStateChangeCallbacks.push(cb);
+    this._perspectiveSyncStateChangeCallbacks.push(cb);
   }
 
   /**
@@ -1031,17 +1036,17 @@ export class PerspectiveProxy {
    */
   async removeListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
     if (type === "link-added") {
-      const index = this.#perspectiveLinkAddedCallbacks.indexOf(cb);
+      const index = this._perspectiveLinkAddedCallbacks.indexOf(cb);
 
-      this.#perspectiveLinkAddedCallbacks.splice(index, 1);
+      this._perspectiveLinkAddedCallbacks.splice(index, 1);
     } else if (type === "link-removed") {
-      const index = this.#perspectiveLinkRemovedCallbacks.indexOf(cb);
+      const index = this._perspectiveLinkRemovedCallbacks.indexOf(cb);
 
-      this.#perspectiveLinkRemovedCallbacks.splice(index, 1);
+      this._perspectiveLinkRemovedCallbacks.splice(index, 1);
     } else if (type === "link-updated") {
-      const index = this.#perspectiveLinkUpdatedCallbacks.indexOf(cb);
+      const index = this._perspectiveLinkUpdatedCallbacks.indexOf(cb);
 
-      this.#perspectiveLinkUpdatedCallbacks.splice(index, 1);
+      this._perspectiveLinkUpdatedCallbacks.splice(index, 1);
     }
   }
 
@@ -1052,7 +1057,7 @@ export class PerspectiveProxy {
    * @returns Perspective object containing all links
    */
   async snapshot(): Promise<Perspective> {
-    return this.#client.snapshotByUUID(this.#handle.uuid);
+    return this._client.snapshotByUUID(this._handle.uuid);
   }
 
   /**
@@ -1376,8 +1381,8 @@ export class PerspectiveProxy {
     sdnaType: "subject_class" | "flow" | "custom",
     shaclJson?: string,
   ) {
-    return this.#client.addSdna(
-      this.#handle.uuid,
+    return this._client.addSdna(
+      this._handle.uuid,
       name,
       sdnaCode,
       sdnaType,
@@ -1784,8 +1789,8 @@ export class PerspectiveProxy {
 
     if (typeof subjectClass === "string") {
       className = subjectClass;
-      await this.#client.createSubject(
-        this.#handle.uuid,
+      await this._client.createSubject(
+        this._handle.uuid,
         JSON.stringify({
           className,
           initialValues,
@@ -1805,8 +1810,8 @@ export class PerspectiveProxy {
           `createSubject: could not resolve className from subject class object. Ensure the class is decorated with @Model.`,
         );
       }
-      await this.#client.createSubject(
-        this.#handle.uuid,
+      await this._client.createSubject(
+        this._handle.uuid,
         JSON.stringify({
           className,
           initialValues,
@@ -1830,8 +1835,8 @@ export class PerspectiveProxy {
   async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
     if (typeof subjectClass === "string") {
       return JSON.parse(
-        await this.#client.getSubjectData(
-          this.#handle.uuid,
+        await this._client.getSubjectData(
+          this._handle.uuid,
           JSON.stringify({ className: subjectClass }),
           exprAddr,
         ),
@@ -1848,8 +1853,8 @@ export class PerspectiveProxy {
       );
     }
     return JSON.parse(
-      await this.#client.getSubjectData(
-        this.#handle.uuid,
+      await this._client.getSubjectData(
+        this._handle.uuid,
         JSON.stringify({ className }),
         exprAddr,
       ),
@@ -2923,7 +2928,7 @@ export class PerspectiveProxy {
   }
 
   getNeighbourhoodProxy(): NeighbourhoodProxy {
-    return this.#client.getNeighbourhoodProxy(this.#handle.uuid);
+    return this._client.getNeighbourhoodProxy(this._handle.uuid);
   }
 
   /**
@@ -2941,7 +2946,7 @@ export class PerspectiveProxy {
    * ```
    */
   get ai(): AIClient {
-    return this.#client.aiClient;
+    return this._client.aiClient;
   }
 
   /**
@@ -2987,7 +2992,7 @@ export class PerspectiveProxy {
     const subscriptionProxy = new QuerySubscriptionProxy(
       this.uuid,
       query,
-      this.#client,
+      this._client,
     );
 
     // Start the subscription on the Rust side first to get the real subscription ID

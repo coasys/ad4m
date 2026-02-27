@@ -6,50 +6,50 @@ function encodeRFC3986URIComponent(str) {
 }
 
 export class Literal {
-  #literal?: any;
-  #url?: string;
+  private _literal?: any;
+  private _url?: string;
 
   public static fromUrl(url: string) {
     if (!url || !url.startsWith("literal://"))
       throw new Error("Can't create Literal from non-literal URL");
     const l = new Literal();
-    l.#url = url;
+    l._url = url;
     return l;
   }
 
   public static from(literal: any) {
     const l = new Literal();
-    l.#literal = literal;
+    l._literal = literal;
     return l;
   }
 
   toUrl(): string {
-    if (this.#url && !this.#literal) return this.#url;
+    if (this._url && !this._literal) return this._url;
     if (
-      !this.#url &&
-      (this.#literal === undefined ||
-        this.#literal === "" ||
-        this.#literal === null)
+      !this._url &&
+      (this._literal === undefined ||
+        this._literal === "" ||
+        this._literal === null)
     )
       throw new Error("Can't turn empty Literal into URL");
 
     let encoded;
-    switch (typeof this.#literal) {
+    switch (typeof this._literal) {
       case "string":
-        encoded = `string:${encodeRFC3986URIComponent(this.#literal)}`;
+        encoded = `string:${encodeRFC3986URIComponent(this._literal)}`;
         break;
       case "number":
-        encoded = `number:${encodeRFC3986URIComponent(this.#literal)}`;
+        encoded = `number:${encodeRFC3986URIComponent(this._literal)}`;
         break;
       case "boolean":
-        encoded = `boolean:${encodeRFC3986URIComponent(this.#literal)}`;
+        encoded = `boolean:${encodeRFC3986URIComponent(this._literal)}`;
         break;
       case "object":
-        encoded = `json:${encodeRFC3986URIComponent(JSON.stringify(this.#literal))}`;
+        encoded = `json:${encodeRFC3986URIComponent(JSON.stringify(this._literal))}`;
         break;
       default:
         throw new Error(
-          `Literal.toUrl(): unsupported type "${typeof this.#literal}" (value: ${String(this.#literal)})`,
+          `Literal.toUrl(): unsupported type "${typeof this._literal}" (value: ${String(this._literal)})`,
         );
     }
 
@@ -58,19 +58,19 @@ export class Literal {
 
   get(): any {
     if (
-      this.#literal !== undefined &&
-      this.#literal !== null &&
-      this.#literal !== ""
+      this._literal !== undefined &&
+      this._literal !== null &&
+      this._literal !== ""
     )
-      return this.#literal;
+      return this._literal;
 
-    if (!this.#url) throw new Error("Can't render empty Literal");
+    if (!this._url) throw new Error("Can't render empty Literal");
 
-    if (!this.#url.startsWith("literal://"))
+    if (!this._url.startsWith("literal://"))
       throw new Error("Can't render Literal from non-literal URL");
 
     // get rid of "literal://"
-    const body = this.#url.substring(10);
+    const body = this._url.substring(10);
 
     if (body.startsWith("string:")) {
       return decodeURIComponent(body.substring(7));

@@ -11,5 +11,6 @@ esbuild
     outfile: "dist/web.js",
     watch: process.env.NODE_ENV === "dev" ? true : false,
     plugins: [litPlugin()],
+    external: ["@coasys/ad4m"],
   })
   .catch(() => process.exit(1));
