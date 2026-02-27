@@ -164,7 +164,7 @@ impl Ad4mMcpHandler {
     pub async fn add_perspective(&self, params: Parameters<AddPerspectiveParams>) -> String {
         let p = &params.0;
 
-        let agent_context = match self.get_agent_context().await {
+        let _agent_context = match self.get_agent_context().await {
             Ok(ctx) => ctx,
             Err(e) => return format!("Authentication error: {}", e),
         };
@@ -177,15 +177,20 @@ impl Ad4mMcpHandler {
             return format!("Capability error: {}", e);
         }
 
-        let uuid = uuid::Uuid::new_v4().to_string();
-        let handle = PerspectiveHandle {
-            uuid: uuid.clone(),
-            name: Some(p.name.clone()),
-            neighbourhood: None,
-            shared_url: None,
-            state: PerspectiveState::Private,
-            owners: None,
+        // In multi-user mode, set the creating user as owner (reuses GraphQL pattern)
+        let user_email = self.get_user_email().await;
+        let owner_did = if let Some(email) = &user_email {
+            crate::agent::AgentService::get_user_did_by_email(email).ok()
+        } else {
+            None
         };
+
+        let handle = if let Some(owner) = &owner_did {
+            PerspectiveHandle::new_with_owner(p.name.clone(), owner.clone())
+        } else {
+            PerspectiveHandle::new_from_name(p.name.clone())
+        };
+        let uuid = handle.uuid.clone();
 
         match add_perspective(handle, None).await {
             Ok(_) => {
