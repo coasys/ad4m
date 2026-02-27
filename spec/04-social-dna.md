@@ -6,7 +6,7 @@ Social DNA (SDNA) defines data schemas over the link graph in a Perspective. It 
 
 SDNA enables applications to work with typed objects (e.g., "Message", "Post", "Channel") while the underlying storage is always links. The SHACL shapes describe the expected graph structure, property constraints, and cardinality rules.
 
-> **Historical note:** Prior to v0.12.0, subject classes were defined using Prolog rules. The Prolog engine is still available for backward compatibility and custom logic, but SHACL is now the normative representation for subject class definitions.
+> **Historical note:** Prior to v0.12.0, subject classes were defined using Prolog rules. SHACL is now the sole normative representation for subject class definitions.
 
 ## 4.2 SDNA Link Structure
 
@@ -51,12 +51,12 @@ Each property shape is a node with links describing the constraint:
 |--------|-----------|--------|---------|
 | `ad4m://self` | `ad4m://has_flow` | `literal://...` | Declares a flow definition |
 
-### Legacy Prolog SDNA
+### Legacy SDNA (Deprecated)
 
 | Source | Predicate | Target | Purpose |
 |--------|-----------|--------|---------|
-| `ad4m://self` | `ad4m://has_subject_class` | `literal://...` | Legacy Prolog subject class |
-| `ad4m://self` | `ad4m://has_custom_sdna` | `literal://...` | Custom Prolog rules |
+| `ad4m://self` | `ad4m://has_subject_class` | `literal://...` | Legacy subject class (deprecated, use SHACL) |
+| `ad4m://self` | `ad4m://has_custom_sdna` | `literal://...` | Custom SHACL rules |
 
 ## 4.3 Subject Classes
 
@@ -294,7 +294,7 @@ AD4M provides two query engines for working with Social DNA and perspective data
 
 ### SurrealDB (Recommended)
 
-SurrealDB provides 10-100x faster performance than Prolog for most queries:
+SurrealDB provides 10-100x faster performance for most queries:
 
 ```typescript
 // Find all todos in "done" state
@@ -310,27 +310,27 @@ const alicePosts = await perspective.querySurrealDB(
 
 `Ad4mModel` uses SurrealDB by default for `findAll()` and query builder operations.
 
-### Prolog (Legacy)
+### Custom SHACL Rules
 
-The Prolog engine is populated with facts derived from the Perspective's links:
-
-```prolog
-% For each link in the perspective:
-triple("source_uri", "predicate_uri", "target_uri").
-link("source_uri", "predicate_uri", "target_uri", TimestampMillis, "author_did").
-```
-
-The Prolog engine remains available for backward compatibility, custom logic rules, and complex reasoning that is difficult to express in SQL. However, new implementations SHOULD prioritise SurrealDB query support.
-
-Custom Prolog rules can still be added via `ad4m://has_custom_sdna` links with Prolog conditions:
+For complex reasoning beyond standard property constraints, SHACL's advanced features (SPARQL-based constraints, rules) can be used. Custom SHACL rules can be added via `ad4m://has_custom_sdna` links:
 
 ```typescript
-// Prolog condition on a property (backward compatibility)
+// SHACL constraint on a property
 @Property({
   through: "todo://state",
-  prologCondition: 'triple(Base, "rdf://type", "todo://Todo")'
+  shaclConstraint: `
+    sh:sparql [
+      sh:select """
+        SELECT $this WHERE {
+          $this <rdf://type> <todo://Todo> .
+        }
+      """ ;
+    ]
+  `
 })
 ```
+
+New implementations SHOULD prioritise SurrealDB query support for performance-critical operations and SHACL for schema validation and constraint checking.
 
 ## 4.7 Flows
 
@@ -375,6 +375,6 @@ For alternative implementations:
 | Property get/set via link operations | **MUST** | Core CRUD operations |
 | Collection operations | **MUST** | Add/remove/set for multi-value properties |
 | SurrealDB query support | **SHOULD** | Primary query engine |
-| Prolog engine | **MAY** | Legacy; needed for backward compatibility with pre-v0.12.0 SDNA |
+| SHACL custom rules | **MAY** | For advanced constraint checking and reasoning |
 | Flow support | **MAY** | State machine functionality |
 | `Ad4mModel` / decorator API | **MAY** | Client-side convenience; not required in the executor |

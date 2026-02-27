@@ -44,7 +44,7 @@ MAJOR.MINOR.PATCH
 | Expression signing | MAJOR | Changes break all signature verification |
 | Link/Expression types | MAJOR | Core data model changes break interop |
 | GraphQL API | MINOR | New fields/operations don't break existing clients |
-| SDNA Prolog predicates | MINOR | New predicates are additive |
+| SDNA SHACL shapes | MINOR | New shapes are additive |
 | Language interfaces | MINOR | New adapters are optional |
 | P-Diff-Sync DNA | Implementation-defined | DNA changes require new Neighbourhoods |
 | Bootstrap Languages | Implementation-defined | Can be swapped for alternatives |

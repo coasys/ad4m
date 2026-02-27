@@ -38,7 +38,7 @@ type Query {
   perspective(uuid: String!): PerspectiveHandle
   perspectives: [PerspectiveHandle!]!
   perspectiveQueryLinks(uuid: String!, query: LinkQuery!): [DecoratedLinkExpression!]!
-  perspectiveQueryProlog(uuid: String!, query: String!): String!
+  perspectiveQuerySurreal(uuid: String!, query: String!): String!
   perspectiveSnapshot(uuid: String!): Perspective!
 }
 
