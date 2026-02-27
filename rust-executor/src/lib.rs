@@ -8,7 +8,6 @@ mod globals;
 pub mod graphql;
 pub mod holochain_service;
 pub mod js_core;
-pub mod literal;
 pub mod mcp;
 mod prolog_service;
 pub mod runtime_service;

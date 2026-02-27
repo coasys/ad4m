@@ -7,12 +7,18 @@
 Download pre-built binaries from [GitHub Releases](https://github.com/coasys/ad4m/releases):
 
 ```bash
+# First, check the latest release version:
+LATEST=$(curl -s https://api.github.com/repos/coasys/ad4m/releases/latest | grep '"tag_name"' | sed 's/.*"tag_name": "//;s/".*//')
+VERSION=${LATEST#v}  # strip leading 'v'
+
 # Linux x64
-curl -L -o ad4m-executor https://github.com/coasys/ad4m/releases/download/v0.12.0-rc1/ad4m-cli-executor-linux-0.12.0-rc1-x64
-curl -L -o ad4m https://github.com/coasys/ad4m/releases/download/v0.12.0-rc1/ad4m-cli-client-linux-0.12.0-rc1-x64
+curl -L -o ad4m-executor "https://github.com/coasys/ad4m/releases/download/${LATEST}/ad4m-cli-executor-linux-${VERSION}-x64"
+curl -L -o ad4m "https://github.com/coasys/ad4m/releases/download/${LATEST}/ad4m-cli-client-linux-${VERSION}-x64"
 chmod +x ad4m-executor ad4m
 sudo mv ad4m-executor ad4m /usr/local/bin/
 ```
+
+> **Always use the latest release.** Check the [releases page](https://github.com/coasys/ad4m/releases) for the most recent version. Pre-release versions (e.g., `-rc1`) may also be available.
 
 Available assets per release:
 - `ad4m-cli-executor-linux-*-x64` — Executor binary (Linux)

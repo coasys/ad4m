@@ -23,7 +23,7 @@ pub struct SubscribeToModelParams {
     /// Parent expression address to scope the subscription (e.g., a channel address).
     /// If provided, only watches for new instances that are children of this parent.
     pub parent_address: Option<String>,
-    /// Predicate URI to filter by (e.g., "ad4m://has_child", "flux://entry_type").
+    /// Predicate URI to filter by (e.g., "ad4m://has_child").
     /// If neither parent_address nor predicate is provided, watches all new links.
     pub predicate: Option<String>,
     /// Target value to match when filtering by predicate.
