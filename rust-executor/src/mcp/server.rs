@@ -4,14 +4,13 @@
 //! AI agents connect via HTTP to interact with AD4M perspectives, models,
 //! and neighbourhoods using the Model Context Protocol.
 //!
-//! Authentication: clients can pass a JWT token via the `Authorization: Bearer <token>`
-//! HTTP header. This token is extracted by middleware and injected into the MCP session
-//! context, so the agent doesn't need to call auth tools to authenticate.
+//! Authentication: clients authenticate via MCP tools (`request_capability` + `login_email`).
+//! Bearer header auth is not yet supported for multi-session setups — each session gets
+//! its own isolated token state, so a shared HTTP middleware cannot route tokens correctly.
 
 use super::tools::Ad4mMcpHandler;
 use crate::js_core::JsCoreHandle;
 use anyhow::Result;
-use axum::{extract::Request, http, middleware, response::Response};
 use log::info;
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
@@ -92,32 +91,10 @@ pub async fn start_mcp_server(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("MCP HTTP server listening on {}", addr);
 
-    // Middleware to extract Authorization: Bearer <token> from HTTP headers.
-    // TODO: Currently this writes to the shared context token, which means the last
-    // Bearer token seen wins across all sessions. For proper multi-session support,
-    // we need a per-session token registry keyed by session ID. For single-client use
-    // this is fine — each session also starts with its own token from the factory.
-    let auth_token_ref = context.auth_token.clone();
-    let auth_layer = middleware::from_fn(move |req: Request, next: middleware::Next| {
-        let token_ref = auth_token_ref.clone();
-        async move {
-            if let Some(auth_header) = req.headers().get(http::header::AUTHORIZATION) {
-                if let Ok(auth_str) = auth_header.to_str() {
-                    if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                        let mut guard = token_ref.write().await;
-                        *guard = Some(token.to_string());
-                        info!("MCP auth: Bearer token extracted from HTTP header");
-                    }
-                }
-            }
-            let response: Response = next.run(req).await;
-            Ok::<_, std::convert::Infallible>(response)
-        }
-    });
-
-    let app = axum::Router::new()
-        .fallback_service(service)
-        .layer(auth_layer);
+    // NOTE: Bearer header auth removed — the per-session token isolation means an HTTP
+    // middleware can't route tokens to the correct session without a session ID registry.
+    // Clients authenticate via MCP tools (request_capability + login_email) instead.
+    let app = axum::Router::new().fallback_service(service);
 
     axum::serve(listener, app).await?;
 
