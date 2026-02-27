@@ -25,6 +25,17 @@ jobs:
         with:
           deno-version: v1.32.4
 
+      - name: Delete existing tag (idempotent re-runs)
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+          echo "Deleting tag $TAG if it exists..."
+          curl -s -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$TAG" || true
+          echo "Tag cleanup done"
+
       - name: Create Tags From
         id: create_tag
         uses: jaywcjlove/create-tag-action@v1.3.14
@@ -561,7 +572,7 @@ jobs:
           echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
           npm config set //registry.npmjs.org/:_authToken "${NPM_TOKEN}"
           echo "npm version: $(npm --version), node: $(node --version)"
-          echo "Auth configured: $(npm config get //registry.npmjs.org/:_authToken | cut -c1-8)..."
+          echo "npmrc written: $(wc -c < ~/.npmrc) bytes"
           TAG="${{ env.NPM_TAG }}"
           echo "Publishing with tag: $TAG"
           FAILED=0
