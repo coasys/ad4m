@@ -1,0 +1,204 @@
+import { Callout } from "nextra-theme-docs";
+import { Tab, Tabs } from "nextra-theme-docs";
+
+# MCP Server (AI Agent Integration)
+
+AD4M includes a built-in [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server, enabling AI agents to interact with AD4M natively — creating perspectives, managing data models, joining neighbourhoods, and sending messages through a standardised protocol.
+
+<Callout type="info">
+MCP is an open standard that lets AI applications discover and use tools exposed by external services. Any MCP-compatible client (OpenClaw, Claude Desktop, Cursor, etc.) can connect to AD4M's MCP server.
+</Callout>
+
+## Why MCP?
+
+While AD4M's GraphQL API provides full programmatic access, MCP is purpose-built for AI agents:
+
+- **Tool discovery** — agents automatically discover available operations and their parameters
+- **Dynamic tools** — SHACL subject classes generate domain-specific tools at runtime (e.g., `channel_create`, `message_set_body`)
+- **Natural descriptions** — every tool includes LLM-optimised descriptions with examples
+- **Authentication built-in** — signup, login, and JWT management through MCP tools themselves
+
+## Enabling the MCP Server
+
+Pass `--enable-mcp true` when starting the executor:
+
+```bash
+ad4m-executor run \
+  --app-data-path ~/.ad4m \
+  --admin-credential my-secret \
+  --gql-port 12100 \
+  --enable-mcp true
+```
+
+The MCP server starts on **port 3001** by default, serving Streamable HTTP at `/mcp`.
+
+## Connecting an AI Agent
+
+### OpenClaw
+
+Add AD4M as an MCP server in your OpenClaw configuration:
+
+```json
+{
+  "mcpServers": {
+    "ad4m": {
+      "url": "http://localhost:3001/mcp"
+    }
+  }
+}
+```
+
+Once connected, your agent can call any AD4M tool directly. An [OpenClaw skill](https://github.com/coasys/ad4m/tree/dev/skills/ad4m) is also available with setup guides and reference material.
+
+### Other MCP Clients
+
+Any MCP client supporting Streamable HTTP transport can connect to `http://localhost:3001/mcp`. Refer to your client's documentation for configuration.
+
+## Authentication
+
+AD4M's MCP server supports two authentication modes:
+
+### Single-User Mode (Local Development)
+
+When running a personal executor, use the admin credential:
+
+```bash
+# The same credential passed to --admin-credential
+# Include as Authorization header or authenticate via MCP tools
+```
+
+### Multi-User Mode
+
+For shared executors serving multiple users, AD4M provides a full auth flow through MCP tools:
+
+1. **`signup`** — Create an account with email and password
+2. **`login_email`** — Authenticate and receive a JWT
+3. **`verify_email_code`** — Verify email (if SMTP is configured)
+4. **`auth_status`** — Check current authentication state
+
+```
+→ signup(email: "agent@example.com", password: "secure-pass")
+← { did: "did:key:z6Mk...", success: true }
+
+→ login_email(email: "agent@example.com", password: "secure-pass")
+← { token: "eyJ...", success: true }
+```
+
+After login, the JWT is stored in the MCP session and used automatically for all subsequent tool calls. Each user gets their own DID and isolated perspective space.
+
+<Callout type="warning">
+Unauthenticated connections can only access auth tools (signup, login, verify, auth_status). All other tools require a valid JWT or admin credential.
+</Callout>
+
+## Available Tools
+
+Tools are organised by domain. Dynamic tools (generated from SHACL subject classes) appear alongside these core tools.
+
+### Perspective & Link Tools
+
+| Tool | Description |
+|------|-------------|
+| `perspective_create` | Create a new perspective (personal knowledge graph) |
+| `perspective_list` | List all perspectives with metadata |
+| `add_link` | Add an RDF-like triple to a perspective |
+| `get_links` | Query links by source, predicate, or target |
+| `remove_link` | Remove a specific link |
+
+### Subject (Model) Tools
+
+| Tool | Description |
+|------|-------------|
+| `get_models` | Discover all SHACL-defined data models in a perspective |
+| `get_subject_data` | Get a subject instance by URI |
+| `create_subject` | Create a new subject instance |
+| `delete_subject` | Delete a subject instance |
+| `query_subjects` | Query subjects by class with optional filters |
+
+### Dynamic SHACL Tools
+
+When a perspective contains SHACL subject class definitions, tools are generated automatically:
+
+- **Scalar properties** (`sh:maxCount 1`) → `{class}_set_{property}`, `{class}_get_{property}`
+- **Collections** (`sh:maxCount > 1`) → `{class}_add_{collection}`, `{class}_remove_{collection}`
+
+For example, a `Channel` class with `name` (scalar) and `members` (collection) generates:
+`channel_create`, `channel_set_name`, `channel_add_members`, `channel_remove_members`
+
+### Neighbourhood Tools
+
+| Tool | Description |
+|------|-------------|
+| `join_neighbourhood` | Join a neighbourhood by URL |
+| `publish_neighbourhood` | Publish a perspective as a shared neighbourhood |
+
+### Agent & Profile Tools
+
+| Tool | Description |
+|------|-------------|
+| `agent_me` | Get the current agent's DID and status |
+| `agent_unlock` | Unlock the agent keystore |
+| `get_agent_public_perspective` | Read any agent's public profile |
+| `set_agent_public_perspective` | Update your public profile links |
+
+### Waker / Subscription Tools
+
+| Tool | Description |
+|------|-------------|
+| `subscribe_to_model` | Generate a reactive query configuration for monitoring model changes |
+
+## Example Workflow
+
+Here's a typical AI agent workflow — discover models, create data, query it back:
+
+```
+# 1. List perspectives
+→ perspective_list()
+← [{ uuid: "ab23...", name: "My Space", neighbourhood: null }]
+
+# 2. Discover available models
+→ get_models(perspective_id: "ab23...")
+← [{ name: "Task", properties: ["title", "status", "assignee"],
+      collections: ["tags"] }]
+
+# 3. Create a task
+→ task_create(perspective_id: "ab23...", title: "Review MCP docs",
+              status: "open", assignee: "did:key:z6Mk...")
+← { uri: "ad4m://task_1234", success: true }
+
+# 4. Add tags
+→ task_add_tags(perspective_id: "ab23...", uri: "ad4m://task_1234",
+                value: "documentation")
+← { success: true }
+
+# 5. Query all open tasks
+→ query_subjects(perspective_id: "ab23...", class_name: "Task",
+                 filter: { status: "open" })
+← [{ uri: "ad4m://task_1234", title: "Review MCP docs", status: "open" }]
+```
+
+## Joining a Neighbourhood
+
+AI agents can join shared spaces and participate alongside humans:
+
+```
+# Join an existing neighbourhood
+→ join_neighbourhood(url: "neighbourhood://Qm...")
+← { perspective_id: "cd45...", state: "SYNCED" }
+
+# Discover what models exist in this community
+→ get_models(perspective_id: "cd45...")
+← [{ name: "Message", properties: ["body", "author", "timestamp"],
+      collections: ["reactions"] }]
+
+# Send a message
+→ message_create(perspective_id: "cd45...", body: "Hello from an AI agent! 🖖")
+← { uri: "ad4m://msg_5678", success: true }
+```
+
+## Further Reading
+
+- [Model Classes](/developer-guides/model-classes) — defining SHACL subject classes
+- [Social DNA](/social-dna) — understanding SDNA and SHACL schemas
+- [Neighbourhoods](/neighbourhoods) — how shared perspectives work
+- [Authentication](/auth) — AD4M's auth system in depth
+- [AI in AD4M](/developer-guides/ai) — local AI model inference (complementary to MCP)
