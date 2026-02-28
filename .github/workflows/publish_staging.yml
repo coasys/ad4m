@@ -84,6 +84,8 @@ jobs:
       run: cd ./core && pnpm install --no-frozen-lockfile
 
     - name: Build AD4M-CLI
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
       run: pnpm build-libs
 
     - name: Build Launcher binary
@@ -193,6 +195,8 @@ jobs:
       run: cd ./core && pnpm install --no-frozen-lockfile
 
     - name: Build AD4M-CLI
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
       run: pnpm build-libs
 
     - name: Build Launcher binary with CUDA
