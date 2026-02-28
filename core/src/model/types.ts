@@ -57,6 +57,19 @@ export type Query = {
   offset?: number;
   limit?: number;
   count?: boolean;
+  /**
+   * When provided, restricts results to instances reachable from the given
+   * parent node via the given predicate.
+   *
+   * The subscription layer also watches this predicate so that adding or
+   * removing a child link triggers a live re-query.
+   *
+   * Consumers should derive `predicate` from the parent model's `@HasMany`
+   * decorator metadata (via `ParentModel.getModelMetadata().relations[field].predicate`)
+   * rather than hard-coding the string — the `useLive` hook does this automatically
+   * when a `parent` option is supplied.
+   */
+  linkedFrom?: { id: string; predicate: string };
 };
 
 /**

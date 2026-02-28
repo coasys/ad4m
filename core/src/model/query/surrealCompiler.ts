@@ -221,7 +221,7 @@ export function buildSurrealQuery(
   metadata: ModelMetadata,
   query: Query,
 ): string {
-  const { where } = query;
+  const { where, linkedFrom } = query;
 
   const graphTraversalFilters: string[] = [];
   for (const [, propMeta] of Object.entries(metadata.properties)) {
@@ -281,6 +281,11 @@ export function buildSurrealQuery(
   const whereConditions: string[] = [
     ...graphTraversalFilters,
     ...(userWhereClause ? [userWhereClause] : []),
+    ...(linkedFrom
+      ? [
+          `count(<-link[WHERE predicate = '${escapeSurrealString(linkedFrom.predicate)}' AND in.uri = '${escapeSurrealString(linkedFrom.id)}']) > 0`,
+        ]
+      : []),
   ];
 
   // Ensure we always have at least one condition to produce valid SurrealQL

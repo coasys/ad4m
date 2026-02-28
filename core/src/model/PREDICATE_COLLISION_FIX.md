@@ -1,6 +1,6 @@
 # Fix Predicate Collision: Type-Safe Relation Hydration
 
-> **Status:** Planning  
+> **Status:** Agreed — implementing Path 3 (Hybrid)  
 > **Created:** 2026-02-28  
 > **Priority:** High — this is the root cause of the channel pinning duplication bug
 
@@ -405,36 +405,38 @@ if (predicateCollision) {
 This gives developers visibility ("hey, you're sharing predicates") without
 breaking their code, while the type-filtering ensures correctness regardless.
 
-**This is technically the most robust path**, but it's also the most work —
-you're building the full type-filtering mutation logic AND adding the warning
-check.
+**This is the recommended path.** It fixes the bug at the engine level,
+gives developers visibility without breaking changes, and leaves predicate
+renaming as an optional clean-up rather than a hard prerequisite.
 
-### Our recommendation: Path 1 (Option A alone)
+### Our recommendation: Path 3 (Hybrid — Warning + Type-Filtered Mutation)
 
-For a project at this stage, simplicity wins. Here's why:
+After further discussion, Path 3 is the optimal route. Here's why:
 
-1. **The collision is a modelling mistake, not a feature.** `has_child` meaning
-   both "has conversation" and "has sub-channel" is ambiguous. Forcing the
-   developer to be specific is a better schema.
+1. **Correctness by default.** Type-filtered mutation (Option B) means the ORM
+   handles shared predicates correctly regardless of whether the developer
+   notices the collision. Silent data corruption is eliminated at the engine
+   level, not just at the schema level.
 
-2. **The ORM already treats predicates as typed keys.** The query path uses
-   SurrealDB's type index to disambiguate, but the mutation path doesn't.
-   Rather than making the mutation path equally complex, align the schema with
-   the ORM's actual semantics.
+2. **The warning is still valuable.** Shared predicates are almost always a
+   modelling mistake. The `console.warn` in `@Model` gives developers immediate
+   visibility without breaking existing code or requiring a forced migration.
+   It's a nudge, not a blocker.
 
-3. **Type-filtered mutation adds latency to every write.** Each `isOfType()`
-   call is a SurrealDB lookup. Even batched into a single `WHERE id IN [...]`
-   query, it's an extra round-trip per dirty relation per `save()`. The read
-   path is unaffected (SurrealDB already type-filters during hydration), but
-   writes get slower. Unique predicates avoid this entirely.
+3. **Write-side cost is acceptable.** The `isOfType()` lookups during mutation
+   can be batched into a single `WHERE id IN [...]` query per relation, keeping
+   the extra round-trip to one per dirty relation per `save()`. For the typical
+   model this is negligible, and the correctness guarantee outweighs it.
 
-4. **Migration cost is bounded.** The Channel model in Flux is the only known
-   collision (audit needed to confirm). Renaming predicates in one model and
-   migrating its links is a few hours of work, not a project.
+4. **No forced migration.** Path 1 requires renaming all colliding predicates
+   and writing a data migration before shipping. Path 3 fixes the bug
+   immediately in the engine, then lets predicate renaming happen at a more
+   comfortable pace — or not at all, if developers prefer to leave their schemas
+   as-is.
 
-If you later discover that shared predicates are a legitimate pattern you need
-(e.g. for RDF interop with external agents that expect generic predicates), you
-can add Option B at that point. But build it when you need it, not before.
+5. **Future-proof.** If RDF interop with external agents becomes a requirement,
+   shared predicates are already handled correctly. Nothing needs to be
+   re-architected later.
 
 ---
 
@@ -453,11 +455,53 @@ grep -rn '@Has\|@BelongsTo' --include='*.ts' | grep 'through:' | \
 
 Confirm the Channel collision is the only one, or identify others.
 
-### Phase 2: Add the Enforcement Check
+### Phase 2: Implement Type-Filtered Mutation (Option B — the core fix)
 
-Add the duplicate-predicate check in `@Model` decorator. Start with a **hard
-error** — there's no point doing a warning-then-error rollout if there's only
-one collision and you're going to fix it in the same PR.
+Update `mutation.ts` so that when re-writing a relation, the ORM only touches
+links whose targets are of the correct type. This eliminates the data corruption
+regardless of whether predicates are shared.
+
+```ts
+// In mutation.ts, when updating a HasMany relation:
+async function updateRelation(ctx, key, relMeta) {
+  const currentLinks = await ctx.perspective.get(
+    new LinkQuery({
+      source: ctx.id,
+      predicate: relMeta.through,
+    }),
+  );
+
+  // Only touch links whose targets are of the correct type — this ensures
+  // shared predicates across different relation fields don't clobber each other.
+  const relevantLinks = await filterByType(currentLinks, relMeta.type);
+
+  const desiredIds = new Set(ctx.instance[key].map((v) => v.id));
+  const currentIds = new Set(relevantLinks.map((l) => l.data.target));
+
+  for (const link of relevantLinks) {
+    if (!desiredIds.has(link.data.target)) {
+      await ctx.perspective.remove(link);
+    }
+  }
+
+  for (const id of desiredIds) {
+    if (!currentIds.has(id)) {
+      await ctx.perspective.add(
+        new Link({ source: ctx.id, predicate: relMeta.through, target: id }),
+      );
+    }
+  }
+}
+```
+
+`filterByType` should batch the type lookups into a single `WHERE id IN [...]`
+query to keep the extra round-trip to one per dirty relation per `save()`.
+
+### Phase 3: Add @Model Collision Warning (Option A as warning)
+
+Add the duplicate-predicate check in the `@Model` decorator, emitting a
+**warning** (not an error) so developers are alerted without breaking existing
+code:
 
 ```ts
 // In the @Model decorator:
@@ -467,19 +511,20 @@ const predicates = new Map<string, string>();
 for (const rel of relations) {
   const existing = predicates.get(rel.through);
   if (existing) {
-    throw new Error(
-      `@Model("${name}"): predicate "${rel.through}" is used by both ` +
-        `"${existing}" and "${rel.key}". Each relation must use a unique ` +
-        `predicate to avoid data corruption during save().`,
+    console.warn(
+      `[AD4M ORM] Model "${name}": predicate "${rel.through}" is shared by ` +
+        `"${existing}" and "${rel.key}". The ORM handles this correctly via ` +
+        `type-filtered mutation, but consider using unique predicates for clarity.`,
     );
   }
   predicates.set(rel.through, rel.key);
 }
 ```
 
-### Phase 3: Rename Colliding Predicates
+### Phase 4: (Optional) Rename Colliding Predicates
 
-Update the Channel model (and any other collisions found in Phase 1):
+With Phases 2 and 3 in place the bug is already fixed. Renaming predicates is
+now a clean-up exercise, not a hard requirement. Do it when convenient:
 
 ```ts
 // Before:
@@ -497,10 +542,8 @@ conversations: Conversation[] = [];
 childChannels: Channel[] = [];
 ```
 
-### Phase 4: Data Migration
-
-Write a one-time migration that renames existing links in users' local
-perspectives:
+If predicates are renamed, ship a one-time data migration run on app startup
+(gated by a version flag) to rewrite existing links:
 
 ```ts
 async function migrateChannelPredicates(perspective: PerspectiveProxy) {
@@ -523,15 +566,13 @@ async function migrateChannelPredicates(perspective: PerspectiveProxy) {
 }
 ```
 
-Run this once on app startup, gated by a version flag in the perspective's
-metadata.
-
 ### Phase 5: Verify
 
 - All existing tests pass
-- Channel pinning no longer duplicates conversations (even without dirty tracking)
-- New conversations appear correctly under the new predicate
-- Child channels appear correctly under their new predicate
+- Channel pinning no longer duplicates conversations
+- New conversations appear correctly
+- Child channels appear correctly
+- Shared-predicate warning fires in dev console for any colliding models
 
 ---
 

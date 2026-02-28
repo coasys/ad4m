@@ -111,6 +111,12 @@ function getOrCreateSharedEntry(
   for (const rel of Object.values(metadata.relations)) {
     if (rel.predicate) watchedPredicates.add(rel.predicate);
   }
+  // If the query is scoped to a parent via linkedFrom, also watch the
+  // parent-relationship predicate so that adding/removing a child link
+  // triggers a live re-query even though it's not in the child model's schema.
+  if (query.linkedFrom?.predicate) {
+    watchedPredicates.add(query.linkedFrom.predicate);
+  }
 
   const entry: SharedEntry = {
     listeners: new Map(),
