@@ -15,12 +15,16 @@ const TEST_PORTS = [
   15000, 15001, 15002,        // app.test.ts
   15100, 15101, 15102,        // authentication.test.ts (suite 1)
   15200, 15201, 15202, 15203, // authentication.test.ts (suite 2)
-  15300, 15301, 15302,        // integration.test.ts
+  15300, 15301, 15302,        // integration.test.ts (alice)
+  15400, 15401, 15402,        // integration.test.ts (bob — multi-user section)
   15600, 15601, 15602,        // simple.test.ts
   15800, 15801, 15802,        // multi-user-connect.test.ts
   15900, 15901, 15902,        // multi-user-simple.test.ts
   15920, 15921, 15922,        // email-verification.test.ts
   16600, 16601, 16602,        // prolog-and-literals.test.ts
+  16000, 16001, 16002,        // mcp-http.test.ts
+  16010, 16011, 16012,        // mcp-auth.test.ts
+  3001,                       // MCP HTTP server
 ];
 
 async function cleanup() {

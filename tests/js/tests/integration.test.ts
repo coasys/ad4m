@@ -4,7 +4,7 @@ import { isProcessRunning, sleep } from "../utils/utils";
 import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
 import { fileURLToPath } from 'url';
 import { expect } from "chai";
-import { startExecutor, apolloClient, runHcLocalServices } from "../utils/utils";
+import { startExecutor, apolloClient, runHcLocalServices, killByPorts } from "../utils/utils";
 import { ChildProcess } from 'child_process';
 import perspectiveTests from "./perspective";
 import agentTests from "./agent";
@@ -116,19 +116,15 @@ describe("Integration tests", function () {
 
     after(async () => {
       if (executorProcess) {
-        while (!executorProcess?.killed) {
-          let status  = executorProcess?.kill();
-          console.log("killed executor with", status);
-          await sleep(500);
-        }
+        executorProcess.kill('SIGTERM');
+        await sleep(500);
+        if (!executorProcess.killed) executorProcess.kill('SIGKILL');
       }
       if (localServicesProcess) {
-        while (!localServicesProcess?.killed) {
-          let status  = localServicesProcess?.kill();
-          console.log("killed local services with", status);
-          await sleep(500);
-        }
+        localServicesProcess.kill('SIGKILL');
       }
+      // Port-based kill as safety net — catches the executor even if kill() missed it
+      killByPorts([gqlPort, hcAdminPort, hcAppPort]);
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
@@ -176,13 +172,13 @@ describe("Integration tests", function () {
         })
 
         after(async () => {
-          if (executorProcess) {
-            while (!bobExecutorProcess?.killed) {
-              let status  = bobExecutorProcess?.kill();
-              console.log("killed bobs executor with", status);
-              await sleep(500);
-            }
+          if (bobExecutorProcess) {
+            bobExecutorProcess.kill('SIGTERM');
+            await sleep(500);
+            if (!bobExecutorProcess.killed) bobExecutorProcess.kill('SIGKILL');
           }
+          // Port-based kill as safety net (bob: 15400/15401/15402)
+          killByPorts([15400, 15401, 15402]);
         })
 
         describe('Agent Language', agentLanguageTests(testContext))

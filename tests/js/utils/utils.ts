@@ -1,4 +1,4 @@
-import { ChildProcess, exec, ExecException, execSync } from "node:child_process";
+import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions/index.js";
 import { ApolloClient, InMemoryCache } from "@apollo/client/core/index.js";
@@ -167,17 +167,29 @@ export async function startExecutor(dataPath: string,
         console.log("USING RELAY URL: ", relayUrl);
     }
 
-    const execOptions = {
-        maxBuffer: 100 * 1024 * 1024, // 100MB instead of 1MB
-    }
+    // Build args array explicitly so spawn() can run the executor directly
+    // (no shell wrapper). exec() spawns `sh -c "..."` — kill() only kills
+    // the shell, leaving the actual executor running as an orphan.
+    // spawn() runs the binary directly so kill()/SIGKILL actually reach it.
+    const args = [
+        'run',
+        '--app-data-path', dataPath,
+        '--gql-port', String(gqlPort),
+        '--hc-admin-port', String(hcAdminPort),
+        '--hc-app-port', String(hcAppPort),
+        '--hc-proxy-url', proxyUrl,
+        '--hc-bootstrap-url', bootstrapUrl,
+        '--hc-use-bootstrap', 'true',
+        '--hc-use-proxy', 'true',
+        '--hc-use-local-proxy', 'true',
+        '--hc-use-mdns', 'true',
+        '--language-language-only', String(languageLanguageOnly),
+        '--run-dapp-server', 'false',
+    ];
+    if (relayUrl) { args.push('--hc-relay-url', relayUrl); }
+    if (adminCredential) { args.push('--admin-credential', adminCredential); }
 
-    const relayUrlArg = relayUrl ? `--hc-relay-url ${relayUrl}` : '';
-
-    if (!adminCredential) {
-        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} ${relayUrlArg} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --run-dapp-server false`, execOptions)
-    } else {
-        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} ${relayUrlArg} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${adminCredential} --run-dapp-server false`, execOptions)
-    }
+    executorProcess = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let executorReady = new Promise<void>((resolve, reject) => {
         executorProcess!.stdout!.on('data', (data) => {
             if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
@@ -245,4 +257,18 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
 
 export function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Kill any process listening on the given ports.
+ * Use as a safety net in after() hooks — catches executors that survived kill().
+ */
+export function killByPorts(ports: number[]): void {
+    for (const port of ports) {
+        try {
+            execSync(`lsof -ti TCP:${port} -s TCP:LISTEN | xargs -r kill -9`, { stdio: 'ignore' });
+        } catch (e) {
+            // Port not in use — fine
+        }
+    }
 }
