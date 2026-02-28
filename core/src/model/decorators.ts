@@ -49,8 +49,12 @@ export function instanceToSerializable(instance: any): Record<string, unknown> {
     | Function
     | undefined;
   const registeredProps = ctor ? getPropertiesMetadata(ctor) : null;
-  const keys = registeredProps ? Object.keys(registeredProps) : null;
-  if (!keys || keys.length === 0) {
+  const registeredRels = ctor ? getRelationsMetadata(ctor) : null;
+  const propKeys = registeredProps ? Object.keys(registeredProps) : null;
+  const relKeys = registeredRels ? Object.keys(registeredRels) : null;
+  const allKeys =
+    (propKeys ?? relKeys) ? [...(propKeys ?? []), ...(relKeys ?? [])] : null;
+  if (!allKeys || allKeys.length === 0) {
     // Plain object / no @Property decorators — safe to spread.
     return { ...(instance as object) };
   }
@@ -58,8 +62,19 @@ export function instanceToSerializable(instance: any): Record<string, unknown> {
   if ((instance as any).id !== undefined) {
     obj.id = (instance as any).id;
   }
-  for (const key of keys) {
-    obj[key] = (instance as any)[key];
+  for (const key of allKeys) {
+    const val = (instance as any)[key];
+    // For relation arrays containing model instances, serialize only their IDs
+    // to avoid circular references and keep the fingerprint lightweight.
+    if (Array.isArray(val)) {
+      obj[key] = val.map((item: any) =>
+        item && typeof item === "object" && item.id !== undefined
+          ? item.id
+          : item,
+      );
+    } else {
+      obj[key] = val;
+    }
   }
   return obj;
 }

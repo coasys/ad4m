@@ -17,7 +17,7 @@ import { Ad4mClient, PerspectiveProxy } from "@coasys/ad4m";
 import { startAgent, waitUntil } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 import { wipePerspective } from "../../utils/utils.js";
-import { TestPost } from "./models.js";
+import { TestComment, TestPost, TestTag } from "./models.js";
 
 
 // ── Helper ────────────────────────────────────────────────────────────────────
@@ -74,6 +74,8 @@ describe("Ad4mModel — Subscriptions", function () {
     }
     perspective = await ad4m.perspective.add("model-subscriptions-test");
     await TestPost.register(perspective);
+    await TestComment.register(perspective);
+    await TestTag.register(perspective);
   });
 
   after(async () => {
@@ -83,6 +85,8 @@ describe("Ad4mModel — Subscriptions", function () {
   beforeEach(async () => {
     await wipePerspective(perspective);
     await TestPost.register(perspective);
+    await TestComment.register(perspective);
+    await TestTag.register(perspective);
   });
 
   // ── 1. Immediate initial callback ─────────────────────────────────────────
@@ -246,6 +250,47 @@ describe("Ad4mModel — Subscriptions", function () {
 
     const afterCount = await TestPost.query(perspective).count();
     expect(afterCount).to.equal(initialCount + 1);
+  });
+
+  // ── 9. @HasMany relation changes trigger re-fire ─────────────────────────
+  //
+  // Regression: instanceToSerializable previously omitted @HasMany relation
+  // fields from the fingerprint, so adding a tag/comment to an existing
+  // instance would not change the fingerprint and the subscription would
+  // never re-broadcast.
+
+  it("subscribe() re-fires when a @HasMany relation is updated on an existing instance", async () => {
+    const post = await TestPost.create(perspective, { title: "Tagged", body: "" });
+
+    const all: TestPost[][] = [];
+    const sub = TestPost.subscribe(perspective, {}, (r) => all.push(r));
+
+    // Wait for the initial callback that contains the post
+    await waitUntil(
+      () => all.some((batch) => batch.some((p) => p.id === post.id)),
+      8000,
+      "initial callback contains the post",
+    );
+    const initialTagCount = (all.at(-1)!.find((p) => p.id === post.id)?.tags ?? []).length;
+
+    // Add a tag — this is a @HasMany relation change, not a property change
+    const tag = await TestTag.create(perspective, { label: "rust" });
+    await post.addTags(tag.id);
+
+    // Subscription must re-fire with the updated tags array
+    await waitUntil(
+      () => {
+        const latest = all.at(-1);
+        const latestPost = latest?.find((p) => p.id === post.id);
+        return (latestPost?.tags ?? []).length > initialTagCount;
+      },
+      8000,
+      "subscription re-fires with updated tags after addTags()",
+    );
+    sub.unsubscribe();
+
+    const finalPost = all.at(-1)!.find((p) => p.id === post.id)!;
+    expect(finalPost.tags.length).to.be.greaterThan(initialTagCount);
   });
 
   // ── 8. Error handling ─────────────────────────────────────────────────────

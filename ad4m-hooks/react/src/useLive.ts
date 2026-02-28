@@ -161,6 +161,16 @@ export function useLive<T extends Ad4mModel>(
   const subscribe = useCallback(() => {
     if (!perspective) return;
 
+    // If a parent scope is declared but its id is not yet resolved (e.g. the
+    // web-component prop hasn't been set yet), hold off.  Running the query
+    // with an undefined id causes escapeSurrealString(undefined) to throw.
+    if (parent && !parent.id) {
+      setCollectionData([]);
+      setInstanceData(null);
+      setLoading(false);
+      return;
+    }
+
     subRef.current?.unsubscribe();
     subRef.current = null;
     setLoading(true);
