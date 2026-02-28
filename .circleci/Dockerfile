@@ -92,7 +92,7 @@ RUN apt-get install -y gnupg2 wget && \
     dpkg -i cuda-keyring_1.1-1_all.deb && \
     rm cuda-keyring_1.1-1_all.deb && \
     apt-get update && \
-    apt-get install -y cuda-toolkit-12-5 && \
+    apt-get install -y cuda-toolkit-12-5 libcudnn9-dev-cuda-12 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ENV PATH="/usr/local/cuda-12.5/bin:${PATH}"
