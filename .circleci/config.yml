@@ -108,6 +108,10 @@ jobs:
               lsof -ti:$port | xargs -r kill -9 2>/dev/null || true
             done
       - run:
+          name: Prepare test environment
+          command: cd ./tests/js && pnpm run prepare-test
+          no_output_timeout: 20m
+      - run:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test:ci
           no_output_timeout: 30m
