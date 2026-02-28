@@ -88,6 +88,10 @@ jobs:
 
     - name: Build Launcher binary
       run: pnpm run package-ad4m
+      env:
+        # GitHub Actions container jobs don't always inherit the full system
+        # PKG_CONFIG_PATH. Set it explicitly so soup3-sys/webkit can find .pc files.
+        PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
 
     - name: Upload Release Deb Asset
       id: upload-release-deb-asset
@@ -193,6 +197,8 @@ jobs:
 
     - name: Build Launcher binary with CUDA
       run: pnpm run package-ad4m:cuda
+      env:
+        PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
 
     - name: Upload Release AppImage CUDA Asset
       id: upload-release-appimage-cuda-asset
