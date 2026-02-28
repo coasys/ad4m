@@ -1,4 +1,4 @@
-import type { ModelMetadata } from "./types";
+import type { ModelMetadata, ParentQuery, ParentQueryByPredicate } from "./types";
 
 /**
  * Resolves the predicate URI for a parent→child relation, used by
@@ -64,4 +64,28 @@ export function resolveParentPredicate(
       `"${(childCtor as any).name ?? String(childCtor)}" (fields: ${fieldNames}). ` +
       `Provide "field" to disambiguate.`,
   );
+}
+
+/**
+ * Normalises a `Query.parent` option to its raw `{ id, predicate }` form.
+ *
+ * When the model-backed form `{ id, model, field? }` is supplied, the predicate
+ * is resolved via {@link resolveParentPredicate}.  The raw `{ id, predicate }`
+ * form is returned as-is.
+ *
+ * @param lf         - Either the raw or model-backed `parent` query value.
+ * @param childCtor  - The child model constructor.  Required when `field` is
+ *                     omitted (used for inference across `@HasMany` metadata).
+ */
+export function normalizeParentQuery(
+  lf: ParentQuery,
+  childCtor?: new (...args: any[]) => any,
+): ParentQueryByPredicate {
+  if ("predicate" in lf) return lf;
+  const predicate = resolveParentPredicate(
+    lf.model.getModelMetadata(),
+    childCtor,
+    lf.field,
+  );
+  return { id: lf.id, predicate };
 }

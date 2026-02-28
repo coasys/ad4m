@@ -48,6 +48,31 @@ export type Order = { [propertyName: string]: "ASC" | "DESC" };
  */
 export type IncludeMap = { [relationName: string]: true | Query };
 
+// ── ParentQuery ─────────────────────────────────────────────────────────────
+
+/**
+ * Minimal interface a parent model class must satisfy for the model-backed
+ * `parent` query form.  Avoids a circular import between types.ts and Ad4mModel.ts.
+ */
+type ParentQueryParentCtor = { getModelMetadata(): ModelMetadata };
+
+/** Raw predicate form — use for ad-hoc or cross-package predicates. */
+export type ParentQueryByPredicate = { id: string; predicate: string };
+
+/**
+ * Model-backed form — DRY alternative that resolves the predicate from the
+ * parent model's `@HasMany` decorator metadata at query time.
+ */
+export type ParentQueryByModel = {
+  id: string;
+  model: ParentQueryParentCtor;
+  /** The `@HasMany` field name on `model`.  Optional when unambiguous. */
+  field?: string;
+};
+
+/** Union of the two `parent` query forms accepted by {@link Query}. */
+export type ParentQuery = ParentQueryByPredicate | ParentQueryByModel;
+
 export type Query = {
   properties?: string[];
   /** Eagerly hydrate relations. Key = field name; value = `true` or a sub-`Query`. See {@link IncludeMap}. */
@@ -64,12 +89,22 @@ export type Query = {
    * The subscription layer also watches this predicate so that adding or
    * removing a child link triggers a live re-query.
    *
-   * Consumers should derive `predicate` from the parent model's `@HasMany`
-   * decorator metadata (via `ParentModel.getModelMetadata().relations[field].predicate`)
-   * rather than hard-coding the string — the `useLive` hook does this automatically
-   * when a `parent` option is supplied.
+   * Two equivalent forms are accepted:
+   *  - Raw: `{ id, predicate }` — use for ad-hoc / foreign predicates.
+   *  - Model-backed: `{ id, model, field? }` — DRY, refactor-safe; the
+   *    predicate is resolved automatically from the parent model's `@HasMany`
+   *    decorator metadata.  `field` is the `@HasMany` field name; when the
+   *    parent has exactly one `@HasMany` pointing to the child type it may be
+   *    omitted (but is recommended for clarity).
+   *
+   * @example
+   * // Raw form (still valid for foreign predicates)
+   * parent: { id: parentId, predicate: 'custom://my_pred' }
+   *
+   * // Model-backed form (preferred for schema-declared relations)
+   * parent: { id: poll.id, model: Poll, field: 'answers' }
    */
-  linkedFrom?: { id: string; predicate: string };
+  parent?: ParentQuery;
 };
 
 /**

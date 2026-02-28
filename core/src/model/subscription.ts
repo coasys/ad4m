@@ -19,6 +19,7 @@ import type {
   SubscribeOptions,
 } from "./types";
 import { instanceToSerializable } from "./decorators";
+import { normalizeParentQuery } from "./parentUtils";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -111,11 +112,11 @@ function getOrCreateSharedEntry(
   for (const rel of Object.values(metadata.relations)) {
     if (rel.predicate) watchedPredicates.add(rel.predicate);
   }
-  // If the query is scoped to a parent via linkedFrom, also watch the
+  // If the query is scoped to a parent via parent query, also watch the
   // parent-relationship predicate so that adding/removing a child link
   // triggers a live re-query even though it's not in the child model's schema.
-  if (query.linkedFrom?.predicate) {
-    watchedPredicates.add(query.linkedFrom.predicate);
+  if (query.parent && 'predicate' in query.parent) {
+    watchedPredicates.add(query.parent.predicate);
   }
 
   const entry: SharedEntry = {
@@ -235,9 +236,17 @@ export function createSubscription<T>(
   perspective: PerspectiveProxy,
   options: SubscribeOptions,
   callback: (results: T[]) => void,
+  ctor?: new (...args: any[]) => any,
 ): Subscription {
   const { debounce: debounceMs = 0, onError, ...queryOptions } = options;
-  const query: Query = queryOptions as Query;
+  // Normalise model-backed parent query to { id, predicate } before key
+  // computation so the shared-entry registry and predicate watcher both
+  // operate on the resolved string form.
+  const rawParent = (queryOptions as Query).parent;
+  const resolvedOptions = rawParent
+    ? { ...queryOptions, parent: normalizeParentQuery(rawParent, ctor) }
+    : queryOptions;
+  const query: Query = resolvedOptions as Query;
   const metadata = getMetadata();
   const key = `${metadata.className}:${stableQueryKey(query)}`;
 

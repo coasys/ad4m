@@ -45,7 +45,7 @@ import {
 import { startAgent, waitUntil } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 import { wipePerspective, sleep } from "../../utils/utils.js";
-import { TestComment, TestPost, TestTag, TestReaction } from "./models.js";
+import { TestComment, TestPost, TestTag, TestReaction, TestChannel } from "./models.js";
 
 describe("Ad4mModel — Query API", function () {
   this.timeout(120_000);
@@ -71,6 +71,7 @@ describe("Ad4mModel — Query API", function () {
     await TestComment.register(perspective);
     await TestTag.register(perspective);
     await TestReaction.register(perspective);
+    await TestChannel.register(perspective);
   });
 
   after(async () => {
@@ -83,6 +84,7 @@ describe("Ad4mModel — Query API", function () {
     await TestComment.register(perspective);
     await TestTag.register(perspective);
     await TestReaction.register(perspective);
+    await TestChannel.register(perspective);
     // Re-seed fresh posts for every test so tests are fully independent
     p1 = await TestPost.create(perspective, {
       title: "Alpha",
@@ -1192,5 +1194,90 @@ describe("Ad4mModel — Query API", function () {
     // include is orthogonal to properties — relations are hydrated regardless
     expect(found!.comments.length).to.be.at.least(1);
     expect(found!.comments[0]).to.be.instanceOf(TestComment);
+  });
+
+  // ── 18. parent query ──────────────────────────────────────────────────────
+
+  it("findAll() with parent (raw predicate form) returns only children of that node", async () => {
+    const channel = await TestChannel.create(perspective, { name: "chan" });
+    await channel.addPosts(p1.id);
+    await channel.addPosts(p2.id);
+
+    const results = await TestPost.findAll(perspective, {
+      parent: { id: channel.id, predicate: "test://channel_post" },
+    });
+
+    const ids = results.map((r) => r.id);
+    expect(ids).to.include(p1.id);
+    expect(ids).to.include(p2.id);
+    expect(ids).to.not.include(p3.id);
+  });
+
+  it("findAll() with parent (model-backed, field inferred) returns only children of that node", async () => {
+    const channel = await TestChannel.create(perspective, { name: "chan" });
+    await channel.addPosts(p1.id);
+    await channel.addPosts(p2.id);
+
+    const results = await TestPost.findAll(perspective, {
+      parent: { model: TestChannel, id: channel.id },
+    });
+
+    const ids = results.map((r) => r.id);
+    expect(ids).to.include(p1.id);
+    expect(ids).to.include(p2.id);
+    expect(ids).to.not.include(p3.id);
+  });
+
+  it("findAll() with parent (model-backed, explicit field) resolves the correct predicate", async () => {
+    const channel = await TestChannel.create(perspective, { name: "chan" });
+    const comment = await TestComment.create(perspective, { body: "hello" });
+    await channel.addPosts(p1.id);
+    await channel.addComments(comment.id);
+
+    // Explicit field = 'posts' — must not return comments
+    const results = await TestPost.findAll(perspective, {
+      parent: { model: TestChannel, id: channel.id, field: "posts" },
+    });
+
+    const ids = results.map((r) => r.id);
+    expect(ids).to.include(p1.id);
+    expect(ids).to.not.include(comment.id);
+  });
+
+  it("findOne() with parent returns a single child of that node", async () => {
+    const channel = await TestChannel.create(perspective, { name: "chan" });
+    await channel.addPosts(p1.id);
+
+    const found = await TestPost.findOne(perspective, {
+      parent: { model: TestChannel, id: channel.id },
+    });
+
+    expect(found).to.not.be.null;
+    expect(found!.id).to.equal(p1.id);
+  });
+
+  it("findAll() with parent returns empty array when node has no children", async () => {
+    const channel = await TestChannel.create(perspective, { name: "empty" });
+    // no posts linked
+
+    const results = await TestPost.findAll(perspective, {
+      parent: { model: TestChannel, id: channel.id },
+    });
+
+    expect(results).to.have.length(0);
+  });
+
+  it("parent query and where can be combined", async () => {
+    const channel = await TestChannel.create(perspective, { name: "chan" });
+    await channel.addPosts(p1.id); // title = "Alpha"
+    await channel.addPosts(p2.id); // title = "Beta"
+
+    const results = await TestPost.findAll(perspective, {
+      parent: { model: TestChannel, id: channel.id },
+      where: { title: "Alpha" },
+    });
+
+    expect(results).to.have.length(1);
+    expect(results[0].id).to.equal(p1.id);
   });
 });

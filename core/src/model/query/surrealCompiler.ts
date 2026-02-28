@@ -12,7 +12,13 @@
  */
 
 import { escapeSurrealString } from "../../utils";
-import { ModelMetadata, Query, Where, WhereCondition } from "../types";
+import {
+  ModelMetadata,
+  Query,
+  Where,
+  WhereCondition,
+  ParentQueryByPredicate,
+} from "../types";
 
 // ── Value formatting ────────────────────────────────────────────────────────
 
@@ -221,7 +227,9 @@ export function buildSurrealQuery(
   metadata: ModelMetadata,
   query: Query,
 ): string {
-  const { where, linkedFrom } = query;
+  const { where, parent: linkedFrom } = query as Query & {
+    parent?: ParentQueryByPredicate;
+  };
 
   const graphTraversalFilters: string[] = [];
   for (const [, propMeta] of Object.entries(metadata.properties)) {

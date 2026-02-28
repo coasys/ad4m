@@ -1,7 +1,7 @@
 import { Ad4mModel } from "./Ad4mModel";
 import { Model, Property, HasMany, Flag } from "./decorators";
 import { Literal } from "../Literal";
-import { resolveParentPredicate } from "./parentUtils";
+import { resolveParentPredicate, normalizeParentQuery } from "./parentUtils";
 
 // ── Shared test fixtures ──────────────────────────────────────────────────────
 // Defined once at module level — used by queryToSurrealQL,
@@ -950,6 +950,36 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
       "(SELECT predicate, out.uri AS target, author, timestamp FROM link WHERE in = $parent.id ORDER BY timestamp ASC) AS links",
     );
   });
+
+  it("should include backward link filter when parent is given as raw predicate form", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, {
+      parent: { id: "some://parent-uri", predicate: "custom://has_recipe" },
+    });
+
+    expect(query).toContain(
+      "count(<-link[WHERE predicate = 'custom://has_recipe' AND in.uri = 'some://parent-uri']) > 0",
+    );
+  });
+
+  it("should resolve model-backed parent form and include correct backward link filter", async () => {
+    @Model({ name: "MenuForQueryTest" })
+    class MenuForQueryTest extends Ad4mModel {
+      @HasMany(() => Recipe, { through: "menu://has_recipe" })
+      recipes: Recipe[] = [];
+    }
+
+    const query = await Recipe.queryToSurrealQL(mockPerspective, {
+      parent: {
+        id: "some://menu-uri",
+        model: MenuForQueryTest,
+        field: "recipes",
+      },
+    });
+
+    expect(query).toContain(
+      "count(<-link[WHERE predicate = 'menu://has_recipe' AND in.uri = 'some://menu-uri']) > 0",
+    );
+  });
 });
 
 describe("Ad4mModel.instancesFromSurrealResult() — hydration and query dispatch", () => {
@@ -1699,9 +1729,7 @@ describe("resolveParentPredicate()", () => {
 
   it("infers predicate from child constructor when field is omitted", () => {
     const meta = Channel.getModelMetadata();
-    expect(resolveParentPredicate(meta, Comment)).toBe(
-      "channel://has_comment",
-    );
+    expect(resolveParentPredicate(meta, Comment)).toBe("channel://has_comment");
   });
 
   it("throws when explicit field does not exist on parent", () => {
@@ -1732,5 +1760,56 @@ describe("resolveParentPredicate()", () => {
     expect(() => resolveParentPredicate(meta, Comment)).toThrow(
       /multiple relations.*provide "field" to disambiguate/i,
     );
+  });
+});
+
+describe("normalizeParentQuery()", () => {
+  @Model({ name: "NpqTag" })
+  class NpqTag extends Ad4mModel {}
+
+  @Model({ name: "NpqComment" })
+  class NpqComment extends Ad4mModel {}
+
+  @Model({ name: "NpqBlogPost" })
+  class NpqBlogPost extends Ad4mModel {
+    @HasMany(() => NpqTag, { through: "blog://has_tag" })
+    tags: NpqTag[] = [];
+
+    @HasMany(() => NpqComment, { through: "blog://has_comment" })
+    comments: NpqComment[] = [];
+
+    @HasMany(() => NpqComment, { through: "blog://has_pinned_comment" })
+    pinnedComments: NpqComment[] = [];
+  }
+
+  it("passes through raw { id, predicate } form unchanged", () => {
+    const raw = { id: "some://uri", predicate: "custom://predicate" };
+    expect(normalizeParentQuery(raw)).toEqual(raw);
+  });
+
+  it("resolves model-backed form with explicit field", () => {
+    const result = normalizeParentQuery({
+      id: "some://uri",
+      model: NpqBlogPost,
+      field: "tags",
+    });
+    expect(result).toEqual({ id: "some://uri", predicate: "blog://has_tag" });
+  });
+
+  it("infers predicate from childCtor when field is omitted", () => {
+    const result = normalizeParentQuery(
+      { id: "some://uri", model: NpqBlogPost },
+      NpqTag,
+    );
+    expect(result).toEqual({ id: "some://uri", predicate: "blog://has_tag" });
+  });
+
+  it("throws when model-backed form has no field and multiple relations point to the same child type", () => {
+    expect(() =>
+      normalizeParentQuery(
+        { id: "some://uri", model: NpqBlogPost },
+        NpqComment,
+      ),
+    ).toThrow(/multiple relations.*provide "field" to disambiguate/i);
   });
 });

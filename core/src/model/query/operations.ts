@@ -26,6 +26,7 @@ import {
 import { hydrateInstanceFromLinks, evaluateCustomGetters } from "./hydration";
 import { captureSnapshot } from "./snapshot";
 import { escapeSurrealString } from "../../utils";
+import { normalizeParentQuery } from "../parentUtils";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Query-to-SurrealQL helpers
@@ -43,7 +44,10 @@ export async function queryToSurrealQL(
   _perspective: PerspectiveProxy,
   query: Query,
 ): Promise<string> {
-  return buildSurrealQuery((ctor as any).getModelMetadata(), query);
+  const normalizedQuery = query.parent
+    ? { ...query, parent: normalizeParentQuery(query.parent, ctor as any) }
+    : query;
+  return buildSurrealQuery((ctor as any).getModelMetadata(), normalizedQuery);
 }
 
 /**
@@ -54,7 +58,10 @@ export async function countQueryToSurrealQL(
   _perspective: PerspectiveProxy,
   query: Query,
 ): Promise<string> {
-  return buildSurrealCountQuery((ctor as any).getModelMetadata(), query);
+  const normalizedQuery = query.parent
+    ? { ...query, parent: normalizeParentQuery(query.parent, ctor as any) }
+    : query;
+  return buildSurrealCountQuery((ctor as any).getModelMetadata(), normalizedQuery);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

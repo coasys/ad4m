@@ -5,7 +5,7 @@ import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { SHACLShape } from "../shacl/SHACLShape";
 import { makeRandomId, getRelationsMetadata } from "./decorators";
 import { resolveParentPredicate } from "./parentUtils";
-export { resolveParentPredicate } from "./parentUtils";
+export { resolveParentPredicate, normalizeParentQuery } from "./parentUtils";
 import * as mutation from "./mutation";
 export type { MutationContext } from "./mutation";
 import { capitalize } from "./util";
@@ -25,6 +25,9 @@ export type {
   IncludeMap,
   SubscribeOptions,
   Subscription,
+  ParentQuery,
+  ParentQueryByPredicate,
+  ParentQueryByModel,
 } from "./types";
 
 /**
@@ -467,7 +470,7 @@ export class Ad4mModel {
   /**
    * Removes this instance from the perspective, including all incoming links
    * that point to it (e.g. parent→child membership links created by
-   * `create({ parent: ... })`). This ensures that `findAll({ linkedFrom: ... })`
+   * `create({ parent: ... })`). This ensures that `findAll({ parent: ... })`
    * will no longer return this instance after deletion.
    *
    * @example
@@ -477,7 +480,7 @@ export class Ad4mModel {
    */
   async delete(batchId?: string) {
     // Remove all incoming links that point to this instance so that parent
-    // collections (linkedFrom queries) are kept consistent.
+    // collections (parent queries) are kept consistent.
     const incomingLinks = await this._perspective.get(new LinkQuery({ target: this._id }));
     for (const link of incomingLinks) {
       await this._perspective.remove(link);
@@ -553,6 +556,7 @@ export class Ad4mModel {
       perspective,
       options,
       callback,
+      this as any,
     );
   }
 

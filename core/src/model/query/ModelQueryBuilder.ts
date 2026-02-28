@@ -167,6 +167,7 @@ export class ModelQueryBuilder<T extends import("../Ad4mModel").Ad4mModel> {
       this.perspective,
       options,
       callback,
+      this.ctor as any,
     );
   }
 }

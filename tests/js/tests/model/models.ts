@@ -118,3 +118,21 @@ export class TestDerivedModel extends TestBaseModel {
   @Property({ through: "test://poll_question", required: true })
   question: string = "";
 }
+
+// ── TestChannel ───────────────────────────────────────────────────────────────
+
+@Model({ name: "TestChannel" })
+export class TestChannel extends Ad4mModel {
+  @Flag({ through: "test://channel_type", value: "test://channel" })
+  type = "test://channel";
+
+  @Property({ through: "test://channel_name" })
+  name: string = "";
+
+  @HasMany(() => TestPost, { through: "test://channel_post" })
+  posts: TestPost[] = [];
+
+  @HasMany(() => TestComment, { through: "test://channel_comment" })
+  comments: TestComment[] = [];
+}
+export interface TestChannel extends HasManyMethods<"posts" | "comments"> {}

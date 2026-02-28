@@ -17,7 +17,7 @@ import { Ad4mClient, PerspectiveProxy } from "@coasys/ad4m";
 import { startAgent, waitUntil } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 import { wipePerspective } from "../../utils/utils.js";
-import { TestComment, TestPost, TestTag } from "./models.js";
+import { TestComment, TestPost, TestTag, TestChannel } from "./models.js";
 
 
 // ── Helper ────────────────────────────────────────────────────────────────────
@@ -76,6 +76,7 @@ describe("Ad4mModel — Subscriptions", function () {
     await TestPost.register(perspective);
     await TestComment.register(perspective);
     await TestTag.register(perspective);
+    await TestChannel.register(perspective);
   });
 
   after(async () => {
@@ -300,5 +301,97 @@ describe("Ad4mModel — Subscriptions", function () {
     await new Promise((r) => setTimeout(r, 300));
     expect(sub.lastError).to.be.null;
     sub.unsubscribe();
+  });
+
+  // ── 10. parent-scoped subscriptions ───────────────────────────────────────
+
+  it("parent-scoped subscribe() fires when a child is linked to the parent", async () => {
+    const channel = await TestChannel.create(perspective, { name: "sub-chan" });
+    const post = await TestPost.create(perspective, { title: "Sub Post", body: "" });
+
+    const all: TestPost[][] = [];
+    const sub = TestPost.subscribe(
+      perspective,
+      { parent: { model: TestChannel, id: channel.id } },
+      (r) => all.push(r),
+    );
+
+    // Wait for initial (empty) callback
+    await waitUntil(() => all.length >= 1, 6000, "initial callback");
+    expect(all[0]).to.have.length(0);
+
+    // Link the post to the channel
+    await channel.addPosts(post.id);
+
+    // Subscription must re-fire with the post now included
+    await waitUntil(
+      () => all.some((batch) => batch.some((p) => p.id === post.id)),
+      8000,
+      "re-fire after child linked to parent",
+    );
+    sub.unsubscribe();
+
+    expect(all.some((batch) => batch.some((p) => p.id === post.id))).to.be.true;
+  });
+
+  it("parent-scoped subscribe() fires when a child is unlinked from the parent", async () => {
+    const channel = await TestChannel.create(perspective, { name: "sub-chan-2" });
+    const post = await TestPost.create(perspective, { title: "Removable", body: "" });
+    await channel.addPosts(post.id);
+
+    const all: TestPost[][] = [];
+    const sub = TestPost.subscribe(
+      perspective,
+      { parent: { model: TestChannel, id: channel.id } },
+      (r) => all.push(r),
+    );
+
+    // Wait until initial callback contains the post
+    await waitUntil(
+      () => all.some((batch) => batch.some((p) => p.id === post.id)),
+      8000,
+      "initial callback contains the post",
+    );
+
+    // Remove the link
+    await channel.removePosts(post.id);
+
+    // Subscription must re-fire with the post absent
+    await waitUntil(
+      () => {
+        const latest = all.at(-1);
+        return latest !== undefined && !latest.some((p) => p.id === post.id);
+      },
+      8000,
+      "re-fire after child unlinked from parent",
+    );
+    sub.unsubscribe();
+
+    expect(all.at(-1)!.some((p) => p.id === post.id)).to.be.false;
+  });
+
+  it("parent-scoped subscribe() does NOT fire when a child is added to a different parent", async () => {
+    const channelA = await TestChannel.create(perspective, { name: "chan-a" });
+    const channelB = await TestChannel.create(perspective, { name: "chan-b" });
+
+    const all: TestPost[][] = [];
+    const sub = TestPost.subscribe(
+      perspective,
+      { parent: { model: TestChannel, id: channelA.id } },
+      (r) => all.push(r),
+    );
+
+    // Wait for initial (empty) callback
+    await waitUntil(() => all.length >= 1, 6000, "initial callback");
+    const countAfterInitial = all.length;
+
+    // Add a post to channel B — should not trigger channel A's subscription
+    const post = await TestPost.create(perspective, { title: "Wrong Chan", body: "" });
+    await channelB.addPosts(post.id);
+
+    await new Promise((r) => setTimeout(r, 1000));
+    sub.unsubscribe();
+
+    expect(all.length).to.equal(countAfterInitial);
   });
 });

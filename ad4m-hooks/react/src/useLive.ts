@@ -1,5 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { PerspectiveProxy, Ad4mModel, Query, Subscription, resolveParentPredicate } from "@coasys/ad4m";
+import {
+  PerspectiveProxy,
+  Ad4mModel,
+  Query,
+  Subscription,
+  resolveParentPredicate,
+} from "@coasys/ad4m";
 
 type ModelCtor<T extends Ad4mModel> = (new (...args: any[]) => T) &
   typeof Ad4mModel;
@@ -14,14 +20,12 @@ type ModelCtor<T extends Ad4mModel> = (new (...args: any[]) => T) &
  * @example
  * ```ts
  * // field inferred — only one @HasMany on Channel points to Message
- * const { data: messages } = useLive(Message, {
- *   perspective,
+ * const { data: messages } = useLive(Message, perspective, {
  *   parent: { model: Channel, id: channelId },
  * });
  *
  * // field explicit — needed when multiple @HasMany point to the same type
- * const { data: messages } = useLive(Message, {
- *   perspective,
+ * const { data: messages } = useLive(Message, perspective, {
  *   parent: { model: Channel, id: channelId, field: 'messages' },
  * });
  * ```
@@ -37,7 +41,6 @@ type ParentScope = {
 };
 
 type LiveOptions<T extends Ad4mModel> = {
-  perspective: PerspectiveProxy;
   /**
    * When provided, restricts results to children of this parent node via the
    * declared `@HasMany` relation.  The subscription also watches the relation
@@ -72,6 +75,7 @@ export type LiveInstanceResult<T> = {
  */
 export function useLive<T extends Ad4mModel>(
   model: ModelCtor<T>,
+  perspective: PerspectiveProxy,
   options: LiveOptions<T> & { id: string },
 ): LiveInstanceResult<T>;
 
@@ -81,7 +85,8 @@ export function useLive<T extends Ad4mModel>(
  */
 export function useLive<T extends Ad4mModel>(
   model: ModelCtor<T>,
-  options: LiveOptions<T>,
+  perspective: PerspectiveProxy,
+  options?: LiveOptions<T>,
 ): LiveCollectionResult<T>;
 
 /**
@@ -90,17 +95,18 @@ export function useLive<T extends Ad4mModel>(
  */
 export function useLive(
   model: string,
-  options: LiveOptions<Ad4mModel>,
+  perspective: PerspectiveProxy,
+  options?: LiveOptions<Ad4mModel>,
 ): LiveCollectionResult<Ad4mModel>;
 
 // ── Implementation ─────────────────────────────────────────────────────────
 
 export function useLive<T extends Ad4mModel>(
   model: ModelCtor<T> | string,
-  options: LiveOptions<T> & { id?: string },
+  perspective: PerspectiveProxy,
+  options: LiveOptions<T> & { id?: string } = {},
 ): LiveCollectionResult<T> | LiveInstanceResult<T> {
   const {
-    perspective,
     parent,
     query: userQuery = {},
     preserveReferences = false,
@@ -119,8 +125,8 @@ export function useLive<T extends Ad4mModel>(
 
   const subRef = useRef<Subscription | null>(null);
 
-  /** Derive `linkedFrom` from the parent scope if provided. */
-  function resolveLinkedFrom(): { id: string; predicate: string } | undefined {
+  /** Resolve the `parent` query from the top-level `parent` scope option. */
+  function resolveParentQuery(): { id: string; predicate: string } | undefined {
     if (!parent) return undefined;
     try {
       const predicate = resolveParentPredicate(
@@ -149,10 +155,10 @@ export function useLive<T extends Ad4mModel>(
       ...(pageSize ? { limit: pageSize * pageNumber } : {}),
     };
 
-    // Parent scope takes precedence; only set linkedFrom if not already in userQuery
-    if (!base.linkedFrom) {
-      const linkedFrom = resolveLinkedFrom();
-      if (linkedFrom) base.linkedFrom = linkedFrom;
+    // Parent scope takes precedence; only set parent if not already in userQuery
+    if (!base.parent) {
+      const resolvedParent = resolveParentQuery();
+      if (resolvedParent) base.parent = resolvedParent;
     }
 
     // For single-instance mode, filter to the specific node URI
