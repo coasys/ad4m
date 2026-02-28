@@ -203,6 +203,7 @@ jobs:
       run: pnpm run package-ad4m:cuda
       env:
         PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
+        CUDA_COMPUTE_CAP: "80"
 
     - name: Upload Release AppImage CUDA Asset
       id: upload-release-appimage-cuda-asset
