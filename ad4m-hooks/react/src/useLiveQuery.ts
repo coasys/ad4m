@@ -20,12 +20,12 @@ type ModelCtor<T extends Ad4mModel> = (new (...args: any[]) => T) &
  * @example
  * ```ts
  * // field inferred — only one @HasMany on Channel points to Message
- * const { data: messages } = useLive(Message, perspective, {
+ * const { data: messages } = useLiveQuery(Message, perspective, {
  *   parent: { model: Channel, id: channelId },
  * });
  *
  * // field explicit — needed when multiple @HasMany point to the same type
- * const { data: messages } = useLive(Message, perspective, {
+ * const { data: messages } = useLiveQuery(Message, perspective, {
  *   parent: { model: Channel, id: channelId, field: 'messages' },
  * });
  * ```
@@ -73,7 +73,7 @@ export type LiveInstanceResult<T> = {
  * Reactive single-instance query (supply `id` to select one node).
  * Returns `{ data: T | null, loading, error }`.
  */
-export function useLive<T extends Ad4mModel>(
+export function useLiveQuery<T extends Ad4mModel>(
   model: ModelCtor<T>,
   perspective: PerspectiveProxy,
   options: LiveOptions<T> & { id: string },
@@ -83,7 +83,7 @@ export function useLive<T extends Ad4mModel>(
  * Reactive collection query.
  * Returns `{ data: T[], loading, error, totalCount, loadMore }`.
  */
-export function useLive<T extends Ad4mModel>(
+export function useLiveQuery<T extends Ad4mModel>(
   model: ModelCtor<T>,
   perspective: PerspectiveProxy,
   options?: LiveOptions<T>,
@@ -93,7 +93,7 @@ export function useLive<T extends Ad4mModel>(
  * Dynamic string-model collection query (e.g. for generic class browsers).
  * When `model` is an empty string, returns empty data immediately.
  */
-export function useLive(
+export function useLiveQuery(
   model: string,
   perspective: PerspectiveProxy,
   options?: LiveOptions<Ad4mModel>,
@@ -101,7 +101,7 @@ export function useLive(
 
 // ── Implementation ─────────────────────────────────────────────────────────
 
-export function useLive<T extends Ad4mModel>(
+export function useLiveQuery<T extends Ad4mModel>(
   model: ModelCtor<T> | string,
   perspective: PerspectiveProxy,
   options: LiveOptions<T> & { id?: string } = {},
@@ -136,7 +136,7 @@ export function useLive<T extends Ad4mModel>(
       );
       return { id: parent.id, predicate };
     } catch (err) {
-      console.warn(`useLive: ${err instanceof Error ? err.message : err}`);
+      console.warn(`useLiveQuery: ${err instanceof Error ? err.message : err}`);
       return undefined;
     }
   }

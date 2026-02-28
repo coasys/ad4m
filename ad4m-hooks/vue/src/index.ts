@@ -1,2 +1,2 @@
-export { useLive } from "./useLive";
-export type { LiveCollectionResult, LiveInstanceResult } from "./useLive";
+export { useLiveQuery } from "./useLiveQuery";
+export type { LiveCollectionResult, LiveInstanceResult } from "./useLiveQuery";

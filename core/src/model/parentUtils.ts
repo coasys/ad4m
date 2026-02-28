@@ -2,7 +2,7 @@ import type { ModelMetadata, ParentQuery, ParentQueryByPredicate } from "./types
 
 /**
  * Resolves the predicate URI for a parent→child relation, used by
- * `Ad4mModel.create()` and the `useLive` hooks.
+ * `Ad4mModel.create()` and the `useLiveQuery` hooks.
  *
  * If `field` is supplied, that exact relation is looked up on the parent.
  * Otherwise, all forward relations on the parent whose `relatedModel()` factory
