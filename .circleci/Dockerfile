@@ -95,6 +95,13 @@ RUN apt-get install -y gnupg2 wget && \
     apt-get install -y cuda-toolkit-12-5 libcudnn9-dev-cuda-12 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# cuDNN headers land in the Debian multiarch path /usr/include/x86_64-linux-gnu/
+# but cudarc v0.13.9 only searches /usr/local/cuda*/include/cudnn.h.
+# Symlink every cudnn header into the CUDA include dir so cudarc finds them.
+RUN for f in /usr/include/x86_64-linux-gnu/cudnn*.h; do \
+        ln -sf "$f" "/usr/local/cuda-12.5/include/$(basename $f)"; \
+    done
+
 ENV PATH="/usr/local/cuda-12.5/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/usr/local/cuda-12.5/lib64"
 

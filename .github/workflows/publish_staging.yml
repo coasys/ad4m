@@ -57,7 +57,7 @@ jobs:
   build-launcher-binary-linux:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:0ca707b22b6ac6b79b3692f78c5fa9c089ce26cd6e268a807e7dedee9622fb53
+      image: coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
 
     needs:
       - create-release
@@ -167,7 +167,7 @@ jobs:
   build-launcher-binary-linux-cuda:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:0ca707b22b6ac6b79b3692f78c5fa9c089ce26cd6e268a807e7dedee9622fb53
+      image: coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
 
     needs:
       - create-release
@@ -203,10 +203,6 @@ jobs:
       run: pnpm run package-ad4m:cuda
       env:
         PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
-        # cudarc v0.13.9 looks for cudnn.h; on Ubuntu the package libcudnn9-dev-cuda-12
-        # installs headers to /usr/include/x86_64-linux-gnu/ not /usr/include/ directly.
-        # Setting CUDNN_LIB tells cudarc where to find the include dir.
-        CUDNN_LIB: /usr/include/x86_64-linux-gnu
 
     - name: Upload Release AppImage CUDA Asset
       id: upload-release-appimage-cuda-asset
@@ -624,7 +620,7 @@ jobs:
   crates-publish:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:0ca707b22b6ac6b79b3692f78c5fa9c089ce26cd6e268a807e7dedee9622fb53
+      image: coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
     steps:
       - uses: actions/checkout@v3
 
