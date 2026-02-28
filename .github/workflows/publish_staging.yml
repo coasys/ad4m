@@ -332,6 +332,10 @@ jobs:
     - name: Build AD4M-CLI
       env:
         RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
+        # Use system git instead of libgit2 so cargo does NOT auto-fetch git submodules.
+        # coasys/deno.git has heavy chromium submodules (wpt, buildtools, abseil-cpp)
+        # that cause SecureTransport/network errors on macOS runners.
+        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       run: pnpm build-libs
 
     - name: Build Launcher binary
@@ -483,6 +487,8 @@ jobs:
         # libort_sys (ONNX Runtime) ships with static MT CRT; Rust MSVC defaults to dynamic MD.
         # +crt-static makes Rust use MT too — fixes LNK2038/LNK1169 CRT mismatch in generate_snapshot.
         RUSTFLAGS: -C target-feature=+crt-static
+        # Use system git so cargo does NOT auto-fetch chromium submodules from coasys/deno.git
+        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       run: pnpm build-libs
 
     - name: Build Launcher binary
