@@ -27,8 +27,12 @@ commands:
     description: "Setup common integration test environment"
     steps:
       - checkout
-      - attach_workspace:
-          at: .
+      - run:
+          name: Restore binaries from local stash (no CircleCI network storage needed — same host)
+          command: |
+            mkdir -p target/release
+            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m target/release/ad4m
+            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m-executor target/release/ad4m-executor
       - setup_env
       - run:
           name: Install dependencies
@@ -48,6 +52,10 @@ jobs:
     steps:
       - checkout
       - setup_env
+      - run:
+          name: Clean up stale local artifact stashes (older than 1 day)
+          command: |
+            find /tmp/circleci-artifacts -maxdepth 1 -mindepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
       - run:
           name: cargo fmt --check
           command: cargo fmt --check
@@ -75,11 +83,11 @@ jobs:
           name: cargo clippy
           no_output_timeout: 30m
           command: cargo clippy --all --exclude ad4m-launcher
-      - persist_to_workspace:
-          root: .
-          paths:
-            - ./target/release/ad4m
-            - ./target/release/ad4m-executor
+      - run:
+          name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
+          command: |
+            mkdir -p /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}
+            cp target/release/ad4m target/release/ad4m-executor /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js
@@ -156,8 +164,12 @@ jobs:
     resource_class: coasys/marvin
     steps:
       - checkout
-      - attach_workspace:
-          at: .
+      - run:
+          name: Restore binaries from local stash
+          command: |
+            mkdir -p target/release
+            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m target/release/ad4m
+            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m-executor target/release/ad4m-executor
       - setup_env
       - run:
           name: git submodule
