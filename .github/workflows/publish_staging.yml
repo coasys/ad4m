@@ -321,10 +321,6 @@ jobs:
     #    mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
     #    security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "actions" build.keychain
 
-    - name: Update cargo git deps (ensure pre-built V8 from coasys/rusty_v8 tag)
-      working-directory: rust-executor
-      run: cargo update -p v8 2>/dev/null || cargo update 2>/dev/null || true
-
     - name: Build AD4M-CLI
       env:
         RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
@@ -472,11 +468,6 @@ jobs:
 
     - name: Install core dependencies
       run: cd ./core && pnpm install
-
-    - name: Update cargo git deps (ensure pre-built V8 from coasys/rusty_v8 tag)
-      working-directory: rust-executor
-      shell: bash
-      run: cargo update -p v8 2>/dev/null || cargo update 2>/dev/null || true
 
     - name: Build AD4M-CLI
       env:

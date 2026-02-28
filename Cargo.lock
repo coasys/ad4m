@@ -22882,7 +22882,7 @@ dependencies = [
 [[package]]
 name = "v8"
 version = "137.1.0"
-source = "git+https://github.com/coasys/rusty_v8.git?branch=v0.137.1-abseil-namespaced#523fb33b7cd47b54074c40d8dca74bf7623f0456"
+source = "git+https://github.com/coasys/rusty_v8.git?branch=v0.137.1-abseil-namespaced#c302ece8ab991ce125d29acdacb623a39585b581"
 dependencies = [
  "bindgen 0.71.1",
  "bitflags 2.9.4",
