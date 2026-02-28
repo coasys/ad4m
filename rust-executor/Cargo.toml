@@ -146,5 +146,9 @@ itertools = "0.10.1"
 fs_extra = "1.3.0"
 
 
+# Force static CRT on Windows MSVC to match libort_sys (ONNX Runtime) and avoid LNK2038 mismatch
+[target.'cfg(target_env = "msvc")'.dependencies]
+surrealdb-librocksdb-sys = { version = "0.17", features = ["mt_static"] }
+
 [patch.crates-io]
 rusqlite = { version = "0.34.0" }
