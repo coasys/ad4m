@@ -1256,10 +1256,11 @@ describe("Ad4mModel.instancesFromSurrealResult() — hydration and query dispatc
     // rating and ingredients should be removed since only "name" was requested
     expect(recipe.rating).toBeUndefined();
     expect(recipe.ingredients).toBeUndefined();
-    // author and timestamp should still be present
-    expect(recipe.author).toBe("did:key:alice");
-    // Timestamp is converted to Unix epoch (milliseconds)
-    expect(recipe.timestamp).toBe(new Date("2023-01-01T00:00:00Z").getTime());
+    // author and timestamp are metadata fields — they are also stripped unless
+    // explicitly listed in `properties`. Integration tests cover the
+    // `properties: ["author", "createdAt"]` case.
+    expect(recipe.author).toBeUndefined();
+    expect(recipe.createdAt).toBeUndefined();
   });
 
   it("should handle results missing base field", async () => {
