@@ -404,18 +404,6 @@ export class Ad4mModel {
   }
 
   /**
-   * @deprecated Use `save()` instead. `save()` now automatically detects whether
-   * to create or update based on whether the instance already exists in the
-   * perspective. `update()` is kept for backwards compatibility and simply
-   * delegates to `save()`.
-   *
-   * @param batchId - Optional batch ID for batch operations
-   */
-  async update(batchId?: string) {
-    return this.save(batchId);
-  }
-
-  /**
    * Gets the model instance with all properties and relations populated.
    *
    * @returns The populated model instance
