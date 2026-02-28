@@ -1,6 +1,6 @@
 version: 2.1
 references:
-  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:60edab864bdd9540e3e0ca1c3da58b91d1866418f4f2f3b82b05a814eb2b7d7c
+  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:0ca707b22b6ac6b79b3692f78c5fa9c089ce26cd6e268a807e7dedee9622fb53
 
 # Self-hosted machine runner on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04)
 # Resource class: coasys/marvin
