@@ -3,133 +3,220 @@ import { Ad4mClient, LanguageMetaInput } from "@coasys/ad4m";
 import fs from "fs-extra";
 import { exit } from "process";
 import { execSync } from "child_process";
-import { fileURLToPath } from 'url';
+import { fileURLToPath } from "url";
 import { apolloClient, sleep, startExecutor } from "./utils";
-import fetch from 'node-fetch'
+import fetch from "node-fetch";
 
 //@ts-ignore
-global.fetch = fetch
+global.fetch = fetch;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const TEST_DIR = path.resolve(__dirname, '..', 'tst-tmp');
+const TEST_DIR = path.resolve(__dirname, "..", "tst-tmp");
 const appDataPath = path.resolve(TEST_DIR, "agents", "p");
 const publishLanguagesPath = path.resolve(TEST_DIR, "languages");
-const publishingBootstrapSeedPath = path.resolve(__dirname, '..', 'publishBootstrapSeed.json');
-const bootstrapSeedPath = path.resolve(__dirname, '..', 'bootstrapSeed.json');
-const perspectiveDiffSyncHashPath = path.resolve(__dirname, '..', 'scripts', 'perspective-diff-sync-hash');
+const publishingBootstrapSeedPath = path.resolve(
+  __dirname,
+  "..",
+  "publishBootstrapSeed.json",
+);
+const bootstrapSeedPath = path.resolve(__dirname, "..", "bootstrapSeed.json");
+const perspectiveDiffSyncHashPath = path.resolve(
+  __dirname,
+  "..",
+  "scripts",
+  "perspective-diff-sync-hash",
+);
 // Allow env-var override so concurrent CI jobs can each use a unique port range
 // and avoid stomping on each other during the setup phase.
 // Defaults: 15700/15701/15702 (used by integration-tests-js / test-main)
-const gqlPort = parseInt(process.env.AD4M_SETUP_GQL_PORT || '15700', 10);
-const hcAdminPort = parseInt(process.env.AD4M_SETUP_HC_ADMIN_PORT || '15701', 10);
-const hcAppPort = parseInt(process.env.AD4M_SETUP_HC_APP_PORT || '15702', 10);
+const gqlPort = parseInt(process.env.AD4M_SETUP_GQL_PORT || "15700", 10);
+const hcAdminPort = parseInt(
+  process.env.AD4M_SETUP_HC_ADMIN_PORT || "15701",
+  10,
+);
+const hcAppPort = parseInt(process.env.AD4M_SETUP_HC_APP_PORT || "15702", 10);
 
 //Update this as new languages are needed within testing code
 const languagesToPublish = {
-    "agent-expression-store": {name: "agent-expression-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput, 
-    "direct-message-language": {name: "direct-message-language", description: "", possibleTemplateParams: ["uid", "recipient_did", "recipient_hc_agent_pubkey"]} as LanguageMetaInput, 
-    "neighbourhood-store": {name: "neighbourhood-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput, 
-    "perspective-diff-sync": {name: "perspective-diff-sync", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
-    "perspective-language": {name: "perspective-language", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
-}
+  "agent-expression-store": {
+    name: "agent-expression-store",
+    description: "",
+    possibleTemplateParams: ["uid", "name", "description"],
+  } as LanguageMetaInput,
+  "direct-message-language": {
+    name: "direct-message-language",
+    description: "",
+    possibleTemplateParams: [
+      "uid",
+      "recipient_did",
+      "recipient_hc_agent_pubkey",
+    ],
+  } as LanguageMetaInput,
+  "neighbourhood-store": {
+    name: "neighbourhood-store",
+    description: "",
+    possibleTemplateParams: ["uid", "name", "description"],
+  } as LanguageMetaInput,
+  "perspective-diff-sync": {
+    name: "perspective-diff-sync",
+    description: "",
+    possibleTemplateParams: ["uid", "name", "description"],
+  } as LanguageMetaInput,
+  "perspective-language": {
+    name: "perspective-language",
+    description: "",
+    possibleTemplateParams: ["uid", "name", "description"],
+  } as LanguageMetaInput,
+};
 
 const languageHashes = {
-    "directMessageLanguage": "",
-    "agentLanguage": "",
-    "perspectiveLanguage": "",
-    "neighbourhoodLanguage": "",
-    "perspectiveDiffSync": ""
-}
+  directMessageLanguage: "",
+  agentLanguage: "",
+  perspectiveLanguage: "",
+  neighbourhoodLanguage: "",
+  perspectiveDiffSync: "",
+};
 
 // Kill the listening process on each port (TCP:LISTEN filter ensures we only
 // kill the executor server, NOT this node process which has a *connection* to it).
 function killExecutorPorts(ports: number[]) {
-    for (const port of ports) {
-        try {
-            execSync(`lsof -ti TCP:${port} -s TCP:LISTEN | xargs -r kill -9`, { stdio: 'ignore' });
-        } catch (e) {
-            console.warn(`Port cleanup warning for ${port}:`, e);
-        }
+  for (const port of ports) {
+    try {
+      execSync(`lsof -ti TCP:${port} -s TCP:LISTEN | xargs -r kill -9`, {
+        stdio: "ignore",
+      });
+    } catch (e) {
+      console.warn(`Port cleanup warning for ${port}:`, e);
     }
+  }
+}
+
+// Poll until no process is listening on the port (or maxWaitMs exceeded).
+// This closes the race window between kill -9 and the next executor start.
+async function waitForPortFree(port: number, maxWaitMs = 10000): Promise<void> {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    try {
+      const out = execSync(`lsof -ti TCP:${port} -s TCP:LISTEN 2>/dev/null`, {
+        encoding: "utf8",
+      }).trim();
+      if (!out) return; // nothing listening — port is free
+    } catch {
+      return; // lsof exited non-zero = no match = port is free
+    }
+    await sleep(200);
+  }
+  console.warn(
+    `waitForPortFree: port ${port} still in use after ${maxWaitMs}ms — proceeding anyway`,
+  );
 }
 
 function createTestingAgent() {
-    if (!fs.existsSync(appDataPath)) {
-        fs.mkdirSync(appDataPath);
-    }
+  if (!fs.existsSync(appDataPath)) {
+    fs.mkdirSync(appDataPath);
+  }
 }
 
 function injectSystemLanguages() {
-    if (fs.existsSync(bootstrapSeedPath)) {
-        const bootstrapSeed = JSON.parse(fs.readFileSync(bootstrapSeedPath).toString());
-        bootstrapSeed["directMessageLanguage"] = languageHashes["directMessageLanguage"];
-        bootstrapSeed["agentLanguage"] = languageHashes["agentLanguage"];
-        bootstrapSeed["perspectiveLanguage"] = languageHashes["perspectiveLanguage"];
-        bootstrapSeed["neighbourhoodLanguage"] = languageHashes["neighbourhoodLanguage"];
-        bootstrapSeed["knownLinkLanguages"] = [languageHashes["perspectiveDiffSync"]];
-        fs.writeFileSync(bootstrapSeedPath, JSON.stringify(bootstrapSeed));
-    } else {
-        throw new Error(`Could not find boostrapSeed at path: ${bootstrapSeedPath}`)
-    }
+  if (fs.existsSync(bootstrapSeedPath)) {
+    const bootstrapSeed = JSON.parse(
+      fs.readFileSync(bootstrapSeedPath).toString(),
+    );
+    bootstrapSeed["directMessageLanguage"] =
+      languageHashes["directMessageLanguage"];
+    bootstrapSeed["agentLanguage"] = languageHashes["agentLanguage"];
+    bootstrapSeed["perspectiveLanguage"] =
+      languageHashes["perspectiveLanguage"];
+    bootstrapSeed["neighbourhoodLanguage"] =
+      languageHashes["neighbourhoodLanguage"];
+    bootstrapSeed["knownLinkLanguages"] = [
+      languageHashes["perspectiveDiffSync"],
+    ];
+    fs.writeFileSync(bootstrapSeedPath, JSON.stringify(bootstrapSeed));
+  } else {
+    throw new Error(
+      `Could not find boostrapSeed at path: ${bootstrapSeedPath}`,
+    );
+  }
 }
 
 function injectLangAliasHashes() {
-    fs.writeFileSync(perspectiveDiffSyncHashPath, languageHashes["perspectiveDiffSync"]);
+  fs.writeFileSync(
+    perspectiveDiffSyncHashPath,
+    languageHashes["perspectiveDiffSync"],
+  );
 }
 
 async function publish() {
-    const setupPorts = [gqlPort, hcAdminPort, hcAppPort];
+  const setupPorts = [gqlPort, hcAdminPort, hcAppPort];
 
-    // Pre-clean: kill any orphaned executor from a previous CI job that may be
-    // squatting on our ports. Self-hosted runners reuse workdirs between jobs
-    // and don't clean up automatically.
-    console.log(`Pre-cleaning ports ${setupPorts.join('/')} before starting executor...`);
-    killExecutorPorts(setupPorts);
-    await sleep(500);
+  // Pre-clean: kill any orphaned executor from a previous CI job that may be
+  // squatting on our ports. Self-hosted runners reuse workdirs between jobs
+  // and don't clean up automatically.
+  console.log(
+    `Pre-cleaning ports ${setupPorts.join("/")} before starting executor...`,
+  );
+  killExecutorPorts(setupPorts);
+  // Wait until every port is confirmed free — avoids the race where kill -9
+  // was sent but the OS hasn't fully released the socket yet.
+  await Promise.all(setupPorts.map((p) => waitForPortFree(p, 10000)));
+  console.log(`All setup ports free, starting executor...`);
 
-    createTestingAgent();
+  createTestingAgent();
 
-    const executorProcess = await startExecutor(appDataPath, publishingBootstrapSeedPath, gqlPort, hcAdminPort, hcAppPort, true);
+  const executorProcess = await startExecutor(
+    appDataPath,
+    publishingBootstrapSeedPath,
+    gqlPort,
+    hcAdminPort,
+    hcAppPort,
+    true,
+  );
 
-    try {
-        const ad4mClient = new Ad4mClient(apolloClient(gqlPort));
-        await ad4mClient.agent.generate("passphrase");
+  try {
+    const ad4mClient = new Ad4mClient(apolloClient(gqlPort));
+    await ad4mClient.agent.generate("passphrase");
 
-        for (const [language, languageMeta] of Object.entries(languagesToPublish)) {
-            let bundlePath = path.join(publishLanguagesPath, language, "build", "bundle.js").replace(/\\/g, "/");
-            console.log("Attempting to publish language", bundlePath);
-            let publishedLang = await ad4mClient.languages.publish(bundlePath, languageMeta);
-            console.log("Published with result", publishedLang);
-            if (language === "agent-expression-store") {
-                languageHashes["agentLanguage"] = publishedLang.address;
-            }
-            if (language === "neighbourhood-store") {
-                languageHashes["neighbourhoodLanguage"] = publishedLang.address;
-            }
-            if (language === "direct-message-language") {
-                languageHashes["directMessageLanguage"] = publishedLang.address;
-            }
-            if (language === "perspective-language") {
-                languageHashes["perspectiveLanguage"] = publishedLang.address;
-            }
-            if (language === "perspective-diff-sync") {
-                languageHashes["perspectiveDiffSync"] = publishedLang.address;
-            }
-        }
-        injectSystemLanguages();
-        injectLangAliasHashes();
-    } finally {
-        // Always kill the executor on the way out — success or failure.
-        // Uses TCP:LISTEN filter so we only kill the listening server (the executor),
-        // NOT this node process which has an outbound connection to that port.
-        console.log(`Killing executor on ports ${setupPorts.join('/')}...`);
-        killExecutorPorts(setupPorts);
-        await sleep(1000);
+    for (const [language, languageMeta] of Object.entries(languagesToPublish)) {
+      let bundlePath = path
+        .join(publishLanguagesPath, language, "build", "bundle.js")
+        .replace(/\\/g, "/");
+      console.log("Attempting to publish language", bundlePath);
+      let publishedLang = await ad4mClient.languages.publish(
+        bundlePath,
+        languageMeta,
+      );
+      console.log("Published with result", publishedLang);
+      if (language === "agent-expression-store") {
+        languageHashes["agentLanguage"] = publishedLang.address;
+      }
+      if (language === "neighbourhood-store") {
+        languageHashes["neighbourhoodLanguage"] = publishedLang.address;
+      }
+      if (language === "direct-message-language") {
+        languageHashes["directMessageLanguage"] = publishedLang.address;
+      }
+      if (language === "perspective-language") {
+        languageHashes["perspectiveLanguage"] = publishedLang.address;
+      }
+      if (language === "perspective-diff-sync") {
+        languageHashes["perspectiveDiffSync"] = publishedLang.address;
+      }
     }
+    injectSystemLanguages();
+    injectLangAliasHashes();
+  } finally {
+    // Always kill the executor on the way out — success or failure.
+    // Uses TCP:LISTEN filter so we only kill the listening server (the executor),
+    // NOT this node process which has an outbound connection to that port.
+    console.log(`Killing executor on ports ${setupPorts.join("/")}...`);
+    killExecutorPorts(setupPorts);
+    await sleep(1000);
+  }
 
-    exit();
+  exit();
 }
 
-publish()
+publish();
