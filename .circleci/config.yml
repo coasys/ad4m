@@ -1,6 +1,6 @@
 version: 2.1
 references:
-  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:0eddf04e4380f892968297a248da05c734f64d089e9e01cf7b89e3ff4328db4c
+  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:bffabe1dfc4ef18ca64105318d342ab61c2db946ae6ba16718dcd8d1d57c2cff
 
 # Self-hosted machine runner on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04)
 # Resource class: coasys/marvin
@@ -138,6 +138,14 @@ jobs:
     resource_class: coasys/marvin
     steps:
       - setup_integration_test_environment
+      - run:
+          name: Kill any orphaned executors from previous runs
+          command: |
+            # MCP tests use ports 16000-16002 (mcp-http) and 16010-16012 (mcp-auth)
+            # plus port 3001 (MCP HTTP server). Clear all before starting.
+            for port in 16000 16001 16002 16010 16011 16012 3001; do
+              lsof -ti:$port | xargs -r kill -9 2>/dev/null || true
+            done
       - run:
           name: Run MCP integration tests
           command: cd ./tests/js && pnpm run test-mcp

@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor } from "../utils/utils";
+import { apolloClient, sleep, startExecutor, killByPorts } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch';
 
@@ -231,9 +231,11 @@ describe("MCP Authentication HTTP Tests", function() {
     const TEST_DIR = path.join(__dirname + "/../tst-tmp");
     const appDataPath = path.join(TEST_DIR, "agents", "mcp-auth-test");
     const bootstrapSeedPath = path.join(__dirname + "/../bootstrapSeed.json");
-    const gqlPort = 15700;
-    const hcAdminPort = 15701;
-    const hcAppPort = 15702;
+    // Unique ports for mcp-auth tests — must not collide with other concurrent
+    // CI jobs (integration-tests-js uses 15700-15702, mcp-http uses 16000-16002)
+    const gqlPort = 16010;
+    const hcAdminPort = 16011;
+    const hcAppPort = 16012;
     const adminCredential = "mcp-auth-test-admin";
 
     let executorProcess: ChildProcess | null = null;
@@ -271,16 +273,15 @@ describe("MCP Authentication HTTP Tests", function() {
 
     after(async () => {
         if (executorProcess) {
-            var attempts = 0;
-            while (!executorProcess.killed && attempts < 10) {
-                executorProcess.kill();
-                await sleep(500);
-                attempts++;
-            }
+            executorProcess.kill('SIGTERM');
+            await sleep(1000);
             if (!executorProcess.killed) {
                 executorProcess.kill('SIGKILL');
             }
         }
+        // Port-based kill as safety net — catches the executor even if the
+        // ChildProcess handle is stale or kill() missed a grandchild process.
+        killByPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
     });
 
     // ========================================================================

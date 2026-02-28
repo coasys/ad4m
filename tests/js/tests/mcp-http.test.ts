@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor } from "../utils/utils";
+import { apolloClient, sleep, startExecutor, killByPorts } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch';
 
@@ -394,16 +394,14 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
     after(async () => {
         if (executorProcess) {
-            var attempts = 0;
-            while (!executorProcess.killed && attempts < 10) {
-                executorProcess.kill();
-                await sleep(500);
-                attempts++;
-            }
+            executorProcess.kill('SIGTERM');
+            await sleep(1000);
             if (!executorProcess.killed) {
                 executorProcess.kill('SIGKILL');
             }
         }
+        // Port-based kill as safety net
+        killByPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
     });
 
     // ========================================================================
