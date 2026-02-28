@@ -15,8 +15,7 @@ import { Ad4mClient, PerspectiveProxy } from "@coasys/ad4m";
 import { startAgent } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 import { wipePerspective } from "../../utils/utils.js";
-import { TestPost } from "./models.js";
-
+import { TestPost, TestComment } from "./models.js";
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -38,6 +37,7 @@ describe("Ad4mModel — Transactions", function () {
     }
     perspective = await ad4m.perspective.add("model-transactions-test");
     await TestPost.register(perspective);
+    await TestComment.register(perspective);
   });
 
   after(async () => {
@@ -47,6 +47,7 @@ describe("Ad4mModel — Transactions", function () {
   beforeEach(async () => {
     await wipePerspective(perspective);
     await TestPost.register(perspective);
+    await TestComment.register(perspective);
   });
 
   // ── 1. Batch creates in one transaction ───────────────────────────────────
@@ -233,5 +234,97 @@ describe("Ad4mModel — Transactions", function () {
       where: { id: abortedId! },
     });
     expect(found).to.be.null;
+  });
+
+  // ── 8. Dirty tracking — relations are not duplicated on re-save ───────────
+
+  it("saving a hydrated instance only writes changed fields — relations are not duplicated", async () => {
+    // Create a post with two comments
+    const c1 = await TestComment.create(perspective, { body: "first" });
+    const c2 = await TestComment.create(perspective, { body: "second" });
+    const post = await TestPost.create(perspective, {
+      title: "Original",
+      body: "body",
+    });
+    await post.addComments(c1.id);
+    await post.addComments(c2.id);
+
+    // Fetch the post (triggers snapshot capture)
+    const fetched = await TestPost.findOne(perspective, {
+      where: { id: post.id },
+    });
+    expect(fetched).to.not.be.null;
+    expect(fetched!.comments).to.have.length(2);
+
+    // Mutate only the title, then save
+    fetched!.title = "Updated";
+    await fetched!.save();
+
+    // Re-fetch and verify comments were NOT duplicated
+    const refetched = await TestPost.findOne(perspective, {
+      where: { id: post.id },
+    });
+    expect(refetched).to.not.be.null;
+    expect(refetched!.title).to.equal("Updated");
+    expect(
+      refetched!.comments,
+      "comments must not be duplicated after partial save",
+    ).to.have.length(2);
+  });
+
+  it("dirty tracking: a field not changed since hydration is not re-written", async () => {
+    const post = await TestPost.create(perspective, {
+      title: "Unchanged",
+      body: "body",
+    });
+
+    // Hydrate — establishes snapshot
+    const fetched = await TestPost.findOne(perspective, {
+      where: { id: post.id },
+    });
+    expect(fetched).to.not.be.null;
+
+    // Save without changing anything — must be idempotent
+    await fetched!.save();
+
+    const refetched = await TestPost.findOne(perspective, {
+      where: { id: post.id },
+    });
+    expect(refetched!.title).to.equal("Unchanged");
+    expect(refetched!.body).to.equal("body");
+  });
+
+  it("dirty tracking: adding a relation via addX then saving does not duplicate pre-existing relations", async () => {
+    const c1 = await TestComment.create(perspective, { body: "original" });
+    const c2 = await TestComment.create(perspective, { body: "new" });
+    const post = await TestPost.create(perspective, {
+      title: "Post",
+      body: "",
+    });
+    await post.addComments(c1.id);
+
+    // Hydrate then add a second comment via the array directly (simulating
+    // a caller that appends to the relation array before saving)
+    const fetched = await TestPost.findOne(perspective, {
+      where: { id: post.id },
+    });
+    expect(fetched!.comments).to.have.length(1);
+
+    // Push the new comment id into the array and save — the snapshot has [c1.id]
+    // so comments IS dirty (length differs) and setRelationSetter runs, but with
+    // the full [c1.id, c2.id] set — no duplication of c1.
+    (fetched!.comments as any[]).push(c2.id);
+    await fetched!.save();
+
+    const refetched = await TestPost.findOne(perspective, {
+      where: { id: post.id },
+    });
+    expect(
+      refetched!.comments,
+      "should have exactly 2 comments, not 3",
+    ).to.have.length(2);
+    const ids = refetched!.comments as unknown as string[];
+    expect(ids).to.include(c1.id);
+    expect(ids).to.include(c2.id);
   });
 });

@@ -21,6 +21,7 @@ import {
 } from "./decorators";
 import { formatSurrealValue } from "./query/surrealCompiler";
 import { fetchInstanceData } from "./query/fetchInstance";
+import { isDirty } from "./query/snapshot";
 import { getModelMetadata as _getModelMetadata } from "./schema/metadata";
 
 // ── Context ────────────────────────────────────────────────────────────────
@@ -328,6 +329,8 @@ export async function innerUpdate(
         }
       } else if (Array.isArray(value)) {
         // All arrays (including empty) treated as relation setters.
+        // Skip if the set hasn't changed since the last hydration/save.
+        if (!isDirty(ctx.instance, key, value)) continue;
         await setRelationSetter(ctx, key, value, batchId);
       } else if (value !== undefined && value !== null && value !== "") {
         if (setProperties) {
@@ -342,6 +345,8 @@ export async function innerUpdate(
           if (!propMeta) continue;
           // Skip flag fields — flags are immutable, written once by createSubject.
           if (propMeta.flag) continue;
+          // Skip if the value hasn't changed since the last hydration/save.
+          if (!isDirty(ctx.instance, key, value)) continue;
           await setProperty(ctx, key, value, batchId);
         }
       }

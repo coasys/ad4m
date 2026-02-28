@@ -15,6 +15,7 @@ import type { PerspectiveProxy } from "../../perspectives/PerspectiveProxy";
 import type { ModelMetadata, IncludeMap, Query } from "../types";
 import { formatSurrealValue } from "./surrealCompiler";
 import { hydrateInstanceFromLinks, evaluateCustomGetters } from "./hydration";
+import { captureSnapshot } from "./snapshot";
 import { _findAllInternal } from "./operations";
 
 /**
@@ -165,6 +166,13 @@ export async function fetchInstanceData(
 
     // ── 4. Custom SurrealQL getters ─────────────────────────────────────────
     await evaluateCustomGetters(instance, perspective, metadata);
+
+    // ── 5. Snapshot capture — baseline for dirty tracking on next save() ────
+    const schemaKeys = [
+      ...Object.keys(metadata.properties),
+      ...Object.keys(metadata.relations),
+    ];
+    captureSnapshot(instance, schemaKeys);
   } catch (e) {
     console.error(`SurrealDB getData failed for ${id}:`, e);
   }

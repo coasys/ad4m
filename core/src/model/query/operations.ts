@@ -24,6 +24,7 @@ import {
   matchesCondition,
 } from "./surrealCompiler";
 import { hydrateInstanceFromLinks, evaluateCustomGetters } from "./hydration";
+import { captureSnapshot } from "./snapshot";
 import { escapeSurrealString } from "../../utils";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -86,6 +87,20 @@ export async function instancesFromSurrealResult<T>(
   const metadata = (ctor as any).getModelMetadata();
   const requestedProperties = query?.properties || [];
 
+  // ── 0. Pre-validate the `properties` option ───────────────────────────────
+  //
+  // An empty array is disallowed: it almost certainly indicates a bug in the
+  // caller (a computed list that produced no entries). Pass `undefined` or
+  // omit the field entirely to get all properties.
+  //
+  // This check is BEFORE the row loop so the error propagates to the caller
+  // instead of being swallowed by the per-row try/catch.
+  if (query?.properties !== undefined && requestedProperties.length === 0) {
+    throw new Error(
+      "Ad4mModel: properties[] must not be empty. Omit the field to retrieve all properties.",
+    );
+  }
+
   // ── 1. Build instances from rows ──────────────────────────────────────────────────
   const instances: T[] = [];
   for (const row of result) {
@@ -99,19 +114,35 @@ export async function instancesFromSurrealResult<T>(
       // Shared hydration: properties + forward relations + author + timestamps
       await hydrateInstanceFromLinks(instance, links, metadata, perspective);
 
-      // If the query asked for specific properties only, strip everything else
+      // If the query asked for specific properties only, strip schema-declared
+      // fields that weren't requested. We only touch fields that are declared in
+      // the schema (via @Property / relation decorators) plus the well-known
+      // metadata fields (author, createdAt, updatedAt). Internal machinery such
+      // as _id, _perspective, _savedOnce, and the dynamically-wired addX /
+      // removeX / setX methods must never be deleted — they are not enumerated
+      // by their public names in Object.keys, but _id and _perspective ARE plain
+      // own properties and would be wrongly removed by a naïve Object.keys scan.
+      //
+      // Note: `id` is always accessible regardless — it is a prototype getter
+      // backed by the private _id field and cannot be deleted from an instance.
       if (requestedProperties.length > 0) {
-        Object.keys(instance).forEach((key) => {
-          if (
-            !requestedProperties.includes(key) &&
-            key !== "createdAt" &&
-            key !== "updatedAt" &&
-            key !== "author" &&
-            key !== "id"
-          ) {
+        const schemaKeys = [
+          ...Object.keys(metadata.properties),
+          ...Object.keys(metadata.relations),
+          "author",
+          "createdAt",
+          "updatedAt",
+        ];
+        for (const key of schemaKeys) {
+          if (!requestedProperties.includes(key)) {
+            // Don't delete relation keys that are listed in the include map.
+            // The include-hydration step (step 3 below) needs the raw IDs to
+            // batch-fetch related models, and the hydrated result should appear
+            // in the final output even when the relation is not in `properties`.
+            if (query?.include && key in query.include) continue;
             delete instance[key];
           }
-        });
+        }
       }
 
       instances.push(instance);
@@ -202,13 +233,25 @@ export async function instancesFromSurrealResult<T>(
         const hydratedMap = new Map<string, any>(
           allHydrated.map((h: any) => [h.id, h]),
         );
+        // When the sub-query specifies an `order`, the sorted order from
+        // _findAllInternal must be preserved. We filter allHydrated (which is
+        // already sorted) by IDs belonging to this instance, rather than
+        // iterating `val` (which is in the original link-insertion order).
+        const hasSubOrder = entry !== true && !!(entry as Query).order;
         for (const instance of instances) {
           const val = (instance as any)[relationName];
           if (!val) continue;
           if (Array.isArray(val)) {
-            (instance as any)[relationName] = val
-              .map((id: string) => hydratedMap.get(id))
-              .filter((h: any) => h !== undefined);
+            if (hasSubOrder) {
+              const valSet = new Set(val as string[]);
+              (instance as any)[relationName] = allHydrated.filter((h: any) =>
+                valSet.has(h.id),
+              );
+            } else {
+              (instance as any)[relationName] = val
+                .map((id: string) => hydratedMap.get(id))
+                .filter((h: any) => h !== undefined);
+            }
           } else if (typeof val === "string") {
             (instance as any)[relationName] = hydratedMap.get(val) ?? null;
           }
@@ -224,7 +267,16 @@ export async function instancesFromSurrealResult<T>(
     await evaluateCustomGetters(instance as any, perspective, metadata);
   }
 
-  // ── 5. Post-filter: where conditions that SurrealDB can't handle in SQL ───
+  // ── 5. Snapshot capture — baseline for dirty tracking on next save() ──────
+  const schemaKeys = [
+    ...Object.keys(metadata.properties),
+    ...Object.keys(metadata.relations),
+  ];
+  for (const instance of instances) {
+    captureSnapshot(instance as object, schemaKeys);
+  }
+
+  // ── 6. Post-filter: where conditions that SurrealDB can't handle in SQL ───
   //    • author / timestamp (computed from grouped links)
   //    • Comparison operators: gt, gte, lt, lte, between, contains
   let filteredInstances = instances;
