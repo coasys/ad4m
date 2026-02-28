@@ -1,4 +1,4 @@
-import { Ad4mModel, PerspectiveProxy, Query, Subscription } from "@coasys/ad4m";
+import { Ad4mModel, PerspectiveProxy, Query, Subscription, resolveParentPredicate } from "@coasys/ad4m";
 import {
   ComputedRef,
   isRef,
@@ -16,12 +16,30 @@ type ModelCtor<T extends Ad4mModel> = (new (...args: any[]) => T) &
  * Scope a reactive query to a specific parent node via a `@HasMany` relation.
  * The hook reads the `through` predicate from the parent model's decorator
  * metadata automatically.
+ *
+ * @example
+ * ```ts
+ * // field inferred — only one @HasMany on Channel points to Message
+ * const { data: messages } = useLive(Message, {
+ *   perspective,
+ *   parent: { model: Channel, id: channelId },
+ * });
+ *
+ * // field explicit — needed when multiple @HasMany point to the same type
+ * const { data: messages } = useLive(Message, {
+ *   perspective,
+ *   parent: { model: Channel, id: channelId, field: 'messages' },
+ * });
+ * ```
  */
 type ParentScope = {
   model: ModelCtor<any>;
   id: string;
-  /** Name of the `@HasMany` field on the parent model. */
-  field: string;
+  /**
+   * The `@HasMany` field on the parent model with the linking predicate.
+   * Optional when exactly one `@HasMany` on the parent points to this child type.
+   */
+  field?: string;
 };
 
 type LiveOptions<T extends Ad4mModel> = {
@@ -139,16 +157,17 @@ export function useLive<T extends Ad4mModel>(
   /** Derive `linkedFrom` from the parent scope if provided. */
   function resolveLinkedFrom(): { id: string; predicate: string } | undefined {
     if (!parent) return undefined;
-    const parentMeta = parent.model.getModelMetadata();
-    const through = parentMeta.relations[parent.field]?.predicate;
-    if (!through) {
-      console.warn(
-        `useLive: field "${parent.field}" not found in parent model "${parent.model.name}" relations. ` +
-          `Check that "@HasMany" is declared on that field.`,
+    try {
+      const predicate = resolveParentPredicate(
+        parent.model.getModelMetadata(),
+        typeof model !== "string" ? model : undefined,
+        parent.field,
       );
+      return { id: parent.id, predicate };
+    } catch (err) {
+      console.warn(`useLive: ${err instanceof Error ? err.message : err}`);
       return undefined;
     }
-    return { id: parent.id, predicate: through };
   }
 
   /** Build the query builder for either a class constructor or a string class name. */

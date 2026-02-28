@@ -1,6 +1,7 @@
 import { Ad4mModel } from "./Ad4mModel";
 import { Model, Property, HasMany, Flag } from "./decorators";
 import { Literal } from "../Literal";
+import { resolveParentPredicate } from "./parentUtils";
 
 // ── Shared test fixtures ──────────────────────────────────────────────────────
 // Defined once at module level — used by queryToSurrealQL,
@@ -1661,5 +1662,75 @@ describe("resolveLanguage implicit literal default", () => {
     );
 
     expect(getExpression).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveParentPredicate()", () => {
+  @Model({ name: "Comment" })
+  class Comment extends Ad4mModel {}
+
+  @Model({ name: "Tag" })
+  class Tag extends Ad4mModel {}
+
+  @Model({ name: "Channel" })
+  class Channel extends Ad4mModel {
+    @HasMany(() => Comment, { through: "channel://has_comment" })
+    comments: Comment[] = [];
+
+    @HasMany(() => Tag, { through: "channel://has_tag" })
+    tags: Tag[] = [];
+  }
+
+  @Model({ name: "AmbiguousParent" })
+  class AmbiguousParent extends Ad4mModel {
+    @HasMany(() => Comment, { through: "parent://primary_comments" })
+    primaryComments: Comment[] = [];
+
+    @HasMany(() => Comment, { through: "parent://secondary_comments" })
+    secondaryComments: Comment[] = [];
+  }
+
+  it("resolves predicate by explicit field name", () => {
+    const meta = Channel.getModelMetadata();
+    expect(resolveParentPredicate(meta, Comment, "comments")).toBe(
+      "channel://has_comment",
+    );
+  });
+
+  it("infers predicate from child constructor when field is omitted", () => {
+    const meta = Channel.getModelMetadata();
+    expect(resolveParentPredicate(meta, Comment)).toBe(
+      "channel://has_comment",
+    );
+  });
+
+  it("throws when explicit field does not exist on parent", () => {
+    const meta = Channel.getModelMetadata();
+    expect(() => resolveParentPredicate(meta, Comment, "nonExistent")).toThrow(
+      /field "nonExistent" not found/,
+    );
+  });
+
+  it("throws when no relation on parent matches the child type", () => {
+    @Model({ name: "UnrelatedParent" })
+    class UnrelatedParent extends Ad4mModel {}
+    const meta = UnrelatedParent.getModelMetadata();
+    expect(() => resolveParentPredicate(meta, Comment)).toThrow(
+      /no forward relation pointing to "Comment"/,
+    );
+  });
+
+  it("throws when neither field nor childCtor is provided", () => {
+    const meta = Channel.getModelMetadata();
+    expect(() => resolveParentPredicate(meta, undefined)).toThrow(
+      /either "field" or a child model constructor must be provided/,
+    );
+  });
+
+  it("throws with disambiguation hint when multiple relations point to the same type", () => {
+    const meta = AmbiguousParent.getModelMetadata();
+    expect(() => resolveParentPredicate(meta, Comment)).toThrow(
+      /multiple relations.*provide "field" to disambiguate/i,
+    );
   });
 });

@@ -1,7 +1,11 @@
 import { Literal } from "../Literal";
+import { Link } from "../links/Links";
+import { LinkQuery } from "../perspectives/LinkQuery";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { SHACLShape } from "../shacl/SHACLShape";
 import { makeRandomId, getRelationsMetadata } from "./decorators";
+import { resolveParentPredicate } from "./parentUtils";
+export { resolveParentPredicate } from "./parentUtils";
 import * as mutation from "./mutation";
 export type { MutationContext } from "./mutation";
 import { capitalize } from "./util";
@@ -22,6 +26,29 @@ export type {
   SubscribeOptions,
   Subscription,
 } from "./types";
+
+/**
+ * Options for linking a newly created instance to an existing parent node.
+ * Pass as the third argument to `Model.create()`.
+ *
+ * @example
+ * // Field inferred — only one @HasMany on Channel points to Poll
+ * await Poll.create(perspective, { title }, { parent: { model: Channel, id: channelId } })
+ *
+ * // Field explicit — needed when multiple @HasMany on the parent point to the same type
+ * await Poll.create(perspective, { title }, { parent: { model: Channel, id: channelId, field: 'featuredPolls' } })
+ */
+export type ParentOptions = {
+  /** The parent model class (must have a `@HasMany` pointing to this child type). */
+  model: typeof Ad4mModel;
+  /** The ID of the parent instance. */
+  id: string;
+  /**
+   * The `@HasMany` field on the parent whose predicate is used for the link.
+   * Optional when exactly one `@HasMany` on the parent points to this child type.
+   */
+  field?: string;
+};
 import type {
   Query,
   ResultsWithTotalCount,
@@ -162,10 +189,20 @@ export class Ad4mModel {
     this: new (perspective: PerspectiveProxy) => T,
     perspective: PerspectiveProxy,
     data: Partial<Omit<T, keyof Ad4mModel>>,
+    options?: { parent?: ParentOptions },
   ): Promise<T> {
     const instance = new this(perspective);
     Object.assign(instance, data);
     await instance.save();
+    if (options?.parent) {
+      const { model, id, field } = options.parent;
+      const predicate = resolveParentPredicate(
+        model.getModelMetadata(),
+        this as unknown as new (...args: any[]) => any,
+        field,
+      );
+      await perspective.add(new Link({ source: id, predicate, target: instance.id }));
+    }
     return instance;
   }
 
@@ -428,10 +465,24 @@ export class Ad4mModel {
   }
 
   /**
-   * Removes all links for this instance from the perspective.
-   * @param batchId - Optional batch ID for batched operations
+   * Removes this instance from the perspective, including all incoming links
+   * that point to it (e.g. parent→child membership links created by
+   * `create({ parent: ... })`). This ensures that `findAll({ linkedFrom: ... })`
+   * will no longer return this instance after deletion.
+   *
+   * @example
+   * await vote.delete();
+   *
+   * @param batchId - Optional batch identifier for grouping removals.
    */
   async delete(batchId?: string) {
+    // Remove all incoming links that point to this instance so that parent
+    // collections (linkedFrom queries) are kept consistent.
+    const incomingLinks = await this._perspective.get(new LinkQuery({ target: this._id }));
+    for (const link of incomingLinks) {
+      await this._perspective.remove(link);
+    }
+
     await this._perspective.removeSubject(this, this._id, batchId);
   }
 

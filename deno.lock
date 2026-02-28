@@ -387,14 +387,6 @@
       ]
     },
     "members": {
-      "ad4m-hooks/helpers": {
-        "packageJson": {
-          "dependencies": [
-            "npm:@types/uuid@9",
-            "npm:uuid@*"
-          ]
-        }
-      },
       "ad4m-hooks/react": {
         "packageJson": {
           "dependencies": [
