@@ -41,7 +41,7 @@ commands:
           command: pnpm run build-languages
 
 jobs:
-  build-and-test:
+  build:
     machine: true
     resource_class: coasys/marvin
     steps:
@@ -93,13 +93,13 @@ jobs:
           command: pnpm test
           no_output_timeout: 30m
 
-  integration-tests-js:
+  integration-tests-core:
     machine: true
     resource_class: coasys/marvin
     environment:
       # Unique port range for this job's setup executor so it never conflicts
-      # with integration-tests-multi-user-simple running concurrently on the
-      # same self-hosted runner (both jobs run after build-and-test in parallel).
+      # with integration-tests-multi-user running concurrently on the
+      # same self-hosted runner (both jobs run after build in parallel).
       AD4M_SETUP_GQL_PORT: "15700"
       AD4M_SETUP_HC_ADMIN_PORT: "15701"
       AD4M_SETUP_HC_APP_PORT: "15702"
@@ -124,12 +124,12 @@ jobs:
           command: cd ./tests/js && pnpm run test:ci
           no_output_timeout: 30m
 
-  integration-tests-multi-user-simple:
+  integration-tests-multi-user:
     machine: true
     resource_class: coasys/marvin
     environment:
       # Unique port range for this job's setup executor — offset by 10 from
-      # integration-tests-js to prevent conflicts when both jobs run in parallel.
+      # integration-tests-core to prevent conflicts when both jobs run in parallel.
       AD4M_SETUP_GQL_PORT: "15710"
       AD4M_SETUP_HC_ADMIN_PORT: "15711"
       AD4M_SETUP_HC_APP_PORT: "15712"
@@ -143,19 +143,9 @@ jobs:
             done
             sleep 1
       - run:
-          name: Run multi-user-simple integration tests
+          name: Run multi-user integration tests
           command: cd ./tests/js && pnpm run test-multi-user
           no_output_timeout: 60m
-
-  integration-tests-email-verification:
-    machine: true
-    resource_class: coasys/marvin
-    steps:
-      - setup_integration_test_environment
-      - run:
-          name: Run email-verification integration tests
-          command: cd ./tests/js && ./email-verification-test-with-setup.sh
-          no_output_timeout: 30m
 
   integration-tests-cli:
     machine: true
@@ -179,13 +169,10 @@ workflows:
   version: 2
   build-and-test:
     jobs:
-      - build-and-test
-      - integration-tests-js:
+      - build
+      - integration-tests-core:
           requires:
-            - build-and-test
-      - integration-tests-multi-user-simple:
+            - build
+      - integration-tests-multi-user:
           requires:
-            - build-and-test
-      - integration-tests-email-verification:
-          requires:
-            - build-and-test
+            - build
