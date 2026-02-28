@@ -30,15 +30,22 @@ type ModelCtor<T extends Ad4mModel> = (new (...args: any[]) => T) &
  * });
  * ```
  */
-type ParentScope = {
-  model: ModelCtor<any>;
-  id: string;
-  /**
-   * The `@HasMany` field on the parent model with the linking predicate.
-   * Optional when exactly one `@HasMany` on the parent points to this child type.
-   */
-  field?: string;
-};
+type ParentScope =
+  | {
+      /** Raw predicate form — use when the parent model type is unknown or
+       *  the relationship is not declared via `@HasMany`. */
+      id: string;
+      predicate: string;
+    }
+  | {
+      model: ModelCtor<any>;
+      id: string;
+      /**
+       * The `@HasMany` field on the parent model with the linking predicate.
+       * Optional when exactly one `@HasMany` on the parent points to this child type.
+       */
+      field?: string;
+    };
 
 type LiveOptions<T extends Ad4mModel> = {
   /**
@@ -128,6 +135,8 @@ export function useLiveQuery<T extends Ad4mModel>(
   /** Resolve the `parent` query from the top-level `parent` scope option. */
   function resolveParentQuery(): { id: string; predicate: string } | undefined {
     if (!parent) return undefined;
+    // Raw predicate form — pass through directly
+    if ("predicate" in parent) return { id: parent.id, predicate: parent.predicate };
     try {
       const predicate = resolveParentPredicate(
         parent.model.getModelMetadata(),
@@ -251,7 +260,7 @@ export function useLiveQuery<T extends Ad4mModel>(
     pageNumber,
     JSON.stringify(userQuery),
     parent?.id,
-    parent?.field,
+    parent && "field" in parent ? parent.field : undefined,
     id,
   ]);
 
