@@ -108,7 +108,57 @@ export function buildGraphTraversalWhereClause(
       }
     } else {
       const propMeta = metadata.properties[propertyName];
-      if (!propMeta) continue;
+      if (!propMeta) {
+        // ── Relation-based where clause ────────────────────────────────────
+        // If the where key is a relation name (e.g. `where: { post: postId }`),
+        // generate a graph-traversal filter on the link predicate.
+        //
+        //  • Reverse relations (@BelongsToOne / @BelongsToMany):
+        //    The link is stored as  parentId --predicate--> thisId.
+        //    From this node we traverse <-link (incoming) and check in.uri.
+        //
+        //  • Forward relations (@HasMany / @HasOne):
+        //    The link is stored as  thisId --predicate--> childId.
+        //    From this node we traverse ->link (outgoing) and check out.uri.
+        const relMeta = metadata.relations[propertyName];
+        if (!relMeta) continue;
+
+        const predicate = escapeSurrealString(relMeta.predicate);
+        const isReverse = relMeta.direction === "reverse";
+        const arrow = isReverse ? "<-" : "->";
+        const uriField = isReverse ? "in.uri" : "out.uri";
+
+        if (Array.isArray(condition)) {
+          const formattedValues = condition.map(formatSurrealValue).join(", ");
+          conditions.push(
+            `count(${arrow}link[WHERE predicate = '${predicate}' AND ${uriField} IN [${formattedValues}]]) > 0`,
+          );
+        } else if (typeof condition === "object" && condition !== null) {
+          const ops = condition as any;
+          if (ops.not !== undefined) {
+            if (Array.isArray(ops.not)) {
+              const formattedValues = ops.not
+                .map(formatSurrealValue)
+                .join(", ");
+              conditions.push(
+                `count(${arrow}link[WHERE predicate = '${predicate}' AND ${uriField} IN [${formattedValues}]]) = 0`,
+              );
+            } else {
+              conditions.push(
+                `count(${arrow}link[WHERE predicate = '${predicate}' AND ${uriField} = ${formatSurrealValue(ops.not)}]) = 0`,
+              );
+            }
+          }
+          // Comparison operators on relation IDs are unusual but handled:
+          // they'll be caught in JS post-filtering (step 6 in operations.ts).
+        } else {
+          conditions.push(
+            `count(${arrow}link[WHERE predicate = '${predicate}' AND ${uriField} = ${formatSurrealValue(condition)}]) > 0`,
+          );
+        }
+
+        continue;
+      }
 
       const predicate = escapeSurrealString(propMeta.predicate);
       // Scalar properties (resolveLanguage === "literal" or unset) store values as

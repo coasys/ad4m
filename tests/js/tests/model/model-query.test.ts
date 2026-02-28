@@ -10,19 +10,20 @@
  *   1.  where — exact match
  *   2.  where — operators (gt/gte/lt/lte/between/contains/not/IN)
  *   3.  where — combined conditions (AND semantics)
- *   4.  order
- *   5.  limit / offset
- *   6.  findOne
- *   7.  count
- *   8.  findAllAndCount
- *   9.  paginate
- *   10. instance.get()
- *   11. fluent QueryBuilder
- *   12. IncludeMap — @HasMany / @HasOne / @BelongsToOne / @BelongsToMany
- *   13. IncludeMap — sub-queries (where / order / limit / properties)
- *   14. IncludeMap — nested (multi-level)
- *   15. IncludeMap — edge cases (non-conforming nodes)
- *   16. properties field projection
+ *   4.  where — relation-based filtering (@BelongsToOne in where clause)
+ *   5.  order
+ *   6.  limit / offset
+ *   7.  findOne
+ *   8.  count
+ *   9.  findAllAndCount
+ *   10. paginate
+ *   11. instance.get()
+ *   12. fluent QueryBuilder
+ *   13. IncludeMap — @HasMany / @HasOne / @BelongsToOne / @BelongsToMany
+ *   14. IncludeMap — sub-queries (where / order / limit / properties)
+ *   15. IncludeMap — nested (multi-level)
+ *   16. IncludeMap — edge cases (non-conforming nodes)
+ *   17. properties field projection
  *
  * Run with:
  *   pnpm ts-mocha -p tsconfig.json --timeout 120000 --exit tests/model/model-query.test.ts
@@ -258,7 +259,101 @@ describe("Ad4mModel — Query API", function () {
     expect(results.some((r) => r.id === p2.id)).to.be.false;
   });
 
-  // ── 4. order ───────────────────────────────────────────────────────────────
+  // ── 4. where — relation-based filtering ───────────────────────────────────
+  //
+  // `where` can reference relation fields (@BelongsToOne / @HasMany / etc.)
+  // in addition to @Property fields. This enables the pattern:
+  //   Comment.findAll(perspective, { where: { post: postId } })
+  // which replaces the deprecated `source` parameter.
+
+  it("where on @BelongsToOne: { post: postId } returns only comments linked to that post", async () => {
+    const c1 = await TestComment.create(perspective, { body: "on alpha" });
+    const c2 = await TestComment.create(perspective, { body: "on beta" });
+    const c3 = await TestComment.create(perspective, { body: "orphan" });
+    await p1.addComments(c1.id);
+    await p2.addComments(c2.id);
+    // c3 is not linked to any post
+
+    const results = await TestComment.findAll(perspective, {
+      where: { post: p1.id },
+    });
+    expect(results).to.have.length(1);
+    expect(results[0].id).to.equal(c1.id);
+    expect(results[0].body).to.equal("on alpha");
+  });
+
+  it("where on @BelongsToOne with findOne: { post: postId } returns the first matching comment", async () => {
+    const c1 = await TestComment.create(perspective, { body: "the one" });
+    await p1.addComments(c1.id);
+
+    const found = await TestComment.findOne(perspective, {
+      where: { post: p1.id },
+    });
+    expect(found).to.not.be.null;
+    expect(found!.id).to.equal(c1.id);
+  });
+
+  it("where on @BelongsToOne returns null/empty when no comments are linked to the given post", async () => {
+    // Create a comment linked to p2, but query for p1
+    const c = await TestComment.create(perspective, { body: "on p2" });
+    await p2.addComments(c.id);
+
+    const results = await TestComment.findAll(perspective, {
+      where: { post: p1.id },
+    });
+    expect(results).to.have.length(0);
+
+    const found = await TestComment.findOne(perspective, {
+      where: { post: p1.id },
+    });
+    expect(found).to.be.null;
+  });
+
+  it("where on @BelongsToOne combined with @Property: { post: postId, body: 'target' }", async () => {
+    const c1 = await TestComment.create(perspective, { body: "target" });
+    const c2 = await TestComment.create(perspective, { body: "other" });
+    await p1.addComments(c1.id);
+    await p1.addComments(c2.id);
+
+    const results = await TestComment.findAll(perspective, {
+      where: { post: p1.id, body: "target" },
+    });
+    expect(results).to.have.length(1);
+    expect(results[0].body).to.equal("target");
+  });
+
+  it("where on @BelongsToOne with IN-style array: { post: [p1.id, p2.id] }", async () => {
+    const c1 = await TestComment.create(perspective, { body: "on p1" });
+    const c2 = await TestComment.create(perspective, { body: "on p2" });
+    const c3 = await TestComment.create(perspective, { body: "on p3" });
+    await p1.addComments(c1.id);
+    await p2.addComments(c2.id);
+    await p3.addComments(c3.id);
+
+    const results = await TestComment.findAll(perspective, {
+      where: { post: [p1.id, p2.id] },
+    });
+    expect(results).to.have.length(2);
+    const ids = results.map((r) => r.id);
+    expect(ids).to.include(c1.id);
+    expect(ids).to.include(c2.id);
+    expect(ids).to.not.include(c3.id);
+  });
+
+  it("where on @BelongsToOne + include hydrates the relation", async () => {
+    const c1 = await TestComment.create(perspective, { body: "hydrate me" });
+    await p1.addComments(c1.id);
+
+    const found = await TestComment.findOne(perspective, {
+      where: { post: p1.id },
+      include: { post: true },
+    });
+    expect(found).to.not.be.null;
+    expect(found!.post).to.be.instanceOf(TestPost);
+    expect((found!.post as TestPost).title).to.equal("Alpha");
+  });
+
+  // ── 5. order ───────────────────────────────────────────────────────────────
 
   it("findAll() with order: { title: 'ASC' } sorts alphabetically", async () => {
     const results = await TestPost.findAll(perspective, {
@@ -333,7 +428,7 @@ describe("Ad4mModel — Query API", function () {
     expect(aEntries[1].viewCount as any as number).to.equal(2);
   });
 
-  // ── 5. limit / offset ──────────────────────────────────────────────────────
+  // ── 6. limit / offset ──────────────────────────────────────────────────────
 
   it("findAll() with limit returns at most that many results", async () => {
     const results = await TestPost.findAll(perspective, { limit: 2 });
@@ -364,7 +459,7 @@ describe("Ad4mModel — Query API", function () {
     expect(page1Ids.some((id) => page2Ids.includes(id))).to.be.false;
   });
 
-  // ── 6. findOne ─────────────────────────────────────────────────────────────
+  // ── 7. findOne ─────────────────────────────────────────────────────────────
 
   it("findOne() returns the matching instance", async () => {
     const found = await TestPost.findOne(perspective, { where: { id: p2.id } });
@@ -379,7 +474,7 @@ describe("Ad4mModel — Query API", function () {
     expect(missing).to.be.null;
   });
 
-  // ── 7. count ───────────────────────────────────────────────────────────────
+  // ── 8. count ───────────────────────────────────────────────────────────────
 
   it("count() returns the total number of instances", async () => {
     const n = await TestPost.count(perspective, {});
@@ -404,7 +499,7 @@ describe("Ad4mModel — Query API", function () {
     expect(n).to.equal(1);
   });
 
-  // ── 8. findAllAndCount ─────────────────────────────────────────────────────
+  // ── 9. findAllAndCount ─────────────────────────────────────────────────────
 
   it("findAllAndCount() returns both the instances and the total", async () => {
     const { results, totalCount } = await TestPost.findAllAndCount(
@@ -436,7 +531,7 @@ describe("Ad4mModel — Query API", function () {
     expect(totalCount).to.equal(1);
   });
 
-  // ── 9. paginate ────────────────────────────────────────────────────────────
+  // ── 10. paginate ───────────────────────────────────────────────────────────
 
   it("paginate() returns the correct page with metadata", async () => {
     const page = await TestPost.paginate(perspective, 2, 1);
@@ -458,7 +553,7 @@ describe("Ad4mModel — Query API", function () {
     expect(page.pageNumber).to.equal(1);
   });
 
-  // ── 10. instance.get() ─────────────────────────────────────────────────────
+  // ── 11. instance.get() ─────────────────────────────────────────────────────
 
   it("instance.get() hydrates a bare instance in-place and returns it", async () => {
     // Construct a bare instance with only the id — no data yet
@@ -487,7 +582,7 @@ describe("Ad4mModel — Query API", function () {
     expect((bare.comments[0] as TestComment).body).to.equal("get-include");
   });
 
-  // ── 11. fluent QueryBuilder ────────────────────────────────────────────────
+  // ── 12. fluent QueryBuilder ────────────────────────────────────────────────
 
   it("fluent .query().where().get() matches findAll()", async () => {
     const json = await TestPost.findAll(perspective, { where: { id: p3.id } });
@@ -526,7 +621,7 @@ describe("Ad4mModel — Query API", function () {
     expect(titles).to.deep.equal([...titles].sort());
   });
 
-  // ── 12. IncludeMap — relation types ───────────────────────────────────────
+  // ── 13. IncludeMap — relation types ───────────────────────────────────────
 
   it("include: { comments: true } hydrates @HasMany to TestComment instances", async () => {
     const comment = await TestComment.create(perspective, { body: "hydrated" });
@@ -661,7 +756,7 @@ describe("Ad4mModel — Query API", function () {
     expect(found!.comments).to.have.length(0);
   });
 
-  // ── 13. IncludeMap — sub-queries ───────────────────────────────────────────
+  // ── 14. IncludeMap — sub-queries ───────────────────────────────────────────
 
   it("include sub-query: { limit: 2 } caps the number of hydrated relations", async () => {
     for (let i = 0; i < 3; i++) {
@@ -763,7 +858,7 @@ describe("Ad4mModel — Query API", function () {
     expect(found!.posts).to.have.length(1);
   });
 
-  // ── 14. IncludeMap — nested (multi-level) ─────────────────────────────────
+  // ── 15. IncludeMap — nested (multi-level) ─────────────────────────────────
 
   it("nested include: post → comments → reactions (2 levels, findOne)", async () => {
     const comment = await TestComment.create(perspective, { body: "nested" });
@@ -853,7 +948,7 @@ describe("Ad4mModel — Query API", function () {
     expect(typeof hydratedComment.reactions[0]).to.equal("string");
   });
 
-  // ── 15. IncludeMap — edge cases (non-conforming nodes) ────────────────────
+  // ── 16. IncludeMap — edge cases (non-conforming nodes) ────────────────────
   //
   // Only nodes that conform to the related model's SDNA class are hydrated;
   // bare URIs or nodes of a different type are silently dropped.
@@ -970,7 +1065,7 @@ describe("Ad4mModel — Query API", function () {
     });
   });
 
-  // ── 16. properties field projection ───────────────────────────────────────
+  // ── 17. properties field projection ───────────────────────────────────────
 
   it("properties: [] throws — empty array is disallowed", async () => {
     let threw = false;
