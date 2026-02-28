@@ -86,12 +86,6 @@ jobs:
     - name: Build AD4M-CLI
       run: pnpm build-libs
 
-    - name: Install missing Tauri GTK deps (soup3 not in Docker image)
-      run: |
-        add-apt-repository -y universe || true
-        apt-get update
-        apt-get install -y libsoup-3.0-dev libjavascriptcoregtk-4.1-dev squashfs-tools
-
     - name: Build Launcher binary
       run: pnpm run package-ad4m
 
@@ -196,12 +190,6 @@ jobs:
 
     - name: Build AD4M-CLI
       run: pnpm build-libs
-
-    - name: Install missing Tauri GTK deps (soup3 not in Docker image)
-      run: |
-        add-apt-repository -y universe || true
-        apt-get update
-        apt-get install -y libsoup-3.0-dev libjavascriptcoregtk-4.1-dev squashfs-tools
 
     - name: Build Launcher binary with CUDA
       run: pnpm run package-ad4m:cuda
