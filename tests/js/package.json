@@ -4,8 +4,8 @@
   "type": "module",
   "scripts": {
     "prepare-test": "run-script-os",
-    "prepare-test:default": "./scripts/build-test-language.sh && ./scripts/prepareTestDirectory.sh && deno run --allow-all scripts/get-builtin-test-langs.js && pnpm run inject-language-language && pnpm run publish-test-languages && pnpm run inject-publishing-agent",
-    "prepare-test:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/build-test-language.ps1 && powershell -ExecutionPolicy Bypass -File ./scripts/prepareTestDirectory.ps1 && deno run --allow-all scripts/get-builtin-test-langs.js && pnpm run inject-language-language && pnpm run publish-test-languages && pnpm run inject-publishing-agent",
+    "prepare-test:default": "node scripts/resetBootstrapSeed.js && ./scripts/build-test-language.sh && ./scripts/prepareTestDirectory.sh && deno run --allow-all scripts/get-builtin-test-langs.js && pnpm run inject-language-language && pnpm run publish-test-languages && pnpm run inject-publishing-agent",
+    "prepare-test:windows": "node scripts/resetBootstrapSeed.js && powershell -ExecutionPolicy Bypass -File ./scripts/build-test-language.ps1 && powershell -ExecutionPolicy Bypass -File ./scripts/prepareTestDirectory.ps1 && deno run --allow-all scripts/get-builtin-test-langs.js && pnpm run inject-language-language && pnpm run publish-test-languages && pnpm run inject-publishing-agent",
     "inject-language-language": "node scripts/injectLanguageLanguageBundle.js",
     "inject-publishing-agent": "node scripts/injectPublishingAgent.js",
     "publish-test-languages": "node --no-warnings=ExperimentalWarning --experimental-specifier-resolution=node --loader ts-node/esm ./utils/publishTestLangs.ts",
