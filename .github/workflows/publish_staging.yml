@@ -476,6 +476,9 @@ jobs:
     - name: Build AD4M-CLI
       env:
         RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
+        # libort_sys (ONNX Runtime) ships with static MT CRT; Rust MSVC defaults to dynamic MD.
+        # +crt-static makes Rust use MT too — fixes LNK2038/LNK1169 CRT mismatch in generate_snapshot.
+        RUSTFLAGS: -C target-feature=+crt-static
       run: pnpm build-libs
 
     - name: Build Launcher binary
