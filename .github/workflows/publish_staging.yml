@@ -203,6 +203,10 @@ jobs:
       run: pnpm run package-ad4m:cuda
       env:
         PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
+        # cudarc v0.13.9 looks for cudnn.h; on Ubuntu the package libcudnn9-dev-cuda-12
+        # installs headers to /usr/include/x86_64-linux-gnu/ not /usr/include/ directly.
+        # Setting CUDNN_LIB tells cudarc where to find the include dir.
+        CUDNN_LIB: /usr/include/x86_64-linux-gnu
 
     - name: Upload Release AppImage CUDA Asset
       id: upload-release-appimage-cuda-asset
