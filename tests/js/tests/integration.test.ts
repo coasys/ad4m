@@ -132,12 +132,12 @@ describe("Integration tests", function () {
 
     describe('with Alice and Bob', () => {
         let bobExecutorProcess: ChildProcess | null = null
+        const bobGqlPort = 15400
+        const bobHcAdminPort = 15401
+        const bobHcAppPort = 15402
         before(async () => {
           const bobAppDataPath = path.join(TEST_DIR, 'agents', 'bob')
           const bobBootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-          const bobGqlPort = 15400
-          const bobHcAdminPort = 15401
-          const bobHcAppPort = 15402
 
           if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
             fs.mkdirSync(path.join(TEST_DIR, 'agents'))
