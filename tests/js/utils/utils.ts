@@ -1,7 +1,7 @@
 import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions/index.js";
-import { ApolloClient, InMemoryCache } from "@apollo/client/core/index.js";
+import { ApolloClient, gql, InMemoryCache } from "@apollo/client/core/index.js";
 import Websocket from "ws";
 import { createClient } from "graphql-ws";
 import path from "path";
@@ -261,7 +261,7 @@ export function sleep(ms: number) {
 
 /**
  * Kill any process listening on the given ports.
- * Use as a safety net in after() hooks — catches executors that survived kill().
+ * Use as a last-resort safety net — prefer quitExecutor() for normal teardown.
  */
 export function killByPorts(ports: number[]): void {
     for (const port of ports) {
@@ -271,4 +271,68 @@ export function killByPorts(ports: number[]): void {
             // Port not in use — fine
         }
     }
+}
+
+/**
+ * Gracefully shut down an executor via the runtimeQuit GraphQL mutation,
+ * then wait for the process to exit naturally.
+ *
+ * The executor calls std::process::exit(0) immediately on runtimeQuit, so the
+ * WebSocket connection drops mid-call — that's expected, not an error. We wait
+ * for the OS-level 'exit' event to confirm the process is gone. If it doesn't
+ * exit within the timeout we escalate to SIGTERM → SIGKILL → port kill.
+ *
+ * @param executorProcess - The ChildProcess returned by startExecutor()
+ * @param gqlPort         - The GQL port the executor is listening on
+ * @param adminCredential - Optional admin credential (pass if executor was
+ *                          started with --admin-credential)
+ * @param timeoutMs       - How long to wait for natural exit (default 8s)
+ */
+export async function quitExecutor(
+    executorProcess: ChildProcess,
+    gqlPort: number,
+    adminCredential?: string,
+    timeoutMs: number = 8000,
+): Promise<void> {
+    // If already dead, nothing to do
+    if (executorProcess.exitCode !== null || executorProcess.killed) return;
+
+    // Start listening for exit before we send the mutation
+    const exitPromise = new Promise<void>((resolve) => {
+        executorProcess.once('exit', () => resolve());
+        executorProcess.once('close', () => resolve());
+    });
+
+    // Fire the runtimeQuit mutation. The executor calls process::exit(0) which
+    // kills it before it can send a GraphQL response, so we'll get a WebSocket
+    // close error — that's fine, it means the quit worked.
+    try {
+        const client = apolloClient(gqlPort, adminCredential);
+        await Promise.race([
+            client.mutate({ mutation: gql`mutation { runtimeQuit }` }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('runtimeQuit timeout')), 3000)),
+        ]);
+    } catch (_e) {
+        // Expected: either the connection dropped (executor exited) or it timed out.
+        // Either way, fall through and check whether the process actually exited.
+    }
+
+    // Wait for natural exit with timeout
+    const timedOut = await Promise.race([
+        exitPromise.then(() => false),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(true), timeoutMs)),
+    ]);
+
+    if (!timedOut) return; // Clean exit — done
+
+    // Escalate: SIGTERM
+    console.warn(`quitExecutor: executor (port ${gqlPort}) still running after ${timeoutMs}ms, sending SIGTERM`);
+    executorProcess.kill('SIGTERM');
+    await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+
+    if (executorProcess.exitCode !== null || executorProcess.killed) return;
+
+    // Final escalation: SIGKILL
+    console.warn(`quitExecutor: executor (port ${gqlPort}) survived SIGTERM, sending SIGKILL`);
+    executorProcess.kill('SIGKILL');
 }

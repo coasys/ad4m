@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor, runHcLocalServices } from "../utils/utils";
+import { apolloClient, sleep, startExecutor, runHcLocalServices, quitExecutor } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
 import { LinkQuery } from "@coasys/ad4m";
@@ -61,18 +61,10 @@ describe("Multi-User Simple integration tests", () => {
 
     after(async () => {
         if (executorProcess) {
-            while (!executorProcess?.killed) {
-                let status = executorProcess?.kill();
-                console.log("killed executor with", status);
-                await sleep(500);
-            }
+            await quitExecutor(executorProcess, gqlPort);
         }
         if (localServicesProcess) {
-            while (!localServicesProcess?.killed) {
-                let status = localServicesProcess?.kill();
-                console.log("killed local services with", status);
-                await sleep(500);
-            }
+            localServicesProcess.kill('SIGKILL');
         }
     })
 
@@ -1777,11 +1769,7 @@ describe("Multi-User Simple integration tests", () => {
         after(async function() {
             this.timeout(20000);
             if (node2ExecutorProcess) {
-                while (!node2ExecutorProcess?.killed) {
-                    let status = node2ExecutorProcess?.kill();
-                    console.log("killed node 2 executor with", status);
-                    await sleep(500);
-                }
+                await quitExecutor(node2ExecutorProcess, node2GqlPort);
             }
         });
 
