@@ -339,6 +339,14 @@ impl PerspectiveInstance {
                             let mut link_language_guard = self.link_language.write().await;
                             *link_language_guard = Some(language);
                         }
+                        // Cache language→perspective mapping for fast signal routing
+                        {
+                            let handle = self.persisted.lock().await.clone();
+                            crate::perspectives::register_link_language_perspective(
+                                nh.data.link_language.clone(),
+                                handle,
+                            );
+                        }
                         if self.persisted.lock().await.state
                             == PerspectiveState::NeighbourhoodCreationInitiated
                         {

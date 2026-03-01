@@ -99,12 +99,41 @@ function registerSignalCallbacksForApp(appInfo, signalCallback, languageAddress)
 }
 
 /**
+ * Recursively convert {__binary: [...]} markers (produced by Rust's
+ * msgpack_value_to_json for Binary values) back into Uint8Array so that
+ * language bundles receive the same types as from zome call responses.
+ */
+function convertBinaryMarkers(val) {
+    if (val === null || val === undefined) return val;
+    if (Array.isArray(val)) {
+        return val.map(convertBinaryMarkers);
+    }
+    if (typeof val === 'object') {
+        const keys = Object.keys(val);
+        if (keys.length === 1 && keys[0] === '__binary' && Array.isArray(val.__binary)) {
+            return new Uint8Array(val.__binary);
+        }
+        const result = {};
+        for (const key of keys) {
+            result[key] = convertBinaryMarkers(val[key]);
+        }
+        return result;
+    }
+    return val;
+}
+
+/**
  * Handle a Holochain signal dispatched from Rust.
  * Rust calls this with the decoded signal object: { cell_id, zome_name, payload }.
  * We match cell_id against registered callbacks and invoke the right one.
  */
 globalThis.__handleHolochainSignal__ = async function(signal) {
     if (!signal || !signal.cell_id) return;
+    // Convert __binary markers in the payload to Uint8Array, matching
+    // the conversion that callZomeFunction already does for call responses.
+    if (signal.payload) {
+        signal.payload = convertBinaryMarkers(signal.payload);
+    }
     const key = cellIdKey(signal.cell_id);
     const callback = globalThis.__holochainSignalCallbacks__.get(key);
     if (callback) {
