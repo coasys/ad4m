@@ -6,7 +6,10 @@
 use crate::graphql::graphql_types::LinkQuery;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 
-/// A SHACL subject class with its properties
+/// A SHACL subject class with its properties and metadata.
+///
+/// Contains enough information to construct SurrealQL subscription queries
+/// and generate dynamic MCP tools without hardcoding type-specific predicates.
 #[derive(Debug, Clone)]
 pub struct ShaclClass {
     /// Class name (e.g., "Channel", "Message", "Task")
@@ -15,6 +18,11 @@ pub struct ShaclClass {
     pub name_lower: String,
     /// Properties defined on this class
     pub properties: Vec<ShaclProperty>,
+    /// The SHACL shape URI (the target of ad4m://shacl_shape_uri link)
+    pub shape_uri: Option<String>,
+    /// All predicate URIs used by this class's properties (derived from sh://path).
+    /// Useful for constructing targeted subscription queries.
+    pub all_predicates: Vec<String>,
 }
 
 /// A property on a SHACL subject class
@@ -98,11 +106,18 @@ pub async fn load_classes(perspective: &PerspectiveInstance) -> Vec<ShaclClass> 
 
     let mut classes = Vec::new();
     for class_name in class_names {
-        let properties = load_class_properties(perspective, &class_name).await;
+        let (properties, shape_uri) =
+            load_class_properties_with_uri(perspective, &class_name).await;
+        let all_predicates = properties
+            .iter()
+            .filter_map(|p| p.predicate.clone())
+            .collect();
         classes.push(ShaclClass {
             name_lower: class_name.to_lowercase(),
             name: class_name,
             properties,
+            shape_uri,
+            all_predicates,
         });
     }
 
@@ -111,17 +126,42 @@ pub async fn load_classes(perspective: &PerspectiveInstance) -> Vec<ShaclClass> 
 
 /// Load a single class by name from a perspective
 pub async fn load_class(perspective: &PerspectiveInstance, class_name: &str) -> Option<ShaclClass> {
-    let classes = load_classes(perspective).await;
-    classes
-        .into_iter()
-        .find(|c| c.name.to_lowercase() == class_name.to_lowercase())
+    let (properties, shape_uri) = load_class_properties_with_uri(perspective, class_name).await;
+    if properties.is_empty() {
+        // Fall back to full scan
+        let classes = load_classes(perspective).await;
+        return classes
+            .into_iter()
+            .find(|c| c.name.to_lowercase() == class_name.to_lowercase());
+    }
+    let all_predicates = properties
+        .iter()
+        .filter_map(|p| p.predicate.clone())
+        .collect();
+    Some(ShaclClass {
+        name_lower: class_name.to_lowercase(),
+        name: class_name.to_string(),
+        properties,
+        shape_uri,
+        all_predicates,
+    })
 }
 
-/// Extract property information from a SHACL shape
+/// Extract property information from a SHACL shape (convenience wrapper)
 pub async fn load_class_properties(
     perspective: &PerspectiveInstance,
     class_name: &str,
 ) -> Vec<ShaclProperty> {
+    load_class_properties_with_uri(perspective, class_name)
+        .await
+        .0
+}
+
+/// Extract property information from a SHACL shape, also returning the shape URI
+pub async fn load_class_properties_with_uri(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+) -> (Vec<ShaclProperty>, Option<String>) {
     // Try both URL-encoded and raw formats (Flux uses raw, Rust Literal encodes)
     let encoded = ad4m_client::literal::Literal::from_string(format!("shacl://{}", class_name))
         .to_url()
@@ -136,7 +176,7 @@ pub async fn load_class_properties(
         .await
     {
         Ok(links) => links,
-        Err(_) => return vec![],
+        Err(_) => return (vec![], None),
     };
     if shape_links.is_empty() {
         shape_links = match perspective
@@ -148,12 +188,12 @@ pub async fn load_class_properties(
             .await
         {
             Ok(links) => links,
-            Err(_) => return vec![],
+            Err(_) => return (vec![], None),
         };
     }
 
     if shape_links.is_empty() {
-        return vec![];
+        return (vec![], None);
     }
 
     let shape_uri = &shape_links[0].data.target;
@@ -166,7 +206,7 @@ pub async fn load_class_properties(
         .await
     {
         Ok(links) => links,
-        Err(_) => return vec![],
+        Err(_) => return (vec![], None),
     };
 
     let mut properties = Vec::new();
@@ -275,7 +315,7 @@ pub async fn load_class_properties(
         });
     }
 
-    properties
+    (properties, Some(shape_uri.clone()))
 }
 
 /// Find the original-cased class name from a lowercase name
