@@ -45,7 +45,7 @@ describe("Multi-User integration tests", () => {
 
     after(async () => {
         if (executorProcess) {
-            await quitExecutor(executorProcess, gqlPort);
+            await quitExecutor(executorProcess, gqlPort, "admin123");
         }
     })
 

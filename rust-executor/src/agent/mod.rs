@@ -681,10 +681,20 @@ impl AgentService {
         }
 
         if std::path::Path::new(self.file_profile.as_str()).exists() {
-            let file_profile = std::fs::read_to_string(self.file_profile.as_str())
-                .expect("Failed to read agent profile file");
-            self.agent =
-                Some(serde_json::from_str(&file_profile).expect("Failed to parse agent profile"));
+            let file_profile = match std::fs::read_to_string(self.file_profile.as_str()) {
+                Ok(f) => f,
+                Err(e) => {
+                    log::error!("AgentService::load() — failed to read profile file '{}': {}. Skipping profile load.", self.file_profile, e);
+                    return;
+                }
+            };
+            self.agent = match serde_json::from_str(&file_profile) {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    log::error!("AgentService::load() — failed to parse profile file '{}': {}. Skipping profile load.", self.file_profile, e);
+                    return;
+                }
+            };
         } else {
             let did_clone = dump.did.clone();
             let did = check_keys_and_create(did_clone).id.clone();
