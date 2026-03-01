@@ -116,7 +116,7 @@ describe("Integration tests", function () {
 
     after(async () => {
       if (executorProcess) {
-        await quitExecutor(executorProcess, gqlPort);
+        await quitExecutor(executorProcess, gqlPort, hcAdminPort, hcAppPort);
       }
       if (localServicesProcess) {
         localServicesProcess.kill('SIGKILL');
@@ -169,7 +169,7 @@ describe("Integration tests", function () {
 
         after(async () => {
           if (bobExecutorProcess) {
-            await quitExecutor(bobExecutorProcess, bobGqlPort);
+            await quitExecutor(bobExecutorProcess, bobGqlPort, bobHcAdminPort, bobHcAppPort);
           }
         })
 

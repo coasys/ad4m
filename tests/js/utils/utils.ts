@@ -227,6 +227,9 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
                 }
             }
         },
+        // Don't retry when the server goes down — avoids ECONNREFUSED spam
+        // during test teardown when the executor is intentionally killed.
+        shouldRetry: () => false,
     }));
     wsLink.client.on('message' as any, (data: any) => {
         if (data.payload) {
@@ -235,6 +238,8 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
             }
         }
     });
+    // Suppress connection errors during teardown (executor may have exited).
+    wsLink.client.on('error' as any, () => {});
 
     let client = new ApolloClient({
         link: wsLink,
@@ -291,9 +296,14 @@ export function killByPorts(ports: number[]): void {
 export async function quitExecutor(
     executorProcess: ChildProcess,
     gqlPort: number,
+    hcAdminPort?: number,
+    hcAppPort?: number,
     adminCredential?: string,
     timeoutMs: number = 8000,
 ): Promise<void> {
+    // Collect all ports to clean up (GQL + optional HC ports).
+    const allPorts = [gqlPort, ...(hcAdminPort ? [hcAdminPort] : []), ...(hcAppPort ? [hcAppPort] : [])];
+
     // Only check exitCode (set when OS process actually exits).
     // Do NOT check executorProcess.killed — that's set as soon as kill() is
     // CALLED, not when the process has actually terminated. Using it as a
@@ -325,7 +335,7 @@ export async function quitExecutor(
         exitPromise.then(() => true),
         new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
     ]);
-    if (gracefullyExited) { killByPorts([gqlPort]); return; }
+    if (gracefullyExited) { killByPorts(allPorts); return; }
 
     // Escalate: SIGTERM
     console.warn(`quitExecutor: executor (port ${gqlPort}) still running after ${timeoutMs}ms, sending SIGTERM`);
@@ -334,7 +344,7 @@ export async function quitExecutor(
         exitPromise.then(() => true),
         new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3000)),
     ]);
-    if (termExited) { killByPorts([gqlPort]); return; }
+    if (termExited) { killByPorts(allPorts); return; }
 
     // Final escalation: SIGKILL
     console.warn(`quitExecutor: executor (port ${gqlPort}) survived SIGTERM, sending SIGKILL`);
@@ -345,5 +355,5 @@ export async function quitExecutor(
     ]);
 
     // Always ensure the port is freed, regardless of kill outcome.
-    killByPorts([gqlPort]);
+    killByPorts(allPorts);
 }
