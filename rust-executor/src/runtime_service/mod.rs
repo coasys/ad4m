@@ -60,7 +60,11 @@ impl RuntimeService {
     {
         let global_instance_arc = RuntimeService::global_instance();
         let lock_result = global_instance_arc.lock();
-        let runtime_lock = lock_result.expect("Couldn't get lock on Ad4mDb");
+        // Recover from PoisonError to prevent panic cascades that kill the conductor.
+        let runtime_lock = lock_result.unwrap_or_else(|e| {
+            log::error!("RuntimeService mutex was poisoned; recovering: {:?}", e);
+            e.into_inner()
+        });
         let runtime_ref = runtime_lock.as_ref().expect("Ad4mDb not initialized");
         func(runtime_ref)
     }
