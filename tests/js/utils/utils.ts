@@ -227,9 +227,6 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
                 }
             }
         },
-        // Don't retry when the server goes down — avoids ECONNREFUSED spam
-        // during test teardown when the executor is intentionally killed.
-        shouldRetry: () => false,
     }));
     wsLink.client.on('message' as any, (data: any) => {
         if (data.payload) {
