@@ -1,6 +1,10 @@
 version: 2.1
 references:
   ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
+  # Ubuntu 25.04 test runner image (glibc 2.41 — matches build host).
+  # Required because binaries are built on Ubuntu 25.04 and glibc is not forwards-compatible.
+  # Image: .circleci/Dockerfile.test | Node 18 + pnpm + Deno
+  ad4m_test_image: &ad4m_test_image coasys/ad4m-ci-test:latest@sha256:de8f691544f7c2f3b0f919fd870e0161c7f025d8169e45ed68b51f60c2b58a96
 
 # Self-hosted machine runner on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04)
 # Resource class: coasys/marvin
@@ -108,17 +112,18 @@ jobs:
     steps:
       - setup_integration_test_environment
       - run:
-          name: Kill any orphaned executors from previous runs
+          name: Run integration tests in Docker
+          # Run tests inside a Docker container for clean process isolation.
+          # When the container exits (pass or fail) ALL processes inside die —
+          # no orphaned executors, no port conflicts between re-runs.
+          # --network host: executor binds localhost ports, tests connect via localhost.
           command: |
-            # Self-hosted runners reuse workdirs; previous job may have left
-            # an executor alive (exec() shell-wrap means kill() only kills
-            # the shell, not the executor grandchild). Clear ports before test.
-            for port in 15700 15701 15702; do
-              lsof -ti:$port | xargs -r kill -9 2>/dev/null || true
-            done
-      - run:
-          name: Run integration tests
-          command: cd ./tests/js && pnpm run test-main
+            docker run --rm \
+              --network host \
+              -v "$(pwd):/workspace" \
+              -w /workspace \
+              coasys/ad4m-ci-test:latest@sha256:de8f691544f7c2f3b0f919fd870e0161c7f025d8169e45ed68b51f60c2b58a96 \
+              bash -c "cd tests/js && pnpm run test-main"
           no_output_timeout: 30m
 
   integration-tests-multi-user-simple:
@@ -127,8 +132,14 @@ jobs:
     steps:
       - setup_integration_test_environment
       - run:
-          name: Run multi-user-simple integration tests
-          command: cd ./tests/js && ./test-multi-user-with-setup.sh
+          name: Run multi-user-simple integration tests in Docker
+          command: |
+            docker run --rm \
+              --network host \
+              -v "$(pwd):/workspace" \
+              -w /workspace \
+              coasys/ad4m-ci-test:latest@sha256:de8f691544f7c2f3b0f919fd870e0161c7f025d8169e45ed68b51f60c2b58a96 \
+              bash -c "cd tests/js && ./test-multi-user-with-setup.sh"
           no_output_timeout: 30m
 
   integration-tests-email-verification:
@@ -137,8 +148,14 @@ jobs:
     steps:
       - setup_integration_test_environment
       - run:
-          name: Run email-verification integration tests
-          command: cd ./tests/js && ./email-verification-test-with-setup.sh
+          name: Run email-verification integration tests in Docker
+          command: |
+            docker run --rm \
+              --network host \
+              -v "$(pwd):/workspace" \
+              -w /workspace \
+              coasys/ad4m-ci-test:latest@sha256:de8f691544f7c2f3b0f919fd870e0161c7f025d8169e45ed68b51f60c2b58a96 \
+              bash -c "cd tests/js && ./email-verification-test-with-setup.sh"
           no_output_timeout: 30m
 
   integration-tests-cli:
