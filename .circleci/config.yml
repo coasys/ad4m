@@ -1,38 +1,36 @@
 version: 2.1
 references:
   ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
-  # Ubuntu 25.04 test runner image (glibc 2.41 — matches build host).
-  # Required because binaries are built on Ubuntu 25.04 and glibc is not forwards-compatible.
-  # Image: .circleci/Dockerfile.test | Node 18 + pnpm + Deno
-  ad4m_test_image: &ad4m_test_image coasys/ad4m-ci-test:latest@sha256:de8f691544f7c2f3b0f919fd870e0161c7f025d8169e45ed68b51f60c2b58a96
 
 # Self-hosted machine runner on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04)
 # Resource class: coasys/marvin
+#
+# All build and test steps run inside the coasys/ad4m-ci-linux Docker container
+# (Ubuntu 22.04). This gives:
+#   - Clean process isolation: container exit kills all child processes
+#   - glibc compatibility: binaries built inside the same container they run in
+#   - No orphaned executors between test runs
 
+# Environment variables to run as root but use circleci user's pre-installed tools
+# (node, cargo, pnpm, deno are all installed under /home/circleci in the image)
 commands:
   setup_env:
-    description: "Set up build environment (Node 18, Rust, Deno, Go, pnpm)"
+    description: "Set up build environment (used for host-side non-Docker steps only)"
     steps:
       - run:
           name: Setup build environment
           command: |
-            # Add all tool paths directly to PATH — no NVM sourcing (nvm use prints to stdout
-            # which corrupts subshell commands in cargo build scripts like libffi's libtool)
             echo 'export PATH="$HOME/.nvm/versions/node/v18.20.8/bin:$HOME/.cargo/bin:$HOME/.deno/bin:$HOME/.local/go/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/go/bin:$PATH"' >> $BASH_ENV
             source $BASH_ENV
             echo "Node: $(node --version)"
-            echo "npm: $(npm --version)"
-            echo "Rust: $(rustc --version)"
-            echo "Deno: $(deno --version | head -1)"
-            echo "Go: $(go version)"
             echo "pnpm: $(pnpm --version)"
 
   setup_integration_test_environment:
-    description: "Setup common integration test environment"
+    description: "Checkout + restore binaries + install deps + build languages (on host)"
     steps:
       - checkout
       - run:
-          name: Restore binaries from local stash (no CircleCI network storage needed — same host)
+          name: Restore binaries from local stash
           command: |
             mkdir -p target/release
             cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m target/release/ad4m
@@ -55,56 +53,42 @@ jobs:
     resource_class: coasys/marvin
     steps:
       - checkout
-      - setup_env
       - run:
           name: Clean up stale local artifact stashes (older than 1 day)
           command: |
             find /tmp/circleci-artifacts -maxdepth 1 -mindepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
       - run:
-          name: cargo fmt --check
-          command: cargo fmt --check
+          name: Build and test inside Docker (coasys/ad4m-ci-linux)
+          no_output_timeout: 60m
+          command: |
+            docker run --rm \
+              --user root \
+              -e HOME=/home/circleci \
+              -e CARGO_HOME=/home/circleci/.cargo \
+              -e RUSTUP_HOME=/home/circleci/.rustup \
+              -v "$(pwd):/workspace" \
+              -w /workspace \
+              coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c \
+              bash -c "
+                set -euo pipefail
+                cargo fmt --check
+                pnpm install --no-frozen-lockfile
+                pnpm build-dapp
+                cd core && pnpm install --no-frozen-lockfile && cd ..
+                pnpm run build-core-executor
+                pnpm run build-deno-snapshot
+                pnpm run build-libs
+                cargo clippy --all --exclude ad4m-launcher
+                node removePnpm.js
+                pnpm install --no-frozen-lockfile
+                cd core && pnpm install --no-frozen-lockfile && cd ..
+                pnpm test
+              "
       - run:
-          name: Install dependencies
-          command: pnpm install --no-frozen-lockfile
-      - run:
-          name: Build dapp
-          command: pnpm build-dapp
-      - run:
-          name: Install core dependencies
-          command: cd ./core && pnpm install --no-frozen-lockfile
-      - run:
-          name: Build core executor
-          command: pnpm run build-core-executor
-      - run:
-          name: Build deno snapshot
-          command: pnpm run build-deno-snapshot
-          no_output_timeout: 30m
-      - run:
-          name: Build ADAM (without bootstrap languages)
-          command: pnpm run build-libs
-          no_output_timeout: 30m
-      - run:
-          name: cargo clippy
-          no_output_timeout: 30m
-          command: cargo clippy --all --exclude ad4m-launcher
-      - run:
-          name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
+          name: Stash binaries for integration test jobs
           command: |
             mkdir -p /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}
             cp target/release/ad4m target/release/ad4m-executor /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/
-      - run:
-          name: Remove pnpm patches
-          command: node removePnpm.js
-      - run:
-          name: Install dependencies
-          command: pnpm install --no-frozen-lockfile
-      - run:
-          name: Install core dependencies
-          command: cd ./core && pnpm install --no-frozen-lockfile
-      - run:
-          name: Root tests
-          command: pnpm test
-          no_output_timeout: 30m
 
   integration-tests-js:
     machine: true
@@ -112,19 +96,19 @@ jobs:
     steps:
       - setup_integration_test_environment
       - run:
-          name: Run integration tests in Docker
-          # Run tests inside a Docker container for clean process isolation.
-          # When the container exits (pass or fail) ALL processes inside die —
-          # no orphaned executors, no port conflicts between re-runs.
-          # --network host: executor binds localhost ports, tests connect via localhost.
+          name: Run integration tests inside Docker
+          no_output_timeout: 30m
           command: |
             docker run --rm \
               --network host \
+              --user root \
+              -e HOME=/home/circleci \
+              -e CARGO_HOME=/home/circleci/.cargo \
+              -e RUSTUP_HOME=/home/circleci/.rustup \
               -v "$(pwd):/workspace" \
               -w /workspace \
-              coasys/ad4m-ci-test:latest@sha256:de8f691544f7c2f3b0f919fd870e0161c7f025d8169e45ed68b51f60c2b58a96 \
+              coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c \
               bash -c "cd tests/js && pnpm run test-main"
-          no_output_timeout: 30m
 
   integration-tests-multi-user-simple:
     machine: true
@@ -132,15 +116,19 @@ jobs:
     steps:
       - setup_integration_test_environment
       - run:
-          name: Run multi-user-simple integration tests in Docker
+          name: Run multi-user-simple integration tests inside Docker
+          no_output_timeout: 30m
           command: |
             docker run --rm \
               --network host \
+              --user root \
+              -e HOME=/home/circleci \
+              -e CARGO_HOME=/home/circleci/.cargo \
+              -e RUSTUP_HOME=/home/circleci/.rustup \
               -v "$(pwd):/workspace" \
               -w /workspace \
-              coasys/ad4m-ci-test:latest@sha256:de8f691544f7c2f3b0f919fd870e0161c7f025d8169e45ed68b51f60c2b58a96 \
+              coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c \
               bash -c "cd tests/js && ./test-multi-user-with-setup.sh"
-          no_output_timeout: 30m
 
   integration-tests-email-verification:
     machine: true
@@ -148,15 +136,19 @@ jobs:
     steps:
       - setup_integration_test_environment
       - run:
-          name: Run email-verification integration tests in Docker
+          name: Run email-verification integration tests inside Docker
+          no_output_timeout: 30m
           command: |
             docker run --rm \
               --network host \
+              --user root \
+              -e HOME=/home/circleci \
+              -e CARGO_HOME=/home/circleci/.cargo \
+              -e RUSTUP_HOME=/home/circleci/.rustup \
               -v "$(pwd):/workspace" \
               -w /workspace \
-              coasys/ad4m-ci-test:latest@sha256:de8f691544f7c2f3b0f919fd870e0161c7f025d8169e45ed68b51f60c2b58a96 \
+              coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c \
               bash -c "cd tests/js && ./email-verification-test-with-setup.sh"
-          no_output_timeout: 30m
 
   integration-tests-cli:
     machine: true
