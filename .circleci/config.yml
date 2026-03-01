@@ -112,8 +112,12 @@ jobs:
           command: |
             # Self-hosted runners reuse workdirs; previous job may have left
             # an executor alive (exec() shell-wrap means kill() only kills
-            # the shell, not the executor grandchild). Clear ports before test.
-            for port in 15700 15701 15702; do
+            # the shell, not the executor grandchild). Clear ALL test ports
+            # before starting, not just setup ports.
+            for port in 15000 15001 15002 15100 15101 15102 15200 15201 15202 15203 \
+                        15300 15301 15302 15400 15401 15402 \
+                        15600 15601 15602 15700 15701 15702 \
+                        16600 16601 16602; do
               lsof -ti:$port | xargs -r kill -9 2>/dev/null || true
             done
       - run:
