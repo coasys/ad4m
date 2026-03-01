@@ -654,14 +654,22 @@ impl AgentService {
         let file = match std::fs::read_to_string(self.file.as_str()) {
             Ok(f) => f,
             Err(e) => {
-                log::error!("AgentService::load() — failed to read agent file '{}': {}. Skipping load.", self.file, e);
+                log::error!(
+                    "AgentService::load() — failed to read agent file '{}': {}. Skipping load.",
+                    self.file,
+                    e
+                );
                 return;
             }
         };
         let dump: AgentStore = match serde_json::from_str(&file) {
             Ok(d) => d,
             Err(e) => {
-                log::error!("AgentService::load() — failed to parse agent file '{}': {}. Skipping load.", self.file, e);
+                log::error!(
+                    "AgentService::load() — failed to parse agent file '{}': {}. Skipping load.",
+                    self.file,
+                    e
+                );
                 return;
             }
         };
@@ -684,7 +692,9 @@ impl AgentService {
         // and fall through to the default-agent creation below so self.agent is
         // always initialised (returning early here would leave it None, causing
         // downstream .expect("agent") calls to panic).
-        let loaded_agent: Option<Agent> = if std::path::Path::new(self.file_profile.as_str()).exists() {
+        let loaded_agent: Option<Agent> = if std::path::Path::new(self.file_profile.as_str())
+            .exists()
+        {
             match std::fs::read_to_string(self.file_profile.as_str()) {
                 Err(e) => {
                     log::error!("AgentService::load() — failed to read profile file '{}': {}. Will use default agent.", self.file_profile, e);
