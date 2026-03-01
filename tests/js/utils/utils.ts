@@ -293,9 +293,9 @@ export function killByPorts(ports: number[]): void {
 export async function quitExecutor(
     executorProcess: ChildProcess,
     gqlPort: number,
+    adminCredential?: string,
     hcAdminPort?: number,
     hcAppPort?: number,
-    adminCredential?: string,
     timeoutMs: number = 8000,
 ): Promise<void> {
     // Collect all ports to clean up (GQL + optional HC ports).
