@@ -168,9 +168,8 @@ impl Mutation {
             agent_service.create_new_keys();
 
             // Set the direct message language from bootstrap seed
-            let dm_language = RuntimeService::with_global_instance(|rt| {
-                rt.get_direct_message_language()
-            });
+            let dm_language =
+                RuntimeService::with_global_instance(|rt| rt.get_direct_message_language());
             if let Some(ref mut agent) = agent_service.agent {
                 agent.direct_message_language = Some(dm_language);
             }

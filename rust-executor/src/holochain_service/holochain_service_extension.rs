@@ -31,19 +31,13 @@ pub fn msgpack_value_to_json(val: rmpv::Value) -> serde_json::Value {
                 serde_json::Value::Null
             }
         }
-        rmpv::Value::F32(f) => {
-            serde_json::Number::from_f64(f as f64)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null)
-        }
-        rmpv::Value::F64(f) => {
-            serde_json::Number::from_f64(f)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null)
-        }
-        rmpv::Value::String(s) => {
-            serde_json::Value::String(s.into_str().unwrap_or_default())
-        }
+        rmpv::Value::F32(f) => serde_json::Number::from_f64(f as f64)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        rmpv::Value::F64(f) => serde_json::Number::from_f64(f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        rmpv::Value::String(s) => serde_json::Value::String(s.into_str().unwrap_or_default()),
         rmpv::Value::Binary(bytes) => {
             // Mark binary data so JS can convert it to Uint8Array
             let arr: Vec<serde_json::Value> = bytes
@@ -102,14 +96,12 @@ fn json_to_msgpack_value(val: &serde_json::Value) -> rmpv::Value {
         serde_json::Value::String(s) => rmpv::Value::String(s.clone().into()),
         serde_json::Value::Array(arr) => {
             // Check if this looks like a byte array (all integers in 0-255 range)
-            let is_byte_array = !arr.is_empty() && arr.iter().all(|v| {
-                v.as_u64().map(|n| n <= 255).unwrap_or(false)
-            });
-            if is_byte_array {
-                let bytes: Vec<u8> = arr
+            let is_byte_array = !arr.is_empty()
+                && arr
                     .iter()
-                    .map(|v| v.as_u64().unwrap() as u8)
-                    .collect();
+                    .all(|v| v.as_u64().map(|n| n <= 255).unwrap_or(false));
+            if is_byte_array {
+                let bytes: Vec<u8> = arr.iter().map(|v| v.as_u64().unwrap() as u8).collect();
                 rmpv::Value::Binary(bytes)
             } else {
                 rmpv::Value::Array(arr.iter().map(json_to_msgpack_value).collect())

@@ -402,12 +402,11 @@ impl Query {
             let (constructor_icon_json, icon_json, settings_icon_json) =
                 controller.get_language_icons(&address).await;
 
-            let constructor_icon = constructor_icon_json
-                .and_then(|j| serde_json::from_str::<Icon>(&j).ok());
-            let icon = icon_json
-                .and_then(|j| serde_json::from_str::<Icon>(&j).ok());
-            let settings_icon = settings_icon_json
-                .and_then(|j| serde_json::from_str::<Icon>(&j).ok());
+            let constructor_icon =
+                constructor_icon_json.and_then(|j| serde_json::from_str::<Icon>(&j).ok());
+            let icon = icon_json.and_then(|j| serde_json::from_str::<Icon>(&j).ok());
+            let settings_icon =
+                settings_icon_json.and_then(|j| serde_json::from_str::<Icon>(&j).ok());
 
             return Ok(LanguageHandle {
                 address,

@@ -32,10 +32,10 @@ use language_runtime_handle::LanguageRuntimeHandle;
 use log::{error, info, warn};
 use regex::Regex;
 use serde_json::Value as JsonValue;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::collections::BTreeMap;
 use tokio::sync::Mutex as TokioMutex;
 
 /// Produce a JSON string with keys sorted alphabetically (matches json-stable-stringify)
@@ -46,8 +46,8 @@ fn sorted_json_string(val: &JsonValue) -> String {
             let sorted_val: serde_json::Map<String, JsonValue> = sorted
                 .into_iter()
                 .map(|(k, v)| {
-                    let v_sorted: JsonValue = serde_json::from_str(&sorted_json_string(v))
-                        .unwrap_or_else(|_| v.clone());
+                    let v_sorted: JsonValue =
+                        serde_json::from_str(&sorted_json_string(v)).unwrap_or_else(|_| v.clone());
                     (k.clone(), v_sorted)
                 })
                 .collect();
@@ -223,7 +223,11 @@ impl LanguageController {
                 names.insert(language_address.clone(), name);
             }
             Err(e) => {
-                log::warn!("Failed to get language name for {}: {}", language_address, e);
+                log::warn!(
+                    "Failed to get language name for {}: {}",
+                    language_address,
+                    e
+                );
             }
         }
 
@@ -2042,31 +2046,31 @@ impl LanguageController {
                 // while signing always uses alphabetically sorted keys.
                 expr.data = crate::js_core::utils::sort_json_value(&expr.data);
                 match crate::agent::signatures::verify(&expr) {
-                Ok(valid) => {
-                    log::warn!(
-                        "verify_expression_proof: author={}, valid={}, sig={}",
-                        expr.author,
-                        valid,
-                        &expr.proof.signature[..20.min(expr.proof.signature.len())]
-                    );
-                    if let Some(proof) = expr_json.get_mut("proof") {
-                        proof["valid"] = JsonValue::Bool(valid);
-                        proof["invalid"] = JsonValue::Bool(!valid);
+                    Ok(valid) => {
+                        log::warn!(
+                            "verify_expression_proof: author={}, valid={}, sig={}",
+                            expr.author,
+                            valid,
+                            &expr.proof.signature[..20.min(expr.proof.signature.len())]
+                        );
+                        if let Some(proof) = expr_json.get_mut("proof") {
+                            proof["valid"] = JsonValue::Bool(valid);
+                            proof["invalid"] = JsonValue::Bool(!valid);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "verify_expression_proof: verification error for author={}: {}",
+                            expr.author,
+                            e
+                        );
+                        if let Some(proof) = expr_json.get_mut("proof") {
+                            proof["valid"] = JsonValue::Bool(false);
+                            proof["invalid"] = JsonValue::Bool(true);
+                        }
                     }
                 }
-                Err(e) => {
-                    log::warn!(
-                        "verify_expression_proof: verification error for author={}: {}",
-                        expr.author,
-                        e
-                    );
-                    if let Some(proof) = expr_json.get_mut("proof") {
-                        proof["valid"] = JsonValue::Bool(false);
-                        proof["invalid"] = JsonValue::Bool(true);
-                    }
-                }
-                }
-            },
+            }
             Err(e) => {
                 log::warn!(
                     "verify_expression_proof: failed to parse expression: {}. Keys: {:?}",

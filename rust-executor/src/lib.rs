@@ -97,11 +97,20 @@ async fn holochain_signal_receiver() {
                             match rmpv::decode::read_value(&mut cursor) {
                                 Ok(msgpack_val) => {
                                     let json_val = holochain_service::holochain_service_extension::msgpack_value_to_json(msgpack_val);
-                                    serde_json::to_string(&json_val).unwrap_or_else(|_| "null".to_string())
+                                    serde_json::to_string(&json_val)
+                                        .unwrap_or_else(|_| "null".to_string())
                                 }
                                 Err(e) => {
-                                    log::warn!("Failed to decode signal payload from msgpack: {}", e);
-                                    format!("{}", js_core::ExternWrapper(holochain::prelude::ExternIO::from(payload_bytes)))
+                                    log::warn!(
+                                        "Failed to decode signal payload from msgpack: {}",
+                                        e
+                                    );
+                                    format!(
+                                        "{}",
+                                        js_core::ExternWrapper(holochain::prelude::ExternIO::from(
+                                            payload_bytes
+                                        ))
+                                    )
                                 }
                             }
                         };
