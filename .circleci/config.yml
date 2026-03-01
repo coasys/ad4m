@@ -66,6 +66,7 @@ jobs:
               -e HOME=/home/circleci \
               -e CARGO_HOME=/home/circleci/.cargo \
               -e RUSTUP_HOME=/home/circleci/.rustup \
+              -e CI=true \
               -v "$(pwd):/workspace" \
               -w /workspace \
               coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c \
@@ -105,6 +106,7 @@ jobs:
               -e HOME=/home/circleci \
               -e CARGO_HOME=/home/circleci/.cargo \
               -e RUSTUP_HOME=/home/circleci/.rustup \
+              -e CI=true \
               -v "$(pwd):/workspace" \
               -w /workspace \
               coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c \
@@ -125,6 +127,7 @@ jobs:
               -e HOME=/home/circleci \
               -e CARGO_HOME=/home/circleci/.cargo \
               -e RUSTUP_HOME=/home/circleci/.rustup \
+              -e CI=true \
               -v "$(pwd):/workspace" \
               -w /workspace \
               coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c \
@@ -145,6 +148,7 @@ jobs:
               -e HOME=/home/circleci \
               -e CARGO_HOME=/home/circleci/.cargo \
               -e RUSTUP_HOME=/home/circleci/.rustup \
+              -e CI=true \
               -v "$(pwd):/workspace" \
               -w /workspace \
               coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c \
