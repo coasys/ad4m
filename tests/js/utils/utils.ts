@@ -215,9 +215,13 @@ export async function startExecutor(dataPath: string,
     return executorProcess;
 }
 
+// Track graphql-ws clients by port so quitExecutor can terminate them
+// before killing the executor, preventing subscription errors from
+// causing mocha "done() called multiple times" failures.
+const wsClientsByPort = new Map<number, ReturnType<typeof createClient>>();
+
 export function apolloClient(port: number, token?: string): ApolloClient<any> {
-    //@ts-ignore
-    const wsLink = new GraphQLWsLink(createClient({
+    const wsClient = createClient({
         url: `ws://127.0.0.1:${port}/graphql`,
         webSocketImpl: Websocket,
         connectionParams: () => {
@@ -227,7 +231,12 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
                 }
             }
         },
-    }));
+    });
+    // Register so quitExecutor can terminate this client on teardown.
+    wsClientsByPort.set(port, wsClient);
+
+    //@ts-ignore
+    const wsLink = new GraphQLWsLink(wsClient);
     wsLink.client.on('message' as any, (data: any) => {
         if (data.payload) {
             if (data.payload.errors) {
@@ -300,6 +309,19 @@ export async function quitExecutor(
 ): Promise<void> {
     // Collect all ports to clean up (GQL + optional HC ports).
     const allPorts = [gqlPort, ...(hcAdminPort ? [hcAdminPort] : []), ...(hcAppPort ? [hcAppPort] : [])];
+
+    // Terminate all known graphql-ws clients on these ports BEFORE killing
+    // the executor. This prevents active subscriptions from firing errors
+    // during teardown, which causes mocha "done() called multiple times".
+    for (const port of allPorts) {
+        const wsClient = wsClientsByPort.get(port);
+        if (wsClient) {
+            try { wsClient.terminate(); } catch (_) {}
+            wsClientsByPort.delete(port);
+        }
+    }
+    // Brief pause to let ws close events settle before process dies.
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
 
     // Only check exitCode (set when OS process actually exits).
     // Do NOT check executorProcess.killed — that's set as soon as kill() is
