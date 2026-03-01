@@ -680,31 +680,37 @@ impl AgentService {
             wallet_ref.load(dump.keystore);
         }
 
-        if std::path::Path::new(self.file_profile.as_str()).exists() {
-            let file_profile = match std::fs::read_to_string(self.file_profile.as_str()) {
-                Ok(f) => f,
+        // Try to load the agent profile from disk. On any read/parse error, log
+        // and fall through to the default-agent creation below so self.agent is
+        // always initialised (returning early here would leave it None, causing
+        // downstream .expect("agent") calls to panic).
+        let loaded_agent: Option<Agent> = if std::path::Path::new(self.file_profile.as_str()).exists() {
+            match std::fs::read_to_string(self.file_profile.as_str()) {
                 Err(e) => {
-                    log::error!("AgentService::load() — failed to read profile file '{}': {}. Skipping profile load.", self.file_profile, e);
-                    return;
+                    log::error!("AgentService::load() — failed to read profile file '{}': {}. Will use default agent.", self.file_profile, e);
+                    None
                 }
-            };
-            self.agent = match serde_json::from_str(&file_profile) {
-                Ok(a) => Some(a),
-                Err(e) => {
-                    log::error!("AgentService::load() — failed to parse profile file '{}': {}. Skipping profile load.", self.file_profile, e);
-                    return;
-                }
-            };
+                Ok(file_profile) => match serde_json::from_str::<Agent>(&file_profile) {
+                    Err(e) => {
+                        log::error!("AgentService::load() — failed to parse profile file '{}': {}. Will use default agent.", self.file_profile, e);
+                        None
+                    }
+                    Ok(agent) => Some(agent),
+                },
+            }
         } else {
+            None
+        };
+
+        self.agent = Some(loaded_agent.unwrap_or_else(|| {
             let did_clone = dump.did.clone();
             let did = check_keys_and_create(did_clone).id.clone();
-
-            self.agent = Some(Agent {
+            Agent {
                 did,
                 perspective: Some(Perspective { links: vec![] }),
                 direct_message_language: None,
-            });
-        }
+            }
+        }));
     }
 
     pub fn dump(&self) -> AgentStatus {
