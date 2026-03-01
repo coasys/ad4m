@@ -347,6 +347,16 @@ export async function quitExecutor(
         ]);
     } catch (_e) {
         // Expected: either the connection dropped (executor exited) or it timed out.
+    } finally {
+        // apolloClient() registered a new wsClient in wsClientsByPort for gqlPort.
+        // Terminate it immediately so it doesn't enter a reconnect loop after the
+        // executor dies — those reconnect errors fire asynchronously and can
+        // surface as uncaught ApolloErrors in later mocha hooks.
+        const ephemeralWs = wsClientsByPort.get(gqlPort);
+        if (ephemeralWs) {
+            try { ephemeralWs.terminate(); } catch (_) {}
+            wsClientsByPort.delete(gqlPort);
+        }
     }
 
     // Wait for natural exit
