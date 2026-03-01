@@ -541,8 +541,8 @@ impl AgentService {
         Ok(())
     }
 
-    /// Ensure the main agent has an expression in the agent language.
-    /// If no expression is found for the agent's DID, publishes it.
+    /// Publish the main agent's current profile to the agent language.
+    /// Always updates the expression (creates or overwrites).
     pub async fn ensure_agent_expression() -> Result<(), AnyError> {
         let controller = crate::languages::LanguageController::global_instance();
 
@@ -554,30 +554,6 @@ impl AgentService {
                 return Ok(());
             }
         };
-
-        let agent_did = did();
-
-        // Check if expression already exists
-        let check_script = format!(
-            r#"JSON.stringify(await language.expressionAdapter.get("{}"))"#,
-            agent_did
-        );
-
-        match controller
-            .execute_on_language(agent_language.address(), &check_script)
-            .await
-        {
-            Ok(result) => {
-                let trimmed = result.trim().trim_matches('"');
-                if trimmed != "null" && trimmed != "undefined" && !trimmed.is_empty() {
-                    log::info!("Agent expression already exists");
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                log::warn!("Error checking agent expression: {:?}", e);
-            }
-        }
 
         // Get current agent data and publish it
         let agent_data =
@@ -595,7 +571,7 @@ impl AgentService {
                 .execute_on_language(agent_language.address(), &create_script)
                 .await
                 .map_err(|e| anyhow!("Error creating agent expression: {:?}", e))?;
-            log::info!("Agent expression created successfully");
+            log::info!("Agent expression published successfully");
         } else {
             log::warn!("No agent data available to publish");
         }

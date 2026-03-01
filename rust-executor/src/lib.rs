@@ -89,8 +89,22 @@ async fn holochain_signal_receiver() {
                                 .collect::<String>()
                         );
 
-                        let payload_str =
-                            format!("{}", js_core::ExternWrapper(payload.into_inner()));
+                        // Decode the signal payload from msgpack to JSON using rmpv
+                        // for proper Binary type handling
+                        let payload_bytes = payload.into_inner().as_bytes().to_vec();
+                        let payload_str = {
+                            let mut cursor = std::io::Cursor::new(&payload_bytes);
+                            match rmpv::decode::read_value(&mut cursor) {
+                                Ok(msgpack_val) => {
+                                    let json_val = holochain_service::holochain_service_extension::msgpack_value_to_json(msgpack_val);
+                                    serde_json::to_string(&json_val).unwrap_or_else(|_| "null".to_string())
+                                }
+                                Err(e) => {
+                                    log::warn!("Failed to decode signal payload from msgpack: {}", e);
+                                    format!("{}", js_core::ExternWrapper(holochain::prelude::ExternIO::from(payload_bytes)))
+                                }
+                            }
+                        };
                         let dna_hash_dbg = format!("{:?}", dna_hash_raw);
                         let agent_pubkey_dbg = format!("{:?}", agent_pubkey_raw);
 

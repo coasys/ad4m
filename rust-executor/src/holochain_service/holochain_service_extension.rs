@@ -7,12 +7,138 @@ use holochain::{
 };
 use log::error;
 use serde::{Deserialize, Serialize};
+use std::io::Cursor;
 use std::time::Duration;
 use tokio::time::timeout;
 
 use super::get_holochain_service;
 use crate::holochain_service::{HolochainService, LocalConductorConfig};
 use crate::js_core::error::AnyhowWrapperError;
+
+/// Convert an rmpv::Value (full-fidelity msgpack) to serde_json::Value.
+/// Binary data is represented as a JSON object `{"__binary": [byte, byte, ...]}` so
+/// the JS layer can recognize it and convert to Uint8Array.
+pub fn msgpack_value_to_json(val: rmpv::Value) -> serde_json::Value {
+    match val {
+        rmpv::Value::Nil => serde_json::Value::Null,
+        rmpv::Value::Boolean(b) => serde_json::Value::Bool(b),
+        rmpv::Value::Integer(i) => {
+            if let Some(n) = i.as_i64() {
+                serde_json::Value::Number(n.into())
+            } else if let Some(n) = i.as_u64() {
+                serde_json::Value::Number(n.into())
+            } else {
+                serde_json::Value::Null
+            }
+        }
+        rmpv::Value::F32(f) => {
+            serde_json::Number::from_f64(f as f64)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null)
+        }
+        rmpv::Value::F64(f) => {
+            serde_json::Number::from_f64(f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null)
+        }
+        rmpv::Value::String(s) => {
+            serde_json::Value::String(s.into_str().unwrap_or_default())
+        }
+        rmpv::Value::Binary(bytes) => {
+            // Mark binary data so JS can convert it to Uint8Array
+            let arr: Vec<serde_json::Value> = bytes
+                .iter()
+                .map(|b| serde_json::Value::Number((*b).into()))
+                .collect();
+            let mut map = serde_json::Map::new();
+            map.insert("__binary".to_string(), serde_json::Value::Array(arr));
+            serde_json::Value::Object(map)
+        }
+        rmpv::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(msgpack_value_to_json).collect())
+        }
+        rmpv::Value::Map(entries) => {
+            let mut map = serde_json::Map::new();
+            for (k, v) in entries {
+                let key = match k {
+                    rmpv::Value::String(s) => s.into_str().unwrap_or_default(),
+                    other => format!("{}", other),
+                };
+                map.insert(key, msgpack_value_to_json(v));
+            }
+            serde_json::Value::Object(map)
+        }
+        rmpv::Value::Ext(_, data) => {
+            // Treat extension types like binary
+            let arr: Vec<serde_json::Value> = data
+                .iter()
+                .map(|b| serde_json::Value::Number((*b).into()))
+                .collect();
+            let mut map = serde_json::Map::new();
+            map.insert("__binary".to_string(), serde_json::Value::Array(arr));
+            serde_json::Value::Object(map)
+        }
+    }
+}
+
+/// Convert a serde_json::Value back to rmpv::Value for encoding to msgpack.
+/// Recognizes `{"__binary": [...]}` objects and converts them back to Binary.
+/// Also heuristically converts top-level or nested arrays of u8-range numbers to Binary.
+fn json_to_msgpack_value(val: &serde_json::Value) -> rmpv::Value {
+    match val {
+        serde_json::Value::Null => rmpv::Value::Nil,
+        serde_json::Value::Bool(b) => rmpv::Value::Boolean(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                rmpv::Value::Integer(rmpv::Integer::from(i))
+            } else if let Some(u) = n.as_u64() {
+                rmpv::Value::Integer(rmpv::Integer::from(u))
+            } else if let Some(f) = n.as_f64() {
+                rmpv::Value::F64(f)
+            } else {
+                rmpv::Value::Nil
+            }
+        }
+        serde_json::Value::String(s) => rmpv::Value::String(s.clone().into()),
+        serde_json::Value::Array(arr) => {
+            // Check if this looks like a byte array (all integers in 0-255 range)
+            let is_byte_array = !arr.is_empty() && arr.iter().all(|v| {
+                v.as_u64().map(|n| n <= 255).unwrap_or(false)
+            });
+            if is_byte_array {
+                let bytes: Vec<u8> = arr
+                    .iter()
+                    .map(|v| v.as_u64().unwrap() as u8)
+                    .collect();
+                rmpv::Value::Binary(bytes)
+            } else {
+                rmpv::Value::Array(arr.iter().map(json_to_msgpack_value).collect())
+            }
+        }
+        serde_json::Value::Object(map) => {
+            // Check for our __binary marker
+            if map.len() == 1 {
+                if let Some(serde_json::Value::Array(bytes)) = map.get("__binary") {
+                    let byte_vec: Vec<u8> = bytes
+                        .iter()
+                        .filter_map(|v| v.as_u64().map(|n| n as u8))
+                        .collect();
+                    return rmpv::Value::Binary(byte_vec);
+                }
+            }
+            let entries: Vec<(rmpv::Value, rmpv::Value)> = map
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        rmpv::Value::String(k.clone().into()),
+                        json_to_msgpack_value(v),
+                    )
+                })
+                .collect();
+            rmpv::Value::Map(entries)
+        }
+    }
+}
 
 /// A JS-friendly version of ZomeCallResponse that decodes ExternIO bytes to JSON.
 #[derive(Debug, Serialize, Deserialize)]
@@ -27,9 +153,31 @@ impl DecodedZomeCallResponse {
     fn from_zome_call_response(response: ZomeCallResponse) -> Result<Self, AnyhowWrapperError> {
         match response {
             ZomeCallResponse::Ok(extern_io) => {
-                let value: serde_json::Value = extern_io.decode().map_err(|e| {
-                    AnyhowWrapperError::from(anyhow!("Failed to decode ExternIO response: {}", e))
-                })?;
+                // Decode msgpack bytes using rmpv for full-fidelity type preservation.
+                // This properly handles Binary types (hashes, etc.) that serde_json::Value
+                // cannot represent directly.
+                let bytes = extern_io.as_bytes();
+                let value = if bytes.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    let mut cursor = Cursor::new(bytes);
+                    match rmpv::decode::read_value(&mut cursor) {
+                        Ok(msgpack_val) => msgpack_value_to_json(msgpack_val),
+                        Err(e) => {
+                            log::warn!(
+                                "rmpv decode failed ({}), falling back to raw bytes array",
+                                e
+                            );
+                            // Last resort: return raw bytes as an array of numbers
+                            serde_json::Value::Array(
+                                bytes
+                                    .iter()
+                                    .map(|b| serde_json::Value::Number((*b).into()))
+                                    .collect(),
+                            )
+                        }
+                    }
+                };
                 Ok(DecodedZomeCallResponse::Ok { value })
             }
             ZomeCallResponse::NetworkError(msg) => {
@@ -112,13 +260,17 @@ async fn call_zome_function(
     #[string] fn_name: String,
     #[serde] payload: Option<serde_json::Value>,
 ) -> Result<DecodedZomeCallResponse, AnyhowWrapperError> {
-    // Convert the JSON value to ExternIO (msgpack-encoded bytes) that Holochain expects
+    // Convert the JSON value to ExternIO (msgpack-encoded bytes) that Holochain expects.
+    // We use json_to_msgpack_value to properly reconvert __binary markers and byte arrays
+    // back to msgpack Binary type, preserving round-trip fidelity for Holochain hashes etc.
     let extern_payload = match payload {
         Some(val) => {
-            let bytes = ExternIO::encode(val).map_err(|e| {
-                AnyhowWrapperError::from(anyhow!("Failed to encode payload: {}", e))
+            let msgpack_val = json_to_msgpack_value(&val);
+            let mut buf = Vec::new();
+            rmpv::encode::write_value(&mut buf, &msgpack_val).map_err(|e| {
+                AnyhowWrapperError::from(anyhow!("Failed to encode payload to msgpack: {}", e))
             })?;
-            Some(bytes)
+            Some(ExternIO::from(buf))
         }
         None => None,
     };

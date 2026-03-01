@@ -133,6 +133,14 @@ impl Query {
                                 .unwrap_or(serde_json::Value::Null),
                         )
                         .ok();
+                        // Verify link signatures in the agent's perspective,
+                        // same as agent_me() does
+                        let agent = agent.map(|mut a| {
+                            if a.perspective.is_some() {
+                                a.perspective.as_mut().unwrap().verify_link_signatures();
+                            }
+                            a
+                        });
                         Ok(agent)
                     }
                     Ok(None) => Ok(None),
@@ -391,13 +399,23 @@ impl Query {
                 Some(serde_json::to_string(&settings).unwrap_or_default())
             };
 
+            let (constructor_icon_json, icon_json, settings_icon_json) =
+                controller.get_language_icons(&address).await;
+
+            let constructor_icon = constructor_icon_json
+                .and_then(|j| serde_json::from_str::<Icon>(&j).ok());
+            let icon = icon_json
+                .and_then(|j| serde_json::from_str::<Icon>(&j).ok());
+            let settings_icon = settings_icon_json
+                .and_then(|j| serde_json::from_str::<Icon>(&j).ok());
+
             return Ok(LanguageHandle {
                 address,
                 name,
                 settings: settings_str,
-                constructor_icon: None,
-                icon: None,
-                settings_icon: None,
+                constructor_icon,
+                icon,
+                settings_icon,
             });
         }
 

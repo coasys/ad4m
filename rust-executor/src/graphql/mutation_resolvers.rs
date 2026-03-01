@@ -27,7 +27,7 @@ use crate::{
     },
     holochain_service::get_holochain_service,
     languages::LanguageController,
-    pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC},
+    pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC},
 };
 use base64::prelude::*;
 
@@ -166,6 +166,15 @@ impl Mutation {
         check_capability(&context.capabilities, &AGENT_CREATE_CAPABILITY)?;
         let agent = AgentService::with_mutable_global_instance(|agent_service| {
             agent_service.create_new_keys();
+
+            // Set the direct message language from bootstrap seed
+            let dm_language = RuntimeService::with_global_instance(|rt| {
+                rt.get_direct_message_language()
+            });
+            if let Some(ref mut agent) = agent_service.agent {
+                agent.direct_message_language = Some(dm_language);
+            }
+
             agent_service.save(passphrase.clone());
 
             // Store passphrase so future wallet modifications (e.g., adding user keys) can be saved
@@ -440,7 +449,7 @@ impl Mutation {
     ) -> FieldResult<Agent> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
 
-        AgentService::with_mutable_global_instance(|agent_service| {
+        let agent = AgentService::with_mutable_global_instance(|agent_service| {
             if let Some(ref mut agent) = agent_service.agent {
                 agent.direct_message_language = Some(direct_message_language.clone());
                 let updated_agent = agent.clone();
@@ -451,7 +460,26 @@ impl Mutation {
             } else {
                 Err(FieldError::new("Agent not initialized", Value::null()))
             }
-        })
+        })?;
+
+        // Publish updated agent to agent language
+        if let Err(e) = AgentService::ensure_agent_expression().await {
+            log::warn!(
+                "Failed to publish agent expression after DM language update: {}",
+                e
+            );
+        }
+
+        // Notify subscribers
+        get_global_pubsub()
+            .await
+            .publish(
+                &AGENT_UPDATED_TOPIC,
+                &serde_json::to_string(&agent).unwrap(),
+            )
+            .await;
+
+        Ok(agent)
     }
 
     async fn agent_update_public_perspective(
@@ -541,6 +569,15 @@ impl Mutation {
                     Value::null(),
                 )
             })?;
+
+            // Notify subscribers
+            get_global_pubsub()
+                .await
+                .publish(
+                    &AGENT_UPDATED_TOPIC,
+                    &serde_json::to_string(&agent).unwrap(),
+                )
+                .await;
 
             Ok(agent)
         }
@@ -1404,6 +1441,12 @@ impl Mutation {
                 .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
 
             let input_name = input.meta.name.clone();
+            let input_address = input.meta.address.clone();
+
+            // Save the templated bundle locally so it can be loaded into a runtime
+            if let Err(e) = controller.save_language_bundle(&input.bundle, None) {
+                log::warn!("Failed to save templated language bundle locally: {}", e);
+            }
 
             let language_language_address = {
                 let sys = controller.system_addresses.lock().await;
@@ -1422,7 +1465,7 @@ impl Mutation {
                 input_json
             );
 
-            let address = controller
+            let address_raw = controller
                 .execute_on_language(&language_language_address, &publish_script)
                 .await
                 .map_err(|e| {
@@ -1431,6 +1474,19 @@ impl Mutation {
                         graphql_value!(null),
                     )
                 })?;
+
+            // Strip surrounding quotes from the address
+            let address = address_raw.trim().trim_matches('"').to_string();
+
+            // Load the templated language into a per-language runtime
+            let bundle_on_disk = crate::utils::languages_directory()
+                .join(&address)
+                .join("bundle.js");
+            if bundle_on_disk.exists() {
+                if let Err(e) = controller.load_language(bundle_on_disk).await {
+                    log::warn!("Failed to load templated language into runtime: {}", e);
+                }
+            }
 
             Ok(LanguageRef {
                 address,
@@ -1472,18 +1528,16 @@ impl Mutation {
                 )
             })?;
 
-        // Build meta with the computed address
+        // Build meta with the computed address.
+        // Note: `author` and `templated` are NOT included in the data –
+        // they come from the Expression envelope (author) or are derived (templated).
+        // This matches the old JS LanguageMetaInternal behavior.
         let meta = LanguageMeta {
             name: language_meta.name.clone(),
             address: hash.clone(),
             description: Some(language_meta.description.clone()),
-            author: crate::agent::did(),
-            template_source_language_address: language_meta
-                .possible_template_params
-                .as_ref()
-                .map(|_| String::new()),
-            templated: Some(false),
             possible_template_params: language_meta.possible_template_params.clone(),
+            source_code_link: language_meta.source_code_link.clone(),
             ..LanguageMeta::default()
         };
 
@@ -1529,7 +1583,13 @@ impl Mutation {
             }
         }
 
-        Ok(meta)
+        // Build the response meta with all fields for GraphQL
+        let response_meta = LanguageMeta {
+            author: crate::agent::did(),
+            templated: Some(false),
+            ..meta
+        };
+        Ok(response_meta)
     }
 
     async fn language_remove(

@@ -81,6 +81,10 @@ impl RuntimeService {
         self.seed.perspective_language.clone()
     }
 
+    pub fn get_direct_message_language(&self) -> String {
+        self.seed.direct_message_language.clone()
+    }
+
     pub fn get_trusted_agents(&self) -> Vec<String> {
         let mut trusted_agents: Vec<String> = self.seed.trusted_agents.clone();
         let mut stored_agents = Ad4mDb::with_global_instance(|db| db.get_all_trusted_agents())

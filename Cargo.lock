@@ -133,6 +133,8 @@ dependencies = [
  "rayon",
  "regex",
  "reqwest 0.11.27",
+ "rmp-serde",
+ "rmpv",
  "rocket",
  "rodio",
  "rusqlite",

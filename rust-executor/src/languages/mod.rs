@@ -35,7 +35,34 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::collections::BTreeMap;
 use tokio::sync::Mutex as TokioMutex;
+
+/// Produce a JSON string with keys sorted alphabetically (matches json-stable-stringify)
+fn sorted_json_string(val: &JsonValue) -> String {
+    match val {
+        JsonValue::Object(map) => {
+            let sorted: BTreeMap<&String, &JsonValue> = map.iter().collect();
+            let sorted_val: serde_json::Map<String, JsonValue> = sorted
+                .into_iter()
+                .map(|(k, v)| {
+                    let v_sorted: JsonValue = serde_json::from_str(&sorted_json_string(v))
+                        .unwrap_or_else(|_| v.clone());
+                    (k.clone(), v_sorted)
+                })
+                .collect();
+            serde_json::to_string(&JsonValue::Object(sorted_val)).unwrap_or_default()
+        }
+        JsonValue::Array(arr) => {
+            let sorted_items: Vec<JsonValue> = arr
+                .iter()
+                .map(|v| serde_json::from_str(&sorted_json_string(v)).unwrap_or_else(|_| v.clone()))
+                .collect();
+            serde_json::to_string(&sorted_items).unwrap_or_default()
+        }
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
 
 /// Tracks addresses of system languages (language language, agent, neighbourhood, perspective)
 #[derive(Debug, Clone, Default)]
@@ -188,22 +215,17 @@ impl LanguageController {
         runtimes.insert(language_address.clone(), runtime_handle.clone());
         drop(runtimes);
 
-        // Cache the language name in a non-blocking spawn so it doesn't delay bootstrap
-        let names = self.language_names.clone();
-        let addr = language_address.clone();
-        let handle = runtime_handle.clone();
-        tokio::spawn(async move {
-            match handle.execute("language.name".to_string()).await {
-                Ok(name) => {
-                    let name = name.trim().trim_matches('"').to_string();
-                    let mut names = names.lock().await;
-                    names.insert(addr, name);
-                }
-                Err(e) => {
-                    log::warn!("Failed to get language name for {}: {}", addr, e);
-                }
+        // Cache the language name synchronously so it's available immediately after load
+        match runtime_handle.execute("language.name".to_string()).await {
+            Ok(name) => {
+                let name = name.trim().trim_matches('"').to_string();
+                let mut names = self.language_names.lock().await;
+                names.insert(language_address.clone(), name);
             }
-        });
+            Err(e) => {
+                log::warn!("Failed to get language name for {}: {}", language_address, e);
+            }
+        }
 
         info!("Successfully loaded language: {}", language_address);
         Ok(language_address)
@@ -1401,6 +1423,13 @@ impl LanguageController {
             .cloned()
             .unwrap_or(JsonValue::Object(serde_json::Map::new()));
 
+        // If data is a string, parse it as JSON
+        let language_meta_data = if let JsonValue::String(s) = &language_meta_data {
+            serde_json::from_str::<JsonValue>(s).unwrap_or(language_meta_data)
+        } else {
+            language_meta_data
+        };
+
         // Get trusted agents
         let trusted_agents = RuntimeService::with_global_instance(|rs| rs.get_trusted_agents());
         let agent_did = did();
@@ -1470,7 +1499,12 @@ impl LanguageController {
                 .unwrap_or("");
 
             if template_applied_params.is_empty() || template_source_language_address.is_empty() {
-                let meta_json = serde_json::to_string(&language_meta_data).unwrap_or_default();
+                // Ensure sourceCodeLink is present (as null) to match json-stable-stringify output
+                let mut meta_for_error = language_meta_data.clone();
+                if let Some(obj) = meta_for_error.as_object_mut() {
+                    obj.entry("sourceCodeLink").or_insert(JsonValue::Null);
+                }
+                let meta_json = sorted_json_string(&meta_for_error);
                 let err_msg = format!(
                     "Language not created by trusted agent: {} and is not templated... aborting language install. Language metadata: {}",
                     language_author, meta_json
@@ -1603,6 +1637,12 @@ impl LanguageController {
         if let Some(rest) = url.strip_prefix("literal://") {
             return Ok(("literal".to_string(), rest.to_string()));
         }
+
+        // DID URLs: "did:key:z6Mk..." -> language alias "did", expression address is the full DID
+        if url.starts_with("did:") {
+            return Ok(("did".to_string(), url.to_string()));
+        }
+
         match url.find("://") {
             Some(idx) => {
                 let scheme = &url[..idx];
@@ -1805,6 +1845,90 @@ impl LanguageController {
         names.get(address).cloned().unwrap_or_default()
     }
 
+    /// Get icon code from a language's expressionUI/settingsUI interfaces.
+    /// Returns (constructorIcon, icon, settingsIcon) as Option<String>.
+    pub async fn get_language_icons(
+        &self,
+        address: &str,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let constructor_icon = match self
+            .execute_on_language(
+                address,
+                r#"(function() {
+                    const lang = globalThis.__ad4m_language_instance__;
+                    if (lang && lang.expressionUI && lang.expressionUI.constructorIcon) {
+                        const code = lang.expressionUI.constructorIcon();
+                        return code ? JSON.stringify({code: code}) : JSON.stringify({code: ""});
+                    }
+                    return "null";
+                })()"#,
+            )
+            .await
+        {
+            Ok(result) => {
+                let trimmed = result.trim().trim_matches('"');
+                if trimmed == "null" {
+                    None
+                } else {
+                    Some(result.trim().to_string())
+                }
+            }
+            Err(_) => None,
+        };
+
+        let icon = match self
+            .execute_on_language(
+                address,
+                r#"(function() {
+                    const lang = globalThis.__ad4m_language_instance__;
+                    if (lang && lang.expressionUI && lang.expressionUI.icon) {
+                        const code = lang.expressionUI.icon();
+                        return code ? JSON.stringify({code: code}) : JSON.stringify({code: ""});
+                    }
+                    return "null";
+                })()"#,
+            )
+            .await
+        {
+            Ok(result) => {
+                let trimmed = result.trim().trim_matches('"');
+                if trimmed == "null" {
+                    None
+                } else {
+                    Some(result.trim().to_string())
+                }
+            }
+            Err(_) => None,
+        };
+
+        let settings_icon = match self
+            .execute_on_language(
+                address,
+                r#"(function() {
+                    const lang = globalThis.__ad4m_language_instance__;
+                    if (lang && lang.settingsUI && lang.settingsUI.settingsIcon) {
+                        const code = lang.settingsUI.settingsIcon();
+                        return code ? JSON.stringify({code: code}) : JSON.stringify({code: ""});
+                    }
+                    return "null";
+                })()"#,
+            )
+            .await
+        {
+            Ok(result) => {
+                let trimmed = result.trim().trim_matches('"');
+                if trimmed == "null" {
+                    None
+                } else {
+                    Some(result.trim().to_string())
+                }
+            }
+            Err(_) => None,
+        };
+
+        (constructor_icon, icon, settings_icon)
+    }
+
     // ─── Expression handling methods ────────────────────────────────────
 
     /// Check if an expression is immutable (cacheable).
@@ -1911,7 +2035,13 @@ impl LanguageController {
     /// Verify an expression's proof and set the `valid` field.
     fn verify_expression_proof(expr_json: &mut JsonValue) {
         match serde_json::from_value::<crate::types::Expression<JsonValue>>(expr_json.clone()) {
-            Ok(expr) => match crate::agent::signatures::verify(&expr) {
+            Ok(mut expr) => {
+                // Sort the data keys to match the canonical order used during signing.
+                // This is necessary because `preserve_order` is enabled for serde_json,
+                // so deserialized key order depends on source (e.g. Holochain struct field order)
+                // while signing always uses alphabetically sorted keys.
+                expr.data = crate::js_core::utils::sort_json_value(&expr.data);
+                match crate::agent::signatures::verify(&expr) {
                 Ok(valid) => {
                     log::warn!(
                         "verify_expression_proof: author={}, valid={}, sig={}",
@@ -1934,6 +2064,7 @@ impl LanguageController {
                         proof["valid"] = JsonValue::Bool(false);
                         proof["invalid"] = JsonValue::Bool(true);
                     }
+                }
                 }
             },
             Err(e) => {

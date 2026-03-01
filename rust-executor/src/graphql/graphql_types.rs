@@ -222,13 +222,20 @@ pub struct LanguageHandle {
 #[serde(rename_all = "camelCase", default)]
 pub struct LanguageMeta {
     pub address: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub author: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub possible_template_params: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_code_link: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub template_applied_params: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub template_source_language_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub templated: Option<bool>,
 }
 
