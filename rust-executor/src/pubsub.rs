@@ -57,11 +57,14 @@ pub(crate) async fn subscribe_and_process<
             Ok(msg) => match serde_json::from_str::<T>(&msg) {
                 Ok(data) => {
                     if let Some(filter) = &filter {
-                        if &data
+                        let data_filter = data
                             .get_filter()
-                            .expect("Could not get filter on T where we expected to filter")
-                            != filter
-                        {
+                            .expect("Could not get filter on T where we expected to filter");
+                        if &data_filter != filter {
+                            log::debug!(
+                                "PubSub filter MISMATCH on topic {}: data_filter={}, subscription_filter={}",
+                                topic, data_filter, filter
+                            );
                             return futures::future::ready(None);
                         }
                     }
