@@ -294,11 +294,15 @@ export async function quitExecutor(
     adminCredential?: string,
     timeoutMs: number = 8000,
 ): Promise<void> {
-    // If already dead, nothing to do
-    if (executorProcess.exitCode !== null || executorProcess.killed) return;
+    // Only check exitCode (set when OS process actually exits).
+    // Do NOT check executorProcess.killed — that's set as soon as kill() is
+    // CALLED, not when the process has actually terminated. Using it as a
+    // "process is gone" guard would cause SIGKILL to never fire after SIGTERM.
+    if (executorProcess.exitCode !== null) return;
 
-    // Start listening for exit before we send the mutation
+    // One shared exitPromise reused across all wait stages below.
     const exitPromise = new Promise<void>((resolve) => {
+        if (executorProcess.exitCode !== null) { resolve(); return; }
         executorProcess.once('exit', () => resolve());
         executorProcess.once('close', () => resolve());
     });
@@ -314,25 +318,32 @@ export async function quitExecutor(
         ]);
     } catch (_e) {
         // Expected: either the connection dropped (executor exited) or it timed out.
-        // Either way, fall through and check whether the process actually exited.
     }
 
-    // Wait for natural exit with timeout
-    const timedOut = await Promise.race([
-        exitPromise.then(() => false),
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(true), timeoutMs)),
+    // Wait for natural exit
+    const gracefullyExited = await Promise.race([
+        exitPromise.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
     ]);
-
-    if (!timedOut) return; // Clean exit — done
+    if (gracefullyExited) { killByPorts([gqlPort]); return; }
 
     // Escalate: SIGTERM
     console.warn(`quitExecutor: executor (port ${gqlPort}) still running after ${timeoutMs}ms, sending SIGTERM`);
     executorProcess.kill('SIGTERM');
-    await new Promise<void>((resolve) => setTimeout(resolve, 2000));
-
-    if (executorProcess.exitCode !== null || executorProcess.killed) return;
+    const termExited = await Promise.race([
+        exitPromise.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3000)),
+    ]);
+    if (termExited) { killByPorts([gqlPort]); return; }
 
     // Final escalation: SIGKILL
     console.warn(`quitExecutor: executor (port ${gqlPort}) survived SIGTERM, sending SIGKILL`);
     executorProcess.kill('SIGKILL');
+    await Promise.race([
+        exitPromise,
+        new Promise<void>((resolve) => setTimeout(resolve, 2000)),
+    ]);
+
+    // Always ensure the port is freed, regardless of kill outcome.
+    killByPorts([gqlPort]);
 }
