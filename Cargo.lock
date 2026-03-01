@@ -147,6 +147,7 @@ dependencies = [
  "signal-hook",
  "sodoken 0.1.0",
  "surrealdb",
+ "surrealdb-librocksdb-sys",
  "sys_traits",
  "thiserror 2.0.17",
  "tokio",
