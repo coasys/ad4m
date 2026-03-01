@@ -192,11 +192,11 @@ export class Ad4mModel {
     this: new (perspective: PerspectiveProxy) => T,
     perspective: PerspectiveProxy,
     data: Partial<Omit<T, keyof Ad4mModel>>,
-    options?: { parent?: ParentOptions },
+    options?: { parent?: ParentOptions; batchId?: string },
   ): Promise<T> {
     const instance = new this(perspective);
     Object.assign(instance, data);
-    await instance.save();
+    await instance.save(options?.batchId);
     if (options?.parent) {
       const { model, id, field } = options.parent;
       const predicate = resolveParentPredicate(
@@ -204,7 +204,11 @@ export class Ad4mModel {
         this as unknown as new (...args: any[]) => any,
         field,
       );
-      await perspective.add(new Link({ source: id, predicate, target: instance.id }));
+      await perspective.addLinks(
+        [new Link({ source: id, predicate, target: instance.id })],
+        "shared",
+        options?.batchId,
+      );
     }
     return instance;
   }
@@ -481,7 +485,9 @@ export class Ad4mModel {
   async delete(batchId?: string) {
     // Remove all incoming links that point to this instance so that parent
     // collections (parent queries) are kept consistent.
-    const incomingLinks = await this._perspective.get(new LinkQuery({ target: this._id }));
+    const incomingLinks = await this._perspective.get(
+      new LinkQuery({ target: this._id }),
+    );
     for (const link of incomingLinks) {
       await this._perspective.remove(link);
     }
