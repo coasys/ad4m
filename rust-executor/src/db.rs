@@ -1892,11 +1892,7 @@ impl Ad4mDb {
     {
         let global_instance_arc = Ad4mDb::global_instance();
         let lock_result = global_instance_arc.lock();
-        // Recover from PoisonError to prevent panic cascades that kill the conductor.
-        let ad4m_db_lock = lock_result.unwrap_or_else(|e| {
-            log::error!("Ad4mDb mutex was poisoned; recovering: {:?}", e);
-            e.into_inner()
-        });
+        let ad4m_db_lock = lock_result.expect("Couldn't get lock on Ad4mDb");
         let ad4m_db_ref = ad4m_db_lock.as_ref().expect("Ad4mDb not initialized");
         func(ad4m_db_ref)
     }

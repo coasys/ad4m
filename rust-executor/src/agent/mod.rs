@@ -280,14 +280,7 @@ impl AgentService {
     {
         let global_instance_arc = AgentService::global_instance();
         let lock_result = global_instance_arc.lock();
-        // Recover from PoisonError: a previous holder panicked, but the data is
-        // still usable. Propagating the panic cascade makes every subsequent
-        // GraphQL request fail and effectively kills the conductor. Recovering
-        // here keeps the executor alive for all other requests.
-        let agent_service_lock = lock_result.unwrap_or_else(|e| {
-            log::error!("AgentService mutex was poisoned (a previous caller panicked); recovering. Error: {:?}", e);
-            e.into_inner()
-        });
+        let agent_service_lock = lock_result.expect("Couldn't get lock on Ad4mDb");
         let agent_service_ref = agent_service_lock
             .as_ref()
             .expect("AgentService not initialized");
@@ -300,11 +293,7 @@ impl AgentService {
     {
         let global_instance_arc = AgentService::global_instance();
         let lock_result = global_instance_arc.lock();
-        // Same PoisonError recovery as with_global_instance above.
-        let mut agent_service_lock = lock_result.unwrap_or_else(|e| {
-            log::error!("AgentService mutex was poisoned (a previous caller panicked); recovering. Error: {:?}", e);
-            e.into_inner()
-        });
+        let mut agent_service_lock = lock_result.expect("Couldn't get lock on Ad4mDb");
         let agent_service_mut = agent_service_lock
             .as_mut()
             .expect("AgentService not initialized");
@@ -651,28 +640,8 @@ impl AgentService {
             return;
         }
 
-        let file = match std::fs::read_to_string(self.file.as_str()) {
-            Ok(f) => f,
-            Err(e) => {
-                log::error!(
-                    "AgentService::load() — failed to read agent file '{}': {}. Skipping load.",
-                    self.file,
-                    e
-                );
-                return;
-            }
-        };
-        let dump: AgentStore = match serde_json::from_str(&file) {
-            Ok(d) => d,
-            Err(e) => {
-                log::error!(
-                    "AgentService::load() — failed to parse agent file '{}': {}. Skipping load.",
-                    self.file,
-                    e
-                );
-                return;
-            }
-        };
+        let file = std::fs::read_to_string(self.file.as_str()).expect("Failed to read agent file");
+        let dump: AgentStore = serde_json::from_str(&file).unwrap();
 
         self.did = Some(dump.did.clone());
         self.did_document = Some(dump.did_document);
@@ -688,39 +657,21 @@ impl AgentService {
             wallet_ref.load(dump.keystore);
         }
 
-        // Try to load the agent profile from disk. On any read/parse error, log
-        // and fall through to the default-agent creation below so self.agent is
-        // always initialised (returning early here would leave it None, causing
-        // downstream .expect("agent") calls to panic).
-        let loaded_agent: Option<Agent> = if std::path::Path::new(self.file_profile.as_str())
-            .exists()
-        {
-            match std::fs::read_to_string(self.file_profile.as_str()) {
-                Err(e) => {
-                    log::error!("AgentService::load() — failed to read profile file '{}': {}. Will use default agent.", self.file_profile, e);
-                    None
-                }
-                Ok(file_profile) => match serde_json::from_str::<Agent>(&file_profile) {
-                    Err(e) => {
-                        log::error!("AgentService::load() — failed to parse profile file '{}': {}. Will use default agent.", self.file_profile, e);
-                        None
-                    }
-                    Ok(agent) => Some(agent),
-                },
-            }
+        if std::path::Path::new(self.file_profile.as_str()).exists() {
+            let file_profile = std::fs::read_to_string(self.file_profile.as_str())
+                .expect("Failed to read agent profile file");
+            self.agent =
+                Some(serde_json::from_str(&file_profile).expect("Failed to parse agent profile"));
         } else {
-            None
-        };
-
-        self.agent = Some(loaded_agent.unwrap_or_else(|| {
             let did_clone = dump.did.clone();
             let did = check_keys_and_create(did_clone).id.clone();
-            Agent {
+
+            self.agent = Some(Agent {
                 did,
                 perspective: Some(Perspective { links: vec![] }),
                 direct_message_language: None,
-            }
-        }));
+            });
+        }
     }
 
     pub fn dump(&self) -> AgentStatus {

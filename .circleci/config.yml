@@ -11,8 +11,7 @@ references:
 #   - glibc compatibility: binaries built inside the same container they run in
 #   - No orphaned executors between test runs
 
-# Environment variables to run as root but use circleci user's pre-installed tools
-# (node, cargo, pnpm, deno are all installed under /home/circleci in the image)
+# Run as host user with circleci group access — files written to workspace owned by host user
 commands:
   setup_env:
     description: "Set up build environment (used for host-side non-Docker steps only)"
@@ -62,7 +61,8 @@ jobs:
           no_output_timeout: 60m
           command: |
             docker run --rm \
-              --user root \
+              --user "$(id -u):$(id -g)" \
+              --group-add 1002 \
               -e HOME=/home/circleci \
               -e CARGO_HOME=/home/circleci/.cargo \
               -e RUSTUP_HOME=/home/circleci/.rustup \
@@ -102,7 +102,8 @@ jobs:
           command: |
             docker run --rm \
               --network host \
-              --user root \
+              --user "$(id -u):$(id -g)" \
+              --group-add 1002 \
               -e HOME=/home/circleci \
               -e CARGO_HOME=/home/circleci/.cargo \
               -e RUSTUP_HOME=/home/circleci/.rustup \
@@ -123,7 +124,8 @@ jobs:
           command: |
             docker run --rm \
               --network host \
-              --user root \
+              --user "$(id -u):$(id -g)" \
+              --group-add 1002 \
               -e HOME=/home/circleci \
               -e CARGO_HOME=/home/circleci/.cargo \
               -e RUSTUP_HOME=/home/circleci/.rustup \
@@ -144,7 +146,8 @@ jobs:
           command: |
             docker run --rm \
               --network host \
-              --user root \
+              --user "$(id -u):$(id -g)" \
+              --group-add 1002 \
               -e HOME=/home/circleci \
               -e CARGO_HOME=/home/circleci/.cargo \
               -e RUSTUP_HOME=/home/circleci/.rustup \
