@@ -65,7 +65,9 @@ impl RuntimeService {
             log::error!("RuntimeService mutex was poisoned; recovering: {:?}", e);
             e.into_inner()
         });
-        let runtime_ref = runtime_lock.as_ref().expect("RuntimeService not initialized");
+        let runtime_ref = runtime_lock
+            .as_ref()
+            .expect("RuntimeService not initialized");
         func(runtime_ref)
     }
 
