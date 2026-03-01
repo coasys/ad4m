@@ -1813,3 +1813,145 @@ describe("normalizeParentQuery()", () => {
     ).toThrow(/multiple relations.*provide "field" to disambiguate/i);
   });
 });
+
+describe("Ad4mModel.update() — static convenience method", () => {
+  @Model({ name: "UpdatableModel" })
+  class UpdatableModel extends Ad4mModel {
+    @Property({ through: "test://title" })
+    title: string = "";
+    @Property({ through: "test://body" })
+    body: string = "";
+    @Property({ through: "test://count" })
+    count: number = 0;
+  }
+
+  it("calls get() then save() after merging data", async () => {
+    const existingTitle = "Original Title";
+    const existingBody = "Original Body";
+
+    const mockPerspective = {
+      querySurrealDB: jest.fn().mockResolvedValue([
+        {
+          source: "literal://string:abc123",
+          source_uri: "literal://string:abc123",
+          links: [
+            { predicate: "test://title", target: `literal://string:${existingTitle}`, author: "did:key:alice", timestamp: "2024-01-01T00:00:00Z" },
+            { predicate: "test://body",  target: `literal://string:${existingBody}`,  author: "did:key:alice", timestamp: "2024-01-01T00:00:00Z" },
+            { predicate: "test://count", target: "literal://number:5",               author: "did:key:alice", timestamp: "2024-01-01T00:00:00Z" },
+          ],
+        },
+      ]),
+      infer: jest.fn(),
+      uuid: "test-uuid",
+      stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue("UpdatableModel"),
+      add: jest.fn(),
+      remove: jest.fn(),
+      get: jest.fn().mockResolvedValue([]),
+      removeSubject: jest.fn(),
+      createSubject: jest.fn(),
+      subjectEntities: jest.fn().mockResolvedValue([]),
+    } as any;
+
+    const saveSpy = jest.spyOn(UpdatableModel.prototype, "save").mockResolvedValue();
+    const getSpy  = jest.spyOn(UpdatableModel.prototype, "get").mockImplementation(async function (this: any) {
+      this.title = existingTitle;
+      this.body  = existingBody;
+      this.count = 5;
+      return this;
+    });
+
+    const result = await UpdatableModel.update(
+      mockPerspective,
+      "literal://string:abc123",
+      { title: "New Title" },
+    );
+
+    // get() must be called to fetch the pre-existing state
+    expect(getSpy).toHaveBeenCalledTimes(1);
+
+    // save() must be called after merging
+    expect(saveSpy).toHaveBeenCalledTimes(1);
+
+    // Only the provided field was overwritten
+    expect(result.title).toBe("New Title");
+
+    // Other fields are preserved from the fetched state
+    expect(result.body).toBe(existingBody);
+    expect(result.count).toBe(5);
+
+    getSpy.mockRestore();
+    saveSpy.mockRestore();
+  });
+
+  it("returns the updated instance", async () => {
+    const saveSpy = jest.spyOn(UpdatableModel.prototype, "save").mockResolvedValue();
+    const getSpy  = jest.spyOn(UpdatableModel.prototype, "get").mockImplementation(async function (this: any) {
+      this.title = "Old";
+      this.body  = "kept";
+      return this;
+    });
+
+    const mockPerspective = {} as any;
+    const result = await UpdatableModel.update(mockPerspective, "literal://string:xyz", { title: "New" });
+
+    expect(result).toBeInstanceOf(UpdatableModel);
+    expect(result.id).toBe("literal://string:xyz");
+
+    getSpy.mockRestore();
+    saveSpy.mockRestore();
+  });
+
+  it("passes batchId through to save()", async () => {
+    const saveSpy = jest.spyOn(UpdatableModel.prototype, "save").mockResolvedValue();
+    const getSpy  = jest.spyOn(UpdatableModel.prototype, "get").mockImplementation(async function (this: any) {
+      return this;
+    });
+
+    await UpdatableModel.update({} as any, "literal://string:id1", {}, "batch-42");
+    expect(saveSpy).toHaveBeenCalledWith("batch-42");
+
+    getSpy.mockRestore();
+    saveSpy.mockRestore();
+  });
+});
+
+describe("Ad4mModel.delete() — static convenience method", () => {
+  @Model({ name: "DeletableModel" })
+  class DeletableModel extends Ad4mModel {
+    @Property({ through: "test://label" })
+    label: string = "";
+  }
+
+  it("calls instance.delete() with no batchId by default", async () => {
+    const deleteSpy = jest.spyOn(DeletableModel.prototype, "delete").mockResolvedValue();
+
+    await DeletableModel.delete({} as any, "literal://string:del1");
+
+    expect(deleteSpy).toHaveBeenCalledTimes(1);
+    expect(deleteSpy).toHaveBeenCalledWith(undefined);
+
+    deleteSpy.mockRestore();
+  });
+
+  it("forwards batchId to instance.delete()", async () => {
+    const deleteSpy = jest.spyOn(DeletableModel.prototype, "delete").mockResolvedValue();
+
+    await DeletableModel.delete({} as any, "literal://string:del2", "batch-99");
+
+    expect(deleteSpy).toHaveBeenCalledWith("batch-99");
+
+    deleteSpy.mockRestore();
+  });
+
+  it("constructs an instance with the given id", async () => {
+    const deleteSpy = jest.spyOn(DeletableModel.prototype, "delete").mockResolvedValue();
+
+    const targetId = "literal://string:target-id";
+    await DeletableModel.delete({} as any, targetId);
+
+    // The static method must target the correct id
+    expect((deleteSpy.mock.instances[0] as unknown as DeletableModel).id).toBe(targetId);
+
+    deleteSpy.mockRestore();
+  });
+});

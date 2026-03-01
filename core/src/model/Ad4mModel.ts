@@ -214,6 +214,63 @@ export class Ad4mModel {
   }
 
   /**
+   * Fetches the instance, merges `data` into it, then saves.
+   *
+   * This is a convenience alternative to the three-step pattern:
+   * ```typescript
+   * // Before
+   * const instance = new Vote(perspective, id);
+   * instance.score = newScore;
+   * await instance.save();
+   *
+   * // After
+   * await Vote.update(perspective, id, { score: newScore });
+   * ```
+   *
+   * @param data - Partial set of properties to merge into the stored instance.
+   * @param batchId - Optional batch identifier for grouping writes.
+   * @returns The updated instance with all fields populated.
+   */
+  static async update<T extends Ad4mModel>(
+    this: (new (perspective: PerspectiveProxy, id: string) => T) &
+      typeof Ad4mModel,
+    perspective: PerspectiveProxy,
+    id: string,
+    data: Partial<Omit<T, keyof Ad4mModel>>,
+    batchId?: string,
+  ): Promise<T> {
+    const instance = new this(perspective, id);
+    await instance.get();
+    Object.assign(instance, data);
+    await instance.save(batchId);
+    return instance;
+  }
+
+  /**
+   * Deletes the instance with the given `id` from the perspective.
+   *
+   * This is a convenience alternative to:
+   * ```typescript
+   * // Before
+   * const instance = new Poll(perspective, id);
+   * await instance.delete();
+   *
+   * // After
+   * await Poll.delete(perspective, id);
+   * ```
+   *
+   * @param batchId - Optional batch identifier for grouping removals.
+   */
+  static async delete(
+    perspective: PerspectiveProxy,
+    id: string,
+    batchId?: string,
+  ): Promise<void> {
+    const instance = new this(perspective, id);
+    await instance.delete(batchId);
+  }
+
+  /**
    * Generates the SHACL shape for this model class.
    * Attached dynamically by the `@Model` decorator.
    */

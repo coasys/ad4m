@@ -216,6 +216,46 @@ describe("Ad4mModel — Core CRUD", function () {
     expect(found).to.have.length(0);
   });
 
+  // ── static delete() ────────────────────────────────────────────────────────
+
+  it("TestPost.delete(perspective, id) removes the instance", async () => {
+    const post = await TestPost.create(perspective, { title: "Static Delete", body: "" });
+    const id = post.id;
+    await TestPost.delete(perspective, id);
+    const found = await TestPost.findAll(perspective, { where: { id } });
+    expect(found).to.have.length(0);
+  });
+
+  // ── static update() ────────────────────────────────────────────────────────
+
+  it("TestPost.update() mutates only the specified field and leaves others intact", async () => {
+    const post = await TestPost.create(perspective, { title: "Before", body: "Keep this" });
+
+    await TestPost.update(perspective, post.id, { title: "After" });
+
+    const found = await TestPost.findOne(perspective, { where: { id: post.id } });
+    expect(found).to.not.be.null;
+    expect(found!.title).to.equal("After");
+    expect(found!.body).to.equal("Keep this");
+  });
+
+  it("TestPost.update() returns the updated instance", async () => {
+    const post = await TestPost.create(perspective, { title: "Original", body: "" });
+    const updated = await TestPost.update(perspective, post.id, { title: "Returned" });
+    expect(updated).to.be.instanceOf(TestPost);
+    expect(updated.id).to.equal(post.id);
+    expect(updated.title).to.equal("Returned");
+  });
+
+  it("TestPost.update() with multiple fields updates all of them", async () => {
+    const post = await TestPost.create(perspective, { title: "Old Title", body: "Old Body" });
+    await TestPost.update(perspective, post.id, { title: "New Title", body: "New Body" });
+    const found = await TestPost.findOne(perspective, { where: { id: post.id } });
+    expect(found!.title).to.equal("New Title");
+    expect(found!.body).to.equal("New Body");
+  });
+
+
   // ── @HasMany — addComments ─────────────────────────────────────────────────
 
   it("@HasMany — addComments() links comment to post", async () => {
