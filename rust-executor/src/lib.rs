@@ -117,9 +117,6 @@ async fn holochain_signal_receiver() {
                                 }
                             }
                         };
-                        let dna_hash_dbg = format!("{:?}", dna_hash_raw);
-                        let agent_pubkey_dbg = format!("{:?}", agent_pubkey_raw);
-
                         let maybe_lang_address: Option<String> = {
                             let handlers = js_core::languages_extension::HOLOCHAIN_SIGNAL_HANDLERS
                                 .read()
@@ -127,9 +124,21 @@ async fn holochain_signal_receiver() {
                             handlers.get(&cell_id_key).cloned()
                         };
                         if let Some(lang_address) = maybe_lang_address {
+                            // Build the signal argument as a JSON value so no raw
+                            // data is interpolated directly into executable JS.
+                            let payload_json: serde_json::Value =
+                                serde_json::from_str(&payload_str)
+                                    .unwrap_or(serde_json::Value::Null);
+                            let args = serde_json::json!({
+                                "cell_id": [dna_hash_raw, agent_pubkey_raw],
+                                "zome_name": zome_name.to_string(),
+                                "payload": payload_json,
+                            });
+                            let args_json =
+                                serde_json::to_string(&args).unwrap_or_else(|_| "null".to_string());
                             let signal_script = format!(
-                                "await globalThis.__handleHolochainSignal__({{cell_id: [{}, {}], zome_name: '{}', payload: {}}})",
-                                dna_hash_dbg, agent_pubkey_dbg, zome_name, payload_str
+                                "await globalThis.__handleHolochainSignal__({})",
+                                args_json
                             );
                             let lang_addr = lang_address.clone();
                             tokio::spawn(async move {
