@@ -849,15 +849,11 @@ impl LanguageController {
     pub async fn language_by_address(address: Address) -> Result<Option<Language>, AnyError> {
         let controller = Self::global_instance();
 
-        // Check Rust-side runtimes
+        // Only return a Language if the runtime is actually loaded and can execute.
+        // On the old JS-executor branch, a single JsCore worker could load languages on-demand,
+        // so checking for the bundle on disk was sufficient. With per-language isolated runtimes,
+        // the runtime must be explicitly started before the language can be used.
         if controller.is_language_loaded(&address).await {
-            return Ok(Some(Language::new(address)));
-        }
-
-        // Check if the language bundle exists on disk (installed but not loaded yet)
-        let bundle_path = languages_directory().join(&address).join("bundle.js");
-        if bundle_path.exists() {
-            log::debug!("language_by_address: found bundle on disk for {}", address);
             return Ok(Some(Language::new(address)));
         }
 
