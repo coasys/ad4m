@@ -57,6 +57,16 @@ jobs:
           command: |
             find /tmp/circleci-artifacts -maxdepth 1 -mindepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
       - run:
+          name: Remove any root-owned build artifacts from previous runs
+          command: |
+            # Previous Docker runs with --user root may have left node_modules and
+            # target/ owned by root. Remove them inside a root container so the
+            # build user (host UID) can create fresh ones.
+            docker run --rm --user root \
+              -v "$(pwd):/workspace" -w /workspace \
+              coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c \
+              bash -c "rm -rf node_modules core/node_modules target 2>/dev/null || true"
+      - run:
           name: Build and test inside Docker (coasys/ad4m-ci-linux)
           no_output_timeout: 60m
           command: |
