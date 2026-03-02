@@ -684,12 +684,17 @@ impl AgentService {
                 .expect("Failed to read agent profile file");
             self.agent =
                 Some(serde_json::from_str(&file_profile).expect("Failed to parse agent profile"));
+        } else if let Some(agent) = dump.agent {
+            // Restore agent profile from agent.json (save() embeds it there).
+            // agentProfile.json may not exist if the profile was only saved via save().
+            self.agent = Some(agent);
         } else {
-            let did_clone = dump.did.clone();
-            let did = check_keys_and_create(did_clone).id.clone();
-
+            // No profile anywhere - create a minimal placeholder with just the DID.
+            // DO NOT call check_keys_and_create() here because that would initialize
+            // wallet keys without a passphrase, making is_unlocked() return true
+            // before the user has actually entered their password.
             self.agent = Some(Agent {
-                did,
+                did: dump.did.clone(),
                 perspective: Some(Perspective { links: vec![] }),
                 direct_message_language: None,
             });
