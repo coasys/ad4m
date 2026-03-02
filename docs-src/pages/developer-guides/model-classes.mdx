@@ -701,11 +701,11 @@ post.title = "Type-safe access";
 
 ## Under the Hood
 
-### Social DNA and Prolog
+### Social DNA and SHACL
 
-When you define a model class, AD4M generates a Social DNA (SDNA) representation in Prolog:
+When you define a model class, AD4M generates a **SHACL** (Shapes Constraint Language) representation — a W3C standard for describing and validating RDF graph shapes:
 
-<Tabs items={['TypeScript Class', 'Generated Prolog SDNA']}>
+<Tabs items={['TypeScript Class', 'Generated SHACL']}>
   <Tab>
     ```typescript
     @ModelOptions({ name: "Recipe" })
@@ -716,34 +716,57 @@ When you define a model class, AD4M generates a Social DNA (SDNA) representation
         required: true
       })
       name: string = "";
+
+      @Collection({
+        through: "recipe://ingredient"
+      })
+      ingredients: string[] = [];
     }
     ```
   </Tab>
   <Tab>
-    ```prolog
-    subject_class("Recipe", c).
-    
-    constructor(c, '[
-      {action: "addLink", source: "this", predicate: "recipe://name", target: "literal://string:''"}
-    ]').
+    ```turtle
+    @prefix sh: <http://www.w3.org/ns/shacl#> .
+    @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+    @prefix ad4m: <ad4m://> .
 
-    instance(c, Base) :- triple(Base, "recipe://name", _).
-
-    property(c, "name").
-    property_resolve(c, "name").
-    property_resolve_language(c, "name", "literal").
-    property_getter(c, Base, "name", Value) :- triple(Base, "recipe://name", Value).
-    property_setter(c, "name", '[{action: "setSingleTarget", source: "this", predicate: "recipe://name", "target": "value"}]').
+    <recipe://Recipe> a sh:NodeShape ;
+      sh:targetClass <recipe://Recipe> ;
+      sh:property [
+        sh:path <recipe://name> ;
+        sh:datatype xsd:string ;
+        sh:maxCount 1 ;      # Scalar property
+        sh:minCount 1 ;      # Required
+        ad4m:resolveLanguage "literal" ;
+      ] ;
+      sh:property [
+        sh:path <recipe://ingredient> ;
+        sh:datatype xsd:string ;
+        # No maxCount = collection (multiple values)
+      ] .
     ```
   </Tab>
 </Tabs>
 
-### Relationship with SHACL and Linked Data
+The SHACL shape is stored as links in the perspective graph, making it discoverable and queryable by any agent or tool that joins the perspective.
 
-AD4M's model classes share concepts with SHACL (Shapes Constraint Language):
-- Both define property constraints and validation rules
-- Both work with graph-based data
-- AD4M adds TypeScript integration, CRUD operations, and real-time features
+### How SHACL Maps to AD4M
+
+| SHACL Concept | AD4M Equivalent |
+|--------------|-----------------|
+| `sh:NodeShape` | Subject Class definition |
+| `sh:PropertyShape` | Property or Collection definition |
+| `sh:maxCount 1` | Scalar property (single value, generates `set_` tool) |
+| No `sh:maxCount` or `> 1` | Collection (generates `add_`/`remove_` tools) |
+| `sh:minCount 1` | Required property (must be set on creation) |
+| `sh:datatype` | Value type constraint |
+| `sh:class` | Reference to another Subject Class |
+| `ad4m://initial` | Default value on instance creation |
+| `ad4m://resolveLanguage` | Expression language for value resolution |
+| `ad4m://writable` | Property supports updates |
+| `ad4m://readonly` | Read-only computed property |
+
+AD4M extends standard SHACL with `ad4m://` predicates for features specific to the AD4M runtime (initial values, language resolution, write permissions).
 
 ## Best Practices
 

@@ -7,6 +7,7 @@ use crate::types::{AITask, DecoratedExpressionProof, ModelType};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
 use crate::{
     db::Ad4mDb,
+    globals::AD4M_VERSION,
     holochain_service::get_holochain_service,
     perspectives::{all_perspectives, get_perspective, utils::prolog_resolution_to_string},
     runtime_service::RuntimeService,
@@ -798,7 +799,7 @@ impl Query {
             Ok(RuntimeInfo {
                 is_initialized: agent_service.is_initialized(),
                 is_unlocked: agent_service.is_unlocked(),
-                ad4m_executor_version: env!("CARGO_PKG_VERSION").to_string(),
+                ad4m_executor_version: AD4M_VERSION.clone(),
             })
         })
     }

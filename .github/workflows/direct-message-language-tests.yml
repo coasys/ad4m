@@ -15,7 +15,7 @@ jobs:
     name: Sweettest
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
+      image: coasys/ad4m-ci-linux:latest@sha256:bffabe1dfc4ef18ca64105318d342ab61c2db946ae6ba16718dcd8d1d57c2cff
 
     steps:
     - uses: actions/checkout@v3

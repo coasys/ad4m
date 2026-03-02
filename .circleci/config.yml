@@ -1,4 +1,6 @@
 version: 2.1
+references:
+  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
 
 # Self-hosted machine runner on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04)
 # Resource class: coasys/marvin
@@ -25,8 +27,12 @@ commands:
     description: "Setup common integration test environment"
     steps:
       - checkout
-      - attach_workspace:
-          at: .
+      - run:
+          name: Restore binaries from local stash (no CircleCI network storage needed — same host)
+          command: |
+            mkdir -p target/release
+            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m target/release/ad4m
+            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m-executor target/release/ad4m-executor
       - setup_env
       - run:
           name: Install dependencies
@@ -46,6 +52,10 @@ jobs:
     steps:
       - checkout
       - setup_env
+      - run:
+          name: Clean up stale local artifact stashes (older than 1 day)
+          command: |
+            find /tmp/circleci-artifacts -maxdepth 1 -mindepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
       - run:
           name: cargo fmt --check
           command: cargo fmt --check
@@ -70,11 +80,11 @@ jobs:
           name: cargo clippy
           no_output_timeout: 30m
           command: cargo clippy --all --exclude ad4m-launcher
-      - persist_to_workspace:
-          root: .
-          paths:
-            - ./target/release/ad4m
-            - ./target/release/ad4m-executor
+      - run:
+          name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
+          command: |
+            mkdir -p /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}
+            cp target/release/ad4m target/release/ad4m-executor /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js
@@ -94,6 +104,15 @@ jobs:
     resource_class: coasys/marvin
     steps:
       - setup_integration_test_environment
+      - run:
+          name: Kill any orphaned executors from previous runs
+          command: |
+            # Self-hosted runners reuse workdirs; previous job may have left
+            # an executor alive (exec() shell-wrap means kill() only kills
+            # the shell, not the executor grandchild). Clear ports before test.
+            for port in 15700 15701 15702; do
+              lsof -ti:$port | xargs -r kill -9 2>/dev/null || true
+            done
       - run:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test-main
@@ -124,8 +143,12 @@ jobs:
     resource_class: coasys/marvin
     steps:
       - checkout
-      - attach_workspace:
-          at: .
+      - run:
+          name: Restore binaries from local stash
+          command: |
+            mkdir -p target/release
+            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m target/release/ad4m
+            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m-executor target/release/ad4m-executor
       - setup_env
       - run:
           name: git submodule

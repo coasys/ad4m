@@ -380,7 +380,7 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:d0c3e9683811505955185782a5cd683952f846f1abc520c35c1293ad7f046593
+      image: coasys/ad4m-ci-linux:latest@sha256:bffabe1dfc4ef18ca64105318d342ab61c2db946ae6ba16718dcd8d1d57c2cff
     steps:
       - uses: actions/checkout@v3
 

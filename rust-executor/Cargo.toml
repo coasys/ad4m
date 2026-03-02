@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-executor"
-version = "0.12.0-rc1-dev.1"
+version = "0.12.0-rc1-dev.2"
 edition = "2021"
 authors = ["Nicolas Luck <nicolas.luck@coasys.org>"]
 description = "Runtime implementation of AD4M as library - https://ad4m.dev"
@@ -107,7 +107,7 @@ sodoken = "=0.1.0"
 scryer-prolog = { version = "0.10", git = "https://github.com/coasys/scryer-prolog", branch = "ad4m" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
-ad4m-client = { path = "../rust-client", version="0.12.0-rc1-dev.1" }
+ad4m-client = { path = "../rust-client", version="0.12.0-rc1-dev.2" }
 reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
 
 # rusqlite = { version = "0.29.0", git = "https://github.com/coasys/rusqlite.git", rev = "12ec1330bd4b46411ab9895364da4a3e172d0fbb", features = ["bundled"] }
@@ -148,6 +148,10 @@ itertools = "0.10.1"
 [build-dependencies]
 fs_extra = "1.3.0"
 
+
+# Force static CRT on Windows MSVC to match libort_sys (ONNX Runtime) and avoid LNK2038 mismatch
+[target.'cfg(target_env = "msvc")'.dependencies]
+surrealdb-librocksdb-sys = { version = "0.17", features = ["mt_static"] }
 
 [patch.crates-io]
 rusqlite = { version = "0.34.0" }
