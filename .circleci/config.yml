@@ -73,17 +73,19 @@ jobs:
             docker run --rm \
               --user "$(id -u):$(id -g)" \
               --group-add 1002 \
-              -e HOME=/home/circleci \
+              -e HOME=/workspace/.ci-home \
               -e CARGO_HOME=/home/circleci/.cargo \
               -e RUSTUP_HOME=/home/circleci/.rustup \
+              -e DENO_DIR=/workspace/.ci-home/.deno \
               -e CI=true \
               -e ELECTRON_SKIP_BINARY_DOWNLOAD=1 \
-              -e npm_config_cache=/workspace/.npm-cache \
+              -e npm_config_cache=/workspace/.ci-home/.npm-cache \
               -v "$(pwd):/workspace" \
               -w /workspace \
               coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c \
               bash -c "
                 set -euo pipefail
+                mkdir -p /workspace/.ci-home
                 cargo fmt --check
                 pnpm install --no-frozen-lockfile
                 pnpm build-dapp
@@ -116,14 +118,14 @@ jobs:
               --network host \
               --user "$(id -u):$(id -g)" \
               --group-add 1002 \
-              -e HOME=/home/circleci \
+              -e HOME=/workspace/.ci-home \
               -e CARGO_HOME=/home/circleci/.cargo \
               -e RUSTUP_HOME=/home/circleci/.rustup \
               -e CI=true \
               -v "$(pwd):/workspace" \
               -w /workspace \
               coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c \
-              bash -c "cd tests/js && pnpm run test-main"
+              bash -c "mkdir -p /workspace/.ci-home && cd tests/js && pnpm run test-main"
 
   integration-tests-multi-user-simple:
     machine: true
@@ -138,14 +140,14 @@ jobs:
               --network host \
               --user "$(id -u):$(id -g)" \
               --group-add 1002 \
-              -e HOME=/home/circleci \
+              -e HOME=/workspace/.ci-home \
               -e CARGO_HOME=/home/circleci/.cargo \
               -e RUSTUP_HOME=/home/circleci/.rustup \
               -e CI=true \
               -v "$(pwd):/workspace" \
               -w /workspace \
               coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c \
-              bash -c "cd tests/js && ./test-multi-user-with-setup.sh"
+              bash -c "mkdir -p /workspace/.ci-home && cd tests/js && ./test-multi-user-with-setup.sh"
 
   integration-tests-email-verification:
     machine: true
@@ -160,14 +162,14 @@ jobs:
               --network host \
               --user "$(id -u):$(id -g)" \
               --group-add 1002 \
-              -e HOME=/home/circleci \
+              -e HOME=/workspace/.ci-home \
               -e CARGO_HOME=/home/circleci/.cargo \
               -e RUSTUP_HOME=/home/circleci/.rustup \
               -e CI=true \
               -v "$(pwd):/workspace" \
               -w /workspace \
               coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c \
-              bash -c "cd tests/js && ./email-verification-test-with-setup.sh"
+              bash -c "mkdir -p /workspace/.ci-home && cd tests/js && ./email-verification-test-with-setup.sh"
 
   integration-tests-cli:
     machine: true
