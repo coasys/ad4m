@@ -461,7 +461,22 @@ impl LanguageController {
             });
         }
 
-        let (_hash, saved_bundle_path) = self.save_language_bundle(&bundle_source, meta)?;
+        let (hash, saved_bundle_path) = self.save_language_bundle(&bundle_source, meta)?;
+
+        if hash != address {
+            error!(
+                "install_language_from_address: hash mismatch for {}! Computed: {}",
+                address, hash
+            );
+            return Err(LanguageError::LoadError {
+                address: address.to_string(),
+                message: format!(
+                    "Bundle hash mismatch: expected {} but got {}",
+                    address, hash
+                ),
+            });
+        }
+
         info!("Saved language bundle for: {}", address);
 
         // Load into a per-language runtime
