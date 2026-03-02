@@ -75,6 +75,7 @@ jobs:
               -e RUSTUP_HOME=/home/circleci/.rustup \
               -e DENO_DIR=/workspace/.ci-home/.deno \
               -e CI=true \
+              -e CARGO_BUILD_JOBS=8 \
               -e ELECTRON_SKIP_BINARY_DOWNLOAD=1 \
               -e npm_config_cache=/workspace/.ci-home/.npm-cache \
               -v "$(pwd):/workspace" \
