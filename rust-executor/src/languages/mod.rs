@@ -761,19 +761,22 @@ impl LanguageController {
             info!("install_language: saved language bundle for {}", language);
 
             // Load into a per-language Deno runtime
-            match controller.load_language(saved_bundle_path).await {
-                Ok(_) => {
-                    info!("install_language: loaded language runtime for {}", language);
-                }
-                Err(e) => {
-                    warn!(
+            controller
+                .load_language(saved_bundle_path)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
                         "install_language: failed to load language runtime for {}: {}",
-                        language, e
-                    );
-                }
-            }
+                        language,
+                        e
+                    )
+                })?;
+            info!("install_language: loaded language runtime for {}", language);
         } else {
-            warn!("install_language: no source available for {}", language);
+            return Err(anyhow::anyhow!(
+                "install_language: no source available for {}",
+                language
+            ));
         }
 
         Ok(())
