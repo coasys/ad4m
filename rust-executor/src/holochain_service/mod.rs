@@ -932,9 +932,30 @@ impl HolochainService {
             .map(|(k, v)| (k.to_string(), v))
             .collect();
 
+        // Convert stats to JSON-safe structure. The blocked_message_counts field
+        // has HashMap<Url, HashMap<SpaceId, _>> where SpaceId doesn't serialize
+        // as a JSON string key, so we convert all map keys to strings.
+        let blocked_counts_safe: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, _>,
+        > = stats
+            .blocked_message_counts
+            .into_iter()
+            .map(|(url, inner)| {
+                let inner_safe: std::collections::HashMap<String, _> = inner
+                    .into_iter()
+                    .map(|(space_id, count)| (format!("{:?}", space_id), count))
+                    .collect();
+                (url.to_string(), inner_safe)
+            })
+            .collect();
+
         let combined_metrics = serde_json::json!({
             "metrics": metrics_with_string_keys,
-            "stats": stats
+            "stats": {
+                "transport_stats": stats.transport_stats,
+                "blocked_message_counts": blocked_counts_safe
+            }
         });
 
         Ok(serde_json::to_string(&combined_metrics)?)
