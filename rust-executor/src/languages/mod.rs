@@ -1944,9 +1944,11 @@ impl LanguageController {
             return Ok(true);
         }
 
+        let escaped_addr =
+            serde_json::to_string(expression_address).unwrap_or_else(|_| "\"\"".to_string());
         let script = format!(
-            r#"language.isImmutableExpression ? await language.isImmutableExpression("{}") : false"#,
-            expression_address
+            r#"language.isImmutableExpression ? await language.isImmutableExpression({}) : false"#,
+            escaped_addr
         );
 
         let result = self.execute_on_language(lang_address, &script).await?;
@@ -1998,9 +2000,11 @@ impl LanguageController {
         }
 
         // Fetch from the language runtime
+        let escaped_addr =
+            serde_json::to_string(expression_address).unwrap_or_else(|_| "\"\"".to_string());
         let script = format!(
-            r#"JSON.stringify(await language.expressionAdapter.get("{}"))"#,
-            expression_address
+            r#"JSON.stringify(await language.expressionAdapter.get({}))"#,
+            escaped_addr
         );
 
         let result = self.execute_on_language(lang_address, &script).await?;
@@ -2176,13 +2180,15 @@ impl LanguageController {
             aliases.get(&lang_address).cloned().unwrap_or(lang_address)
         };
 
+        let escaped_addr =
+            serde_json::to_string(&expression_address).unwrap_or_else(|_| "\"\"".to_string());
         let script = format!(
             r#"JSON.stringify(
-                language.interactions("{}").map(ic => ({{
+                language.interactions({}).map(ic => ({{
                     label: ic.label, name: ic.name, parameters: ic.parameters
                 }}))
             )"#,
-            expression_address
+            escaped_addr
         );
 
         let result = self.execute_on_language(&lang_address, &script).await?;
@@ -2206,16 +2212,19 @@ impl LanguageController {
             aliases.get(&lang_address).cloned().unwrap_or(lang_address)
         };
 
+        let escaped_addr =
+            serde_json::to_string(&expression_address).unwrap_or_else(|_| "\"\"".to_string());
+        let escaped_name = serde_json::to_string(&call.name).unwrap_or_else(|_| "\"\"".to_string());
         let script = format!(
             r#"JSON.stringify(
                 await (async () => {{
-                    const interaction = language.interactions("{}")
-                        .find(i => i.name === "{}");
-                    if (!interaction) throw new Error("No interaction named '{}'");
+                    const interaction = language.interactions({})
+                        .find(i => i.name === {});
+                    if (!interaction) throw new Error("No interaction named " + {});
                     return await interaction.execute({});
                 }})()
             )"#,
-            expression_address, call.name, call.name, call.parameters_stringified
+            escaped_addr, escaped_name, escaped_name, call.parameters_stringified
         );
 
         let result = self.execute_on_language(&lang_address, &script).await?;
