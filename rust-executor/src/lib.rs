@@ -249,6 +249,17 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     info!("Initializing Agent service...");
     AgentService::init_global_instance(config.app_data_path.clone().unwrap());
 
+    // Load agent data from disk (wallet cipher, DID, etc.) if previously initialized.
+    // On the old JS-based executor this was done by the JS AgentService calling AGENT.load().
+    AgentService::with_mutable_global_instance(|agent_service| {
+        if agent_service.is_initialized() {
+            agent_service.load();
+            info!("Agent loaded from disk");
+        } else {
+            info!("Agent not yet initialized (first run)");
+        }
+    });
+
     // Spawn background task to clean up expired verification codes every 5 minutes
     tokio::spawn(async {
         loop {
