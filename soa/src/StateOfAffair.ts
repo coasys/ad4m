@@ -1,4 +1,4 @@
-import { ModelOptions, Ad4mModel, Property, Collection, Flag } from '@coasys/ad4m';
+import { ModelOptions, Ad4mModel, Property } from '@coasys/ad4m';
 
 /**
  * Modality of a State of Affairs — its epistemic status.
@@ -22,15 +22,26 @@ export type SoAModality = 'belief' | 'observation' | 'intention' | 'vision' | 'p
  * Used by both humans and AI agents in the Eve architecture.
  * Same schema works for personal memory, shared task boards,
  * and collective intelligence networks.
+ * 
+ * Note: author and timestamp come from the link expressions
+ * themselves — every AD4M link carries this metadata natively.
+ * A SoA can have multiple authors (when created independently
+ * by different agents).
+ * 
+ * Relationships between SoA nodes are expressed as AD4M links
+ * using the soa language for predicates:
+ *   link(soaA, "soa://rel_supports", soaB)
+ *   link(soaA, "soa://rel_contradicts", soaB)
+ *   link(soaA, "soa://rel_similar", soaB)
+ *   link(soaA, "soa://rel_same", soaB)
+ *   link(soaA, "soa://rel_requires", soaB)
+ *   link(soaA, "soa://rel_enables", soaB)
+ *   link(soaA, "soa://rel_parent", soaB)     // soaA is parent of soaB
+ *   link(soaA, "soa://rel_refines", soaB)
+ *   link(soaA, "soa://rel_blocks", soaB)
  */
 @ModelOptions({ name: 'StateOfAffair' })
 export default class StateOfAffair extends Ad4mModel {
-  @Flag({
-    through: 'soa://entry_type',
-    value: 'soa://state_of_affair',
-  })
-  type: string;
-
   /**
    * Short summary of this state of affairs.
    */
@@ -38,6 +49,7 @@ export default class StateOfAffair extends Ad4mModel {
     through: 'soa://title',
     resolveLanguage: 'literal',
     writable: true,
+    required: true,
   })
   title: string;
 
@@ -48,8 +60,9 @@ export default class StateOfAffair extends Ad4mModel {
     through: 'soa://modality',
     resolveLanguage: 'literal',
     writable: true,
+    required: true,
   })
-  modality: string;
+  modality: SoAModality;
 
   /**
    * Longer description or body text.
@@ -59,7 +72,7 @@ export default class StateOfAffair extends Ad4mModel {
     resolveLanguage: 'literal',
     writable: true,
   })
-  description: string;
+  description?: string;
 
   /**
    * Confidence level (0.0 to 1.0).
@@ -72,7 +85,7 @@ export default class StateOfAffair extends Ad4mModel {
     resolveLanguage: 'literal',
     writable: true,
   })
-  confidence: number;
+  confidence?: number;
 
   /**
    * Current status of this SoA.
@@ -85,38 +98,7 @@ export default class StateOfAffair extends Ad4mModel {
     resolveLanguage: 'literal',
     writable: true,
   })
-  status: string;
-
-  /**
-   * Who authored/asserted this SoA.
-   * Could be a DID, agent name, or identifier.
-   */
-  @Property({
-    through: 'soa://author',
-    resolveLanguage: 'literal',
-    writable: true,
-  })
-  author: string;
-
-  /**
-   * ISO 8601 timestamp of when this SoA was created.
-   */
-  @Property({
-    through: 'soa://created_at',
-    resolveLanguage: 'literal',
-    writable: true,
-  })
-  createdAt: string;
-
-  /**
-   * ISO 8601 timestamp of last modification.
-   */
-  @Property({
-    through: 'soa://updated_at',
-    resolveLanguage: 'literal',
-    writable: true,
-  })
-  updatedAt: string;
+  status?: string;
 
   /**
    * Optional tags for categorization and search.
@@ -127,7 +109,7 @@ export default class StateOfAffair extends Ad4mModel {
     resolveLanguage: 'literal',
     writable: true,
   })
-  tags: string;
+  tags?: string;
 
   /**
    * Optional priority level (1-5, where 1 is highest).
@@ -138,7 +120,7 @@ export default class StateOfAffair extends Ad4mModel {
     resolveLanguage: 'literal',
     writable: true,
   })
-  priority: number;
+  priority?: number;
 
   /**
    * Source or evidence for this SoA.
@@ -149,5 +131,5 @@ export default class StateOfAffair extends Ad4mModel {
     resolveLanguage: 'literal',
     writable: true,
   })
-  source: string;
+  source?: string;
 }

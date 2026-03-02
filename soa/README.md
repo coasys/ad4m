@@ -19,38 +19,48 @@ Every node in a SoA tree is a `StateOfAffair` with a **modality** that describes
 
 ## Relationships
 
-SoA nodes connect to each other via typed relationships:
+Relationships between SoA nodes are expressed as **standard AD4M links** using the `soa` language for predicates. No separate model needed — link expressions natively carry author and timestamp.
 
-| Relationship | Meaning |
+| Predicate | Meaning |
 |---|---|
-| `supports` | Evidence or argument for |
-| `contradicts` | Evidence or argument against |
-| `similar` | Related but not identical |
-| `same` | Equivalent propositions |
-| `requires` | Dependency (B requires A) |
-| `enables` | Capability relationship (A enables B) |
-| `parent` / `child` | Tree composition |
+| `soa://rel_supports` | Evidence or argument for |
+| `soa://rel_contradicts` | Evidence or argument against |
+| `soa://rel_similar` | Related but not identical |
+| `soa://rel_same` | Equivalent propositions |
+| `soa://rel_requires` | Dependency (target requires source) |
+| `soa://rel_enables` | Capability (source enables target) |
+| `soa://rel_parent` | Tree structure (source is parent of target) |
+| `soa://rel_refines` | More specific version of |
+| `soa://rel_blocks` | Prevents or blocks |
+
+The `soa` language is a static language — these expressions resolve to documentation describing the relationship semantics.
+
+## Authorship & Provenance
+
+SoA nodes do **not** store author or timestamp fields. Every link that constitutes a SoA shape is an AD4M `LinkExpression` which natively includes:
+- `author` — the DID of the agent who created the link
+- `timestamp` — when the link was created
+
+A single SoA can have multiple authors — when different agents independently create the same state of affairs, the link graph naturally represents this.
 
 ## Structure
 
-```
+```text
 soa/
 ├── README.md           # This file
-├── src/                # TypeScript model classes (for UIs, Flux apps)
-│   ├── index.ts
-│   ├── StateOfAffair.ts
-│   └── Relationship.ts
-├── schemas/            # JSON schemas (for MCP, programmatic access)
-│   ├── StateOfAffair.json
-│   └── Relationship.json
+├── src/                # TypeScript model classes
+│   ├── index.ts        # Exports + relationship predicate constants
+│   └── StateOfAffair.ts
 └── package.json
 ```
+
+SHACL shapes are auto-generated from the `Ad4mModel` decorators — no separate schema files needed. The TypeScript classes ARE the source of truth.
 
 ## Usage
 
 ### TypeScript (UI / Flux)
 ```typescript
-import { StateOfAffair, SoARelationship } from '@coasys/soa';
+import { StateOfAffair, SoA } from '@coasys/soa';
 
 // Create a belief
 const belief = new StateOfAffair();
@@ -63,33 +73,43 @@ const goal = new StateOfAffair();
 goal.title = "Migrate Data's memory to AD4M perspectives";
 goal.modality = "intention";
 
-// Link them
-const rel = new SoARelationship();
-rel.type = "supports";
-rel.source = belief.baseExpression;  
-rel.target = goal.baseExpression;
+// Link them with a relationship (just an AD4M link!)
+perspective.addLink({
+  source: belief.baseExpression,
+  predicate: SoA.REL_SUPPORTS,
+  target: goal.baseExpression,
+});
+
+// Tree structure
+perspective.addLink({
+  source: parentSoA.baseExpression,
+  predicate: SoA.REL_PARENT,
+  target: childSoA.baseExpression,
+});
 ```
 
-### JSON Schema (MCP / programmatic)
-```json
-{
-  "title": "StateOfAffair",
-  "properties": {
-    "title": { "type": "string" },
-    "modality": { "type": "string", "enum": ["belief", "observation", "intention", "vision", "plan", "skill"] },
-    "description": { "type": "string" },
-    "confidence": { "type": "number" }
-  }
-}
-```
+### MCP / Programmatic Access
+SoA instances can be created via MCP tools using the auto-generated SHACL shape. Relationships are just `add_link` calls with `soa://rel_*` predicates.
 
 ## Design Principles
 
-1. **Universal base class** — `StateOfAffair` is the super-class; modalities are subtypes
-2. **Works for humans AND agents** — same schema for personal memory, shared task boards, Eve's worldview
-3. **Trees AND graphs** — parent/child gives hierarchy; relationships give cross-links
-4. **Fractal** — same pattern at individual, group, and network levels
-5. **Evolvable** — new modalities and relationship types can be added without breaking existing trees
+1. **No flags** — the graph shape + `soa://` namespace is sufficient for type identification
+2. **No separate relationship model** — relationships are native AD4M links with typed predicates
+3. **No author/timestamp fields** — link expressions handle provenance natively
+4. **Works for humans AND agents** — same schema for personal memory, shared task boards, Eve's worldview
+5. **Trees AND graphs** — `rel_parent` gives hierarchy; other predicates give cross-links
+6. **Fractal** — same pattern at individual, group, and network levels
+7. **Evolvable** — new modalities and relationship predicates can be added without breaking existing trees
+
+## The `soa` Language
+
+The `soa` language should be implemented as a **static language** in AD4M — defining fixed expressions that resolve to documentation:
+
+- `soa://rel_supports` → "This link indicates the source SoA provides evidence or argument for the target SoA"
+- `soa://rel_contradicts` → "This link indicates the source SoA provides evidence or argument against the target SoA"
+- etc.
+
+This makes the ontology self-documenting and discoverable.
 
 ## Connection to Eve
 

@@ -4,9 +4,11 @@
   "description": "State of Affairs ontology for AD4M — universal knowledge representation as trees and graphs",
   "main": "src/index.ts",
   "types": "src/index.ts",
+  "scripts": {
+    "build": "tsc"
+  },
   "files": [
-    "src/",
-    "schemas/"
+    "src/"
   ],
   "keywords": [
     "ad4m",
