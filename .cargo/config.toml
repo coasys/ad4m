@@ -1,0 +1,16 @@
+# Cargo project configuration for coasys/ad4m
+# This file applies to all `cargo` invocations in this workspace,
+# including local developer builds — not just CI.
+
+[env]
+# Use pre-built rusty_v8 static libraries from our coasys fork releases
+# instead of building V8 from source (which takes 2-3 hours).
+# Anyone cloning this repo gets the right binaries automatically.
+RUSTY_V8_MIRROR = "https://github.com/coasys/rusty_v8/releases/download"
+
+[net]
+# Use system git instead of cargo's built-in libgit2.
+# Required because coasys/deno.git has heavy chromium submodules
+# (wpt, buildtools, abseil-cpp from chromium.googlesource.com) that
+# libgit2 auto-fetches but are not needed for building.
+git-fetch-with-cli = true
