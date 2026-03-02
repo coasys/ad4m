@@ -164,7 +164,7 @@ impl Mutation {
         passphrase: String,
     ) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_CREATE_CAPABILITY)?;
-        let agent = AgentService::with_mutable_global_instance(|agent_service| {
+        let mut agent = AgentService::with_mutable_global_instance(|agent_service| {
             agent_service.create_new_keys();
 
             // Set the direct message language from bootstrap seed
@@ -203,8 +203,11 @@ impl Mutation {
             app_port: config.hc_app_port.unwrap_or(1337),
         };
 
+        let mut init_errors: Vec<String> = Vec::new();
+
         if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
             log::error!("Error initializing Holochain: {:?}", e);
+            init_errors.push(format!("Holochain init failed: {}", e));
         } else {
             log::info!("Holochain init complete");
         }
@@ -217,6 +220,7 @@ impl Mutation {
             .await
         {
             log::error!("Error loading system languages: {:?}", e);
+            init_errors.push(format!("Failed to load system languages: {}", e));
         } else {
             log::info!("System languages loaded");
         }
@@ -224,6 +228,10 @@ impl Mutation {
         // Ensure agent expression exists in the agent language
         if let Err(e) = AgentService::ensure_agent_expression().await {
             log::warn!("Error ensuring public agent expression: {}", e);
+        }
+
+        if !init_errors.is_empty() {
+            agent.error = Some(init_errors.join("; "));
         }
 
         get_global_pubsub()
@@ -351,6 +359,8 @@ impl Mutation {
             agent_ref.unlock(passphrase.clone())?
         }
 
+        let mut init_errors: Vec<String> = Vec::new();
+
         if agent_instance
             .lock()
             .expect("agent lock")
@@ -386,6 +396,7 @@ impl Mutation {
 
                 if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
                     log::error!("Error initializing Holochain: {:?}", e);
+                    init_errors.push(format!("Holochain init failed: {}", e));
                 } else {
                     log::info!("Holochain init complete");
                 }
@@ -402,6 +413,7 @@ impl Mutation {
                 .await
             {
                 log::error!("Error loading system languages: {:?}", e);
+                init_errors.push(format!("Failed to load system languages: {}", e));
             } else {
                 log::info!("System languages loaded");
             }
@@ -428,6 +440,8 @@ impl Mutation {
             .is_unlocked()
         {
             agent.error = Some("Failed to unlock agent".to_string());
+        } else if !init_errors.is_empty() {
+            agent.error = Some(init_errors.join("; "));
         }
 
         get_global_pubsub()
