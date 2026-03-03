@@ -127,8 +127,9 @@ impl LanguageController {
 
     /// Load a language from a bundle path
     ///
-    /// Creates a dedicated per-language runtime with isolated Deno worker
-    pub async fn load_language(&self, bundle_path: PathBuf) -> Result<String, LanguageError> {
+    /// Creates a dedicated per-language runtime with isolated Deno worker.
+    /// System/bootstrap languages get wider filesystem access (CWD + storage dir).
+    pub async fn load_language(&self, bundle_path: PathBuf, is_system_language: bool) -> Result<String, LanguageError> {
         info!("Loading language from bundle: {:?}", bundle_path);
 
         // Read bundle to calculate IPFS hash
@@ -169,7 +170,7 @@ impl LanguageController {
 
         // Spawn dedicated runtime in its own thread (sandboxed to storage_directory)
         let runtime_handle =
-            LanguageRuntimeHandle::spawn(language_address.clone(), storage_directory.clone())
+            LanguageRuntimeHandle::spawn(language_address.clone(), storage_directory.clone(), is_system_language)
                 .map_err(|e| LanguageError::LoadError {
                     address: language_address.clone(),
                     message: e,
@@ -398,14 +399,14 @@ impl LanguageController {
 
     /// Ensure a language bundle is saved on disk (fetching from the language language if needed)
     /// and then load it into a per-language runtime.
-    async fn install_language_from_address(&self, address: &str) -> Result<(), LanguageError> {
+    async fn install_language_from_address(&self, address: &str, is_system_language: bool) -> Result<(), LanguageError> {
         let bundle_path = languages_directory().join(address).join("bundle.js");
 
         if bundle_path.exists() {
             log::debug!("Language bundle already on disk: {}", address);
             // Still need to load into runtime if not already loaded
             if !self.is_language_loaded(address).await {
-                self.load_language(bundle_path).await?;
+                self.load_language(bundle_path, is_system_language).await?;
             }
             return Ok(());
         }
@@ -484,7 +485,7 @@ impl LanguageController {
         info!("Saved language bundle for: {}", address);
 
         // Load into a per-language runtime
-        self.load_language(saved_bundle_path).await?;
+        self.load_language(saved_bundle_path, is_system_language).await?;
         info!("Loaded language runtime for: {}", address);
 
         Ok(())
@@ -523,7 +524,7 @@ impl LanguageController {
 
         let (hash, bundle_path) = self.save_language_bundle(&language_language_bundle, None)?;
         info!("Saved language language bundle, hash={}, loading...", hash);
-        self.load_language(bundle_path).await?;
+        self.load_language(bundle_path, true).await?;
         info!("load_language returned successfully for language language");
 
         // Store as system language
@@ -544,7 +545,7 @@ impl LanguageController {
                 RuntimeService::with_global_instance(|rs| rs.get_perspective_language());
 
             // Install agent language
-            if let Err(e) = self.install_language_from_address(&agent_language).await {
+            if let Err(e) = self.install_language_from_address(&agent_language, true).await {
                 error!(
                     "Failed to install agent language {}: {}",
                     &agent_language, e
@@ -553,7 +554,7 @@ impl LanguageController {
 
             // Install neighbourhood language
             if let Err(e) = self
-                .install_language_from_address(&neighbourhood_language)
+                .install_language_from_address(&neighbourhood_language, true)
                 .await
             {
                 error!(
@@ -564,7 +565,7 @@ impl LanguageController {
 
             // Install perspective language
             if let Err(e) = self
-                .install_language_from_address(&perspective_language)
+                .install_language_from_address(&perspective_language, true)
                 .await
             {
                 error!(
@@ -599,7 +600,7 @@ impl LanguageController {
             let known_link_languages =
                 RuntimeService::with_global_instance(|rs| rs.get_know_link_languages());
             for lang_address in known_link_languages {
-                if let Err(e) = self.install_language_from_address(&lang_address).await {
+                if let Err(e) = self.install_language_from_address(&lang_address, true).await {
                     warn!(
                         "Failed to preload known link language {}: {}",
                         lang_address, e
@@ -664,7 +665,7 @@ impl LanguageController {
                     continue;
                 }
                 info!("Loading installed language from disk: {}", dir_name);
-                match self.load_language(bundle_path).await {
+                match self.load_language(bundle_path, false).await {
                     Ok(_) => {
                         info!("Successfully loaded language: {}", dir_name);
                     }
@@ -781,7 +782,7 @@ impl LanguageController {
 
             // Load into a per-language Deno runtime
             controller
-                .load_language(saved_bundle_path)
+                .load_language(saved_bundle_path, false)
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -2268,11 +2269,15 @@ impl LanguageController {
 
     /// Reload a language: unload and re-load from disk.
     pub async fn reload_language(&self, address: &str) -> Result<(), LanguageError> {
+        let is_system = {
+            let sys = self.system_addresses.lock().await;
+            sys.system_language_set.contains(address)
+        };
         self.unload_language(address).await?;
 
         let bundle_path = languages_directory().join(address).join("bundle.js");
         if bundle_path.exists() {
-            self.load_language(bundle_path).await?;
+            self.load_language(bundle_path, is_system).await?;
         }
 
         Ok(())

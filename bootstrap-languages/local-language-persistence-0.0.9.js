@@ -1089,7 +1089,11 @@ class LangAdapter {
     putAdapter;
     #storagePath;
     constructor(context){
-        this.#storagePath = context.storageDirectory;
+        if ("storagePath" in context.customSettings) {
+            this.#storagePath = context.customSettings["storagePath"];
+        } else {
+            this.#storagePath = "./tst-tmp/languages";
+        }
     }
     async getLanguageSource(address) {
         const bundlePath = join3(this.#storagePath, `bundle-${address}.js`);
@@ -1107,7 +1111,11 @@ class PutAdapter {
     #storagePath;
     constructor(context){
         this.#agent = context.agent;
-        this.#storagePath = context.storageDirectory;
+        if ("storagePath" in context.customSettings) {
+            this.#storagePath = context.customSettings["storagePath"];
+        } else {
+            this.#storagePath = "./tst-tmp/languages";
+        }
     }
     async createPublic(language) {
         const hash = UTILS.hash(language.bundle.toString());
@@ -1127,7 +1135,11 @@ class Adapter {
     #storagePath;
     constructor(context){
         this.putAdapter = new PutAdapter(context);
-        this.#storagePath = context.storageDirectory;
+        if ("storagePath" in context.customSettings) {
+            this.#storagePath = context.customSettings["storagePath"];
+        } else {
+            this.#storagePath = "./tst-tmp/languages";
+        }
     }
     async get(address) {
         const metaPath = join3(this.#storagePath, `meta-${address}.json`);

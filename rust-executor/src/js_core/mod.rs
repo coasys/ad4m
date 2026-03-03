@@ -60,25 +60,39 @@ impl std::fmt::Display for ExternWrapper {
 impl JsCore {
     /// Create a new language-specific JsCore instance with sandboxed permissions.
     /// Filesystem access is scoped to the language's storage directory only.
+    /// System/bootstrap languages additionally get access to the executor's CWD
+    /// (they are bundled by the developer and trusted).
     /// Network access is allowed (languages need HTTP for peers/DHT).
     /// All other capabilities (env, run, ffi, sys) are denied.
-    pub fn new_for_language(storage_directory: PathBuf) -> Self {
+    pub fn new_for_language(storage_directory: PathBuf, is_system_language: bool) -> Self {
         let permission_desc_parser = Arc::new(RuntimePermissionDescriptorParser::new(
             sys_traits::impls::RealSys,
         ));
 
         let storage_dir_str = storage_directory.to_string_lossy().to_string();
         info!(
-            "Creating sandboxed language runtime with storage: {}",
+            "Creating {} language runtime with storage: {}",
+            if is_system_language { "system" } else { "sandboxed" },
             storage_dir_str
         );
 
+        // Build the filesystem allow list
+        let mut allowed_paths = vec![storage_dir_str.clone()];
+        if is_system_language {
+            // System/bootstrap languages get CWD access (for shared test storage, etc.)
+            if let Ok(cwd) = std::env::current_dir() {
+                let cwd_str = cwd.to_string_lossy().to_string();
+                info!("System language also gets CWD access: {}", cwd_str);
+                allowed_paths.push(cwd_str);
+            }
+        }
+
         let permissions_opts = PermissionsOptions {
             allow_all: false,
-            // Filesystem: scoped to this language's storage directory only
-            allow_read: Some(vec![storage_dir_str.clone()]),
+            // Filesystem: scoped to storage dir (+ CWD for system languages)
+            allow_read: Some(allowed_paths.clone()),
             deny_read: None,
-            allow_write: Some(vec![storage_dir_str]),
+            allow_write: Some(allowed_paths),
             deny_write: None,
             // Network: allowed (languages make HTTP requests to peers, DHT nodes, etc.)
             allow_net: Some(vec![]),

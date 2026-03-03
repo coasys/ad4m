@@ -1468,7 +1468,7 @@ impl Mutation {
                 .join(&address)
                 .join("bundle.js");
             if bundle_on_disk.exists() {
-                if let Err(e) = controller.load_language(bundle_on_disk).await {
+                if let Err(e) = controller.load_language(bundle_on_disk, false).await {
                     log::warn!("Failed to load templated language into runtime: {}", e);
                 }
             }
@@ -1563,7 +1563,7 @@ impl Mutation {
             .join(&hash)
             .join("bundle.js");
         if bundle_on_disk.exists() {
-            if let Err(e) = controller.load_language(bundle_on_disk).await {
+            if let Err(e) = controller.load_language(bundle_on_disk, false).await {
                 log::warn!("Failed to load published language into runtime: {}", e);
             }
         }

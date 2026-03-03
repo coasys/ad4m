@@ -1090,7 +1090,11 @@ class SharedPerspectivePutAdapter {
     #storagePath;
     constructor(context){
         this.#agent = context.agent;
-        this.#storagePath = context.storageDirectory;
+        if ("storagePath" in context.customSettings) {
+            this.#storagePath = context.customSettings["storagePath"];
+        } else {
+            this.#storagePath = "./tst-tmp/";
+        }
     }
     async createPublic(neighbourhood) {
         const expression = this.#agent.createSignedExpression(neighbourhood);
@@ -1107,7 +1111,11 @@ class Adapter {
     putAdapter;
     constructor(context){
         this.putAdapter = new SharedPerspectivePutAdapter(context);
-        this.#storagePath = context.storageDirectory;
+        if ("storagePath" in context.customSettings) {
+            this.#storagePath = context.customSettings["storagePath"];
+        } else {
+            this.#storagePath = "./tst-tmp/";
+        }
     }
     async get(address) {
         const neighbourhoodPath = join3(this.#storagePath, `neighbourhood-${address}.json`);
