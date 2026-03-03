@@ -51,13 +51,14 @@ impl LanguageRuntime {
         })
     }
 
-    /// Load a language bundle by dynamically importing it via the bootstrap's loadLanguageBundle()
-    pub async fn load_module(&self, path: &str) -> Result<(), String> {
-        let script = format!(r#"await loadLanguageBundle("{}")"#, path);
+    /// Load a language bundle from base64-encoded source code.
+    /// The bundle is read in Rust and passed as base64 so the JS sandbox never does file I/O.
+    pub async fn load_module(&self, base64_source: &str) -> Result<(), String> {
+        let script = format!(r#"await loadLanguageBundle("{}")"#, base64_source);
         self.js_core
             .execute(&script)
             .await
-            .map_err(|e| format!("Failed to load language bundle {}: {}", path, e))?;
+            .map_err(|e| format!("Failed to load language bundle: {}", e))?;
         Ok(())
     }
 
