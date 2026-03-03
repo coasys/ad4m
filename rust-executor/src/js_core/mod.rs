@@ -5,12 +5,14 @@ use deno_core::{resolve_url_or_path, v8, PollEventLoopOptions};
 use deno_fs::RealFs;
 use deno_resolver::npm::DenoInNpmPackageChecker;
 use deno_resolver::npm::NpmResolver;
-use deno_runtime::deno_permissions::PermissionsContainer;
+use deno_runtime::deno_permissions::{Permissions, PermissionsContainer, PermissionsOptions};
 use deno_runtime::permissions::RuntimePermissionDescriptorParser;
 use deno_runtime::worker::{MainWorker, WorkerOptions, WorkerServiceOptions};
 use holochain::prelude::ExternIO;
+use log::info;
 use std::collections::HashSet;
 use std::env::current_dir;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
@@ -56,13 +58,54 @@ impl std::fmt::Display for ExternWrapper {
 }
 
 impl JsCore {
-    /// Create a new language-specific JsCore instance
-    /// This uses a minimal bootstrap and doesn't load main.js or executor
-    pub fn new_for_language() -> Self {
+    /// Create a new language-specific JsCore instance with sandboxed permissions.
+    /// Filesystem access is scoped to the language's storage directory only.
+    /// Network access is allowed (languages need HTTP for peers/DHT).
+    /// All other capabilities (env, run, ffi, sys) are denied.
+    pub fn new_for_language(storage_directory: PathBuf) -> Self {
+        let permission_desc_parser = Arc::new(RuntimePermissionDescriptorParser::new(
+            sys_traits::impls::RealSys,
+        ));
+
+        let storage_dir_str = storage_directory.to_string_lossy().to_string();
+        info!(
+            "Creating sandboxed language runtime with storage: {}",
+            storage_dir_str
+        );
+
+        let permissions_opts = PermissionsOptions {
+            allow_all: false,
+            // Filesystem: scoped to this language's storage directory only
+            allow_read: Some(vec![storage_dir_str.clone()]),
+            deny_read: None,
+            allow_write: Some(vec![storage_dir_str]),
+            deny_write: None,
+            // Network: allowed (languages make HTTP requests to peers, DHT nodes, etc.)
+            allow_net: Some(vec![]),
+            deny_net: None,
+            // Module imports: only from our synthetic domain (for the bundle capture script)
+            allow_import: Some(vec!["ad4m.language".to_string()]),
+            // Everything else: denied
+            allow_env: None,
+            deny_env: None,
+            allow_sys: None,
+            deny_sys: None,
+            allow_run: None,
+            deny_run: None,
+            allow_ffi: None,
+            deny_ffi: None,
+            prompt: false,
+        };
+
+        let permissions = Permissions::from_options(&*permission_desc_parser, &permissions_opts)
+            .expect("Failed to create sandboxed permissions for language runtime");
+        let container = PermissionsContainer::new(permission_desc_parser, permissions);
+
         Self::new_with_options(
             options::language_main_module_url(),
             options::language_module_loader(),
             options::language_worker_options(),
+            container,
         )
     }
 
@@ -70,11 +113,9 @@ impl JsCore {
         module_url: Url,
         module_loader: Rc<string_module_loader::StringModuleLoader>,
         worker_options: WorkerOptions,
+        permissions: PermissionsContainer,
     ) -> Self {
         let fs = Arc::new(RealFs);
-        let permission_desc_parser = Arc::new(RuntimePermissionDescriptorParser::new(
-            sys_traits::impls::RealSys,
-        ));
 
         let worker = MainWorker::bootstrap_from_options(
             &module_url,
@@ -85,7 +126,7 @@ impl JsCore {
             > {
                 deno_rt_native_addon_loader: None,
                 module_loader,
-                permissions: PermissionsContainer::allow_all(permission_desc_parser),
+                permissions,
                 blob_store: Default::default(),
                 broadcast_channel: Default::default(),
                 feature_checker: Default::default(),

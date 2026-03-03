@@ -1,5 +1,6 @@
 use log::{debug, error, info};
 use serde_json::Value as JsonValue;
+use std::path::PathBuf;
 use tokio::runtime::Builder;
 use tokio::sync::{
     mpsc::{self, UnboundedSender},
@@ -19,7 +20,8 @@ pub struct LanguageRuntimeHandle {
 
 impl LanguageRuntimeHandle {
     /// Spawn a new LanguageRuntime in a dedicated thread.
-    pub fn spawn(language_address: String) -> Result<Self, String> {
+    /// The storage_directory is the only filesystem path accessible to this sandbox.
+    pub fn spawn(language_address: String, storage_directory: PathBuf) -> Result<Self, String> {
         info!("Spawning LanguageRuntime for: {}", language_address);
 
         let (tx, rx) = mpsc::unbounded_channel::<LanguageRuntimeRequest>();
@@ -35,7 +37,7 @@ impl LanguageRuntimeHandle {
                     .expect("Failed to create Tokio runtime for language");
 
                 rt.block_on(async {
-                    let runtime = LanguageRuntime::new(addr.clone());
+                    let runtime = LanguageRuntime::new(addr.clone(), storage_directory);
 
                     // Execute bootstrap module to make Deno ops available
                     if let Err(e) = runtime.init().await {

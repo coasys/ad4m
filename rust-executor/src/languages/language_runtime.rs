@@ -1,6 +1,7 @@
 use crate::js_core::JsCore;
 use log::{debug, error, info, warn};
 use serde_json::Value as JsonValue;
+use std::path::PathBuf;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 
 /// Request sent to a LanguageRuntime via its channel
@@ -32,11 +33,11 @@ pub struct LanguageRuntime {
 }
 
 impl LanguageRuntime {
-    pub fn new(language_address: String) -> Self {
+    pub fn new(language_address: String, storage_directory: PathBuf) -> Self {
         info!("Creating LanguageRuntime for: {}", language_address);
         Self {
             language_address,
-            js_core: JsCore::new_for_language(),
+            js_core: JsCore::new_for_language(storage_directory),
         }
     }
 

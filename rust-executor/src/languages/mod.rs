@@ -167,14 +167,13 @@ impl LanguageController {
             language_address.clone(),
         );
 
-        // Spawn dedicated runtime in its own thread
+        // Spawn dedicated runtime in its own thread (sandboxed to storage_directory)
         let runtime_handle =
-            LanguageRuntimeHandle::spawn(language_address.clone()).map_err(|e| {
-                LanguageError::LoadError {
+            LanguageRuntimeHandle::spawn(language_address.clone(), storage_directory.clone())
+                .map_err(|e| LanguageError::LoadError {
                     address: language_address.clone(),
                     message: e,
-                }
-            })?;
+                })?;
 
         // Read the language bundle in Rust and pass source code to JS
         // (the JS sandbox should NOT do file operations)
