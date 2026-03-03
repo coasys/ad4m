@@ -1,0 +1,9 @@
+{
+  "name": "ad4m-profiling",
+  "private": true,
+  "type": "module",
+  "description": "Memory profiling and leak investigation scripts for AD4M executor",
+  "dependencies": {
+    "ws": "^8.0.0"
+  }
+}

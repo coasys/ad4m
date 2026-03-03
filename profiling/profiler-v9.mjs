@@ -155,12 +155,13 @@ async function main() {
   
   // Wait for AD4M init
   log("Waiting for AD4M init...");
-  await new Promise(resolve => {
+  const initComplete = await new Promise(resolve => {
     const check = setInterval(() => {
-      try { if (readFileSync(EXEC_LOG, "utf-8").includes("AD4M init complete")) { clearInterval(check); resolve(); } } catch {}
+      try { if (readFileSync(EXEC_LOG, "utf-8").includes("AD4M init complete")) { clearInterval(check); resolve(true); } } catch {}
     }, 2000);
-    setTimeout(() => { clearInterval(check); resolve(); }, 300000);
+    setTimeout(() => { clearInterval(check); resolve(false); }, 300000);
   });
+  if (!initComplete) throw new Error("AD4M init did not complete within 300s — aborting");
   log("AD4M init complete!");
   await sleep(10000);
   

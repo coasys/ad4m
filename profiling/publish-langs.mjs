@@ -116,14 +116,15 @@ async function main() {
   log(`Agent DID: ${did}`);
 
   // Wait for init
-  await new Promise(resolve => {
+  const initComplete = await new Promise(resolve => {
     const check = setInterval(() => {
       try {
-        if (readFileSync(execLog, "utf-8").includes("AD4M init complete")) { clearInterval(check); resolve(); }
+        if (readFileSync(execLog, "utf-8").includes("AD4M init complete")) { clearInterval(check); resolve(true); }
       } catch {}
     }, 2000);
-    setTimeout(() => { clearInterval(check); resolve(); }, 120000);
+    setTimeout(() => { clearInterval(check); resolve(false); }, 120000);
   });
+  if (!initComplete) throw new Error("AD4M init did not complete within 120s — aborting");
   log("AD4M init complete");
   await sleep(5000);
 
