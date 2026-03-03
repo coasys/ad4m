@@ -1,4 +1,4 @@
-import { ApolloClient, ApolloQueryResult, gql } from "@apollo/client/core"
+import { ApolloClient, gql, FetchResult } from "@apollo/client/core"
 import { Address } from "../Address"
 import { DID } from "../DID"
 import { OnlineAgent, TelepresenceSignalCallback } from "../language/Language"
@@ -256,7 +256,7 @@ export class NeighbourhoodClient {
             }`,
             variables: { perspectiveUUID }
         }).subscribe({
-            next: (result: ApolloQueryResult<any>) => {
+            next: (result: FetchResult<any>) => {
                 try {
                     const { neighbourhoodSignal } = unwrapApolloResult(result)
                     that.dispatchSignal(perspectiveUUID, neighbourhoodSignal)
