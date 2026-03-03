@@ -2348,7 +2348,7 @@ impl Mutation {
         // Direct message sending requires DM language - not yet ported to Rust
         log::warn!("runtime_friend_send_message: DM language interaction not yet ported to Rust");
         let _ = message;
-        Ok(false)
+        Err(FieldError::new("DM send not implemented in Rust", Value::Null))
     }
 
     async fn runtime_hc_add_agent_infos(
