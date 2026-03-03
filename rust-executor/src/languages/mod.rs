@@ -178,12 +178,11 @@ impl LanguageController {
 
         // Read the language bundle in Rust and pass source code to JS
         // (the JS sandbox should NOT do file operations)
-        let bundle_source = std::fs::read_to_string(&bundle_path).map_err(|e| {
-            LanguageError::LoadError {
+        let bundle_source =
+            std::fs::read_to_string(&bundle_path).map_err(|e| LanguageError::LoadError {
                 address: language_address.clone(),
                 message: format!("Failed to read language bundle {:?}: {}", bundle_path, e),
-            }
-        })?;
+            })?;
         let bundle_base64 = BASE64_STANDARD.encode(&bundle_source);
         info!("Loading module for language {}", language_address);
         runtime_handle

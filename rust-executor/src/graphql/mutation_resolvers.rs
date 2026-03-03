@@ -184,7 +184,10 @@ impl Mutation {
 
         // Start Holochain conductor (previously done via JS core.initHolochain)
         let config = crate::config::get_global_config();
-        let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(&config, passphrase.clone());
+        let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
+            &config,
+            passphrase.clone(),
+        );
 
         let mut init_errors: Vec<String> = Vec::new();
 
@@ -358,7 +361,10 @@ impl Mutation {
             {
                 log::info!("Holochain service not initialized. Initializing...");
                 let config = crate::config::get_global_config();
-                let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(&config, passphrase.clone());
+                let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
+                    &config,
+                    passphrase.clone(),
+                );
 
                 if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
                     log::error!("Error initializing Holochain: {:?}", e);
