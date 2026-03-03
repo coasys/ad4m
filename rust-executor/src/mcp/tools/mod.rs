@@ -23,6 +23,7 @@
 pub mod auth;
 pub mod dynamic;
 pub mod flows;
+pub mod neighbourhoods;
 pub mod perspectives;
 pub mod profiles;
 pub mod subjects;
@@ -232,6 +233,15 @@ impl Ad4mMcpHandler {
             .with_route((
                 Self::generate_waker_query_tool_attr(),
                 Self::generate_waker_query,
+            ))
+            // neighbourhoods.rs
+            .with_route((
+                Self::neighbourhood_publish_from_perspective_tool_attr(),
+                Self::neighbourhood_publish_from_perspective,
+            ))
+            .with_route((
+                Self::neighbourhood_join_from_url_tool_attr(),
+                Self::neighbourhood_join_from_url,
             ))
     }
 
