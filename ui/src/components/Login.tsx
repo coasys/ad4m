@@ -192,7 +192,7 @@ const Login = () => {
       local: { fileName: "bert" },
       modelType: "EMBEDDING",
     });
-    // add medium whisper model
+    // add main whisper model (quantized large v3 turbo)
     client!.ai.addModel({
       name: "Whisper",
       local: { fileName: whisperModel },
@@ -655,6 +655,17 @@ const Login = () => {
                   <a
                     onClick={() =>
                       open(
+                        "https://huggingface.co/lmz/candle-whisper"
+                      )
+                    }
+                    style={{ cursor: "pointer" }}
+                  >Whisper tiny quantized (42MB)</a>
+                </p>
+                and
+                <p>
+                  <a
+                    onClick={() =>
+                      open(
                         "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs"
                       )
                     }
@@ -829,6 +840,17 @@ const Login = () => {
                     <a
                       onClick={() =>
                         open(
+                          "https://huggingface.co/lmz/candle-whisper"
+                        )
+                      }
+                      style={{ cursor: "pointer" }}
+                    >Whisper tiny quantized (42MB)</a>
+                  </p>
+                  and
+                  <p>
+                    <a
+                      onClick={() =>
+                        open(
                           "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs"
                         )
                       }
@@ -865,6 +887,17 @@ const Login = () => {
                       }
                       style={{ cursor: "pointer" }}
                     >Whisper large v3 turbo quantized (454MB)</a>
+                  </p>
+                  and
+                  <p>
+                    <a
+                      onClick={() =>
+                        open(
+                          "https://huggingface.co/lmz/candle-whisper"
+                        )
+                      }
+                      style={{ cursor: "pointer" }}
+                    >Whisper tiny quantized (42MB)</a>
                   </p>
                   and
                   <p>
