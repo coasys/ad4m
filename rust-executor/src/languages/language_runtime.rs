@@ -51,14 +51,29 @@ impl LanguageRuntime {
         })
     }
 
-    /// Load a language bundle from base64-encoded source code.
-    /// The bundle is read in Rust and passed as base64 so the JS sandbox never does file I/O.
-    pub async fn load_module(&self, base64_source: &str) -> Result<(), String> {
-        let script = format!(r#"await loadLanguageBundle("{}")"#, base64_source);
+    /// Load a language bundle from source code directly (no file I/O in JS).
+    /// The bundle is loaded as an ES module via Deno's runtime API and its
+    /// default export is captured as `globalThis.languageConstructor`.
+    pub async fn load_module(&self, source: &str) -> Result<(), String> {
+        // Use a synthetic URL unique to this language so Deno's module map
+        // doesn't collide if multiple languages are loaded in the same runtime.
+        let specifier = format!("https://ad4m.language/{}/bundle.js", self.language_address);
         self.js_core
-            .execute(&script)
+            .load_module_from_source(&specifier, source.to_string())
             .await
             .map_err(|e| format!("Failed to load language bundle: {}", e))?;
+
+        // Capture the default export as globalThis.languageConstructor.
+        // Note: execute() wraps scripts in `return (expr)`, so this must be
+        // a single expression, not statements.
+        let capture_script = format!(
+            r#"import("{}").then(m => {{ globalThis.languageConstructor = m.default && m.default.default ? m.default.default : m.default || m; }})"#,
+            specifier
+        );
+        self.js_core
+            .execute(&capture_script)
+            .await
+            .map_err(|e| format!("Failed to capture language constructor: {}", e))?;
         Ok(())
     }
 

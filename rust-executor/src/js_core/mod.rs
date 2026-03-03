@@ -126,6 +126,34 @@ impl JsCore {
         Ok(())
     }
 
+    /// Load an ES module from source code directly (no file I/O).
+    /// The module is registered under a synthetic URL so it can be evaluated.
+    pub async fn load_module_from_source(
+        &self,
+        specifier: &str,
+        source: String,
+    ) -> Result<(), AnyError> {
+        let mut worker = self.worker.lock().await;
+        let mut loaded_modules = self.loaded_modules.lock().await;
+        if loaded_modules.contains(specifier) {
+            return Ok(());
+        }
+
+        let url = Url::parse(specifier)
+            .map_err(|e| anyhow!("Invalid module specifier '{}': {}", specifier, e))?;
+        let module_id = worker
+            .js_runtime
+            .load_side_es_module_from_code(&url, source)
+            .await?;
+        loaded_modules.insert(specifier.to_string());
+        let evaluate_fut = worker.js_runtime.mod_evaluate(module_id);
+        worker
+            .js_runtime
+            .with_event_loop_future(evaluate_fut, PollEventLoopOptions::default())
+            .await?;
+        Ok(())
+    }
+
     /// Initialize a language-specific runtime by executing the minimal bootstrap module.
     /// This makes Deno ops available without loading the full executor/main.js.
     pub async fn init_for_language(&self) -> Result<(), AnyError> {

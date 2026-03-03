@@ -183,10 +183,9 @@ impl LanguageController {
                 address: language_address.clone(),
                 message: format!("Failed to read language bundle {:?}: {}", bundle_path, e),
             })?;
-        let bundle_base64 = BASE64_STANDARD.encode(&bundle_source);
         info!("Loading module for language {}", language_address);
         runtime_handle
-            .load_module(bundle_base64)
+            .load_module(bundle_source)
             .await
             .map_err(|e| LanguageError::LoadError {
                 address: language_address.clone(),
