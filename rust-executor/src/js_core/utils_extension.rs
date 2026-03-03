@@ -4,7 +4,6 @@ use log::{debug, error, info, warn};
 use multibase::Base;
 use multihash::{Code, MultihashDigest};
 
-use super::JS_CORE_HANDLE;
 use crate::js_core::error::AnyhowWrapperError;
 #[op2]
 #[string]
@@ -53,24 +52,9 @@ fn console_warn(#[string] data: String) -> Result<String, AnyhowWrapperError> {
     Ok(String::from("temp"))
 }
 
-#[op2(async)]
-#[string]
-async fn load_module(#[string] path: String) -> Result<String, AnyhowWrapperError> {
-    info!("Trying to load module: {}", path);
-
-    let mut js_core_handle = JS_CORE_HANDLE.lock().await;
-
-    if let Some(ref mut value) = *js_core_handle {
-        // Call mutable functions on JsCoreHandle
-        let _res = value.load_module(path).await;
-    }
-
-    Ok(String::from("temp"))
-}
-
 deno_core::extension!(
     utils_service,
-    ops = [hash, load_module, console_log, console_debug, console_error, console_warn],
+    ops = [hash, console_log, console_debug, console_error, console_warn],
     esm_entry_point = "ext:utils_service/utils_extension.js",
     esm = [dir "src/js_core", "utils_extension.js"]
 );

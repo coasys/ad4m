@@ -7,6 +7,27 @@ use std::sync::{Arc, Mutex};
 lazy_static::lazy_static! {
     /// Global SMTP configuration for sending emails
     pub static ref SMTP_CONFIG: Arc<Mutex<Option<SmtpConfig>>> = Arc::new(Mutex::new(None));
+
+    /// Global Ad4mConfig instance, set once during startup
+    pub static ref GLOBAL_AD4M_CONFIG: Arc<Mutex<Option<Ad4mConfig>>> = Arc::new(Mutex::new(None));
+}
+
+/// Store the Ad4mConfig globally so services can access it without passing it through every call
+pub fn set_global_config(config: Ad4mConfig) {
+    let mut global_config = GLOBAL_AD4M_CONFIG
+        .lock()
+        .expect("Failed to lock GLOBAL_AD4M_CONFIG");
+    *global_config = Some(config);
+}
+
+/// Get a clone of the global Ad4mConfig
+pub fn get_global_config() -> Ad4mConfig {
+    let global_config = GLOBAL_AD4M_CONFIG
+        .lock()
+        .expect("Failed to lock GLOBAL_AD4M_CONFIG");
+    global_config
+        .clone()
+        .expect("GLOBAL_AD4M_CONFIG not initialized")
 }
 
 /// Set the global SMTP config (called during server initialization)

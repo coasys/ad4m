@@ -42,7 +42,7 @@ pub async fn migrate_links_from_rusqlite_to_surrealdb(
         return Ok(());
     }
 
-    log::info!(
+    log::debug!(
         "Starting link migration from Rusqlite to SurrealDB for perspective {}",
         perspective_uuid
     );

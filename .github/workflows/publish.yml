@@ -380,7 +380,7 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:0eddf04e4380f892968297a248da05c734f64d089e9e01cf7b89e3ff4328db4c
+      image: coasys/ad4m-ci-linux:latest@sha256:bffabe1dfc4ef18ca64105318d342ab61c2db946ae6ba16718dcd8d1d57c2cff
     steps:
       - uses: actions/checkout@v3
 
@@ -461,14 +461,6 @@ jobs:
           tag: ${{ env.NPM_TAG }}
           access: public
 
-      - name: Publish executor
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: executor/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
-
       - name: Publish Test runner
         uses: JS-DevTools/npm-publish@v1
         with:
@@ -522,7 +514,6 @@ jobs:
   
      - run: rustup target add wasm32-unknown-unknown
      - run: pnpm install
-     - run: pnpm build-core-executor
      - run: cargo install cargo-workspaces || echo "cargo-workspaces already installed"
      - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
      - run: cargo workspaces publish --from-git
