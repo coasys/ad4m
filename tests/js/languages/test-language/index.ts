@@ -1,4 +1,4 @@
-import type { Address, Interaction, Expression, Language, LanguageContext } from "https://esm.sh/@coasys/ad4m@0.5.0";
+import type { Address, Interaction, Expression, Language, LanguageContext } from "https://esm.sh/v135/@coasys/ad4m@0.5.0";
 
 export default function create(context: LanguageContext): Language {
     const expressions = new Array<Expression>()

@@ -1,4 +1,4 @@
-import { ChildProcess, exec, ExecException, execSync } from "node:child_process";
+import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions/index.js";
 import { ApolloClient, InMemoryCache } from "@apollo/client/core/index.js";
@@ -33,32 +33,112 @@ export async function isProcessRunning(processName: string): Promise<boolean> {
     })
 }
 
-export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bootstrapUrl: string | null, process: ChildProcess}> {
-    const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
-    let servicesProcess = exec(`${command} run-local-hc-services`);
+export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bootstrapUrl: string | null, relayUrl: string | null, process: ChildProcess}> {
+    let servicesProcess = exec(`kitsune2-bootstrap-srv`);
 
     let proxyUrl: string | null = null;
     let bootstrapUrl: string | null = null;
+    let relayUrl: string | null = null;
+    let bootstrapPort: string | null = null;
+    let relayPort: string | null = null;
 
     let servicesReady = new Promise<void>((resolve, reject) => {
-        servicesProcess.stdout!.on('data', (data) => {
-            if (data.includes("HC BOOTSTRAP - ADDR")) {
-                const regex = /(http:\/\/|ws:\/\/)[^\s]+/g;
-                const matches = data.match(regex);
-                bootstrapUrl = matches![0];
+        const SERVICES_READY_TIMEOUT_MS = 60000; // 60 seconds timeout
+        const stdoutBuffer: string[] = [];
+        const stderrBuffer: string[] = [];
+        let timeoutId: NodeJS.Timeout | null = null;
+        let resolved = false;
+
+        const cleanup = () => {
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+                timeoutId = null;
+            }
+            servicesProcess.stdout!.removeListener('data', stdoutHandler);
+            servicesProcess.stderr!.removeListener('data', stderrHandler);
+        };
+
+        const stdoutHandler = (data: Buffer) => {
+            const dataStr = data.toString();
+            stdoutBuffer.push(dataStr);
+            console.log("Bootstrap server output: ", dataStr);
+
+            // Look for the bootstrap server listening message
+            if (dataStr.includes("#kitsune2_bootstrap_srv#listening#")) {
+                const lines = dataStr.split("\n");
+                //@ts-ignore
+                const portLine = lines.find(line => line.includes("#kitsune2_bootstrap_srv#listening#"));
+                if (portLine) {
+                    const parts = portLine.split('#');
+                    const portPart = parts[3]; // "127.0.0.1:36353"
+                    bootstrapPort = portPart.split(':')[1];
+                    console.log("Bootstrap Port: ", bootstrapPort);
+                    bootstrapUrl = `https://127.0.0.1:${bootstrapPort}`;
+                    proxyUrl = `wss://127.0.0.1:${bootstrapPort}`;
+                    console.log("Bootstrap URL: ", bootstrapUrl);
+                    console.log("Proxy URL: ", proxyUrl);
+                }
             }
 
-            if (data.includes("HC SIGNAL - ADDR")) {
-                const regex = /(http:\/\/|ws:\/\/)[^\s]+/g;
-                const matches = data.match(regex);
-                proxyUrl = matches![0];
+            // Look for the iroh relay server message
+            if (dataStr.includes("Internal iroh relay server started at")) {
+                const match = dataStr.match(/Internal iroh relay server started at ([\d.]+:\d+)/);
+                if (match) {
+                    const address = match[1];
+                    relayPort = address.split(':')[1];
+                    console.log("Iroh Relay Port: ", relayPort);
+                    relayUrl = `http://127.0.0.1:${relayPort}`;
+                    console.log("Relay URL: ", relayUrl);
+                }
+            }
+
+            // Resolve when we have both ports
+            if (bootstrapPort && relayPort && !resolved) {
+                resolved = true;
+                cleanup();
                 resolve();
             }
-        });
+        };
+
+        const stderrHandler = (data: Buffer) => {
+            const dataStr = data.toString();
+            stderrBuffer.push(dataStr);
+            console.log("Bootstrap server stderr: ", dataStr);
+        };
+
+        servicesProcess.stdout!.on('data', stdoutHandler);
+        servicesProcess.stderr!.on('data', stderrHandler);
+
+        // Set up timeout to prevent hanging forever
+        timeoutId = setTimeout(() => {
+            if (!resolved) {
+                resolved = true;
+                cleanup();
+
+                console.error("=== Services startup timeout ===");
+                console.error(`Timeout after ${SERVICES_READY_TIMEOUT_MS}ms waiting for bootstrap and relay services`);
+                console.error(`Bootstrap port found: ${bootstrapPort ?? 'NO'}`);
+                console.error(`Relay port found: ${relayPort ?? 'NO'}`);
+                console.error("--- Collected stdout ---");
+                console.error(stdoutBuffer.join(''));
+                console.error("--- Collected stderr ---");
+                console.error(stderrBuffer.join(''));
+                console.error("========================");
+
+                // Kill the services process
+                try {
+                    servicesProcess.kill('SIGKILL');
+                } catch (killErr) {
+                    console.error("Error killing services process:", killErr);
+                }
+
+                reject(new Error(`Services startup timeout: bootstrapPort=${bootstrapPort}, relayPort=${relayPort}`));
+            }
+        }, SERVICES_READY_TIMEOUT_MS);
     });
 
     await servicesReady;
-    return {proxyUrl, bootstrapUrl, process: servicesProcess};
+    return {proxyUrl, bootstrapUrl, relayUrl, process: servicesProcess};
 }
 
 export async function startExecutor(dataPath: string,
@@ -68,8 +148,9 @@ export async function startExecutor(dataPath: string,
     hcAppPort: number,
     languageLanguageOnly: boolean = false,
     adminCredential?: string,
-    proxyUrl: string = "wss://signal.holotest.net",
-    bootstrapUrl: string = "https://bootstrap.holo.host",
+    proxyUrl: string = "wss://dev-test-bootstrap2.holochain.org",
+    bootstrapUrl: string = "https://dev-test-bootstrap2.holochain.org",
+    relayUrl?: string,
 ): Promise<ChildProcess> {
     const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
 
@@ -78,16 +159,37 @@ export async function startExecutor(dataPath: string,
     let executorProcess = null as ChildProcess | null;
     rmSync(dataPath, { recursive: true, force: true })
     execSync(`${command} init --data-path ${dataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
-
+    
     console.log("Starting executor")
 
     console.log("USING LOCAL BOOTSTRAP & PROXY URL: ", bootstrapUrl, proxyUrl);
-
-    if (!adminCredential) {
-        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --run-dapp-server false`, {})
-    } else {
-        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${adminCredential} --run-dapp-server false`, {})
+    if (relayUrl) {
+        console.log("USING RELAY URL: ", relayUrl);
     }
+
+    // Build args array explicitly so spawn() can run the executor directly
+    // (no shell wrapper). exec() spawns `sh -c "..."` — kill() only kills
+    // the shell, leaving the actual executor running as an orphan.
+    // spawn() runs the binary directly so kill()/SIGKILL actually reach it.
+    const args = [
+        'run',
+        '--app-data-path', dataPath,
+        '--gql-port', String(gqlPort),
+        '--hc-admin-port', String(hcAdminPort),
+        '--hc-app-port', String(hcAppPort),
+        '--hc-proxy-url', proxyUrl,
+        '--hc-bootstrap-url', bootstrapUrl,
+        '--hc-use-bootstrap', 'true',
+        '--hc-use-proxy', 'true',
+        '--hc-use-local-proxy', 'true',
+        '--hc-use-mdns', 'true',
+        '--language-language-only', String(languageLanguageOnly),
+        '--run-dapp-server', 'false',
+    ];
+    if (relayUrl) { args.push('--hc-relay-url', relayUrl); }
+    if (adminCredential) { args.push('--admin-credential', adminCredential); }
+
+    executorProcess = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let executorReady = new Promise<void>((resolve, reject) => {
         executorProcess!.stdout!.on('data', (data) => {
             if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
@@ -155,4 +257,18 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
 
 export function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Kill any process listening on the given ports.
+ * Use as a safety net in after() hooks — catches executors that survived kill().
+ */
+export function killByPorts(ports: number[]): void {
+    for (const port of ports) {
+        try {
+            execSync(`lsof -ti TCP:${port} -s TCP:LISTEN | xargs -r kill -9`, { stdio: 'ignore' });
+        } catch (e) {
+            // Port not in use — fine
+        }
+    }
 }

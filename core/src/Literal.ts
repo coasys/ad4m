@@ -27,7 +27,7 @@ export class Literal {
     toUrl(): string {
         if(this.#url && !this.#literal)
             return this.#url
-        if(!this.#url && !this.#literal)
+        if(!this.#url && (this.#literal === undefined || this.#literal === "" || this.#literal === null))
             throw new Error("Can't turn empty Literal into URL")
 
         let encoded
@@ -37,6 +37,9 @@ export class Literal {
                 break;
             case 'number':
                 encoded = `number:${encodeRFC3986URIComponent(this.#literal)}`
+                break;
+            case 'boolean':
+                encoded = `boolean:${encodeRFC3986URIComponent(this.#literal)}`
                 break;
             case 'object':
                 encoded = `json:${encodeRFC3986URIComponent(JSON.stringify(this.#literal))}`

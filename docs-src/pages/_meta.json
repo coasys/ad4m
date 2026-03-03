@@ -1,0 +1,41 @@
+{
+  "--start": {
+    "type": "separator",
+    "title": "Getting Started"
+  },
+  "index": "Introduction",
+  "installation": "Installation",
+  "--essentials": {
+    "type": "separator",
+    "title": "Core Concepts"
+  },
+  "auth": "Authentication",
+  "agents": "Agents",
+  "languages": "Languages",
+  "expressions": "Expressions",
+  "perspectives": "Perspectives",
+  "neighbourhoods": "Neighbourhoods",
+  "social-dna": "Social DNA",
+  "--dev": {
+    "type": "separator",
+    "title": "Developing with AD4M"
+  },
+  "tutorial": {
+    "type": "separator",
+    "title": "Tutorial"
+  },
+  "developer-guides": "Developer Guides",
+  "jsdoc": "API Reference",
+  "download": {
+    "title": "AD4M Website",
+    "type": "page",
+    "href": "https://coasys.org/adam",
+    "newWindow": true
+  },
+  "community": {
+    "title": "Community",
+    "type": "page",
+    "href": "https://discord.com/invite/fYGVM66jEz",
+    "newWindow": true
+  }
+}

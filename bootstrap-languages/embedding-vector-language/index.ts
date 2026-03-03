@@ -1,8 +1,8 @@
-import type { Address, Interaction, Expression, Language, LanguageContext } from "https://esm.sh/@coasys/ad4m@0.5.0";
+import type { Address, Interaction, Expression, Language, LanguageContext } from "https://esm.sh/v135/@coasys/ad4m@0.5.0";
 import { exists } from "https://deno.land/std@0.184.0/fs/mod.ts";
 import { join } from "https://deno.land/std@0.184.0/path/mod.ts";
-import pako from "https://esm.sh/pako@2.0.4";
-import base64js from "https://esm.sh/base64-js@1.5.1";
+import pako from "https://esm.sh/v135/pako@2.0.4";
+import base64js from "https://esm.sh/v135/base64-js@1.5.1";
 
 function compressUri(uri: string): string {
     const compressed = pako.deflate(uri);

@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::errors::{SocialContextError, SocialContextResult};
+use crate::link_adapter::chunked_diffs::load_diff_from_entry;
 use crate::link_adapter::topo_sort::topo_sort_diff_references;
 use crate::retriever::{hash_to_node_id, PerspectiveDiffRetreiver};
 use crate::utils::get_now;
@@ -149,26 +150,31 @@ impl Workspace {
 
                 if snapshot.is_none() {
                     debug!("===Workspace.collect_only_from_latest(): ERROR: Expected to find snapshot link on current_diff where diffs_since_snapshot was 0");
-                    self.handle_parents(current_diff, current_hash, &mut unprocessed_branches);
+                    self.handle_parents::<Retriever>(current_diff, current_hash, &mut unprocessed_branches)?;
                 } else {
                     let mut snapshot = snapshot.unwrap();
 
+                    // Process chunked diffs from snapshot
                     let mut last_diff = None;
                     for i in 0..snapshot.diff_chunks.len() {
-                        let diff_chunk = &snapshot.diff_chunks[i];
-                        self.entry_map.insert(
-                            diff_chunk.clone(),
-                            PerspectiveDiffEntryReference::new(
-                                diff_chunk.clone(),
-                                last_diff.clone(),
-                            ),
-                        );
-                        last_diff = Some(vec![diff_chunk.clone()]);
+                        let diff_chunk_hash = &snapshot.diff_chunks[i];
+
+                        // Retrieve the actual chunked diff entry
+                        let chunked_diff_entry =
+                            Self::get_p_diff_reference::<Retriever>(diff_chunk_hash.clone())?;
+
+                        self.entry_map
+                            .insert(diff_chunk_hash.clone(), chunked_diff_entry);
+                        last_diff = Some(vec![diff_chunk_hash.clone()]);
                     }
 
+                    // Insert the current snapshot reference entry with empty diff and link to last chunk
                     self.entry_map.insert(
                         current_hash.clone(),
-                        PerspectiveDiffEntryReference::new(current_diff.diff, last_diff.clone()),
+                        PerspectiveDiffEntryReference::new(
+                            PerspectiveDiff::new(), // empty diff for snapshot reference itself
+                            last_diff.clone(),
+                        ),
                     );
 
                     snapshot_seen.append(&mut snapshot.included_diffs);
@@ -179,7 +185,7 @@ impl Workspace {
                     unprocessed_branches.pop_front();
                 };
             } else {
-                self.handle_parents(current_diff, current_hash, &mut unprocessed_branches);
+                self.handle_parents::<Retriever>(current_diff, current_hash, &mut unprocessed_branches)?;
             }
         }
 
@@ -189,12 +195,12 @@ impl Workspace {
         Ok(())
     }
 
-    fn handle_parents(
+    fn handle_parents<Retriever: PerspectiveDiffRetreiver>(
         &mut self,
         current_diff: PerspectiveDiffEntryReference,
         current_hash: Hash,
         unprocessed_branches: &mut VecDeque<Hash>,
-    ) {
+    ) -> SocialContextResult<()> {
         if let Some(parents) = &current_diff.parents {
             for i in 0..parents.len() {
                 // Depth-first search:
@@ -214,7 +220,28 @@ impl Workspace {
             unprocessed_branches.pop_front();
         }
 
-        self.entry_map.insert(current_hash, current_diff);
+        // CRITICAL FIX: If the entry has chunked diffs, load them before inserting into entry_map
+        // Otherwise render() will see empty additions/removals for chunked entries
+        let resolved_diff = if current_diff.is_chunked() {
+            debug!("===Workspace.handle_parents(): Entry {:?} is CHUNKED - loading {} chunk(s)",
+                current_hash, current_diff.diff_chunks.as_ref().unwrap().len());
+            let loaded_diff = load_diff_from_entry::<Retriever>(&current_diff)?;
+            debug!("===Workspace.handle_parents(): Loaded chunked diff - additions: {}, removals: {}",
+                loaded_diff.additions.len(), loaded_diff.removals.len());
+
+            // Create a new entry with the loaded diff (inline, not chunked)
+            PerspectiveDiffEntryReference {
+                diff: loaded_diff,
+                parents: current_diff.parents.clone(),
+                diffs_since_snapshot: current_diff.diffs_since_snapshot,
+                diff_chunks: None, // No longer chunked after loading
+            }
+        } else {
+            current_diff
+        };
+
+        self.entry_map.insert(current_hash, resolved_diff);
+        Ok(())
     }
 
     pub fn sort_graph(&mut self) -> SocialContextResult<()> {
@@ -373,8 +400,11 @@ impl Workspace {
             other_mut.found_ancestors.get_mut().push(NULL_NODE());
         };
         if self.diffs.get(&NULL_NODE()).is_none() {
-            let current_diff = PerspectiveDiffEntryReference::new(NULL_NODE(), None);
-            self.diffs.insert(NULL_NODE(), current_diff.clone());
+            let current_diff = PerspectiveDiffEntryReference::new(
+                PerspectiveDiff::new(), // Empty diff for NULL_NODE
+                None,
+            );
+            self.diffs.insert(NULL_NODE(), current_diff);
         };
 
         let mut set = if let Some(nodes_back_links) = self.back_links.get(&NULL_NODE()) {
@@ -654,15 +684,9 @@ impl Workspace {
         debug!("===Workspace.get_snapshot(): Function start");
         let fn_start = get_now()?.time();
 
-        let input = GetLinksInputBuilder::try_new(
-            hash_entry(address)?,
-            LinkTypes::Snapshot
-        )
-        .unwrap()
-        .tag_prefix(LinkTag::new("snapshot"))
-        .get_options(GetStrategy::Network)
-        .build();
-        let mut snapshot_links = get_links(input)?;
+        let query = LinkQuery::try_new(hash_entry(address)?, LinkTypes::Snapshot)?
+            .tag_prefix(LinkTag::new("snapshot"));
+        let mut snapshot_links = get_links(query, GetStrategy::Local)?;
 
         if snapshot_links.len() > 0 {
             let snapshot = get(
@@ -767,12 +791,13 @@ impl Workspace {
             removals: vec![],
         };
         for (_key, value) in self.entry_map.iter() {
-            if value.diff == NULL_NODE() {
+            if _key == &NULL_NODE() {
                 continue;
             }
-            let diff_entry = Retriever::get::<PerspectiveDiff>(value.diff.clone())?;
-            out.additions.append(&mut diff_entry.additions.clone());
-            out.removals.append(&mut diff_entry.removals.clone());
+            // Load diff handling both inline and chunked storage
+            let mut loaded_diff = load_diff_from_entry::<Retriever>(value)?;
+            out.additions.append(&mut loaded_diff.additions);
+            out.removals.append(&mut loaded_diff.removals);
         }
 
         //let fn_end = get_now()?.time();

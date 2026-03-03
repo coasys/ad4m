@@ -15,6 +15,7 @@ import Settings from "./components/Settings";
 import Splashscreen from "./components/Splashscreen";
 import TrayMessage from "./components/TrayMessage";
 import TrustAgent from "./components/TrustAgent";
+import Users from "./components/Users";
 import { Ad4minContext } from "./context/Ad4minContext";
 import { AgentProvider } from "./context/AgentContext";
 const appWindow = getCurrentWebviewWindow();
@@ -74,6 +75,7 @@ const App = () => {
             element={<Perspectives setOpened={setOpened} opened={opened} />}
           />
           <Route path="ai" element={<AI />} />
+          <Route path="users" element={<Users />} />
           <Route
             path="settings"
             element={

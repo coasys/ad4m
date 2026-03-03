@@ -67,7 +67,7 @@ impl PerspectiveDiffRetreiver for HolochainRetreiver {
         let query = query(
             QueryFilter::new()
                 .entry_type(EntryType::App(AppEntryDef {
-                    entry_index: 4.into(),
+                    entry_index: 3.into(),
                     zome_index: 0.into(),
                     visibility: EntryVisibility::Private,
                 }))
@@ -100,14 +100,8 @@ impl PerspectiveDiffRetreiver for HolochainRetreiver {
     fn latest_revision() -> SocialContextResult<Option<HashReference>> {
         let latest_root_entry = get_latest_revision_anchor();
         let latest_root_entry_hash = hash_entry(latest_root_entry.clone())?;
-        let input = GetLinksInputBuilder::try_new(
-            latest_root_entry_hash,
-            LinkTypes::Index
-        )
-        .unwrap()
-        .get_options(GetStrategy::Network)
-        .build();
-        let mut latest_revision_links = get_links(input)?;
+        let query = LinkQuery::try_new(latest_root_entry_hash, LinkTypes::Index)?;
+        let mut latest_revision_links = get_links(query, GetStrategy::Network)?;
 
         latest_revision_links.sort_by(|link_a, link_b| {
             let link_a_str = std::str::from_utf8(&link_a.tag.0).unwrap();
@@ -170,15 +164,9 @@ pub fn get_active_agent_anchor() -> Anchor {
 }
 
 pub fn get_active_agents() -> SocialContextResult<Vec<AgentPubKey>> {
-    let input = GetLinksInputBuilder::try_new(
-        hash_entry(get_active_agent_anchor())?,
-        LinkTypes::Index
-    )
-    .unwrap()
-    .tag_prefix(LinkTag::new("active_agent"))
-    .get_options(GetStrategy::Network)
-    .build();
-    let recent_agents = get_links(input)?;
+    let query = LinkQuery::try_new(hash_entry(get_active_agent_anchor())?, LinkTypes::Index)?
+        .tag_prefix(LinkTag::new("active_agent"));
+    let recent_agents = get_links(query, GetStrategy::Local)?;
 
     let recent_agents = recent_agents
         .into_iter()
@@ -193,7 +181,8 @@ pub fn get_active_agents() -> SocialContextResult<Vec<AgentPubKey>> {
     //Dedup the agents
     let mut recent_agents = dedup(&recent_agents);
     //Remove ourself from the agents
-    let me = agent_info()?.agent_latest_pubkey;
+    // TODO: should be agent_latest_pubkey, but that was made unstable behind dpki feature flag
+    let me = agent_info()?.agent_initial_pubkey;
     let index = recent_agents.iter().position(|x| *x == me);
     if let Some(index) = index {
         recent_agents.remove(index);

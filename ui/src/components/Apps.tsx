@@ -1,4 +1,4 @@
-import { open } from "@tauri-apps/plugin-shell";
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { useContext, useEffect, useState } from "preact/compat";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { cardStyle, linkStyle, listStyle } from "./styles";
@@ -72,7 +72,7 @@ const Apps = () => {
   }, [client]);
 
   function goToFlux() {
-    open("https://fluxsocial-dev.netlify.app/");
+    openUrl("https://fluxsocial-dev.netlify.app/");
   }
 
   return (

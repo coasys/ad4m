@@ -357,19 +357,19 @@ export class AIClient {
         return aiCloseTranscriptionStream;
     }
 
-    async feedTranscriptionStream(streamId: string, audio: Float32Array): Promise<void> {
-        const { feedTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
+    async feedTranscriptionStream(streamIds: string | string[], audio: Float32Array): Promise<void> {
+        const { aiFeedTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
-                mutation AiFeedTranscriptionStream($streamId: String!, $audio: [Float!]!) {
-                    aiFeedTranscriptionStream(streamId: $streamId, audio: $audio)
+                mutation AiFeedTranscriptionStream($streamIds: [String!]!, $audio: [Float!]!) {
+                    aiFeedTranscriptionStream(streamIds: $streamIds, audio: $audio)
                 }
             `,
             variables: {
-                streamId,
+                streamIds: Array.isArray(streamIds) ? streamIds : [streamIds],
                 audio: audio
             }
         }));
 
-        return feedTranscriptionStream;
+        return aiFeedTranscriptionStream;
     }
 }

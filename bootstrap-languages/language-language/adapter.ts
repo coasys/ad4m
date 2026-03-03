@@ -1,4 +1,4 @@
-import type { Address, Expression, ExpressionAdapter, PublicSharing, LanguageContext } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+import type { Address, Expression, ExpressionAdapter, PublicSharing, LanguageContext } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
 import { CloudflarePutAdapter } from "./putAdapter.ts";
 //@ts-ignore
 import axiod from "https://deno.land/x/axiod/mod.ts";

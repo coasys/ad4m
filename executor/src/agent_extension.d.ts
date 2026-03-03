@@ -1,4 +1,4 @@
-import { AgentStatus } from "@coasys/ad4m";
+import { Agent, AgentStatus } from "@coasys/ad4m";
 
 export interface VerificationMethod {
     id: string;
@@ -59,6 +59,34 @@ declare global {
         unlock: (password: string) => boolean;
         lock: () => void;
         save_agent_profile: (agent: Agent) => void;
+        createSignedExpressionForUser: (userEmail: string, data: unknown) => Expression;
+        
+        /**
+         * Gets the DID for a user by their email address.
+         * 
+         * This method follows the consistent naming pattern used by other user-scoped
+         * operations (createSignedExpressionForUser, agentForUser).
+         * 
+         * @param userEmail - The email address of the user
+         * @returns The user's DID
+         * @throws {TypeError} If userEmail is not a non-empty string
+         * @throws {Error} If no key is found for the given user email (user does not exist)
+         * 
+         * @example
+         * ```typescript
+         * try {
+         *   const did = AGENT.didForUser("user@example.com");
+         *   console.log(`User DID: ${did}`);
+         * } catch (error) {
+         *   console.error("User not found or error occurred:", error);
+         * }
+         * ```
+         */
+        didForUser: (userEmail: string) => string;
+        
+        agentForUser: (userEmail: string) => Agent;
+        listUserEmails: () => string[];
+        getAllLocalUserDIDs: () => string[];
     }
 
     const AGENT: RustAgent;

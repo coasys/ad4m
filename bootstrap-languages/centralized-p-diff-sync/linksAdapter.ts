@@ -1,8 +1,8 @@
 import { LinkSyncAdapter, PerspectiveDiffObserver, HolochainLanguageDelegate, LanguageContext, PerspectiveDiff, 
-  LinkExpression, DID, Perspective, PerspectiveState } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
-import type { SyncStateChangeObserver } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
-import { Mutex, withTimeout } from "https://esm.sh/async-mutex@0.4.0";
-import type { Socket, ServerToClientEvents, ClientToServerEvents } from "https://esm.sh/socket.io-client@4.7.2";
+  LinkExpression, DID, Perspective, PerspectiveState } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
+import type { SyncStateChangeObserver } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
+import { Mutex, withTimeout } from "https://esm.sh/v135/async-mutex@0.4.0";
+import type { Socket, ServerToClientEvents, ClientToServerEvents } from "https://esm.sh/v135/socket.io-client@4.7.2";
 import axiod from "https://deno.land/x/axiod/mod.ts";
 
 export class LinkAdapter implements LinkSyncAdapter {

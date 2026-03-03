@@ -5,6 +5,7 @@ target/
 .cargo
 *.log
 *.dna
+*.happ
 build/*
 *.js
 *.js.map

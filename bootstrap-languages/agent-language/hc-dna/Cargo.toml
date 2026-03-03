@@ -1,7 +1,8 @@
 [workspace]
 members = [
   "zomes/agent_store",
-  "zomes/agent_store_integrity"
+  "zomes/agent_store_integrity",
+  "tests/sweettest"
 ]
 resolver="2"
 

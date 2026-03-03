@@ -20,7 +20,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                         throw Error("Agent language does not have an expression adapter")
                     }
                     const expr = await agentLanguage.get(did);
-                    if (expr != null) {
+                    if (expr != null && expr.data != null) {
                         tagExpressionSignatureStatus(expr);
                         for(const link of expr.data.perspective.links) {
                             tagExpressionSignatureStatus(link)
@@ -226,10 +226,14 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             },
             //@ts-ignore
             agentGenerate: async (args, context) => {
-                const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, hcProxyUrl, hcBootstrapUrl, logHolochainMetrics} = config;
+                const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, hcProxyUrl, hcBootstrapUrl, hcRelayUrl, logHolochainMetrics} = config;
 
-                await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl, logHolochainMetrics });
-                console.log("Holochain init complete");
+                try {
+                    await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl, hcRelayUrl, logHolochainMetrics });
+                    console.log("Holochain init complete");
+                } catch(e) {
+                    console.error("Error initializing holochain: ", e)
+                }
 
                 console.log("Wait for agent");
                 core.initControllers()
@@ -252,10 +256,14 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                     if(!core.holochainService) {
                         console.log("Holochain service not initialized. Initializing...")
                         // @ts-ignore
-                        const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, hcProxyUrl, hcBootstrapUrl} = config;
-                        await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl });
+                        const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, hcProxyUrl, hcBootstrapUrl, hcRelayUrl} = config;
+                        try {
+                            await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl, hcRelayUrl });
+                        } catch(e) {
+                            console.error("Error initializing holochain: ", e)
+                        }
                     } else {
-                        console.log("Holo service already initialized")
+                        console.log("Holochain service already initialized")
                     }
 
                     core.initControllers()

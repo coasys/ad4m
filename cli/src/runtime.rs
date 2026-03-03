@@ -2,11 +2,7 @@ use crate::formatting::{print_message_perspective, print_sent_message_perspectiv
 use crate::util::string_2_perspective_snapshot;
 use ad4m_client::Ad4mClient;
 use anyhow::Result;
-use base64::prelude::*;
 use clap::Subcommand;
-use kitsune_p2p_types::{
-    agent_info::AgentInfoSigned, dependencies::lair_keystore_api::dependencies::base64,
-};
 
 #[derive(Debug, Subcommand)]
 pub enum RuntimeFunctions {
@@ -123,26 +119,13 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
             let infos = ad4m_client.runtime.hc_agent_infos().await?;
             println!("\x1b[36mAll AgentInfos encoded:\n \x1b[32m{}\n\n", infos);
 
-            let encoded_agent_infos: Vec<String> = serde_json::from_str(&infos)?;
-            let agent_infos: Vec<(AgentInfoSigned, String)> = encoded_agent_infos
-                .into_iter()
-                .map(|encoded_info| {
-                    let info_bytes = BASE64_STANDARD
-                        .decode(encoded_info.clone())
-                        .expect("Failed to decode base64 AgentInfoSigned");
-                    (
-                        AgentInfoSigned::decode(&info_bytes)
-                            .expect("Failed to decode AgentInfoSigned"),
-                        encoded_info,
-                    )
-                })
-                .collect();
+            let separate_agent_infos: Vec<String> = serde_json::from_str(&infos)?;
 
             println!("\x1b[36mSeparate AgentInfos:\n");
-            for agent_info in &agent_infos {
-                println!("\x1b[36mAgent: \x1b[37m{:?}", agent_info.0.agent);
-                println!("\x1b[36mURL List: \x1b[94m{:?}", agent_info.0.url_list);
-                println!("\x1b[36mEncoded:\n\x1b[32m[{:?}]\n\n", agent_info.1);
+            for agent_info in &separate_agent_infos {
+                let val: serde_json::Value = serde_json::from_str(agent_info)?;
+                println!("\x1b[36mAgent: \x1b[37m{:?}", val["agent"]);
+                println!("\x1b[36mURL List: \x1b[94m{:?}", val["url_list"]);
             }
         }
         RuntimeFunctions::HcAddAgentInfos { infos_file } => {

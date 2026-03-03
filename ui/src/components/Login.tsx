@@ -23,8 +23,11 @@ const Login = () => {
 
   const [currentIndex, setCurrentIndex] = useState(0);
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [failedAttempts, setFailedAttempts] = useState(0);
   const [username, setUsername] = useState("");
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -59,9 +62,16 @@ const Login = () => {
   }
 
   function passwordValid(): boolean {
-    const valid = password.length > 0;
-    setPasswordError(valid ? null : "Password is requied");
-    return valid;
+    if (password.length === 0) {
+      setPasswordError("Password is required");
+      return false;
+    }
+    if (password !== confirmPassword) {
+      setPasswordError("Passwords do not match");
+      return false;
+    }
+    setPasswordError(null);
+    return true;
   }
 
   async function checkApi() {
@@ -158,11 +168,13 @@ const Login = () => {
     let whisperModel = "whisper_small";
     // add llm model
     if (aiMode !== "None") {
-      const llm = { name: "DeepHermes-3-Llama-3-8B", modelType: "LLM" } as ModelInput;
+      const llm = { modelType: "LLM" } as ModelInput;
       if (aiMode === "Local") {
         whisperModel = "whisper_distil_large_v3";
-        llm.local = { fileName: "deephermes-3-llama-3-8b-Q4" };
+        llm.name = "Qwen2.5.1-Coder-7B-Instruct";
+        llm.local = { fileName: "Qwen2.5.1-Coder-7B-Instruct" };
       } else {
+        llm.name = "Remote LLM";
         llm.api = {
           baseUrl: apiUrl,
           apiKey,
@@ -197,10 +209,21 @@ const Login = () => {
   }
 
   useEffect(() => {
-    if (!connected && !connectedLoading) navigate("/connect");
-    else if (connected && isUnlocked) navigate("/apps");
-    else if (isInitialized) setCurrentIndex(7);
-  }, [connected, isUnlocked, navigate, isInitialized, connectedLoading]);
+    if (!connected && !connectedLoading) {
+      navigate("/connect");
+    } else if (connected && isUnlocked) {
+      navigate("/apps");
+    } else if (isInitialized && currentIndex === 0) {
+      setCurrentIndex(7);
+    }
+  }, [connected, isUnlocked, navigate, isInitialized, connectedLoading, currentIndex]);
+
+  const handlePasswordSubmit = () => {
+    if (passwordValid()) {
+      generateAgent(password);
+      setCurrentIndex(3);
+    }
+  };
 
   return (
     <div className="wrapper">
@@ -295,37 +318,87 @@ const Login = () => {
           >
             <j-icon name="key" size="xl" color="ui-700" />
             <j-text size="800" nomargin color="ui-0">
-              Create your password
+              Create your encryption passphrase
             </j-text>
           </j-flex>
 
-          <j-input
-            size="lg"
-            placeholder="Password..."
-            minlength={10}
-            maxlength={30}
-            autovalidate
-            required
-            type={showPassword ? "text" : "password"}
-            onInput={(e: any) => setPassword(e.target.value)}
-            onKeyDown={(e: any) => {
-              if (e.key === "Enter" && passwordValid()) {
-                generateAgent(password);
-                setCurrentIndex(3);
-              }
-            }}
-            style={{ width: "100%" }}
+          <j-flex
+            direction="column"
+            a="center"
+            gap="400"
+            style={{ textAlign: "center", width: "100%", maxWidth: 500, marginBottom: 30 }}
           >
-            <j-button
-              onClick={() => setShowPassword(!showPassword)}
-              slot="end"
-              variant="subtle"
-              square
-              style={{ marginRight: -13 }}
+            <j-text size="600" nomargin color="ui-900">
+              This passphrase will be used to encrypt your local keys. If you lose it, you will lose access to your agent and will need to create a new one.
+            </j-text>
+            <j-text size="600" nomargin color="ui-900">
+              Please choose a strong passphrase and store it securely.
+            </j-text>
+          </j-flex>
+
+          <j-flex direction="column" gap="400" style={{ width: "100%" }}>
+            <j-input
+              size="lg"
+              placeholder="Enter passphrase..."
+              minlength={10}
+              maxlength={30}
+              autovalidate
+              required
+              type={showPassword ? "text" : "password"}
+              onInput={(e: any) => setPassword(e.target.value)}
+              onKeyDown={(e: any) => {
+                if (e.key === "Enter") {
+                  handlePasswordSubmit();
+                }
+              }}
+              style={{ width: "100%" }}
             >
-              <j-icon name={showPassword ? "eye-slash" : "eye"} size="sm" />
-            </j-button>
-          </j-input>
+              <j-button
+                onClick={() => setShowPassword(!showPassword)}
+                slot="end"
+                variant="subtle"
+                square
+                style={{ marginRight: -13 }}
+                tabIndex={-1}
+              >
+                <j-icon name={showPassword ? "eye-slash" : "eye"} size="sm" />
+              </j-button>
+            </j-input>
+
+            <j-input
+              size="lg"
+              placeholder="Confirm passphrase..."
+              minlength={10}
+              maxlength={30}
+              autovalidate
+              required
+              type={showConfirmPassword ? "text" : "password"}
+              onInput={(e: any) => setConfirmPassword(e.target.value)}
+              onKeyDown={(e: any) => {
+                if (e.key === "Enter") {
+                  handlePasswordSubmit();
+                }
+              }}
+              style={{ width: "100%" }}
+            >
+              <j-button
+                onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                slot="end"
+                variant="subtle"
+                square
+                style={{ marginRight: -13 }}
+                tabIndex={-1}
+              >
+                <j-icon name={showConfirmPassword ? "eye-slash" : "eye"} size="sm" />
+              </j-button>
+            </j-input>
+
+            {passwordError && (
+              <j-text color="danger-500" nomargin>
+                {passwordError}
+              </j-text>
+            )}
+          </j-flex>
 
           <j-flex gap="500" j="center" wrap style={{ marginTop: 70 }}>
             <j-button size="xl" onClick={() => setCurrentIndex(1)}>
@@ -334,14 +407,9 @@ const Login = () => {
             <j-button
               variant="primary"
               size="xl"
-              onClick={() => {
-                if (passwordValid()) {
-                  generateAgent(password);
-                  setCurrentIndex(3);
-                }
-              }}
+              onClick={handlePasswordSubmit}
               loading={loading}
-              disabled={password.length === 0}
+              disabled={password.length === 0 || confirmPassword.length === 0}
             >
               Next
             </j-button>
@@ -563,12 +631,12 @@ const Login = () => {
                   <a
                     onClick={() =>
                       open(
-                        "https://huggingface.co/NousResearch/DeepHermes-3-Llama-3-8B-Preview-GGUF"
+                        "https://huggingface.co/bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF"
                       )
                     }
                     style={{ cursor: "pointer" }}
                   >
-                    DeepHermes-3-Llama-3-8B (4.66GB)
+                    Qwen2.5.1-Coder-7B-Instruct Q4_K_M (4.68GB)
                   </a>
                 </p>
                 and
@@ -679,33 +747,6 @@ const Login = () => {
                   )}
                 </j-flex>
 
-                <j-text>
-                  This will still download
-                  <p>
-                    <a
-                      onClick={() =>
-                        open(
-                          "https://huggingface.co/openai/whisper-small"
-                        )
-                      }
-                      style={{ cursor: "pointer" }}
-                    >Whisper small (244MB)</a>
-                  </p>
-                  and
-                  <p>
-                    <a
-                      onClick={() =>
-                        open(
-                          "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs"
-                        )
-                      }
-                      style={{ cursor: "pointer" }}
-                    >
-                      Bert Embedding model (90MB)
-                    </a>
-                  </p>
-                </j-text>
-
                 {apiValid && (
                   <j-flex direction="column" a="center" gap="400">
                     <j-flex a="center" gap="400">
@@ -770,6 +811,33 @@ const Login = () => {
                     )}
                   </>
                 )}
+
+                <j-text>
+                  This will still download
+                  <p>
+                    <a
+                      onClick={() =>
+                        open(
+                          "https://huggingface.co/openai/whisper-small"
+                        )
+                      }
+                      style={{ cursor: "pointer" }}
+                    >Whisper small (244MB)</a>
+                  </p>
+                  and
+                  <p>
+                    <a
+                      onClick={() =>
+                        open(
+                          "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs"
+                        )
+                      }
+                      style={{ cursor: "pointer" }}
+                    >
+                      Bert Embedding model (90MB)
+                    </a>
+                  </p>
+                </j-text>
               </j-flex>
             </j-box>
           )}
@@ -898,37 +966,71 @@ const Login = () => {
           >
             <j-icon name="key" size="xl" color="ui-700" />
             <j-text size="800" nomargin color="ui-0">
-              Login
+              Unlock your agent
             </j-text>
           </j-flex>
 
-          <j-input
-            size="lg"
-            placeholder="Password..."
-            minlength={10}
-            maxlength={30}
-            autovalidate
-            required
-            type={showPassword ? "text" : "password"}
-            onInput={(e: any) => setPassword(e.target.value)}
-            onKeyDown={(e: any) => {
-              if (e.key === "Enter") {
-                if (isInitialized) unlockAgent(password, holochain);
-                else if (passwordValid()) generateAgent(password);
-              }
-            }}
-            style={{ width: "100%" }}
+          <j-flex
+            direction="column"
+            a="center"
+            gap="400"
+            style={{ textAlign: "center", width: "100%", maxWidth: 500, marginBottom: 30 }}
           >
-            <j-button
-              onClick={() => setShowPassword(!showPassword)}
-              slot="end"
-              variant="subtle"
-              square
-              style={{ marginRight: -13 }}
+            <j-text size="600" nomargin color="ui-900">
+              Enter your encryption passphrase to unlock your agent and access your data.
+            </j-text>
+          </j-flex>
+
+          <j-flex direction="column" gap="400" style={{ width: "100%" }}>
+            <j-input
+              size="lg"
+              placeholder="Enter passphrase..."
+              minlength={10}
+              maxlength={30}
+              autovalidate
+              required
+              type={showPassword ? "text" : "password"}
+              disabled={loading}
+              onInput={(e: any) => setPassword(e.target.value)}
+              onKeyDown={(e: any) => {
+                if (e.key === "Enter") {
+                  if (isInitialized) {
+                    setFailedAttempts(prev => prev + 1);
+                    unlockAgent(password, holochain);
+                  }
+                  else if (passwordValid()) generateAgent(password);
+                }
+              }}
+              style={{ width: "100%" }}
             >
-              <j-icon name={showPassword ? "eye-slash" : "eye"} size="sm" />
-            </j-button>
-          </j-input>
+              <j-button
+                onClick={() => setShowPassword(!showPassword)}
+                slot="end"
+                variant="subtle"
+                square
+                style={{ marginRight: -13 }}
+                tabIndex={-1}
+              >
+                <j-icon name={showPassword ? "eye-slash" : "eye"} size="sm" />
+              </j-button>
+            </j-input>
+
+            {hasLoginError && (
+              <>
+                <j-text color="danger-500" nomargin style={{ maxWidth: 500 }}>
+                  Invalid passphrase. Please try again.
+                </j-text>
+                
+                {failedAttempts >= 2 && 
+                  <j-text color="danger-700" nomargin style={{ maxWidth: 500 }}>
+                    If you've forgotten your passphrase, you might need to create a new agent 
+                    with the "Reset agent" button below.
+                    This will delete keys and data and you'll have to start over.
+                  </j-text>
+                }
+              </>
+            )}
+          </j-flex>
 
           <j-flex
             direction="column"
@@ -940,14 +1042,30 @@ const Login = () => {
             <j-button
               size="xl"
               variant="primary"
-              onClick={() => unlockAgent(password, holochain)}
+              onClick={() => {
+                setFailedAttempts(prev => prev + 1);
+                unlockAgent(password, holochain)
+              }}
               loading={loading}
             >
               Unlock Agent
             </j-button>
-            <j-button size="xl" onClick={() => setClearAgentModalOpen(true)}>
-              Reset agent
-            </j-button>
+            
+            <j-flex
+              direction="row"
+              a="center"
+              gap="400"
+              style={{ textAlign: "center", width: "100%", maxWidth: 500, marginBottom: 30 }}
+            >
+              <j-button size="xl" onClick={() => setClearAgentModalOpen(true)} disabled={loading}>
+                Reset agent
+              </j-button>
+              <j-button size="xl" onClick={() => invoke("close_application")} disabled={loading}>
+                Quit
+              </j-button>
+              
+              
+            </j-flex>
           </j-flex>
         </div>
       )}
@@ -967,7 +1085,7 @@ const Login = () => {
               <j-text nomargin size="800">
                 Reset agent
               </j-text>
-              <j-text nomargin size="600">
+              <j-text nomargin size="600" color="danger-600">
                 Warning: by clearing the agent you will loose all the data and
                 will have to start with a fresh agent
               </j-text>

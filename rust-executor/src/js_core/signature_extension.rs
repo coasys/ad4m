@@ -1,9 +1,9 @@
-use crate::agent::signatures::{verify, verify_string_signed_by_did};
-use crate::types::Expression;
-use deno_core::{error::AnyError, op2};
-use serde::{Deserialize, Serialize};
-
 use super::utils::sort_json_value;
+use crate::agent::signatures::{verify, verify_string_signed_by_did};
+use crate::js_core::error::AnyhowWrapperError;
+use crate::types::Expression;
+use deno_core::op2;
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -17,7 +17,7 @@ fn signature_verify_string_signed_by_did(
     #[string] did: String,
     #[string] data: String,
     #[string] signed_data: String,
-) -> Result<SignatureVerificationResult, AnyError> {
+) -> Result<SignatureVerificationResult, AnyhowWrapperError> {
     let is_valid = verify_string_signed_by_did(&did, &data, &signed_data)?;
     Ok(SignatureVerificationResult { is_valid })
 }
@@ -26,7 +26,7 @@ fn signature_verify_string_signed_by_did(
 #[serde]
 fn signature_verify(
     #[serde] expr: Expression<serde_json::Value>,
-) -> Result<SignatureVerificationResult, AnyError> {
+) -> Result<SignatureVerificationResult, AnyhowWrapperError> {
     let sorted_expression = Expression {
         author: expr.author,
         timestamp: expr.timestamp,

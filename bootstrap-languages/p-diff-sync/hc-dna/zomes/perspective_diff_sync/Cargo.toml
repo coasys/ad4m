@@ -10,19 +10,27 @@ name = "perspective_diff_sync"
 
 [dependencies]
 derive_more = "0"
-serde = "1.0.198"
+serde = "1"
 lazy_static = "*"
 chrono = { version = "0.4.38", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
-thiserror = "1.0.20"
+thiserror = "1"
 petgraph = "0.6.2"
 maplit = "1.0.2"
-graphviz-rust = "0.2.1"
+graphviz-rust = "0.9.6"
 dot-structures = "0.1.0"
 itertools = "0.10.3"
 perspective_diff_sync_integrity = { path = "../perspective_diff_sync_integrity" }
 sha2 = "0.10.5"
-hdk = { version = "0.3.6", git = "https://github.com/coasys/holochain.git", branch = "0.3.6-coasys" }
-holo_hash =  { version = "0.3.6", git = "https://github.com/coasys/holochain.git", branch = "0.3.6-coasys" }
+#getrandom = { version = "0.2", features = ["js"] }
+getrandom = { version = "0.3" }
+js-sys = "0.3.82"
+
+hdi = { version = "0.8.0-dev.4", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys" }
+hdk = { version = "0.7.0-dev.6", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys" }
+holochain_serialized_bytes = "=0.0.56"
 
 [features]
 test = []
+
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="custom"']

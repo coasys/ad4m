@@ -1,4 +1,4 @@
-import type { Address, LanguageAdapter, LanguageContext } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+import type { Address, LanguageAdapter, LanguageContext } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
 //@ts-ignore
 import axiod from "https://deno.land/x/axiod/mod.ts";
 import { PROXY_URL } from "./index.ts";

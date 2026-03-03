@@ -4,7 +4,6 @@ extern crate anyhow;
 extern crate chrono;
 extern crate clap;
 extern crate dirs;
-extern crate kitsune_p2p_types;
 extern crate rand;
 extern crate regex;
 extern crate rustyline;

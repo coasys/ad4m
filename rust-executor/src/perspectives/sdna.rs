@@ -1,4 +1,5 @@
 use crate::agent;
+use crate::perspectives::shacl_to_prolog::generate_prolog_facts_from_shacl;
 use crate::types::{DecoratedLinkExpression, ExpressionRef, LanguageRef, Link};
 use ad4m_client::literal::Literal;
 use chrono::DateTime;
@@ -110,10 +111,178 @@ pub fn is_sdna_link(link: &Link) -> bool {
         .contains(&link.predicate.as_deref().unwrap_or(""))
 }
 
-pub async fn init_engine_facts(
-    all_links: Vec<DecoratedLinkExpression>,
-    neighbourhood_author: Option<String>,
-) -> Result<Vec<String>, AnyError> {
+/// Returns true if the link is SDNA-related (either a declaration or code link)
+/// This includes both `is_sdna_link` (declarations) and links with predicate "ad4m://sdna" (code)
+pub fn is_sdna_related_link(link: &Link) -> bool {
+    is_sdna_link(link) || link.predicate.as_deref() == Some("ad4m://sdna")
+}
+
+/// Returns the JSON parser Prolog code as a string
+/// This is used both in production (get_static_infrastructure_facts) and in tests
+pub fn get_json_parser_code() -> &'static str {
+    r#"
+    % Main predicate to parse JSON and extract a property
+    % Use list-based dict instead of assoc to support nested JSON objects
+    json_property(JsonString, Property, Value) :-
+        phrase(json_dict(Dict), JsonString),
+        member(Property-Value, Dict).
+
+    % DCG rules to parse JSON
+    % Empty dict clause - must come before non-empty variant
+    json_dict([]) -->
+        ws, "{", ws, "}", ws.
+    json_dict(Dict) -->
+        ws, "{", ws, key_value_pairs(Pairs), ws, "}", ws,
+        { Dict = Pairs }.
+
+    key_value_pairs([Key-Value|Pairs]) -->
+        ws, json_string(Key), ws, ":", ws, json_value(Value), ws, ",", !,
+        key_value_pairs(Pairs).
+    key_value_pairs([Key-Value]) -->
+        ws, json_string(Key), ws, ":", ws, json_value(Value), ws.
+
+    json_value(Value) --> json_dict(Value).
+    json_value(Value) --> json_array(Value).
+    json_value(Value) --> json_string(Value).
+    json_value(Value) --> json_number(Value).
+    json_value(true) --> "true".
+    json_value(false) --> "false".
+    json_value(null) --> "null".
+
+    % Empty array clause - must come before non-empty variant
+    json_array([]) -->
+        "[", ws, "]".
+    json_array([Value|Values]) -->
+        "[", ws, json_value(Value), ws, ",", !, ws,
+        json_value_list(Values), ws, "]".
+    json_array([Value]) -->
+        "[", ws, json_value(Value), ws, "]".
+
+    json_value_list([Value|Values]) -->
+        json_value(Value), ws, ",", !, ws,
+        json_value_list(Values).
+    json_value_list([Value]) -->
+        json_value(Value), ws.
+    
+    json_string(String) -->
+    "\"", json_string_chars(String), "\"".
+
+    json_string_chars([]) --> [].
+    json_string_chars([C|Cs]) --> json_string_char(C), json_string_chars(Cs).
+
+    json_string_char(C) --> [C], { dif(C, '"'), dif(C, '\\') }.
+    json_string_char('"') --> ['\\', '"'].
+    json_string_char('\\') --> ['\\', '\\'].
+    json_string_char('/') --> ['\\', '/'].
+    json_string_char('\b') --> ['\\', 'b'].
+    json_string_char('\f') --> ['\\', 'f'].
+    json_string_char('\n') --> ['\\', 'n'].
+    json_string_char('\r') --> ['\\', 'r'].
+    json_string_char('\t') --> ['\\', 't'].
+    
+    json_number(Number) -->
+        number_sequence(Chars),
+        { number_chars(Number, Chars) }.
+    
+    string_chars([]) --> [].
+    string_chars([C|Cs]) --> [C], { dif(C, '"') }, string_chars(Cs).
+    
+    % Simplified number_sequence to handle both integer and fractional parts
+    number_sequence([D|Ds]) --> digit(D), number_sequence_rest(Ds).
+    number_sequence_rest([D|Ds]) --> digit(D), number_sequence_rest(Ds).
+    number_sequence_rest([]) --> [].
+    
+    digit(D) --> [D], { member(D, "0123456789.") }.
+    
+    ws --> ws_char, ws.
+    ws --> [].
+
+    ws_char --> [C], { C = ' ' ; C = '\t' ; C = '\n' ; C = '\r' }.
+
+    % Convert Prolog values back to JSON strings
+    % This is needed to convert nested dict structures back to proper JSON for JavaScript
+
+    % Helper to check if something is a list (empty or non-empty)
+    check_is_list([]).
+    check_is_list([_|_]).
+
+    % Check if a value is a dict (list of Key-Value pairs)
+    is_dict([]).
+    is_dict([K-_V|Rest]) :- check_is_list(K), is_dict(Rest).
+
+    % Check if a value looks like a regular list (not a dict)
+    is_regular_list([]).
+    is_regular_list([H|T]) :- \+ is_pair(H), is_regular_list(T).
+
+    is_pair(_-_).
+
+    % Main conversion predicate
+    prolog_value_to_json(Value, JsonChars) :-
+        is_dict(Value),
+        !,
+        dict_to_json(Value, JsonChars).
+    prolog_value_to_json(Value, JsonChars) :-
+        is_regular_list(Value),
+        !,
+        list_to_json(Value, JsonChars).
+    prolog_value_to_json(Value, JsonChars) :-
+        check_is_list(Value),
+        !,
+        % It's a character list (string)
+        append("\"", Value, Temp),
+        append(Temp, "\"", JsonChars).
+    prolog_value_to_json(true, "true") :- !.
+    prolog_value_to_json(false, "false") :- !.
+    prolog_value_to_json(null, "null") :- !.
+    prolog_value_to_json(Value, JsonChars) :-
+        number(Value),
+        !,
+        number_chars(Value, JsonChars).
+    prolog_value_to_json(Value, Value).
+
+    % Convert dict (list of pairs) to JSON object
+    dict_to_json([], "{}") :- !.
+    dict_to_json(Pairs, JsonChars) :-
+        dict_pairs_to_json(Pairs, PairsJson),
+        append("{", PairsJson, Temp),
+        append(Temp, "}", JsonChars).
+
+    dict_pairs_to_json([Key-Value], JsonChars) :-
+        !,
+        prolog_value_to_json(Value, ValueJson),
+        append("\"", Key, Temp1),
+        append(Temp1, "\":", Temp2),
+        append(Temp2, ValueJson, JsonChars).
+    dict_pairs_to_json([Key-Value|Rest], JsonChars) :-
+        prolog_value_to_json(Value, ValueJson),
+        dict_pairs_to_json(Rest, RestJson),
+        append("\"", Key, Temp1),
+        append(Temp1, "\":", Temp2),
+        append(Temp2, ValueJson, Temp3),
+        append(Temp3, ",", Temp4),
+        append(Temp4, RestJson, JsonChars).
+
+    % Convert list to JSON array
+    list_to_json([], "[]") :- !.
+    list_to_json(Items, JsonChars) :-
+        list_items_to_json(Items, ItemsJson),
+        append("[", ItemsJson, Temp),
+        append(Temp, "]", JsonChars).
+
+    list_items_to_json([Item], JsonChars) :-
+        !,
+        prolog_value_to_json(Item, JsonChars).
+    list_items_to_json([Item|Rest], JsonChars) :-
+        prolog_value_to_json(Item, ItemJson),
+        list_items_to_json(Rest, RestJson),
+        append(ItemJson, ",", Temp),
+        append(Temp, RestJson, JsonChars).
+    "#
+}
+
+/// Get static infrastructure facts that are the same for all engines
+/// This includes setup directives, library imports, and built-in predicates
+pub fn get_static_infrastructure_facts() -> Vec<String> {
     let mut lines: Vec<String> = vec![
         // triple/3
         // link/5
@@ -123,27 +292,33 @@ pub async fn init_engine_facts(
         ":- dynamic(link/5).".to_string(),
     ];
 
-    let links_without_sdna: Vec<_> = all_links
-        .iter()
-        .filter(|l| !is_sdna_link(&l.data))
-        .collect();
-
-    for link in &links_without_sdna {
-        lines.push(format!("{}.", triple_fact(link)));
-    }
-    for link in &links_without_sdna {
-        lines.push(format!("{}.", link_fact(link)));
-    }
-
-    // reachable/2
+    // reachable/2 - Optimized version with visited tracking
     lines.push(":- discontiguous(reachable/2).".to_string());
-    lines.push("reachable(A,B) :- triple(A,_,B).".to_string());
-    lines.push("reachable(A,B) :- triple(A,_,X), reachable(X,B).".to_string());
+    lines.push(":- discontiguous(reachable_visited/3).".to_string());
+
+    // Main reachable predicate - starts with empty visited list
+    lines.push("reachable(A,B) :- reachable_visited(A,B,[]).".to_string());
+
+    // Base case: direct connection
+    lines.push("reachable_visited(A,B,_) :- triple(A,_,B).".to_string());
+
+    // Recursive case: avoid cycles by checking visited list
+    lines.push("reachable_visited(A,B,Visited) :- \\+ member(A,Visited), triple(A,_,X), reachable_visited(X,B,[A|Visited]).".to_string());
+
+    // Alternative BFS implementation (comment out above and use this for very dense graphs):
+    // lines.push("reachable(A,B) :- reachable_bfs([A],[],B).".to_string());
+    // lines.push("reachable_bfs([Target|_],_,Target).".to_string());
+    // lines.push("reachable_bfs([Node|Queue],Visited,Target) :- \\+ member(Node,Visited), findall(X,triple(Node,_,X),Children), append(Queue,Children,NewQueue), reachable_bfs(NewQueue,[Node|Visited],Target).".to_string());
+    // lines.push("reachable_bfs([Node|Queue],Visited,Target) :- member(Node,Visited), reachable_bfs(Queue,Visited,Target).".to_string());
+
+    // Alternative iterative deepening (safest for unknown graph sizes - limits to depth 10):
+    // lines.push("reachable(A,B) :- between(0,10,Depth), reachable_depth(A,B,Depth,[]).".to_string());
+    // lines.push("reachable_depth(A,A,_,_).".to_string());
+    // lines.push("reachable_depth(A,B,0,_) :- triple(A,_,B).".to_string());
+    // lines.push("reachable_depth(A,B,Depth,Visited) :- Depth > 0, \\+ member(A,Visited), triple(A,_,X), NextDepth is Depth - 1, reachable_depth(X,B,NextDepth,[A|Visited]).".to_string());
 
     // hiddenExpression/1
     lines.push(":- discontiguous(hiddenExpression/1).".to_string());
-
-    // lines.extend(node_facts(&links_without_sdna).await?);
 
     // Social DNA zomes
     lines.push(":- discontiguous(register_sdna_flow/2).".to_string());
@@ -201,7 +376,8 @@ NextN is N - 1,
 skipN(Rest, NextN, SkippedData).
 
 :- discontiguous(takeN/3).
-takeN(_, 0, []).
+takeN([], _, []).  % Base case: If the list is empty, return an empty list.
+takeN(_, 0, []).   % Base case: If N is 0, return an empty list.
 takeN([Item|Rest], N, [Item|PageRest]) :-
 N > 0,
 NextN is N - 1,
@@ -209,6 +385,71 @@ takeN(Rest, NextN, PageRest).
     "#;
 
     lines.extend(lib.split('\n').map(|s| s.to_string()));
+
+    let sorting_predicates = r#"
+:- discontiguous(decorate/4).
+decorate(List, SortKey, Direction, Decorated) :-
+    maplist(decorate_item(SortKey), List, Decorated),
+    (Direction == "ASC" ; Direction == "DESC").
+
+:- discontiguous(decorate_item/2).
+decorate_item("timestamp", [Base, Properties, Collections, Timestamp, Author], [Timestamp, Base, Properties, Collections, Timestamp, Author]) :- !.
+decorate_item(PropertyKey, [Base, Properties, Collections, Timestamp, Author], [KeyValue, Base, Properties, Collections, Timestamp, Author]) :-
+    member([PropertyKey, KeyValue, _], Properties),
+    !.
+decorate_item(_, Item, [0|Item]).  % Default to 0 if key not found
+
+:- discontiguous(undecorate/2).
+undecorate(Decorated, Undecorated) :-
+    maplist(arg(2), Decorated, Undecorated).
+
+:- discontiguous(merge_sort/3).
+merge_sort([], [], _).
+merge_sort([X], [X], _).
+merge_sort(List, Sorted, Direction) :-
+    length(List, Len),
+    Len > 1,
+    split(List, Left, Right),
+    merge_sort(Left, SortedLeft, Direction),
+    merge_sort(Right, SortedRight, Direction),
+    merge(SortedLeft, SortedRight, Sorted, Direction).
+
+:- discontiguous(split/3).
+split(List, Left, Right) :-
+    length(List, Len),
+    Half is Len // 2,
+    length(Left, Half),
+    append(Left, Right, List).
+
+:- discontiguous(merge/4).
+merge([], Right, Right, _).
+merge(Left, [], Left, _).
+merge([X|Xs], [Y|Ys], [X|Merged], "ASC") :-
+    X = [KeyX|_], Y = [KeyY|_],
+    KeyX =< KeyY,
+    merge(Xs, [Y|Ys], Merged, "ASC").
+merge([X|Xs], [Y|Ys], [Y|Merged], "ASC") :-
+    X = [KeyX|_], Y = [KeyY|_],
+    KeyX > KeyY,
+    merge([X|Xs], Ys, Merged, "ASC").
+merge([X|Xs], [Y|Ys], [X|Merged], "DESC") :-
+    X = [KeyX|_], Y = [KeyY|_],
+    KeyX >= KeyY,
+    merge(Xs, [Y|Ys], Merged, "DESC").
+merge([X|Xs], [Y|Ys], [Y|Merged], "DESC") :-
+    X = [KeyX|_], Y = [KeyY|_],
+    KeyX < KeyY,
+    merge([X|Xs], Ys, Merged, "DESC").
+
+% New sort_instances predicate
+:- discontiguous(sort_instances/4).
+sort_instances(UnsortedInstances, SortKey, Direction, SortedInstances) :-
+    decorate(UnsortedInstances, SortKey, Direction, Decorated),
+    merge_sort(Decorated, SortedDecorated, Direction),
+    undecorate(SortedDecorated, SortedInstances).
+"#;
+
+    lines.extend(sorting_predicates.split('\n').map(|s| s.to_string()));
 
     let literal_html_string_predicates = r#"
 % Main predicate to remove HTML tags
@@ -242,7 +483,19 @@ string([C|Cs]) --> [C], string(Cs).
 
 literal_from_url(Url, Decoded, Scheme) :-
     phrase(parse_url(Scheme, Encoded), Url),
-    phrase(url_decode(Decoded), Encoded).
+    phrase(url_decode(StringValue), Encoded),
+    (   Scheme = number 
+    ->  number_chars(Decoded, StringValue)
+    ;   (   Scheme = boolean
+        ->  (   StringValue = "true"
+            ->  Decoded = true
+            ;   StringValue = "false"
+            ->  Decoded = false
+            ;   Decoded = false  % Default for invalid boolean
+            )
+        ;   Decoded = StringValue  % For all other schemes
+        )
+    ).
 
 % DCG rule to parse the URL
 parse_url(Scheme, Encoded) -->
@@ -250,46 +503,72 @@ parse_url(Scheme, Encoded) -->
 
 scheme(string) --> "string".
 scheme(number) --> "number".
+scheme(boolean) --> "boolean".
 scheme(json) --> "json".
 
+% Simple URL decoder with cuts to prevent infinite loops
 url_decode([]) --> [].
 url_decode([H|T]) --> url_decode_char(H), url_decode(T).
 
-url_decode_char(' ') --> "%20".
-url_decode_char('!') --> "%21".
-url_decode_char('"') --> "%22".
-url_decode_char('#') --> "%23".
-url_decode_char('$') --> "%24".
-url_decode_char('%') --> "%25".
-url_decode_char('&') --> "%26".
-url_decode_char('\'') --> "%27".
-url_decode_char('(') --> "%28".
-url_decode_char(')') --> "%29".
-url_decode_char('*') --> "%2A".
-url_decode_char('+') --> "%2B".
-url_decode_char(',') --> "%2C".
-url_decode_char('/') --> "%2F".
-url_decode_char(':') --> "%3A".
-url_decode_char(';') --> "%3B".
-url_decode_char('=') --> "%3D".
-url_decode_char('?') --> "%3F".
-url_decode_char('@') --> "%40".
-url_decode_char('[') --> "%5B".
-url_decode_char(']') --> "%5D".
-url_decode_char('{') --> "%7B".
-url_decode_char('}') --> "%7D".
-url_decode_char('<') --> "%3C".
-url_decode_char('>') --> "%3E".
-url_decode_char('\\') --> "%5C".
-url_decode_char('^') --> "%5E".
-url_decode_char('_') --> "%5F".
-url_decode_char('|') --> "%7C".
-url_decode_char('~') --> "%7E".
-url_decode_char('`') --> "%60".
-url_decode_char('-') --> "%2D".
-url_decode_char('.') --> "%2E".
+% Specific ASCII characters first (with cuts to prevent backtracking)
+url_decode_char(' ') --> "%20", !.
+url_decode_char('!') --> "%21", !.
+url_decode_char('"') --> "%22", !.
+url_decode_char('#') --> "%23", !.
+url_decode_char('$') --> "%24", !.
+url_decode_char('%') --> "%25", !.
+url_decode_char('&') --> "%26", !.
+url_decode_char('\'') --> "%27", !.
+url_decode_char('(') --> "%28", !.
+url_decode_char(')') --> "%29", !.
+url_decode_char('*') --> "%2A", !.
+url_decode_char('+') --> "%2B", !.
+url_decode_char(',') --> "%2C", !.
+url_decode_char('-') --> "%2D", !.
+url_decode_char('.') --> "%2E", !.
+url_decode_char('/') --> "%2F", !.
+url_decode_char(':') --> "%3A", !.
+url_decode_char(';') --> "%3B", !.
+url_decode_char('=') --> "%3D", !.
+url_decode_char('?') --> "%3F", !.
+url_decode_char('@') --> "%40", !.
+url_decode_char('[') --> "%5B", !.
+url_decode_char(']') --> "%5D", !.
+url_decode_char('\\') --> "%5C", !.
+url_decode_char('^') --> "%5E", !.
+url_decode_char('_') --> "%5F", !.
+url_decode_char('`') --> "%60", !.
+url_decode_char('{') --> "%7B", !.
+url_decode_char('|') --> "%7C", !.
+url_decode_char('}') --> "%7D", !.
+url_decode_char('~') --> "%7E", !.
+url_decode_char('<') --> "%3C", !.
+url_decode_char('>') --> "%3E", !.
 
-url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
+% General percent-encoded character handler for UTF-8 and other bytes (with cut)
+url_decode_char(Char) --> 
+    "%", hex_digit(H1), hex_digit(H2), !,
+    { 
+        hex_digit_value(H1, V1), hex_digit_value(H2, V2),
+        Byte is V1 * 16 + V2,
+        Byte >= 0, Byte =< 255,
+        char_code(Char, Byte)
+    }.
+
+% Fast path: non-percent characters pass through unchanged (with cut)
+url_decode_char(Char) --> [Char], !.
+
+% Helper predicates for hex digit parsing
+hex_digit(D) --> [D], { member(D, "0123456789ABCDEFabcdef") }.
+
+hex_digit_value('0', 0). hex_digit_value('1', 1). hex_digit_value('2', 2).
+hex_digit_value('3', 3). hex_digit_value('4', 4). hex_digit_value('5', 5).
+hex_digit_value('6', 6). hex_digit_value('7', 7). hex_digit_value('8', 8).
+hex_digit_value('9', 9). hex_digit_value('A', 10). hex_digit_value('B', 11).
+hex_digit_value('C', 12). hex_digit_value('D', 13). hex_digit_value('E', 14).
+hex_digit_value('F', 15). hex_digit_value('a', 10). hex_digit_value('b', 11).
+hex_digit_value('c', 12). hex_digit_value('d', 13). hex_digit_value('e', 14).
+hex_digit_value('f', 15).
     "#;
 
     lines.extend(
@@ -298,67 +577,61 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
             .map(|s| s.to_string()),
     );
 
-    let json_parser = r#"
-    % Main predicate to parse JSON and extract a property
-    json_property(JsonString, Property, Value) :-
-        phrase(json_dict(Dict), JsonString),
-        get_assoc(Property, Dict, Value).
-    
-    % DCG rules to parse JSON
-    json_dict(Dict) -->
-        ws, "{", ws, key_value_pairs(Pairs), ws, "}", ws,
-        { list_to_assoc(Pairs, Dict) }.
-    
-    key_value_pairs([Key-Value|Pairs]) -->
-        ws, json_string(Key), ws, ":", ws, json_value(Value), ws, ("," -> key_value_pairs(Pairs) ; {Pairs=[]}).
-    
-    json_value(Value) --> json_dict(Value).
-    json_value(Value) --> json_array(Value).
-    json_value(Value) --> json_string(Value).
-    json_value(Value) --> json_number(Value).
-    
-    json_array([Value|Values]) -->
-        "[", ws, json_value(Value), ws, ("," -> json_value_list(Values) ; {Values=[]}), ws, "]".
-    json_value_list([Value|Values]) --> json_value(Value), ws, ("," -> json_value_list(Values) ; {Values=[]}).
-    
-    json_string(String) -->
-    "\"", json_string_chars(String), "\"".
+    lines.extend(get_json_parser_code().split('\n').map(|s| s.to_string()));
 
-    json_string_chars([]) --> [].
-    json_string_chars([C|Cs]) --> json_string_char(C), json_string_chars(Cs).
+    let resolve_property = r#"
+    % Retrieve a property from a subject class
+    % If the property is resolvable, this will try to do the resolution here
+    % which works if it is a literal, otherwise it will pass through the URI to JS
+    % to be resolved later
+    % Resolve is a boolean that tells JS whether to resolve the property or not
+    % If it is false, then the property value is a literal and we did resolve it here
+    % If it is true, then the property value is a URI and it still needs to be resolved
+    resolve_property(SubjectClass, Base, PropertyName, PropertyValue, Resolve) :-
+        property(SubjectClass, PropertyName),
+        property_getter(SubjectClass, Base, PropertyName, PropertyUri),
+        resolve_property_value(SubjectClass, PropertyName, PropertyUri, PropertyValue, Resolve).
 
-    json_string_char(C) --> [C], { dif(C, '"'), dif(C, '\\') }.
-    json_string_char('"') --> ['\\', '"'].
-    json_string_char('\\') --> ['\\', '\\'].
-    json_string_char('/') --> ['\\', '/'].
-    json_string_char('\b') --> ['\\', 'b'].
-    json_string_char('\f') --> ['\\', 'f'].
-    json_string_char('\n') --> ['\\', 'n'].
-    json_string_char('\r') --> ['\\', 'r'].
-    json_string_char('\t') --> ['\\', 't'].
-    
-    json_number(Number) -->
-        number_sequence(Chars),
-        { atom_chars(Atom, Chars),
-          atom_number(Atom, Number) }.
-    
-    string_chars([]) --> [].
-    string_chars([C|Cs]) --> [C], { dif(C, '"') }, string_chars(Cs).
-    
-    % Simplified number_sequence to handle both integer and fractional parts
-    number_sequence([D|Ds]) --> digit(D), number_sequence_rest(Ds).
-    number_sequence_rest([D|Ds]) --> digit(D), number_sequence_rest(Ds).
-    number_sequence_rest([]) --> [].
-    
-    digit(D) --> [D], { member(D, "0123456789.") }.
-    
-    ws --> ws_char, ws.
-    ws --> [].
-    
-    ws_char --> [C], { C = ' ' ; C = '\t' ; C = '\n' ; C = '\r' }.
-    "#;
+    % Helper to convert PropertyUri to character list whether it's an atom or already a list
+    resolve_property_ensure_chars(Input, Chars) :-
+        atom(Input),
+        !,
+        atom_chars(Input, Chars).
+    resolve_property_ensure_chars(Input, Input).
 
-    lines.extend(json_parser.split('\n').map(|s| s.to_string()));
+    % Case 1: Property is resolvable AND it's a literal URL - resolve it here
+    resolve_property_value(SubjectClass, PropertyName, PropertyUri, PropertyValue, false) :-
+        property_resolve(SubjectClass, PropertyName),
+        resolve_property_ensure_chars(PropertyUri, PropertyUriChars),
+        append("literal://", _, PropertyUriChars),
+        !,
+        literal_from_url(PropertyUriChars, LiteralValue, _Scheme),
+        resolve_property_extract_json_or_value(LiteralValue, PropertyValue).
+
+    % Case 2: Property is resolvable but NOT a literal URL - pass through for JS resolution
+    resolve_property_value(SubjectClass, PropertyName, PropertyUri, PropertyUri, true) :-
+        property_resolve(SubjectClass, PropertyName),
+        !.
+
+    % Case 3: Property is NOT resolvable - return the URI as-is
+    resolve_property_value(_SubjectClass, _PropertyName, PropertyUri, PropertyUri, false).
+
+    % Helper to extract JSON data field or return value as-is
+    % If the extracted data is a complex object (dict or array), convert it back to JSON
+    resolve_property_extract_json_or_value(Value, JsonData) :-
+        catch(json_property(Value, "data", Data), _, fail),
+        !,
+        resolve_property_convert_if_complex(Data, JsonData).
+    resolve_property_extract_json_or_value(Value, Value).
+
+    % Convert complex objects (dicts) to a format Rust understands as objects
+    % Wrap dict in dict/1 compound so Rust knows to convert it to JSON object
+    resolve_property_convert_if_complex(Data, dict(Data)) :-
+        is_dict(Data),
+        !.
+    resolve_property_convert_if_complex(Data, Data)."#;
+
+    lines.extend(resolve_property.split('\n').map(|s| s.to_string()));
 
     let assert_link = r#"
     assert_link(Source, Predicate, Target, Timestamp, Author) :-
@@ -377,7 +650,34 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
 
     lines.push(format!("agent_did(\"{}\").", agent::did()));
 
-    let mut author_agents = vec![agent::did()];
+    lines
+}
+
+/// Get just the data facts (triple and link facts) from the links
+pub fn get_data_facts(links: &[DecoratedLinkExpression]) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    let links_without_sdna: Vec<_> = links.iter().filter(|l| !is_sdna_link(&l.data)).collect();
+
+    for link in &links_without_sdna {
+        lines.push(format!("{}.", triple_fact(link)));
+    }
+    for link in &links_without_sdna {
+        lines.push(format!("{}.", link_fact(link)));
+    }
+
+    lines
+}
+
+/// Get SDNA facts extracted from the links
+pub fn get_sdna_facts(
+    all_links: &[DecoratedLinkExpression],
+    neighbourhood_author: Option<String>,
+    perspective_owner_did: Option<String>,
+) -> Result<Vec<String>, AnyError> {
+    let mut lines = Vec::new();
+
+    let mut author_agents = vec![perspective_owner_did.unwrap_or(agent::did())];
     if let Some(neughbourhood_author) = neighbourhood_author {
         author_agents.push(neughbourhood_author);
     }
@@ -446,5 +746,243 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
         }
     }
 
+    // Generate Prolog facts from SHACL links for backward compatibility
+    // This allows infer() queries and template matching to work with SHACL-only classes
+    lines.extend(generate_prolog_facts_from_shacl(
+        all_links,
+        &seen_subject_classes,
+    ));
+
     Ok(lines)
+}
+pub async fn init_engine_facts(
+    all_links: Vec<DecoratedLinkExpression>,
+    neighbourhood_author: Option<String>,
+    perspective_owner_did: Option<String>,
+) -> Result<Vec<String>, AnyError> {
+    let mut lines = get_static_infrastructure_facts();
+
+    // Add data facts
+    lines.extend(get_data_facts(&all_links));
+
+    // Add SDNA facts
+    lines.extend(get_sdna_facts(
+        &all_links,
+        neighbourhood_author,
+        perspective_owner_did,
+    )?);
+
+    Ok(lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prolog_service::engine::PrologEngine;
+    use crate::prolog_service::types::QueryResolution;
+
+    // Helper function for tests to get JSON parser code with required libraries
+    // Returns a Vec<String> just like production code does
+    fn get_json_parser_for_test() -> Vec<String> {
+        let mut lines = vec![];
+        lines.push(":- use_module(library(lists)).".to_string());
+        lines.push(":- use_module(library(dcgs)).".to_string());
+        lines.push(":- use_module(library(dif)).".to_string());
+        lines.extend(get_json_parser_code().split('\n').map(|s| s.to_string()));
+        lines
+    }
+
+    #[tokio::test]
+    async fn test_simple_dcg() {
+        let mut engine = PrologEngine::new();
+        assert!(engine.spawn().await.is_ok());
+
+        // Load a simple DCG rule to test if DCGs work at all
+        let simple_dcg = r#"
+    :- use_module(library(dcgs)).
+    
+    simple --> "hello".
+        "#
+        .to_string();
+
+        let load_result = engine.load_module_string("user", &[simple_dcg]).await;
+        assert!(
+            load_result.is_ok(),
+            "Failed to load simple DCG: {:?}",
+            load_result
+        );
+
+        // Test the simple DCG
+        let query = r#"phrase(simple, "hello")."#.to_string();
+        println!("Testing simple DCG: {}", query);
+        let result = engine.run_query(query).await;
+        println!("Simple DCG result: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_simple_empty_dict_dcg() {
+        let mut engine = PrologEngine::new();
+        assert!(engine.spawn().await.is_ok());
+
+        // Load the production JSON parser code
+        let json_parser = get_json_parser_for_test();
+        let load_result = engine.load_module_string("user", &json_parser).await;
+        if let Err(e) = &load_result {
+            println!("Load error: {:?}", e);
+        }
+        assert!(
+            load_result.is_ok(),
+            "Failed to load JSON parser: {:?}",
+            load_result
+        );
+
+        // Test the empty dict DCG
+        let query = r#"phrase(json_dict(Dict), "{}")."#.to_string();
+        println!("Testing empty dict DCG: {}", query);
+        let result = engine.run_query(query).await;
+        println!("Empty dict DCG result: {:?}", result);
+        match result {
+            Ok(Ok(QueryResolution::True)) | Ok(Ok(QueryResolution::Matches(_))) => {
+                println!("✅ Empty dict DCG succeeded!");
+            }
+            _ => {
+                panic!("Empty dict DCG failed: {:?}", result);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_empty_json_object_parsing() {
+        let mut engine = PrologEngine::new();
+        assert!(engine.spawn().await.is_ok());
+
+        // Load the production JSON parser code with required libraries
+        let json_parser = get_json_parser_for_test();
+        let load_result = engine.load_module_string("user", &json_parser).await;
+        assert!(
+            load_result.is_ok(),
+            "Failed to load JSON parser: {:?}",
+            load_result
+        );
+
+        // Test empty JSON object "{}"
+        let query = r#"phrase(json_dict(Dict), "{}")."#.to_string();
+        println!("Testing empty JSON object: {}", query);
+        let result = engine.run_query(query).await;
+        println!("Empty object result: {:?}", result);
+        match result {
+            Ok(Ok(QueryResolution::True)) | Ok(Ok(QueryResolution::Matches(_))) => {
+                println!("✅ Empty JSON object parsing succeeded");
+            }
+            _ => {
+                panic!("Empty JSON object parsing failed: {:?}", result);
+            }
+        }
+
+        // Test empty JSON object with whitespace "{ }"
+        let query = r#"phrase(json_dict(Dict), "{ }")."#.to_string();
+        println!("Testing empty JSON object with whitespace: {}", query);
+        let result = engine.run_query(query).await;
+        println!("Empty object with whitespace result: {:?}", result);
+        match result {
+            Ok(Ok(QueryResolution::True)) | Ok(Ok(QueryResolution::Matches(_))) => {
+                println!("✅ Empty JSON object with whitespace parsing succeeded");
+            }
+            _ => {
+                panic!(
+                    "Empty JSON object with whitespace parsing failed: {:?}",
+                    result
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_empty_json_array_parsing() {
+        let mut engine = PrologEngine::new();
+        assert!(engine.spawn().await.is_ok());
+
+        // Load the production JSON parser code with required libraries
+        let json_parser = get_json_parser_for_test();
+        let load_result = engine.load_module_string("user", &json_parser).await;
+        assert!(
+            load_result.is_ok(),
+            "Failed to load JSON parser: {:?}",
+            load_result
+        );
+
+        // Test empty JSON array "[]"
+        let query = r#"phrase(json_array(Array), "[]")."#.to_string();
+        println!("Testing empty JSON array: {}", query);
+        let result = engine.run_query(query).await;
+        println!("Empty array result: {:?}", result);
+        match result {
+            Ok(Ok(QueryResolution::True)) | Ok(Ok(QueryResolution::Matches(_))) => {
+                println!("✅ Empty JSON array parsing succeeded");
+            }
+            _ => {
+                panic!("Empty JSON array parsing failed: {:?}", result);
+            }
+        }
+
+        // Test empty JSON array with whitespace "[ ]"
+        let query = r#"phrase(json_array(Array), "[ ]")."#.to_string();
+        println!("Testing empty JSON array with whitespace: {}", query);
+        let result = engine.run_query(query).await;
+        println!("Empty array with whitespace result: {:?}", result);
+        match result {
+            Ok(Ok(QueryResolution::True)) | Ok(Ok(QueryResolution::Matches(_))) => {
+                println!("✅ Empty JSON array with whitespace parsing succeeded");
+            }
+            _ => {
+                panic!(
+                    "Empty JSON array with whitespace parsing failed: {:?}",
+                    result
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_non_empty_json_parsing() {
+        let mut engine = PrologEngine::new();
+        assert!(engine.spawn().await.is_ok());
+
+        // Load the production JSON parser code with required libraries
+        let json_parser = get_json_parser_for_test();
+        let load_result = engine.load_module_string("user", &json_parser).await;
+        assert!(
+            load_result.is_ok(),
+            "Failed to load JSON parser: {:?}",
+            load_result
+        );
+
+        // Test non-empty JSON object
+        let query = r#"phrase(json_dict(Dict), "{\"key\": \"value\"}")."#.to_string();
+        println!("Testing non-empty JSON object: {}", query);
+        let result = engine.run_query(query).await;
+        println!("Non-empty object result: {:?}", result);
+        match result {
+            Ok(Ok(QueryResolution::True)) | Ok(Ok(QueryResolution::Matches(_))) => {
+                println!("✅ Non-empty JSON object parsing succeeded");
+            }
+            _ => {
+                panic!("Non-empty JSON object parsing failed: {:?}", result);
+            }
+        }
+
+        // Test non-empty JSON array
+        let query = r#"phrase(json_array(Array), "[1, 2, 3]")."#.to_string();
+        println!("Testing non-empty JSON array: {}", query);
+        let result = engine.run_query(query).await;
+        println!("Non-empty array result: {:?}", result);
+        match result {
+            Ok(Ok(QueryResolution::True)) | Ok(Ok(QueryResolution::Matches(_))) => {
+                println!("✅ Non-empty JSON array parsing succeeded");
+            }
+            _ => {
+                panic!("Non-empty JSON array parsing failed: {:?}", result);
+            }
+        }
+    }
 }

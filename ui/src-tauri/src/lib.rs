@@ -4,18 +4,17 @@
 )]
 
 extern crate env_logger;
-use chrono::Local;
-use colored::Colorize;
 #[cfg(not(target_os = "windows"))]
 use libc::{rlimit, setrlimit, RLIMIT_NOFILE};
-use log::LevelFilter;
 use log::{debug, error, info};
+use rust_executor::config::TlsConfig as ExecutorTlsConfig;
+use rust_executor::logging::{get_default_log_config, init_launcher_logging};
+use rust_executor::utils::find_port;
 use rust_executor::Ad4mConfig;
 use std::env;
 use std::fs;
 use std::fs::File;
 use std::io;
-use std::io::Write;
 use std::sync::Mutex;
 use tauri::{Emitter, Listener, WebviewWindow};
 //use tauri::Size;
@@ -34,6 +33,7 @@ use uuid::Uuid;
 mod app_state;
 mod commands;
 mod config;
+mod encryption;
 mod menu;
 mod system_tray;
 mod util;
@@ -41,15 +41,15 @@ mod util;
 use crate::app_state::LauncherState;
 use crate::commands::app::{
     add_app_agent_state, clear_state, close_application, close_main_window, get_app_agent_list,
-    open_dapp, open_tray, open_tray_message, remove_app_agent_state, set_selected_agent,
-    show_main_window,
+    get_data_path, get_log_config, get_smtp_config, get_tls_config, open_dapp, open_tray,
+    open_tray_message, remove_app_agent_state, set_log_config, set_selected_agent, set_smtp_config,
+    set_tls_config, show_main_window, test_smtp_config,
 };
 use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
 use crate::config::log_path;
 
-use crate::menu::open_logs_folder;
-use crate::util::find_port;
+use crate::menu::reveal_log_file;
 use crate::util::{create_main_window, save_executor_port};
 use tauri::Manager;
 
@@ -69,8 +69,9 @@ pub struct ProxyService {
 }
 
 pub struct AppState {
-    graphql_port: u16,
+    graphql_port: u16, // Local HTTP port (always for local access)
     req_credential: String,
+    tls_enabled: bool,
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -114,12 +115,27 @@ fn rlim_execute() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env::set_var(
-        "RUST_LOG",
-        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp=warn,warp::server=warn,warp::filters=warn",
-    );
-
     let state = LauncherState::load().unwrap();
+
+    // Validate TLS config if enabled
+    if let Some(tls_cfg) = &state.tls_config {
+        if tls_cfg.enabled {
+            if !std::path::Path::new(&tls_cfg.cert_file_path).exists() {
+                error!(
+                    "TLS is enabled but certificate file not found: {}. \
+                     TLS will be disabled. Please check your TLS settings.",
+                    tls_cfg.cert_file_path
+                );
+            }
+            if !std::path::Path::new(&tls_cfg.key_file_path).exists() {
+                error!(
+                    "TLS is enabled but key file not found: {}. \
+                     TLS will be disabled. Please check your TLS settings.",
+                    tls_cfg.key_file_path
+                );
+            }
+        }
+    }
 
     let selected_agent = state.selected_agent.clone().unwrap();
     let app_path = selected_agent.path;
@@ -138,40 +154,19 @@ pub fn run() {
 
     let target = Box::new(File::create(log_path()).expect("Can't create file"));
 
-    env_logger::Builder::new()
-        .target(env_logger::Target::Pipe(target))
-        .filter(Some("holochain"), LevelFilter::Warn)
-        .filter(Some("wasmer_compiler_cranelift"), LevelFilter::Warn)
-        .filter(Some("rust_executor"), LevelFilter::Debug)
-        .filter(Some("warp::server"), LevelFilter::Debug)
-        .format(|buf, record| {
-            let level = match record.level() {
-                log::Level::Error => record.level().as_str().red(),
-                log::Level::Warn => record.level().as_str().yellow(),
-                log::Level::Info => record.level().as_str().green(),
-                log::Level::Debug => record.level().as_str().blue(),
-                log::Level::Trace => record.level().as_str().purple(),
-            };
-            writeln!(
-                buf,
-                "[{} {} {}:{}] {}",
-                Local::now()
-                    .format("%Y-%m-%d %H:%M:%S%.3f")
-                    .to_string()
-                    .as_str()
-                    .dimmed(),
-                level,
-                record
-                    .file()
-                    .unwrap_or("unknown")
-                    .to_string()
-                    .as_str()
-                    .dimmed(),
-                record.line().unwrap_or(0).to_string().as_str().dimmed(),
-                record.args().to_string().as_str().bold(),
-            )
-        })
-        .init();
+    // Set up logging configuration and pass it to the logger
+    let log_config = if let Some(user_config) = &state.log_config {
+        // Start with defaults, then apply user overrides
+        let mut final_config = get_default_log_config();
+        for (crate_name, level) in user_config {
+            final_config.insert(crate_name.clone(), level.clone());
+        }
+        Some(final_config)
+    } else {
+        None
+    };
+
+    init_launcher_logging(target, log_config.as_ref()).expect("Failed to initialize logging");
 
     let format = format::debug_fn(move |writer, _field, value| {
         debug!("TRACE: {:?}", value);
@@ -187,7 +182,11 @@ pub fn run() {
 
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 
-    let free_port = find_port(12000, 13000);
+    let free_port = find_port(12000, 13000).unwrap_or_else(|e| {
+        let error_string = format!("Failed to find free main executor interface port: {}", e);
+        error!("{}", error_string);
+        panic!("{}", error_string);
+    });
 
     info!("Free port: {:?}", free_port);
 
@@ -208,17 +207,26 @@ pub fn run() {
 
     let req_credential = Uuid::new_v4().to_string();
 
-    let state = AppState {
-        graphql_port: free_port,
+    // Check if TLS is enabled
+    let tls_enabled = state
+        .tls_config
+        .as_ref()
+        .map(|config| config.enabled)
+        .unwrap_or(false);
+
+    let app_state = AppState {
+        graphql_port: free_port, // Always the local HTTP port
         req_credential: req_credential.clone(),
+        tls_enabled,
     };
 
     let builder_result = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_notification::init())
-        .manage(state)
+        .manage(app_state)
         .manage(ProxyState(Default::default()))
         .invoke_handler(tauri::generate_handler![
             get_port,
@@ -237,7 +245,15 @@ pub fn run() {
             add_app_agent_state,
             get_app_agent_list,
             set_selected_agent,
-            remove_app_agent_state
+            remove_app_agent_state,
+            get_data_path,
+            get_log_config,
+            set_log_config,
+            get_smtp_config,
+            set_smtp_config,
+            test_smtp_config,
+            get_tls_config,
+            set_tls_config
         ])
         .setup(move |app| {
             // Hides the dock icon
@@ -246,18 +262,70 @@ pub fn run() {
 
             let splashscreen = app.get_webview_window("splashscreen").unwrap();
 
-            let _id = splashscreen.listen("copyLogs", |event| {
+            let app_handle = app.handle().clone();
+            let _id = splashscreen.listen("revealLogFile", move |event| {
                 info!(
                     "got window event-name with payload {:?} {:?}",
                     event,
                     event.payload()
                 );
 
-                open_logs_folder();
+                reveal_log_file(&app_handle);
             });
 
             build_menu(app.handle())?;
             build_system_tray(app.handle())?;
+
+            // Convert TlsConfig and SmtpConfig if enabled
+            let launcher_state = LauncherState::load().unwrap();
+
+            // Prefer multi_user_config over deprecated tls_config
+            let (tls_config, smtp_config, enable_multi_user) =
+                if let Some(multi_user_config) = &launcher_state.multi_user_config {
+                    let tls = multi_user_config.tls_config.as_ref().and_then(|config| {
+                        if config.enabled {
+                            let tls_port = config.tls_port.unwrap_or(free_port + 1);
+                            Some(ExecutorTlsConfig {
+                                cert_file_path: config.cert_file_path.clone(),
+                                key_file_path: config.key_file_path.clone(),
+                                tls_port,
+                            })
+                        } else {
+                            None
+                        }
+                    });
+
+                    let smtp = multi_user_config.smtp_config.as_ref().map(|config| {
+                        rust_executor::config::SmtpConfig {
+                            enabled: config.enabled,
+                            host: config.host.clone(),
+                            port: config.port,
+                            username: config.username.clone(),
+                            password: config.password.clone(),
+                            from_address: config.from_address.clone(),
+                        }
+                    });
+
+                    (tls, smtp, Some(multi_user_config.enabled))
+                } else {
+                    // Fallback to deprecated tls_config for backwards compatibility
+                    let tls = launcher_state.tls_config.as_ref().and_then(|config| {
+                        if config.enabled {
+                            let tls_port = config.tls_port.unwrap_or(free_port + 1);
+                            Some(ExecutorTlsConfig {
+                                cert_file_path: config.cert_file_path.clone(),
+                                key_file_path: config.key_file_path.clone(),
+                                tls_port,
+                            })
+                        } else {
+                            None
+                        }
+                    });
+                    (tls, None, None)
+                };
+
+            // TLS enabled = bind to 0.0.0.0, TLS disabled = bind to 127.0.0.1
+            let localhost = tls_config.is_none();
 
             let config = rust_executor::Ad4mConfig {
                 admin_credential: Some(req_credential.to_string()),
@@ -268,6 +336,10 @@ pub fn run() {
                 hc_use_bootstrap: Some(true),
                 hc_use_mdns: Some(false),
                 hc_use_proxy: Some(true),
+                tls: tls_config,
+                localhost: Some(localhost),
+                enable_multi_user,
+                smtp_config,
                 ..Default::default()
             };
 

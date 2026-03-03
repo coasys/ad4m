@@ -2,8 +2,9 @@ import { Agent, ImportResult, ImportStats, Literal } from "@coasys/ad4m";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { open } from "@tauri-apps/plugin-shell";
-import { save as dialogSave, open as dialogOpen, message as dialogMessage, type MessageDialogOptions } from "@tauri-apps/plugin-dialog";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { join } from '@tauri-apps/api/path';
+import { save as dialogSave, open as dialogOpen, message as dialogMessage, ask as dialogAsk, type MessageDialogOptions } from "@tauri-apps/plugin-dialog";
 import { useCallback, useContext, useEffect, useState } from "react";
 import QRCode from "react-qr-code";
 import { PREDICATE_FIRSTNAME, PREDICATE_LASTNAME, PREDICATE_USERNAME } from "../constants/triples";
@@ -12,6 +13,8 @@ import { AgentContext } from "../context/AgentContext";
 import { buildAd4mClient, copyTextToClipboard } from "../util";
 import ActionButton from "./ActionButton";
 import { cardStyle } from "./styles";
+import { HoloHash } from '@spartan-hc/holo-hash';
+
 const appWindow = getCurrentWebviewWindow();
 
 type Props = {
@@ -51,8 +54,8 @@ const Profile = (props: Props) => {
   } = useContext(AgentContext);
 
   const {
-    state: { url, did, client, expertMode, isInitialized },
-    methods: { toggleExpertMode },
+    state: { url, did, client, expertMode, isInitialized, multiUserEnabled },
+    methods: { toggleExpertMode, setMultiUserEnabled },
   } = useContext(Ad4minContext);
 
   const [appState, setAppState] = useState({} as any);
@@ -86,8 +89,257 @@ const Profile = (props: Props) => {
   const [exportStatus, setExportStatus] = useState("");
   const [importStatus, setImportStatus] = useState("");
 
-  function openLogs() {
-    appWindow.emit("copyLogs");
+  const [networkMetrics, setNetworkMetrics] = useState("");
+  const [showNetworkMetrics, setShowNetworkMetrics] = useState(false);
+
+  const [agentInfos, setAgentInfos] = useState("");
+  const [showAgentInfos, setShowAgentInfos] = useState(false);
+
+  const [restartingHolochain, setRestartingHolochain] = useState(false);
+
+  const [logConfig, setLogConfig] = useState<Record<string, string>>({});
+  const [newCrateName, setNewCrateName] = useState<string>("");
+  const [newCrateLevel, setNewCrateLevel] = useState<string>("info");
+  const [crateNameError, setCrateNameError] = useState<string>("");
+
+  const [tlsConfig, setTlsConfig] = useState<{
+    enabled: boolean;
+    cert_file_path: string;
+    key_file_path: string;
+    tls_port: number | null;
+  } | null>(null);
+  const [tlsChanged, setTlsChanged] = useState(false);
+  const [certPathError, setCertPathError] = useState<string>("");
+  const [keyPathError, setKeyPathError] = useState<string>("");
+
+  // SMTP Configuration state
+  const [smtpConfig, setSmtpConfig] = useState<{
+    enabled: boolean;
+    host: string;
+    port: number;
+    username: string;
+    password: string;
+    from_address: string;
+  } | null>(null);
+  const [smtpChanged, setSmtpChanged] = useState(false);
+  const [smtpTesting, setSmtpTesting] = useState(false);
+  const [smtpTestStatus, setSmtpTestStatus] = useState<string>("");
+  const [smtpTestEmail, setSmtpTestEmail] = useState<string>("");
+  const [showSmtpPassword, setShowSmtpPassword] = useState(false);
+
+  // Load current log config on component mount
+  useEffect(() => {
+    const loadLogConfig = async () => {
+      try {
+        const currentConfig = await invoke<Record<string, string>>("get_log_config");
+        setLogConfig(currentConfig);
+      } catch (error) {
+        console.error("Failed to load log config:", error);
+      }
+    };
+    loadLogConfig();
+  }, []);
+
+  // Load TLS config on component mount
+  useEffect(() => {
+    const loadTlsConfig = async () => {
+      try {
+        const config = await invoke<typeof tlsConfig>("get_tls_config");
+        setTlsConfig(config || {
+          enabled: false,
+          cert_file_path: "",
+          key_file_path: "",
+          tls_port: 12001, // Default TLS port
+        });
+      } catch (error) {
+        console.error("Failed to load TLS config:", error);
+      }
+    };
+    loadTlsConfig();
+  }, []);
+
+  // Load SMTP config on component mount
+  useEffect(() => {
+    const loadSmtpConfig = async () => {
+      try {
+        const config = await invoke<typeof smtpConfig>("get_smtp_config");
+        setSmtpConfig(config || {
+          enabled: true,
+          host: "",
+          port: 587,
+          username: "",
+          password: "",
+          from_address: "",
+        });
+      } catch (error) {
+        console.error("Failed to load SMTP config:", error);
+      }
+    };
+    loadSmtpConfig();
+  }, []);
+
+  const handleLogConfigChange = async (newConfig: Record<string, string>) => {
+    try {
+      await invoke<void>("set_log_config", { config: newConfig });
+      setLogConfig(newConfig);
+    } catch (error) {
+      console.error("Failed to set log config:", error);
+      alert("Failed to set log config. Check console for details.");
+    }
+  };
+
+  const updateCrateLevel = (crateName: string, level: string) => {
+    const newConfig = { ...logConfig, [crateName]: level };
+    handleLogConfigChange(newConfig);
+  };
+
+  const validateCrateName = (name: string): string | null => {
+    const trimmed = name.trim();
+    
+    // Check if empty
+    if (!trimmed) {
+      return "Crate name cannot be empty";
+    }
+    
+    // Check if already exists
+    if (trimmed in logConfig) {
+      return "Crate name already exists";
+    }
+    
+    // Check Rust crate naming conventions
+    // Must start with letter or underscore
+    if (!/^[a-zA-Z_]/.test(trimmed)) {
+      return "Crate name must start with a letter or underscore";
+    }
+    
+    // Only lowercase letters, numbers, hyphens, and underscores allowed
+    if (!/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
+      return "Crate name can only contain letters, numbers, hyphens, and underscores";
+    }
+    
+    // Cannot end with hyphen
+    if (trimmed.endsWith("-")) {
+      return "Crate name cannot end with a hyphen";
+    }
+    
+    // No double hyphens
+    if (trimmed.includes("--")) {
+      return "Crate name cannot contain consecutive hyphens";
+    }
+    
+    // Convert to lowercase for consistency with Rust conventions
+    if (trimmed !== trimmed.toLowerCase()) {
+      return "Crate name should be lowercase (will be converted automatically)";
+    }
+    
+    return null;
+  };
+
+  const addNewCrate = () => {
+    const trimmedName = newCrateName.trim().toLowerCase();
+    const error = validateCrateName(trimmedName);
+    
+    if (error) {
+      setCrateNameError(error);
+      return;
+    }
+    
+    // Clear any previous error
+    setCrateNameError("");
+    
+    // Add the new crate
+    const newConfig = { ...logConfig, [trimmedName]: newCrateLevel };
+    handleLogConfigChange(newConfig);
+    setNewCrateName("");
+    setNewCrateLevel("info");
+  };
+
+  const handleTlsConfigChange = async (newConfig: typeof tlsConfig) => {
+    if (!newConfig) return;
+
+    try {
+      await invoke<void>("set_tls_config", { config: newConfig });
+      setTlsConfig(newConfig);
+      setTlsChanged(true);
+      setCertPathError("");
+      setKeyPathError("");
+    } catch (error) {
+      const errorMsg = String(error);
+      if (errorMsg.includes("Certificate")) {
+        setCertPathError(errorMsg);
+      } else if (errorMsg.includes("Key")) {
+        setKeyPathError(errorMsg);
+      } else {
+        alert("Failed to save TLS config: " + errorMsg);
+      }
+    }
+  };
+
+  const handleCertFilePicker = async () => {
+    const filePath = await dialogOpen({
+      title: "Select TLS Certificate File",
+      filters: [{ name: 'Certificate', extensions: ['pem', 'crt', 'cert'] }]
+    });
+
+    if (filePath && tlsConfig) {
+      setTlsConfig({ ...tlsConfig, cert_file_path: filePath.toString() });
+    }
+  };
+
+  const handleKeyFilePicker = async () => {
+    const filePath = await dialogOpen({
+      title: "Select TLS Private Key File",
+      filters: [{ name: 'Private Key', extensions: ['pem', 'key'] }]
+    });
+
+    if (filePath && tlsConfig) {
+      setTlsConfig({ ...tlsConfig, key_file_path: filePath.toString() });
+    }
+  };
+
+  const handleSmtpConfigChange = async (newConfig: typeof smtpConfig) => {
+    if (!newConfig) return;
+
+    try {
+      await invoke<void>("set_smtp_config", { config: newConfig });
+      setSmtpConfig(newConfig);
+      setSmtpChanged(true);
+    } catch (error) {
+      alert("Failed to save SMTP config: " + error);
+    }
+  };
+
+  const handleSmtpTest = async () => {
+    if (!smtpConfig || !smtpTestEmail) {
+      alert("Please configure SMTP settings and provide a test email address");
+      return;
+    }
+
+    setSmtpTesting(true);
+    setSmtpTestStatus("");
+
+    try {
+      await invoke<void>("test_smtp_config", {
+        config: smtpConfig,
+        testEmail: smtpTestEmail
+      });
+      setSmtpTestStatus("Test email sent successfully! Check your inbox.");
+    } catch (error) {
+      setSmtpTestStatus("Failed to send test email: " + error);
+    } finally {
+      setSmtpTesting(false);
+    }
+  };
+
+  const removeCrate = (crateName: string) => {
+    const newConfig = { ...logConfig };
+    delete newConfig[crateName];
+    handleLogConfigChange(newConfig);
+  };
+
+  async function openLogs() {
+    let dataPath = await invoke("get_data_path") as string;
+    revealItemInDir(await join(dataPath, "ad4m.log"))
   }
 
   const [profile, setProfile] = useState({
@@ -143,17 +395,16 @@ const Profile = (props: Props) => {
 
   const getAgentInfo = async () => {
     const info = await client?.runtime.hcAgentInfos();
-
-    console.log("info", info);
-
-    await writeText(info);
-
-    setCopied(true);
-
-    setTimeout(() => {
-      setCopied(false);
-      closeSecretCodeModal();
-    }, 3000);
+    if (info) {
+      try {
+        const formattedInfo = JSON.stringify(JSON.parse(info), null, 2);
+        setAgentInfos(formattedInfo);
+        setShowAgentInfos(true);
+      } catch (error) {
+        console.error("Failed to parse agent info data:", error);
+        alert("Failed to display agent info: The data returned from the backend is malformed. Please check the console for details.");
+      }
+    }
   };
 
   const addAgentInfo = async (info: string) => {
@@ -355,7 +606,7 @@ const Profile = (props: Props) => {
               <ActionButton title="QR Code" onClick={showProxyQRCode} icon="qr-code-scan" />
               <ActionButton
                 title="Open GraphQL"
-                onClick={() => open(proxy.replace("wss", "https").replace("graphql", "playground"))}
+                onClick={() => openUrl(proxy.replace("wss", "https").replace("graphql", "playground"))}
                 icon="box-arrow-up-right"
               />
             </j-flex>
@@ -366,9 +617,11 @@ const Profile = (props: Props) => {
       <j-box px="500" my="500">
         <j-button onClick={openLogs} full variant="primary">
           <j-icon size="sm" slot="start" name="clipboard"></j-icon>
-          Show logs
+          Reveal Log File
         </j-button>
       </j-box>
+
+
 
       <j-box px="500" my="500">
         <j-button onClick={() => setShowAgentSelection(true)} full variant="secondary">
@@ -383,8 +636,406 @@ const Profile = (props: Props) => {
         </j-toggle>
       </j-box>
 
+      <j-box px="500" my="500">
+        <j-toggle full="" checked={multiUserEnabled} onChange={async (e) => {
+          try {
+            await setMultiUserEnabled(e.target.checked);
+          } catch (error) {
+            console.error("Failed to toggle multi-user mode:", error);
+            e.target.checked = !e.target.checked; // Revert on error
+          }
+        }}>
+          Multi-user mode
+        </j-toggle>
+      </j-box>
+
+      {/* SMTP/Email Configuration Section */}
+      {multiUserEnabled && (
+        <>
+          <j-box px="500" my="500">
+            <j-text size="600" weight="600" color="black">
+              Email Configuration (SMTP)
+            </j-text>
+          </j-box>
+
+          <j-box px="500" my="300">
+            <j-text size="500" color="ui-500">
+              Configure SMTP settings for email verification. Required for email-based user authentication.
+            </j-text>
+          </j-box>
+
+          {smtpConfig && (
+            <>
+              {/* SMTP Enable/Disable Toggle */}
+              <j-box px="500" my="500">
+                <j-toggle
+                  checked={smtpConfig.enabled}
+                  onChange={(e) => {
+                    const newConfig = { ...smtpConfig, enabled: (e.target as HTMLInputElement).checked };
+                    setSmtpConfig(newConfig);
+                    handleSmtpConfigChange(newConfig);
+                  }}
+                >
+                  Enable Email/SMTP
+                </j-toggle>
+              </j-box>
+
+              {smtpConfig.enabled && (
+                <>
+                  {/* SMTP Host */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">SMTP Host</j-text>
+                </j-box>
+                <j-input
+                  value={smtpConfig.host}
+                  onChange={(e) => {
+                    setSmtpConfig({
+                      ...smtpConfig,
+                      host: (e.target as HTMLInputElement).value
+                    });
+                  }}
+                  placeholder="smtp.gmail.com"
+                />
+              </j-box>
+
+              {/* SMTP Port */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">SMTP Port</j-text>
+                </j-box>
+                <j-input
+                  type="number"
+                  value={smtpConfig.port.toString()}
+                  onChange={(e) => {
+                    const port = parseInt((e.target as HTMLInputElement).value);
+                    setSmtpConfig({
+                      ...smtpConfig,
+                      port: isNaN(port) ? 587 : port
+                    });
+                  }}
+                  placeholder="587"
+                />
+                <j-box mt="200">
+                  <j-text size="300" color="ui-500">
+                    Common ports: 587 (STARTTLS), 465 (SSL/TLS), 25 (unencrypted)
+                  </j-text>
+                </j-box>
+              </j-box>
+
+              {/* SMTP Username */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">Username</j-text>
+                </j-box>
+                <j-input
+                  value={smtpConfig.username}
+                  onChange={(e) => {
+                    setSmtpConfig({
+                      ...smtpConfig,
+                      username: (e.target as HTMLInputElement).value
+                    });
+                  }}
+                  placeholder="your-email@example.com"
+                />
+              </j-box>
+
+              {/* SMTP Password */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">Password / App Password</j-text>
+                </j-box>
+                <j-input
+                  type={showSmtpPassword ? "text" : "password"}
+                  value={smtpConfig.password}
+                  onChange={(e) => {
+                    setSmtpConfig({
+                      ...smtpConfig,
+                      password: (e.target as HTMLInputElement).value
+                    });
+                  }}
+                  placeholder="Enter SMTP password or app password"
+                >
+                  <j-button onClick={() => setShowSmtpPassword(!showSmtpPassword)} slot="end" variant="link" square>
+                    <j-icon name={showSmtpPassword ? "eye-slash" : "eye"} size="sm"></j-icon>
+                  </j-button>
+                </j-input>
+                <j-box mt="200">
+                  <j-text size="300" color="ui-500">
+                    For Gmail, use an App Password. Regular passwords won't work with 2FA enabled.
+                  </j-text>
+                </j-box>
+              </j-box>
+
+              {/* From Address */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">From Email Address</j-text>
+                </j-box>
+                <j-input
+                  value={smtpConfig.from_address}
+                  onChange={(e) => {
+                    setSmtpConfig({
+                      ...smtpConfig,
+                      from_address: (e.target as HTMLInputElement).value
+                    });
+                  }}
+                  placeholder="noreply@yourdomain.com"
+                />
+                <j-box mt="200">
+                  <j-text size="300" color="ui-500">
+                    Email address that will appear in the "From" field of verification emails
+                  </j-text>
+                </j-box>
+              </j-box>
+
+              {/* Save Button */}
+              <j-box px="500" my="500">
+                <j-button onClick={() => handleSmtpConfigChange(smtpConfig)} variant="primary" full>
+                  Save SMTP Configuration
+                </j-button>
+              </j-box>
+
+              {/* Test Email Section */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">Test Email Configuration</j-text>
+                </j-box>
+                <j-flex gap="200" a="center">
+                  <j-input
+                    value={smtpTestEmail}
+                    onChange={(e) => {
+                      setSmtpTestEmail((e.target as HTMLInputElement).value);
+                    }}
+                    placeholder="test@example.com"
+                    style={{ flexGrow: "1" }}
+                  />
+                  <j-button onClick={handleSmtpTest} variant="secondary" loading={smtpTesting} disabled={smtpTesting}>
+                    Send Test
+                  </j-button>
+                </j-flex>
+                {smtpTestStatus && (
+                  <j-box mt="200">
+                    <j-text size="400" color={smtpTestStatus.includes("success") ? "success-500" : "danger-500"}>
+                      {smtpTestStatus}
+                    </j-text>
+                  </j-box>
+                )}
+              </j-box>
+
+              {/* Restart Required Warning */}
+              {smtpChanged && (
+                <j-box px="500" my="500">
+                  <j-box p="400" style={{
+                    backgroundColor: "#fff3cd",
+                    borderRadius: "8px",
+                    border: "1px solid #ffc107"
+                  }}>
+                    <j-flex a="center" gap="300">
+                      <j-icon name="exclamation-triangle" color="warning"></j-icon>
+                      <j-text size="500">
+                        Restart required: SMTP settings will take effect after restarting the launcher.
+                      </j-text>
+                    </j-flex>
+                  </j-box>
+                </j-box>
+              )}
+
+              {/* Info about SMTP providers setup */}
+              <j-box px="500" my="500">
+                <j-box p="400" style={{
+                  backgroundColor: "#e7f3ff",
+                  borderRadius: "8px",
+                  border: "1px solid #2196f3"
+                }}>
+                  <j-text size="400">
+                    <strong>Common SMTP Provider Settings:</strong>
+                    <br/><br/>
+                    <strong>Gmail:</strong>
+                    <br/>• Host: smtp.gmail.com, Port: 587
+                    <br/>• Enable 2FA and generate an App Password (Google Account → Security → App Passwords)
+                    <br/><br/>
+                    <strong>Mailgun:</strong>
+                    <br/>• Host: smtp.mailgun.org (or your region-specific host)
+                    <br/>• Port: 587 (STARTTLS) or 465 (SSL/TLS)
+                    <br/>• Username: Your Mailgun SMTP username (usually postmaster@your-domain)
+                    <br/>• Password: Your Mailgun SMTP password
+                    <br/><br/>
+                    <strong>Note:</strong> Port 465 uses implicit SSL/TLS, Port 587 uses STARTTLS
+                  </j-text>
+                </j-box>
+              </j-box>
+                </>
+              )}
+            </>
+          )}
+        </>
+      )}
+
+      {/* TLS Configuration Section */}
+      <j-box px="500" my="500">
+        <j-text size="600" weight="600" color="black">
+          TLS/HTTPS Configuration
+        </j-text>
+      </j-box>
+
+      <j-box px="500" my="300">
+        <j-text size="500" color="ui-500">
+          Enable HTTPS for secure remote access. Required for multi-user mode over the web.
+        </j-text>
+      </j-box>
+
+      {tlsConfig && (
+        <>
+          <j-box px="500" my="500">
+            <j-toggle
+              checked={tlsConfig.enabled}
+              onChange={(e) => {
+                setTlsConfig({ ...tlsConfig, enabled: e.target.checked });
+              }}
+            >
+              Enable TLS/HTTPS
+            </j-toggle>
+          </j-box>
+
+          {tlsConfig.enabled && (
+            <>
+              {/* Certificate File Input */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">Certificate File</j-text>
+                </j-box>
+                <j-flex gap="200" a="center">
+                  <j-input
+                    value={tlsConfig.cert_file_path}
+                    onChange={(e) => {
+                      setTlsConfig({
+                        ...tlsConfig,
+                        cert_file_path: (e.target as HTMLInputElement).value
+                      });
+                    }}
+                    placeholder="/path/to/certificate.pem"
+                    style={{ flexGrow: "1" }}
+                    error={!!certPathError}
+                  />
+                  <j-button onClick={handleCertFilePicker} variant="secondary" size="sm">
+                    Browse
+                  </j-button>
+                </j-flex>
+                {certPathError && (
+                  <j-box mt="200">
+                    <j-text size="300" color="danger-500">{certPathError}</j-text>
+                  </j-box>
+                )}
+              </j-box>
+
+              {/* Private Key File Input */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">Private Key File</j-text>
+                </j-box>
+                <j-flex gap="200" a="center">
+                  <j-input
+                    value={tlsConfig.key_file_path}
+                    onChange={(e) => {
+                      setTlsConfig({
+                        ...tlsConfig,
+                        key_file_path: (e.target as HTMLInputElement).value
+                      });
+                    }}
+                    placeholder="/path/to/private-key.pem"
+                    style={{ flexGrow: "1" }}
+                    error={!!keyPathError}
+                  />
+                  <j-button onClick={handleKeyFilePicker} variant="secondary" size="sm">
+                    Browse
+                  </j-button>
+                </j-flex>
+                {keyPathError && (
+                  <j-box mt="200">
+                    <j-text size="300" color="danger-500">{keyPathError}</j-text>
+                  </j-box>
+                )}
+              </j-box>
+
+              {/* TLS Port Input */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">TLS Port (HTTPS/WSS)</j-text>
+                </j-box>
+                <j-input
+                  type="number"
+                  value={tlsConfig.tls_port?.toString() || "12001"}
+                  onChange={(e) => {
+                    const port = parseInt((e.target as HTMLInputElement).value);
+                    setTlsConfig({
+                      ...tlsConfig,
+                      tls_port: isNaN(port) ? null : port
+                    });
+                  }}
+                  placeholder="12001"
+                />
+                <j-box mt="200">
+                  <j-text size="300" color="ui-500">
+                    Port for remote HTTPS/WSS access. Local HTTP will use port 12000.
+                  </j-text>
+                </j-box>
+              </j-box>
+
+              {/* Save Button */}
+              <j-box px="500" my="500">
+                <j-button onClick={() => handleTlsConfigChange(tlsConfig)} variant="primary" full>
+                  Save TLS Configuration
+                </j-button>
+              </j-box>
+
+              {/* Restart Required Warning */}
+              {tlsChanged && (
+                <j-box px="500" my="500">
+                  <j-box p="400" style={{
+                    backgroundColor: "#fff3cd",
+                    borderRadius: "8px",
+                    border: "1px solid #ffc107"
+                  }}>
+                    <j-flex a="center" gap="300">
+                      <j-icon name="exclamation-triangle" color="warning"></j-icon>
+                      <j-text size="500">
+                        Restart required: TLS settings will take effect after restarting the launcher.
+                      </j-text>
+                    </j-flex>
+                  </j-box>
+                </j-box>
+              )}
+
+              {/* Info about binding behavior */}
+              <j-box px="500" my="500">
+                <j-box p="400" style={{
+                  backgroundColor: "#e7f3ff",
+                  borderRadius: "8px",
+                  border: "1px solid #2196f3"
+                }}>
+                  <j-text size="400">
+                    <strong>Note:</strong> When TLS is enabled, AD4M will run two GraphQL servers:
+                    <br/>• <strong>HTTP on 127.0.0.1:12000</strong> - for local apps (Flux, launcher, ad4m-connect)
+                    <br/>• <strong>HTTPS on 0.0.0.0:[TLS port]</strong> - for remote access with TLS encryption
+                    <br/><br/>
+                    Local apps will continue using port 12000 for compatibility. Remote users connect
+                    via your domain on the configured TLS port.
+                  </j-text>
+                </j-box>
+              </j-box>
+            </>
+          )}
+        </>
+      )}
+
       {expertMode && (
         <div>
+          <j-box px="500" my="500">
+            <j-text size="600" weight="600" color="black">
+              Advanced Settings
+            </j-text>
+          </j-box>
           <j-box px="500" my="500">
             <j-button onClick={handleExport} full variant="ghost">
               <j-icon size="sm" slot="start" name="download"></j-icon>
@@ -404,6 +1055,20 @@ const Profile = (props: Props) => {
             </j-button>
           </j-box>
           <j-box px="500" my="500">
+            <j-button onClick={() => settrustedAgentModalOpen(true)} full variant="ghost">
+              <j-icon size="sm" slot="start" name="shield-check"></j-icon>
+              Show trusted agents
+            </j-button>
+          </j-box>
+
+          {/* Holochain Section */}
+          <j-box px="500" my="500">
+            <j-text size="600" weight="600" color="black">
+              Holochain
+            </j-text>
+          </j-box>
+          
+          <j-box px="500" my="500">
             <j-button
               onClick={() => {
                 getAgentInfo();
@@ -412,7 +1077,7 @@ const Profile = (props: Props) => {
               variant="ghost"
             >
               <j-icon size="sm" slot="start" name={!copied ? "clipboard" : "clipboard-check"}></j-icon>
-              Copy Holochain Agent Info(s)
+              Show Holochain Agent Info(s)
             </j-button>
           </j-box>
 
@@ -429,12 +1094,169 @@ const Profile = (props: Props) => {
             </j-button>
           </j-box>
           <j-box px="500" my="500">
-            <j-button onClick={() => settrustedAgentModalOpen(true)} full variant="ghost">
-              <j-icon size="sm" slot="start" name="shield-check"></j-icon>
-              Show trusted agents
+            <j-button onClick={async () => {
+              if (client) {
+                try {
+                  const metrics = await client.runtime.getNetworkMetrics();
+                  const parsedMetrics = JSON.parse(metrics);
+                  const formattedMetrics = JSON.stringify(parsedMetrics, (key, value) => {
+                    // Keep buffer arrays on one line by not formatting them
+                    if (Array.isArray(value) && value.every(item => typeof item === 'number' && item >= 0 && item <= 255)) {
+
+                      if(value.length > 0){
+                        let array = new Uint8Array(value)
+                        try{
+                          const holoHash = new HoloHash(array);
+                          return holoHash.toString();
+                        } catch (error) {
+                          return JSON.stringify(value);
+                        }
+                      }
+                    }
+                    return value;
+                  }, 2);
+                  setNetworkMetrics(formattedMetrics);
+                  setShowNetworkMetrics(true);
+                } catch (error) {
+                  console.error('Failed to get network metrics:', error);
+                  alert('Failed to get network metrics. Check console for details.');
+                }
+              }
+            }} full variant="ghost">
+              <j-icon size="sm" slot="start" name="graph-up"></j-icon>
+              Get Network Metrics
             </j-button>
           </j-box>
           <j-box px="500" my="500">
+            <j-button onClick={async () => {
+              if (client) {
+                try {
+                  const confirmed = await dialogAsk('Are you sure you want to restart Holochain? This will temporarily disconnect you from the network and restart the Holochain conductor.', {
+                    title: 'Restart Holochain'
+                  });
+                  
+                  if (confirmed) {
+                    setRestartingHolochain(true);
+                    await client.runtime.restartHolochain();
+                    await dialogMessage('Holochain has been restarted successfully!', {
+                      title: 'Success'
+                    });
+                    setRestartingHolochain(false);
+                  }
+                } catch (error) {
+                  console.error('Failed to restart Holochain:', error);
+                  await dialogMessage('Failed to restart Holochain. Check console for details.', {
+                    title: 'Error'
+                  });
+                  setRestartingHolochain(false);
+                }
+              }
+            }} full variant="ghost" loading={restartingHolochain} disabled={restartingHolochain}>
+              <j-icon size="sm" slot="start" name="arrow-clockwise"></j-icon>
+              Restart Holochain
+            </j-button>
+          </j-box>
+
+          <j-box px="500" my="500">
+            <j-text size="600" weight="600" color="black">
+              Logging Configuration
+            </j-text>
+          </j-box>
+
+          <j-box px="500" my="500">
+            <j-text size="500" color="ui-500">
+              Configure log levels for different crates. Changes take effect after restart.
+            </j-text>
+          </j-box>
+
+          {Object.entries(logConfig)
+            .sort(([a], [b]) => {
+              // Put rust_executor first, then alphabetical
+              if (a === "rust_executor") return -1;
+              if (b === "rust_executor") return 1;
+              return a.localeCompare(b);
+            })
+            .map(([crateName, level]) => (
+              <j-box key={crateName} px="500" my="300">
+                <j-box mb="200">
+                  <j-flex a="center" j="between">
+                    <j-text size="500" weight="500" color="black">
+                      {crateName === "rust_executor" ? "ad4m" : crateName}
+                    </j-text>
+                    <j-button
+                      onClick={() => removeCrate(crateName)}
+                      variant="ghost"
+                      size="sm"
+                    >
+                      <j-icon name="trash" size="sm"></j-icon>
+                    </j-button>
+                  </j-flex>
+                </j-box>
+                <j-flex gap="200">
+                  {["error", "warn", "info", "debug", "trace"].map((lvl) => (
+                    <j-button
+                      key={lvl}
+                      onClick={() => updateCrateLevel(crateName, lvl)}
+                      variant={level === lvl ? "primary" : "ghost"}
+                      size="sm"
+                    >
+                      {lvl}
+                    </j-button>
+                  ))}
+                </j-flex>
+              </j-box>
+            ))}
+
+          <j-box px="500" my="500">
+            <j-text size="500" weight="600" color="black">
+              Add New Crate
+            </j-text>
+          </j-box>
+
+          {crateNameError && (
+            <j-box px="500" my="200">
+              <j-text size="300" color="danger-500">
+                {crateNameError}
+              </j-text>
+            </j-box>
+          )}
+
+          <j-box px="500" my="300">
+            <j-box mb="200">
+              <j-flex a="center" j="between">
+                <j-input
+                  value={newCrateName}
+                  onChange={(e) => {
+                    setNewCrateName((e.target as HTMLInputElement).value);
+                    // Clear error when user starts typing
+                    if (crateNameError) {
+                      setCrateNameError("");
+                    }
+                  }}
+                  placeholder="Crate name (e.g., tokio)"
+                  style={{ flexGrow: "1", marginRight: "10px" }}
+                />
+                <j-button
+                  onClick={addNewCrate}
+                  variant="primary"
+                  size="sm"
+                >
+                  Add
+                </j-button>
+              </j-flex>
+            </j-box>
+            <j-flex gap="200">
+              {["error", "warn", "info", "debug", "trace"].map((lvl) => (
+                <j-button
+                  key={lvl}
+                  onClick={() => setNewCrateLevel(lvl)}
+                  variant={newCrateLevel === lvl ? "primary" : "ghost"}
+                  size="sm"
+                >
+                  {lvl}
+                </j-button>
+              ))}
+            </j-flex>
           </j-box>
         </div>
       )}
@@ -623,6 +1445,106 @@ const Profile = (props: Props) => {
                 Delete Agent
               </j-button>
             </j-flex>
+          </j-box>
+        </j-modal>
+      )}
+      
+      {showNetworkMetrics && (
+        <j-modal
+          size="fullscreen"
+          open={showNetworkMetrics}
+          onToggle={(e: any) => setShowNetworkMetrics(e.target.open)}
+        >
+          <j-box px="400" py="600" style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Network Metrics
+              </j-text>
+            </j-box>
+            <j-box pb="500">
+              <j-button 
+                onClick={() => {
+                  navigator.clipboard.writeText(networkMetrics);
+                  alert('Network metrics copied to clipboard!');
+                }}
+                variant="primary"
+              >
+                <j-icon size="sm" slot="start" name="clipboard"></j-icon>
+                Copy to Clipboard
+              </j-button>
+            </j-box>
+            <div style={{ 
+              flex: 1, 
+              overflow: 'auto', 
+              border: '1px solid #ccc', 
+              padding: '10px', 
+              backgroundColor: '#1e1e1e',
+              maxHeight: 'calc(100vh - 200px)',
+              scrollbarWidth: 'thin',
+              scrollbarColor: '#888 #f1f1f1'
+            }}>
+              <pre style={{ 
+                margin: 0, 
+                fontSize: '12px', 
+                fontFamily: 'monospace', 
+                whiteSpace: 'pre-wrap',
+                overflowWrap: 'break-word',
+                wordBreak: 'break-all',
+                color: '#e0e0e0'
+              }}>
+                {networkMetrics}
+              </pre>
+            </div>
+          </j-box>
+        </j-modal>
+      )}
+
+      {showAgentInfos && (
+        <j-modal
+          size="fullscreen"
+          open={showAgentInfos}
+          onToggle={(e: any) => setShowAgentInfos(e.target.open)}
+        >
+          <j-box px="400" py="600" style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Holochain Agent Infos
+              </j-text>
+            </j-box>
+            <j-box pb="500">
+              <j-button 
+                onClick={() => {
+                  navigator.clipboard.writeText(agentInfos);
+                  alert('Agent infos copied to clipboard!');
+                }}
+                variant="primary"
+              >
+                <j-icon size="sm" slot="start" name="clipboard"></j-icon>
+                Copy to Clipboard
+              </j-button>
+            </j-box>
+            <div style={{ 
+              flex: 1, 
+              overflow: 'auto', 
+              border: '1px solid #ccc', 
+              padding: '10px', 
+              backgroundColor: '#1e1e1e',
+              maxHeight: 'calc(100vh - 200px)',
+              scrollbarWidth: 'thin',
+              scrollbarColor: '#888 #f1f1f1'
+            }}>
+              <pre style={{ 
+                margin: 0, 
+                fontSize: '12px', 
+                fontFamily: 'monospace', 
+                whiteSpace: 'pre-wrap',
+                overflowWrap: 'break-word',
+                wordBreak: 'break-all',
+                color: '#e0e0e0'
+              }}>
+                {agentInfos}
+              </pre>
+            </div>
           </j-box>
         </j-modal>
       )}

@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-launcher"
-version = "0.10.1-release-candidate-1"
+version = "0.12.0-rc1-dev.2"
 description = "Administration of ad4m services"
 authors = ["Kaichao Sun"]
 license = ""
@@ -23,7 +23,6 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 log4rs = "1.0.0"
 nix = "0.23.1"
-portpicker = "0.1.1"
 libc = "0.2"
 directories = "4.0.1"
 opener = "0.5.0"
@@ -38,6 +37,7 @@ remove_dir_all = "0.7.0"
 reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
 ad4m-client = { path = "../../rust-client" }
 ad4m-executor = { path = "../../rust-executor" }
+lettre = "0.11"
 chrono = "0.4"
 env_logger = "0.10.0"
 colored = "2.0"
@@ -53,6 +53,12 @@ tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2.0.0-alpha.2"
 tauri-plugin-shell = "2"
 dirs = "5"
+tauri-plugin-opener = "2.2.6"
+aes-gcm = "0.10"
+keyring = "2.3"
+base64 = "0.21"
+rand = "0.8"
+lazy_static = "1.4"
 
 [features]
 # by default Tauri runs in production mode
@@ -70,7 +76,7 @@ custom-protocol = [ "tauri/custom-protocol"]
 
 [lib]
 name = "app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["staticlib", "rlib"]
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-global-shortcut = "2"

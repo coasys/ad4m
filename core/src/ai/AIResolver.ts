@@ -352,12 +352,15 @@ export default class AIResolver {
 
     @Mutation(() => String)
     aiFeedTranscriptionStream(
-        @Arg("streamId") streamId: string,
+        @Arg("streamIds", type => [String]) streamIds: string[],
         @Arg("audio", () => [Float]) audio: number[],
         @PubSub() pubSub: any
     ): boolean {
-        pubSub.publish(AI_TRANSCRIPTION_TEXT_TOPIC, { streamId });
-        return true
+        // Publish for each stream ID
+        for (const streamId of streamIds) {
+            pubSub.publish(AI_TRANSCRIPTION_TEXT_TOPIC, { streamId });
+        }
+        return true;
     }
 
     @Subscription({ topics: AI_TRANSCRIPTION_TEXT_TOPIC, nullable: false })

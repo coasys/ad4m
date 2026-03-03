@@ -1,4 +1,4 @@
-import type { Address, Interaction, Expression, Language, LanguageContext } from "https://esm.sh/@coasys/ad4m@0.5.0";
+import type { Address, Interaction, Expression, Language, LanguageContext } from "https://esm.sh/v135/@coasys/ad4m@0.5.0";
 import { exists } from "https://deno.land/std@0.184.0/fs/mod.ts";
 import { join } from "https://deno.land/std@0.184.0/path/mod.ts";
 

@@ -4,7 +4,7 @@ use crate::{
     graphql::graphql_types::EntanglementProof,
 };
 
-pub(crate) mod entanglement_service_extension;
+pub mod entanglement_service_extension;
 
 pub fn sign_device_key(device_key: String, device_key_type: String) -> EntanglementProof {
     let signed_device_key = sign_string_hex(device_key.clone()).unwrap();

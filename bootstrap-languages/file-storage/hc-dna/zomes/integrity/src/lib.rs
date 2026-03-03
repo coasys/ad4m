@@ -1,9 +1,11 @@
 use chrono::{DateTime, Utc};
 use hdi::prelude::*;
 
+#[derive(Clone)]
 #[hdk_entry_helper]
-pub struct FileChunk(SerializedBytes);
+pub struct FileChunk(pub SerializedBytes);
 
+#[derive(Clone)]
 #[hdk_entry_helper]
 pub struct FileMetadata {
     pub name: String,
@@ -19,6 +21,7 @@ pub struct ExpressionProof {
     pub key: String,
 }
 
+#[derive(Clone)]
 #[hdk_entry_helper]
 pub struct FileExpression {
     pub author: String,

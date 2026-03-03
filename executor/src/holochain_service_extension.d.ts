@@ -1,5 +1,4 @@
-import { AgentInfoSigned, AgentPubKey, AppInfo, CallZomeResponse, InstallAppRequest, Signature } from "@holochain/client";
-
+import { AgentInfoSigned, AgentPubKey, AppInfo, CallZomeResponse, InstallAppRequest, Signature } from "./holochain_types";
 declare global {
     interface ConductorConfig {
         passphrase: String,
@@ -11,6 +10,7 @@ declare global {
         useMdns: bool,
         proxyUrl: String,
         bootstrapUrl: String,
+        relayUrl?: String,
         appPort: Number
     }
 
@@ -28,6 +28,8 @@ declare global {
         async getAgentKey: () => AgentPubKey;
         async packDna: (path: String) => String;
         async unPackDna: (path: String) => String;
+        async packHapp: (path: String) => String;
+        async unPackHapp: (path: String) => String;
     }
 
     const HOLOCHAIN_SERVICE: HolochainService;

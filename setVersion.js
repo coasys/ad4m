@@ -75,11 +75,13 @@ fs.writeFileSync('ad4m-hooks/helpers/package.json', JSON.stringify(hookHelpers, 
 const reactHooks = JSON.parse(fs.readFileSync('ad4m-hooks/react/package.json', 'utf8'))
 console.log("Ad4m React hook version: " + reactHooks.version + " -> " + VERSION)
 reactHooks.version = VERSION
+reactHooks.dependencies["@coasys/ad4m"] = 'workspace:'+VERSION
 fs.writeFileSync('ad4m-hooks/react/package.json', JSON.stringify(reactHooks, null, 2) + '\n')
 
 const vueHooks = JSON.parse(fs.readFileSync('ad4m-hooks/vue/package.json', 'utf8'))
 console.log("Ad4m Vue hook version: " + vueHooks.version + " -> " + VERSION)
 vueHooks.version = VERSION
+vueHooks.dependencies["@coasys/ad4m"] = 'workspace:'+VERSION
 fs.writeFileSync('ad4m-hooks/vue/package.json', JSON.stringify(vueHooks, null, 2) + '\n')
 
 const executor = JSON.parse(fs.readFileSync('executor/package.json', 'utf8'))
@@ -155,10 +157,10 @@ if (isPreRelease) {
 }
 fs.writeFileSync('ui/src-tauri/Cargo.toml', uiTauriCargo.newContent)
 
-const book = JSON.parse(fs.readFileSync('docs/package.json', 'utf8'))
+const book = JSON.parse(fs.readFileSync('docs-src/package.json', 'utf8'))
 console.log("Docs version: " + book.version + " -> " + VERSION)
 book.version = VERSION
-fs.writeFileSync('docs/package.json', JSON.stringify(book, null, 2) + '\n')
+fs.writeFileSync('docs-src/package.json', JSON.stringify(book, null, 2) + '\n')
 
 const testRunner = JSON.parse(fs.readFileSync('test-runner/package.json', 'utf8'))
 console.log("Test runner version: " + testRunner.version + " -> " + VERSION)

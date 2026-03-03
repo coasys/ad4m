@@ -261,10 +261,10 @@ export class NeighbourhoodClient {
         let handlersForPerspective = this.#signalHandlers.get(perspectiveUUID)
         if (!handlersForPerspective) {
             handlersForPerspective = []
+            this.#signalHandlers.set(perspectiveUUID, handlersForPerspective)
             await this.subscribeToSignals(perspectiveUUID)
         }
         handlersForPerspective.push(handler)
-        this.#signalHandlers.set(perspectiveUUID, handlersForPerspective)
     }
 
     removeSignalHandler(perspectiveUUID: string, handler: TelepresenceSignalCallback): void {
@@ -275,6 +275,5 @@ export class NeighbourhoodClient {
                 handlersForPerspective.splice(index, 1)
             }
         }
-        this.#signalHandlers.set(perspectiveUUID, handlersForPerspective)
     }
 }

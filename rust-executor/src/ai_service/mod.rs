@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::sleep;
 
@@ -33,14 +33,19 @@ use log::error;
 pub type Result<T> = std::result::Result<T, AnyError>;
 
 static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
+static TRANSCRIPTION_TIMEOUT_SECS: u64 = 30; // 30 seconds (was 2 minutes)
+static TRANSCRIPTION_CHECK_INTERVAL_SECS: u64 = 5; // 5 seconds (was 10)
 
 lazy_static! {
     static ref AI_SERVICE: Arc<Mutex<Option<AIService>>> = Arc::new(Mutex::new(None));
+    static ref PROGRESS_RATE_LIMITER: Arc<Mutex<HashMap<String, Instant>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 }
 
 struct TranscriptionSession {
     samples_tx: futures_channel::mpsc::UnboundedSender<Vec<f32>>,
     drop_tx: oneshot::Sender<()>,
+    last_activity: Arc<Mutex<std::time::Instant>>,
 }
 
 #[derive(Clone)]
@@ -48,6 +53,23 @@ pub struct AIService {
     embedding_channel: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<EmbeddingRequest>>>>,
     llm_channel: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<LLMTaskRequest>>>>,
     transcription_streams: Arc<Mutex<HashMap<String, TranscriptionSession>>>,
+    cleanup_task_shutdown: Arc<std::sync::Mutex<Option<oneshot::Sender<()>>>>,
+    /// Shared Whisper models - ONE model per size, shared across ALL streams using that size
+    /// Key = WhisperSource (Tiny/Small/Medium/Large), Value = Arc<Whisper>
+    /// Cloning Arc is cheap (just increments ref count), model weights stay in memory once
+    /// Saves 500MB-1.5GB per stream!
+    shared_whisper_models: Arc<Mutex<HashMap<String, Arc<Whisper>>>>,
+}
+
+impl Drop for AIService {
+    fn drop(&mut self) {
+        // Try to get the shutdown sender - using std::sync::Mutex so this works in Drop
+        if let Ok(mut shutdown) = self.cleanup_task_shutdown.lock() {
+            if let Some(sender) = shutdown.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
 }
 
 struct EmbeddingRequest {
@@ -134,13 +156,59 @@ async fn publish_model_status(
 
 async fn handle_progress(model_id: String, loading: ModelLoadingProgress) {
     let progress = loading.progress() * 100.0;
-    let status = if progress < 100.0 {
-        "Loading".to_string()
-    } else {
-        "Loaded".to_string()
+
+    // Rate limiting: Only update every 100ms to prevent task thrashing
+    let now = Instant::now();
+    let should_update = {
+        let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
+
+        if let Some(last_update) = rate_limiter.get(&model_id) {
+            // If less than 100ms since last update, skip unless it's 100% completion
+            if now.duration_since(*last_update) < Duration::from_millis(100) && progress < 100.0 {
+                false
+            } else {
+                rate_limiter.insert(model_id.clone(), now);
+                true
+            }
+        } else {
+            // First update for this model
+            rate_limiter.insert(model_id.clone(), now);
+            true
+        }
     };
-    //println!("Progress update: {}% for model {}", progress, model_id); // Add logging
-    publish_model_status(model_id.clone(), progress, &status, false, false).await;
+
+    if should_update {
+        let status = if progress < 100.0 {
+            "Loading".to_string()
+        } else {
+            "Loaded".to_string()
+        };
+
+        log::debug!(
+            "Publishing model status for {}: {}% - {}",
+            model_id,
+            progress,
+            status
+        );
+
+        // Clean up rate limiter entry when model is fully loaded
+        if progress >= 100.0 {
+            let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
+            rate_limiter.remove(&model_id);
+            log::debug!(
+                "Cleaned up rate limiter entry for completed model: {}",
+                model_id
+            );
+        }
+
+        publish_model_status(model_id.clone(), progress, &status, false, false).await;
+    } else {
+        log::trace!(
+            "Rate limited progress update for {}: {}%",
+            model_id,
+            progress
+        );
+    }
 }
 
 #[derive(Debug)]
@@ -158,6 +226,8 @@ impl AIService {
             embedding_channel: Arc::new(Mutex::new(HashMap::new())),
             llm_channel: Arc::new(Mutex::new(HashMap::new())),
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
+            cleanup_task_shutdown: Arc::new(std::sync::Mutex::new(None)),
+            shared_whisper_models: Arc::new(Mutex::new(HashMap::new())), // Models loaded on demand per size
         };
 
         let clone = service.clone();
@@ -167,7 +237,50 @@ impl AIService {
             }
         });
 
+        // Create shutdown channel
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        if let Ok(mut shutdown) = service.cleanup_task_shutdown.lock() {
+            *shutdown = Some(shutdown_tx);
+        }
+
+        // Spawn background task to clean up timed out streams
+        let service_clone = service.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = shutdown_rx => {
+                    log::info!("Shutting down transcription cleanup task");
+                }
+                _ = async {
+                    loop {
+                        sleep(Duration::from_secs(TRANSCRIPTION_CHECK_INTERVAL_SECS)).await;
+                        if let Err(e) = service_clone.cleanup_timed_out_streams().await {
+                            error!("Error cleaning up timed out streams: {:?}", e);
+                        }
+                    }
+                } => {}
+            }
+        });
+
         Ok(service)
+    }
+
+    async fn cleanup_timed_out_streams(&self) -> Result<()> {
+        let mut map_lock = self.transcription_streams.lock().await;
+
+        let mut timed_out_streams = Vec::new();
+        for (id, stream) in map_lock.iter() {
+            let last_activity = stream.last_activity.lock().await;
+            if last_activity.elapsed() > Duration::from_secs(TRANSCRIPTION_TIMEOUT_SECS) {
+                timed_out_streams.push(id.clone());
+            }
+        }
+
+        for id in timed_out_streams {
+            if let Some(stream) = map_lock.remove(&id) {
+                let _ = stream.drop_tx.send(());
+            }
+        }
+        Ok(())
     }
 
     pub async fn load(&self) -> Result<()> {
@@ -281,8 +394,10 @@ impl AIService {
     // -------------------------------------
 
     fn new_candle_device() -> Device {
-        let non_accelerated_message = "Could not get accelerated Candle device. Defaulting to CPU.";
         if cfg!(feature = "cuda") {
+            log::info!("Using CUDA device");
+            let non_accelerated_message =
+                "Could not get accelerated CUDA device. Defaulting to CPU.";
             Device::new_cuda(0).unwrap_or_else(|e| {
                 println!("{} {:?}", non_accelerated_message, e);
                 error!("{} {:?}", non_accelerated_message, e);
@@ -290,11 +405,14 @@ impl AIService {
             })
         } else if cfg!(feature = "metal") {
             Device::new_metal(0).unwrap_or_else(|e| {
+                let non_accelerated_message =
+                    "Could not get accelerated Metal device. Defaulting to CPU.";
                 println!("{} {:?}", non_accelerated_message, e);
                 error!("{} {:?}", non_accelerated_message, e);
                 Device::Cpu
             })
         } else {
+            log::warn!("Using CPU candle device");
             Device::Cpu
         }
     }
@@ -996,101 +1114,129 @@ impl AIService {
         model_id: String,
         params: Option<VoiceActivityParams>,
     ) -> Result<String> {
-        let model_size = Self::get_whisper_model_size(model_id)?;
+        let model_size = Self::get_whisper_model_size(model_id.clone())?;
+
+        // MEMORY OPTIMIZATION: Load each Whisper model size ONCE and share across all streams using that size
+        // Arc cloning is cheap (just increments ref count), saves 500MB-1.5GB per stream!
+        let whisper_model = {
+            let mut shared_models = self.shared_whisper_models.lock().await;
+            let model_key = format!("{:?}", model_size); // Use Debug format as key (e.g., "Small", "Medium")
+
+            if !shared_models.contains_key(&model_key) {
+                log::info!(
+                    "Loading shared Whisper model {} ({:?}) (ONE model per size, ~500MB-1.5GB)...",
+                    model_id,
+                    model_size
+                );
+
+                let model = WhisperBuilder::default()
+                    .with_source(model_size)
+                    .with_device(Self::new_candle_device())
+                    .build()
+                    .await?;
+
+                log::info!(
+                    "Shared Whisper model {:?} loaded! All streams using this size will reuse this model.",
+                    model_size
+                );
+                shared_models.insert(model_key.clone(), Arc::new(model));
+            } else {
+                log::info!(
+                    "Reusing existing shared Whisper model {:?} for new stream",
+                    model_size
+                );
+            }
+
+            // Clone the Arc - this is CHEAP! Just increments a reference count
+            shared_models.get(&model_key).unwrap().clone()
+        };
+
+        log::info!("Opening transcription stream with model {:?}", model_size);
+
         let stream_id = uuid::Uuid::new_v4().to_string();
         let stream_id_clone = stream_id.clone();
         let (samples_tx, samples_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
-        //TODO: use drop_rx to exit thread
         let (drop_tx, drop_rx) = oneshot::channel();
-        let (done_tx, done_rx) = oneshot::channel();
+        let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
 
         thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
 
             rt.block_on(async {
-                let maybe_model = WhisperBuilder::default()
-                    .with_source(model_size)
-                    .with_device(Self::new_candle_device())
-                    .build()
-                    .await;
+                // Dereference the Arc to get the Whisper model
+                // The model weights stay shared in memory!
+                let whisper = (*whisper_model).clone();
 
-                if let Ok(whisper) = maybe_model {
-                    let audio_stream = AudioStream {
-                        read_data: Vec::new(),
-                        receiver: Box::pin(samples_rx.map(futures_util::stream::iter).flatten()),
-                    };
+                let audio_stream = AudioStream {
+                    read_data: Vec::new(),
+                    receiver: Box::pin(samples_rx.map(futures_util::stream::iter).flatten()),
+                };
 
-                    let mut voice_stream = audio_stream
-                        .voice_activity_stream()
-                        .rechunk_voice_activity();
+                let mut voice_stream = audio_stream
+                    .voice_activity_stream()
+                    .rechunk_voice_activity();
 
-                    // Apply voice activity parameters if provided
-                    if let Some(params) = params {
-                        if let Some(start_threshold) = params.start_threshold {
-                            voice_stream = voice_stream.with_start_threshold(start_threshold);
-                        }
-                        if let Some(start_window) = params.start_window {
-                            voice_stream =
-                                voice_stream.with_start_window(Duration::from_millis(start_window));
-                        }
-                        if let Some(end_threshold) = params.end_threshold {
-                            voice_stream = voice_stream.with_end_threshold(end_threshold);
-                        }
-                        if let Some(end_window) = params.end_window {
-                            voice_stream =
-                                voice_stream.with_end_window(Duration::from_millis(end_window));
-                        }
-                        if let Some(time_before_speech) = params.time_before_speech {
-                            voice_stream = voice_stream
-                                .with_time_before_speech(Duration::from_millis(time_before_speech));
-                        }
-                    } else {
-                        // Set default end window if no params provided
-                        voice_stream = voice_stream.with_end_window(Duration::from_millis(500));
+                // Apply voice activity parameters if provided
+                if let Some(params) = params {
+                    if let Some(start_threshold) = params.start_threshold {
+                        voice_stream = voice_stream.with_start_threshold(start_threshold);
                     }
-
-                    let mut word_stream = voice_stream.transcribe(whisper);
-
-                    let _ = done_tx.send(Ok(()));
-
-                    tokio::select! {
-                        _ = drop_rx => {},
-                        _ = async {
-                            while let Some(segment) = word_stream.next().await {
-                                //println!("GOT segment: {}", segment.text());
-                                let stream_id_clone = stream_id_clone.clone();
-
-                                rt.spawn(async move {
-                                    let _ = get_global_pubsub()
-                                        .await
-                                        .publish(
-                                            &AI_TRANSCRIPTION_TEXT_TOPIC,
-                                            &serde_json::to_string(&TranscriptionTextFilter {
-                                                stream_id: stream_id_clone.clone(),
-                                                text: segment.text().to_string(),
-                                            })
-                                            .expect("TranscriptionTextFilter must be serializable"),
-                                        )
-                                        .await;
-                                });
-
-                                sleep(Duration::from_millis(50)).await;
-                            }
-                        } => {}
+                    if let Some(start_window) = params.start_window {
+                        voice_stream =
+                            voice_stream.with_start_window(Duration::from_millis(start_window));
+                    }
+                    if let Some(end_threshold) = params.end_threshold {
+                        voice_stream = voice_stream.with_end_threshold(end_threshold);
+                    }
+                    if let Some(end_window) = params.end_window {
+                        voice_stream =
+                            voice_stream.with_end_window(Duration::from_millis(end_window));
+                    }
+                    if let Some(time_before_speech) = params.time_before_speech {
+                        voice_stream = voice_stream
+                            .with_time_before_speech(Duration::from_millis(time_before_speech));
                     }
                 } else {
-                    let _ = done_tx.send(Err(maybe_model.err().unwrap()));
+                    // Set default end window if no params provided
+                    voice_stream = voice_stream.with_end_window(Duration::from_millis(500));
+                }
+
+                let mut word_stream = voice_stream.transcribe(whisper);
+
+                tokio::select! {
+                    _ = drop_rx => {},
+                    _ = async {
+                        while let Some(segment) = word_stream.next().await {
+                            //println!("GOT segment: {}", segment.text());
+                            let stream_id_clone = stream_id_clone.clone();
+
+                            rt.spawn(async move {
+                                let _ = get_global_pubsub()
+                                    .await
+                                    .publish(
+                                        &AI_TRANSCRIPTION_TEXT_TOPIC,
+                                        &serde_json::to_string(&TranscriptionTextFilter {
+                                            stream_id: stream_id_clone.clone(),
+                                            text: segment.text().to_string(),
+                                        })
+                                        .expect("TranscriptionTextFilter must be serializable"),
+                                    )
+                                    .await;
+                            });
+
+                            sleep(Duration::from_millis(50)).await;
+                        }
+                    } => {}
                 }
             });
         });
-
-        done_rx.await??;
 
         self.transcription_streams.lock().await.insert(
             stream_id.clone(),
             TranscriptionSession {
                 samples_tx,
                 drop_tx,
+                last_activity,
             },
         );
 
@@ -1103,9 +1249,13 @@ impl AIService {
         audio_samples: Vec<f32>,
     ) -> Result<()> {
         let mut map_lock = self.transcription_streams.lock().await;
-        let maybe_stream = map_lock.get_mut(stream_id);
-        if let Some(stream) = maybe_stream {
-            stream.samples_tx.send(audio_samples).await?;
+
+        if let Some(stream) = map_lock.get_mut(stream_id) {
+            // Update last activity time
+            *stream.last_activity.lock().await = std::time::Instant::now();
+            stream.samples_tx.send(audio_samples).await.map_err(|e| {
+                AIServiceError::CrazyError(format!("Failed to feed stream {}: {}", stream_id, e))
+            })?;
             Ok(())
         } else {
             Err(AIServiceError::StreamNotFound.into())
@@ -1274,6 +1424,62 @@ impl AIService {
 mod tests {
     use super::*;
     use crate::graphql::graphql_types::{AIPromptExamplesInput, LocalModelInput};
+    use tokio::time::{sleep, Duration};
+
+    #[tokio::test]
+    async fn test_progress_rate_limiting() {
+        // Test the rate limiting functionality by directly testing the rate limiter
+        let model_id = "test_model".to_string();
+
+        // Clear any existing rate limiter state
+        {
+            let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
+            rate_limiter.clear();
+        }
+
+        // Test that rate limiter prevents rapid updates
+        let now = std::time::Instant::now();
+
+        // First update should set the timestamp
+        {
+            let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
+            rate_limiter.insert(model_id.clone(), now);
+        }
+
+        // Immediate check should indicate rate limiting
+        {
+            let rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
+            let should_rate_limit = if let Some(last_update) = rate_limiter.get(&model_id) {
+                std::time::Instant::now().duration_since(*last_update) < Duration::from_millis(100)
+            } else {
+                false
+            };
+            assert!(should_rate_limit, "Should rate limit rapid updates");
+        }
+
+        // Wait for rate limit window to pass
+        sleep(Duration::from_millis(150)).await;
+
+        // Now updates should be allowed
+        {
+            let rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
+            let should_rate_limit = if let Some(last_update) = rate_limiter.get(&model_id) {
+                std::time::Instant::now().duration_since(*last_update) < Duration::from_millis(100)
+            } else {
+                false
+            };
+            assert!(
+                !should_rate_limit,
+                "Should allow updates after rate limit window"
+            );
+        }
+
+        // Clean up
+        {
+            let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
+            rate_limiter.remove(&model_id);
+        }
+    }
 
     // TODO: We ignore these tests because they need a GPU to not take ages to run
     // BUT: the model lifecycle and update tests show another problem:

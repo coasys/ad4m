@@ -1,54 +1,61 @@
 version: 2.1
+references:
+  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
 
-orbs:
-  node: circleci/node@5.2.0
-  go: circleci/go@1.10.0
-  rust: circleci/rust@1.6.1
+# Self-hosted machine runner on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04)
+# Resource class: coasys/marvin
+
+commands:
+  setup_env:
+    description: "Set up build environment (Node 18, Rust, Deno, Go, pnpm)"
+    steps:
+      - run:
+          name: Setup build environment
+          command: |
+            # Add all tool paths directly to PATH — no NVM sourcing (nvm use prints to stdout
+            # which corrupts subshell commands in cargo build scripts like libffi's libtool)
+            echo 'export PATH="$HOME/.nvm/versions/node/v18.20.8/bin:$HOME/.cargo/bin:$HOME/.deno/bin:$HOME/.local/go/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/go/bin:$PATH"' >> $BASH_ENV
+            source $BASH_ENV
+            echo "Node: $(node --version)"
+            echo "npm: $(npm --version)"
+            echo "Rust: $(rustc --version)"
+            echo "Deno: $(deno --version | head -1)"
+            echo "Go: $(go version)"
+            echo "pnpm: $(pnpm --version)"
+
+  setup_integration_test_environment:
+    description: "Setup common integration test environment"
+    steps:
+      - checkout
+      - run:
+          name: Restore binaries from local stash (no CircleCI network storage needed — same host)
+          command: |
+            mkdir -p target/release
+            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m target/release/ad4m
+            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m-executor target/release/ad4m-executor
+      - setup_env
+      - run:
+          name: Install dependencies
+          command: pnpm install --no-frozen-lockfile
+      - run:
+          name: Install core dependencies
+          command: cd ./core && pnpm install --no-frozen-lockfile
+      - run:
+          name: Build bootstrap languages
+          command: pnpm run build-languages
+
 
 jobs:
   build-and-test:
-    docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:f6499125645a0df59bacf1790d9c68ab3e4872d0ca435bfc96d78bd5d857e114
-    resource_class: xlarge
+    machine: true
+    resource_class: coasys/marvin
     steps:
       - checkout
-      - restore_cache:
-          keys:
-            - hc-0.3.2-rc1
-            - hc-
-            - rust-cache-{{ checksum "Cargo.lock" }}
-            - rust-cache-
+      - setup_env
       - run:
-          name: Install HC
+          name: Clean up stale local artifact stashes (older than 1 day)
           command: |
-            ls -la $HOME/.cargo/bin
-            if [ ! -f "$HOME/.cargo/bin/hc" ]; then
-              git clone https://github.com/holochain/holochain.git
-              cd holochain
-              git checkout holochain-0.3.2-rc.1
-              cd crates/hc
-              cargo build --release
-              pwd
-              ls -la
-              mkdir -p $HOME/.cargo/bin
-              cd ../../target/release
-              pwd
-              ls -lah
-              cp hc $HOME/.cargo/bin/hc
-              cd $HOME/.cargo/bin
-              pwd
-              ls -lah
-              ./hc --version
-            fi
-            echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> $BASH_ENV
-      - save_cache:
-          key: hc-0.3.2-rc1
-          paths:
-            - /home/circleci/.cargo/bin
-      - restore_cache:
-          keys:
-            - rust-cache-{{ checksum "Cargo.lock" }}-v2
-            - rust-cache-
+            find /tmp/circleci-artifacts -maxdepth 1 -mindepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
       - run:
           name: cargo fmt --check
           command: cargo fmt --check
@@ -62,6 +69,13 @@ jobs:
           name: Install core dependencies
           command: cd ./core && pnpm install --no-frozen-lockfile
       - run:
+          name: Build core executor
+          command: pnpm run build-core-executor
+      - run:
+          name: Build deno snapshot
+          command: pnpm run build-deno-snapshot
+          no_output_timeout: 30m
+      - run:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
           no_output_timeout: 30m
@@ -69,18 +83,11 @@ jobs:
           name: cargo clippy
           no_output_timeout: 30m
           command: cargo clippy --all --exclude ad4m-launcher
-      - save_cache:
-          key: rust-cache-{{ checksum "Cargo.lock" }}-v2
-          paths:
-            - ./target
-            - ~/.cargo/registry
-            - ~/.cargo/git
-      - persist_to_workspace:
-          no-output-timeout: 30m
-          root: .
-          paths:
-            - ./target/release/ad4m
-            - ./target/release/ad4m-executor
+      - run:
+          name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
+          command: |
+            mkdir -p /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}
+            cp target/release/ad4m target/release/ad4m-executor /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js
@@ -96,84 +103,56 @@ jobs:
           no_output_timeout: 30m
 
   integration-tests-js:
-    docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
-    resource_class: xlarge
+    machine: true
+    resource_class: coasys/marvin
     steps:
-      - checkout
-      - attach_workspace:
-          at: .
-      - restore_cache:
-          keys:
-            - hc-hc-0.3.2-rc1
-            - hc-
-      - restore_cache:
-          keys:
-            - agent-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
-            - agent-language-rust-cache-
-      - restore_cache:
-          keys:
-            - direct-message-language-rust-cache-{{ checksum "bootstrap-languages/direct-message-language/hc-dna/Cargo.lock" }}
-            - direct-message-language-rust-cache-
-      - restore_cache:
-          keys:
-            - file-storage-rust-cache-{{ checksum "bootstrap-languages/file-storage/hc-dna/Cargo.lock" }}
-            - file-storage-rust-cache-
-      - restore_cache:
-          keys:
-            - p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
-            - p-diff-sync-rust-cache-
-      - restore_cache:
-          keys:
-            - p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
-            - p-diff-sync-socket-signaling-rust-cache-
+      - setup_integration_test_environment
       - run:
-          name: Install specific pnpm version
-          command: npm install -g pnpm@9.15.0
-      - run:
-          name: Install dependencies
-          command: pnpm install --no-frozen-lockfile
-      - run:
-          name: Install core dependencies
-          command: cd ./core && pnpm install --no-frozen-lockfile
-      - run:
-          name: Build bootstrap languages
-          command: pnpm run build-languages
-      - save_cache:
-          key: agent-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
-          paths:
-            - ./bootstrap-languages/agent-language/hc-dna/target
-      - save_cache:
-          key: direct-message-language-rust-cache-{{ checksum "bootstrap-languages/direct-message-language/hc-dna/Cargo.lock" }}
-          paths:
-            - ./bootstrap-languages/direct-message-language/hc-dna/target
-      - save_cache:
-          key: file-storage-rust-cache-{{ checksum "bootstrap-languages/file-storage/hc-dna/Cargo.lock" }}
-          paths:
-            - ./bootstrap-languages/file-storage-language/hc-dna/target
-      - save_cache:
-          key: p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
-          paths:
-            - ./bootstrap-languages/p-diff-sync/hc-dna/target
-      - save_cache:
-          key: p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
-          paths:
-            - ./bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/target\
-      - run:
-          name: Install ffmpeg for transcription test
-          command: sudo apt-get update && sudo apt-get install ffmpeg --fix-missing
+          name: Kill any orphaned executors from previous runs
+          command: |
+            # Self-hosted runners reuse workdirs; previous job may have left
+            # an executor alive (exec() shell-wrap means kill() only kills
+            # the shell, not the executor grandchild). Clear ports before test.
+            for port in 15700 15701 15702; do
+              lsof -ti:$port | xargs -r kill -9 2>/dev/null || true
+            done
       - run:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test-main
           no_output_timeout: 30m
 
+  integration-tests-multi-user-simple:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - setup_integration_test_environment
+      - run:
+          name: Run multi-user-simple integration tests
+          command: cd ./tests/js && ./test-multi-user-with-setup.sh
+          no_output_timeout: 30m
+
+  integration-tests-email-verification:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - setup_integration_test_environment
+      - run:
+          name: Run email-verification integration tests
+          command: cd ./tests/js && ./email-verification-test-with-setup.sh
+          no_output_timeout: 30m
+
   integration-tests-cli:
-    docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
+    machine: true
+    resource_class: coasys/marvin
     steps:
       - checkout
-      - attach_workspace:
-          at: .
+      - run:
+          name: Restore binaries from local stash
+          command: |
+            mkdir -p target/release
+            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m target/release/ad4m
+            cp /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}/ad4m-executor target/release/ad4m-executor
+      - setup_env
       - run:
           name: git submodule
           command: git submodule update --init --recursive
@@ -190,5 +169,11 @@ workflows:
     jobs:
       - build-and-test
       - integration-tests-js:
+          requires:
+            - build-and-test
+      - integration-tests-multi-user-simple:
+          requires:
+            - build-and-test
+      - integration-tests-email-verification:
           requires:
             - build-and-test

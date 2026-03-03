@@ -1,5 +1,5 @@
 ---
-manifest_version: 1
+manifest_version: 0
 name: "perspective-diff-sync"
 integrity:
   network_seed: 00000000-0000-0000-0000-000000000000
@@ -9,13 +9,12 @@ integrity:
     "active_agent_duration_s": 300,
     "enable_signals": true
   }
-  origin_time: 2022-02-11T23:05:19.470323Z
   zomes:
     - name: perspective_diff_sync_integrity
-      bundled: ../target/wasm32-unknown-unknown/release/perspective_diff_sync_integrity.wasm
+      path: ../target/wasm32-unknown-unknown/release/perspective_diff_sync_integrity.wasm
 coordinator:
   zomes:
     - name: perspective_diff_sync
-      bundled: ../target/wasm32-unknown-unknown/release/perspective_diff_sync.wasm
+      path: ../target/wasm32-unknown-unknown/release/perspective_diff_sync.wasm
       dependencies:
         - name: perspective_diff_sync_integrity

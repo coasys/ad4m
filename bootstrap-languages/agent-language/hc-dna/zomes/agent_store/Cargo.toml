@@ -10,10 +10,15 @@ name = "agent_store"
 
 [dependencies]
 derive_more = "0"
-serde = "1.0.198"
+serde = "1"
 chrono = { version = "0.4.38", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
-thiserror = "1.0.20"
+thiserror = "1"
+getrandom = { version = "0.3" }
 
-hdk = { version = "0.3.6", git = "https://github.com/coasys/holochain.git", branch = "0.3.6-coasys" }
-holo_hash =  { version = "0.3.6", git = "https://github.com/coasys/holochain.git", branch = "0.3.6-coasys" }
+hdk = { version = "0.7.0-dev.6", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys" }
+holo_hash =  { version = "0.7.0-dev.3", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys" }
+holochain_serialized_bytes = "=0.0.56"
 agent_store_integrity = { path = "../agent_store_integrity" }
+
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="custom"']

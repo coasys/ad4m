@@ -1,10 +1,10 @@
 use hdk::prelude::*;
 use perspective_diff_sync_integrity::{
-    LinkExpression, LinkTypes, PerspectiveDiff, PerspectiveDiffEntryReference, Snapshot,
+    LinkExpression, LinkTypes, PerspectiveDiffEntryReference, Snapshot,
 };
 
 use crate::errors::{SocialContextError, SocialContextResult};
-use crate::link_adapter::chunked_diffs::ChunkedDiffs;
+use crate::link_adapter::chunked_diffs::{load_diff_from_entry, ChunkedDiffs};
 use crate::retriever::HolochainRetreiver;
 use crate::utils::get_now;
 use crate::{Hash, CHUNK_SIZE};
@@ -41,15 +41,9 @@ pub fn generate_snapshot(
             ))?;
         if diff.diffs_since_snapshot == 0 && search_position.hash != latest {
             let now = get_now()?.time();
-            let input = GetLinksInputBuilder::try_new(
-                hash_entry(&diff)?,
-                LinkTypes::Snapshot
-            )
-            .unwrap()
-            .tag_prefix(LinkTag::new("snapshot"))
-            .get_options(GetStrategy::Network)
-            .build();
-            let mut snapshot_links = get_links(input)?;
+            let query = LinkQuery::try_new(hash_entry(&diff)?, LinkTypes::Snapshot)?
+                .tag_prefix(LinkTag::new("snapshot"));
+            let mut snapshot_links = get_links(query, GetStrategy::Local)?;
             let after = get_now()?.time();
             debug!("===PerspectiveDiffSync.generate_snapshot() - Profiling: Took {} to get the snapshot links", (after - now).num_milliseconds());
             if snapshot_links.len() == 0 {
@@ -147,20 +141,13 @@ fn handle_parents(
     //Check if entry is already in graph
     if !seen.contains(&search_position.hash) {
         seen.insert(search_position.hash.clone());
-        let diff_entry = get(diff.diff.clone(), GetOptions::network())?
-            .ok_or(SocialContextError::InternalError(
-                "Could not find diff entry for given diff entry reference",
-            ))?
-            .entry()
-            .to_app_option::<PerspectiveDiff>()?
-            .ok_or(SocialContextError::InternalError(
-                "Expected element to contain app entry data",
-            ))?;
 
-        for addition in diff_entry.additions.iter() {
+        // Load diff handling both inline and chunked storage
+        let loaded_diff = load_diff_from_entry::<HolochainRetreiver>(&diff)?;
+        for addition in loaded_diff.additions.iter() {
             all_additions.insert(addition.clone());
         }
-        for removal in diff_entry.removals.iter() {
+        for removal in loaded_diff.removals.iter() {
             all_removals.insert(removal.clone());
         }
 
