@@ -502,7 +502,7 @@ async fn publish_telepresence_signal(
                 .unwrap(),
             )
             .await;
-    } else if let Some(owners) = &handle.owners {
+    } else if let Some(owners) = handle.owners.as_ref().filter(|o| !o.is_empty()) {
         for owner_did in owners {
             get_global_pubsub()
                 .await
