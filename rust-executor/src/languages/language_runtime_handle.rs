@@ -1,4 +1,4 @@
-use log::{error, info};
+use log::{debug, error, info};
 use serde_json::Value as JsonValue;
 use tokio::runtime::Builder;
 use tokio::sync::{
@@ -60,7 +60,7 @@ impl LanguageRuntimeHandle {
         let op_name = format!("{:?}", operation);
         let (response_tx, response_rx) = oneshot::channel();
 
-        info!(
+        debug!(
             "[handle:{}] Sending operation: {}",
             self.language_address,
             &op_name[..op_name.len().min(100)]
@@ -78,7 +78,7 @@ impl LanguageRuntimeHandle {
             .map_err(|e| format!("Language runtime dropped without responding: {}", e))?;
 
         match &result {
-            Ok(_) => info!("[handle:{}] Operation completed OK", self.language_address),
+            Ok(_) => debug!("[handle:{}] Operation completed OK", self.language_address),
             Err(e) => error!("[handle:{}] Operation failed: {}", self.language_address, e),
         }
 
