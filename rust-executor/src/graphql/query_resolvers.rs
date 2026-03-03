@@ -147,7 +147,7 @@ impl Query {
                     Ok(None) => Ok(None),
                     Err(e) => {
                         log::warn!("agentByDID: failed to get expression for {}: {}", did, e);
-                        Ok(None)
+                        Err(FieldError::new(format!("agentByDID: failed to get expression for {}: {}", did, e), Value::null()))
                     }
                 }
             } else {
