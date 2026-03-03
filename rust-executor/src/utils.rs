@@ -1,9 +1,31 @@
 use dirs::home_dir;
 use portpicker;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+static LANGUAGES_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 pub(crate) fn ad4m_data_directory() -> PathBuf {
     home_dir().unwrap().join(".ad4m")
+}
+
+/// Set the languages directory based on the app data path.
+/// Must be called once during initialization before any language operations.
+/// The languages directory will be `{app_data_path}/ad4m/languages/`.
+pub fn set_languages_directory(app_data_path: &str) {
+    let dir = PathBuf::from(app_data_path).join("ad4m").join("languages");
+    let _ = LANGUAGES_DIR.set(dir);
+}
+
+pub fn languages_directory() -> PathBuf {
+    LANGUAGES_DIR
+        .get()
+        .cloned()
+        .unwrap_or_else(|| ad4m_data_directory().join("languages"))
+}
+
+pub fn language_storage_directory(language_address: &str) -> PathBuf {
+    languages_directory().join(language_address)
 }
 
 pub fn find_port(start_port: u16, end_port: u16) -> Result<u16, String> {
