@@ -165,12 +165,12 @@ const Login = () => {
   }
 
   async function saveModels() {
-    let whisperModel = "whisper_small";
+    let whisperModel = "whisper_large_v3_turbo_quantized";
     // add llm model
     if (aiMode !== "None") {
       const llm = { modelType: "LLM" } as ModelInput;
       if (aiMode === "Local") {
-        whisperModel = "whisper_distil_large_v3";
+        whisperModel = "whisper_large_v3_turbo_quantized";
         llm.name = "Qwen2.5.1-Coder-7B-Instruct";
         llm.local = { fileName: "Qwen2.5.1-Coder-7B-Instruct" };
       } else {
@@ -644,11 +644,11 @@ const Login = () => {
                   <a
                     onClick={() =>
                       open(
-                        "https://huggingface.co/openai/whisper-large-v3-turbo"
+                        "https://huggingface.co/Demonthos/candle-quantized-whisper-large-v3-turbo"
                       )
                     }
                     style={{ cursor: "pointer" }}
-                  >Whisper distill large v3 (1.42GB)</a>
+                  >Whisper large v3 turbo quantized (454MB)</a>
                 </p>
                 and
                 <p>
@@ -818,11 +818,11 @@ const Login = () => {
                     <a
                       onClick={() =>
                         open(
-                          "https://huggingface.co/openai/whisper-small"
+                          "https://huggingface.co/Demonthos/candle-quantized-whisper-large-v3-turbo"
                         )
                       }
                       style={{ cursor: "pointer" }}
-                    >Whisper small (244MB)</a>
+                    >Whisper large v3 turbo quantized (454MB)</a>
                   </p>
                   and
                   <p>
@@ -860,11 +860,11 @@ const Login = () => {
                     <a
                       onClick={() =>
                         open(
-                          "https://huggingface.co/openai/whisper-small"
+                          "https://huggingface.co/Demonthos/candle-quantized-whisper-large-v3-turbo"
                         )
                       }
                       style={{ cursor: "pointer" }}
-                    >Whisper small (244MB)</a>
+                    >Whisper large v3 turbo quantized (454MB)</a>
                   </p>
                   and
                   <p>

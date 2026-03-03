@@ -32,7 +32,7 @@ use log::error;
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
-static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
+static WHISPER_MODEL: WhisperSource = WhisperSource::QuantizedLargeV3Turbo;
 static TRANSCRIPTION_TIMEOUT_SECS: u64 = 30; // 30 seconds (was 2 minutes)
 static TRANSCRIPTION_CHECK_INTERVAL_SECS: u64 = 5; // 5 seconds (was 10)
 
