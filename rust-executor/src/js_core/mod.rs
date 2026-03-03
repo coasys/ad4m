@@ -72,7 +72,11 @@ impl JsCore {
         let storage_dir_str = storage_directory.to_string_lossy().to_string();
         info!(
             "Creating {} language runtime with storage: {}",
-            if is_system_language { "system" } else { "sandboxed" },
+            if is_system_language {
+                "system"
+            } else {
+                "sandboxed"
+            },
             storage_dir_str
         );
 

@@ -33,8 +33,15 @@ pub struct LanguageRuntime {
 }
 
 impl LanguageRuntime {
-    pub fn new(language_address: String, storage_directory: PathBuf, is_system_language: bool) -> Self {
-        info!("Creating LanguageRuntime for: {} (system={})", language_address, is_system_language);
+    pub fn new(
+        language_address: String,
+        storage_directory: PathBuf,
+        is_system_language: bool,
+    ) -> Self {
+        info!(
+            "Creating LanguageRuntime for: {} (system={})",
+            language_address, is_system_language
+        );
         Self {
             language_address,
             js_core: JsCore::new_for_language(storage_directory, is_system_language),

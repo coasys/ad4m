@@ -22,8 +22,15 @@ impl LanguageRuntimeHandle {
     /// Spawn a new LanguageRuntime in a dedicated thread.
     /// The storage_directory is the only filesystem path accessible to this sandbox.
     /// System/bootstrap languages additionally get CWD access.
-    pub fn spawn(language_address: String, storage_directory: PathBuf, is_system_language: bool) -> Result<Self, String> {
-        info!("Spawning LanguageRuntime for: {} (system={})", language_address, is_system_language);
+    pub fn spawn(
+        language_address: String,
+        storage_directory: PathBuf,
+        is_system_language: bool,
+    ) -> Result<Self, String> {
+        info!(
+            "Spawning LanguageRuntime for: {} (system={})",
+            language_address, is_system_language
+        );
 
         let (tx, rx) = mpsc::unbounded_channel::<LanguageRuntimeRequest>();
         let addr = language_address.clone();
@@ -38,7 +45,8 @@ impl LanguageRuntimeHandle {
                     .expect("Failed to create Tokio runtime for language");
 
                 rt.block_on(async {
-                    let runtime = LanguageRuntime::new(addr.clone(), storage_directory, is_system_language);
+                    let runtime =
+                        LanguageRuntime::new(addr.clone(), storage_directory, is_system_language);
 
                     // Execute bootstrap module to make Deno ops available
                     if let Err(e) = runtime.init().await {
