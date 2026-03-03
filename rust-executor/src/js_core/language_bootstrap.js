@@ -146,24 +146,6 @@ globalThis.__handleHolochainSignal__ = async function(signal) {
 };
 
 /**
- * Loads a language bundle from base64-encoded source code using a data: URL.
- * The bundle is read in Rust and passed as base64 so the JS sandbox never
- * does file I/O.
- */
-async function loadLanguageBundle(base64Source) {
-    const url = `data:text/javascript;base64,${base64Source}`;
-    const module = await import(url);
-    // Handle module.default.default, module.default, or bare module
-    if (module.default && module.default.default) {
-        globalThis.languageConstructor = module.default.default;
-    } else if (module.default) {
-        globalThis.languageConstructor = module.default;
-    } else {
-        globalThis.languageConstructor = module;
-    }
-}
-
-/**
  * Creates a Holochain delegate object for a given language address.
  * Provides registerDNAs, call, and callAsync methods.
  */
@@ -304,7 +286,6 @@ async function initLanguage(contextJson) {
     return language;
 }
 
-globalThis.loadLanguageBundle = loadLanguageBundle;
 globalThis.initLanguage = initLanguage;
 globalThis.createHolochainDelegate = createHolochainDelegate;
 globalThis.createAd4mSignal = createAd4mSignal;
