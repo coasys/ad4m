@@ -146,11 +146,12 @@ globalThis.__handleHolochainSignal__ = async function(signal) {
 };
 
 /**
- * Dynamically imports the language bundle from a file:// URL and captures
- * the default export as globalThis.languageConstructor.
+ * Loads a language bundle from base64-encoded source code using a data: URL.
+ * The bundle is read in Rust and passed as base64 so the JS sandbox never
+ * does file I/O.
  */
-async function loadLanguageBundle(path) {
-    const url = path.startsWith("file://") ? path : `file://${path}`;
+async function loadLanguageBundle(base64Source) {
+    const url = `data:text/javascript;base64,${base64Source}`;
     const module = await import(url);
     // Handle module.default.default, module.default, or bare module
     if (module.default && module.default.default) {

@@ -216,6 +216,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         for dir in &dirs {
             if let Err(e) = std::fs::create_dir_all(dir) {
                 error!("Failed to create data directory {:?}: {}", dir, e);
+                panic!(
+                    "Cannot continue without required data directory {:?}: {}",
+                    dir, e
+                );
             }
         }
     }
@@ -334,9 +338,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     LanguageController::init_global_instance();
 
-    // NOTE: load_system_languages() is triggered from the JS side via the
-    // load_system_languages Deno op when agent.generate or agent.unlock is called.
-    // See Ad4mCore.initLanguages() which calls LANGUAGE_CONTROLLER.loadSystemLanguages().
+    // NOTE: load_system_languages() is called directly from Rust in
+    // agent_generate/agent_unlock mutation resolvers.
 
     // Set app data path for perspectives module (needed for file-based SurrealDB)
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
