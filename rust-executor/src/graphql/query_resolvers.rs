@@ -14,7 +14,6 @@ use crate::{
     types::{DecoratedLinkExpression, Model, Notification},
 };
 use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
-use std::env;
 
 pub struct Query;
 

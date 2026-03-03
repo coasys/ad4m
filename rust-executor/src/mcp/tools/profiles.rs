@@ -1,8 +1,14 @@
 //! Agent profile tools
 //!
 //! Tools for managing agent identity, profile fields, and profile pictures.
+//! Uses native Rust agent service calls (no JS runtime required).
 
 use super::Ad4mMcpHandler;
+use crate::agent::capabilities::user_email_from_token;
+use crate::agent::AgentService;
+use crate::graphql::graphql_types::{Agent, Perspective};
+use crate::languages::LanguageController;
+use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -57,6 +63,114 @@ pub struct SetAgentPublicPerspectiveParams {
 }
 
 // ============================================================================
+// Helper: get agent via native Rust calls
+// ============================================================================
+
+/// Get the current agent, handling both multi-user and single-user modes.
+fn get_current_agent(auth_token: &str) -> Result<Agent, String> {
+    if let Some(user_email) = user_email_from_token(auth_token.to_string()) {
+        // Multi-user mode: load user-specific profile
+        let agent_data = AgentService::get_user_agent_data(&user_email)
+            .map_err(|e| format!("User agent not available: {}", e))?;
+
+        let agent = match AgentService::with_global_instance(|agent_service| {
+            agent_service.load_user_agent_profile(&user_email)
+        }) {
+            Ok(Some(profile)) => profile,
+            Ok(None) | Err(_) => Agent {
+                did: agent_data.did,
+                direct_message_language: None,
+                perspective: Some(Perspective { links: vec![] }),
+            },
+        };
+        Ok(agent)
+    } else {
+        // Single-user / admin mode: main agent
+        AgentService::with_global_instance(|agent_service| {
+            agent_service
+                .agent
+                .clone()
+                .ok_or_else(|| "Agent not initialized".to_string())
+        })
+    }
+}
+
+/// Update the current agent's public perspective, handling both multi-user and single-user modes.
+async fn update_agent_perspective(
+    auth_token: &str,
+    links: Vec<DecoratedLinkExpression>,
+) -> Result<Agent, String> {
+    if let Some(user_email) = user_email_from_token(auth_token.to_string()) {
+        // Multi-user mode
+        let agent_data = AgentService::get_user_agent_data(&user_email)
+            .map_err(|e| format!("User agent not available: {}", e))?;
+
+        let agent = Agent {
+            did: agent_data.did,
+            direct_message_language: None,
+            perspective: Some(Perspective { links }),
+        };
+
+        AgentService::with_global_instance(|agent_service| {
+            agent_service.store_user_agent_profile(&user_email, &agent)
+        })
+        .map_err(|e| format!("Failed to store user profile: {}", e))?;
+
+        if let Err(e) = AgentService::publish_user_agent_to_language(&user_email, &agent).await {
+            log::warn!("Failed to publish user profile to agent language: {}", e);
+        }
+
+        Ok(agent)
+    } else {
+        // Single-user / admin mode
+        let agent = AgentService::with_mutable_global_instance(|agent_service| {
+            if let Some(ref mut agent) = agent_service.agent {
+                agent.perspective = Some(Perspective { links });
+                let updated = agent.clone();
+                if let Some(ref passphrase) = agent_service.passphrase {
+                    agent_service.save(passphrase.clone());
+                }
+                Ok(updated)
+            } else {
+                Err("Agent not initialized".to_string())
+            }
+        })?;
+
+        if let Err(e) = AgentService::ensure_agent_expression().await {
+            log::warn!("Failed to publish agent expression: {}", e);
+        }
+
+        Ok(agent)
+    }
+}
+
+/// Build a DecoratedLinkExpression with empty proof (profile links don't need signatures).
+fn make_profile_link(
+    author: &str,
+    timestamp: &str,
+    source: &str,
+    predicate: &str,
+    target: &str,
+) -> DecoratedLinkExpression {
+    DecoratedLinkExpression {
+        author: author.to_string(),
+        timestamp: timestamp.to_string(),
+        data: Link {
+            source: source.to_string(),
+            predicate: Some(predicate.to_string()),
+            target: target.to_string(),
+        },
+        proof: DecoratedExpressionProof {
+            key: String::new(),
+            signature: String::new(),
+            valid: Some(false),
+            invalid: Some(true),
+        },
+        status: None,
+    }
+}
+
+// ============================================================================
 // Tool Implementations
 // ============================================================================
 
@@ -66,28 +180,14 @@ impl Ad4mMcpHandler {
         description = "Get the current agent's public profile (username, name, bio, profile picture URLs). This is the identity that other agents and Flux users see in neighbourhoods."
     )]
     pub async fn get_agent_profile(&self, _params: Parameters<GetAgentProfileParams>) -> String {
-        let _agent_context = self.get_agent_context_for_read().await;
+        let token = self.get_auth_token().await.unwrap_or_default();
 
-        let mut js = self.context.js_handle.clone();
-        let script = r#"JSON.stringify(await core.callResolver("Query", "agent", {}))"#;
-
-        let result = match js.execute(script.to_string()).await {
-            Ok(r) => r,
+        let agent = match get_current_agent(&token) {
+            Ok(a) => a,
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };
 
-        let agent: serde_json::Value = match serde_json::from_str(&result) {
-            Ok(v) => v,
-            Err(e) => return json!({"error": format!("Failed to parse agent: {}", e)}).to_string(),
-        };
-
-        let did = agent.get("did").and_then(|v| v.as_str()).unwrap_or("");
-        let links = agent
-            .get("perspective")
-            .and_then(|p| p.get("links"))
-            .and_then(|l| l.as_array());
-
-        let mut profile = json!({"did": did});
+        let mut profile = json!({"did": agent.did});
 
         let predicates = vec![
             ("sioc://has_username", "username"),
@@ -99,25 +199,13 @@ impl Ad4mMcpHandler {
             ("sioc://has_profile_thumbnail_image", "profile_thumbnail"),
         ];
 
-        if let Some(links) = links {
-            for link in links {
-                let source = link
-                    .pointer("/data/source")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let predicate = link
-                    .pointer("/data/predicate")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let target = link
-                    .pointer("/data/target")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-
-                if source == "flux://profile" {
+        if let Some(ref perspective) = agent.perspective {
+            for link in &perspective.links {
+                if link.data.source == "flux://profile" {
+                    let predicate = link.data.predicate.as_deref().unwrap_or("");
                     for (pred_uri, field_name) in &predicates {
                         if predicate == *pred_uri {
-                            let value = Self::resolve_literal_value(target);
+                            let value = Self::resolve_literal_value(&link.data.target);
                             profile[field_name] = json!(value);
                         }
                     }
@@ -138,30 +226,21 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Authentication error: {}", e),
         };
 
-        let mut js = self.context.js_handle.clone();
-        let script = r#"JSON.stringify(await core.callResolver("Query", "agent", {}))"#;
-        let result = match js.execute(script.to_string()).await {
-            Ok(r) => r,
+        let token = self.get_auth_token().await.unwrap_or_default();
+
+        let agent = match get_current_agent(&token) {
+            Ok(a) => a,
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };
-        let agent: serde_json::Value = match serde_json::from_str(&result) {
-            Ok(v) => v,
-            Err(e) => return json!({"error": format!("Failed to parse agent: {}", e)}).to_string(),
-        };
 
-        let did = agent
-            .get("did")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let did = &agent.did;
         let current_links = agent
-            .get("perspective")
-            .and_then(|p| p.get("links"))
-            .and_then(|l| l.as_array())
-            .cloned()
-            .unwrap_or_default();
+            .perspective
+            .as_ref()
+            .map(|p| &p.links[..])
+            .unwrap_or(&[]);
 
-        let profile_text_predicates = vec![
+        let profile_text_predicates = [
             "sioc://has_username",
             "sioc://has_given_name",
             "sioc://has_family_name",
@@ -170,32 +249,16 @@ impl Ad4mMcpHandler {
         ];
 
         let mut current_values = std::collections::HashMap::new();
-        let mut preserved_links: Vec<serde_json::Value> = Vec::new();
+        let mut preserved_links: Vec<DecoratedLinkExpression> = Vec::new();
 
-        for link in &current_links {
-            let source = link
-                .pointer("/data/source")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let predicate = link
-                .pointer("/data/predicate")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let target = link
-                .pointer("/data/target")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            if source == "flux://profile" && profile_text_predicates.contains(&predicate) {
-                current_values.insert(predicate.to_string(), target.to_string());
+        for link in current_links {
+            let predicate = link.data.predicate.as_deref().unwrap_or("");
+            if link.data.source == "flux://profile" && profile_text_predicates.contains(&predicate)
+            {
+                current_values.insert(predicate.to_string(), link.data.target.clone());
                 continue;
             }
-            preserved_links.push(json!({
-                "author": did,
-                "timestamp": link.get("timestamp").and_then(|v| v.as_str()).unwrap_or(""),
-                "proof": {"invalid": false, "key": "", "signature": ""},
-                "data": {"source": source, "predicate": predicate, "target": target}
-            }));
+            preserved_links.push(link.clone());
         }
 
         let p = &params.0;
@@ -219,21 +282,16 @@ impl Ad4mMcpHandler {
                 },
             };
             let ts = now + chrono::Duration::milliseconds(i as i64);
-            all_links.push(json!({
-                "author": did,
-                "timestamp": ts.to_rfc3339(),
-                "proof": {"invalid": false, "key": "", "signature": ""},
-                "data": {"source": "flux://profile", "predicate": predicate, "target": target}
-            }));
+            all_links.push(make_profile_link(
+                did,
+                &ts.to_rfc3339(),
+                "flux://profile",
+                predicate,
+                &target,
+            ));
         }
 
-        let perspective_json = json!({"links": all_links});
-        let update_script = format!(
-            r#"JSON.stringify(await core.callResolver("Mutation", "agentUpdatePublicPerspective", {{ perspective: {} }}))"#,
-            serde_json::to_string(&perspective_json).unwrap()
-        );
-
-        match js.execute(update_script).await {
+        match update_agent_perspective(&token, all_links).await {
             Ok(_) => {
                 let mut updated = json!({"success": true});
                 if let Some(u) = p.username.as_ref() {
@@ -270,119 +328,82 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Authentication error: {}", e),
         };
 
-        let mut js = self.context.js_handle.clone();
+        let token = self.get_auth_token().await.unwrap_or_default();
         let mime = params.0.mime_type.as_deref().unwrap_or("image/png");
 
-        // Query file storage language address from the runtime instead of hardcoding
-        let get_file_storage_script = r#"
-            const langs = await core.callResolver("Query", "languages", { filter: "" });
-            const parsed = JSON.parse(langs);
-            const fileStorage = parsed.find(l => l.name && l.name.toLowerCase().includes("file-storage"));
-            JSON.stringify(fileStorage ? fileStorage.address : null)
-        "#;
-        let file_storage_lang = match js.execute(get_file_storage_script.to_string()).await {
-            Ok(r) => {
-                let addr: Option<String> = serde_json::from_str(&r).unwrap_or(None);
-                match addr {
-                    Some(a) => a,
-                    None => {
-                        return json!({"error": "File storage language not found in runtime"})
-                            .to_string()
-                    }
-                }
-            }
-            Err(e) => {
-                return json!({"error": format!("Failed to query file storage language: {}", e)})
-                    .to_string()
+        // Find the file-storage language via the LanguageController
+        let controller = LanguageController::global_instance();
+        let all_languages = controller.get_installed_languages(None).await;
+        let file_storage_lang = all_languages
+            .iter()
+            .find(|l| l.name.to_lowercase().contains("file-storage"))
+            .map(|l| l.address.clone());
+
+        let file_storage_addr = match file_storage_lang {
+            Some(addr) => addr,
+            None => {
+                return json!({"error": "File storage language not found in runtime"}).to_string()
             }
         };
 
+        // Create expression via the language controller
         let content = json!({
             "data_base64": params.0.image_base64,
             "name": "profile-image",
             "file_type": mime,
         });
-        let create_script = format!(
-            r#"JSON.stringify(await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: {:?} }}))"#,
-            serde_json::to_string(&serde_json::to_string(&content).unwrap()).unwrap(),
-            file_storage_lang
-        );
-
-        let profile_img = match js.execute(create_script).await {
-            Ok(r) => {
-                let addr: String = serde_json::from_str(&r).unwrap_or(r);
-                addr
-            }
+        let agent_context = crate::agent::AgentContext::from_auth_token(token.clone());
+        let profile_img = match controller
+            .expression_create(&file_storage_addr, content, &agent_context)
+            .await
+        {
+            Ok(addr) => addr,
             Err(e) => {
                 return json!({"error": format!("Failed to upload image: {}", e)}).to_string()
             }
         };
 
-        let script = r#"JSON.stringify(await core.callResolver("Query", "agent", {}))"#;
-        let result = match js.execute(script.to_string()).await {
-            Ok(r) => r,
+        // Get current agent and rebuild links with the new profile image
+        let agent = match get_current_agent(&token) {
+            Ok(a) => a,
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };
-        let agent: serde_json::Value = serde_json::from_str(&result).unwrap_or(json!({}));
-        let did = agent
-            .get("did")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
 
+        let did = &agent.did;
         let current_links = agent
-            .get("perspective")
-            .and_then(|p| p.get("links"))
-            .and_then(|l| l.as_array())
-            .cloned()
-            .unwrap_or_default();
+            .perspective
+            .as_ref()
+            .map(|p| &p.links[..])
+            .unwrap_or(&[]);
 
-        let mut all_links: Vec<serde_json::Value> = Vec::new();
-        for link in &current_links {
-            let predicate = link
-                .pointer("/data/predicate")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+        let mut all_links: Vec<DecoratedLinkExpression> = Vec::new();
+        for link in current_links {
+            let predicate = link.data.predicate.as_deref().unwrap_or("");
             if predicate == "sioc://has_profile_image"
                 || predicate == "sioc://has_profile_thumbnail_image"
             {
                 continue;
             }
-            let source = link
-                .pointer("/data/source")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let target = link
-                .pointer("/data/target")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            all_links.push(json!({
-                "author": did,
-                "timestamp": link.get("timestamp").and_then(|v| v.as_str()).unwrap_or(""),
-                "proof": {"invalid": false, "key": "", "signature": ""},
-                "data": {"source": source, "predicate": predicate, "target": target}
-            }));
+            all_links.push(link.clone());
         }
 
         let now = chrono::Utc::now().to_rfc3339();
-        all_links.push(json!({
-            "author": did, "timestamp": now,
-            "proof": {"invalid": false, "key": "", "signature": ""},
-            "data": {"source": "flux://profile", "predicate": "sioc://has_profile_image", "target": profile_img}
-        }));
-        all_links.push(json!({
-            "author": did, "timestamp": now,
-            "proof": {"invalid": false, "key": "", "signature": ""},
-            "data": {"source": "flux://profile", "predicate": "sioc://has_profile_thumbnail_image", "target": profile_img}
-        }));
+        all_links.push(make_profile_link(
+            did,
+            &now,
+            "flux://profile",
+            "sioc://has_profile_image",
+            &profile_img,
+        ));
+        all_links.push(make_profile_link(
+            did,
+            &now,
+            "flux://profile",
+            "sioc://has_profile_thumbnail_image",
+            &profile_img,
+        ));
 
-        let perspective_json = json!({"links": all_links});
-        let update_script = format!(
-            r#"JSON.stringify(await core.callResolver("Mutation", "agentUpdatePublicPerspective", {{ perspective: {} }}))"#,
-            serde_json::to_string(&perspective_json).unwrap()
-        );
-
-        match js.execute(update_script).await {
+        match update_agent_perspective(&token, all_links).await {
             Ok(_) => json!({
                 "success": true,
                 "profile_image": profile_img,
@@ -401,23 +422,45 @@ impl Ad4mMcpHandler {
         &self,
         params: Parameters<GetAgentPublicPerspectiveParams>,
     ) -> String {
-        let _agent_context = self.get_agent_context_for_read().await;
+        let token = self.get_auth_token().await.unwrap_or_default();
 
-        let mut js = self.context.js_handle.clone();
-
-        let js_code = if let Some(did) = &params.0.did {
-            format!(
-                "JSON.stringify(await core.callResolver(\"Query\", \"agentByDID\", {{ did: \"{}\" }}))",
-                did
-            )
+        if let Some(did) = &params.0.did {
+            // Look up another agent by DID via the agent language
+            let controller = LanguageController::global_instance();
+            let agent_lang = match controller.get_agent_language().await {
+                Ok(lang) => lang,
+                Err(e) => {
+                    return json!({"error": format!("Agent language not available: {}", e)})
+                        .to_string()
+                }
+            };
+            let lang_address = agent_lang.address().to_string();
+            match controller.get_expression(&lang_address, did).await {
+                Ok(Some(expr_json)) => {
+                    let agent: Option<Agent> = serde_json::from_value(
+                        expr_json
+                            .get("data")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                    )
+                    .ok();
+                    match agent {
+                        Some(a) => serde_json::to_string(&a).unwrap_or_else(|_| "null".into()),
+                        None => json!({"error": "Agent not found"}).to_string(),
+                    }
+                }
+                Ok(None) => json!({"error": "Agent not found"}).to_string(),
+                Err(e) => {
+                    json!({"error": format!("Failed to get agent perspective: {}", e)}).to_string()
+                }
+            }
         } else {
-            "JSON.stringify(await core.callResolver(\"Query\", \"agent\", {}))".to_string()
-        };
-
-        match js.execute(js_code).await {
-            Ok(result) => result,
-            Err(e) => {
-                json!({"error": format!("Failed to get agent perspective: {}", e)}).to_string()
+            // Get own agent
+            match get_current_agent(&token) {
+                Ok(agent) => serde_json::to_string(&agent).unwrap_or_else(|_| "null".into()),
+                Err(e) => {
+                    json!({"error": format!("Failed to get agent perspective: {}", e)}).to_string()
+                }
             }
         }
     }
@@ -435,22 +478,15 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Authentication error: {}", e),
         };
 
-        let links: Vec<serde_json::Value> = match serde_json::from_str(&params.0.links_json) {
+        let token = self.get_auth_token().await.unwrap_or_default();
+
+        let links: Vec<DecoratedLinkExpression> = match serde_json::from_str(&params.0.links_json) {
             Ok(l) => l,
             Err(e) => return json!({"error": format!("Invalid links JSON: {}", e)}).to_string(),
         };
 
-        let perspective = json!({ "links": links });
-
-        let mut js = self.context.js_handle.clone();
-
-        let js_code = format!(
-            "JSON.stringify(await core.callResolver(\"Mutation\", \"agentUpdatePublicPerspective\", {{ perspective: {} }}))",
-            perspective
-        );
-
-        match js.execute(js_code).await {
-            Ok(result) => result,
+        match update_agent_perspective(&token, links).await {
+            Ok(agent) => serde_json::to_string(&agent).unwrap_or_else(|_| "null".into()),
             Err(e) => {
                 json!({"error": format!("Failed to update agent perspective: {}", e)}).to_string()
             }

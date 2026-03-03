@@ -376,7 +376,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     if config.enable_mcp == Some(true) {
         info!("Starting MCP server alongside GraphQL...");
         let admin_credential = config.admin_credential.clone();
-        let js_core_handle_mcp = js_core_handle.clone();
 
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -389,7 +388,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                 ..Default::default()
             };
             if let Err(e) = runtime.block_on(mcp::start_mcp_server(
-                js_core_handle_mcp,
                 admin_credential,
                 None, // No pre-set auth token
                 mcp_config,

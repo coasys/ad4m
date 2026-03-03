@@ -1072,8 +1072,7 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
-    // Test-only struct that mirrors McpContext but without JsCoreHandle
-    // This is necessary because JsCoreHandle requires complex channel setup
+    // Test-only struct that mirrors McpContext for test isolation
     struct TestAuthContext {
         admin_credential: Option<String>,
         auth_token: Arc<RwLock<Option<String>>>,

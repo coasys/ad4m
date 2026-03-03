@@ -9,7 +9,6 @@
 //! its own isolated token state, so a shared HTTP middleware cannot route tokens correctly.
 
 use super::tools::Ad4mMcpHandler;
-use crate::js_core::JsCoreHandle;
 use anyhow::Result;
 use log::info;
 use rmcp::transport::streamable_http_server::{
@@ -22,7 +21,6 @@ use tokio::sync::RwLock;
 /// MCP Server context, similar to GraphQL's RequestContext
 #[derive(Clone)]
 pub struct McpContext {
-    pub js_handle: JsCoreHandle,
     pub admin_credential: Option<String>,
     pub auth_token: Arc<RwLock<Option<String>>>,
 }
@@ -50,7 +48,6 @@ impl Default for McpServerConfig {
 /// This runs an HTTP server that accepts MCP protocol requests.
 /// AI agents can connect via HTTP to interact with AD4M.
 pub async fn start_mcp_server(
-    js_core_handle: JsCoreHandle,
     admin_credential: Option<String>,
     auth_token: Option<String>,
     config: McpServerConfig,
@@ -61,7 +58,6 @@ pub async fn start_mcp_server(
     let initial_token = auth_token;
 
     let context = McpContext {
-        js_handle: js_core_handle,
         admin_credential,
         auth_token: Arc::new(RwLock::new(initial_token.clone())),
     };
