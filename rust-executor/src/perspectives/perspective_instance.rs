@@ -7,10 +7,10 @@ use super::utils::{
 use crate::agent::AgentContext;
 use crate::agent::{create_signed_expression, did_for_context};
 use crate::graphql::graphql_types::{
-    DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery,
-    LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle,
-    PerspectiveLinkUpdatedWithOwner, PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter,
-    PerspectiveState, PerspectiveStateFilter,
+    DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter,
+    OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
+    PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter, PerspectiveState,
+    PerspectiveStateFilter,
 };
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
@@ -296,6 +296,11 @@ impl PerspectiveInstance {
                     .expect("must be some")
                     .clone();
 
+                log::debug!(
+                    "ensure_link_language: checking language {} for perspective",
+                    nh.data.link_language
+                );
+
                 match LanguageController::language_by_address(nh.data.link_language.clone()).await {
                     Ok(Some(mut language)) => {
                         // Set local agents before storing the language
@@ -333,6 +338,14 @@ impl PerspectiveInstance {
                         {
                             let mut link_language_guard = self.link_language.write().await;
                             *link_language_guard = Some(language);
+                        }
+                        // Cache language→perspective mapping for fast signal routing
+                        {
+                            let handle = self.persisted.lock().await.clone();
+                            crate::perspectives::register_link_language_perspective(
+                                nh.data.link_language.clone(),
+                                handle,
+                            );
                         }
                         if self.persisted.lock().await.state
                             == PerspectiveState::NeighbourhoodCreationInitiated
@@ -3577,6 +3590,7 @@ impl PerspectiveInstance {
         class_name: &str,
         property: &str,
         value: &serde_json::Value,
+        context: &AgentContext,
     ) -> Result<String, AnyError> {
         // Get resolve language from SHACL links
         let resolve_language = self
@@ -3585,19 +3599,17 @@ impl PerspectiveInstance {
 
         if let Some(resolve_language) = resolve_language {
             // Create an expression for the value
-            let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
-            let content = serde_json::to_string(value)
-                .map_err(|e| anyhow!("Failed to serialize JSON value: {}", e))?;
-            if let Some(ref mut js) = *lock {
-                let result = js.execute(format!(
-                    r#"JSON.stringify(
-                        (await core.callResolver("Mutation", "expressionCreate", {{ languageAddress: "{}", content: {} }})).Ok
-                    )"#,
-                    resolve_language, content
-                )).await?;
-                Ok(result.trim_matches('"').to_string())
-            } else {
-                Ok(value.to_string())
+            let controller = crate::languages::LanguageController::global_instance();
+            let agent_context = context.clone();
+            match controller
+                .expression_create(&resolve_language, value.clone(), &agent_context)
+                .await
+            {
+                Ok(url) => Ok(url),
+                Err(e) => {
+                    log::warn!("Failed to create expression on {}: {}", resolve_language, e);
+                    Ok(value.to_string())
+                }
             }
         } else {
             let uri = match value {
@@ -3667,7 +3679,7 @@ impl PerspectiveInstance {
                         self.get_property_setter_actions(&class_name, prop).await?
                     {
                         let target_value = self
-                            .resolve_property_value(&class_name, prop, value)
+                            .resolve_property_value(&class_name, prop, value, context)
                             .await?;
 
                         //log::info!("🎯 CREATE SUBJECT: Property '{}' setter resolved in {:?}",
@@ -3808,33 +3820,26 @@ impl PerspectiveInstance {
                 let value = if resolve_expression_uri {
                     match &property_value {
                         scryer_prolog::Term::String(s) => {
-                            //println!("getting expr url: {}", s);
-                            let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
-
-                            if let Some(ref mut js) = *lock {
-                                let result = js.execute(format!(
-                                        r#"JSON.stringify(await core.callResolver("Query", "expression", {{ url: "{}" }}))"#,
-                                        s
-                                    ))
-                                    .await?;
-
-                                let result: JsResultType<Option<ExpressionRendered>> =
-                                    serde_json::from_str(&result)?;
-
-                                match result {
-                                    JsResultType::Ok(Some(expr)) => expr.data,
-                                    JsResultType::Ok(None) | JsResultType::Error(_) => {
-                                        prolog_value_to_json_string(property_value.clone())
+                            let controller =
+                                crate::languages::LanguageController::global_instance();
+                            if let Ok((lang_address, expression_address)) =
+                                crate::languages::LanguageController::parse_expr_url(s)
+                            {
+                                match controller
+                                    .get_expression(&lang_address, &expression_address)
+                                    .await
+                                {
+                                    Ok(Some(expr_json)) => {
+                                        let rendered = crate::graphql::query_resolvers::build_expression_rendered(&expr_json, &lang_address);
+                                        rendered.data
                                     }
+                                    _ => prolog_value_to_json_string(property_value.clone()),
                                 }
                             } else {
                                 prolog_value_to_json_string(property_value.clone())
                             }
                         }
-                        _x => {
-                            //println!("Couldn't get expression subjectentity: {:?}", x);
-                            prolog_value_to_json_string(property_value.clone())
-                        }
+                        _x => prolog_value_to_json_string(property_value.clone()),
                     }
                 } else {
                     prolog_value_to_json_string(property_value.clone())

@@ -1,6 +1,5 @@
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::agent::signatures::verify;
-use crate::js_core::JsCoreHandle;
 use crate::types::{
     AIPromptExamples, AITask, DecoratedExpressionProof, DecoratedLinkExpression, Expression,
     ExpressionProof, Link, ModelType, Notification, TriggeredNotification,
@@ -15,7 +14,6 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 #[derive(Clone)]
 pub struct RequestContext {
     pub capabilities: Result<Vec<Capability>, String>,
-    pub js_handle: JsCoreHandle,
     pub auto_permit_cap_requests: bool,
     pub auth_token: String,
     /// True when the request was authenticated with the launcher's admin_credential token.
@@ -148,11 +146,16 @@ pub struct ExceptionInfo {
 
 #[derive(GraphQLEnum, Default, Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ExceptionType {
+    #[serde(alias = "LANGUAGE_IS_NOT_LOADED")]
     LanguageIsNotLoaded = 0,
+    #[serde(alias = "EXPRESSION_IS_NOT_VERIFIED")]
     ExpressionIsNotVerified = 1,
+    #[serde(alias = "AGENT_IS_UNTRUSTED")]
     AgentIsUntrusted = 2,
     #[default]
+    #[serde(alias = "CAPABILITY_REQUESTED")]
     CapabilityRequested = 3,
+    #[serde(alias = "INSTALL_NOTIFICATION_REQUEST")]
     InstallNotificationRequest = 4,
 }
 
@@ -216,16 +219,23 @@ pub struct LanguageHandle {
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct LanguageMeta {
     pub address: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub author: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub possible_template_params: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_code_link: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub template_applied_params: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub template_source_language_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub templated: Option<bool>,
 }
 
@@ -236,6 +246,13 @@ pub struct LanguageMetaInput {
     pub name: String,
     pub possible_template_params: Option<Vec<String>>,
     pub source_code_link: Option<String>,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageLanguageInput {
+    pub bundle: String,
+    pub meta: LanguageMeta,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]

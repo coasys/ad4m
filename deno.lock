@@ -604,13 +604,6 @@
           ]
         }
       },
-      "cli": {
-        "packageJson": {
-          "dependencies": [
-            "npm:@coasys/ad4m-executor@*"
-          ]
-        }
-      },
       "connect": {
         "packageJson": {
           "dependencies": [
@@ -698,44 +691,6 @@
             "npm:typedoc-plugin-markdown@^3.15.2",
             "npm:typedoc@~0.24.4",
             "npm:typescript@^4.9.3"
-          ]
-        }
-      },
-      "executor": {
-        "packageJson": {
-          "dependencies": [
-            "npm:@msgpack/msgpack@3.0.0-beta2",
-            "npm:@noble/secp256k1@^1.7.0",
-            "npm:@transmute/did-key.js@~0.2.1-unstable.29",
-            "npm:@types/chai@*",
-            "npm:@types/faker@^5.5.7",
-            "npm:@types/js-yaml@^4.0.2",
-            "npm:@types/json-stable-stringify@^1.0.33",
-            "npm:@types/lodash@*",
-            "npm:@types/mocha@*",
-            "npm:@types/mocha@10",
-            "npm:@types/node@18",
-            "npm:@types/secp256k1@^4.0.3",
-            "npm:@types/sha256@0.2",
-            "npm:@types/sinon@*",
-            "npm:@types/uuid@^8.3.1",
-            "npm:aloedb-node@^1.1.1",
-            "npm:async-mutex@~0.3.2",
-            "npm:chai@*",
-            "npm:faker@^5.1.0",
-            "npm:get-port@5.1.1",
-            "npm:js-yaml@^4.1.0",
-            "npm:json-stable-stringify@^1.0.1",
-            "npm:linkedom@~0.14.26",
-            "npm:lodash@^4.17.21",
-            "npm:mocha@*",
-            "npm:patch-package@8",
-            "npm:sha256@0.2",
-            "npm:sinon@*",
-            "npm:tmp@~0.2.1",
-            "npm:ts-mocha@*",
-            "npm:ts-node@^10.8.0",
-            "npm:uuid@*"
           ]
         }
       },
