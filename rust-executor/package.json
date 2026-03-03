@@ -29,9 +29,7 @@
   "bugs": {
     "url": "https://github.com/coasys/ad4m/issues"
   },
-  "devDependencies": {
-    "@coasys/ad4m-executor": "link:../core"
-  },
+  "devDependencies": {},
   "dependencies": {},
-  "version": "0.12.0-rc1-dev.1"
+  "version": "0.12.0-rc1-dev.2"
 }

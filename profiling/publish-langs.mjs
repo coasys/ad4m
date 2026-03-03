@@ -37,7 +37,10 @@ function gql(ws, query, variables, timeoutMs = 300000) {
     const handler = raw => {
       const msg = JSON.parse(raw.toString());
       if (msg.id !== id) return;
-      if (msg.type === "next") result = msg.payload;
+      if (msg.type === "next") {
+        result = msg.payload;
+        if (result?.errors?.length) { clearTimeout(t); ws.removeListener("message", handler); reject(new Error(`GraphQL errors: ${JSON.stringify(result.errors)}`)); return; }
+      }
       if (msg.type === "complete") { clearTimeout(t); ws.removeListener("message", handler); resolve(result); }
       if (msg.type === "error") { clearTimeout(t); ws.removeListener("message", handler); reject(new Error(JSON.stringify(msg.payload))); }
     };
@@ -48,12 +51,16 @@ function gql(ws, query, variables, timeoutMs = 300000) {
 }
 
 async function main() {
+  let ws;
+  let proc;
+  let bootstrap;
   writeFileSync(LOG, "");
   log("=== Publishing bootstrap languages ===");
 
   // Start kitsune2-bootstrap-srv
   log("Starting bootstrap service...");
-  const bootstrap = execCb("bash -lc 'kitsune2-bootstrap-srv'", { maxBuffer: 10*1024*1024 });
+  try {
+  bootstrap = execCb("bash -lc 'kitsune2-bootstrap-srv'", { maxBuffer: 10*1024*1024 });
   let bootstrapUrl = null;
   await new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error("Bootstrap timeout")), 30000);
@@ -73,7 +80,7 @@ async function main() {
   // Start executor
   const cmd = `${EXECUTOR} run --app-data-path ${DATA_PATH} --gql-port ${PORT} --hc-admin-port ${PORT+1} --hc-app-port ${PORT+2} --hc-use-bootstrap true --hc-bootstrap-url ${bootstrapUrl} --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only false --run-dapp-server false --admin-credential ${TOKEN}`;
   log(`Starting executor: ${cmd}`);
-  const proc = execCb(cmd, { maxBuffer: 200*1024*1024, cwd: path.join(AD4M_DIR, "tests/js") });
+  proc = execCb(cmd, { maxBuffer: 200*1024*1024, cwd: path.join(AD4M_DIR, "tests/js") });
   const execLog = "/tmp/ad4m-publish-executor.log";
   writeFileSync(execLog, "");
   proc.stdout.on("data", d => appendFileSync(execLog, d));
@@ -90,7 +97,7 @@ async function main() {
   log("Executor ready!");
 
   // Connect WS
-  const ws = new WebSocket(`ws://127.0.0.1:${PORT}/graphql`, "graphql-transport-ws");
+  ws = new WebSocket(`ws://127.0.0.1:${PORT}/graphql`, "graphql-transport-ws");
   await new Promise((resolve, reject) => {
     ws.on("open", () => ws.send(JSON.stringify({ type: "connection_init", payload: { headers: { authorization: TOKEN } } })));
     ws.on("message", raw => { if (JSON.parse(raw.toString()).type === "connection_ack") resolve(); });
@@ -103,6 +110,9 @@ async function main() {
   log("Generating agent...");
   const agent = await gql(ws, `mutation { agentGenerate(passphrase: "publishing-agent") { isInitialized did } }`);
   const did = agent?.data?.agentGenerate?.did;
+  if (!did) {
+    throw new Error("agentGenerate did not return a DID — cannot proceed");
+  }
   log(`Agent DID: ${did}`);
 
   // Wait for init
@@ -177,15 +187,17 @@ async function main() {
   log(`\nPrepared seed written to: ${OUT_SEED}`);
   log(`Language store at: ${DATA_PATH}/ad4m/languages/`);
 
+  } finally {
   // Cleanup
-  ws.close();
-  try { process.kill(proc.pid, "SIGTERM"); } catch {}
-  try { bootstrap.kill("SIGTERM"); } catch {}
+  if (ws) try { ws.close(); } catch {}
+  if (proc) { try { process.kill(proc.pid, "SIGTERM"); } catch {} }
+  if (bootstrap) { try { bootstrap.kill("SIGTERM"); } catch {} }
   await sleep(2000);
-  try { process.kill(proc.pid, "SIGKILL"); } catch {}
-  try { bootstrap.kill("SIGKILL"); } catch {}
+  if (proc) { try { process.kill(proc.pid, "SIGKILL"); } catch {} }
+  if (bootstrap) { try { bootstrap.kill("SIGKILL"); } catch {} }
   
   log("=== DONE ===");
+  }
 }
 
 main().catch(e => { log(`FATAL: ${e.stack || e}`); process.exit(1); });

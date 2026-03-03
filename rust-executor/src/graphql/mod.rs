@@ -1,6 +1,6 @@
 pub mod graphql_types;
 mod mutation_resolvers;
-mod query_resolvers;
+pub mod query_resolvers;
 mod subscription_resolvers;
 
 use graphql_types::RequestContext;
@@ -11,7 +11,6 @@ use subscription_resolvers::*;
 use warp::reply::with_header;
 
 use crate::agent::capabilities::{capabilities_from_token, is_admin_credential_token};
-use crate::js_core::JsCoreHandle;
 use crate::Ad4mConfig;
 
 use std::collections::HashMap;
@@ -42,10 +41,7 @@ fn _reply_with_header(
     warp::reply::with_header(reply, name, value)
 }
 
-pub async fn start_server(
-    js_core_handle: JsCoreHandle,
-    config: Ad4mConfig,
-) -> Result<(), AnyError> {
+pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     // Set global SMTP config for email verification
     crate::config::set_smtp_config(config.smtp_config.clone())?;
 
@@ -66,7 +62,6 @@ pub async fn start_server(
     });
 
     let qm_schema = schema();
-    let js_core_handle_cloned1 = js_core_handle.clone();
 
     let default_auth = warp::any().map(|| String::from(""));
 
@@ -75,13 +70,11 @@ pub async fn start_server(
         .or(default_auth)
         .unify()
         .map(move |auth_header: String| {
-            //println!("Request body: {}", std::str::from_utf8(body_data::bytes()).expect("error converting bytes to &str"));
             let capabilities =
                 capabilities_from_token(auth_header.clone(), admin_credential.clone());
             let is_admin_credential = is_admin_credential_token(&auth_header, &admin_credential);
             RequestContext {
                 capabilities,
-                js_handle: js_core_handle_cloned1.clone(),
                 auto_permit_cap_requests: config.auto_permit_cap_requests.unwrap_or(false),
                 auth_token: auth_header,
                 is_admin_credential,
@@ -95,13 +88,10 @@ pub async fn start_server(
     let admin_credential_arc = Arc::new(config.admin_credential.clone());
     let admin_credential_arc2 = admin_credential_arc.clone(); // Clone for second server
 
-    let js_core_handle2 = js_core_handle.clone(); // Clone for second server
-
     let routes = (warp::path("graphql")
         .and(warp::ws())
         .map(move |ws: warp::ws::Ws| {
             let root_node = root_node.clone();
-            let js_core_handle = js_core_handle.clone();
             let admin_credential_arc = admin_credential_arc.clone();
             let auto_permit_cap_requests = config.auto_permit_cap_requests.unwrap_or(false);
             ws.on_upgrade(move |websocket| async move {
@@ -133,7 +123,6 @@ pub async fn start_server(
 
                         let context = RequestContext {
                             capabilities,
-                            js_handle: js_core_handle.clone(),
                             auto_permit_cap_requests,
                             auth_token: auth_header,
                             is_admin_credential,
@@ -241,7 +230,6 @@ pub async fn start_server(
             .and(warp::ws())
             .map(move |ws: warp::ws::Ws| {
                 let root_node = root_node2.clone();
-                let js_core_handle = js_core_handle2.clone();
                 let admin_credential_arc = admin_credential_arc2.clone();
                 let auto_permit_cap_requests2 = config.auto_permit_cap_requests.unwrap_or(false);
                 ws.on_upgrade(move |websocket| async move {
@@ -276,7 +264,6 @@ pub async fn start_server(
 
                             let context = RequestContext {
                                 capabilities,
-                                js_handle: js_core_handle.clone(),
                                 auto_permit_cap_requests: auto_permit_cap_requests2,
                                 auth_token: auth_header,
                                 is_admin_credential,

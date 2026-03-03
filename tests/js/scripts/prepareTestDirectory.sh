@@ -6,7 +6,7 @@ mkdir agents
 mkdir languages
 mkdir note
 
-ln -s ../../../executor/temp/binary/hc ./hc
+ln -s "$(which hc)" ./hc
 # ln -s ../../../executor/temp/binary/holochain ./holochain
 #ln -s ../../../executor/temp/swipl/bin/swipl ./swipl
 # homedir=`echo "$(cd ../../../executor/temp/swipl/lib/swipl; pwd)"`

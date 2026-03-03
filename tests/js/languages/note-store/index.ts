@@ -5,10 +5,7 @@ import { join } from "https://deno.land/std@0.184.0/path/mod.ts";
 export default function create(context: LanguageContext): Language {
     const expressions = new Array<Expression>()
 
-    let storagePath = "";
-
-    //@ts-ignore
-    if ("storagePath" in context.customSettings) { storagePath = context.customSettings["storagePath"] } else { storagePath = "./tst-tmp/note" };
+    const storagePath = context.storageDirectory;
 
     function interactions(expressionAddress: Address): Interaction[] {
         return []

@@ -127,7 +127,10 @@ function gql(ws, query, timeoutMs = 300000) {
     const handler = raw => {
       const msg = JSON.parse(raw.toString());
       if (msg.id !== id) return;
-      if (msg.type === "next") result = msg.payload;
+      if (msg.type === "next") {
+        result = msg.payload;
+        if (result?.errors?.length) { clearTimeout(t); ws.removeListener("message", handler); reject(new Error(`GraphQL errors: ${JSON.stringify(result.errors)}`)); return; }
+      }
       if (msg.type === "complete") { clearTimeout(t); ws.removeListener("message", handler); resolve(result); }
       if (msg.type === "error") { clearTimeout(t); ws.removeListener("message", handler); reject(new Error(JSON.stringify(msg.payload))); }
     };
@@ -137,6 +140,10 @@ function gql(ws, query, timeoutMs = 300000) {
 }
 
 async function main() {
+  let ws;
+  let proc;
+  let bootstrap;
+  let execPid;
   writeFileSync(OUT, "");
   log("=== AD4M MEMORY LEAK INVESTIGATION v2 ===");
   log(`Executor: ${EXECUTOR}`);
@@ -144,10 +151,14 @@ async function main() {
 
   const seedData = JSON.parse(readFileSync(SEED, "utf-8"));
   const linkLangAddr = seedData.knownLinkLanguages?.[0];
+  if (!linkLangAddr) {
+    throw new Error(`No knownLinkLanguages[0] found in seed file: ${SEED}`);
+  }
   log(`Link language (p-diff-sync): ${linkLangAddr}`);
 
   // Start bootstrap
-  const bootstrap = execCb(`${HOME}/.cargo/bin/kitsune2-bootstrap-srv`, { maxBuffer: 10*1024*1024 });
+  try {
+  bootstrap = execCb(`${HOME}/.cargo/bin/kitsune2-bootstrap-srv`, { maxBuffer: 10*1024*1024 });
   let bootstrapUrl = null;
   await new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error("Bootstrap timeout")), 30000);
@@ -160,7 +171,7 @@ async function main() {
   execSync(`${EXECUTOR} init --data-path ${DATA} --network-bootstrap-seed ${SEED}`, { stdio: "pipe" });
 
   const cmd = `${EXECUTOR} run --app-data-path ${DATA} --gql-port ${PORT} --hc-admin-port ${PORT+1} --hc-app-port ${PORT+2} --hc-use-bootstrap true --hc-bootstrap-url ${bootstrapUrl} --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only false --run-dapp-server false --admin-credential ${TOKEN}`;
-  const proc = execCb(cmd, { maxBuffer: 200*1024*1024, cwd: CWD });
+  proc = execCb(cmd, { maxBuffer: 200*1024*1024, cwd: CWD });
   writeFileSync(EXEC_LOG, "");
   proc.stdout.on("data", d => appendFileSync(EXEC_LOG, d));
   proc.stderr.on("data", d => appendFileSync(EXEC_LOG, d));
@@ -171,11 +182,10 @@ async function main() {
     proc.stdout.on("data", check); proc.stderr.on("data", check);
   });
 
-  let execPid;
   try { execPid = parseInt(execSync(`pgrep -P ${proc.pid} -f ad4m-executor 2>/dev/null || echo ${proc.pid}`, { encoding: "utf-8" }).trim().split("\n")[0]); } catch { execPid = proc.pid; }
   log(`Executor PID: ${execPid}`);
 
-  const ws = new WebSocket(`ws://127.0.0.1:${PORT}/graphql`, "graphql-transport-ws");
+  ws = new WebSocket(`ws://127.0.0.1:${PORT}/graphql`, "graphql-transport-ws");
   await new Promise((resolve, reject) => {
     ws.on("open", () => ws.send(JSON.stringify({ type: "connection_init", payload: { headers: { authorization: TOKEN } } })));
     ws.on("message", raw => { if (JSON.parse(raw.toString()).type === "connection_ack") resolve(); });
@@ -395,14 +405,16 @@ async function main() {
     if (unique.length === 0) log("  (none)");
   } catch {}
 
-  ws.close();
-  try { process.kill(execPid, "SIGTERM"); } catch {}
+  } finally {
+  if (ws) try { ws.close(); } catch {}
+  if (execPid) { try { process.kill(execPid, "SIGTERM"); } catch {} }
   await sleep(3000);
-  try { process.kill(execPid, "SIGKILL"); } catch {}
-  try { process.kill(proc.pid, "SIGKILL"); } catch {}
-  try { bootstrap.kill("SIGTERM"); } catch {}
+  if (execPid) { try { process.kill(execPid, "SIGKILL"); } catch {} }
+  if (proc) { try { process.kill(proc.pid, "SIGKILL"); } catch {} }
+  if (bootstrap) { try { bootstrap.kill("SIGTERM"); } catch {} }
 
   log("\n=== INVESTIGATION COMPLETE ===");
+  }
 }
 
 main().catch(e => { log(`FATAL: ${e.stack || e}`); process.exit(1); });

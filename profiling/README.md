@@ -48,7 +48,7 @@ This was confirmed by comparing an unpatched binary (no cleanup) against a patch
 
 ```bash
 # From the ad4m/tests/js directory
-node ../../docs/profiling/leak-investigation.mjs
+node ../../profiling/leak-investigation.mjs
 ```
 
 The script:

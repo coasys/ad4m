@@ -511,8 +511,12 @@ impl PrologService {
     }
 
     pub async fn remove_perspective_pool(&self, perspective_id: String) -> Result<(), Error> {
-        let mut pools = self.engine_pools.write().await;
-        if let Some(pool) = pools.remove(&perspective_id) {
+        let pool = {
+            let mut pools = self.engine_pools.write().await;
+            pools.remove(&perspective_id)
+        };
+        // Await teardown outside the lock to avoid blocking other pool operations
+        if let Some(pool) = pool {
             pool._drop_all().await?;
         }
         Ok(())

@@ -1,6 +1,6 @@
 # AD4M Executor Memory Leak Analysis & Refactoring Plan
 
-**Date:** 2025-02-21  
+**Date:** 2026-02-21  
 **Author:** Hex (Agent), based on memory profiling results  
 **For:** Nico (lucksus)
 
@@ -22,7 +22,7 @@ Memory profiling revealed three categories of leaks:
 
 ### The Call Chain
 
-```
+```text
 GraphQL perspectiveRemove
   → rust-executor/src/graphql/mutation_resolvers.rs:804-815
     → perspectives::remove_perspective(uuid)
@@ -196,7 +196,7 @@ The 2.4 MB figure matches: 2 Prolog pools (main with 5 engines + notification wi
 
 ### The Flow
 
-```
+```text
 languageApplyTemplateAndPublish (Ad4mCore.ts:190)
   → languageApplyTemplateOnSource (LanguageController.ts:810)
     → readAndTemplateHolochainDNA (LanguageController.ts:604)

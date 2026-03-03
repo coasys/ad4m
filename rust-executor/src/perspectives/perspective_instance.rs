@@ -7,10 +7,10 @@ use super::utils::{
 use crate::agent::AgentContext;
 use crate::agent::{create_signed_expression, did_for_context};
 use crate::graphql::graphql_types::{
-    DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery,
-    LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle,
-    PerspectiveLinkUpdatedWithOwner, PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter,
-    PerspectiveState, PerspectiveStateFilter,
+    DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter,
+    OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
+    PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter, PerspectiveState,
+    PerspectiveStateFilter,
 };
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
@@ -252,7 +252,18 @@ impl PerspectiveInstance {
         let uuid = self.persisted.lock().await.uuid.clone();
         log::info!("🧹 Tearing down perspective {}: starting resource cleanup", uuid);
 
-        // 1. Remove Prolog engine pools (main pool + notification pool)
+        // 1. End Prolog subscriptions before clearing local state
+        {
+            let queries = self.subscribed_queries.lock().await;
+            if !queries.is_empty() {
+                log::info!("🧹 Perspective {}: ending {} Prolog subscriptions", uuid, queries.len());
+            }
+            // Drop the lock; Prolog pool removal below will clean up engine-side state
+        }
+        self.subscribed_queries.lock().await.clear();
+        self.surreal_subscribed_queries.lock().await.clear();
+
+        // 2. Remove Prolog engine pools (main pool + notification pool)
         let prolog_service = get_prolog_service().await;
         if let Err(e) = prolog_service.remove_perspective_pool(uuid.clone()).await {
             log::error!("Error removing Prolog pool for perspective {}: {:?}", uuid, e);
@@ -262,12 +273,12 @@ impl PerspectiveInstance {
             log::error!("Error removing notification Prolog pool for perspective {}: {:?}", uuid, e);
         }
 
-        // 2. Shut down SurrealDB instance (drop all data and indexes)
+        // 3. Shut down SurrealDB instance (drop all data and indexes)
         if let Err(e) = self.surreal_service.shutdown().await {
             log::error!("Error shutting down SurrealDB for perspective {}: {:?}", uuid, e);
         }
 
-        // 3. If this is a neighbourhood, unload the link language (which uninstalls the Holochain hApp)
+        // 4. If this is a neighbourhood, unload the link language (which uninstalls the Holochain hApp)
         let handle = self.persisted.lock().await.clone();
         if let Some(ref nh) = handle.neighbourhood {
             let link_language_address = nh.data.link_language.clone();
@@ -277,11 +288,21 @@ impl PerspectiveInstance {
             }
         }
 
-        // 4. Clear subscribed queries to release any held state
-        self.subscribed_queries.lock().await.clear();
+        // 5. End Prolog subscriptions before clearing local state
+        {
+            let mut queries = self.subscribed_queries.lock().await;
+            let removed_queries: Vec<String> = queries.drain().map(|(_, q)| q.query).collect();
+            drop(queries);
+            let prolog_svc = get_prolog_service().await;
+            for query in removed_queries {
+                if let Err(e) = prolog_svc.subscription_ended(uuid.clone(), query).await {
+                    log::warn!("Failed to notify prolog of subscription end during teardown: {}", e);
+                }
+            }
+        }
         self.surreal_subscribed_queries.lock().await.clear();
 
-        // 5. Clear batch store
+        // 6. Clear batch store
         self.batch_store.write().await.clear();
 
         // 6. Clear the link language reference
@@ -337,6 +358,11 @@ impl PerspectiveInstance {
                     .expect("must be some")
                     .clone();
 
+                log::debug!(
+                    "ensure_link_language: checking language {} for perspective",
+                    nh.data.link_language
+                );
+
                 match LanguageController::language_by_address(nh.data.link_language.clone()).await {
                     Ok(Some(mut language)) => {
                         // Set local agents before storing the language
@@ -374,6 +400,14 @@ impl PerspectiveInstance {
                         {
                             let mut link_language_guard = self.link_language.write().await;
                             *link_language_guard = Some(language);
+                        }
+                        // Cache language→perspective mapping for fast signal routing
+                        {
+                            let handle = self.persisted.lock().await.clone();
+                            crate::perspectives::register_link_language_perspective(
+                                nh.data.link_language.clone(),
+                                handle,
+                            );
                         }
                         if self.persisted.lock().await.state
                             == PerspectiveState::NeighbourhoodCreationInitiated
@@ -3618,6 +3652,7 @@ impl PerspectiveInstance {
         class_name: &str,
         property: &str,
         value: &serde_json::Value,
+        context: &AgentContext,
     ) -> Result<String, AnyError> {
         // Get resolve language from SHACL links
         let resolve_language = self
@@ -3626,19 +3661,17 @@ impl PerspectiveInstance {
 
         if let Some(resolve_language) = resolve_language {
             // Create an expression for the value
-            let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
-            let content = serde_json::to_string(value)
-                .map_err(|e| anyhow!("Failed to serialize JSON value: {}", e))?;
-            if let Some(ref mut js) = *lock {
-                let result = js.execute(format!(
-                    r#"JSON.stringify(
-                        (await core.callResolver("Mutation", "expressionCreate", {{ languageAddress: "{}", content: {} }})).Ok
-                    )"#,
-                    resolve_language, content
-                )).await?;
-                Ok(result.trim_matches('"').to_string())
-            } else {
-                Ok(value.to_string())
+            let controller = crate::languages::LanguageController::global_instance();
+            let agent_context = context.clone();
+            match controller
+                .expression_create(&resolve_language, value.clone(), &agent_context)
+                .await
+            {
+                Ok(url) => Ok(url),
+                Err(e) => {
+                    log::warn!("Failed to create expression on {}: {}", resolve_language, e);
+                    Ok(value.to_string())
+                }
             }
         } else {
             let uri = match value {
@@ -3708,7 +3741,7 @@ impl PerspectiveInstance {
                         self.get_property_setter_actions(&class_name, prop).await?
                     {
                         let target_value = self
-                            .resolve_property_value(&class_name, prop, value)
+                            .resolve_property_value(&class_name, prop, value, context)
                             .await?;
 
                         //log::info!("🎯 CREATE SUBJECT: Property '{}' setter resolved in {:?}",
@@ -3849,33 +3882,26 @@ impl PerspectiveInstance {
                 let value = if resolve_expression_uri {
                     match &property_value {
                         scryer_prolog::Term::String(s) => {
-                            //println!("getting expr url: {}", s);
-                            let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
-
-                            if let Some(ref mut js) = *lock {
-                                let result = js.execute(format!(
-                                        r#"JSON.stringify(await core.callResolver("Query", "expression", {{ url: "{}" }}))"#,
-                                        s
-                                    ))
-                                    .await?;
-
-                                let result: JsResultType<Option<ExpressionRendered>> =
-                                    serde_json::from_str(&result)?;
-
-                                match result {
-                                    JsResultType::Ok(Some(expr)) => expr.data,
-                                    JsResultType::Ok(None) | JsResultType::Error(_) => {
-                                        prolog_value_to_json_string(property_value.clone())
+                            let controller =
+                                crate::languages::LanguageController::global_instance();
+                            if let Ok((lang_address, expression_address)) =
+                                crate::languages::LanguageController::parse_expr_url(s)
+                            {
+                                match controller
+                                    .get_expression(&lang_address, &expression_address)
+                                    .await
+                                {
+                                    Ok(Some(expr_json)) => {
+                                        let rendered = crate::graphql::query_resolvers::build_expression_rendered(&expr_json, &lang_address);
+                                        rendered.data
                                     }
+                                    _ => prolog_value_to_json_string(property_value.clone()),
                                 }
                             } else {
                                 prolog_value_to_json_string(property_value.clone())
                             }
                         }
-                        _x => {
-                            //println!("Couldn't get expression subjectentity: {:?}", x);
-                            prolog_value_to_json_string(property_value.clone())
-                        }
+                        _x => prolog_value_to_json_string(property_value.clone()),
                     }
                 } else {
                     prolog_value_to_json_string(property_value.clone())
