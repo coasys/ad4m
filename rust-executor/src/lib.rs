@@ -216,6 +216,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         for dir in &dirs {
             if let Err(e) = std::fs::create_dir_all(dir) {
                 error!("Failed to create data directory {:?}: {}", dir, e);
+                panic!("Cannot continue without required data directory {:?}: {}", dir, e);
             }
         }
     }
