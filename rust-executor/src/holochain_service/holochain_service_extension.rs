@@ -95,17 +95,7 @@ fn json_to_msgpack_value(val: &serde_json::Value) -> rmpv::Value {
         }
         serde_json::Value::String(s) => rmpv::Value::String(s.clone().into()),
         serde_json::Value::Array(arr) => {
-            // Check if this looks like a byte array (all integers in 0-255 range)
-            let is_byte_array = !arr.is_empty()
-                && arr
-                    .iter()
-                    .all(|v| v.as_u64().map(|n| n <= 255).unwrap_or(false));
-            if is_byte_array {
-                let bytes: Vec<u8> = arr.iter().map(|v| v.as_u64().unwrap() as u8).collect();
-                rmpv::Value::Binary(bytes)
-            } else {
-                rmpv::Value::Array(arr.iter().map(json_to_msgpack_value).collect())
-            }
+            rmpv::Value::Array(arr.iter().map(json_to_msgpack_value).collect())
         }
         serde_json::Value::Object(map) => {
             // Check for our __binary marker
