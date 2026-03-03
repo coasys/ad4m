@@ -15,6 +15,7 @@ use super::language_runtime::{LanguageOperation, LanguageRuntime, LanguageRuntim
 #[derive(Clone)]
 pub struct LanguageRuntimeHandle {
     pub language_address: String,
+    pub language_name: Option<String>,
     tx: UnboundedSender<LanguageRuntimeRequest>,
 }
 
@@ -62,6 +63,7 @@ impl LanguageRuntimeHandle {
         info!("LanguageRuntimeHandle spawned for: {}", language_address);
         Ok(Self {
             language_address,
+            language_name: None,
             tx,
         })
     }
@@ -124,5 +126,30 @@ impl LanguageRuntimeHandle {
 
     pub async fn teardown(&self) -> Result<(), String> {
         self.send(LanguageOperation::Teardown).await.map(|_| ())
+    }
+
+    /// Query the language name from the JS runtime after initLanguage has run.
+    pub async fn query_language_name(&mut self) -> Option<String> {
+        let script = "(globalThis.__ad4m_language_instance__ && globalThis.__ad4m_language_instance__.name) || ''".to_string();
+        match self.execute(script).await {
+            Ok(name) => {
+                let name = name.trim().trim_matches('"').to_string();
+                if name.is_empty() {
+                    None
+                } else {
+                    self.language_name = Some(name.clone());
+                    Some(name)
+                }
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Return a human-readable label: "name (address)" or just "address"
+    pub fn label(&self) -> String {
+        match &self.language_name {
+            Some(name) => format!("{} ({})", name, self.language_address),
+            None => self.language_address.clone(),
+        }
     }
 }

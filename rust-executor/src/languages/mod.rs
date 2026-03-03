@@ -125,6 +125,15 @@ impl LanguageController {
         }
     }
 
+    /// Return a human-readable label for a language: "name (address)" or just "address".
+    async fn language_label(&self, address: &str) -> String {
+        let names = self.language_names.lock().await;
+        match names.get(address) {
+            Some(name) => format!("{} ({})", name, address),
+            None => address.to_string(),
+        }
+    }
+
     /// Load a language from a bundle path
     ///
     /// Creates a dedicated per-language runtime with isolated Deno worker.
@@ -201,7 +210,7 @@ impl LanguageController {
         info!("Module loaded for language {}", language_address);
 
         // Initialize the language with context
-        info!("Calling load_language for {}", language_address);
+        info!("Initializing language {}", language_address);
         runtime_handle
             .load_language(language_context.to_json())
             .await
@@ -209,10 +218,16 @@ impl LanguageController {
                 address: language_address.clone(),
                 message: format!("Failed to initialize language: {}", e),
             })?;
-        info!("load_language completed for {}", language_address);
+
+        // Query the language name now that the constructor has run
+        let mut runtime_handle = runtime_handle;
+        runtime_handle.query_language_name().await;
+        let label = runtime_handle.label();
+
+        info!("Language initialized: {}", label);
 
         // Register callbacks for adapters
-        info!("Registering callbacks for {}", language_address);
+        info!("Registering callbacks for {}", label);
         runtime_handle
             .register_callbacks()
             .await
@@ -220,36 +235,27 @@ impl LanguageController {
                 address: language_address.clone(),
                 message: format!("Failed to register callbacks: {}", e),
             })?;
-        info!("Callbacks registered for {}", language_address);
+        info!("Callbacks registered for {}", label);
+
+        // Cache the language name for use by other log sites
+        if let Some(name) = &runtime_handle.language_name {
+            let mut names = self.language_names.lock().await;
+            names.insert(language_address.clone(), name.clone());
+        }
 
         // Store the runtime handle
         let mut runtimes = self.runtimes.lock().await;
-        runtimes.insert(language_address.clone(), runtime_handle.clone());
+        runtimes.insert(language_address.clone(), runtime_handle);
         drop(runtimes);
 
-        // Cache the language name synchronously so it's available immediately after load
-        match runtime_handle.execute("language.name".to_string()).await {
-            Ok(name) => {
-                let name = name.trim().trim_matches('"').to_string();
-                let mut names = self.language_names.lock().await;
-                names.insert(language_address.clone(), name);
-            }
-            Err(e) => {
-                log::warn!(
-                    "Failed to get language name for {}: {}",
-                    language_address,
-                    e
-                );
-            }
-        }
-
-        info!("Successfully loaded language: {}", language_address);
+        info!("Successfully loaded language: {}", label);
         Ok(language_address)
     }
 
     /// Unload a language and clean up
     pub async fn unload_language(&self, language_address: &str) -> Result<(), LanguageError> {
-        info!("Unloading language: {}", language_address);
+        let label = self.language_label(language_address).await;
+        info!("Unloading language: {}", label);
 
         let mut runtimes = self.runtimes.lock().await;
         if let Some(runtime) = runtimes.remove(language_address) {
@@ -268,7 +274,7 @@ impl LanguageController {
         let mut names = self.language_names.lock().await;
         names.remove(language_address);
 
-        info!("Successfully unloaded language: {}", language_address);
+        info!("Successfully unloaded language: {}", label);
         Ok(())
     }
 
@@ -498,7 +504,10 @@ impl LanguageController {
         // Load into a per-language runtime
         self.load_language(saved_bundle_path, is_system_language)
             .await?;
-        info!("Loaded language runtime for: {}", address);
+        info!(
+            "Loaded language runtime for: {}",
+            self.language_label(address).await
+        );
 
         Ok(())
     }
@@ -535,9 +544,8 @@ impl LanguageController {
             RuntimeService::with_global_instance(|rs| rs.get_language_language_bundle());
 
         let (hash, bundle_path) = self.save_language_bundle(&language_language_bundle, None)?;
-        info!("Saved language language bundle, hash={}, loading...", hash);
+        info!("Saved language-language bundle, hash={}, loading...", hash);
         self.load_language(bundle_path, true).await?;
-        info!("load_language returned successfully for language language");
 
         // Store as system language
         {
@@ -546,7 +554,10 @@ impl LanguageController {
             sys.system_language_set.insert(hash.clone());
         }
 
-        info!("Language language loaded: {}", hash);
+        info!(
+            "Language-language loaded: {}",
+            self.language_label(&hash).await
+        );
 
         if !language_language_only {
             // Step 2: Load other system languages
@@ -557,6 +568,7 @@ impl LanguageController {
                 RuntimeService::with_global_instance(|rs| rs.get_perspective_language());
 
             // Install agent language
+            info!("Installing agent language: {}", agent_language);
             if let Err(e) = self
                 .install_language_from_address(&agent_language, true)
                 .await
@@ -568,6 +580,10 @@ impl LanguageController {
             }
 
             // Install neighbourhood language
+            info!(
+                "Installing neighbourhood language: {}",
+                neighbourhood_language
+            );
             if let Err(e) = self
                 .install_language_from_address(&neighbourhood_language, true)
                 .await
@@ -579,6 +595,7 @@ impl LanguageController {
             }
 
             // Install perspective language
+            info!("Installing perspective language: {}", perspective_language);
             if let Err(e) = self
                 .install_language_from_address(&perspective_language, true)
                 .await
@@ -685,7 +702,10 @@ impl LanguageController {
                 info!("Loading installed language from disk: {}", dir_name);
                 match self.load_language(bundle_path, false).await {
                     Ok(_) => {
-                        info!("Successfully loaded language: {}", dir_name);
+                        info!(
+                            "Successfully loaded installed language: {}",
+                            self.language_label(&dir_name).await
+                        );
                     }
                     Err(e) => {
                         warn!("Failed to load language {}: {}", dir_name, e);
