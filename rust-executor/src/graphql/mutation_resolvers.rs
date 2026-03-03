@@ -184,24 +184,7 @@ impl Mutation {
 
         // Start Holochain conductor (previously done via JS core.initHolochain)
         let config = crate::config::get_global_config();
-        let app_data_path = config
-            .app_data_path
-            .as_ref()
-            .expect("app_data_path not set");
-        let base = std::path::Path::new(app_data_path).join("ad4m");
-        let hc_config = crate::holochain_service::LocalConductorConfig {
-            passphrase: passphrase.clone(),
-            conductor_path: base.join("h").join("c").to_string_lossy().into_owned(),
-            data_path: base.join("h").join("d").to_string_lossy().into_owned(),
-            use_bootstrap: config.hc_use_bootstrap.unwrap_or(true),
-            use_proxy: config.hc_use_proxy.unwrap_or(true),
-            use_local_proxy: config.hc_use_local_proxy.unwrap_or(false),
-            use_mdns: config.hc_use_mdns.unwrap_or(false),
-            proxy_url: config.hc_proxy_url.clone().unwrap_or_default(),
-            bootstrap_url: config.hc_bootstrap_url.clone().unwrap_or_default(),
-            relay_url: config.hc_relay_url.clone(),
-            app_port: config.hc_app_port.unwrap_or(1337),
-        };
+        let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(&config, passphrase.clone());
 
         let mut init_errors: Vec<String> = Vec::new();
 
@@ -375,24 +358,7 @@ impl Mutation {
             {
                 log::info!("Holochain service not initialized. Initializing...");
                 let config = crate::config::get_global_config();
-                let app_data_path = config
-                    .app_data_path
-                    .as_ref()
-                    .expect("app_data_path not set");
-                let base = std::path::Path::new(app_data_path).join("ad4m");
-                let hc_config = crate::holochain_service::LocalConductorConfig {
-                    passphrase: passphrase.clone(),
-                    conductor_path: base.join("h").join("c").to_string_lossy().into_owned(),
-                    data_path: base.join("h").join("d").to_string_lossy().into_owned(),
-                    use_bootstrap: config.hc_use_bootstrap.unwrap_or(true),
-                    use_proxy: config.hc_use_proxy.unwrap_or(true),
-                    use_local_proxy: config.hc_use_local_proxy.unwrap_or(false),
-                    use_mdns: config.hc_use_mdns.unwrap_or(false),
-                    proxy_url: config.hc_proxy_url.clone().unwrap_or_default(),
-                    bootstrap_url: config.hc_bootstrap_url.clone().unwrap_or_default(),
-                    relay_url: config.hc_relay_url.clone(),
-                    app_port: config.hc_app_port.unwrap_or(1337),
-                };
+                let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(&config, passphrase.clone());
 
                 if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
                     log::error!("Error initializing Holochain: {:?}", e);
