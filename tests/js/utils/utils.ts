@@ -152,6 +152,7 @@ export async function startExecutor(dataPath: string,
     bootstrapUrl: string = "https://dev-test-bootstrap2.holochain.org",
     relayUrl?: string,
     enableMcp: boolean = false,
+    mcpPort?: number,
 ): Promise<ChildProcess> {
     const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
 
@@ -189,6 +190,7 @@ export async function startExecutor(dataPath: string,
     ];
     if (relayUrl) { args.push('--hc-relay-url', relayUrl); }
     if (enableMcp) { args.push('--enable-mcp', 'true'); }
+    if (mcpPort) { args.push('--mcp-port', String(mcpPort)); }
     if (adminCredential) { args.push('--admin-credential', adminCredential); }
 
     executorProcess = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
