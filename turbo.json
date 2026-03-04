@@ -53,7 +53,8 @@
 
     "@coasys/ad4m-cli#build": {
       "dependsOn": ["@coasys/dapp#build", "@coasys/rust-ad4m-executor#build"],
-      "outputs": ["dist/**", "lib/**", "build/**"]
+      "outputs": ["dist/**", "lib/**", "build/**"],
+      "cache": false
     },
 
     "ad4m-launcher#package-ad4m": {
