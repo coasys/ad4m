@@ -1017,45 +1017,7 @@ impl LanguageController {
         }
     }
 
-    /// Remove a language from the JS LanguageController.
-    /// This calls `core.languageController.languageRemove(address)` which:
-    /// - Tears down any intervals the language has running
-    /// - Removes the language from the #languages Map
-    /// - Removes the language constructor from #languageConstructors
-    /// - Calls HolochainService.removeDnaForLang() to uninstall the hApp
-    /// - Deletes language files from disk
-    pub async fn language_remove(address: Address) -> Result<(), AnyError> {
-        Self::global_instance()
-            .js_core
-            .execute("await core.waitForLanguages()".into())
-            .await?;
-
-        let address_json = serde_json::to_string(&address.to_string())
-            .unwrap_or_else(|_| format!("\"{}\"", address));
-        let script = format!(
-            r#"await core.languageController.languageRemove({})"#,
-            address_json,
-        );
-        let mut js = Self::global_instance().js_core;
-        match js.execute(script).await {
-            Ok(_) => {
-                log::info!("🗑️ Successfully removed language: {}", address);
-                Ok(())
-            }
-            Err(e) => {
-                let msg = format!("{:?}", e);
-                if msg.contains("not found") || msg.contains("already removed") {
-                    log::info!("Language {} already removed/not loaded, skipping", address);
-                    Ok(())
-                } else {
-                    log::warn!("⚠️ Error removing language {}: {:?}", address, e);
-                    Err(e)
-                }
-            }
-        }
-    }
-
-    /// Read and template a Holochain DNA from language source lines.
+        /// Read and template a Holochain DNA from language source lines.
     /// Port of JS readAndTemplateHolochainDNA method.
     async fn read_and_template_holochain_dna(
         &self,

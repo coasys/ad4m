@@ -55,6 +55,7 @@
 | system-libs | 2.1 | <1% |
 
 ### At 5 neighbourhoods (1305 MB)
+
 | Category | MB | % |
 |----------|-----|---|
 | Anonymous mappings | 1126.9 | 86% |

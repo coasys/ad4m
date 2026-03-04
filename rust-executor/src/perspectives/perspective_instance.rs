@@ -283,7 +283,7 @@ impl PerspectiveInstance {
         if let Some(ref nh) = handle.neighbourhood {
             let link_language_address = nh.data.link_language.clone();
             log::info!("🧹 Perspective {} is a neighbourhood, removing link language: {}", uuid, link_language_address);
-            if let Err(e) = LanguageController::language_remove(link_language_address.clone()).await {
+            if let Err(e) = LanguageController::global_instance().language_remove(&link_language_address).await {
                 log::error!("Error unloading link language {} for perspective {}: {:?}", link_language_address, uuid, e);
             }
         }
