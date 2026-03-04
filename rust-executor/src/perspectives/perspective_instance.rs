@@ -248,6 +248,10 @@ impl PerspectiveInstance {
     pub async fn teardown_background_tasks(&self) {
         // Signal all background loops to stop
         *self.is_teardown.lock().await = true;
+        // Prevent any new work from being scheduled by clearing trigger flags
+        *self.trigger_notification_check.lock().await = false;
+        *self.trigger_prolog_subscription_check.lock().await = false;
+        *self.trigger_surreal_subscription_check.lock().await = false;
 
         let uuid = self.persisted.lock().await.uuid.clone();
         log::info!("🧹 Tearing down perspective {}: starting resource cleanup", uuid);
@@ -2706,6 +2710,15 @@ impl PerspectiveInstance {
         let self_clone = self.clone();
 
         tokio::spawn(async move {
+            // Early exit if teardown is in progress — avoid touching Prolog resources
+            // that may have already been cleaned up
+            if *self_clone.is_teardown.lock().await {
+                if let Some(sender) = completion_sender {
+                    let _ = sender.send(());
+                }
+                return;
+            }
+
             // In Disabled, Simple, or SdnaOnly mode, just trigger subscription checks
             // (Pooled mode prolog updates don't apply - run_query_all only works in Pooled mode)
             if PROLOG_MODE == PrologMode::Disabled
