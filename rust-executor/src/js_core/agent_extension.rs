@@ -1,13 +1,13 @@
 use super::utils::sort_json_value;
 use crate::js_core::error::AnyhowWrapperError;
+use crate::languages::language_runtime::get_runtime_agent_context;
 use crate::{
     agent::{
         create_signed_expression, did, did_document, did_for_context, sign_for_context,
-        sign_string_hex, signing_key_id, AgentContext, AgentService,
+        sign_string_hex, signing_key_id_for_context, AgentContext, AgentService,
     },
     graphql::graphql_types::{Agent, AgentStatus},
 };
-// use coasys_juniper::{FieldError, Value};
 use deno_core::anyhow;
 use deno_core::op2;
 
@@ -20,13 +20,13 @@ fn agent_did_document() -> Result<did_key::Document, AnyhowWrapperError> {
 #[op2]
 #[string]
 fn agent_signing_key_id() -> Result<String, AnyhowWrapperError> {
-    Ok(signing_key_id())
+    signing_key_id_for_context(&get_runtime_agent_context()).map_err(AnyhowWrapperError::from)
 }
 
 #[op2]
 #[string]
 fn agent_did() -> Result<String, AnyhowWrapperError> {
-    did_for_context(&AgentContext::main_agent()).map_err(AnyhowWrapperError::from)
+    did_for_context(&get_runtime_agent_context()).map_err(AnyhowWrapperError::from)
 }
 
 #[op2]
@@ -34,9 +34,10 @@ fn agent_did() -> Result<String, AnyhowWrapperError> {
 fn agent_create_signed_expression(
     #[serde] data: serde_json::Value,
 ) -> Result<serde_json::Value, AnyhowWrapperError> {
+    let ctx = get_runtime_agent_context();
     let sorted_json = sort_json_value(&data);
-    let signed_expression = create_signed_expression(sorted_json, &AgentContext::main_agent())
-        .map_err(AnyhowWrapperError::from)?;
+    let signed_expression =
+        create_signed_expression(sorted_json, &ctx).map_err(AnyhowWrapperError::from)?;
     serde_json::to_value(signed_expression).map_err(AnyhowWrapperError::from)
 }
 
@@ -45,9 +46,10 @@ fn agent_create_signed_expression(
 fn agent_create_signed_expression_stringified(
     #[string] data: String,
 ) -> Result<String, AnyhowWrapperError> {
+    let ctx = get_runtime_agent_context();
     let data: serde_json::Value = serde_json::from_str(&data)?;
     let sorted_json = sort_json_value(&data);
-    let signed_expression = create_signed_expression(sorted_json, &AgentContext::main_agent())?;
+    let signed_expression = create_signed_expression(sorted_json, &ctx)?;
     let stringified =
         serde_json::to_string(&signed_expression).map_err(AnyhowWrapperError::from)?;
     Ok(stringified)
@@ -120,7 +122,7 @@ fn agent_agent_for_user(
 #[op2]
 #[serde]
 fn agent_sign(#[buffer] payload: &[u8]) -> Result<Vec<u8>, AnyhowWrapperError> {
-    sign_for_context(payload, &AgentContext::main_agent()).map_err(AnyhowWrapperError::from)
+    sign_for_context(payload, &get_runtime_agent_context()).map_err(AnyhowWrapperError::from)
 }
 
 #[op2]

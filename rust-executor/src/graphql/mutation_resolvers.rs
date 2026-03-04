@@ -211,9 +211,9 @@ impl Mutation {
             log::info!("System languages loaded");
         }
 
-        // Ensure agent expression exists in the agent language
-        if let Err(e) = AgentService::ensure_agent_expression().await {
-            log::warn!("Error ensuring public agent expression: {}", e);
+        // Publish agent expression to the agent language
+        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
+            log::warn!("Error publishing agent expression: {}", e);
         }
 
         if !init_errors.is_empty() {
@@ -392,9 +392,11 @@ impl Mutation {
 
             log::info!("AD4M init complete");
 
-            // Ensure agent expression exists in the agent language
-            if let Err(e) = AgentService::ensure_agent_expression().await {
-                log::warn!("Error ensuring public agent expression: {}", e);
+            // Publish agent expression to the agent language
+            if let Err(e) =
+                AgentService::publish_agent_to_language(&AgentContext::main_agent()).await
+            {
+                log::warn!("Error publishing agent expression: {}", e);
             }
         }
 
@@ -448,7 +450,7 @@ impl Mutation {
         })?;
 
         // Publish updated agent to agent language
-        if let Err(e) = AgentService::ensure_agent_expression().await {
+        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
             log::warn!(
                 "Failed to publish agent expression after DM language update: {}",
                 e
@@ -509,7 +511,10 @@ impl Mutation {
             })?;
 
             // Publish the updated agent to the agent language
-            if let Err(e) = AgentService::publish_user_agent_to_language(&user_email, &agent).await
+            if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::for_user_email(
+                user_email.clone(),
+            ))
+            .await
             {
                 log::warn!(
                     "Failed to publish updated user {} profile to agent language: {}",
@@ -544,16 +549,18 @@ impl Mutation {
             })?;
 
             // Publish updated agent to agent language
-            AgentService::ensure_agent_expression().await.map_err(|e| {
-                log::warn!(
-                    "Failed to publish agent expression after profile update: {}",
-                    e
-                );
-                FieldError::new(
-                    format!("Profile updated but failed to publish: {}", e),
-                    Value::null(),
-                )
-            })?;
+            AgentService::publish_agent_to_language(&AgentContext::main_agent())
+                .await
+                .map_err(|e| {
+                    log::warn!(
+                        "Failed to publish agent expression after profile update: {}",
+                        e
+                    );
+                    FieldError::new(
+                        format!("Profile updated but failed to publish: {}", e),
+                        Value::null(),
+                    )
+                })?;
 
             // Notify subscribers
             get_global_pubsub()
@@ -686,7 +693,10 @@ impl Mutation {
         })?;
 
         // Publish the agent to the agent language
-        if let Err(e) = AgentService::publish_user_agent_to_language(&email, &initial_agent).await {
+        if let Err(e) =
+            AgentService::publish_agent_to_language(&AgentContext::for_user_email(email.clone()))
+                .await
+        {
             log::warn!("Failed to publish user {} to agent language: {}", did, e);
             // Don't fail the user creation, just log the warning
         }

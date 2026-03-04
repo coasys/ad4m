@@ -189,6 +189,22 @@ pub fn sign_string_hex(data: String) -> Result<String, AnyError> {
     Ok(sig_hex)
 }
 
+/// Convert an Agent's decorated perspective to plain LinkExpressions for publishing.
+/// Returns a JSON value with non-decorated types (no proof.valid/invalid, no status).
+fn agent_to_publish_json(agent: &Agent) -> Result<serde_json::Value, AnyError> {
+    use crate::types::{LinkExpression, Perspective as PlainPerspective};
+
+    let plain_perspective = agent.perspective.as_ref().map(|p| PlainPerspective {
+        links: p.links.iter().cloned().map(LinkExpression::from).collect(),
+    });
+
+    Ok(serde_json::json!({
+        "did": agent.did,
+        "directMessageLanguage": agent.direct_message_language,
+        "perspective": plain_perspective,
+    }))
+}
+
 pub struct AgentSignature {
     pub signature: String,
     pub public_key: String,
@@ -466,29 +482,41 @@ impl AgentService {
         Ok(())
     }
 
-    /// Publish agent to the agent language (decentralized storage)
-    pub async fn publish_user_agent_to_language(
-        user_email: &str,
-        agent: &Agent,
-    ) -> Result<(), AnyError> {
+    /// Unified method to publish an agent profile to the agent language.
+    /// Works for both the main agent and managed users.
+    /// Strips link decorations before publishing.
+    pub async fn publish_agent_to_language(context: &AgentContext) -> Result<(), AnyError> {
         let controller = crate::languages::LanguageController::global_instance();
         let agent_lang = controller
             .get_agent_language()
             .await
             .map_err(|e| anyhow!("Agent language not available: {}", e))?;
 
-        let agent_json = serde_json::to_value(agent)?;
-        let agent_context = AgentContext::for_user_email(user_email.to_string());
+        let agent = Self::get_agent_for_context(context)?;
+        let agent_json = agent_to_publish_json(&agent)?;
         controller
-            .expression_create(agent_lang.address(), agent_json, &agent_context)
+            .expression_create(agent_lang.address(), agent_json, context)
             .await
             .map_err(|e| anyhow!("Failed to publish agent to language: {}", e))?;
 
-        log::info!(
-            "Successfully published agent {} to agent language",
-            agent.did
-        );
+        log::info!("Published agent {} to agent language", agent.did);
         Ok(())
+    }
+
+    /// Get the Agent data for a given context (main agent or managed user).
+    fn get_agent_for_context(context: &AgentContext) -> Result<Agent, AnyError> {
+        match &context.user_email {
+            Some(email) => {
+                let agent =
+                    AgentService::with_global_instance(|svc| svc.load_user_agent_profile(email))?;
+                agent.ok_or_else(|| anyhow!("User profile not found for {}", email))
+            }
+            None => AgentService::with_global_instance(|svc| {
+                svc.agent
+                    .clone()
+                    .ok_or_else(|| anyhow!("Agent not initialized"))
+            }),
+        }
     }
 
     /// Load agent profile for a specific user
@@ -513,70 +541,8 @@ impl AgentService {
         .expect("Failed to write agent profile file");
 
         // Note: callers who need the agent published to the agent language
-        // should call publish_main_agent_to_language() separately (this method
+        // should call publish_agent_to_language() separately (this method
         // is sync and cannot await).
-    }
-
-    /// Publish the main agent's profile to the agent language (decentralized storage).
-    /// Mirrors publish_user_agent_to_language() but for the main agent context.
-    pub async fn publish_main_agent_to_language() -> Result<(), AnyError> {
-        let agent_data =
-            AgentService::with_global_instance(|agent_service| agent_service.agent.clone());
-        let agent = agent_data.ok_or_else(|| anyhow!("Agent not initialized"))?;
-
-        let controller = crate::languages::LanguageController::global_instance();
-        let agent_lang = controller
-            .get_agent_language()
-            .await
-            .map_err(|e| anyhow!("Agent language not available: {}", e))?;
-
-        let agent_json = serde_json::to_value(&agent)?;
-        let agent_context = AgentContext::main_agent();
-        controller
-            .expression_create(agent_lang.address(), agent_json, &agent_context)
-            .await
-            .map_err(|e| anyhow!("Failed to publish main agent to language: {}", e))?;
-
-        log::info!("Successfully published main agent to agent language");
-        Ok(())
-    }
-
-    /// Publish the main agent's current profile to the agent language.
-    /// Always updates the expression (creates or overwrites).
-    pub async fn ensure_agent_expression() -> Result<(), AnyError> {
-        let controller = crate::languages::LanguageController::global_instance();
-
-        // Get the agent language
-        let agent_language = match controller.get_agent_language().await {
-            Ok(lang) => lang,
-            Err(e) => {
-                log::warn!("Agent language not available yet: {:?}", e);
-                return Ok(());
-            }
-        };
-
-        // Get current agent data and publish it
-        let agent_data =
-            AgentService::with_global_instance(|agent_service| agent_service.agent.clone());
-
-        if let Some(agent) = agent_data {
-            let agent_json = serde_json::to_string(&agent)
-                .map_err(|e| anyhow!("Failed to serialize agent: {}", e))?;
-            let create_script = format!(
-                r#"JSON.stringify(await language.expressionAdapter.putAdapter.createPublic({}))"#,
-                agent_json
-            );
-
-            controller
-                .execute_on_language(agent_language.address(), &create_script)
-                .await
-                .map_err(|e| anyhow!("Error creating agent expression: {:?}", e))?;
-            log::info!("Agent expression published successfully");
-        } else {
-            log::warn!("No agent data available to publish");
-        }
-
-        Ok(())
     }
 
     pub fn save_agent_profile(&mut self, agent: Agent) {

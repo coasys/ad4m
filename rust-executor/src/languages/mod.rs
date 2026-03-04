@@ -322,6 +322,35 @@ impl LanguageController {
         })
     }
 
+    /// Execute a script in a language runtime with a specific agent context.
+    /// The agent context is passed through the channel so the runtime thread
+    /// sets it as the thread-local before executing the script.
+    pub async fn execute_on_language_with_context(
+        &self,
+        language_address: &str,
+        script: &str,
+        agent_context: &AgentContext,
+    ) -> Result<String, LanguageError> {
+        let handle = {
+            let runtimes = self.runtimes.lock().await;
+            runtimes.get(language_address).cloned()
+        };
+
+        if let Some(handle) = handle {
+            return handle
+                .execute_with_context(script.to_string(), agent_context.clone())
+                .await
+                .map_err(|e| LanguageError::RuntimeError {
+                    address: language_address.to_string(),
+                    message: e,
+                });
+        }
+
+        Err(LanguageError::NotFound {
+            address: language_address.to_string(),
+        })
+    }
+
     /// Calculate IPFS hash for a language bundle using the same algorithm as utils_extension::hash()
     fn calculate_language_hash(&self, bundle_content: &str) -> String {
         use cid::Cid;
@@ -2208,7 +2237,9 @@ impl LanguageController {
             content_json, content_json
         );
 
-        let result = self.execute_on_language(&resolved_address, &script).await?;
+        let result = self
+            .execute_on_language_with_context(&resolved_address, &script, agent_context)
+            .await?;
 
         // Strip surrounding quotes from the result (it's a JSON-encoded string)
         let expression_address = result.trim().trim_matches('"').to_string();
