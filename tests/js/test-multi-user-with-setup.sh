@@ -74,6 +74,13 @@ sleep 3
 # Step 4: Run the multi-user test
 echo "🧪 Running multi-user test..."
 pnpm run test-multi-user-simple
+TEST_EXIT_CODE=$?
 
-echo "✅ Multi-user test with setup complete!"
+if [ $TEST_EXIT_CODE -ne 0 ]; then
+    echo "❌ Multi-user test failed with exit code $TEST_EXIT_CODE"
+else
+    echo "✅ Multi-user test with setup complete!"
+fi
+
+exit $TEST_EXIT_CODE
 
