@@ -282,6 +282,7 @@ async function initLanguage(contextJson) {
 
     const language = await globalThis.languageConstructor(fullContext);
     globalThis.__ad4m_language_instance__ = language;
+    globalThis.__ad4m_agent_proxy__ = agentProxy;
     globalThis.language = language;
     return language;
 }
