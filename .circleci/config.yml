@@ -73,6 +73,9 @@ jobs:
           command: pnpm run build-deno-snapshot
           no_output_timeout: 30m
       - run:
+          name: Clean CLI to force rebuild (self-hosted runner has stale incremental cache)
+          command: cargo clean -p ad4m-cli 2>/dev/null || true
+      - run:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
           no_output_timeout: 30m
