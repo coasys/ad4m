@@ -264,7 +264,7 @@ impl JsCore {
         let resolve_fut = {
             let mut worker = self.worker.lock().await;
             let execute_async = worker.execute_script("js_core", wrapped_script.into());
-            worker.js_runtime.resolve(execute_async.unwrap())
+            worker.js_runtime.resolve(execute_async?)
         };
 
         Ok(SmartGlobalVariableFuture::new(
