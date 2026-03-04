@@ -12,8 +12,12 @@ import {
   AgentSignature,
   Apps,
   AuthInfoInput,
+  AuthorisedKey,
   EntanglementProof,
   EntanglementProofInput,
+  KeyAuthorisation,
+  KeyAuthorisationInput,
+  KeyRevocation,
 } from "./Agent";
 import { AgentStatus } from "./AgentStatus";
 import { AGENT_STATUS_CHANGED, AGENT_UPDATED, APPS_CHANGED } from "../PubSub";
@@ -259,5 +263,45 @@ export default class AgentResolver {
   @Mutation((returns) => AgentSignature)
   agentSignMessage(@Arg("message") message: string): AgentSignature {
     return new AgentSignature("test-message-signature", "test-public-key");
+  }
+
+  @Mutation((returns) => Agent)
+  agentAddAuthorisedKey(
+    @Arg("key") key: string,
+    @Arg("name") name: string,
+    @Arg("proof") proof: KeyAuthorisationInput
+  ): Agent {
+    // TODO: Wire through to executor's agent subsystem → adapter → zome
+    throw new Error("Not implemented - requires executor wiring for multi-key agent identity");
+  }
+
+  @Mutation((returns) => Agent)
+  agentRevokeKey(
+    @Arg("key") key: string,
+    @Arg("reason", { nullable: true }) reason?: string
+  ): Agent {
+    // TODO: Wire through to executor's agent subsystem → adapter → zome
+    throw new Error("Not implemented - requires executor wiring for multi-key agent identity");
+  }
+
+  @Query((returns) => [AuthorisedKey])
+  agentAuthorisedKeys(): AuthorisedKey[] {
+    // TODO: Wire through to executor's agent subsystem → adapter → zome
+    throw new Error("Not implemented - requires executor wiring for multi-key agent identity");
+  }
+
+  @Query((returns) => [KeyRevocation])
+  agentRevokedKeys(): KeyRevocation[] {
+    // TODO: Wire through to executor's agent subsystem → adapter → zome
+    throw new Error("Not implemented - requires executor wiring for multi-key agent identity");
+  }
+
+  @Query((returns) => Boolean)
+  agentIsKeyValid(
+    @Arg("did") did: string,
+    @Arg("key") key: string
+  ): Boolean {
+    // TODO: Wire through to executor's agent subsystem → adapter → zome
+    throw new Error("Not implemented - requires executor wiring for multi-key agent identity");
   }
 }

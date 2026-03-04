@@ -57,10 +57,74 @@ pub struct AgentExpression {
 app_entry!(AgentExpression);
 
 #[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyAuthorisation {
+    pub authorising_key: String,
+    pub signature: String,
+    /// ISO 8601 timestamp that was included in the signed message
+    pub timestamp: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthorisedKey {
+    pub key: String,
+    pub name: String,
+    pub added_at: DateTime<Utc>,
+    pub added_by: String,
+    pub proof: KeyAuthorisation,
+}
+
+#[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyRevocation {
+    pub revoked_key: String,
+    pub revoked_at: DateTime<Utc>,
+    pub revoked_by: String,
+    /// The authorised key that signed this revocation
+    pub revoked_by_key: String,
+    pub signature: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AddAuthorisedKeyInput {
+    pub did: String,
+    pub key: String,
+    pub name: String,
+    pub proof: KeyAuthorisation,
+}
+
+#[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RevokeKeyInput {
+    pub did: String,
+    pub key: String,
+    /// The authorised key used to sign the revocation
+    pub revoked_by_key: String,
+    pub signature: String,
+    /// ISO 8601 timestamp that was included in the signed message
+    pub timestamp: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct IsKeyValidInput {
+    pub did: String,
+    pub key: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug)]
 pub struct AgentExpressionData {
     pub did: String,
     pub perspective: Option<Perspective>,
     #[serde(rename(serialize = "directMessageLanguage"))]
     #[serde(rename(deserialize = "directMessageLanguage"))]
     pub direct_message_language: Option<String>,
+    #[serde(default, rename = "authorisedKeys")]
+    pub authorised_keys: Vec<AuthorisedKey>,
+    #[serde(default, rename = "revokedKeys")]
+    pub revoked_keys: Vec<KeyRevocation>,
 }
