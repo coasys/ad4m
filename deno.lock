@@ -383,7 +383,7 @@
         "npm:patch-package@^6.5.0",
         "npm:prettier@latest",
         "npm:readline-sync@1.4.10",
-        "npm:turbo@latest"
+        "npm:turbo@^2.8.13"
       ]
     },
     "members": {
