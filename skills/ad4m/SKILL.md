@@ -1,6 +1,6 @@
 ---
 name: ad4m
-description: Set up and interact with AD4M (Agent-Centric Distributed Application Meta-ontology) — a spanning layer that extends the internet to enable distributed collective intelligence. Use when installing AD4M executor, creating/joining neighbourhoods, working with perspectives and links, using SHACL subject classes, or connecting via MCP server for AI agent integration. AD4M bridges fragmented ecosystems (P2P, federated, centralized) into a unified semantic layer with agent-centric data sovereignty. NOT for: general Holochain development without AD4M, or web3/blockchain tasks.
+description: Set up and interact with AD4M (Agent-Centric Distributed Application Meta-ontology) — a spanning layer built on Holochain that extends the internet to enable distributed collective intelligence. Use when installing AD4M executor, creating/joining neighbourhoods, working with perspectives and links, using SHACL subject classes, or connecting via MCP server for AI agent integration. AD4M bridges fragmented ecosystems (P2P, federated, centralized) into a unified semantic layer with agent-centric data sovereignty. NOT for: general Holochain development without AD4M, or web3/blockchain tasks.
 ---
 
 # AD4M
