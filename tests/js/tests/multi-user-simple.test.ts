@@ -2131,35 +2131,43 @@ describe("Multi-User Simple integration tests", () => {
             });
             console.log("Node 2 User 2 added link");
 
-            // Wait for synchronization
-            console.log("\nWaiting for sync...");
-            await sleep(10000);
+            // Wait for cross-node Holochain gossip synchronization with retry
+            console.log("\nWaiting for cross-node sync (polling until all users see >= 5 links)...");
+            const syncTimeout = 120000; // 2 minutes max
+            const syncStart = Date.now();
+            let synced = false;
 
-            // Query links from each user's perspective
-            console.log("\nQuerying links from each user's perspective...");
+            let node1User1Links: any[] = [];
+            let node1User2Links: any[] = [];
+            let node2User1Links: any[] = [];
+            let node2User2Links: any[] = [];
 
-            const node1User1Links = await node1User1Client!.perspective.queryLinks(
-                node1User1Neighbourhood!.uuid,
-                new LinkQuery({})
-            );
+            while (!synced && Date.now() - syncStart < syncTimeout) {
+                await sleep(5000);
+
+                node1User1Links = await node1User1Client!.perspective.queryLinks(
+                    node1User1Neighbourhood!.uuid, new LinkQuery({})
+                );
+                node1User2Links = await node1User2Client!.perspective.queryLinks(
+                    node1User2Neighbourhood!.uuid, new LinkQuery({})
+                );
+                node2User1Links = await node2User1Client!.perspective.queryLinks(
+                    node2User1Neighbourhood!.uuid, new LinkQuery({})
+                );
+                node2User2Links = await node2User2Client!.perspective.queryLinks(
+                    node2User2Neighbourhood!.uuid, new LinkQuery({})
+                );
+
+                const counts = [node1User1Links.length, node1User2Links.length, node2User1Links.length, node2User2Links.length];
+                console.log(`  Sync check: link counts = [${counts.join(', ')}] (need >= 5 each)`);
+
+                synced = counts.every(c => c >= 5);
+            }
+
+            console.log(`\nQuerying links from each user's perspective...`);
             console.log(`Node 1 User 1 sees ${node1User1Links.length} links`);
-
-            const node1User2Links = await node1User2Client!.perspective.queryLinks(
-                node1User2Neighbourhood!.uuid,
-                new LinkQuery({})
-            );
             console.log(`Node 1 User 2 sees ${node1User2Links.length} links`);
-
-            const node2User1Links = await node2User1Client!.perspective.queryLinks(
-                node2User1Neighbourhood!.uuid,
-                new LinkQuery({})
-            );
             console.log(`Node 2 User 1 sees ${node2User1Links.length} links`);
-
-            const node2User2Links = await node2User2Client!.perspective.queryLinks(
-                node2User2Neighbourhood!.uuid,
-                new LinkQuery({})
-            );
             console.log(`Node 2 User 2 sees ${node2User2Links.length} links`);
 
             // All users should see at least 5 links (1 from setup + 4 from each user)
