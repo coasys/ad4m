@@ -2199,48 +2199,14 @@ impl LanguageController {
                 message: format!("Failed to serialize content: {}", e),
             })?;
 
-        // When creating an expression on behalf of a managed user, we need to
-        // temporarily switch the agent context on the language worker so the
-        // language sees the user's DID and signs with the user's key.
-        // The agentProxy in language_bootstrap.js exposes didForUser() and
-        // createSignedExpressionForUser() — we use those to swap did and
-        // createSignedExpression, then restore after the call.
-        let script = if let Some(user_email) = &agent_context.user_email {
-            let escaped_email = user_email.replace('\\', "\\\\").replace('"', "\\\"");
-            format!(
-                r##"await (async () => {{
-                    const agent = globalThis.__ad4m_agent_proxy__;
-                    const origDid = agent.did;
-                    const origSign = agent.createSignedExpression;
-                    const origKeyId = agent.signingKeyId;
-                    try {{
-                        const userDid = agent.didForUser("{email}");
-                        agent.did = userDid;
-                        agent.createSignedExpression = (data) => agent.createSignedExpressionForUser("{email}", data);
-                        agent.signingKeyId = userDid + "#key-1";
-                        const result = language.expressionAdapter.putAdapter.createPublic
-                            ? await language.expressionAdapter.putAdapter.createPublic({content})
-                            : await language.expressionAdapter.putAdapter.addressOf({content});
-                        return JSON.stringify(result);
-                    }} finally {{
-                        agent.did = origDid;
-                        agent.createSignedExpression = origSign;
-                        agent.signingKeyId = origKeyId;
-                    }}
-                }})()"##,
-                email = escaped_email,
-                content = content_json,
-            )
-        } else {
-            format!(
-                r#"JSON.stringify(
-                    language.expressionAdapter.putAdapter.createPublic
-                        ? await language.expressionAdapter.putAdapter.createPublic({})
-                        : await language.expressionAdapter.putAdapter.addressOf({})
-                )"#,
-                content_json, content_json
-            )
-        };
+        let script = format!(
+            r#"JSON.stringify(
+                language.expressionAdapter.putAdapter.createPublic
+                    ? await language.expressionAdapter.putAdapter.createPublic({})
+                    : await language.expressionAdapter.putAdapter.addressOf({})
+            )"#,
+            content_json, content_json
+        );
 
         let result = self.execute_on_language(&resolved_address, &script).await?;
 
