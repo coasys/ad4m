@@ -1068,7 +1068,7 @@ describe("Multi-User Simple integration tests", () => {
             console.log("User 1 created perspective:", perspective1.uuid);
 
             // Add some initial links to the perspective
-            const link1 = new Link({source: "user1", target: "data1", predicate: "test://created"});
+            const link1 = new Link({source: "test://user1", target: "test://data1", predicate: "test://created"});
             await client1.perspective.addLink(perspective1.uuid, link1);
 
             console.log("Cloning link language...");
@@ -1111,7 +1111,7 @@ describe("Multi-User Simple integration tests", () => {
             console.log("✅ Both users can access the shared neighbourhood");
 
             // User 2 adds a link to the shared perspective
-            const link2 = new Link({source: "user2", target: "data2", predicate: "test://added"});
+            const link2 = new Link({source: "test://user2", target: "test://data2", predicate: "test://added"});
             await client2.perspective.addLink(user2SharedPerspective!.uuid, link2);
 
             // Wait for sync
@@ -1129,11 +1129,11 @@ describe("Multi-User Simple integration tests", () => {
             expect(user2Links.length).to.be.greaterThan(1);
 
             // Verify specific links exist
-            const user1SeesUser2Link = user1Links.some(l => 
-                l.data.source === "user2" && l.data.target === "data2"
+            const user1SeesUser2Link = user1Links.some(l =>
+                l.data.source === "test://user2" && l.data.target === "test://data2"
             );
-            const user2SeesUser1Link = user2Links.some(l => 
-                l.data.source === "user1" && l.data.target === "data1"
+            const user2SeesUser1Link = user2Links.some(l =>
+                l.data.source === "test://user1" && l.data.target === "test://data1"
             );
 
             expect(user1SeesUser2Link).to.be.true;
