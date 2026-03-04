@@ -28,6 +28,8 @@ AD4M separates concerns in a novel way:
 - **Neighbourhoods**: Shared perspectives synced P2P via Holochain — how agents collaborate
 - **Subject Classes (SDNA)**: SHACL-defined schemas — structure and validation over the link graph
 
+**Built on Holochain:** AD4M's core bootstrap languages (agent, perspective, neighbourhood, language) are implemented as Holochain DNAs, providing the distributed trust layer. Neighbourhoods leverage Holochain's DHT for P2P synchronization and validation.
+
 This architecture enables true data portability: your messages, posts, files, and social graph live in your perspectives, accessible to any app you grant permission to.
 
 ## Core Concepts (Quick Reference)
@@ -42,105 +44,72 @@ This architecture enables true data portability: your messages, posts, files, an
 
 For deeper architecture details, see the [AD4M documentation](https://docs.ad4m.dev).
 
-## Setup for AI Agents
+## Executor Setup for AI Agents
 
-### Option 1: AD4M Launcher (Recommended for Desktop)
+AI agents need a running AD4M executor to connect to via MCP. There are two deployment modes:
 
-The easiest way to run AD4M is via the [AD4M Launcher](https://github.com/coasys/ad4m/releases) — a system-tray app that bundles the executor with a setup wizard:
+### Mode 1: Agent-Only Executor (Recommended)
 
-1. Download the latest release for your OS (macOS, Linux AppImage)
-2. Install and launch — it initializes your agent (DID + keys) on first run
-3. Enable the MCP server in Settings → toggle "MCP Server" and set port (default: 3001)
-4. Restart the launcher for MCP to become available
+The agent runs its own executor locally — simplest and most secure:
 
-The launcher runs the executor at `http://localhost:12000/graphql` (GraphQL) and `http://localhost:3001/mcp` (MCP).
+- **No multi-user setup needed** — single agent DID, no email/password auth
+- **Admin credential authentication** — use `--admin-credential <secret>` flag
+- **Local HTTP only** — `http://localhost:3001/mcp`, no TLS needed
+- **Example:**
+  ```bash
+  ad4m-executor run --app-data-path ~/.ad4m-agent \
+    --admin-credential <your-secret> \
+    --enable-mcp true --mcp-port 3001
+  ```
 
-### Option 2: CLI Executor (For Servers/Scripts)
+**When to use:** Most cases — agent has full control, no shared access, simple auth.
 
-For headless servers, Docker, or scripting, use the CLI executor binary:
+### Mode 2: Multi-User Executor (Agent + Human Users)
 
-```bash
-# 1. Download executor from GitHub releases (Linux x64 example)
-curl -L -o ad4m-executor https://github.com/coasys/ad4m/releases/latest/download/ad4m-cli-executor-linux-x64
-chmod +x ad4m-executor
+The agent hosts an executor that serves multiple users (including the agent itself):
 
-# 2. Init (creates bootstrap seed — MUST run before first start)
-./ad4m-executor init --data-path ~/.ad4m
+- **Multi-user mode required** — each user gets their own DID + JWT after signup/login
+- **Email/password authentication** — users authenticate via MCP `signup`/`login_email` tools
+- **TLS/HTTPS required if remote** — for production, secure with reverse proxy (nginx, Caddy)
+- **Example:**
+  ```bash
+  ad4m-executor run --app-data-path ~/.ad4m-server \
+    --admin-credential <admin-secret> \
+    --enable-mcp true --mcp-port 3001 \
+    --multi-user true
+  ```
+  
+  Then use nginx or Caddy to provide HTTPS:
+  ```nginx
+  server {
+      listen 443 ssl http2;
+      server_name ad4m.example.com;
+      
+      ssl_certificate /path/to/fullchain.pem;
+      ssl_certificate_key /path/to/privkey.pem;
+      
+      location /mcp {
+          proxy_pass http://localhost:3001/mcp;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection "upgrade";
+      }
+  }
+  ```
 
-# 3. Run executor with MCP enabled
-./ad4m-executor run --app-data-path ~/.ad4m --gql-port 12100 \
-  --admin-credential <secret> --enable-mcp true --mcp-port 3001
+**When to use:** Agent provides AD4M access to multiple humans, or agent needs to interact with human users' perspectives.
 
-# 4. Generate agent (if not done during init)
-# Download the CLI client separately or use GraphQL directly
-```
+**Security note:** Multi-user executors require TLS certificates when accessed remotely. Use Let's Encrypt for free certificates, or self-signed certificates for testing.
 
-**Important flags:**
-- `--admin-credential`: Secret token for admin access (use a strong random string)
-- `--enable-mcp true`: Enables the MCP server
-- `--mcp-port 3001`: MCP server port (default: 3001)
-- `--gql-port 12100`: GraphQL server port (default: 12000 in launcher, customizable in CLI)
+### Getting the Executor Binary
 
-### Option 3: Build from Source
+- **Pre-built:** Download from [GitHub Releases](https://github.com/coasys/ad4m/releases) (Linux, macOS)
+- **Build from source:** See [Installation Guide](https://docs.ad4m.dev/installation)
+- **Launcher (for humans):** [AD4M Launcher](https://github.com/coasys/ad4m/releases) includes GUI setup wizard
 
-For development or custom builds:
+## Working with AD4M via MCP
 
-```bash
-git clone --branch dev https://github.com/coasys/ad4m.git
-cd ad4m/cli
-cargo build --release --bin ad4m-executor
-
-# Binary at: target/release/ad4m-executor
-# Follow CLI executor steps above
-```
-
-See the [AD4M Installation Guide](https://docs.ad4m.dev/installation) for full details, including system requirements and dependencies.
-
-## Interacting with AD4M
-
-AD4M provides two complementary interfaces: **GraphQL** (full programmatic API) and **MCP** (AI agent-optimized tools).
-
-### Security & Authentication
-
-**Local development (single-user):**
-- HTTP only, no TLS needed (`http://localhost:12100` / `http://localhost:3001`)
-- Authenticate using the `--admin-credential` you set when starting the executor
-- Include as `Authorization: <credential>` header for GraphQL
-- For MCP, either include in Authorization header or use the `auth_status` check
-
-**Production/multi-user deployments:**
-- Use standard HTTPS with your own TLS certificates (reverse proxy recommended: nginx, Caddy)
-- Each user gets their own DID and JWT after signup/login via MCP or GraphQL
-- JWTs are scoped to individual users and their perspectives
-- See [AD4M Authentication Guide](https://docs.ad4m.dev/auth) for multi-user setup details
-
-**Note:** AD4M executors are designed to run locally (one per user) or on trusted infrastructure. For remote access, secure the connection with TLS and use strong credentials.
-
-### GraphQL Examples
-
-```graphql
-# Check agent status
-{ agentStatus { isInitialized isUnlocked did } }
-
-# Create a perspective
-mutation { perspectiveAdd(name: "My Space") { uuid name } }
-
-# Add a link
-mutation { perspectiveAddLink(
-  uuid: "<perspective-uuid>"
-  link: { source: "ad4m://self", predicate: "has_name", target: "literal://string:Data" }
-) { author timestamp } }
-
-# Get links
-{ perspectiveQueryLinks(uuid: "<perspective-uuid>", query: { source: "ad4m://self" }) {
-  data { source predicate target }
-} }
-
-# Join a neighbourhood
-mutation { neighbourhoodJoinFromUrl(url: "neighbourhood://<hash>") { uuid name } }
-```
-
-Include `Authorization: <admin-credential>` header for authenticated requests.
+**Primary interface for AI agents:** MCP tools provide high-level operations over subject classes (structured data). Use MCP tools first — they auto-generate from SHACL schemas and include natural language descriptions optimized for LLMs.
 
 ### MCP Server (AI Agent Interface)
 
@@ -173,26 +142,83 @@ For comprehensive MCP documentation, workflow examples, and authentication detai
 
 ## Subject Classes (SHACL)
 
-Subject classes define structure over the link graph using SHACL (Shapes Constraint Language):
+Subject classes define structure over the link graph using SHACL (Shapes Constraint Language). Define them in JSON format and add to a perspective using the MCP `add_model` tool.
 
-- `sh:maxCount 1` → scalar property (single value, `set_{prop}` tool)
-- `sh:maxCount > 1` → collection (multiple values, `add_{coll}` / `remove_{coll}` tools)
-- Class-first naming: `channel_create`, `task_set_title`, `post_add_comment`
+**SHACL rules:**
+- `max_count: 1` → scalar property (single value) → generates `{class}_set_{property}` tool
+- `max_count > 1` or omitted → collection (multiple values) → generates `{class}_add_{collection}`, `{class}_remove_{collection}` tools
+- `min_count: 1` → required property (becomes parameter in `{class}_create` constructor)
 
-Example SHACL for a Channel class:
-```turtle
-:ChannelShape a sh:NodeShape ;
-  sh:targetClass :Channel ;
-  sh:property [
-    sh:path :name ;
-    sh:datatype xsd:string ;
-    sh:maxCount 1 ;
-  ] ;
-  sh:property [
-    sh:path :messages ;
-    sh:class :Message ;
-  ] .
+**Example:** Channel class with name (required scalar), description (optional scalar), and messages (collection):
+
+```json
+{
+  "target_class": "app://Channel",
+  "properties": [
+    {
+      "path": "app://has_channel_name",
+      "name": "name",
+      "datatype": "xsd:string",
+      "min_count": 1,
+      "max_count": 1,
+      "writable": true,
+      "resolve_language": "literal"
+    },
+    {
+      "path": "app://has_channel_description",
+      "name": "description",
+      "datatype": "xsd:string",
+      "min_count": 0,
+      "max_count": 1,
+      "writable": true,
+      "resolve_language": "literal"
+    },
+    {
+      "path": "app://has_messages",
+      "name": "messages",
+      "node_kind": "app://Message",
+      "min_count": 0,
+      "writable": true,
+      "resolve_language": "app"
+    }
+  ],
+  "constructor": [
+    {
+      "action": "addLink",
+      "source": "this",
+      "predicate": "rdf://type",
+      "target": "app://Channel"
+    },
+    {
+      "action": "setSingleTarget",
+      "source": "this",
+      "predicate": "app://has_channel_name",
+      "target": "name"
+    }
+  ]
+}
 ```
+
+**Adding to a perspective:**
+```
+→ add_model(
+    perspective_id: "abc123...",
+    class_name: "Channel",
+    shacl_json: "{...json above...}"
+  )
+← { success: true }
+
+→ get_models(perspective_id: "abc123...")
+← [ { name: "Channel", properties: ["name", "description"], collections: ["messages"] } ]
+```
+
+**Auto-generated tools:**
+- `channel_create(perspective_id, name, description?)` — name is required (min_count: 1)
+- `channel_set_name(perspective_id, uri, value)` — update name (max_count: 1)
+- `channel_set_description(perspective_id, uri, value)` — update description
+- `channel_add_messages(perspective_id, uri, value)` — add a Message to the collection
+- `channel_remove_messages(perspective_id, uri, value)` — remove a Message
+- `channel_get(perspective_id, uri)` — retrieve full Channel data
 
 ## Real-Time Notifications (Waker)
 
@@ -319,3 +345,47 @@ Join IPFS neighbourhood (neighbourhood://Qm...) →
 Reference HTTP data from IPFS expressions
 ```
 AD4M bridges protocols — mix HTTP, IPFS, Holochain data in one graph.
+
+---
+
+## Appendix: GraphQL API (Fallback)
+
+**Note:** MCP tools should be your primary interface. Use GraphQL only when MCP dynamic tools don't cover your specific use case. GraphQL is designed for the JavaScript client (`@coasys/ad4m`) and human developers, not AI agents.
+
+### When to Use GraphQL
+
+- Low-level operations not exposed via MCP (e.g., language management, direct Prolog queries)
+- Debugging or inspecting executor state
+- Building custom tooling outside the MCP abstraction
+
+### GraphQL Examples
+
+```graphql
+# Check agent status
+{ agentStatus { isInitialized isUnlocked did } }
+
+# Create a perspective
+mutation { perspectiveAdd(name: "My Space") { uuid name } }
+
+# Add a link (prefer MCP add_link tool)
+mutation { perspectiveAddLink(
+  uuid: "<perspective-uuid>"
+  link: { source: "ad4m://self", predicate: "has_name", target: "literal://string:Data" }
+) { author timestamp } }
+
+# Get links (prefer MCP get_links tool)
+{ perspectiveQueryLinks(uuid: "<perspective-uuid>", query: { source: "ad4m://self" }) {
+  data { source predicate target }
+} }
+
+# Join a neighbourhood (prefer MCP join_neighbourhood tool)
+mutation { neighbourhoodJoinFromUrl(url: "neighbourhood://<hash>") { uuid name } }
+```
+
+**Authentication:**
+- Include `Authorization: <admin-credential>` header for single-user mode
+- Include `Authorization: Bearer <jwt>` for multi-user mode after login
+
+**GraphQL endpoint:** `http://localhost:12000/graphql` (default, configurable via `--gql-port`)
+
+For comprehensive GraphQL documentation, see the [AD4M JavaScript client docs](https://docs.ad4m.dev).

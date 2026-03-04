@@ -60,56 +60,9 @@ Once connected, your agent can call any AD4M tool directly. An [OpenClaw skill](
 
 Any MCP client supporting Streamable HTTP transport can connect to `http://localhost:3001/mcp`. Refer to your client's documentation for configuration.
 
-## Security & Transport
-
-### Network Security
-
-**Local development (single-user):**
-- Plain HTTP (`http://localhost:3001/mcp`) — no TLS needed
-- Executor and MCP client run on the same machine
-- Traffic never leaves localhost
-
-**Production/remote access:**
-- Use HTTPS with valid TLS certificates
-- Deploy behind a reverse proxy (nginx, Caddy, Traefik)
-- Enforce strong authentication (see below)
-
-**Multi-user deployments:**
-- Each user gets isolated perspective space (enforced by executor)
-- JWTs scope access to user-owned perspectives only
-- Consider rate limiting and monitoring for production workloads
-
-<Callout type="warning">
-AD4M executors are designed to run **locally** (one per user) or on **trusted infrastructure** (user's VPS/server). For remote access, always use TLS and strong credentials. Never expose an executor with weak credentials to the public internet.
+<Callout type="info">
+**Deployment & Security:** For guidance on running executors (agent-only vs multi-user mode) and securing remote access with TLS, see the [AD4M skill file](https://github.com/coasys/ad4m/tree/dev/skills/ad4m) for AI agents.
 </Callout>
-
-### Example Reverse Proxy (nginx with TLS)
-
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name ad4m.example.com;
-    
-    ssl_certificate /path/to/fullchain.pem;
-    ssl_certificate_key /path/to/privkey.pem;
-    
-    location /mcp {
-        proxy_pass http://localhost:3001/mcp;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-    
-    location /graphql {
-        proxy_pass http://localhost:12100/graphql;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}
-```
 
 ## Authentication
 
