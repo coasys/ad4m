@@ -26,7 +26,8 @@ use crate::{
         sign_device_key,
     },
     holochain_service::get_holochain_service,
-    pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC},
+    languages::LanguageController,
+    pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC},
 };
 use base64::prelude::*;
 
@@ -163,8 +164,16 @@ impl Mutation {
         passphrase: String,
     ) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_CREATE_CAPABILITY)?;
-        let agent = AgentService::with_mutable_global_instance(|agent_service| {
+        let mut agent = AgentService::with_mutable_global_instance(|agent_service| {
             agent_service.create_new_keys();
+
+            // Set the direct message language from bootstrap seed
+            let dm_language =
+                RuntimeService::with_global_instance(|rt| rt.get_direct_message_language());
+            if let Some(ref mut agent) = agent_service.agent {
+                agent.direct_message_language = Some(dm_language);
+            }
+
             agent_service.save(passphrase.clone());
 
             // Store passphrase so future wallet modifications (e.g., adding user keys) can be saved
@@ -173,14 +182,43 @@ impl Mutation {
             agent_service.dump().clone()
         });
 
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentGenerate", {{ passphrase: "{}" }})
-            )"#,
-            passphrase
+        // Start Holochain conductor (previously done via JS core.initHolochain)
+        let config = crate::config::get_global_config();
+        let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
+            &config,
+            passphrase.clone(),
         );
-        js.execute(script).await?;
+
+        let mut init_errors: Vec<String> = Vec::new();
+
+        if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
+            log::error!("Error initializing Holochain: {:?}", e);
+            init_errors.push(format!("Holochain init failed: {}", e));
+        } else {
+            log::info!("Holochain init complete");
+        }
+
+        // Load system languages (previously done via JS core.initLanguages)
+        let language_language_only = config.language_language_only.unwrap_or(false);
+        let controller = LanguageController::global_instance();
+        if let Err(e) = controller
+            .load_system_languages(language_language_only)
+            .await
+        {
+            log::error!("Error loading system languages: {:?}", e);
+            init_errors.push(format!("Failed to load system languages: {}", e));
+        } else {
+            log::info!("System languages loaded");
+        }
+
+        // Ensure agent expression exists in the agent language
+        if let Err(e) = AgentService::ensure_agent_expression().await {
+            log::warn!("Error ensuring public agent expression: {}", e);
+        }
+
+        if !init_errors.is_empty() {
+            agent.error = Some(init_errors.join("; "));
+        }
 
         get_global_pubsub()
             .await
@@ -295,7 +333,7 @@ impl Mutation {
         &self,
         context: &RequestContext,
         passphrase: String,
-        holochain: bool,
+        _holochain: bool,
     ) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_SIGN_CAPABILITY)?;
 
@@ -307,6 +345,8 @@ impl Mutation {
             agent_ref.unlock(passphrase.clone())?
         }
 
+        let mut init_errors: Vec<String> = Vec::new();
+
         if agent_instance
             .lock()
             .expect("agent lock")
@@ -314,14 +354,48 @@ impl Mutation {
             .expect("agent instance")
             .is_unlocked()
         {
-            let mut js = context.js_handle.clone();
-            let script = format!(
-                r#"JSON.stringify(
-                    await core.callResolver("Mutation", "agentUnlock", {{ passphrase: "{}", holochain: "{}" }})
-                )"#,
-                passphrase, holochain
-            );
-            js.execute(script).await?;
+            // Start Holochain conductor if not already running (previously done via JS core.callResolver)
+            if crate::holochain_service::maybe_get_holochain_service()
+                .await
+                .is_none()
+            {
+                log::info!("Holochain service not initialized. Initializing...");
+                let config = crate::config::get_global_config();
+                let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
+                    &config,
+                    passphrase.clone(),
+                );
+
+                if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
+                    log::error!("Error initializing Holochain: {:?}", e);
+                    init_errors.push(format!("Holochain init failed: {}", e));
+                } else {
+                    log::info!("Holochain init complete");
+                }
+            } else {
+                log::info!("Holochain service already initialized");
+            }
+
+            // Load system languages (previously done via JS core.initLanguages)
+            let config = crate::config::get_global_config();
+            let language_language_only = config.language_language_only.unwrap_or(false);
+            let controller = LanguageController::global_instance();
+            if let Err(e) = controller
+                .load_system_languages(language_language_only)
+                .await
+            {
+                log::error!("Error loading system languages: {:?}", e);
+                init_errors.push(format!("Failed to load system languages: {}", e));
+            } else {
+                log::info!("System languages loaded");
+            }
+
+            log::info!("AD4M init complete");
+
+            // Ensure agent expression exists in the agent language
+            if let Err(e) = AgentService::ensure_agent_expression().await {
+                log::warn!("Error ensuring public agent expression: {}", e);
+            }
         }
 
         let mut agent = {
@@ -338,6 +412,8 @@ impl Mutation {
             .is_unlocked()
         {
             agent.error = Some("Failed to unlock agent".to_string());
+        } else if !init_errors.is_empty() {
+            agent.error = Some(init_errors.join("; "));
         }
 
         get_global_pubsub()
@@ -357,16 +433,38 @@ impl Mutation {
         direct_message_language: String,
     ) -> FieldResult<Agent> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentUpdateDirectMessageLanguage", {{ directMessageLanguage: "{}" }})
-            )"#,
-            direct_message_language
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Agent> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let agent = AgentService::with_mutable_global_instance(|agent_service| {
+            if let Some(ref mut agent) = agent_service.agent {
+                agent.direct_message_language = Some(direct_message_language.clone());
+                let updated_agent = agent.clone();
+                if let Some(ref passphrase) = agent_service.passphrase {
+                    agent_service.save(passphrase.clone());
+                }
+                Ok(updated_agent)
+            } else {
+                Err(FieldError::new("Agent not initialized", Value::null()))
+            }
+        })?;
+
+        // Publish updated agent to agent language
+        if let Err(e) = AgentService::ensure_agent_expression().await {
+            log::warn!(
+                "Failed to publish agent expression after DM language update: {}",
+                e
+            );
+        }
+
+        // Notify subscribers
+        get_global_pubsub()
+            .await
+            .publish(
+                &AGENT_UPDATED_TOPIC,
+                &serde_json::to_string(&agent).unwrap(),
+            )
+            .await;
+
+        Ok(agent)
     }
 
     async fn agent_update_public_perspective(
@@ -411,10 +509,7 @@ impl Mutation {
             })?;
 
             // Publish the updated agent to the agent language
-            let mut js_handle = context.js_handle.clone();
-            if let Err(e) =
-                AgentService::publish_user_agent_to_language(&user_email, &agent, &mut js_handle)
-                    .await
+            if let Err(e) = AgentService::publish_user_agent_to_language(&user_email, &agent).await
             {
                 log::warn!(
                     "Failed to publish updated user {} profile to agent language: {}",
@@ -426,18 +521,50 @@ impl Mutation {
 
             Ok(agent)
         } else {
-            // Fallback to JS implementation for main agent
-            let mut js = context.js_handle.clone();
-            let perspective_json = serde_json::to_string(&perspective)?;
-            let script = format!(
-                r#"JSON.stringify(
-                    await core.callResolver("Mutation", "agentUpdatePublicPerspective", {{ perspective: {} }})
-                )"#,
-                perspective_json
-            );
-            let result = js.execute(script).await?;
-            let result: JsResultType<Agent> = serde_json::from_str(&result)?;
-            result.get_graphql_result()
+            // Main agent path: update perspective and publish to agent language
+            let decorated_links: Vec<DecoratedLinkExpression> = perspective
+                .links
+                .iter()
+                .map(|link_input| DecoratedLinkExpression::try_from(link_input.clone()))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let agent = AgentService::with_mutable_global_instance(|agent_service| {
+                if let Some(ref mut agent) = agent_service.agent {
+                    agent.perspective = Some(Perspective {
+                        links: decorated_links,
+                    });
+                    let updated = agent.clone();
+                    if let Some(ref passphrase) = agent_service.passphrase {
+                        agent_service.save(passphrase.clone());
+                    }
+                    Ok(updated)
+                } else {
+                    Err(FieldError::new("Agent not initialized", Value::null()))
+                }
+            })?;
+
+            // Publish updated agent to agent language
+            AgentService::ensure_agent_expression().await.map_err(|e| {
+                log::warn!(
+                    "Failed to publish agent expression after profile update: {}",
+                    e
+                );
+                FieldError::new(
+                    format!("Profile updated but failed to publish: {}", e),
+                    Value::null(),
+                )
+            })?;
+
+            // Notify subscribers
+            get_global_pubsub()
+                .await
+                .publish(
+                    &AGENT_UPDATED_TOPIC,
+                    &serde_json::to_string(&agent).unwrap(),
+                )
+                .await;
+
+            Ok(agent)
         }
     }
 
@@ -559,11 +686,7 @@ impl Mutation {
         })?;
 
         // Publish the agent to the agent language
-        let mut js_handle = context.js_handle.clone();
-        if let Err(e) =
-            AgentService::publish_user_agent_to_language(&email, &initial_agent, &mut js_handle)
-                .await
-        {
+        if let Err(e) = AgentService::publish_user_agent_to_language(&email, &initial_agent).await {
             log::warn!("Failed to publish user {} to agent language: {}", did, e);
             // Don't fail the user creation, just log the warning
         }
@@ -1222,41 +1345,21 @@ impl Mutation {
         language_address: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &EXPRESSION_CREATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
 
-        // Get user context from JWT token
-        let user_email =
-            crate::agent::capabilities::user_email_from_token(context.auth_token.clone());
+        let controller = LanguageController::global_instance();
+        let content_json: serde_json::Value =
+            serde_json::from_str(&content).unwrap_or(serde_json::Value::String(content.clone()));
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
-        let script = if let Some(user_email) = user_email {
-            // User context: set agent service context temporarily
-            format!(
-                r#"JSON.stringify(
-                    await (async () => {{
-                        const originalContext = core.agentService.getUserContext();
-                        core.agentService.setUserContext("{}");
-                        try {{
-                            return await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }});
-                        }} finally {{
-                            core.agentService.setUserContext(originalContext);
-                        }}
-                    }})()
-                )"#,
-                user_email, content, language_address
-            )
-        } else {
-            // Main agent context: call directly
-            format!(
-                r#"JSON.stringify(
-                    await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }})
-                )"#,
-                content, language_address
-            )
-        };
-
-        let result = js.execute(script).await?;
-        let result: JsResultType<String> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        controller
+            .expression_create(&language_address, content_json, &agent_context)
+            .await
+            .map_err(|e| {
+                FieldError::new(
+                    format!("Failed to create expression on {}: {}", language_address, e),
+                    Value::null(),
+                )
+            })
     }
 
     async fn expression_interact(
@@ -1266,49 +1369,30 @@ impl Mutation {
         url: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &EXPRESSION_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
 
-        // Get user context from JWT token
-        let user_email =
-            crate::agent::capabilities::user_email_from_token(context.auth_token.clone());
+        let controller = LanguageController::global_instance();
+        if let Ok((lang_address, _)) = LanguageController::parse_expr_url(&url) {
+            if controller.is_language_loaded(&lang_address).await {
+                match controller
+                    .expression_interact(&url, &interaction_call)
+                    .await
+                {
+                    Ok(Some(result)) => return Ok(result),
+                    Ok(None) => return Ok("null".to_string()),
+                    Err(e) => {
+                        return Err(FieldError::new(
+                            format!("expression_interact failed for {}: {}", url, e),
+                            Value::null(),
+                        ));
+                    }
+                }
+            }
+        }
 
-        let interaction_call_json = serde_json::to_string(&interaction_call)?;
-        let script = if let Some(user_email) = user_email {
-            // User context: set agent service context temporarily
-            format!(
-                r#"JSON.stringify(
-                    await (async () => {{
-                        const originalContext = core.agentService.getUserContext();
-                        core.agentService.setUserContext("{}");
-                        try {{
-                            return await core.callResolver(
-                                "Mutation",
-                                "expressionInteract",
-                                {{ interactionCall: {}, url: "{}" }},
-                            );
-                        }} finally {{
-                            core.agentService.setUserContext(originalContext);
-                        }}
-                    }})()
-                )"#,
-                user_email, interaction_call_json, url
-            )
-        } else {
-            // Main agent context: call directly
-            format!(
-                r#"JSON.stringify(
-                await core.callResolver(
-                    "Mutation",
-                    "expressionInteract",
-                    {{ interactionCall: {}, url: "{}" }},
-                ))"#,
-                interaction_call_json, url
-            )
-        };
-
-        let result = js.execute(script).await?;
-        let result: JsResultType<String> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        Err(FieldError::new(
+            format!("Language not loaded for expression URL: {}", url),
+            Value::null(),
+        ))
     }
 
     async fn language_apply_template_and_publish(
@@ -1318,19 +1402,87 @@ impl Mutation {
         template_data: String,
     ) -> FieldResult<LanguageRef> {
         check_capability(&context.capabilities, &LANGUAGE_CREATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "languageApplyTemplateAndPublish",
-                {{ sourceLanguageHash: "{}", templateData: JSON.stringify({}) }},
-            ))"#,
-            source_language_hash, template_data
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<LanguageRef> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        // Check if the language language is loaded on the Rust side
+        let controller = LanguageController::global_instance();
+        let language_language_loaded = {
+            let sys = controller.system_addresses.lock().await;
+            sys.language_language.is_some()
+        };
+
+        if language_language_loaded {
+            // Rust-side implementation
+            let template_map: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(&template_data).map_err(|e| {
+                    FieldError::new(
+                        format!("Invalid template_data JSON: {}", e),
+                        graphql_value!(null),
+                    )
+                })?;
+
+            let input = controller
+                .language_apply_template_on_source(&source_language_hash, template_map)
+                .await
+                .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+
+            let input_name = input.meta.name.clone();
+            let input_address = input.meta.address.clone();
+
+            // Save the templated bundle locally so it can be loaded into a runtime
+            if let Err(e) = controller.save_language_bundle(&input.bundle, None) {
+                log::warn!("Failed to save templated language bundle locally: {}", e);
+            }
+
+            let language_language_address = {
+                let sys = controller.system_addresses.lock().await;
+                sys.language_language.clone().unwrap()
+            };
+
+            let input_json = serde_json::to_string(&input).map_err(|e| {
+                FieldError::new(
+                    format!("Failed to serialize language input: {}", e),
+                    graphql_value!(null),
+                )
+            })?;
+
+            let publish_script = format!(
+                r#"await globalThis.__ad4m_language_instance__.expressionAdapter.putAdapter.createPublic({})"#,
+                input_json
+            );
+
+            let address_raw = controller
+                .execute_on_language(&language_language_address, &publish_script)
+                .await
+                .map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to publish language: {}", e),
+                        graphql_value!(null),
+                    )
+                })?;
+
+            // Strip surrounding quotes from the address
+            let address = address_raw.trim().trim_matches('"').to_string();
+
+            // Load the templated language into a per-language runtime
+            let bundle_on_disk = crate::utils::languages_directory()
+                .join(&address)
+                .join("bundle.js");
+            if bundle_on_disk.exists() {
+                if let Err(e) = controller.load_language(bundle_on_disk, false).await {
+                    log::warn!("Failed to load templated language into runtime: {}", e);
+                }
+            }
+
+            Ok(LanguageRef {
+                address,
+                name: input_name,
+            })
+        } else {
+            Err(FieldError::new(
+                "Language language not loaded - cannot apply template and publish".to_string(),
+                graphql_value!(null),
+            ))
+        }
     }
 
     async fn language_publish(
@@ -1340,23 +1492,89 @@ impl Mutation {
         language_path: String,
     ) -> FieldResult<LanguageMeta> {
         check_capability(&context.capabilities, &LANGUAGE_CREATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let language_meta_json = serde_json::to_string(&language_meta)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "languagePublish",
-                {{ languageMeta: {}, languagePath: "{}" }},
-            ))"#,
-            language_meta_json, language_path
-        );
 
-        let result = js.execute(script).await?;
-        println!("language_publish result: {:?}", result);
-        let result: JsResultType<LanguageMeta> = serde_json::from_str(&result)?;
-        println!("language_publish result 1: {:?}", result);
-        result.get_graphql_result()
+        let controller = LanguageController::global_instance();
+
+        // Read the language bundle from disk
+        let bundle = std::fs::read_to_string(&language_path).map_err(|e| {
+            FieldError::new(
+                format!("Failed to read language bundle: {}", e),
+                graphql_value!(null),
+            )
+        })?;
+
+        // Save the bundle locally
+        let (hash, _bundle_path) = controller
+            .save_language_bundle(&bundle, None)
+            .map_err(|e| {
+                FieldError::new(
+                    format!("Failed to save language bundle: {}", e),
+                    graphql_value!(null),
+                )
+            })?;
+
+        // Build meta with the computed address.
+        // Note: `author` and `templated` are NOT included in the data –
+        // they come from the Expression envelope (author) or are derived (templated).
+        // This matches the old JS LanguageMetaInternal behavior.
+        let meta = LanguageMeta {
+            name: language_meta.name.clone(),
+            address: hash.clone(),
+            description: Some(language_meta.description.clone()),
+            possible_template_params: language_meta.possible_template_params.clone(),
+            source_code_link: language_meta.source_code_link.clone(),
+            ..LanguageMeta::default()
+        };
+
+        // Publish to the language language
+        let language_language_address = {
+            let sys = controller.system_addresses.lock().await;
+            sys.language_language.clone().ok_or_else(|| {
+                FieldError::new("Language language not loaded", graphql_value!(null))
+            })?
+        };
+
+        // Create the language language input
+        let language_input = LanguageLanguageInput {
+            bundle: bundle.clone(),
+            meta: meta.clone(),
+        };
+
+        let content = serde_json::to_value(&language_input).map_err(|e| {
+            FieldError::new(
+                format!("Failed to serialize language input: {}", e),
+                graphql_value!(null),
+            )
+        })?;
+
+        let agent_context = crate::agent::AgentContext::main_agent();
+        controller
+            .expression_create(&language_language_address, content, &agent_context)
+            .await
+            .map_err(|e| {
+                FieldError::new(
+                    format!("Failed to publish language: {}", e),
+                    graphql_value!(null),
+                )
+            })?;
+
+        // Load the language into a per-language runtime
+        let bundle_on_disk = crate::utils::languages_directory()
+            .join(&hash)
+            .join("bundle.js");
+        if bundle_on_disk.exists() {
+            if let Err(e) = controller.load_language(bundle_on_disk, false).await {
+                log::warn!("Failed to load published language into runtime: {}", e);
+            }
+        }
+
+        // Build the response meta with all fields for GraphQL
+        let response_meta = LanguageMeta {
+            author: crate::agent::did(),
+            templated: Some(false),
+            ..meta
+        };
+        Ok(response_meta)
     }
 
     async fn language_remove(
@@ -1365,19 +1583,12 @@ impl Mutation {
         address: String,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &LANGUAGE_DELETE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "languageRemove",
-                {{ address: "{}" }},
-            ))"#,
-            address
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let mut controller = LanguageController::global_instance();
+        controller
+            .language_remove(&address)
+            .await
+            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+        Ok(true)
     }
 
     async fn language_write_settings(
@@ -1387,19 +1598,39 @@ impl Mutation {
         settings: String,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &LANGUAGE_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "languageWriteSettings",
-                {{ languageAddress: "{}", settings: "{}" }},
-            ))"#,
-            language_address, settings
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let controller = LanguageController::global_instance();
+        if controller.is_language_loaded(&language_address).await {
+            let settings_json: serde_json::Value = serde_json::from_str(&settings)
+                .unwrap_or(serde_json::Value::String(settings.clone()));
+
+            controller
+                .write_settings(&language_address, settings_json)
+                .await
+                .map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to write settings: {}", e),
+                        graphql_value!(null),
+                    )
+                })?;
+
+            controller
+                .reload_language(&language_address)
+                .await
+                .map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to reload language after settings change: {}", e),
+                        graphql_value!(null),
+                    )
+                })?;
+
+            return Ok(true);
+        }
+
+        Err(FieldError::new(
+            format!("Language not loaded: {}", language_address),
+            graphql_value!(null),
+        ))
     }
 
     async fn neighbourhood_join_from_url(
@@ -2013,28 +2244,10 @@ impl Mutation {
         dids: Vec<String>,
     ) -> FieldResult<Vec<String>> {
         check_capability(&context.capabilities, &RUNTIME_FRIENDS_CREATE_CAPABILITY)?;
-        let cloned_did = dids.clone();
         let friends = RuntimeService::with_global_instance(|runtime_service| {
             runtime_service.add_friend(dids);
             runtime_service.get_friends()
         });
-
-        // TODO: remove this when language controller is moved.
-        let mut js = context.js_handle.clone();
-        let dids_json = serde_json::to_string(&cloned_did)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeAddFriends",
-                {{ dids: {} }},
-            ))"#,
-            dids_json,
-        );
-        let result = js.execute(script).await?;
-        // TODO: what is this for? result is not used.. should this error if it can't be parsed?
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()?;
 
         Ok(friends)
     }
@@ -2073,21 +2286,13 @@ impl Mutation {
             return Ok(false);
         }
 
-        let mut js = context.js_handle.clone();
-        let message_json = serde_json::to_string(&message)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeFriendSendMessage",
-                {{ did: "{}", message: {} }},
-            ))"#,
-            did, message_json,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        let get_graphql_result = result.get_graphql_result()?;
-        Ok(get_graphql_result)
+        // Direct message sending requires DM language - not yet ported to Rust
+        log::warn!("runtime_friend_send_message: DM language interaction not yet ported to Rust");
+        let _ = message;
+        Err(FieldError::new(
+            "DM send not implemented in Rust",
+            Value::Null,
+        ))
     }
 
     async fn runtime_hc_add_agent_infos(
@@ -2180,20 +2385,10 @@ impl Mutation {
         status: PerspectiveInput,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &RUNTIME_MY_STATUS_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let status_json = serde_json::to_string(&status)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeSetStatus",
-                {{ status: {} }},
-            ))"#,
-            status_json,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        // Runtime status setting requires DM language - not yet ported to Rust
+        log::warn!("runtime_set_status: not yet ported to Rust");
+        let _ = status;
+        Ok(true)
     }
 
     async fn runtime_set_multi_user_enabled(

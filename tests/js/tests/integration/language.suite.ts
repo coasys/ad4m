@@ -158,7 +158,7 @@ export default function languageTests(testContext: TestContext) {
         expect(canPublishNonHolochainLang.name).to.be.equal(noteMetaInfo.name);
         //TODO/NOTE: this will break if the note language version is changed
         expect(canPublishNonHolochainLang.address).to.be.equal(
-          "QmzSYwdmAKKivFm8sp7zLDPnT2kwyk2to8Ey1hqEb25DCPaJoRA",
+          "QmzSYwdiTHLZtzCPBq384QqeyKT4P2JvqqXH8So4MB4axfftLHA",
         );
 
         //Get meta for source language above and make sure it is correct
@@ -174,7 +174,7 @@ export default function languageTests(testContext: TestContext) {
           noteMetaInfo.description,
         );
         expect(sourceLanguageMetaNonHCData.address).to.be.equal(
-          "QmzSYwdmAKKivFm8sp7zLDPnT2kwyk2to8Ey1hqEb25DCPaJoRA",
+          "QmzSYwdiTHLZtzCPBq384QqeyKT4P2JvqqXH8So4MB4axfftLHA",
         );
       });
 

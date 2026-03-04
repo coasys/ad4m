@@ -25,6 +25,17 @@ jobs:
         with:
           deno-version: v1.32.4
 
+      - name: Delete existing tag (idempotent re-runs)
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+          echo "Deleting tag $TAG if it exists..."
+          curl -s -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$TAG" || true
+          echo "Tag cleanup done"
+
       - name: Create Tags From
         id: create_tag
         uses: jaywcjlove/create-tag-action@v1.3.14
@@ -46,7 +57,7 @@ jobs:
   build-launcher-binary-linux:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:0eddf04e4380f892968297a248da05c734f64d089e9e01cf7b89e3ff4328db4c
+      image: coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
 
     needs:
       - create-release
@@ -73,10 +84,16 @@ jobs:
       run: cd ./core && pnpm install --no-frozen-lockfile
 
     - name: Build AD4M-CLI
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
       run: pnpm build-libs
 
     - name: Build Launcher binary
       run: pnpm run package-ad4m
+      env:
+        # GitHub Actions container jobs don't always inherit the full system
+        # PKG_CONFIG_PATH. Set it explicitly so soup3-sys/webkit can find .pc files.
+        PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
 
     - name: Upload Release Deb Asset
       id: upload-release-deb-asset
@@ -150,7 +167,7 @@ jobs:
   build-launcher-binary-linux-cuda:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:0eddf04e4380f892968297a248da05c734f64d089e9e01cf7b89e3ff4328db4c
+      image: coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
 
     needs:
       - create-release
@@ -178,10 +195,14 @@ jobs:
       run: cd ./core && pnpm install --no-frozen-lockfile
 
     - name: Build AD4M-CLI
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
       run: pnpm build-libs
 
     - name: Build Launcher binary with CUDA
       run: pnpm run package-ad4m:cuda
+      env:
+        PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
 
     - name: Upload Release AppImage CUDA Asset
       id: upload-release-appimage-cuda-asset
@@ -304,11 +325,13 @@ jobs:
     #    mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
     #    security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "actions" build.keychain
 
-    - name: Update cargo git deps (ensure pre-built V8 from coasys/rusty_v8 tag)
-      working-directory: rust-executor
-      run: cargo update -p v8 2>/dev/null || cargo update 2>/dev/null || true
-
     - name: Build AD4M-CLI
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
+        # Use system git instead of libgit2 so cargo does NOT auto-fetch git submodules.
+        # coasys/deno.git has heavy chromium submodules (wpt, buildtools, abseil-cpp)
+        # that cause SecureTransport/network errors on macOS runners.
+        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       run: pnpm build-libs
 
     - name: Build Launcher binary
@@ -391,6 +414,12 @@ jobs:
     - name: Fetch source code
       uses: actions/checkout@v3
 
+    - name: Enable long paths (Windows MAX_PATH workaround for deno git dep)
+      shell: powershell
+      run: |
+        git config --global core.longpaths true
+        reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
+
     # Rust toolchain configured via rust-toolchain.toml
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
@@ -448,12 +477,14 @@ jobs:
     - name: Install core dependencies
       run: cd ./core && pnpm install
 
-    - name: Update cargo git deps (ensure pre-built V8 from coasys/rusty_v8 tag)
-      working-directory: rust-executor
-      shell: bash
-      run: cargo update -p v8 2>/dev/null || cargo update 2>/dev/null || true
-
     - name: Build AD4M-CLI
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
+        # libort_sys (ONNX Runtime) ships with static MT CRT; Rust MSVC defaults to dynamic MD.
+        # +crt-static makes Rust use MT too — fixes LNK2038/LNK1169 CRT mismatch in generate_snapshot.
+        RUSTFLAGS: -C target-feature=+crt-static
+        # Use system git so cargo does NOT auto-fetch chromium submodules from coasys/deno.git
+        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       run: pnpm build-libs
 
     - name: Build Launcher binary
@@ -505,14 +536,20 @@ jobs:
         asset_content_type: application/octet-stream
 
   # ============================================================================
-  # NPM Publish - Uses Docker container (all deps pre-installed)
+  # NPM Publish - Plain ubuntu runner (no Docker needed, just TS build + publish)
   # ============================================================================
   npm-publish:
     runs-on: ubuntu-latest
-    container:
-      image: coasys/ad4m-ci-linux:latest@sha256:0eddf04e4380f892968297a248da05c734f64d089e9e01cf7b89e3ff4328db4c
     steps:
       - uses: actions/checkout@v3
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Use Node.js 18.x
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18.x
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Extract version
         id: extract_version
@@ -524,14 +561,10 @@ jobs:
         run: |
           STRING="${{ steps.extract_version.outputs.version }}"
           if [[ $STRING == *-* ]]; then
-            echo "CONTAINS_PRERELEASE=true" >> $GITHUB_ENV
+            echo "NPM_TAG=next" >> $GITHUB_ENV
           else
-            echo "CONTAINS_PRERELEASE=false" >> $GITHUB_ENV
+            echo "NPM_TAG=latest" >> $GITHUB_ENV
           fi
-
-      # Rust toolchain configured via rust-toolchain.toml (auto-detected by rustup)
-      - name: Verify Rust toolchain
-        run: rustc --version && cargo --version
 
       - name: Install deps
         run: pnpm install --no-frozen-lockfile
@@ -542,66 +575,44 @@ jobs:
       - name: Build modules
         run: pnpm run build-npm-packages
 
-      - name: Set NPM tag
-        run: |
-          if [ "$CONTAINS_PRERELEASE" = "true" ]; then
-            echo "NPM_TAG=next" >> $GITHUB_ENV
-          else
-            echo "NPM_TAG=latest" >> $GITHUB_ENV
-          fi
-
       - name: Change Package Visibility to Public
         run: |
           cd core
           sed -i 's/"private": true/"private": false/' package.json
 
-      - name: Publish core
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: core/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
-
-      - name: Publish connect
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: connect/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
-
-      - name: Publish ad4m react hooks
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: ad4m-hooks/react/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
-
-      - name: Publish ad4m vue hooks
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: ad4m-hooks/vue/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
-
-      - name: Publish executor
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: executor/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
-
-      - name: Publish Test runner
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: test-runner/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+      - name: Publish all npm packages
+        run: |
+          # Write auth token via both methods to ensure npm/pnpm picks it up
+          # actions/setup-node sets NPM_CONFIG_USERCONFIG to a temp .npmrc — write auth there
+          TARGET_NPMRC="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$TARGET_NPMRC"
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
+          echo "npm version: $(npm --version), node: $(node --version)"
+          echo "npmrc target: $TARGET_NPMRC ($(wc -c < "$TARGET_NPMRC") bytes)"
+          TAG="${{ env.NPM_TAG }}"
+          echo "Publishing with tag: $TAG"
+          FAILED=0
+          for PKG in core connect ad4m-hooks/react ad4m-hooks/vue test-runner; do
+            echo "=== Publishing $PKG ==="
+            set +e
+            OUTPUT=$(cd "$PKG" && npm publish --access public --tag "$TAG" --registry https://registry.npmjs.org 2>&1)
+            EXIT=$?
+            set -e
+            echo "$OUTPUT"
+            if [ $EXIT -ne 0 ]; then
+              if echo "$OUTPUT" | grep -qE "previously published|cannot publish over|already exists|E403.*cannot publish"; then
+                echo "SKIP: $PKG already published"
+              else
+                echo "FAIL: $PKG (exit $EXIT)"
+                FAILED=1
+              fi
+            else
+              echo "OK: $PKG published"
+            fi
+          done
+          exit $FAILED
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.COASYS_NPM_TOKEN }}
 
   # ============================================================================
   # Crates Publish - Uses Docker container
@@ -609,7 +620,7 @@ jobs:
   crates-publish:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:0eddf04e4380f892968297a248da05c734f64d089e9e01cf7b89e3ff4328db4c
+      image: coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
     steps:
       - uses: actions/checkout@v3
 
@@ -620,6 +631,15 @@ jobs:
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm build-core-executor
       - run: ls -al executor/lib
-      - run: cargo install cargo-workspaces || echo "cargo-workspaces already installed"
       - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - run: cargo workspaces publish --from-git
+      - name: Publish ad4m-client crate
+        working-directory: rust-client
+        run: |
+          set +e
+          OUTPUT=$(cargo publish --allow-dirty 2>&1)
+          EXIT=$?
+          set -e
+          echo "$OUTPUT"
+          if [ $EXIT -ne 0 ]; then
+            echo "$OUTPUT" | grep -q "already exists" && echo "Already published — OK" || exit $EXIT
+          fi

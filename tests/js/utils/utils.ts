@@ -388,3 +388,19 @@ export async function wipePerspective(
     await perspective.removeLinks(links);
   }
 }
+
+/**
+ * Kill any process listening on the given ports.
+ * Use as a safety net in after() hooks — catches executors that survived kill().
+ */
+export function killByPorts(ports: number[]): void {
+  for (const port of ports) {
+    try {
+      execSync(`lsof -ti TCP:${port} -s TCP:LISTEN | xargs -r kill -9`, {
+        stdio: "ignore",
+      });
+    } catch (e) {
+      // Port not in use — fine
+    }
+  }
+}

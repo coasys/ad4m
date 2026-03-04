@@ -476,67 +476,25 @@ impl AgentService {
     pub async fn publish_user_agent_to_language(
         user_email: &str,
         agent: &Agent,
-        js_handle: &mut crate::js_core::JsCoreHandle,
     ) -> Result<(), AnyError> {
-        // Create a context-aware agent service that can sign with the user's key
-        // We need to inject this into the language context temporarily
-        let agent_json = serde_json::to_string(agent)?;
+        let controller = crate::languages::LanguageController::global_instance();
+        let agent_lang = controller
+            .get_agent_language()
+            .await
+            .map_err(|e| anyhow!("Agent language not available: {}", e))?;
 
-        let script = format!(
-            r#"
-            (async () => {{
-                // Get the agent language
-                const agentLanguage = core.languageController.getAgentLanguage();
-                if (!agentLanguage || !agentLanguage.expressionAdapter) {{
-                    throw new Error("Agent language not available");
-                }}
-                
-                const userAgent = {};
-                
-                // Set the agent service context to this user temporarily
-                // The agent language uses the same agent service instance from core
-                const originalContext = core.agentService.getUserContext();
-                core.agentService.setUserContext("{}");
-                
-                try {{
-                    // Get the putAdapter like in storeAgentProfile()
-                    const putAdapter = agentLanguage.expressionAdapter.putAdapter;
-                    if (!putAdapter) {{
-                        throw new Error("No putAdapter found in agent language");
-                    }}
-                    
-                    // Now call createPublic - the agent service will return the user's DID and sign with user's key
-                    await putAdapter.createPublic(userAgent);
-                    
-                    return "success";
-                }} finally {{
-                    // Restore the original context
-                    core.agentService.setUserContext(originalContext);
-                }}
-            }})()
-            "#,
-            agent_json, user_email
+        let agent_json = serde_json::to_value(agent)?;
+        let agent_context = AgentContext::for_user_email(user_email.to_string());
+        controller
+            .expression_create(agent_lang.address(), agent_json, &agent_context)
+            .await
+            .map_err(|e| anyhow!("Failed to publish agent to language: {}", e))?;
+
+        log::info!(
+            "Successfully published agent {} to agent language",
+            agent.did
         );
-
-        let result = js_handle.execute(script).await;
-
-        match result {
-            Ok(_) => {
-                log::info!(
-                    "Successfully published agent {} to agent language",
-                    agent.did
-                );
-                Ok(())
-            }
-            Err(e) => {
-                log::error!(
-                    "Failed to publish agent {} to agent language: {}",
-                    agent.did,
-                    e
-                );
-                Err(anyhow!("Failed to publish agent to language: {}", e))
-            }
-        }
+        Ok(())
     }
 
     /// Load agent profile for a specific user
@@ -560,7 +518,71 @@ impl AgentService {
         )
         .expect("Failed to write agent profile file");
 
-        // TODO: once language controller is moved add updating agent profile here
+        // Note: callers who need the agent published to the agent language
+        // should call publish_main_agent_to_language() separately (this method
+        // is sync and cannot await).
+    }
+
+    /// Publish the main agent's profile to the agent language (decentralized storage).
+    /// Mirrors publish_user_agent_to_language() but for the main agent context.
+    pub async fn publish_main_agent_to_language() -> Result<(), AnyError> {
+        let agent_data =
+            AgentService::with_global_instance(|agent_service| agent_service.agent.clone());
+        let agent = agent_data.ok_or_else(|| anyhow!("Agent not initialized"))?;
+
+        let controller = crate::languages::LanguageController::global_instance();
+        let agent_lang = controller
+            .get_agent_language()
+            .await
+            .map_err(|e| anyhow!("Agent language not available: {}", e))?;
+
+        let agent_json = serde_json::to_value(&agent)?;
+        let agent_context = AgentContext::main_agent();
+        controller
+            .expression_create(agent_lang.address(), agent_json, &agent_context)
+            .await
+            .map_err(|e| anyhow!("Failed to publish main agent to language: {}", e))?;
+
+        log::info!("Successfully published main agent to agent language");
+        Ok(())
+    }
+
+    /// Publish the main agent's current profile to the agent language.
+    /// Always updates the expression (creates or overwrites).
+    pub async fn ensure_agent_expression() -> Result<(), AnyError> {
+        let controller = crate::languages::LanguageController::global_instance();
+
+        // Get the agent language
+        let agent_language = match controller.get_agent_language().await {
+            Ok(lang) => lang,
+            Err(e) => {
+                log::warn!("Agent language not available yet: {:?}", e);
+                return Ok(());
+            }
+        };
+
+        // Get current agent data and publish it
+        let agent_data =
+            AgentService::with_global_instance(|agent_service| agent_service.agent.clone());
+
+        if let Some(agent) = agent_data {
+            let agent_json = serde_json::to_string(&agent)
+                .map_err(|e| anyhow!("Failed to serialize agent: {}", e))?;
+            let create_script = format!(
+                r#"JSON.stringify(await language.expressionAdapter.putAdapter.createPublic({}))"#,
+                agent_json
+            );
+
+            controller
+                .execute_on_language(agent_language.address(), &create_script)
+                .await
+                .map_err(|e| anyhow!("Error creating agent expression: {:?}", e))?;
+            log::info!("Agent expression published successfully");
+        } else {
+            log::warn!("No agent data available to publish");
+        }
+
+        Ok(())
     }
 
     pub fn save_agent_profile(&mut self, agent: Agent) {
@@ -668,12 +690,17 @@ impl AgentService {
                 .expect("Failed to read agent profile file");
             self.agent =
                 Some(serde_json::from_str(&file_profile).expect("Failed to parse agent profile"));
+        } else if let Some(agent) = dump.agent {
+            // Restore agent profile from agent.json (save() embeds it there).
+            // agentProfile.json may not exist if the profile was only saved via save().
+            self.agent = Some(agent);
         } else {
-            let did_clone = dump.did.clone();
-            let did = check_keys_and_create(did_clone).id.clone();
-
+            // No profile anywhere - create a minimal placeholder with just the DID.
+            // DO NOT call check_keys_and_create() here because that would initialize
+            // wallet keys without a passphrase, making is_unlocked() return true
+            // before the user has actually entered their password.
             self.agent = Some(Agent {
-                did,
+                did: dump.did.clone(),
                 perspective: Some(Perspective { links: vec![] }),
                 direct_message_language: None,
             });

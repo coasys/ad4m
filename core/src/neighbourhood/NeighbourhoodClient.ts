@@ -1,4 +1,4 @@
-import { ApolloClient, ApolloQueryResult, gql } from "@apollo/client/core";
+import { ApolloClient, gql, FetchResult } from "@apollo/client/core";
 import { Address } from "../Address";
 import { DID } from "../DID";
 import { OnlineAgent, TelepresenceSignalCallback } from "../language/Language";
@@ -182,7 +182,6 @@ export class NeighbourhoodClient {
         variables: { perspectiveUUID, status },
       }),
     );
-
     return neighbourhoodSetOnlineStatus;
   }
 
@@ -206,7 +205,6 @@ export class NeighbourhoodClient {
         variables: { perspectiveUUID, status },
       }),
     );
-
     return neighbourhoodSetOnlineStatusU;
   }
 
@@ -233,7 +231,6 @@ export class NeighbourhoodClient {
         variables: { perspectiveUUID, remoteAgentDid, payload },
       }),
     );
-
     return neighbourhoodSendSignal;
   }
 
@@ -260,7 +257,6 @@ export class NeighbourhoodClient {
         variables: { perspectiveUUID, remoteAgentDid, payload },
       }),
     );
-
     return neighbourhoodSendSignalU;
   }
 
@@ -287,7 +283,6 @@ export class NeighbourhoodClient {
         variables: { perspectiveUUID, payload, loopback },
       }),
     );
-
     return neighbourhoodSendBroadcast;
   }
 
@@ -314,16 +309,19 @@ export class NeighbourhoodClient {
         variables: { perspectiveUUID, payload, loopback },
       }),
     );
-
     return neighbourhoodSendBroadcastU;
   }
 
   dispatchSignal(perspectiveUUID: string, signal: any) {
     const handlers = this._signalHandlers.get(perspectiveUUID);
     if (handlers) {
-      handlers.forEach((handler) => {
-        handler(signal);
-      });
+      for (const handler of handlers) {
+        try {
+          handler(signal);
+        } catch (e) {
+          console.error("Error in signal handler:", e);
+        }
+      }
     }
   }
 
@@ -365,9 +363,13 @@ export class NeighbourhoodClient {
         variables: { perspectiveUUID },
       })
       .subscribe({
-        next: (result: ApolloQueryResult<any>) => {
-          const { neighbourhoodSignal } = unwrapApolloResult(result);
-          that.dispatchSignal(perspectiveUUID, neighbourhoodSignal);
+        next: (result: FetchResult<any>) => {
+          try {
+            const { neighbourhoodSignal } = unwrapApolloResult(result);
+            that.dispatchSignal(perspectiveUUID, neighbourhoodSignal);
+          } catch (e) {
+            console.error("Error in signal subscription:", e);
+          }
         },
         error: (e) => {
           if (!isSocketCloseError(e))
@@ -385,9 +387,12 @@ export class NeighbourhoodClient {
     if (!handlersForPerspective) {
       handlersForPerspective = [];
       this._signalHandlers.set(perspectiveUUID, handlersForPerspective);
+      // Push handler BEFORE subscribing so it's available when signals arrive
+      handlersForPerspective.push(handler);
       await this.subscribeToSignals(perspectiveUUID);
+    } else {
+      handlersForPerspective.push(handler);
     }
-    handlersForPerspective.push(handler);
   }
 
   removeSignalHandler(
