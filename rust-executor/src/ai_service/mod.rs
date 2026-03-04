@@ -1105,8 +1105,8 @@ impl AIService {
             }
         }
 
-        // Default to tiny if nothing found
-        Ok(WhisperSource::Tiny)
+        // Default to configured whisper model if nothing found
+        Ok(WHISPER_MODEL)
     }
 
     pub async fn open_transcription_stream(
