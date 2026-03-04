@@ -70,32 +70,25 @@ The agent hosts an executor that serves multiple users (including the agent itse
 
 - **Multi-user mode required** — each user gets their own DID + JWT after signup/login
 - **Email/password authentication** — users authenticate via MCP `signup`/`login_email` tools
-- **TLS/HTTPS required if remote** — for production, secure with reverse proxy (nginx, Caddy)
-- **Example:**
-  ```bash
-  ad4m-executor run --app-data-path ~/.ad4m-server \
-    --admin-credential <admin-secret> \
-    --enable-mcp true --mcp-port 3001 \
-    --multi-user true
-  ```
-  
-  Then use nginx or Caddy to provide HTTPS:
-  ```nginx
-  server {
-      listen 443 ssl http2;
-      server_name ad4m.example.com;
-      
-      ssl_certificate /path/to/fullchain.pem;
-      ssl_certificate_key /path/to/privkey.pem;
-      
-      location /mcp {
-          proxy_pass http://localhost:3001/mcp;
-          proxy_http_version 1.1;
-          proxy_set_header Upgrade $http_upgrade;
-          proxy_set_header Connection "upgrade";
-      }
-  }
-  ```
+- **TLS/HTTPS required if remote** — provide certificates directly to AD4M or use a reverse proxy
+
+**Basic example:**
+```bash
+ad4m-executor run --app-data-path ~/.ad4m-server \
+  --admin-credential <admin-secret> \
+  --enable-mcp true --mcp-port 3001 \
+  --multi-user true \
+  --tls-cert /path/to/fullchain.pem \
+  --tls-key /path/to/privkey.pem
+```
+
+This serves HTTPS directly from AD4M. Alternatively, use a reverse proxy (nginx, Caddy) to terminate TLS and proxy to localhost HTTP.
+
+**Email verification (SMTP setup):**
+- **SMTP not configured** — users log in with email string + password only (no verification email sent)
+- **SMTP configured** — verification emails are sent on signup (via launcher Settings → SMTP or `--smtp-*` CLI flags)
+
+The SMTP configuration is optional — multi-user mode works without it, just without email-based account verification. For production deployments serving external users, SMTP is recommended.
 
 **When to use:** Agent provides AD4M access to multiple humans, or agent needs to interact with human users' perspectives.
 
