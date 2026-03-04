@@ -128,6 +128,83 @@ curl -s http://localhost:12100/graphql \
 # Expected: {"data":{"agentStatus":{"isInitialized":true,"isUnlocked":true,"did":"did:key:z6Mk..."}}}
 ```
 
+## Deployment Scenarios & Networking
+
+### Scenario 1: Single-user, local (simplest)
+
+Agent and executor on the same machine. No TLS needed.
+
+```bash
+ad4m-executor run --app-data-path ~/.ad4m --gql-port 12100 \
+  --admin-credential mysecret --enable-mcp true
+# MCP at http://localhost:3001/mcp
+# GraphQL at http://localhost:12100/graphql
+```
+
+### Scenario 2: Agent connects to remote executor
+
+Agent on machine A, executor on machine B (LAN or internet). MCP works over plain HTTP for agent-to-agent connections. **Flux UI (browser) requires TLS for non-localhost connections.**
+
+**Option A: SSH tunnel (no TLS needed, simplest for agents)**
+```bash
+# On agent machine — forward both GraphQL and MCP ports
+ssh -L 12100:localhost:12100 -L 3001:localhost:3001 user@executor-host
+# Now agent connects to localhost:12100 / localhost:3001 as if local
+```
+
+**Option B: Caddy reverse proxy (auto TLS, needed for Flux UI)**
+```bash
+# On executor machine — install Caddy, then:
+caddy reverse-proxy --from ad4m.yourdomain.com --to localhost:12100
+# Flux connects to https://ad4m.yourdomain.com
+# Requires: domain name pointing to executor IP, ports 80/443 open
+```
+
+**Option C: Cloudflare Tunnel (no port forwarding, free TLS)**
+```bash
+# On executor machine
+cloudflared tunnel --url http://localhost:12100
+# Gives you a public https://xxx.trycloudflare.com URL
+# Works for both Flux and agents
+```
+
+### Scenario 3: Multi-user (humans via Flux + agents via MCP)
+
+Requires `--enable-multi-user true`. Each user authenticates separately.
+
+**⚠️ Flux (browser) REQUIRES TLS for non-localhost.** Browsers block mixed content and WebSocket connections to insecure origins. You MUST use one of:
+- Caddy/nginx reverse proxy with TLS cert
+- Cloudflare Tunnel
+- SSH tunnel (makes it appear as localhost on the client)
+- Self-signed cert via `mkcert` (install CA on all client devices)
+
+```bash
+ad4m-executor run --app-data-path ~/.ad4m --gql-port 12100 \
+  --admin-credential mysecret --enable-mcp true \
+  --enable-multi-user true
+```
+
+**Agent auth flow (MCP):**
+1. `request_capability` → get `request_id` + `code`
+2. Admin approves (or auto-approve with admin credential)
+3. `generate_jwt` with `request_id` + `code` → get JWT token
+4. All subsequent requests include the JWT
+
+**Human auth flow (Flux):**
+1. Open Flux UI → enter executor URL (must be HTTPS)
+2. Email verification or admin approval
+3. Flux stores JWT in browser
+
+### Quick Decision Guide
+
+| Who connects? | Where? | TLS needed? | Recommended setup |
+|---------------|--------|-------------|-------------------|
+| Just your agent | Same machine | No | Scenario 1 (local) |
+| Just your agent | Remote | No | SSH tunnel |
+| Agent + Flux UI | Same machine | No | Scenario 1 |
+| Agent + Flux UI | Remote/LAN | **Yes (for Flux)** | Caddy + domain, or Cloudflare Tunnel |
+| Multiple users | Remote | **Yes** | Caddy + domain + multi-user flag |
+
 ## Directory Structure
 
 After init + generate, `--app-data-path` contains:
