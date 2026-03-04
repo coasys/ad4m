@@ -1,5 +1,7 @@
 # AD4M Executor Memory Leak Analysis & Refactoring Plan
 
+> **Note:** This plan was written against the pre-#693 architecture. Some details may be outdated.
+
 **Date:** 2026-02-21  
 **Author:** Hex (Agent), based on memory profiling results  
 **For:** Nico (lucksus)

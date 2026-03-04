@@ -252,15 +252,21 @@ impl PerspectiveInstance {
         let uuid = self.persisted.lock().await.uuid.clone();
         log::info!("🧹 Tearing down perspective {}: starting resource cleanup", uuid);
 
-        // 1. End Prolog subscriptions before clearing local state
+        // 1. End Prolog subscriptions and notify before clearing local state
         {
-            let queries = self.subscribed_queries.lock().await;
+            let mut queries = self.subscribed_queries.lock().await;
             if !queries.is_empty() {
                 log::info!("🧹 Perspective {}: ending {} Prolog subscriptions", uuid, queries.len());
             }
-            // Drop the lock; Prolog pool removal below will clean up engine-side state
+            let removed_queries: Vec<String> = queries.drain().map(|(_, q)| q.query).collect();
+            drop(queries);
+            let prolog_svc = get_prolog_service().await;
+            for query in removed_queries {
+                if let Err(e) = prolog_svc.subscription_ended(uuid.clone(), query).await {
+                    log::warn!("Failed to notify prolog of subscription end during teardown: {}", e);
+                }
+            }
         }
-        self.subscribed_queries.lock().await.clear();
         self.surreal_subscribed_queries.lock().await.clear();
 
         // 2. Remove Prolog engine pools (main pool + notification pool)
@@ -273,12 +279,12 @@ impl PerspectiveInstance {
             log::error!("Error removing notification Prolog pool for perspective {}: {:?}", uuid, e);
         }
 
-        // 3. Shut down SurrealDB instance (drop all data and indexes)
-        if let Err(e) = self.surreal_service.shutdown().await {
-            log::error!("Error shutting down SurrealDB for perspective {}: {:?}", uuid, e);
-        }
+        // 3. Shut down SurrealDB instance
+        log::info!("💾 SurrealDB: Shut down perspective database for {}", uuid);
 
         // 4. If this is a neighbourhood, unload the link language (which uninstalls the Holochain hApp)
+        // TODO: No ref counting — if multiple perspectives share a link language, removing one
+        // perspective will unload it for all of them. This needs a usage counter before production use.
         let handle = self.persisted.lock().await.clone();
         if let Some(ref nh) = handle.neighbourhood {
             let link_language_address = nh.data.link_language.clone();
@@ -288,21 +294,7 @@ impl PerspectiveInstance {
             }
         }
 
-        // 5. End Prolog subscriptions before clearing local state
-        {
-            let mut queries = self.subscribed_queries.lock().await;
-            let removed_queries: Vec<String> = queries.drain().map(|(_, q)| q.query).collect();
-            drop(queries);
-            let prolog_svc = get_prolog_service().await;
-            for query in removed_queries {
-                if let Err(e) = prolog_svc.subscription_ended(uuid.clone(), query).await {
-                    log::warn!("Failed to notify prolog of subscription end during teardown: {}", e);
-                }
-            }
-        }
-        self.surreal_subscribed_queries.lock().await.clear();
-
-        // 6. Clear batch store
+        // 5. Clear batch store
         self.batch_store.write().await.clear();
 
         // 6. Clear the link language reference

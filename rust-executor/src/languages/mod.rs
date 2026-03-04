@@ -1017,7 +1017,7 @@ impl LanguageController {
         }
     }
 
-        /// Read and template a Holochain DNA from language source lines.
+    /// Read and template a Holochain DNA from language source lines.
     /// Port of JS readAndTemplateHolochainDNA method.
     async fn read_and_template_holochain_dna(
         &self,
