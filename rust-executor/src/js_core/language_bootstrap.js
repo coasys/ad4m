@@ -259,11 +259,13 @@ async function initLanguage(contextJson) {
     const holochainDelegate = createHolochainDelegate(languageAddress);
     const ad4mSignal = createAd4mSignal(languageAddress);
 
-    // Build an agent proxy that exposes static properties (did, signingKeyId)
-    // and delegates method calls to the global AGENT ops provided by agent_extension.
+    // Build an agent proxy that delegates to the global AGENT ops.
+    // `did` and `signingKeyId` are getters so they reflect the current
+    // thread-local AgentContext (which may be a managed user's context
+    // when expression_create runs with a user agent context).
     const agentProxy = {
-        did: context.agent.did,
-        signingKeyId: context.agent.signingKeyId,
+        get did() { return AGENT.did(); },
+        get signingKeyId() { return AGENT.signingKeyId(); },
         createSignedExpression: (data) => AGENT.createSignedExpression(data),
         sign: (payload) => AGENT.sign(payload),
         signStringHex: (payload) => AGENT.signStringHex(payload),

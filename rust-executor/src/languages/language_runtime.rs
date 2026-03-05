@@ -1,8 +1,61 @@
+use crate::agent::AgentContext;
 use crate::js_core::JsCore;
 use log::{debug, error, info, warn};
 use serde_json::Value as JsonValue;
+use std::cell::RefCell;
 use std::path::PathBuf;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
+
+// ---------------------------------------------------------------------------
+// Per-thread agent context for language runtimes
+// ---------------------------------------------------------------------------
+//
+// CURRENT DESIGN (one language runtime per language, shared across users):
+//
+// Each language runtime runs in its own dedicated thread and processes
+// requests sequentially. When an operation needs to run as a specific user
+// (e.g. publishing a managed user's agent profile), the caller passes an
+// AgentContext through the channel. Before executing the script, the runtime
+// sets this thread-local to the caller's context. The Deno ops (agent_did,
+// agent_sign, agent_create_signed_expression, agent_signing_key_id) read
+// from this thread-local, so the JS code sees the correct DID and signs
+// with the correct key. After execution, the context resets to main_agent().
+//
+// The JS-side `agentProxy` in language_bootstrap.js uses getters for `did`
+// and `signingKeyId` that call back into these ops, so they dynamically
+// reflect the current thread-local context rather than caching the init-time
+// values.
+//
+// FUTURE REFACTOR (one language runtime per user per language):
+//
+// When languages are spawned per user, each runtime would have a fixed
+// AgentContext set once at construction time (no need for thread-local
+// switching). The changes needed:
+//   1. Remove the thread-local and set/get helpers below
+//   2. Store AgentContext as a field on LanguageRuntime
+//   3. Pass it to JsCore or set it once in process_requests() init
+//   4. The agentProxy getters in language_bootstrap.js would still work
+//      (they call ops which would read from the runtime's fixed context)
+//   5. LanguageController would manage runtimes keyed by (address, user)
+//      instead of just address
+//   6. execute_on_language_with_context() could route to the correct
+//      per-user runtime instead of overriding the thread-local
+// ---------------------------------------------------------------------------
+thread_local! {
+    static CURRENT_AGENT_CONTEXT: RefCell<AgentContext> = RefCell::new(AgentContext::main_agent());
+}
+
+/// Set the agent context for the current language runtime thread.
+pub fn set_runtime_agent_context(ctx: &AgentContext) {
+    CURRENT_AGENT_CONTEXT.with(|c| {
+        *c.borrow_mut() = ctx.clone();
+    });
+}
+
+/// Get the agent context for the current language runtime thread.
+pub fn get_runtime_agent_context() -> AgentContext {
+    CURRENT_AGENT_CONTEXT.with(|c| c.borrow().clone())
+}
 
 /// Request sent to a LanguageRuntime via its channel
 #[derive(Debug)]
@@ -14,7 +67,7 @@ pub(crate) struct LanguageRuntimeRequest {
 /// Operations that can be sent to a LanguageRuntime
 #[derive(Debug)]
 pub(crate) enum LanguageOperation {
-    Execute(String),
+    Execute(String, AgentContext),
     LoadModule(String),
     LoadLanguage(JsonValue),
     RegisterCallbacks,
@@ -224,7 +277,12 @@ impl LanguageRuntime {
                                 debug!("[lang:{}] Processing operation: {:?}", addr, request.operation);
 
                                 let result = match request.operation {
-                                    LanguageOperation::Execute(script) => self.execute(&script).await,
+                                    LanguageOperation::Execute(script, ref agent_ctx) => {
+                                        set_runtime_agent_context(agent_ctx);
+                                        let r = self.execute(&script).await;
+                                        set_runtime_agent_context(&AgentContext::main_agent());
+                                        r
+                                    }
                                     LanguageOperation::LoadModule(path) => {
                                         self.load_module(&path).await.map(|_| String::new())
                                     }
