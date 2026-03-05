@@ -169,6 +169,9 @@ export class SHACLShape {
   /** AD4M-specific: Destructor actions for removing instances */
   destructor_actions?: AD4MAction[];
 
+  /** Parent shape URIs for model inheritance (sh:node references) */
+  parentShapes: string[];
+
   /**
    * Create a new SHACL Shape
    * @param targetClassOrShapeUri - If one argument: the target class (shape URI auto-derived as {class}Shape)
@@ -189,6 +192,19 @@ export class SHACLShape {
       this.nodeShapeUri = `${namespace}${localName}Shape`;
     }
     this.properties = [];
+    this.parentShapes = [];
+  }
+
+  /**
+   * Add a parent shape reference (sh:node) for model inheritance.
+   * When a @Model class extends another @Model, the child shape
+   * references the parent shape so SHACL validators can walk the
+   * class hierarchy.
+   */
+  addParentShape(parentShapeUri: string): void {
+    if (!this.parentShapes.includes(parentShapeUri)) {
+      this.parentShapes.push(parentShapeUri);
+    }
   }
 
   /**
@@ -226,6 +242,11 @@ export class SHACLShape {
     
     if (this.targetClass) {
       turtle += `  sh:targetClass <${this.targetClass}> ;\n`;
+    }
+
+    // Emit sh:node references for parent shapes (model inheritance)
+    for (const parentUri of this.parentShapes) {
+      turtle += `  sh:node <${parentUri}> ;\n`;
     }
     
     // Add property shapes
@@ -691,6 +712,7 @@ export class SHACLShape {
     return {
       node_shape_uri: this.nodeShapeUri,
       target_class: this.targetClass,
+      parent_shapes: this.parentShapes.length > 0 ? this.parentShapes : undefined,
       properties: this.properties.map(p => ({
         path: p.path,
         name: p.name,
@@ -748,6 +770,11 @@ export class SHACLShape {
     }
     if (json.destructor_actions) {
       shape.destructor_actions = json.destructor_actions;
+    }
+    if (json.parent_shapes) {
+      for (const ps of json.parent_shapes) {
+        shape.addParentShape(ps);
+      }
     }
     
     return shape;
