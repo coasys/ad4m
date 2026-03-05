@@ -2,7 +2,7 @@ import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';
 import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE,
-    InstanceQuery, Subject,
+    Subject,
     Ad4mModel,
     Flag,
     Property,
@@ -94,8 +94,9 @@ describe("Prolog + Literals", () => {
                 })
                 type: string = ""
 
-                @InstanceQuery()
-                static async all(perspective: PerspectiveProxy): Promise<Message[]> { return [] }
+                static async all(perspective: PerspectiveProxy): Promise<Message[]> {
+                    return Message.query(perspective).run() as Promise<Message[]>
+                }
 
                 @Optional({
                     through: "todo://state",
@@ -123,15 +124,17 @@ describe("Prolog + Literals", () => {
                 // parameter on "state" below will have the same effect as the following:
                 // isSubjectInstance = [hasLink("todo://state")]
 
-                //@ts-ignore
-                @InstanceQuery()
-                static async all(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
+                static async all(perspective: PerspectiveProxy): Promise<Todo[]> {
+                    return Todo.query(perspective).run() as Promise<Todo[]>
+                }
 
-                @InstanceQuery({where: {state: "todo://ready"}})
-                static async allReady(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
+                static async allReady(perspective: PerspectiveProxy): Promise<Todo[]> {
+                    return Todo.query(perspective).where({ state: "todo://ready" }).run() as Promise<Todo[]>
+                }
 
-                @InstanceQuery({where: { state: "todo://done" }})
-                static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
+                static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> {
+                    return Todo.query(perspective).where({ state: "todo://done" }).run() as Promise<Todo[]>
+                }
 
                 //@ts-ignore
                 @Property({
