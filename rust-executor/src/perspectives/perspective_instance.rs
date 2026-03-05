@@ -1,9 +1,7 @@
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::parse_shacl_to_links;
 use super::update_perspective;
-use super::utils::{
-    prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string,
-};
+use super::utils::{prolog_get_all_string_bindings, prolog_resolution_to_string};
 use crate::agent::AgentContext;
 use crate::agent::{create_signed_expression, did_for_context};
 use crate::graphql::graphql_types::{
@@ -1669,10 +1667,6 @@ impl PerspectiveInstance {
             .expect("just initialized Literal couldn't be turned into URL");
 
         let mut sdna_links: Vec<Link> = Vec::new();
-
-        // Preserve original Prolog code for SHACL generation if needed
-        let original_prolog_code = sdna_code.clone();
-        let perspective_uuid = self.persisted.lock().await.uuid.clone();
 
         // Check if SHACL definition already exists for this class BEFORE doing anything
         if matches!(sdna_type, SdnaType::SubjectClass) {
@@ -3436,7 +3430,7 @@ impl PerspectiveInstance {
     async fn subject_class_option_to_class_name(
         &mut self,
         subject_class: SubjectClassOption,
-        context: &AgentContext,
+        _context: &AgentContext,
     ) -> Result<String, AnyError> {
         //let method_start = std::time::Instant::now();
         //log::info!("🔍 SUBJECT CLASS: Starting class name resolution...");
@@ -3549,39 +3543,12 @@ impl PerspectiveInstance {
             ))
     }
 
-    async fn get_destructor_actions(&self, class_name: &str) -> Result<Vec<Command>, AnyError> {
-        self.get_shape_actions_from_shacl(class_name, "ad4m://destructor")
-            .await?
-            .ok_or(anyhow!(
-                "No SHACL destructor found for class: {}. Ensure the class has SHACL definitions.",
-                class_name
-            ))
-    }
-
     async fn get_property_setter_actions(
         &self,
         class_name: &str,
         property: &str,
     ) -> Result<Option<Vec<Command>>, AnyError> {
         self.get_property_actions_from_shacl(class_name, property, "ad4m://setter")
-            .await
-    }
-
-    async fn get_collection_adder_actions(
-        &self,
-        class_name: &str,
-        collection: &str,
-    ) -> Result<Option<Vec<Command>>, AnyError> {
-        self.get_property_actions_from_shacl(class_name, collection, "ad4m://adder")
-            .await
-    }
-
-    async fn get_collection_remover_actions(
-        &self,
-        class_name: &str,
-        collection: &str,
-    ) -> Result<Option<Vec<Command>>, AnyError> {
-        self.get_property_actions_from_shacl(class_name, collection, "ad4m://remover")
             .await
     }
 
