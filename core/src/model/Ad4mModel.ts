@@ -79,8 +79,14 @@ export interface IncludeMap {
 
 export type Query = {
   source?: string;
-  /** Filter to instances that are the target of a link from a given parent via a specific predicate */
-  parent?: { id: string; predicate: string };
+  /**
+   * Filter to instances that are the target of a link from a given parent.
+   *
+   * Supply **either** `model` (preferred — predicate auto-resolved from the
+   * parent model's relation metadata) **or** `predicate` (raw escape hatch).
+   * If both are provided, `predicate` wins.
+   */
+  parent?: { id: string; model?: typeof Ad4mModel; predicate?: string };
   properties?: string[];
   collections?: string[];
   include?: IncludeMap;
@@ -168,10 +174,46 @@ function buildSourceQuery(source?: string): string {
   return `triple("${source}", "ad4m://has_child", Base)`;
 }
 
-function buildParentQuery(parent?: { id: string; predicate: string }): string {
-  // Constrains the query to instances linked from a specific parent via a specific predicate
-  if (!parent) return "";
-  return `triple("${parent.id}", "${parent.predicate}", Base)`;
+/**
+ * Resolves the predicate for a parent query.
+ *
+ * Resolution order:
+ * 1. Explicit `predicate` string — used as-is
+ * 2. `model` class — scan its relation metadata for a relation whose
+ *    `target()` matches `childCtor`, use that relation's `predicate`
+ * 3. Neither — throw
+ */
+function resolveParentPredicate(
+  parent: { id: string; model?: { new(...args: any[]): any }; predicate?: string },
+  childCtor: Function,
+): string {
+  if (parent.predicate) return parent.predicate;
+
+  if (parent.model) {
+    const relMeta = getRelationsMetadata(parent.model);
+    for (const [, entry] of Object.entries(relMeta)) {
+      if (entry.target() === childCtor) {
+        return entry.predicate;
+      }
+    }
+    throw new Error(
+      `parent(): could not resolve predicate — no relation on ${parent.model.name} targets ${(childCtor as any).name || 'the queried class'}`,
+    );
+  }
+
+  throw new Error(
+    'parent() requires either a model class or an explicit predicate to resolve the link predicate',
+  );
+}
+
+function buildParentQuery(
+  parent: { id: string; predicate?: string } | undefined,
+  resolvedPredicate?: string,
+): string {
+  if (!parent) return '';
+  const predicate = resolvedPredicate || parent.predicate;
+  if (!predicate) return '';
+  return `triple("${parent.id}", "${predicate}", Base)`;
 }
 
 // todo: only return Timestamp & Author from query (Base, AllLinks, and SortLinks not required)
@@ -1026,10 +1068,15 @@ export class Ad4mModel {
     const { source, properties, collections, where, order, offset, limit, count } = query;
     const className = modelClassName || (await this.getClassName(perspective));
 
+    // Resolve parent predicate from model metadata if needed
+    const resolvedParentPredicate = query.parent
+      ? resolveParentPredicate(query.parent, this)
+      : undefined;
+
     const instanceQueries = [
       buildAuthorAndTimestampQuery(),
       buildSourceQuery(source),
-      buildParentQuery(query.parent),
+      buildParentQuery(query.parent, resolvedParentPredicate),
       buildPropertiesQuery(properties),
       buildCollectionsQuery(collections),
       buildWhereQuery(where),
@@ -1241,9 +1288,9 @@ export class Ad4mModel {
 
     // Add parent filter if specified (filter to nodes linked from a parent via a specific predicate)
     if (query.parent) {
-      const { id: parentId, predicate: parentPredicate } = query.parent;
+      const parentPredicate = resolveParentPredicate(query.parent, this);
       graphTraversalFilters.push(
-        `count(<-link[WHERE perspective = $perspective AND in.uri = ${this.formatSurrealValue(parentId)} AND predicate = '${escapeSurrealString(parentPredicate)}']) > 0`
+        `count(<-link[WHERE perspective = $perspective AND in.uri = ${this.formatSurrealValue(query.parent.id)} AND predicate = '${escapeSurrealString(parentPredicate)}']) > 0`
       );
     }
 
@@ -2309,7 +2356,10 @@ WHERE ${whereConditions.join(' AND ')}
   static async countQueryToProlog(perspective: PerspectiveProxy, query: Query = {}, modelClassName?: string | null) {
     const { source, where } = query;
     const className = modelClassName || (await this.getClassName(perspective));
-    const instanceQueries = [buildAuthorAndTimestampQuery(), buildSourceQuery(source), buildParentQuery(query.parent), buildWhereQuery(where)];
+    const resolvedParentPredicate = query.parent
+      ? resolveParentPredicate(query.parent, this)
+      : undefined;
+    const instanceQueries = [buildAuthorAndTimestampQuery(), buildSourceQuery(source), buildParentQuery(query.parent, resolvedParentPredicate), buildWhereQuery(where)];
     const resultSetQueries = [buildCountQuery(true), buildOrderQuery(), buildOffsetQuery(), buildLimitQuery()];
 
     const fullQuery = `
@@ -3352,33 +3402,50 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /**
-   * Scopes the query to instances linked from a parent via a specific predicate.
+   * Scopes the query to instances linked from a parent.
    *
-   * When called without a `predicate`, defaults to `ad4m://has_child`
-   * (equivalent to `.source()`).  When a predicate is supplied the query
-   * filters to instances that are the target of a link with that predicate
-   * from the given parent.
+   * The predicate is resolved in order of precedence:
+   * 1. **Instance only** — the parent's constructor is used as the model
+   *    class; its relation metadata is scanned for a relation whose
+   *    `target()` matches the queried model class.
+   * 2. **String id + model class** — same metadata scan.
+   * 3. **String id + string predicate** — raw escape hatch, no metadata lookup.
+   *
+   * Passing a plain string id with no second argument throws because the
+   * predicate cannot be resolved without a model class.
    *
    * @param idOrInstance - The parent's expression URI **or** an Ad4mModel instance
-   * @param predicate    - Optional predicate URI (default: `ad4m://has_child`)
+   * @param modelOrPredicate - A model class (predicate auto-resolved) **or** a raw predicate string
    * @returns The query builder for chaining
    *
    * @example
    * ```typescript
-   * // Children of a cookbook (ad4m://has_child)
+   * // Instance — predicate auto-resolved from Cookbook's @HasMany(() => Recipe)
    * Recipe.query(perspective).parent(cookbook).get();
    *
-   * // Comments linked from a post via a custom predicate
-   * Comment.query(perspective).parent(post, "post://comment").get();
-   * Comment.query(perspective).parent(post.id, "post://comment").get();
+   * // String id + model class
+   * Recipe.query(perspective).parent(cookbookId, Cookbook).get();
+   *
+   * // String id + raw predicate (escape hatch)
+   * Recipe.query(perspective).parent(cookbookId, "cookbook://recipe").get();
    * ```
    */
-  parent(idOrInstance: string | Ad4mModel, predicate?: string): ModelQueryBuilder<T> {
+  parent(idOrInstance: string | Ad4mModel, modelOrPredicate?: typeof Ad4mModel | string): ModelQueryBuilder<T> {
     const id = typeof idOrInstance === 'string' ? idOrInstance : idOrInstance.id;
-    if (predicate) {
-      this.queryParams.parent = { id, predicate };
+
+    if (typeof modelOrPredicate === 'string') {
+      // Raw predicate string
+      this.queryParams.parent = { id, predicate: modelOrPredicate };
+    } else if (typeof modelOrPredicate === 'function') {
+      // Model class
+      this.queryParams.parent = { id, model: modelOrPredicate };
+    } else if (typeof idOrInstance !== 'string') {
+      // Ad4mModel instance — derive model class from constructor
+      this.queryParams.parent = { id, model: idOrInstance.constructor as typeof Ad4mModel };
     } else {
-      this.queryParams.source = id;
+      throw new Error(
+        'parent() called with a string id requires a second argument: either a model class or a predicate string',
+      );
     }
     return this;
   }
