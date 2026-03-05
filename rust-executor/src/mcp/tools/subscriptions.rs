@@ -6,7 +6,6 @@
 
 use super::Ad4mMcpHandler;
 use crate::mcp::shacl;
-use crate::perspectives::get_perspective;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

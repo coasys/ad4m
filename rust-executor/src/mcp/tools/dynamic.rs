@@ -755,7 +755,7 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let agent_context = match self.get_agent_context().await {
+        let _agent_context = match self.get_agent_context().await {
             Ok(ctx) => ctx,
             Err(e) => return format!("Authentication error: {}", e),
         };

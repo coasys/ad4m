@@ -4,7 +4,6 @@
 
 use super::Ad4mMcpHandler;
 use crate::graphql::graphql_types::LinkQuery;
-use crate::perspectives::get_perspective;
 use crate::perspectives::perspective_instance::SdnaType;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;

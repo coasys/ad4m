@@ -30,13 +30,6 @@ pub mod profiles;
 pub mod subjects;
 pub mod subscriptions;
 
-// Re-export param types for backward compatibility
-pub use auth::*;
-pub use flows::*;
-pub use perspectives::*;
-pub use profiles::*;
-pub use subjects::*;
-pub use subscriptions::*;
 
 use super::server::McpContext;
 use crate::agent::capabilities::{
@@ -47,10 +40,10 @@ use crate::graphql::graphql_types::PerspectiveHandle;
 use crate::perspectives::get_perspective;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext},
     model::{
         CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult,
-        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo,
         ToolsCapability,
     },
     service::RequestContext,
@@ -268,10 +261,6 @@ impl Ad4mMcpHandler {
         }
     }
 
-    fn get_tool(&self, name: &str) -> Option<Tool> {
-        self.tool_router.get(name).cloned()
-    }
-
     // ========================================================================
     // Shared Helpers
     // ========================================================================
@@ -466,15 +455,6 @@ impl Ad4mMcpHandler {
             })
             .await
             .unwrap_or_default()
-    }
-
-    /// Escape string for safe use in Prolog queries
-    pub(crate) fn escape_prolog_string(s: &str) -> String {
-        s.replace('\\', "\\\\")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-            .replace('"', "\\\"")
-            .replace('\'', "\\'")
     }
 
     /// Resolve a property name to its predicate URI using SHACL shape links.

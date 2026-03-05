@@ -4,10 +4,10 @@
 
 use super::Ad4mMcpHandler;
 use crate::agent::capabilities::defs::PERSPECTIVE_CREATE_CAPABILITY;
-use crate::graphql::graphql_types::{LinkQuery, LinkStatus, PerspectiveHandle, PerspectiveState};
-use crate::perspectives::perspective_instance::{SdnaType, SubjectClassOption};
+use crate::graphql::graphql_types::{LinkQuery, LinkStatus, PerspectiveHandle};
+use crate::perspectives::perspective_instance::SdnaType;
 use crate::perspectives::utils::prolog_resolution_to_string;
-use crate::perspectives::{add_perspective, all_perspectives, get_perspective};
+use crate::perspectives::{add_perspective, all_perspectives};
 use crate::types::Link;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;

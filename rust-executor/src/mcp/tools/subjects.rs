@@ -4,7 +4,6 @@
 
 use super::Ad4mMcpHandler;
 use crate::graphql::graphql_types::{LinkQuery, LinkStatus};
-use crate::perspectives::get_perspective;
 use crate::perspectives::perspective_instance::{Command, Parameter, SubjectClassOption};
 use crate::types::Link;
 use rmcp::{handler::server::wrapper::Parameters, tool};
@@ -640,7 +639,7 @@ impl Ad4mMcpHandler {
         let p = &params.0;
 
         match self.get_writable_perspective(&p.perspective_id).await {
-            Ok((mut perspective, agent_context)) => {
+            Ok((mut perspective, _agent_context)) => {
                 let predicate = match self
                     .resolve_property_predicate(&perspective, &p.class_name, &p.collection_name)
                     .await
@@ -761,7 +760,7 @@ impl Ad4mMcpHandler {
         let p = &params.0;
 
         match self.get_writable_perspective(&p.perspective_id).await {
-            Ok((mut perspective, agent_context)) => {
+            Ok((mut perspective, _agent_context)) => {
                 let source_links = perspective
                     .get_links(&LinkQuery {
                         source: Some(p.expression_address.clone()),
