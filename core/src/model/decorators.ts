@@ -310,85 +310,12 @@ export interface PropertyOptions {
 
 
 /**
- * Decorator for defining optional properties on model classes.
- * 
- * @category Decorators
- * 
- * @description
- * The most flexible property decorator that allows you to define properties with full control over:
- * - Whether the property is required
- * - Whether the property is writable
- * - How values are stored and retrieved
- * - Custom getter/setter logic
- * - Local vs network storage
- * 
- * Both @Property and @ReadOnly are specialized versions of @Optional with preset configurations.
- * 
- * @example
- * ```typescript
- * class Recipe extends Ad4mModel {
- *   // Basic optional property
- *   @Optional({
- *     through: "recipe://description"
- *   })
- *   description?: string;
- * 
- *   // Optional property with custom initial value
- *   @Optional({
- *     through: "recipe://status",
- *     initial: "recipe://draft",
- *     required: true
- *   })
- *   status: string = "";
- * 
- *   // Read-only property with custom getter
- *   @Optional({
- *     through: "recipe://rating",
- *     readOnly: true,
- *     getter: `
- *       findall(Rating, triple(Base, "recipe://user_rating", Rating), Ratings),
- *       sum_list(Ratings, Sum),
- *       length(Ratings, Count),
- *       Value is Sum / Count
- *     `
- *   })
- *   averageRating: number = 0;
- * 
- *   // Property that resolves to a Literal and is stored locally
- *   @Optional({
- *     through: "recipe://notes",
- *     resolveLanguage: "literal",
- *     local: true
- *   })
- *   notes?: string;
- * 
- *   // Property with custom getter and setter logic
- *   @Optional({
- *     through: "recipe://ingredients",
- *     getter: `
- *       triple(Base, "recipe://ingredients", RawValue),
- *       atom_json_term(RawValue, Value)
- *     `,
- *     setter: `
- *       atom_json_term(Value, JsonValue),
- *       Actions = [{"action": "setSingleTarget", "source": "this", "predicate": "recipe://ingredients", "target": JsonValue}]
- *     `
- *   })
- *   ingredients: string[] = [];
- * }
- * ```
- * 
- * @param {PropertyOptions} opts - Property configuration options
- * @param {string} opts.through - The predicate URI for the property
- * @param {string} [opts.initial] - Initial value (required if property is required)
- * @param {boolean} [opts.required] - Whether the property must have a value
- * @param {boolean} [opts.readOnly=false] - Whether the property is read-only (no setter generated)
- * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
- * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
- * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
- * @param {boolean} [opts.local] - Whether the property should only be stored locally
+ * Internal core implementation for registering property metadata on the prototype.
+ * All property decorators (@Property, @Optional, @ReadOnly) and relation decorators
+ * that create properties delegate to this function.
+ * @internal
  */
-export function Optional(opts: PropertyOptions) {
+function applyPropertyMetadata(opts: PropertyOptions) {
     return function <T>(target: T, key: keyof T) {
         // Map readOnly → internal writable for SDNA/SHACL compatibility
         const writable = opts.readOnly ? false : (opts.through ? true : false);
@@ -412,6 +339,34 @@ export function Optional(opts: PropertyOptions) {
 
         Object.defineProperty(target, key, {configurable: true, writable: true});
     };
+}
+
+/**
+ * Convenience decorator for defining optional (not required) properties.
+ *
+ * @category Decorators
+ *
+ * @description
+ * Equivalent to `@Property` but defaults `required` to `false` and does not
+ * apply `resolveLanguage` or `initial` defaults.  Use this when a property
+ * may or may not have a value, and you want full control over its configuration.
+ *
+ * @example
+ * ```typescript
+ * class Recipe extends Ad4mModel {
+ *   @Optional({ through: "recipe://description" })
+ *   description?: string;
+ * }
+ * ```
+ *
+ * @param {PropertyOptions} opts - Property configuration (same options as @Property)
+ */
+export function Optional(opts: PropertyOptions) {
+    return applyPropertyMetadata({
+        ...opts,
+        required: opts.required ?? false,
+        readOnly: opts.readOnly ?? false,
+    });
 }
 
 export interface FlagOptions {
@@ -1086,18 +1041,19 @@ export function Model(opts: ModelConfig) {
 }
 
 /**
- * Decorator for defining required and writable properties on model classes.
+ * The primary property decorator for AD4M model classes.
  * 
  * @category Decorators
  * 
  * @description
- * A convenience decorator that defines a required property that must have an initial value and is writable by default.
- * This is equivalent to using @Optional with `required: true` and `writable: true`.
+ * The core property decorator with smart defaults.  All other property decorators
+ * (@Optional, @ReadOnly) are thin wrappers that adjust these defaults.
  * 
- * Properties defined with this decorator:
- * - Must have a value (required)
- * - Can be modified after creation (writable)
- * - Default to "literal://string:uninitialized" if no initial value is provided
+ * Smart defaults (all overridable):
+ * - `required` → `true`
+ * - `readOnly` → `false`
+ * - `resolveLanguage` → `"literal"`
+ * - `initial` → `"literal://string:uninitialized"` (when required)
  * 
  * @example
  * ```typescript
@@ -1141,12 +1097,13 @@ export function Model(opts: ModelConfig) {
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function Property(opts: PropertyOptions) {
-    return Optional({
+    const required = opts.required ?? true;
+    return applyPropertyMetadata({
         ...opts,
-        required: true,
-        readOnly: false,
-        resolveLanguage: opts.resolveLanguage || "literal",
-        initial: opts.initial || "literal://string:uninitialized"
+        required,
+        readOnly: opts.readOnly ?? false,
+        resolveLanguage: opts.resolveLanguage ?? "literal",
+        initial: opts.initial ?? (required ? "literal://string:uninitialized" : undefined),
     });
 }
 
@@ -1156,8 +1113,8 @@ export function Property(opts: PropertyOptions) {
  * @category Decorators
  * 
  * @description
- * A convenience decorator that defines a property that can only be read and cannot be modified after initialization.
- * This is equivalent to using @Optional with `writable: false`.
+ * A convenience decorator that defines a read-only property.
+ * Equivalent to `@Property` with `readOnly: true`.
  * 
  * Read-only properties are ideal for:
  * - Computed or derived values
@@ -1206,9 +1163,9 @@ export function Property(opts: PropertyOptions) {
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function ReadOnly(opts: PropertyOptions) {
-    return Optional({
+    return applyPropertyMetadata({
         ...opts,
-        readOnly: true
+        readOnly: true,
     });
 }
 
@@ -1326,7 +1283,7 @@ export function HasOne(opts: RelationOptions) {
         };
 
         // Register as a writable property
-        Optional({
+        applyPropertyMetadata({
             through: opts.through,
             readOnly: false,
             local: opts.local,
@@ -1361,7 +1318,7 @@ export function BelongsToOne(opts: RelationOptions) {
         };
 
         // Read-only property (the owning side manages the link)
-        Optional({
+        applyPropertyMetadata({
             through: opts.through,
             readOnly: true,
             local: opts.local,
