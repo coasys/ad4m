@@ -1256,6 +1256,23 @@ export type HasManyMethods<Keys extends string> = {
 };
 
 /**
+ * Resolve overloaded relation decorator arguments.
+ * Supports two calling conventions:
+ *   @HasMany({ through: "...", target: () => X })       — single options object
+ *   @HasMany(() => X, { through: "..." })                — target thunk + options
+ * @internal
+ */
+function resolveRelationArgs(
+    first: (() => Ad4mModelLike) | RelationOptions,
+    second?: Omit<RelationOptions, 'target'>,
+): RelationOptions {
+    if (typeof first === 'function') {
+        return { ...second!, target: first };
+    }
+    return first;
+}
+
+/**
  * Decorator for defining a one-to-many relation.
  *
  * @category Decorators
@@ -1266,16 +1283,31 @@ export type HasManyMethods<Keys extends string> = {
  * creates the corresponding `@Collection` entry so that the SDNA / SHACL
  * generators continue to emit the correct subject-class code.
  *
+ * Supports two calling conventions:
+ * ```typescript
+ * // Options-object style
+ * @HasMany({ through: "post://comment", target: () => Comment })
+ *
+ * // Target-first shorthand
+ * @HasMany(() => Comment, { through: "post://comment" })
+ * ```
+ *
  * @example
  * ```typescript
  * @Model({ name: "Post" })
  * class Post extends Ad4mModel {
- *   @HasMany({ through: "post://comment", target: () => Comment })
+ *   @HasMany(() => Comment, { through: "post://comment" })
  *   comments: string[] = [];
  * }
  * ```
  */
-export function HasMany(opts: RelationOptions) {
+export function HasMany(opts: RelationOptions): PropertyDecorator;
+export function HasMany(target: () => Ad4mModelLike, opts: Omit<RelationOptions, 'target'>): PropertyDecorator;
+export function HasMany(
+    first: (() => Ad4mModelLike) | RelationOptions,
+    second?: Omit<RelationOptions, 'target'>,
+): PropertyDecorator {
+    const opts = resolveRelationArgs(first, second);
     return function <T>(target: T, key: keyof T) {
         // --- relation registry ---
         const ctor = (target as any).constructor;
@@ -1310,16 +1342,32 @@ export function HasMany(opts: RelationOptions) {
  *
  * @category Decorators
  *
+ * @description
+ * Declares that the decorated property holds a single related model instance.
+ * The owning side manages the link.
+ *
+ * Supports two calling conventions:
+ * ```typescript
+ * @HasOne({ through: "post://author", target: () => Author })
+ * @HasOne(() => Author, { through: "post://author" })
+ * ```
+ *
  * @example
  * ```typescript
  * @Model({ name: "Post" })
  * class Post extends Ad4mModel {
- *   @HasOne({ through: "post://author", target: () => Author })
+ *   @HasOne(() => Author, { through: "post://author" })
  *   author: string = "";
  * }
  * ```
  */
-export function HasOne(opts: RelationOptions) {
+export function HasOne(opts: RelationOptions): PropertyDecorator;
+export function HasOne(target: () => Ad4mModelLike, opts: Omit<RelationOptions, 'target'>): PropertyDecorator;
+export function HasOne(
+    first: (() => Ad4mModelLike) | RelationOptions,
+    second?: Omit<RelationOptions, 'target'>,
+): PropertyDecorator {
+    const opts = resolveRelationArgs(first, second);
     return function <T>(target: T, key: keyof T) {
         const ctor = (target as any).constructor;
         if (!relationRegistry.has(ctor)) relationRegistry.set(ctor, {});
@@ -1345,16 +1393,32 @@ export function HasOne(opts: RelationOptions) {
  *
  * @category Decorators
  *
+ * @description
+ * Declares the non-owning (inverse) side of a one-to-one relationship.
+ * The property is read-only since the owning side manages the link.
+ *
+ * Supports two calling conventions:
+ * ```typescript
+ * @BelongsToOne({ through: "post://author", target: () => Post })
+ * @BelongsToOne(() => Post, { through: "post://author" })
+ * ```
+ *
  * @example
  * ```typescript
  * @Model({ name: "Author" })
  * class Author extends Ad4mModel {
- *   @BelongsToOne({ through: "post://author", target: () => Post })
+ *   @BelongsToOne(() => Post, { through: "post://author" })
  *   post: string = "";
  * }
  * ```
  */
-export function BelongsToOne(opts: RelationOptions) {
+export function BelongsToOne(opts: RelationOptions): PropertyDecorator;
+export function BelongsToOne(target: () => Ad4mModelLike, opts: Omit<RelationOptions, 'target'>): PropertyDecorator;
+export function BelongsToOne(
+    first: (() => Ad4mModelLike) | RelationOptions,
+    second?: Omit<RelationOptions, 'target'>,
+): PropertyDecorator {
+    const opts = resolveRelationArgs(first, second);
     return function <T>(target: T, key: keyof T) {
         const ctor = (target as any).constructor;
         if (!relationRegistry.has(ctor)) relationRegistry.set(ctor, {});
@@ -1380,16 +1444,32 @@ export function BelongsToOne(opts: RelationOptions) {
  *
  * @category Decorators
  *
+ * @description
+ * Declares the non-owning (inverse) side of a many-to-many relationship.
+ * The property is a read-only collection since the owning side manages links.
+ *
+ * Supports two calling conventions:
+ * ```typescript
+ * @BelongsToMany({ through: "post://tag", target: () => Post })
+ * @BelongsToMany(() => Post, { through: "post://tag" })
+ * ```
+ *
  * @example
  * ```typescript
  * @Model({ name: "Tag" })
  * class Tag extends Ad4mModel {
- *   @BelongsToMany({ through: "post://tag", target: () => Post })
+ *   @BelongsToMany(() => Post, { through: "post://tag" })
  *   posts: string[] = [];
  * }
  * ```
  */
-export function BelongsToMany(opts: RelationOptions) {
+export function BelongsToMany(opts: RelationOptions): PropertyDecorator;
+export function BelongsToMany(target: () => Ad4mModelLike, opts: Omit<RelationOptions, 'target'>): PropertyDecorator;
+export function BelongsToMany(
+    first: (() => Ad4mModelLike) | RelationOptions,
+    second?: Omit<RelationOptions, 'target'>,
+): PropertyDecorator {
+    const opts = resolveRelationArgs(first, second);
     return function <T>(target: T, key: keyof T) {
         const ctor = (target as any).constructor;
         if (!relationRegistry.has(ctor)) relationRegistry.set(ctor, {});
