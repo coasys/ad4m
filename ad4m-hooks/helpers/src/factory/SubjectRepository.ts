@@ -4,6 +4,7 @@ import {
   Subject,
   Literal,
   LinkQuery,
+  getPropertiesMetadata,
 } from "@coasys/ad4m";
 import { setProperties } from "./model";
 import { v4 as uuidv4 } from "uuid";
@@ -133,9 +134,10 @@ export class SubjectRepository<SubjectClass extends { [x: string]: any }> {
     let data: any = await this.perspective.getSubjectData(this.subject, entry.baseExpression)
 
     for (const key in data) {
-      if (this.tempSubject.prototype?.__properties[key]?.transform) {
-        data[key] =
-          this.tempSubject.prototype.__properties[key].transform(data[key]);
+      const propsMeta = getPropertiesMetadata(this.tempSubject);
+      const transform = propsMeta[key]?.transform ?? this.tempSubject.prototype?.__properties?.[key]?.transform;
+      if (transform) {
+        data[key] = transform(data[key]);
       }
     }
 

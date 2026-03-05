@@ -1,7 +1,7 @@
 import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { makeRandomId, PropertyOptions, CollectionOptions, Model } from "./decorators";
+import { makeRandomId, PropertyOptions, CollectionOptions, Model, getPropertiesMetadata, getCollectionsMetadata, setPropertyRegistryEntry, setCollectionRegistryEntry, PropertyMetadataEntry } from "./decorators";
 import { singularToPlural, pluralToSingular, propertyNameToSetterName, collectionToAdderName, collectionToRemoverName, collectionToSetterName } from "./util";
 import { escapeSurrealString } from "../utils";
 
@@ -502,9 +502,10 @@ export class Ad4mModel {
     // Extract className
     const className = prototype.className;
     
-    // Extract properties from prototype.__properties
+    // Extract properties from WeakMap registry (with __properties fallback for dynamic classes)
     const propertiesMetadata: Record<string, PropertyMetadata> = {};
-    const prototypeProperties = prototype.__properties || {};
+    const registryProperties = getPropertiesMetadata(this);
+    const prototypeProperties = Object.keys(registryProperties).length > 0 ? registryProperties : (prototype.__properties || {});
     
     for (const [propertyName, opts] of Object.entries(prototypeProperties)) {
       const options = opts as PropertyOptions & { required?: boolean; flag?: boolean; writable?: boolean };
@@ -524,9 +525,10 @@ export class Ad4mModel {
       };
     }
     
-    // Extract collections from prototype.__collections
+    // Extract collections from WeakMap registry (with __collections fallback for dynamic classes)
     const collectionsMetadata: Record<string, CollectionMetadata> = {};
-    const prototypeCollections = prototype.__collections || {};
+    const registryCollections = getCollectionsMetadata(this);
+    const prototypeCollections = Object.keys(registryCollections).length > 0 ? registryCollections : (prototype.__collections || {});
     
     for (const [collectionName, opts] of Object.entries(prototypeCollections)) {
       const options = opts as CollectionOptions;
@@ -635,6 +637,10 @@ export class Ad4mModel {
    * @private
    */
   private getPropertyMetadata(key: string): PropertyOptions | undefined {
+    const ctor = this.constructor;
+    const props = getPropertiesMetadata(ctor);
+    if (props[key]) return props[key];
+    // Fallback to prototype for dynamic classes
     const proto = Object.getPrototypeOf(this);
     return proto.__properties?.[key];
   }
@@ -644,6 +650,10 @@ export class Ad4mModel {
    * @private
    */
   private getCollectionMetadata(key: string): CollectionOptions | undefined {
+    const ctor = this.constructor;
+    const colls = getCollectionsMetadata(ctor);
+    if (colls[key]) return colls[key];
+    // Fallback to prototype for dynamic classes
     const proto = Object.getPrototypeOf(this);
     return proto.__collections?.[key];
   }
@@ -750,7 +760,8 @@ export class Ad4mModel {
             }
           }
           // Apply transform function if it exists
-          const transform = instance["__properties"]?.[name]?.transform;
+          const propsMeta = getPropertiesMetadata(instance.constructor);
+          const transform = propsMeta[name]?.transform ?? instance["__properties"]?.[name]?.transform;
           if (transform && typeof transform === "function") {
             finalValue = transform(finalValue);
           }
@@ -2760,7 +2771,15 @@ WHERE ${whereConditions.join(' AND ')}
       console.warn(`No properties with initial values found. Added automatic type flag: ${typeProperty} = ${typeValue}`);
     }
     
-    // Attach metadata to prototype
+    // Attach metadata to WeakMap registries
+    for (const [propName, propMeta] of Object.entries(properties)) {
+      setPropertyRegistryEntry(DynamicModelClass, propName, propMeta as any);
+    }
+    for (const [collName, collMeta] of Object.entries(collections)) {
+      setCollectionRegistryEntry(DynamicModelClass, collName, collMeta as any);
+    }
+    
+    // Legacy: keep __properties/__collections on prototype for backward compatibility
     (DynamicModelClass.prototype as any).__properties = properties;
     (DynamicModelClass.prototype as any).__collections = collections;
     

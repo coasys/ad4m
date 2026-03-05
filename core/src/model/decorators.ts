@@ -12,6 +12,8 @@ import { SHACLShape, SHACLPropertyShape } from "../shacl/SHACLShape";
 
 /** Metadata stored for each property via @Property / @Optional / @ReadOnly / @Flag */
 export interface PropertyMetadataEntry extends PropertyOptions {
+    /** Internal computed writable flag (inverse of readOnly) for SDNA/SHACL compatibility */
+    writable?: boolean;
     flag?: boolean;
 }
 
@@ -32,6 +34,9 @@ const propertyRegistry = new WeakMap<Function, Record<string, PropertyMetadataEn
 
 /** Registry of relation metadata keyed by constructor → { propName → metadata } */
 const relationRegistry = new WeakMap<Function, Record<string, RelationMetadataEntry>>();
+
+/** Registry of collection metadata keyed by constructor → { propName → CollectionOptions } */
+const collectionRegistry = new WeakMap<Function, Record<string, CollectionOptions>>();
 
 /**
  * Retrieve property metadata for a given class constructor.
@@ -69,6 +74,51 @@ export function getRelationsMetadata(ctor: Function): Record<string, RelationMet
         if (meta) Object.assign(result, meta);
     }
     return result;
+}
+
+/**
+ * Retrieve collection metadata for a given class constructor.
+ * Walks the prototype chain so subclass decorators compose with parent decorators.
+ */
+export function getCollectionsMetadata(ctor: Function): Record<string, CollectionOptions> {
+    const result: Record<string, CollectionOptions> = {};
+    const chain: Function[] = [];
+    let current = ctor;
+    while (current && current !== Object) {
+        chain.unshift(current);
+        current = Object.getPrototypeOf(current);
+    }
+    for (const c of chain) {
+        const meta = collectionRegistry.get(c);
+        if (meta) Object.assign(result, meta);
+    }
+    return result;
+}
+
+/**
+ * Programmatically register property metadata for a given constructor.
+ * Used by `fromJSONSchema()` and other dynamic model builders.
+ */
+export function setPropertyRegistryEntry(
+    ctor: Function,
+    propName: string,
+    meta: PropertyMetadataEntry & { writable?: boolean },
+): void {
+    if (!propertyRegistry.has(ctor)) propertyRegistry.set(ctor, {});
+    propertyRegistry.get(ctor)![propName] = meta;
+}
+
+/**
+ * Programmatically register collection metadata for a given constructor.
+ * Used by `fromJSONSchema()` and other dynamic model builders.
+ */
+export function setCollectionRegistryEntry(
+    ctor: Function,
+    collName: string,
+    meta: CollectionOptions,
+): void {
+    if (!collectionRegistry.has(ctor)) collectionRegistry.set(ctor, {});
+    collectionRegistry.get(ctor)![collName] = meta;
 }
 
 /**
@@ -328,6 +378,12 @@ function applyPropertyMetadata(opts: PropertyOptions) {
             throw new Error("SubjectProperty requires either 'through' or 'prologGetter' option")
         }
 
+        // Write to WeakMap registry (keyed by constructor)
+        const ctor = (target as any).constructor;
+        if (!propertyRegistry.has(ctor)) propertyRegistry.set(ctor, {});
+        propertyRegistry.get(ctor)![key as string] = { ...opts, writable } as any;
+
+        // Legacy: keep __properties in sync until all consumers are migrated
         target["__properties"] = target["__properties"] || {};
         target["__properties"][key] = target["__properties"][key] || {};
         target["__properties"][key] = { ...target["__properties"][key], ...opts, writable }
@@ -448,14 +504,24 @@ export function Flag(opts: FlagOptions) {
             throw new Error("SubjectFlag requires a 'value' option")
         }
 
-        target["__properties"] = target["__properties"] || {};
-        target["__properties"][key] = target["__properties"][key] || {};
-        target["__properties"][key] = {
-            ...target["__properties"][key],
+        const entry = {
             through: opts.through,
             required: true,
             initial: opts.value,
             flag: true
+        };
+
+        // Write to WeakMap registry
+        const ctor = (target as any).constructor;
+        if (!propertyRegistry.has(ctor)) propertyRegistry.set(ctor, {});
+        propertyRegistry.get(ctor)![key as string] = entry as any;
+
+        // Legacy: keep __properties in sync
+        target["__properties"] = target["__properties"] || {};
+        target["__properties"][key] = target["__properties"][key] || {};
+        target["__properties"][key] = {
+            ...target["__properties"][key],
+            ...entry
         }
 
         // @ts-ignore
@@ -569,6 +635,12 @@ export interface CollectionOptions {
  */
 function Collection(opts: CollectionOptions) {
     return function <T>(target: T, key: keyof T) {
+        // Write to WeakMap registry
+        const ctor = (target as any).constructor;
+        if (!collectionRegistry.has(ctor)) collectionRegistry.set(ctor, {});
+        collectionRegistry.get(ctor)![key as string] = opts;
+
+        // Legacy: keep __collections in sync
         target["__collections"] = target["__collections"] || {};
         target["__collections"][key] = opts;
 
@@ -670,7 +742,7 @@ export function Model(opts: ModelConfig) {
             }
 
             let propertiesCode = []
-            let properties = obj.__properties || {}
+            let properties = getPropertiesMetadata(target)
             for(let property in properties) {
                 let propertyCode = `property(${uuid}, "${property}").\n`
 
@@ -731,7 +803,7 @@ export function Model(opts: ModelConfig) {
             }
 
             let collectionsCode = []
-            let collections = obj.__collections || {}
+            let collections = getCollectionsMetadata(target)
             for(let collection in collections) {
                 let collectionCode = `collection(${uuid}, "${collection}").\n`
 
@@ -828,8 +900,8 @@ export function Model(opts: ModelConfig) {
 
             // Determine namespace from first property or collection, or use default
             let namespace = "ad4m://";
-            const properties = obj.__properties || {};
-            const collections = obj.__collections || {};
+            const properties = getPropertiesMetadata(target);
+            const collections = getCollectionsMetadata(target);
             
             // Try properties first
             if (Object.keys(properties).length > 0) {
@@ -901,9 +973,7 @@ export function Model(opts: ModelConfig) {
 
                 // Single-valued properties get maxCount 1
                 // (collections are handled separately below)
-                if (!propMeta.collection) {
-                    propShape.maxCount = 1;
-                }
+                propShape.maxCount = 1;
 
                 // Flag properties have fixed value
                 if (propMeta.flag && propMeta.initial) {
@@ -924,8 +994,8 @@ export function Model(opts: ModelConfig) {
                 }
 
                 // === Extract Setter Actions (same logic as generateSDNA) ===
-                if (propMeta.setter) {
-                    // Custom setter defined - not yet supported in SHACL
+                if (propMeta.prologSetter) {
+                    // Custom Prolog setter defined - not yet supported in SHACL
                     console.warn(
                         `[SHACL Generation] Custom Prolog setter for property '${propName}' in class '${subjectName}' is not yet supported. ` +
                         `The property will be created without setter actions. Consider using standard writable properties or provide explicit SHACL JSON.`
@@ -994,10 +1064,6 @@ export function Model(opts: ModelConfig) {
                 // AD4M-specific metadata
                 if (collMeta.local !== undefined) {
                     collShape.local = collMeta.local;
-                }
-
-                if (collMeta.writable !== undefined) {
-                    collShape.writable = collMeta.writable;
                 }
 
                 // === Extract Collection Actions (adder/remover) ===
