@@ -1,6 +1,6 @@
 ---
 name: ad4m-executor
-description: Build, configure, and run the AD4M executor from source. Use when setting up a development environment, troubleshooting build failures, configuring bootstrap seeds, enabling MCP or TLS, or debugging language loading issues.
+description: Build, configure, and run the AD4M executor from source. Use when setting up a development environment, troubleshooting build failures, configuring bootstrap seeds, enabling MCP or TLS, multi-user mode, Flux connections, GraphQL subscriptions, or debugging language loading issues.
 ---
 
 # AD4M Executor
@@ -63,6 +63,10 @@ Only need to repeat the steps that changed:
 - **Rust executor changes** → `cd rust-executor && pnpm build` then `cd ../cli && pnpm build`
 - **CLI-only changes** → `cd cli && pnpm build`
 
+### Branch awareness
+
+When switching branches to test different features, **always rebuild both crates** — the running binary is from `target/release/ad4m-executor` which is shared across branches. If you checkout `feature/mcp-server` but the binary was last built from `docs/some-branch`, you'll get the wrong binary.
+
 ## Bootstrap Seed
 
 The bootstrap seed determines how languages are distributed. **This is the most common source of failures.**
@@ -115,13 +119,13 @@ ad4m-executor run \
 
 ### Port table
 
-| Port | Service | Default | Required |
-|------|---------|---------|----------|
-| 12100 | GraphQL HTTP | Yes | Yes |
-| 2100 | Holochain admin | Yes | Yes |
-| 1400 | Holochain app | Yes | Yes |
-| 3001 | MCP server | No | Only with `--enable-mcp` |
-| 12001 | HTTPS/TLS | No | Only with `--tls-cert-file` |
+| Port | Service | Default | Bind | Required |
+|------|---------|---------|------|----------|
+| 12100 | GraphQL HTTP | Yes | `127.0.0.1` | Yes |
+| 2100 | Holochain admin | Yes | `127.0.0.1` | Yes |
+| 1400 | Holochain app | Yes | `127.0.0.1` | Yes |
+| 3001 | MCP server | No | `127.0.0.1` | Only with `--enable-mcp` |
+| 12001 | HTTPS/TLS | No | `0.0.0.0` | Only with `--tls-cert-file` |
 
 ## Agent Initialisation
 
@@ -134,7 +138,83 @@ curl -s http://127.0.0.1:12100/graphql \
   -d '{"query":"mutation { agentGenerate(passphrase: \"<passphrase>\") { isInitialized did } }"}'
 ```
 
+### ⚠️ agentGenerate creates the JWT signing key
+
+`agentGenerate` does two things: creates the agent DID **and** creates the wallet main key used for JWT token signing. If you skip this step and only use MCP's `request_capability`/`generate_jwt`, the multi-user login flow will fail with:
+```
+Failed to generate token: main key not found. call createMainKey() first
+```
+**Always run `agentGenerate` once** after init, even if you plan to use MCP auth.
+
 **Wait for init to complete.** After `agentGenerate`, the executor takes 30-60 seconds to download and load bootstrap languages. Watch logs for `"AD4M init complete"` before using perspectives or neighbourhoods. There is no GraphQL readiness endpoint.
+
+## Multi-User Mode
+
+Multi-user mode allows multiple users to connect to a single executor, each with their own DID and scoped capabilities. **Required for Flux web client connections.**
+
+### Enable multi-user mode
+
+```bash
+curl -s http://127.0.0.1:12100/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: <admin-credential>" \
+  -d '{"query":"mutation { runtimeSetMultiUserEnabled(enabled: true) }"}'
+```
+
+### Create a user
+
+```bash
+curl -s http://127.0.0.1:12100/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: <admin-credential>" \
+  -d '{"query":"mutation { runtimeCreateUser(email: \"user@example.com\", password: \"password\") { did success error } }"}'
+```
+
+Without SMTP configured, the response will say email verification was not sent — this is fine for development. The user can login immediately.
+
+### Login
+
+```bash
+curl -s http://127.0.0.1:12100/graphql \
+  -H "Content-Type: application/json" \
+  -d '{"query":"mutation { runtimeLoginUser(email: \"user@example.com\", password: \"password\") }"}'
+# → Returns JWT token
+```
+
+### Capability flow in multi-user mode
+
+When multi-user is **disabled**, unauthenticated requests only get `AUTHENTICATE` + `READ_ENABLED` capabilities — nothing else. When **enabled**, unauthenticated requests additionally get `CREATE`, `LOGIN`, and `VERIFY` capabilities for user management, but still no `agent READ` until authenticated.
+
+**Implication:** Flux (and any client) needs multi-user mode enabled to show the login screen. Without it, even the login form fails because the client tries to query agent info pre-login and gets a capability error.
+
+### Full setup sequence for Flux connections
+
+```bash
+# 1. Start executor with TLS + admin credential
+ad4m-executor run --app-data-path /tmp/ad4m-data \
+  --admin-credential mypassword \
+  --tls-cert-file cert.pem --tls-key-file key.pem
+
+# 2. Generate agent (creates main key for JWT signing)
+curl -sk https://127.0.0.1:12001/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: mypassword" \
+  -d '{"query":"mutation { agentGenerate(passphrase: \"my-passphrase\") { did } }"}'
+
+# 3. Enable multi-user mode
+curl -sk https://127.0.0.1:12001/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: mypassword" \
+  -d '{"query":"mutation { runtimeSetMultiUserEnabled(enabled: true) }"}'
+
+# 4. Create user account
+curl -sk https://127.0.0.1:12001/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: mypassword" \
+  -d '{"query":"mutation { runtimeCreateUser(email: \"user@example.com\", password: \"pass123\") { did success error } }"}'
+
+# 5. User connects via Flux at https://<ip>:12001
+```
 
 ## Enable MCP Server
 
@@ -171,7 +251,7 @@ curl -s POST http://127.0.0.1:3001/mcp \
   -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: <session-id>" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"request_capability","arguments":{"app_name":"my-app","app_desc":"Description","app_url":"http://localhost"}}}'
-# → Returns request_id and code
+# → Returns request_id and code (code is also printed to executor stdout)
 
 # 4. Generate JWT
 curl -s POST http://127.0.0.1:3001/mcp \
@@ -182,7 +262,7 @@ curl -s POST http://127.0.0.1:3001/mcp \
 # → Authenticated. All subsequent calls in this session use the token.
 ```
 
-### MCP tools (37 available)
+### MCP tools
 
 Perspectives: `add_perspective`, `list_perspectives`, `query_links`, `add_link`, `query_subjects`, `create_subject`, `get_subject_data`, `set_subject_property`, `delete_subject`, `get_subject_children`, `get_subject_collection`, `add_to_collection`, `remove_from_collection`
 
@@ -196,6 +276,12 @@ AI/Flows: `get_models`, `add_model`, `infer`, `get_flows`, `add_flow`, `flow_sta
 
 Utility: `execute_commands`, `generate_waker_query`
 
+**Additional SDNA-derived tools:** When you join a neighbourhood with SHACL-defined subject classes (e.g., Flux communities), the MCP server dynamically generates CRUD tools for each class (e.g., `message_create`, `message_query`, `channel_get`). A Flux neighbourhood typically exposes ~248 tools total.
+
+### MCP session lifecycle
+
+Each MCP session is tied to the executor process. **Restarting the executor invalidates all sessions** — you must re-authenticate.
+
 ## Enable TLS (Remote Access)
 
 ```bash
@@ -207,8 +293,7 @@ ad4m-executor run \
   --app-data-path /tmp/ad4m-data \
   --admin-credential <password> \
   --tls-cert-file cert.pem \
-  --tls-key-file key.pem \
-  --tls-port 12001
+  --tls-key-file key.pem
 ```
 
 **Dual-server mode:** With TLS, the executor runs two servers:
@@ -216,6 +301,99 @@ ad4m-executor run \
 - HTTPS on `0.0.0.0:12001` (all interfaces, for remote clients)
 
 **Self-signed cert gotcha:** Browsers must visit `https://<ip>:12001` directly and accept the cert warning before WebSocket connections (e.g., from Flux) will work.
+
+## Connecting Flux (Web Client)
+
+Flux is the web UI for AD4M neighbourhoods. The current development deployment is:
+
+```
+https://deploy-preview-548--fluxsocial-dev.netlify.app/
+```
+
+### Connection requirements
+
+1. **TLS must be enabled** — Flux connects over WebSocket which requires HTTPS for remote executors
+2. **Multi-user mode must be enabled** — Flux uses email/password login
+3. **`agentGenerate` must have been called** — creates the JWT signing key needed for login tokens
+4. **A user account must exist** — created via `runtimeCreateUser` mutation
+5. **Self-signed cert must be accepted** — visit `https://<ip>:12001` directly in the browser first
+
+### Troubleshooting Flux connections
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `Capability not matched... expected LOGIN` | Multi-user mode disabled | `runtimeSetMultiUserEnabled(enabled: true)` |
+| `Capability not matched... expected agent READ` | Unauthenticated requests lack READ; multi-user was just enabled but client not authenticated | Ensure user account exists, try login again |
+| `main key not found. call createMainKey()` | `agentGenerate` was never called | Run `agentGenerate` mutation |
+| WebSocket connection fails silently | Self-signed cert not accepted | Visit `https://<ip>:12001` directly first |
+| Login form doesn't appear | Multi-user mode disabled | Enable it via mutation |
+
+## GraphQL Subscriptions (WebSocket)
+
+The executor supports GraphQL subscriptions over WebSocket at `/graphql` using `graphql-transport-ws` protocol.
+
+### Connection
+
+```javascript
+const ws = new WebSocket('ws://127.0.0.1:12100/graphql', 'graphql-transport-ws');
+// Auth goes inside connection_init payload:
+ws.send(JSON.stringify({
+  type: 'connection_init',
+  payload: { headers: { authorization: '<admin-credential>' } }
+}));
+```
+
+**⚠️ Auth format matters:** The authorization must be inside `payload.headers.authorization`, not `payload.authorization`. Wrong format results in connection closing after ~15 seconds (code 1006).
+
+### Available subscriptions
+
+| Subscription | Use |
+|-------------|-----|
+| `perspectiveLinkAdded(uuid)` | New links added to a perspective (fires for every synced link including historical on first subscribe) |
+| `perspectiveLinkRemoved(uuid)` | Links removed |
+| `perspectiveLinkUpdated(uuid)` | Links modified |
+| `perspectiveQuerySubscription(subscriptionId)` | SurrealQL query change notifications (for waker pattern) |
+| `perspectiveSyncStateChange(uuid)` | Sync status updates |
+| `agentStatusChanged` | Agent online/offline changes |
+| `neighbourhoodSignal(uuid)` | Neighbourhood signals |
+| `runtimeMessageReceived` | Runtime messages |
+| `exceptionOccurred` | Error events |
+
+### Waker pattern (recommended for change detection)
+
+Instead of `perspectiveLinkAdded` (which replays all links on initial subscribe), use the SurrealQL subscription pattern:
+
+```bash
+# 1. Register a SurrealQL subscription
+mutation {
+  perspectiveSubscribeSurrealQuery(
+    uuid: "<perspective-id>",
+    query: "SELECT * FROM link WHERE predicate = 'ad4m://has_child' AND source = '<channel-address>'"
+  ) { subscriptionId result }
+}
+# result contains current matching links (use to populate "seen" set)
+
+# 2. Subscribe to changes via WebSocket
+subscription {
+  perspectiveQuerySubscription(subscriptionId: "<subscription-id>")
+}
+# Fires with updated query results when matching links change
+# Results prefixed with "#init#" on initial delivery
+
+# 3. Keep alive (every 30s) — subscription expires without this
+mutation {
+  perspectiveKeepAliveSurrealQuery(
+    uuid: "<perspective-id>",
+    subscriptionId: "<subscription-id>"
+  )
+}
+```
+
+The `generate_waker_query` MCP tool can generate the SurrealQL query for a given subject class, but **beware double-encoding** — it URL-encodes the source address inside the query. Verify the query manually against `perspectiveQueryLinks` results.
+
+### Subscription polling interval
+
+SurrealQL subscriptions have an internal polling interval (~5-60 seconds). Changes are not instant — expect latency between link creation and subscription notification.
 
 ## Project Structure
 
@@ -242,3 +420,10 @@ ad4m/
 | Port bind error | Previous executor still running | `lsof -ti:12100 \| xargs kill -9` |
 | Agent generates but nothing works | Init still in progress | Wait for "AD4M init complete" in logs |
 | `mainnet_seed.seed` not found | No seed provided to init | Use `--network-bootstrap-seed cli/mainnet_seed.json` |
+| `main key not found` on login | `agentGenerate` never called | Run `agentGenerate` mutation once |
+| `Capability not matched... LOGIN` | Multi-user mode disabled | `runtimeSetMultiUserEnabled(enabled: true)` |
+| WebSocket closes after 15s | Wrong auth format in `connection_init` | Use `payload: { headers: { authorization: '...' } }` |
+| Binary has wrong features after branch switch | Stale build from previous branch | Rebuild both `rust-executor` and `cli` |
+| MCP session stops working | Executor restarted | Re-authenticate (init → notify → request_capability → generate_jwt) |
+| Flux can't connect remotely | TLS not enabled or cert not accepted | Enable TLS flags + accept cert in browser |
+| `generate_waker_query` returns no results | Double-encoded source address in SurrealQL | Write query manually with correct source address |
