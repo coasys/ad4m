@@ -104,10 +104,10 @@ export interface PropertyMetadata {
 }
 
 /**
- * Metadata for a single collection extracted from decorators.
+ * Metadata for a single relation (collection) extracted from decorators.
  */
-export interface CollectionMetadata {
-  /** The collection name */
+export interface RelationMetadata {
+  /** The relation name */
   name: string;
   /** The predicate URI (through value) */
   predicate: string;
@@ -119,6 +119,9 @@ export interface CollectionMetadata {
   local?: boolean;
 }
 
+/** @deprecated Use RelationMetadata */
+export type CollectionMetadata = RelationMetadata;
+
 /**
  * Complete model metadata extracted from decorators.
  */
@@ -127,8 +130,10 @@ export interface ModelMetadata {
   className: string;
   /** Map of property name to metadata */
   properties: Record<string, PropertyMetadata>;
-  /** Map of collection name to metadata */
-  collections: Record<string, CollectionMetadata>;
+  /** Map of relation name to metadata */
+  relations: Record<string, RelationMetadata>;
+  /** @deprecated Use relations */
+  collections: Record<string, RelationMetadata>;
 }
 
 function capitalize(word: string): string {
@@ -524,14 +529,14 @@ export class Ad4mModel {
       };
     }
     
-    // Extract collections from WeakMap registry
-    const collectionsMetadata: Record<string, CollectionMetadata> = {};
+    // Extract relations (collections) from WeakMap registry
+    const relationsMetadata: Record<string, RelationMetadata> = {};
     const prototypeCollections = getCollectionsMetadata(this);
     
-    for (const [collectionName, opts] of Object.entries(prototypeCollections)) {
+    for (const [relationName, opts] of Object.entries(prototypeCollections)) {
       const options = opts as CollectionOptions;
-      collectionsMetadata[collectionName] = {
-        name: collectionName,
+      relationsMetadata[relationName] = {
+        name: relationName,
         predicate: options.through || "",
         ...(options.where !== undefined && { where: options.where }),
         ...(options.local !== undefined && { local: options.local }),
@@ -542,8 +547,8 @@ export class Ad4mModel {
     // Fallback: If both structures are empty but a JSON schema is attached, derive from it
     // This handles edge cases where fromJSONSchema() was called but metadata wasn't properly populated
     const hasProperties = Object.keys(propertiesMetadata).length > 0;
-    const hasCollections = Object.keys(collectionsMetadata).length > 0;
-    const hasMetadata = hasProperties || hasCollections;
+    const hasRelations = Object.keys(relationsMetadata).length > 0;
+    const hasMetadata = hasProperties || hasRelations;
     
     if (!hasMetadata && prototype.__jsonSchema) {
       // Derive metadata from the attached JSON schema
@@ -562,7 +567,7 @@ export class Ad4mModel {
           );
           
           if (isArray) {
-            collectionsMetadata[propertyName] = {
+            relationsMetadata[propertyName] = {
               name: propertyName,
               predicate: predicate,
               ...(propertySchema["x-ad4m"]?.local !== undefined && { local: propertySchema["x-ad4m"].local })
@@ -586,7 +591,8 @@ export class Ad4mModel {
     return {
       className,
       properties: propertiesMetadata,
-      collections: collectionsMetadata
+      relations: relationsMetadata,
+      collections: relationsMetadata,
     };
   }
 
@@ -641,10 +647,10 @@ export class Ad4mModel {
   }
 
   /**
-   * Get collection metadata from decorator (Phase 1: Prolog-free refactor)
+   * Get relation (collection) options from decorator
    * @private
    */
-  private getCollectionMetadata(key: string): CollectionOptions | undefined {
+  private getRelationOptions(key: string): CollectionOptions | undefined {
     const ctor = this.constructor;
     const colls = getCollectionsMetadata(ctor);
     return colls[key];
@@ -695,14 +701,14 @@ export class Ad4mModel {
    * Replaces Prolog queries: collection_adder, collection_remover, collection_setter
    * @private
    */
-  private generateCollectionAction(key: string, actionType: 'adder' | 'remover' | 'setter'): any[] {
-    const metadata = this.getCollectionMetadata(key);
+  private generateRelationAction(key: string, actionType: 'adder' | 'remover' | 'setter'): any[] {
+    const metadata = this.getRelationOptions(key);
     if (!metadata) {
-      throw new Error(`Collection "${key}" has no metadata defined`);
+      throw new Error(`Relation "${key}" has no metadata defined`);
     }
 
     if (!metadata.through) {
-      throw new Error(`Collection "${key}" has no 'through' predicate defined`);
+      throw new Error(`Relation "${key}" has no 'through' predicate defined`);
     }
 
     const actionMap = {
@@ -2267,16 +2273,16 @@ WHERE ${whereConditions.join(' AND ')}
     await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
   }
 
-  private async setCollectionSetter(key: string, value: any, batchId?: string) {
+  private async setRelationValues(key: string, value: any, batchId?: string) {
     // Phase 1: Use metadata instead of Prolog queries
-    const metadata = this.getCollectionMetadata(key);
+    const metadata = this.getRelationOptions(key);
     if (!metadata) {
-      console.warn(`Collection "${key}" has no metadata, skipping`);
+      console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
 
     // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateCollectionAction(key, 'setter');
+    const actions = this.generateRelationAction(key, 'setter');
 
     if (value != null) {
       if (Array.isArray(value)) {
@@ -2292,16 +2298,16 @@ WHERE ${whereConditions.join(' AND ')}
     }
   }
 
-  private async setCollectionAdder(key: string, value: any, batchId?: string) {
+  private async addRelationValue(key: string, value: any, batchId?: string) {
     // Phase 1: Use metadata instead of Prolog queries
-    const metadata = this.getCollectionMetadata(key);
+    const metadata = this.getRelationOptions(key);
     if (!metadata) {
-      console.warn(`Collection "${key}" has no metadata, skipping`);
+      console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
 
     // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateCollectionAction(key, 'adder');
+    const actions = this.generateRelationAction(key, 'adder');
 
     if (value != null) {
       if (Array.isArray(value)) {
@@ -2316,16 +2322,16 @@ WHERE ${whereConditions.join(' AND ')}
     }
   }
 
-  private async setCollectionRemover(key: string, value: any, batchId?: string) {
+  private async removeRelationValue(key: string, value: any, batchId?: string) {
     // Phase 1: Use metadata instead of Prolog queries
-    const metadata = this.getCollectionMetadata(key);
+    const metadata = this.getRelationOptions(key);
     if (!metadata) {
-      console.warn(`Collection "${key}" has no metadata, skipping`);
+      console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
 
     // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateCollectionAction(key, 'remover');
+    const actions = this.generateRelationAction(key, 'remover');
 
     if (value != null) {
       if (Array.isArray(value)) {
@@ -2429,27 +2435,27 @@ WHERE ${whereConditions.join(' AND ')}
         if (value?.action) {
           switch (value.action) {
             case "setter":
-              await this.setCollectionSetter(key, value.value, batchId);
+              await this.setRelationValues(key, value.value, batchId);
               break;
             case "adder":
-              await this.setCollectionAdder(key, value.value, batchId);
+              await this.addRelationValue(key, value.value, batchId);
               break;
             case "remover":
-              await this.setCollectionRemover(key, value.value, batchId);
+              await this.removeRelationValue(key, value.value, batchId);
               break;
             default:
-              await this.setCollectionSetter(key, value.value, batchId);
+              await this.setRelationValues(key, value.value, batchId);
               break;
           }
         } else if (Array.isArray(value)) {
-          // Handle all arrays as collections, including empty ones (which clears the collection)
-          await this.setCollectionSetter(key, value, batchId);
+          // Handle all arrays as relations, including empty ones (which clears the relation)
+          await this.setRelationValues(key, value, batchId);
         } else if (value !== undefined && value !== null && value !== "") {
           if (setProperties) {
-            // Check if this is a collection property (has collection metadata)
-            const collMetadata = this.getCollectionMetadata(key);
-            if (collMetadata) {
-              // Skip - it's a collection, not a regular property
+            // Check if this is a relation property (has relation metadata)
+            const relationMeta = this.getRelationOptions(key);
+            if (relationMeta) {
+              // Skip - it's a relation, not a regular property
               continue;
             }
 

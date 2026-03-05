@@ -1939,9 +1939,9 @@ export class PerspectiveProxy {
      * @returns The matching class name, or null if no match found.
      */
     private async findClassByProperties(obj: object): Promise<string | null> {
-        // Extract properties and collections from the object
+        // Extract properties and relations from the object
         let properties: string[] = [];
-        let collections: string[] = [];
+        let relations: string[] = [];
         const proto = Object.getPrototypeOf(obj);
         const ctor = proto?.constructor;
 
@@ -1952,14 +1952,14 @@ export class PerspectiveProxy {
             properties = Object.keys(obj).filter(key => !Array.isArray((obj as any)[key]));
         }
 
-        const registryColls = ctor ? getCollectionsMetadata(ctor) : {};
-        if (Object.keys(registryColls).length > 0) {
-            collections = Object.keys(registryColls).filter(key => key !== 'isSubjectInstance');
+        const registryRelations = ctor ? getCollectionsMetadata(ctor) : {};
+        if (Object.keys(registryRelations).length > 0) {
+            relations = Object.keys(registryRelations).filter(key => key !== 'isSubjectInstance');
         } else {
-            collections = Object.keys(obj).filter(key => Array.isArray((obj as any)[key]) && key !== 'isSubjectInstance');
+            relations = Object.keys(obj).filter(key => Array.isArray((obj as any)[key]) && key !== 'isSubjectInstance');
         }
 
-        if (properties.length === 0 && collections.length === 0) {
+        if (properties.length === 0 && relations.length === 0) {
             return null;
         }
 
@@ -2008,11 +2008,11 @@ export class PerspectiveProxy {
             }
         }
 
-        // Find a class that has all required properties and collections
+        // Find a class that has all required properties and relations
         for (const [className, shape] of classShapes) {
             const hasAllProps = properties.every(p => shape.properties.includes(p));
-            const hasAllCols = collections.every(c => shape.collections.includes(c));
-            if (hasAllProps && hasAllCols) {
+            const hasAllRels = relations.every(c => shape.collections.includes(c));
+            if (hasAllProps && hasAllRels) {
                 return className;
             }
         }
