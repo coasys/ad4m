@@ -8,6 +8,10 @@ import { open } from "@tauri-apps/plugin-shell";
 import "../index.css";
 import Logo from "./Logo";
 
+const WHISPER_TURBO_URL =
+  "https://huggingface.co/Demonthos/candle-quantized-whisper-large-v3-turbo";
+const WHISPER_TURBO_LABEL = "Whisper large v3 turbo quantized (454MB)";
+
 const Login = () => {
   const {
     state: { loading, hasLoginError },
@@ -643,12 +647,10 @@ const Login = () => {
                 <p>
                   <a
                     onClick={() =>
-                      open(
-                        "https://huggingface.co/Demonthos/candle-quantized-whisper-large-v3-turbo"
-                      )
+                      open(WHISPER_TURBO_URL)
                     }
                     style={{ cursor: "pointer" }}
-                  >Whisper large v3 turbo quantized (454MB)</a>
+                  >{WHISPER_TURBO_LABEL}</a>
                 </p>
                 and
                 <p>
@@ -828,12 +830,10 @@ const Login = () => {
                   <p>
                     <a
                       onClick={() =>
-                        open(
-                          "https://huggingface.co/Demonthos/candle-quantized-whisper-large-v3-turbo"
-                        )
+                        open(WHISPER_TURBO_URL)
                       }
                       style={{ cursor: "pointer" }}
-                    >Whisper large v3 turbo quantized (454MB)</a>
+                    >{WHISPER_TURBO_LABEL}</a>
                   </p>
                   and
                   <p>
@@ -881,12 +881,10 @@ const Login = () => {
                   <p>
                     <a
                       onClick={() =>
-                        open(
-                          "https://huggingface.co/Demonthos/candle-quantized-whisper-large-v3-turbo"
-                        )
+                        open(WHISPER_TURBO_URL)
                       }
                       style={{ cursor: "pointer" }}
-                    >Whisper large v3 turbo quantized (454MB)</a>
+                    >{WHISPER_TURBO_LABEL}</a>
                   </p>
                   and
                   <p>

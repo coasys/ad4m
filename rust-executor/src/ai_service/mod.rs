@@ -1105,10 +1105,8 @@ impl AIService {
             }
         }
 
-        // Default to tiny as a safe fallback when no model is persisted in the DB.
-        // The launcher UI sets the real default (WHISPER_MODEL) during setup,
-        // but CI and tests may skip setup entirely, so we use the smallest model here.
-        Ok(WhisperSource::Tiny)
+        // Default to the configured WHISPER_MODEL constant when no model is persisted in the DB.
+        Ok(WHISPER_MODEL)
     }
 
     pub async fn open_transcription_stream(
