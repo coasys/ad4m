@@ -87,6 +87,10 @@ pub struct Ad4mConfig {
     pub log_holochain_metrics: Option<bool>,
     pub enable_multi_user: Option<bool>,
     pub smtp_config: Option<SmtpConfig>,
+    /// Enable MCP (Model Context Protocol) server for AI agent integration
+    pub enable_mcp: Option<bool>,
+    /// Port for MCP HTTP server (default: 3001)
+    pub mcp_port: Option<u16>,
 }
 
 impl Ad4mConfig {
@@ -174,6 +178,8 @@ impl Default for Ad4mConfig {
             log_holochain_metrics: None,
             enable_multi_user: None,
             smtp_config: None,
+            enable_mcp: None,
+            mcp_port: None,
         };
         config.prepare();
         config

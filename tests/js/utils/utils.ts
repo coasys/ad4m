@@ -151,6 +151,8 @@ export async function startExecutor(dataPath: string,
     proxyUrl: string = "wss://dev-test-bootstrap2.holochain.org",
     bootstrapUrl: string = "https://dev-test-bootstrap2.holochain.org",
     relayUrl?: string,
+    enableMcp: boolean = false,
+    mcpPort?: number,
 ): Promise<ChildProcess> {
     const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
 
@@ -168,9 +170,9 @@ export async function startExecutor(dataPath: string,
     }
 
     // Build args array explicitly so spawn() can run the executor directly
-    // (no shell wrapper). exec() spawns `sh -c "..."` — kill() only kills
-    // the shell, leaving the actual executor running as an orphan.
-    // spawn() runs the binary directly so kill()/SIGKILL actually reach it.
+    // (no shell wrapper). This is critical: exec() spawns `sh -c "..."` and
+    // kill() only kills the shell, leaving the actual executor running.
+    // spawn() runs the binary directly, so kill() / SIGKILL actually reach it.
     const args = [
         'run',
         '--app-data-path', dataPath,
@@ -187,20 +189,30 @@ export async function startExecutor(dataPath: string,
         '--run-dapp-server', 'false',
     ];
     if (relayUrl) { args.push('--hc-relay-url', relayUrl); }
+    if (enableMcp) { args.push('--enable-mcp', 'true'); }
+    if (mcpPort) { args.push('--mcp-port', String(mcpPort)); }
     if (adminCredential) { args.push('--admin-credential', adminCredential); }
 
     executorProcess = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let executorReady = new Promise<void>((resolve, reject) => {
-        executorProcess!.stdout!.on('data', (data) => {
-            if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
-                resolve()
+        const waitFor = enableMcp
+            ? [`listening on http://127.0.0.1:${gqlPort}`, 'MCP HTTP server listening']
+            : [`listening on http://127.0.0.1:${gqlPort}`];
+        const found = new Set<string>();
+
+        const checkReady = (data: string) => {
+            for (const marker of waitFor) {
+                if (data.includes(marker)) {
+                    found.add(marker);
+                }
             }
-        });
-        executorProcess!.stderr!.on('data', (data) => {
-            if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
-                resolve()
+            if (found.size === waitFor.length) {
+                resolve();
             }
-        });
+        };
+
+        executorProcess!.stdout!.on('data', (data: any) => checkReady(data.toString()));
+        executorProcess!.stderr!.on('data', (data: any) => checkReady(data.toString()));
     })
 
     executorProcess!.stdout!.on('data', (data) => {
@@ -261,12 +273,13 @@ export function sleep(ms: number) {
 
 /**
  * Kill any process listening on the given ports.
- * Use as a safety net in after() hooks — catches executors that survived kill().
+ * Use this in after() hooks as a safety net — even if executorProcess.kill()
+ * works correctly, this ensures nothing lingers on the ports.
  */
 export function killByPorts(ports: number[]): void {
     for (const port of ports) {
         try {
-            execSync(`lsof -ti TCP:${port} -s TCP:LISTEN | xargs -r kill -9`, { stdio: 'ignore' });
+            execSync(`lsof -ti:${port} | xargs -r kill -9`, { stdio: 'ignore' });
         } catch (e) {
             // Port not in use — fine
         }

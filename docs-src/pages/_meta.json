@@ -9,6 +9,7 @@
     "type": "separator",
     "title": "Core Concepts"
   },
+  "spanning-layer": "The Spanning Layer",
   "auth": "Authentication",
   "agents": "Agents",
   "languages": "Languages",

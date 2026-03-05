@@ -8,9 +8,11 @@ mod globals;
 pub mod graphql;
 pub mod holochain_service;
 pub mod js_core;
+pub mod mcp;
 mod prolog_service;
 pub mod runtime_service;
 mod surreal_service;
+pub mod user_management;
 pub mod utils;
 mod wallet;
 
@@ -369,6 +371,31 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     // Start holochain signal receiver as standalone task
     tokio::spawn(crate::holochain_signal_receiver());
+
+    // Check if MCP mode is enabled — run MCP server alongside GraphQL
+    if config.enable_mcp == Some(true) {
+        info!("Starting MCP server alongside GraphQL...");
+        let admin_credential = config.admin_credential.clone();
+
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .thread_name(String::from("mcp_server"))
+                .enable_all()
+                .build()
+                .unwrap();
+            let mcp_config = mcp::server::McpServerConfig {
+                port: config.mcp_port.unwrap_or(3001),
+                ..Default::default()
+            };
+            if let Err(e) = runtime.block_on(mcp::start_mcp_server(
+                admin_credential,
+                None, // No pre-set auth token
+                mcp_config,
+            )) {
+                error!("MCP server error: {:?}", e);
+            }
+        });
+    }
 
     info!("Starting GraphQL...");
 

@@ -201,6 +201,10 @@ pub struct LauncherState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_config: Option<TlsConfig>, // Deprecated - use multi_user_config.tls_config instead
     pub multi_user_config: Option<MultiUserConfig>,
+    #[serde(default)]
+    pub mcp_enabled: Option<bool>,
+    #[serde(default)]
+    pub mcp_port: Option<u16>,
 }
 
 fn file_path() -> PathBuf {
@@ -243,6 +247,8 @@ impl LauncherState {
                     log_config: None,
                     tls_config: None,
                     multi_user_config: None,
+                    mcp_enabled: None,
+                    mcp_port: None,
                 }
             }
         };

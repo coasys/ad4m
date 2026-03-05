@@ -543,7 +543,7 @@ impl AgentService {
     }
 
     /// Get the Agent data for a given context (main agent or managed user).
-    fn get_agent_for_context(context: &AgentContext) -> Result<Agent, AnyError> {
+    pub fn get_agent_for_context(context: &AgentContext) -> Result<Agent, AnyError> {
         match &context.user_email {
             Some(email) => {
                 let agent =

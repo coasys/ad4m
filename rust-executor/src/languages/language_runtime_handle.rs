@@ -12,8 +12,8 @@ use crate::agent::AgentContext;
 use super::language_runtime::{LanguageOperation, LanguageRuntime, LanguageRuntimeRequest};
 
 /// Handle to a per-language runtime running in its own thread.
-/// Thin communication layer (like JsCoreHandle) that sends requests
-/// to a LanguageRuntime via a channel.
+/// Thin communication layer that sends requests to a LanguageRuntime
+/// via a channel.
 #[derive(Clone)]
 pub struct LanguageRuntimeHandle {
     pub language_address: String,

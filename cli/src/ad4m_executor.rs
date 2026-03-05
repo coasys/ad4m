@@ -132,6 +132,10 @@ enum Domain {
         log_holochain_metrics: Option<bool>,
         #[arg(long, action)]
         enable_multi_user: Option<bool>,
+        #[arg(long, action)]
+        enable_mcp: Option<bool>,
+        #[arg(long, action)]
+        mcp_port: Option<u16>,
     },
     RunLocalHcServices {},
 }
@@ -183,6 +187,8 @@ async fn main() -> Result<()> {
         tls_port,
         log_holochain_metrics,
         enable_multi_user,
+        enable_mcp,
+        mcp_port,
     } = args.domain
     {
         let tls = if tls_cert_file.is_some() && tls_key_file.is_some() {
@@ -221,6 +227,8 @@ async fn main() -> Result<()> {
                 log_holochain_metrics,
                 enable_multi_user,
                 smtp_config: None,
+                enable_mcp,
+                mcp_port,
             })
             .await;
         })

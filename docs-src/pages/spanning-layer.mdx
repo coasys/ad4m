@@ -1,0 +1,176 @@
+import { Callout } from "nextra-theme-docs";
+
+# AD4M as a Spanning Layer
+
+## The Problem
+
+The internet today is fragmented into isolated ecosystems:
+
+- **Centralized platforms** (Twitter, Facebook) — walled gardens that lock in users and data
+- **Federated protocols** (ActivityPub, Matrix) — better, but still siloed and fragmentation persists
+- **P2P systems** (IPFS, Holochain) — excellent for sovereignty, but lack interoperability
+- **Semantic web** (RDF, Solid) — great for data portability, but struggles with adoption
+
+Each approach solves part of the problem, but we lack a universal layer that **bridges them all**.
+
+## AD4M's Solution: The Spanning Layer
+
+AD4M doesn't replace these systems — it **spans across them**, creating a unified semantic layer that enables:
+
+1. **Global addressing** — any data, any protocol, one address format
+2. **Agent sovereignty** — users own their data, keys, and runtime
+3. **Protocol agnosticism** — mix HTTP, IPFS, Holochain data in one graph
+4. **Semantic interoperability** — RDF-like links connect data across systems
+5. **Distributed collective intelligence** — humans and AI agents collaborate
+
+Think of AD4M as a new layer in the internet stack:
+
+```
+┌─────────────────────────────────────────────────┐
+│         Applications (Flux, WE, custom)         │  ← User interfaces
+├─────────────────────────────────────────────────┤
+│              AD4M Spanning Layer                │  ← What we're building
+│  (Perspectives, SDNA, Neighbourhoods, DIDs)     │
+├─────────────────────────────────────────────────┤
+│   Protocol Layer (HTTP, IPFS, Holochain, etc)  │  ← Languages wrap these
+├─────────────────────────────────────────────────┤
+│             Transport (TCP/IP, QUIC)            │
+└─────────────────────────────────────────────────┘
+```
+
+## How It Works
+
+### 1. Agent-Centric Architecture
+
+Unlike app-centric systems where apps own data, AD4M is **agent-centric**:
+
+- Each user runs their own **executor** (local runtime)
+- The executor holds the user's **DID** (decentralized identity) and keys
+- **Perspectives** (knowledge graphs) store the user's data locally
+- Apps connect to the executor via GraphQL or MCP
+
+**Result:** Your data lives in your executor, accessible to any app you authorize. No single app owns your social graph or content.
+
+### 2. Languages (Protocol Abstraction)
+
+Languages are the bridge between AD4M and existing systems:
+
+- A **Language** wraps any storage/communication protocol
+- Each Language defines how to create/retrieve **Expressions** (data objects)
+- Expressions get universal addresses: `<language_hash>://<address>`
+
+**Examples:**
+- `http` Language → `http://example.com/data.json`
+- `ipfs` Language → `ipfs://Qm...`
+- `holochain` Language → `uhC0k.../entry_hash`
+- Custom Language → `Qm123.../my-id`
+
+**Result:** AD4M can reference data from any system using a consistent address scheme.
+
+### 3. Perspectives (Subjective Knowledge Graphs)
+
+Perspectives are RDF-like graphs built from **links** (triples):
+
+```
+<source> <predicate> <target>
+```
+
+**Example perspective:**
+```turtle
+<did:key:z6Mk...>  <ad4m://posted>      <ipfs://Qm789>
+<ipfs://Qm789>     <ad4m://has_title>   "Hello World"
+<ipfs://Qm789>     <ad4m://has_author>  <did:key:z6Mk...>
+```
+
+Your perspective can mix data from any Language:
+- HTTP URLs alongside IPFS hashes
+- Holochain entries linked to local files
+- Semantic triples connecting it all
+
+**Result:** True data portability — your knowledge graph transcends individual platforms.
+
+### 4. Subject Classes (SDNA)
+
+**SHACL-based schemas** that give structure to the link graph:
+
+```turtle
+:MessageShape a sh:NodeShape ;
+  sh:targetClass :Message ;
+  sh:property [
+    sh:path :body ;
+    sh:datatype xsd:string ;
+    sh:maxCount 1 ;
+    sh:minCount 1 ;
+  ] ;
+  sh:property [
+    sh:path :author ;
+    sh:class :Agent ;
+    sh:maxCount 1 ;
+  ] .
+```
+
+SDNA provides:
+- **Validation rules** enforced across the network
+- **Typed properties** (string, integer, Agent, etc.)
+- **Collections** (one-to-many relationships)
+- **Actions** (state transitions via SHACL Flow)
+
+**Result:** Structured data on top of the flexible link graph — ORM-like ergonomics with RDF's flexibility.
+
+### 5. Neighbourhoods (Shared Perspectives)
+
+Perspectives can be **published as Neighbourhoods** — shared spaces synced P2P:
+
+- Built on **Holochain DHT** (distributed hash table)
+- SDNA enforced by all members (validation rules)
+- Real-time synchronization via gossip protocol
+- Each member has a local replica
+
+**Result:** Truly P2P collaboration — no servers, no single point of failure, agent-centric validation.
+
+## Spanning Layer in Action
+
+### Scenario: Cross-Platform Social Graph
+
+1. **Alice** runs AD4M on her laptop
+2. Her **perspective** contains links to:
+   - Twitter posts (via HTTP Language)
+   - Photos on IPFS (via IPFS Language)
+   - Messages in a Holochain neighbourhood
+   - Local notes (via File Language)
+3. She publishes a **Channel neighbourhood** with Message SDNA
+4. **Bob** (human) and **DataBot** (AI agent) join the neighbourhood
+5. All three can post messages, validated by the shared SDNA
+6. Each member's executor syncs changes P2P via Holochain
+
+**Without AD4M:** Alice's data is trapped in silos. She needs separate accounts, separate APIs, no interoperability.
+
+**With AD4M:** Alice's data lives in her perspective, portable across protocols. Her social graph spans HTTP, IPFS, and Holochain seamlessly.
+
+## Why This Matters for AI Agents
+
+AD4M's spanning layer is particularly powerful for AI agents because:
+
+1. **Semantic understanding** — RDF-like links provide explicit relationships
+2. **Protocol agnostic** — agents don't need to learn every API, just AD4M
+3. **Structured data** — SDNA defines clear schemas (no guessing)
+4. **Distributed intelligence** — agents can join neighbourhoods and collaborate P2P
+5. **Cryptographic provenance** — every action is signed, auditable
+
+Using [MCP](/developer-guides/mcp), AI agents can:
+- Discover data models via `get_models`
+- Create structured data via auto-generated tools
+- Join neighbourhoods and collaborate with humans
+- Subscribe to changes and react in real-time
+
+## Further Reading
+
+- [MCP Integration Guide](/developer-guides/mcp) — how AI agents use AD4M
+- [Model Classes](/developer-guides/model-classes) — defining SHACL SDNA
+- [Perspectives](/perspectives) — understanding subjective graphs
+- [Neighbourhoods](/neighbourhoods) — P2P shared spaces
+- [Languages](/languages) — protocol abstractions
+
+---
+
+**The vision:** A spanning layer where data is portable, agents are sovereign, and collective intelligence emerges from the synergy of humans and AI collaborating across any protocol. AD4M is the infrastructure for that future.
