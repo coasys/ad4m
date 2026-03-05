@@ -5,7 +5,7 @@
 
 use super::Ad4mMcpHandler;
 use crate::agent::capabilities::user_email_from_token;
-use crate::agent::AgentService;
+use crate::agent::{AgentContext, AgentService};
 use crate::graphql::graphql_types::{Agent, Perspective};
 use crate::languages::LanguageController;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
@@ -68,30 +68,21 @@ pub struct SetAgentPublicPerspectiveParams {
 
 /// Get the current agent, handling both multi-user and single-user modes.
 fn get_current_agent(auth_token: &str) -> Result<Agent, String> {
-    if let Some(user_email) = user_email_from_token(auth_token.to_string()) {
-        // Multi-user mode: load user-specific profile
-        let agent_data = AgentService::get_user_agent_data(&user_email)
-            .map_err(|e| format!("User agent not available: {}", e))?;
-
-        let agent = match AgentService::with_global_instance(|agent_service| {
-            agent_service.load_user_agent_profile(&user_email)
-        }) {
-            Ok(Some(profile)) => profile,
-            Ok(None) | Err(_) => Agent {
+    let context = AgentContext::from_auth_token(auth_token.to_string());
+    match AgentService::get_agent_for_context(&context) {
+        Ok(agent) => Ok(agent),
+        Err(_) if context.user_email.is_some() => {
+            // Multi-user fallback: user exists in wallet but has no profile yet
+            let user_email = context.user_email.as_ref().unwrap();
+            let agent_data = AgentService::get_user_agent_data(user_email)
+                .map_err(|e| format!("User agent not available: {}", e))?;
+            Ok(Agent {
                 did: agent_data.did,
                 direct_message_language: None,
                 perspective: Some(Perspective { links: vec![] }),
-            },
-        };
-        Ok(agent)
-    } else {
-        // Single-user / admin mode: main agent
-        AgentService::with_global_instance(|agent_service| {
-            agent_service
-                .agent
-                .clone()
-                .ok_or_else(|| "Agent not initialized".to_string())
-        })
+            })
+        }
+        Err(e) => Err(format!("Agent not available: {}", e)),
     }
 }
 
@@ -100,6 +91,8 @@ async fn update_agent_perspective(
     auth_token: &str,
     links: Vec<DecoratedLinkExpression>,
 ) -> Result<Agent, String> {
+    let context = AgentContext::from_auth_token(auth_token.to_string());
+
     if let Some(user_email) = user_email_from_token(auth_token.to_string()) {
         // Multi-user mode
         let agent_data = AgentService::get_user_agent_data(&user_email)
@@ -116,7 +109,7 @@ async fn update_agent_perspective(
         })
         .map_err(|e| format!("Failed to store user profile: {}", e))?;
 
-        if let Err(e) = AgentService::publish_user_agent_to_language(&user_email, &agent).await {
+        if let Err(e) = AgentService::publish_agent_to_language(&context).await {
             log::warn!("Failed to publish user profile to agent language: {}", e);
         }
 
@@ -136,7 +129,7 @@ async fn update_agent_perspective(
             }
         })?;
 
-        if let Err(e) = AgentService::ensure_agent_expression().await {
+        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
             log::warn!("Failed to publish agent expression: {}", e);
         }
 
