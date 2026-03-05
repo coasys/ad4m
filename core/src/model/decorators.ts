@@ -400,12 +400,6 @@ export function Flag(opts: FlagOptions) {
     };
 }
 
-interface WhereOptions {
-    isInstance?: any
-    prologCondition?: string
-    condition?: string
-}
-
 export interface CollectionOptions {
     /**
      * The predicate of the property. All properties must have this option.
@@ -413,9 +407,9 @@ export interface CollectionOptions {
     through: string;
 
     /**
-     * An object representing the WHERE clause of the query.
+     * Optional Prolog condition appended to the collection_getter rule in SDNA.
      */
-    where?: WhereOptions;
+    prologCondition?: string;
 
     /**
      * Custom SurrealQL getter to resolve the collection values. Use this for custom graph traversals.
@@ -446,9 +440,7 @@ export interface CollectionOptions {
  * 
  * Where X is the capitalized property name.
  * 
- * Collections can be filtered using the `where` option to only include values that:
- * - Are instances of a specific model class
- * - Match a custom Prolog condition
+ * Collections can be filtered using a Prolog condition or a custom SurrealQL getter.
  * 
  * @example
  * ```typescript
@@ -459,26 +451,19 @@ export interface CollectionOptions {
  *   })
  *   ingredients: string[] = [];
  * 
- *   // Collection that only includes instances of another model
- *   @Collection({
- *     through: "recipe://comment",
- *     where: { isInstance: Comment }
- *   })
- *   comments: string[] = [];
- * 
  *   // Collection with custom Prolog filter condition
  *   @Collection({
  *     through: "recipe://step",
- *     where: { prologCondition: `triple(Target, "step://order", Order), Order < 3` }
+ *     prologCondition: `triple(Target, "step://order", Order), Order < 3`
  *   })
  *   firstSteps: string[] = [];
  * 
- *   // Collection with custom SurrealDB filter condition
+ *   // Collection with custom SurrealQL getter
  *   @Collection({
  *     through: "recipe://entries",
- *     where: { condition: `WHERE in.uri = Target AND predicate = 'recipe://has_ingredient' AND out.uri = 'recipe://test')`
+ *     getter: "(<-link[WHERE predicate = 'recipe://has_ingredient'].in.uri)"
  *   })
- *   ingredients: string[] = [];
+ *   resolvedIngredients: string[] = [];
  * 
  *   // Local-only collection not shared with network
  *   @Collection({
@@ -497,9 +482,8 @@ export interface CollectionOptions {
  * 
  * @param {CollectionOptions} opts - Collection configuration
  * @param {string} opts.through - The predicate URI for collection links
- * @param {WhereOptions} [opts.where] - Filter conditions for collection values
- * @param {any} [opts.where.isInstance] - Model class to filter instances by
- * @param {string} [opts.where.prologCondition] - Custom Prolog condition for filtering
+ * @param {string} [opts.prologCondition] - Custom Prolog condition for SDNA filtering
+ * @param {string} [opts.getter] - Custom SurrealQL getter expression
  * @param {boolean} [opts.local] - Whether collection links are stored locally only
  */
 function Collection(opts: CollectionOptions) {
@@ -677,39 +661,11 @@ export function Model(opts: ModelConfig) {
             for(let collection in collections) {
                 let collectionCode = `collection(${uuid}, "${collection}").\n`
 
-                let { through, where, local} = collections[collection]
+                let { through, prologCondition, local} = collections[collection]
 
                 if(through) {
-                    if(where) {
-                        if(!where.isInstance && !where.prologCondition && !where.condition) {
-                            throw "'where' needs one of 'isInstance', 'prologCondition', or 'condition'"
-                        }
-
-                        let conditions = []
-
-                        if(where.isInstance) {
-                            let otherClass
-                            if(where.isInstance.name) {
-                                otherClass = where.isInstance.name
-                            } else {
-                                otherClass = where.isInstance
-                            }
-                            conditions.push(`instance(OtherClass, Target), subject_class("${otherClass}", OtherClass)`)
-                        }
-
-                        if(where.prologCondition) {
-                            conditions.push(where.prologCondition)
-                        }
-
-                        // If there are Prolog conditions (isInstance or prologCondition), use setof with conditions
-                        // If only condition is present, use simple findall (SurrealDB will filter later)
-                        if(conditions.length > 0) {
-                            const conditionString = conditions.join(", ")
-                            collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- setof(Target, (triple(Base, "${through}", Target), ${conditionString}), List).\n`
-                        } else {
-                            // Only SurrealDB condition present (no Prolog filtering)
-                            collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
-                        }
+                    if(prologCondition) {
+                        collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- setof(Target, (triple(Base, "${through}", Target), ${prologCondition}), List).\n`
                     } else {
                         collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
                     }
@@ -935,17 +891,8 @@ export function Model(opts: ModelConfig) {
                     // minCount defaults to 0 (optional)
                 };
                 
-                // Determine if it's a reference (IRI) or literal
-                // Collections typically contain references (IRIs) to other entities
-                // They're literals only if explicitly marked or contain primitive values
-                if (collMeta.where?.isInstance) {
-                    // Collection of typed entities - definitely IRIs
-                    collShape.nodeKind = 'IRI';
-                } else {
-                    // Default to IRI for collections (most common case)
-                    // Literal collections are rare and would need explicit marking
-                    collShape.nodeKind = 'IRI';
-                }
+                // Determine node kind — collections typically contain IRIs
+                collShape.nodeKind = 'IRI';
                 
                 // AD4M-specific metadata
                 if (collMeta.local !== undefined) {
@@ -1236,12 +1183,8 @@ export function HasMany(
         const collectionOpts: CollectionOptions = {
             through: opts.through,
             local: opts.local,
+            prologCondition: opts.prologCondition,
         };
-        if (opts.prologCondition || opts.condition) {
-            collectionOpts.where = {};
-            if (opts.prologCondition) collectionOpts.where.prologCondition = opts.prologCondition;
-            if (opts.condition) collectionOpts.where.condition = opts.condition;
-        }
         // Delegate to Collection decorator logic
         Collection(collectionOpts)(target, key);
     };
@@ -1397,12 +1340,8 @@ export function BelongsToMany(
         const collectionOpts: CollectionOptions = {
             through: opts.through,
             local: opts.local,
+            prologCondition: opts.prologCondition,
         };
-        if (opts.prologCondition || opts.condition) {
-            collectionOpts.where = {};
-            if (opts.prologCondition) collectionOpts.where.prologCondition = opts.prologCondition;
-            if (opts.condition) collectionOpts.where.condition = opts.condition;
-        }
         Collection(collectionOpts)(target, key);
     };
 }

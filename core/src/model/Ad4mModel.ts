@@ -137,8 +137,6 @@ export interface RelationMetadata {
   name: string;
   /** The predicate URI (through value) */
   predicate: string;
-  /** Filter conditions */
-  where?: { isInstance?: any; prologCondition?: string; condition?: string };
   /** Custom SurrealQL getter code */
   getter?: string;
   /** Whether stored locally only */
@@ -412,11 +410,8 @@ function isNumericType(schema: JSONSchemaProperty): boolean {
  *   @Collection({ through: "recipe://ingredient" })
  *   ingredients: string[] = [];
  * 
- *   // Collection of comments that are instances of another model
- *   @Collection({
- *     through: "recipe://comment",
- *     where: { isInstance: Comment }
- *   })
+ *   // Collection of comments linked to another model
+ *   @HasMany(() => Comment, { through: "recipe://comment" })
  *   comments: Comment[] = [];
  * }
  * 
@@ -586,7 +581,6 @@ export class Ad4mModel {
       relationsMetadata[relationName] = {
         name: relationName,
         predicate: options.through || "",
-        ...(options.where !== undefined && { where: options.where }),
         ...(options.local !== undefined && { local: options.local }),
         ...(options.getter !== undefined && { getter: options.getter })
       };
@@ -1183,78 +1177,10 @@ export class Ad4mModel {
       if (links && links.length > 0) {
         // Core hydration: properties (latest-wins), collections, timestamps/author
         await ctor.hydrateFromLinks(this, links, metadata, this._perspective);
-
-        // Post-hydration collection filtering (where.condition, where.isInstance)
-        // These filters can't be part of hydrateFromLinks because they require
-        // SurrealDB queries or batch instance checks against SDNA.
-        for (const [collName, collMeta] of Object.entries(metadata.collections)) {
-          if (collMeta.getter) continue;
-          let values: any[] = (this as any)[collName];
-          if (!values || !Array.isArray(values)) continue;
-
-          // Apply where.condition filtering if present
-          if (collMeta.where?.condition && values.length > 0) {
-            try {
-              const filteredValues: string[] = [];
-              for (const value of values) {
-                let condition = collMeta.where.condition
-                  .replace(/\$perspective/g, `'${this._perspective.uuid}'`)
-                  .replace(/\$base/g, `'${this._id}'`)
-                  .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
-                if (condition.trim().startsWith('WHERE')) {
-                  condition = `array::len(SELECT * FROM link ${condition}) > 0`;
-                }
-                const filterQuery = `RETURN ${condition}`;
-                const result = await this._perspective.querySurrealDB(filterQuery);
-                const isTrue = result === true || (Array.isArray(result) && result.length > 0 && result[0] === true);
-                if (isTrue) filteredValues.push(value);
-              }
-              values = filteredValues;
-            } catch (error) {
-              console.warn(`Failed to apply condition filter for ${collName}:`, error);
-            }
-          }
-
-          // Apply where.isInstance filtering if present
-          if (collMeta.where?.isInstance && values.length > 0) {
-            try {
-              const className = typeof collMeta.where.isInstance === 'string'
-                ? collMeta.where.isInstance
-                : collMeta.where.isInstance.name;
-              const filterMetadata = await this._perspective.getSubjectClassMetadataFromSDNA(className);
-              if (filterMetadata) {
-                values = await this._perspective.batchCheckSubjectInstances(values, filterMetadata);
-              }
-            } catch (error) {
-              // Keep unfiltered values on error
-            }
-          }
-
-          (this as any)[collName] = values;
-        }
       }
 
       // Evaluate SurrealQL getters
       await ctor.evaluateCustomGettersForInstance(this, this._perspective, metadata);
-
-      // Apply where.isInstance filtering to getter collections
-      // (non-getter collections were already filtered above)
-      for (const [collName, collMeta] of Object.entries(metadata.collections)) {
-        if (collMeta.getter && collMeta.where?.isInstance && (this as any)[collName]?.length > 0) {
-          try {
-            const className = typeof collMeta.where.isInstance === 'string'
-              ? collMeta.where.isInstance
-              : collMeta.where.isInstance.name;
-            const filterMetadata = await this._perspective.getSubjectClassMetadataFromSDNA(className);
-            if (filterMetadata) {
-              const filtered = await this._perspective.batchCheckSubjectInstances((this as any)[collName], filterMetadata);
-              (this as any)[collName] = filtered;
-            }
-          } catch (error) {
-            // Keep unfiltered values on error
-          }
-        }
-      }
     } catch (e) {
       console.error(`SurrealDB getData also failed for ${this._id}:`, e);
     }
@@ -2024,40 +1950,8 @@ WHERE ${whereConditions.join(' AND ')}
     }
     
     // Evaluate custom getters for all instances (single pass)
-    // This populates collection values needed for where.isInstance filtering
     for (const instance of instances) {
       await this.evaluateCustomGettersForInstance(instance, perspective, metadata);
-    }
-    
-    // Filter collections by where.isInstance if specified
-    // Do this after initial evaluation so collection values exist for filtering
-    for (const instance of instances) {
-      for (const [collName, collMeta] of Object.entries(metadata.collections)) {
-        if (collMeta.where?.isInstance && instance[collName]?.length > 0) {
-          try {
-            const targetClass = collMeta.where.isInstance;
-            const subjects = instance[collName];
-            
-            // Get the class metadata from SDNA to pass to batchCheckSubjectInstances
-            const targetClassName = typeof targetClass === 'string' 
-              ? targetClass 
-              : (targetClass as any).prototype?.className || targetClass.name;
-            const classMetadata = await perspective.getSubjectClassMetadataFromSDNA(targetClassName);
-            
-            if (!classMetadata) {
-              continue;
-            }
-            
-            // Check which subjects are instances of the target class
-            const validSubjects = await perspective.batchCheckSubjectInstances(subjects, classMetadata);
-            
-            // Update the collection with filtered instances
-            instance[collName] = validSubjects;
-          } catch (error) {
-            // On error, leave the collection unfiltered rather than breaking everything
-          }
-        }
-      }
     }
     
     // Filter by where conditions that couldn't be filtered in SQL
