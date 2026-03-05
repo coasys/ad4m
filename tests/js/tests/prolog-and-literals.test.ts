@@ -8,7 +8,7 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     Property,
     ReadOnly,
     Collection,
-    ModelOptions,
+    Model,
     Optional,
     PropertyOptions,
 } from "@coasys/ad4m";
@@ -84,7 +84,7 @@ describe("Prolog + Literals", () => {
         // See "SDNA creation decorators" tests below for the modern API.
 
         describe("SDNA creation decorators", () => {
-            @ModelOptions({
+            @Model({
                 name: "Message"
             })
             class Message extends Ad4mModel {
@@ -105,7 +105,7 @@ describe("Prolog + Literals", () => {
 
             // This class matches the SDNA in ./sdna/subject.pl
             // and this test proves the decorators create the exact same SDNA code
-            @ModelOptions({
+            @Model({
                 name: "Todo"
             })
             class Todo extends Ad4mModel {
@@ -307,7 +307,7 @@ describe("Prolog + Literals", () => {
             it("can easily be initialized with PerspectiveProxy.ensureSDNASubjectClass()", async () => {
                 expect(await perspective!.getSdna()).to.have.lengthOf(1)
 
-                @ModelOptions({
+                @Model({
                     name: "Test"
                 })
                 class Test {
@@ -387,7 +387,7 @@ describe("Prolog + Literals", () => {
             })
 
             describe("Active record implementation", () => {
-                @ModelOptions({
+                @Model({
                     name: "Recipe"
                 })
                 class Recipe extends Ad4mModel {
@@ -580,7 +580,7 @@ describe("Prolog + Literals", () => {
 
                 it("can constrain collection entries through 'where' clause with condition", async () => {
                     // Define a Recipe model with condition filtering
-                    @ModelOptions({ name: "RecipeWithSurrealFilter" })
+                    @Model({ name: "RecipeWithSurrealFilter" })
                     class RecipeWithSurrealFilter extends Ad4mModel {
                         @Flag({
                             through: "ad4m://type",
@@ -1116,7 +1116,7 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("findAll() works with where query between operations", async () => {
-                    @ModelOptions({
+                    @Model({
                         name: "Task_due"
                     })
                     class TaskDue extends Ad4mModel {
@@ -1709,7 +1709,7 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("query builder works with subscriptions", async () => {
-                    @ModelOptions({
+                    @Model({
                         name: "Notification"
                     })
                     class Notification extends Ad4mModel {
@@ -1815,7 +1815,7 @@ describe("Prolog + Literals", () => {
 
                 it("query builder should filter by subject class", async () => {
                     // Define a second subject class
-                    @ModelOptions({
+                    @Model({
                         name: "Note1"
                     })
                     class Note1 extends Ad4mModel {
@@ -1832,7 +1832,7 @@ describe("Prolog + Literals", () => {
                         content1: string = "";
                     }
 
-                    @ModelOptions({
+                    @Model({
                         name: "Note2"
                     })
                     class Note2 extends Ad4mModel {
@@ -1872,7 +1872,7 @@ describe("Prolog + Literals", () => {
                 });
 
                 it("query builder works with single query object, complex query and subscriptions", async () => {
-                    @ModelOptions({
+                    @Model({
                         name: "Task"
                     })
                     class Task extends Ad4mModel {
@@ -2009,7 +2009,7 @@ describe("Prolog + Literals", () => {
 
                 it("transform option in property decorators works", async () => {
                     const transformTestPerspective = await ad4m?.perspective.add("transform-test");
-                    @ModelOptions({ name: "ImagePost" })
+                    @Model({ name: "ImagePost" })
                     class ImagePost extends Ad4mModel {
                         @Property({
                             through: "image://data",
@@ -2041,7 +2041,7 @@ describe("Prolog + Literals", () => {
 
                 it("should support batch operations with multiple models", async () => {
                     let perspective = await ad4m!.perspective.add("batch test")
-                    @ModelOptions({
+                    @Model({
                         name: "BatchRecipe"
                     })
                     class BatchRecipe extends Ad4mModel {
@@ -2055,7 +2055,7 @@ describe("Prolog + Literals", () => {
                         ingredients: string[] = [];
                     }
 
-                    @ModelOptions({
+                    @Model({
                         name: "BatchNote"
                     })
                     class BatchNote extends Ad4mModel {
@@ -2172,7 +2172,7 @@ describe("Prolog + Literals", () => {
                 describe("SurrealDB vs Prolog Subscriptions", () => {
                     let perspective: PerspectiveProxy;
 
-                    @ModelOptions({ name: "SubscriptionTestModel" })
+                    @Model({ name: "SubscriptionTestModel" })
                     class TestModel extends Ad4mModel {
                         @Property({
                             through: "test://name",
@@ -2235,7 +2235,7 @@ describe("Prolog + Literals", () => {
                     let perspective: PerspectiveProxy;
 
                     // Define a simple test model
-                    @ModelOptions({ name: "TestModel" })
+                    @Model({ name: "TestModel" })
                     class TestModel extends Ad4mModel {
                         @Property({
                             through: "test://name",
@@ -2447,7 +2447,7 @@ describe("Prolog + Literals", () => {
                 });
 
                 describe("Emoji and Special Character Handling", () => {
-                    @ModelOptions({
+                    @Model({
                         name: "Message"
                     })
                     class EmojiMessage extends Ad4mModel {
@@ -2633,7 +2633,7 @@ describe("Prolog + Literals", () => {
             })
 
             describe("getter feature tests", () => {
-                @ModelOptions({ name: "BlogPost" })
+                @Model({ name: "BlogPost" })
                 class BlogPost extends Ad4mModel {
                     @Property({ 
                         through: "blog://title",
@@ -2736,7 +2736,7 @@ describe("Prolog + Literals", () => {
             })
 
             describe("isInstance filtering tests", () => {
-                @ModelOptions({ name: "Comment" })
+                @Model({ name: "Comment" })
                 class Comment extends Ad4mModel {
                     @Flag({
                         through: "ad4m://type",
@@ -2751,7 +2751,7 @@ describe("Prolog + Literals", () => {
                     text: string = "";
                 }
 
-                @ModelOptions({ name: "Article" })
+                @Model({ name: "Article" })
                 class Article extends Ad4mModel {
                     @Property({ 
                         through: "article://title",
@@ -2766,7 +2766,7 @@ describe("Prolog + Literals", () => {
                     comments: string[] = [];
                 }
 
-                @ModelOptions({ name: "ArticleWithString" })
+                @Model({ name: "ArticleWithString" })
                 class ArticleWithString extends Ad4mModel {
                     @Property({ 
                         through: "article://title",

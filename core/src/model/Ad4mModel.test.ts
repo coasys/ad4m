@@ -1,9 +1,9 @@
 import { Ad4mModel } from "./Ad4mModel";
-import { ModelOptions, Property, Optional, ReadOnly, Collection, Flag } from "./decorators";
+import { Model, Property, Optional, ReadOnly, Collection, Flag } from "./decorators";
 
 describe("Ad4mModel.getModelMetadata()", () => {
   it("should extract basic model metadata with className", () => {
-    @ModelOptions({ name: "SimpleModel" })
+    @Model({ name: "SimpleModel" })
     class SimpleModel extends Ad4mModel {}
 
     const metadata = SimpleModel.getModelMetadata();
@@ -14,7 +14,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
   });
 
   it("should extract property metadata with all fields", () => {
-    @ModelOptions({ name: "PropertyModel" })
+    @Model({ name: "PropertyModel" })
     class PropertyModel extends Ad4mModel {
       @Property({ through: "test://name", resolveLanguage: "literal" })
       name: string = "";
@@ -56,7 +56,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
   });
 
   it("should extract collection metadata with where clauses", () => {
-    @ModelOptions({ name: "CollectionModel" })
+    @Model({ name: "CollectionModel" })
     class CollectionModel extends Ad4mModel {
       @Collection({ through: "test://items" })
       items: string[] = [];
@@ -90,7 +90,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
   });
 
   it("should extract transform function from property metadata", () => {
-    @ModelOptions({ name: "TransformModel" })
+    @Model({ name: "TransformModel" })
     class TransformModel extends Ad4mModel {
       @Optional({ 
         through: "test://data",
@@ -110,7 +110,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
   });
 
   it("should extract custom getter and setter from property metadata", () => {
-    @ModelOptions({ name: "CustomModel" })
+    @Model({ name: "CustomModel" })
     class CustomModel extends Ad4mModel {
       @Optional({
         through: "test://computed",
@@ -129,10 +129,10 @@ describe("Ad4mModel.getModelMetadata()", () => {
   });
 
   it("should handle collection with isInstance where clause", () => {
-    @ModelOptions({ name: "Comment" })
+    @Model({ name: "Comment" })
     class Comment extends Ad4mModel {}
     
-    @ModelOptions({ name: "Post" })
+    @Model({ name: "Post" })
     class Post extends Ad4mModel {
       @Collection({ 
         through: "post://comment",
@@ -147,15 +147,15 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.collections.comments.where?.isInstance).toBeDefined();
   });
 
-  it("should throw error for class without @ModelOptions decorator", () => {
+  it("should throw error for class without @Model decorator", () => {
     class NoDecoratorModel extends Ad4mModel {}
 
     // Assert that calling getModelMetadata throws an error
-    expect(() => NoDecoratorModel.getModelMetadata()).toThrow("Model class must be decorated with @ModelOptions");
+    expect(() => NoDecoratorModel.getModelMetadata()).toThrow("Model class must be decorated with @Model");
   });
 
   it("should handle complex model with mixed property and collection types", () => {
-    @ModelOptions({ name: "Recipe" })
+    @Model({ name: "Recipe" })
     class Recipe extends Ad4mModel {
       @Property({ through: "recipe://name", resolveLanguage: "literal" })
       name: string = "";
@@ -447,7 +447,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   }
 
   // Test Recipe model
-  @ModelOptions({ name: "Recipe" })
+  @Model({ name: "Recipe" })
   class Recipe extends Ad4mModel {
     @Property({ through: "recipe://name" })
     name: string = "";
@@ -637,7 +637,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   });
 
   it("should only select requested collections", async () => {
-    @ModelOptions({ name: "MultiCollectionModel" })
+    @Model({ name: "MultiCollectionModel" })
     class MultiCollectionModel extends Ad4mModel {
       @Collection({ through: "test://coll1" })
       coll1: string[] = [];
@@ -802,7 +802,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   });
 
   it("should handle boolean values", async () => {
-    @ModelOptions({ name: "Task" })
+    @Model({ name: "Task" })
     class Task extends Ad4mModel {
       @Property({ through: "task://completed" })
       completed: boolean = false;
@@ -865,7 +865,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
 describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () => {
   // Test Recipe model
-  @ModelOptions({ name: "Recipe" })
+  @Model({ name: "Recipe" })
   class Recipe extends Ad4mModel {
     @Property({ through: "recipe://name" })
     name: string = "";
@@ -1231,7 +1231,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
 
 describe("Ad4mModel.count() with advanced where conditions", () => {
   // Test Recipe model
-  @ModelOptions({ name: "Recipe" })
+  @Model({ name: "Recipe" })
   class Recipe extends Ad4mModel {
     @Property({ through: "recipe://name" })
     name: string = "";

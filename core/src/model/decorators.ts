@@ -3,6 +3,112 @@ import { Subject } from "./Subject";
 import { capitalize, propertyNameToSetterName, singularToPlural, stringifyObjectLiteral } from "./util";
 import { SHACLShape, SHACLPropertyShape } from "../shacl/SHACLShape";
 
+// ============================================================================
+// WeakMap-based metadata registry
+// ============================================================================
+// Stores property and relation metadata per-class using WeakMaps keyed by
+// the class constructor. This replaces the old prototype-mutation approach
+// and avoids issues with inheritance chains sharing mutable state.
+
+/** Metadata stored for each property via @Property / @Optional / @ReadOnly / @Flag */
+export interface PropertyMetadataEntry extends PropertyOptions {
+    flag?: boolean;
+}
+
+/** Metadata stored for each relation via @HasMany / @HasOne / @BelongsToOne / @BelongsToMany */
+export interface RelationMetadataEntry {
+    predicate: string;
+    target: () => Ad4mModelLike;
+    kind: 'hasMany' | 'hasOne' | 'belongsToOne' | 'belongsToMany';
+    /** Optional SurrealDB WHERE clause for filtering */
+    condition?: string;
+    /** Optional Prolog condition for filtering */
+    prologCondition?: string;
+    local?: boolean;
+}
+
+/** Registry of property metadata keyed by constructor → { propName → metadata } */
+const propertyRegistry = new WeakMap<Function, Record<string, PropertyMetadataEntry>>();
+
+/** Registry of relation metadata keyed by constructor → { propName → metadata } */
+const relationRegistry = new WeakMap<Function, Record<string, RelationMetadataEntry>>();
+
+/**
+ * Retrieve property metadata for a given class constructor.
+ * Walks the prototype chain so subclass decorators compose with parent decorators.
+ */
+export function getPropertiesMetadata(ctor: Function): Record<string, PropertyMetadataEntry> {
+    const result: Record<string, PropertyMetadataEntry> = {};
+    const chain: Function[] = [];
+    let current = ctor;
+    while (current && current !== Object) {
+        chain.unshift(current); // parent-first order
+        current = Object.getPrototypeOf(current);
+    }
+    for (const c of chain) {
+        const meta = propertyRegistry.get(c);
+        if (meta) Object.assign(result, meta);
+    }
+    return result;
+}
+
+/**
+ * Retrieve relation metadata for a given class constructor.
+ * Walks the prototype chain so subclass decorators compose with parent decorators.
+ */
+export function getRelationsMetadata(ctor: Function): Record<string, RelationMetadataEntry> {
+    const result: Record<string, RelationMetadataEntry> = {};
+    const chain: Function[] = [];
+    let current = ctor;
+    while (current && current !== Object) {
+        chain.unshift(current);
+        current = Object.getPrototypeOf(current);
+    }
+    for (const c of chain) {
+        const meta = relationRegistry.get(c);
+        if (meta) Object.assign(result, meta);
+    }
+    return result;
+}
+
+/**
+ * Interface for any class that looks like an Ad4mModel (used in circular-ref-safe typings).
+ */
+export interface Ad4mModelLike {
+    new (...args: any[]): any;
+    className?: string;
+    generateSDNA?: () => any;
+    generateSHACL?: () => any;
+}
+
+/**
+ * Convert a model instance to a plain serializable object.
+ * Reads the property metadata and extracts values from the instance.
+ */
+export function instanceToSerializable(instance: any): Record<string, any> {
+    const ctor = instance.constructor;
+    const props = getPropertiesMetadata(ctor);
+    const result: Record<string, any> = {};
+    for (const [key, _meta] of Object.entries(props)) {
+        result[key] = instance[key];
+    }
+    return result;
+}
+
+/**
+ * Generate a random identifier string (lowercase alpha).
+ * Generate a random identifier string of the given length (lowercase alpha).
+ */
+export function makeRandomId(length: number): string {
+    let result = '';
+    const characters = 'abcdefghijklmnopqrstuvwxyz';
+    const charactersLength = characters.length;
+    for (let i = 0; i < length; i++) {
+        result += characters.charAt(Math.floor(Math.random() * charactersLength));
+    }
+    return result;
+}
+
 export class PerspectiveAction {
     action: string
     source: string
@@ -520,17 +626,7 @@ export function Collection(opts: CollectionOptions) {
     };
 }
 
-export function makeRandomPrologAtom(length: number): string {
-    let result = '';
-    let characters = 'abcdefghijklmnopqrstuvwxyz';
-    let charactersLength = characters.length;
-    for (let i = 0; i < length; i++) {
-       result += characters.charAt(Math.floor(Math.random() * charactersLength));
-    }
-    return result;
- }
-
-export interface ModelOptionsOptions {
+export interface ModelConfig {
     /**
      * The name of the entity.
      */
@@ -555,7 +651,7 @@ export interface ModelOptionsOptions {
  * 
  * @example
  * ```typescript
- * @ModelOptions({ name: "Recipe" })
+ * @Model({ name: "Recipe" })
  * class Recipe extends Ad4mModel {
  *   @Property({
  *     through: "recipe://name",
@@ -588,10 +684,10 @@ export interface ModelOptionsOptions {
  * await perspective.ensureSDNASubjectClass(Recipe);
  * ```
  * 
- * @param {ModelOptionsOptions} opts - Model configuration
+ * @param {ModelConfig} opts - Model configuration
  * @param {string} opts.name - Unique name for the model class in AD4M
  */
-export function ModelOptions(opts: ModelOptionsOptions) {
+export function Model(opts: ModelConfig) {
     return function (target: any) {
         target.prototype.className = opts.name;
         target.className = opts.name;
@@ -601,7 +697,7 @@ export function ModelOptions(opts: ModelOptionsOptions) {
             let subjectName = opts.name
             let obj = target.prototype;
 
-            let uuid = makeRandomPrologAtom(8)
+            let uuid = makeRandomId(8)
 
             sdna += `subject_class("${subjectName}", ${uuid}).\n`
 
@@ -1114,3 +1210,203 @@ export function ReadOnly(opts: PropertyOptions) {
         writable: false
     });
 }
+
+// ============================================================================
+// Relation decorators
+// ============================================================================
+
+/**
+ * Options for relation decorators (@HasMany, @HasOne, @BelongsToOne, @BelongsToMany).
+ */
+export interface RelationOptions {
+    /** The predicate URI used to link the two models */
+    through: string;
+    /** The target model class (use a thunk to avoid circular-dependency issues) */
+    target: () => Ad4mModelLike;
+    /** Optional SurrealDB WHERE clause for filtering */
+    condition?: string;
+    /** Optional Prolog condition for filtering */
+    prologCondition?: string;
+    /** Whether the link is stored locally (not shared on the network) */
+    local?: boolean;
+}
+
+/**
+ * Utility type that describes the auto-generated helper methods for a HasMany
+ * relation. For a property named `comments` on a class `Post`, the following
+ * methods will be available on instances:
+ *
+ *   post.addComment(value)
+ *   post.removeComment(value)
+ *   post.setCollectionComment(values)
+ */
+export type HasManyMethods<Keys extends string> = {
+    [K in Keys as `add${Capitalize<K>}`]: (value: string) => Promise<void>;
+} & {
+    [K in Keys as `remove${Capitalize<K>}`]: (value: string) => Promise<void>;
+} & {
+    [K in Keys as `setCollection${Capitalize<K>}`]: (values: string[]) => Promise<void>;
+};
+
+/**
+ * Decorator for defining a one-to-many relation.
+ *
+ * @category Decorators
+ *
+ * @description
+ * Declares that the decorated property is an array of related model instances.
+ * Under the hood it registers the relation in the relation registry and also
+ * creates the corresponding `@Collection` entry so that the SDNA / SHACL
+ * generators continue to emit the correct subject-class code.
+ *
+ * @example
+ * ```typescript
+ * @Model({ name: "Post" })
+ * class Post extends Ad4mModel {
+ *   @HasMany({ through: "post://comment", target: () => Comment })
+ *   comments: string[] = [];
+ * }
+ * ```
+ */
+export function HasMany(opts: RelationOptions) {
+    return function <T>(target: T, key: keyof T) {
+        // --- relation registry ---
+        const ctor = (target as any).constructor;
+        if (!relationRegistry.has(ctor)) relationRegistry.set(ctor, {});
+        const map = relationRegistry.get(ctor)!;
+        map[key as string] = {
+            predicate: opts.through,
+            target: opts.target,
+            kind: 'hasMany',
+            condition: opts.condition,
+            prologCondition: opts.prologCondition,
+            local: opts.local,
+        };
+
+        // --- also register as a collection so existing SDNA/SHACL generators work ---
+        const collectionOpts: CollectionOptions = {
+            through: opts.through,
+            local: opts.local,
+        };
+        if (opts.prologCondition || opts.condition) {
+            collectionOpts.where = {};
+            if (opts.prologCondition) collectionOpts.where.prologCondition = opts.prologCondition;
+            if (opts.condition) collectionOpts.where.condition = opts.condition;
+        }
+        // Delegate to Collection decorator logic
+        Collection(collectionOpts)(target, key);
+    };
+}
+
+/**
+ * Decorator for defining a one-to-one relation (owning side).
+ *
+ * @category Decorators
+ *
+ * @example
+ * ```typescript
+ * @Model({ name: "Post" })
+ * class Post extends Ad4mModel {
+ *   @HasOne({ through: "post://author", target: () => Author })
+ *   author: string = "";
+ * }
+ * ```
+ */
+export function HasOne(opts: RelationOptions) {
+    return function <T>(target: T, key: keyof T) {
+        const ctor = (target as any).constructor;
+        if (!relationRegistry.has(ctor)) relationRegistry.set(ctor, {});
+        const map = relationRegistry.get(ctor)!;
+        map[key as string] = {
+            predicate: opts.through,
+            target: opts.target,
+            kind: 'hasOne',
+            local: opts.local,
+        };
+
+        // Register as a writable property
+        Optional({
+            through: opts.through,
+            writable: true,
+            local: opts.local,
+        })(target, key);
+    };
+}
+
+/**
+ * Decorator for defining the inverse side of a one-to-one relation.
+ *
+ * @category Decorators
+ *
+ * @example
+ * ```typescript
+ * @Model({ name: "Author" })
+ * class Author extends Ad4mModel {
+ *   @BelongsToOne({ through: "post://author", target: () => Post })
+ *   post: string = "";
+ * }
+ * ```
+ */
+export function BelongsToOne(opts: RelationOptions) {
+    return function <T>(target: T, key: keyof T) {
+        const ctor = (target as any).constructor;
+        if (!relationRegistry.has(ctor)) relationRegistry.set(ctor, {});
+        const map = relationRegistry.get(ctor)!;
+        map[key as string] = {
+            predicate: opts.through,
+            target: opts.target,
+            kind: 'belongsToOne',
+            local: opts.local,
+        };
+
+        // Read-only property (the owning side manages the link)
+        Optional({
+            through: opts.through,
+            writable: false,
+            local: opts.local,
+        })(target, key);
+    };
+}
+
+/**
+ * Decorator for defining the inverse side of a many-to-many relation.
+ *
+ * @category Decorators
+ *
+ * @example
+ * ```typescript
+ * @Model({ name: "Tag" })
+ * class Tag extends Ad4mModel {
+ *   @BelongsToMany({ through: "post://tag", target: () => Post })
+ *   posts: string[] = [];
+ * }
+ * ```
+ */
+export function BelongsToMany(opts: RelationOptions) {
+    return function <T>(target: T, key: keyof T) {
+        const ctor = (target as any).constructor;
+        if (!relationRegistry.has(ctor)) relationRegistry.set(ctor, {});
+        const map = relationRegistry.get(ctor)!;
+        map[key as string] = {
+            predicate: opts.through,
+            target: opts.target,
+            kind: 'belongsToMany',
+            condition: opts.condition,
+            prologCondition: opts.prologCondition,
+            local: opts.local,
+        };
+
+        // Register as a collection (read-only — owning side manages links)
+        const collectionOpts: CollectionOptions = {
+            through: opts.through,
+            local: opts.local,
+        };
+        if (opts.prologCondition || opts.condition) {
+            collectionOpts.where = {};
+            if (opts.prologCondition) collectionOpts.where.prologCondition = opts.prologCondition;
+            if (opts.condition) collectionOpts.where.condition = opts.condition;
+        }
+        Collection(collectionOpts)(target, key);
+    };
+}
+

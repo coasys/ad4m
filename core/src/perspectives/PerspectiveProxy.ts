@@ -2069,7 +2069,7 @@ export class PerspectiveProxy {
         
         // Generate SHACL SDNA (Prolog-free)
         if (!jsClass.generateSHACL) {
-            throw new Error(`Class ${jsClass.name} must have generateSHACL(). Use @ModelOptions decorator.`);
+            throw new Error(`Class ${jsClass.name} must have generateSHACL(). Use @Model decorator.`);
         }
 
         // Get SHACL shape (W3C standard + AD4M action definitions)
