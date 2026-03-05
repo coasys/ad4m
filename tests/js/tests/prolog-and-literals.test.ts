@@ -95,7 +95,7 @@ describe("Prolog + Literals", () => {
                 type: string = ""
 
                 static async all(perspective: PerspectiveProxy): Promise<Message[]> {
-                    return Message.query(perspective).run() as Promise<Message[]>
+                    return Message.query(perspective).get() as Promise<Message[]>
                 }
 
                 @Optional({
@@ -125,15 +125,15 @@ describe("Prolog + Literals", () => {
                 // isSubjectInstance = [hasLink("todo://state")]
 
                 static async all(perspective: PerspectiveProxy): Promise<Todo[]> {
-                    return Todo.query(perspective).run() as Promise<Todo[]>
+                    return Todo.query(perspective).get() as Promise<Todo[]>
                 }
 
                 static async allReady(perspective: PerspectiveProxy): Promise<Todo[]> {
-                    return Todo.query(perspective).where({ state: "todo://ready" }).run() as Promise<Todo[]>
+                    return Todo.query(perspective).where({ state: "todo://ready" }).get() as Promise<Todo[]>
                 }
 
                 static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> {
-                    return Todo.query(perspective).where({ state: "todo://done" }).run() as Promise<Todo[]>
+                    return Todo.query(perspective).where({ state: "todo://done" }).get() as Promise<Todo[]>
                 }
 
                 //@ts-ignore
