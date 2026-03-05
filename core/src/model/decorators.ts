@@ -770,12 +770,17 @@ export function Model(opts: ModelConfig) {
 
                 propertiesCode.push(propertyCode)
 
-                if(initial) {
+                // Auto-derive effectiveInitial for writable, non-flag properties
+                // so constructor/destructor always handle the property link
+                const effectiveInitial = initial
+                    ?? (writable && !flag && through ? "literal://string:" : undefined);
+
+                if(effectiveInitial) {
                     constructorActions.push({
                         action: "addLink",
                         source: "this",
                         predicate: through,
-                        target: initial,
+                        target: effectiveInitial,
                     })
 
                     classRemoverActions.push({
@@ -1000,12 +1005,17 @@ export function Model(opts: ModelConfig) {
                 }
 
                 // Add to constructor actions if property has initial value
-                if (propMeta.initial) {
+                // Auto-derive effectiveInitial for writable, non-flag properties
+                const effectiveInitial = propMeta.initial
+                    ?? (propMeta.writable && !propMeta.flag && propMeta.through
+                        ? "literal://string:" : undefined);
+
+                if (effectiveInitial) {
                     constructorActions.push({
                         action: "addLink",
                         source: "this",
                         predicate: propMeta.through,
-                        target: propMeta.initial,
+                        target: effectiveInitial,
                     });
 
                     // Add to destructor actions
