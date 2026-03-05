@@ -920,6 +920,17 @@ export function Model(opts: ModelConfig) {
             const targetClass = `${namespace}${subjectName}`;
             const shape = new SHACLShape(shapeUri, targetClass);
 
+            // Detect @Model inheritance — if the parent class also has
+            // generateSHACL it is itself a @Model and we reference its shape
+            // via sh:node so SHACL validators can walk the hierarchy.
+            const parentCtor = Object.getPrototypeOf(target);
+            if (parentCtor && typeof parentCtor.generateSHACL === 'function') {
+                const parentSHACL = parentCtor.generateSHACL();
+                if (parentSHACL?.shape?.nodeShapeUri) {
+                    shape.addParentShape(parentSHACL.shape.nodeShapeUri);
+                }
+            }
+
             // === Extract Constructor Actions (same logic as generateSDNA) ===
             let constructorActions = [];
             if(obj.subjectConstructor && obj.subjectConstructor.length) {
