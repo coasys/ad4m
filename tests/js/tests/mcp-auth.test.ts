@@ -47,6 +47,8 @@ describe("MCP Authentication HTTP Tests", function() {
 
     let executorProcess: ChildProcess | null = null;
     let mcpSessionId: string = "";
+    // Perspective UUID created while authenticated — used by the auth-bypass regression tests
+    let authedPerspectiveUuid: string = "";
 
     before(async () => {
         // Clean up and create test directory
@@ -169,6 +171,16 @@ describe("MCP Authentication HTTP Tests", function() {
             console.log("Authenticated list_perspectives:", JSON.stringify(result));
         });
 
+        it("should create a perspective while authenticated (used by auth bypass regression tests)", async function() {
+            const result = await callMcpTool(MCP_BASE_URL, 'add_perspective', {
+                name: "auth-test-perspective"
+            }, mcpSessionId);
+            expect(result.success).to.be.true;
+            expect(result.uuid).to.be.a('string');
+            authedPerspectiveUuid = result.uuid;
+            console.log("Created perspective:", authedPerspectiveUuid);
+        });
+
         it("should reject generate_jwt with invalid request_id/code", async function() {
             const init = await initializeMcp(MCP_BASE_URL);
             const freshSession = init.sessionId;
@@ -261,6 +273,67 @@ describe("MCP Authentication HTTP Tests", function() {
             const perspectives = await callMcpTool(MCP_BASE_URL, 'list_perspectives', {}, session);
             expect(perspectives).to.be.an('array');
             console.log("Authenticated list_perspectives:", JSON.stringify(perspectives));
+        });
+    });
+
+    // ========================================================================
+    // 6. Auth Bypass Regression Tests
+    //
+    // Verifies that the security fix in call_tool() + get_readable_perspective()
+    // holds: unauthenticated clients must not be able to access perspective data
+    // even when they know a valid perspective UUID.
+    //
+    // Before the fix, in multi-user/admin mode:
+    //   - capabilities_from_token("", Some(admin_cred)) returned Ok(minimal_caps)
+    //   - The call_tool() check only tested capabilities.is_err() — so it passed
+    //   - get_readable_perspective() treated no-JWT as main-agent context → data exposed
+    // ========================================================================
+
+    describe("6. Auth Bypass Regression — unauthenticated sessions cannot read perspective data", function() {
+        it("query_links must reject unauthenticated access even with a known perspective UUID", async function() {
+            expect(authedPerspectiveUuid).to.be.a('string').with.length.greaterThan(0);
+
+            // Open a fresh session with no JWT
+            const unauthSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
+
+            const result = await callMcpTool(MCP_BASE_URL, 'query_links', {
+                perspective_id: authedPerspectiveUuid,
+            }, unauthSession);
+
+            // Must get an auth error — not an empty array and not perspective data
+            expect(typeof result === 'string' || (result && result.error)).to.be.true;
+            const msg = typeof result === 'string' ? result : JSON.stringify(result);
+            expect(msg.toLowerCase()).to.include("auth");
+            console.log("Unauthenticated query_links response:", msg.substring(0, 120));
+        });
+
+        it("get_models must reject unauthenticated access even with a known perspective UUID", async function() {
+            expect(authedPerspectiveUuid).to.be.a('string').with.length.greaterThan(0);
+
+            const unauthSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
+
+            const result = await callMcpTool(MCP_BASE_URL, 'get_models', {
+                perspective_id: authedPerspectiveUuid,
+            }, unauthSession);
+
+            const msg = typeof result === 'string' ? result : JSON.stringify(result);
+            expect(msg.toLowerCase()).to.include("auth");
+            console.log("Unauthenticated get_models response:", msg.substring(0, 120));
+        });
+
+        it("query_subjects must reject unauthenticated access even with a known perspective UUID", async function() {
+            expect(authedPerspectiveUuid).to.be.a('string').with.length.greaterThan(0);
+
+            const unauthSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
+
+            const result = await callMcpTool(MCP_BASE_URL, 'query_subjects', {
+                perspective_id: authedPerspectiveUuid,
+                class_name: "Message",
+            }, unauthSession);
+
+            const msg = typeof result === 'string' ? result : JSON.stringify(result);
+            expect(msg.toLowerCase()).to.include("auth");
+            console.log("Unauthenticated query_subjects response:", msg.substring(0, 120));
         });
     });
 });
