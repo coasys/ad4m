@@ -2176,6 +2176,37 @@ WHERE ${whereConditions.join(' AND ')}
   }
 
   /**
+   * Finds the first instance matching the query, or `null` if none exists.
+   *
+   * Equivalent to `findAll` with `limit: 1` — only one instance is hydrated.
+   *
+   * @param perspective - The perspective to search in
+   * @param query - Optional query parameters to filter results
+   * @param useSurrealDB - Whether to use SurrealDB (default: true) or Prolog (legacy)
+   * @returns The first matching instance, or `null`
+   *
+   * @example
+   * ```typescript
+   * const recipe = await Recipe.findOne(perspective, {
+   *   where: { name: "Pasta" }
+   * });
+   * if (recipe) {
+   *   console.log(recipe.name);
+   * }
+   * ```
+   */
+  static async findOne<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    query: Query = {},
+    useSurrealDB: boolean = true,
+  ): Promise<T | null> {
+    const limitedQuery = { ...query, limit: 1 };
+    const results = await this.findAll(perspective, limitedQuery, useSurrealDB);
+    return results[0] ?? null;
+  }
+
+  /**
    * Gets all instances with count of total matches without offset & limit applied.
    * 
    * @param perspective - The perspective to search in
@@ -3458,6 +3489,26 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     }
 
     return results;
+  }
+
+  /**
+   * Returns the first matching instance, or `null` if none match.
+   *
+   * Internally sets `limit: 1` and delegates to `get()`.
+   *
+   * @returns The first matching instance, or `null`
+   *
+   * @example
+   * ```typescript
+   * const recipe = await Recipe.query(perspective)
+   *   .where({ name: "Pasta" })
+   *   .first();
+   * ```
+   */
+  async first(): Promise<T | null> {
+    this.queryParams.limit = 1;
+    const results = await this.get();
+    return results[0] ?? null;
   }
 
   /**
