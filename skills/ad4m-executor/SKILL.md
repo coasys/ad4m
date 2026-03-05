@@ -8,9 +8,9 @@ description: Build, configure, and run the AD4M executor from source. Use when s
 ## Prerequisites
 
 ### Required toolchain
-- **Rust 1.84.0+** with `wasm32-unknown-unknown` target
+- **Rust 1.92+** with `wasm32-unknown-unknown` target (see `rust-toolchain.toml` and `.circleci/Dockerfile` for normative versions)
 - **Go 1.22.0+**
-- **Node.js 20+** with **pnpm**
+- **Node.js 18+** with **pnpm**
 - **protobuf compiler** (`protoc`)
 - **cmake**
 
@@ -23,7 +23,7 @@ brew install protobuf cmake
 
 **Ubuntu/Debian:**
 ```bash
-sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev \
+sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libayatana-appindicator3-dev \
   librsvg2-dev patchelf protobuf-compiler cmake fuse libfuse2 \
   mesa-utils mesa-vulkan-drivers libsoup-3.0-dev \
   javascriptcoregtk-4.1-dev webkit2gtk-4.1-dev librust-alsa-sys-dev
@@ -59,7 +59,8 @@ cargo build --release -p ad4m
 ### Rebuild after changes
 
 Only need to repeat the steps that changed:
-- **Deno/JS changes** → `cd rust-executor && pnpm build` then `cd ../cli && pnpm build`
+- **JS changes in `executor/`** → `cd executor && pnpm build` then `cd ../rust-executor && pnpm build` then `cd ../cli && pnpm build`
+- **Deno/snapshot changes in `rust-executor/`** → `cd rust-executor && pnpm build` then `cd ../cli && pnpm build`
 - **Rust executor changes** → `cd rust-executor && pnpm build` then `cd ../cli && pnpm build`
 - **CLI-only changes** → `cd cli && pnpm build`
 
@@ -87,7 +88,7 @@ Without `--network-bootstrap-seed`, the executor looks for `mainnet_seed.seed` i
 ### Diagnosing language failures
 
 If logs show:
-```
+```text
 Did not find language source for given address: QmzSYwd...
 Did not find meta file for given address: QmzSYwd...
 ```
@@ -234,19 +235,19 @@ MCP requires a session handshake before tool calls work:
 
 ```bash
 # 1. Initialize — capture Mcp-Session-Id from response header
-curl -si POST http://127.0.0.1:3001/mcp \
+curl -si -X POST http://127.0.0.1:3001/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"my-app","version":"1.0"}}}'
 
 # 2. Send initialized notification (REQUIRED — without this, tool calls return empty)
-curl -s POST http://127.0.0.1:3001/mcp \
+curl -s -X POST http://127.0.0.1:3001/mcp \
   -H "Content-Type: application/json" \
   -H "Mcp-Session-Id: <session-id>" \
   -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
 
 # 3. Request capability
-curl -s POST http://127.0.0.1:3001/mcp \
+curl -s -X POST http://127.0.0.1:3001/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: <session-id>" \
@@ -254,7 +255,7 @@ curl -s POST http://127.0.0.1:3001/mcp \
 # → Returns request_id and code (code is also printed to executor stdout)
 
 # 4. Generate JWT
-curl -s POST http://127.0.0.1:3001/mcp \
+curl -s -X POST http://127.0.0.1:3001/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: <session-id>" \
@@ -397,7 +398,7 @@ SurrealQL subscriptions have an internal polling interval (~5-60 seconds). Chang
 
 ## Project Structure
 
-```
+```text
 ad4m/
 ├── cli/                    # CLI crate → ad4m + ad4m-executor binaries
 │   └── mainnet_seed.json   # Production bootstrap seed
@@ -417,13 +418,14 @@ ad4m/
 | Languages fail to resolve | Test bootstrap seed | Use `cli/mainnet_seed.json` |
 | `ad4m-executor` missing MCP flags | Built rust-executor last (wrong binary) | Rebuild with `cd cli && pnpm build` |
 | Empty MCP responses | Missing `notifications/initialized` | Send notification after initialize |
-| Port bind error | Previous executor still running | `lsof -ti:12100 \| xargs kill -9` |
+| Port bind error | Previous executor still running | `lsof -ti:12100 \| xargs kill` (use `kill -9` only if needed) |
 | Agent generates but nothing works | Init still in progress | Wait for "AD4M init complete" in logs |
 | `mainnet_seed.seed` not found | No seed provided to init | Use `--network-bootstrap-seed cli/mainnet_seed.json` |
 | `main key not found` on login | `agentGenerate` never called | Run `agentGenerate` mutation once |
 | `Capability not matched... LOGIN` | Multi-user mode disabled | `runtimeSetMultiUserEnabled(enabled: true)` |
 | WebSocket closes after 15s | Wrong auth format in `connection_init` | Use `payload: { headers: { authorization: '...' } }` |
 | Binary has wrong features after branch switch | Stale build from previous branch | Rebuild both `rust-executor` and `cli` |
+| `rust-client/schema.gql` broken symlink | Target deleted in 2023 | `cp tests/js/schema.gql rust-client/schema.gql` (known issue) |
 | MCP session stops working | Executor restarted | Re-authenticate (init → notify → request_capability → generate_jwt) |
 | Flux can't connect remotely | TLS not enabled or cert not accepted | Enable TLS flags + accept cert in browser |
 | `generate_waker_query` returns no results | Double-encoded source address in SurrealQL | Write query manually with correct source address |
