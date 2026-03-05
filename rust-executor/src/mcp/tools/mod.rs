@@ -30,7 +30,6 @@ pub mod profiles;
 pub mod subjects;
 pub mod subscriptions;
 
-
 use super::server::McpContext;
 use crate::agent::capabilities::{
     capabilities_from_token, check_capability, defs::PERSPECTIVE_CREATE_CAPABILITY, Capability,
@@ -43,8 +42,7 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext},
     model::{
         CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult,
-        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo,
-        ToolsCapability,
+        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, ToolsCapability,
     },
     service::RequestContext,
     ErrorData, RoleServer, ServerHandler,
