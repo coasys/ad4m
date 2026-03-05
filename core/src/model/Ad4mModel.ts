@@ -1,7 +1,7 @@
 import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { makeRandomPrologAtom, PropertyOptions, CollectionOptions, ModelOptions } from "./decorators";
+import { makeRandomId, PropertyOptions, CollectionOptions, Model } from "./decorators";
 import { singularToPlural, pluralToSingular, propertyNameToSetterName, collectionToAdderName, collectionToRemoverName, collectionToSetterName } from "./util";
 import { escapeSurrealString } from "../utils";
 
@@ -123,7 +123,7 @@ export interface CollectionMetadata {
  * Complete model metadata extracted from decorators.
  */
 export interface ModelMetadata {
-  /** The model class name from @ModelOptions */
+  /** The model class name from @Model */
   className: string;
   /** Map of property name to metadata */
   properties: Record<string, PropertyMetadata>;
@@ -327,7 +327,7 @@ function isNumericType(schema: JSONSchemaProperty): boolean {
  * @example
  * ```typescript
  * // Define a recipe model
- * @ModelOptions({ name: "Recipe" })
+ * @Model({ name: "Recipe" })
  * class Recipe extends Ad4mModel {
  *   // Required property with literal value
  *   @Property({
@@ -460,7 +460,7 @@ export class Ad4mModel {
    * and other systems that need to introspect model structure.
    * 
    * The metadata includes:
-   * - Class name from @ModelOptions
+   * - Class name from @Model
    * - Property metadata (predicates, types, constraints, etc.)
    * - Collection metadata (predicates, filters, etc.)
    * 
@@ -470,11 +470,11 @@ export class Ad4mModel {
    * attached to the class, it can fall back to deriving metadata from that schema.
    * 
    * @returns Structured metadata object containing className, properties, and collections
-   * @throws Error if the class doesn't have @ModelOptions decorator
+   * @throws Error if the class doesn't have @Model decorator
    * 
    * @example
    * ```typescript
-   * @ModelOptions({ name: "Recipe" })
+   * @Model({ name: "Recipe" })
    * class Recipe extends Ad4mModel {
    *   @Property({ through: "recipe://name", resolveLanguage: "literal" })
    *   name: string = "";
@@ -493,10 +493,10 @@ export class Ad4mModel {
     // Access the prototype with any type to access decorator-added properties
     const prototype = this.prototype as any;
     
-    // Validate that the class has @ModelOptions decorator
+    // Validate that the class has @Model decorator
     // The decorator sets prototype.className, so we check for its existence
     if (!prototype.className || prototype.className === 'Ad4mModel') {
-      throw new Error("Model class must be decorated with @ModelOptions");
+      throw new Error("Model class must be decorated with @Model");
     }
     
     // Extract className
@@ -610,7 +610,7 @@ export class Ad4mModel {
    * ```
    */
   constructor(perspective: PerspectiveProxy, baseExpression?: string, source?: string) {
-    this.#baseExpression = baseExpression ? baseExpression : Literal.from(makeRandomPrologAtom(24)).toUrl();
+    this.#baseExpression = baseExpression ? baseExpression : Literal.from(makeRandomId(24)).toUrl();
     this.#perspective = perspective;
     this.#source = source || "ad4m://self";
   }
@@ -2762,9 +2762,9 @@ WHERE ${whereConditions.join(' AND ')}
     (DynamicModelClass.prototype as any).__jsonSchema = schema;
     (DynamicModelClass.prototype as any).__jsonSchemaOptions = options;
     
-    // Apply the ModelOptions decorator to set up the generateSDNA method
-    const ModelOptionsDecorator = ModelOptions({ name: options.name });
-    ModelOptionsDecorator(DynamicModelClass);
+    // Apply the Model decorator to set up the generateSDNA method
+    const ModelDecorator = Model({ name: options.name });
+    ModelDecorator(DynamicModelClass);
     
     return DynamicModelClass as typeof Ad4mModel;
   }
