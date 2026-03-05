@@ -120,7 +120,13 @@ impl ServerHandler for Ad4mMcpHandler {
         if !AUTH_TOOLS.contains(&tool_name.as_str()) {
             // Check admin credential first
             if let Some(ref admin_cred) = self.context.admin_credential {
-                let token = self.context.auth_token.read().await.clone().unwrap_or_default();
+                let token = self
+                    .context
+                    .auth_token
+                    .read()
+                    .await
+                    .clone()
+                    .unwrap_or_default();
                 if token == *admin_cred {
                     // Admin credential matches — allow access immediately
                     return self.dispatch_tool(request, context).await;
@@ -372,9 +378,9 @@ impl Ad4mMcpHandler {
         // checking perspective ownership. call_tool() should already have blocked
         // unauthenticated requests, but we enforce this here too to be safe.
         if self.context.admin_credential.is_some() {
-            self.get_agent_context().await.map_err(|e| {
-                json!({"error": e}).to_string()
-            })?;
+            self.get_agent_context()
+                .await
+                .map_err(|e| json!({"error": e}).to_string())?;
         }
 
         let perspective = get_perspective(perspective_id).ok_or_else(|| {
