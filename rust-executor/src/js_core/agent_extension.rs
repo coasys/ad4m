@@ -4,7 +4,7 @@ use crate::languages::language_runtime::get_runtime_agent_context;
 use crate::{
     agent::{
         create_signed_expression, did, did_document, did_for_context, sign_for_context,
-        sign_string_hex, signing_key_id_for_context, AgentContext, AgentService,
+        sign_string_hex_for_context, signing_key_id_for_context, AgentContext, AgentService,
     },
     graphql::graphql_types::{Agent, AgentStatus},
 };
@@ -128,7 +128,8 @@ fn agent_sign(#[buffer] payload: &[u8]) -> Result<Vec<u8>, AnyhowWrapperError> {
 #[op2]
 #[string]
 fn agent_sign_string_hex(#[string] payload: String) -> Result<String, AnyhowWrapperError> {
-    sign_string_hex(payload).map_err(AnyhowWrapperError::from)
+    sign_string_hex_for_context(payload, &get_runtime_agent_context())
+        .map_err(AnyhowWrapperError::from)
 }
 
 #[op2(fast)]

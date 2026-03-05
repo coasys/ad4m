@@ -182,11 +182,18 @@ pub fn create_signed_expression<T: Serialize>(
     })
 }
 
-pub fn sign_string_hex(data: String) -> Result<String, AnyError> {
+pub fn sign_string_hex_for_context(
+    data: String,
+    context: &AgentContext,
+) -> Result<String, AnyError> {
     let payload_bytes = signatures::hash_message(&data);
-    let signature = sign_for_context(&payload_bytes, &AgentContext::main_agent())?;
+    let signature = sign_for_context(&payload_bytes, context)?;
     let sig_hex = hex::encode(signature);
     Ok(sig_hex)
+}
+
+pub fn sign_string_hex(data: String) -> Result<String, AnyError> {
+    sign_string_hex_for_context(data, &AgentContext::main_agent())
 }
 
 /// Convert an Agent's decorated perspective to plain LinkExpressions for publishing.
