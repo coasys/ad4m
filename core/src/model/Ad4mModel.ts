@@ -2652,6 +2652,43 @@ WHERE ${whereConditions.join(' AND ')}
   }
 
   /**
+   * Executes a set of model operations inside a single batch (transaction).
+   *
+   * All `save`, `update`, and `delete` calls made via the provided `batchId`
+   * are buffered and flushed atomically when the callback completes.
+   * If the callback throws, the batch is **not** committed, preventing
+   * partial writes.
+   *
+   * @param perspective - The perspective to operate on
+   * @param fn - Async callback that receives a `batchId` string.
+   *             Pass this id to `save(batchId)`, `update(batchId)`,
+   *             `delete(batchId)`, etc.
+   * @returns The value returned by `fn`
+   *
+   * @example
+   * ```typescript
+   * await Ad4mModel.transaction(perspective, async (batchId) => {
+   *   const recipe = new Recipe(perspective);
+   *   recipe.name = "Spaghetti";
+   *   await recipe.save(batchId);
+   *
+   *   const old = await Recipe.query(perspective).where({ name: "Stale" }).run();
+   *   for (const r of old) await r.delete(batchId);
+   * });
+   * // All changes committed atomically here
+   * ```
+   */
+  static async transaction<R = void>(
+    perspective: PerspectiveProxy,
+    fn: (batchId: string) => Promise<R>,
+  ): Promise<R> {
+    const batchId = await perspective.createBatch();
+    const result = await fn(batchId);
+    await perspective.commitBatch(batchId);
+    return result;
+  }
+
+  /**
    * Creates a query builder for fluent query construction.
    * 
    * @param perspective - The perspective to query
