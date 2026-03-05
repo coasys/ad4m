@@ -634,7 +634,7 @@ export class Ad4mModel {
    * Get property metadata from decorator (Phase 1: Prolog-free refactor)
    * @private
    */
-  private getPropertyMetadata(key: string): PropertyOptions | undefined {
+  private getPropertyMetadata(key: string): PropertyMetadataEntry | undefined {
     const ctor = this.constructor;
     const props = getPropertiesMetadata(ctor);
     return props[key];
@@ -655,7 +655,15 @@ export class Ad4mModel {
    * Replaces Prolog query: property_setter(C, key, Setter)
    * @private
    */
-  private generatePropertySetterAction(key: string, metadata: PropertyOptions): any[] {
+  private generatePropertySetterAction(key: string, metadata: PropertyMetadataEntry): any[] {
+    // Flags are always immutable — throw a clear error
+    if (metadata.flag) {
+      throw new Error(
+        `Property "${key}" is a @Flag and cannot be written. ` +
+        `Flags are immutable type markers set at creation time.`
+      );
+    }
+
     // Check if property is read-only
     if (metadata.readOnly) {
       throw new Error(`Property "${key}" is read-only and cannot be written`);
@@ -2444,6 +2452,13 @@ WHERE ${whereConditions.join(' AND ')}
               // Skip - it's a collection, not a regular property
               continue;
             }
+
+            // Skip flag properties — they are immutable after creation
+            const propMeta = this.getPropertyMetadata(key);
+            if (propMeta?.flag) {
+              continue;
+            }
+
             await this.setProperty(key, value, batchId);
           }
         }

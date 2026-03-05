@@ -503,7 +503,9 @@ export function Flag(opts: FlagOptions) {
             through: opts.through,
             required: true,
             initial: opts.value,
-            flag: true
+            flag: true,
+            readOnly: true,
+            writable: false,
         };
 
         // Write to WeakMap registry
