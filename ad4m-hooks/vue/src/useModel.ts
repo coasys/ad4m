@@ -42,12 +42,12 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
     );
   }
 
-  function includeBaseExpressions(entries: T[]): T[] {
-    // Makes the baseExpression on each entry enumerable (while preserving the original instance)
+  function includeIds(entries: T[]): T[] {
+    // Makes the id on each entry enumerable (while preserving the original instance)
     return entries.map((entry) => {
-      if (entry.baseExpression !== undefined) {
-        Object.defineProperty(entry, "baseExpression", {
-          value: entry.baseExpression,
+      if (entry.id !== undefined) {
+        Object.defineProperty(entry, "id", {
+          value: entry.id,
           enumerable: true,
         });
       }
@@ -56,12 +56,12 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
   }
 
   function preserveEntryReferences(oldEntries: T[], newEntries: T[]): T[] {
-    const existingMap = new Map(oldEntries.map((entry) => [entry.baseExpression, entry]));
-    return newEntries.map((newEntry) => existingMap.get(newEntry.baseExpression) || newEntry);
+    const existingMap = new Map(oldEntries.map((entry) => [entry.id, entry]));
+    return newEntries.map((newEntry) => existingMap.get(newEntry.id) || newEntry);
   }
 
   function handleNewEntires(newEntries: T[]) {
-    entries.value = includeBaseExpressions(
+    entries.value = includeIds(
       preserveReferences ? preserveEntryReferences(entries.value, newEntries) : newEntries
     );
   }
@@ -94,12 +94,12 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
           1,
           paginateSubscribeCallback
         );
-        entries.value = includeBaseExpressions(results as T[]);
+        entries.value = includeIds(results as T[]);
         totalCount.value = count as number;
       } else {
         // Handle non-paginated results
         const results = await modelQuery.subscribe((results: Ad4mModel[]) => handleNewEntires(results as T[]));
-        entries.value = includeBaseExpressions(results as T[]);
+        entries.value = includeIds(results as T[]);
       }
     } catch (err) {
       console.error("Error in subscribeToCollection:", err);

@@ -413,7 +413,7 @@ function isNumericType(schema: JSONSchemaProperty): boolean {
  * ```
  */
 export class Ad4mModel {
-  #baseExpression: string;
+  #id: string;
   #subjectClassName: string;
   #source: string;
   #perspective: PerspectiveProxy;
@@ -600,32 +600,40 @@ export class Ad4mModel {
    * Constructs a new model instance.
    * 
    * @param perspective - The perspective where this model will be stored
-   * @param baseExpression - Optional unique identifier for this instance
+   * @param id - Optional unique identifier (expression URI) for this instance.
+   *             If omitted, a random Literal URL is generated.
    * @param source - Optional source expression this instance is linked to
    * 
    * @example
    * ```typescript
-   * // Create a new recipe with auto-generated base expression
+   * // Create a new recipe with auto-generated id
    * const recipe = new Recipe(perspective);
    * 
-   * // Create with specific base expression
+   * // Create with specific id
    * const recipe = new Recipe(perspective, "recipe://chocolate-cake");
    * 
    * // Create with source link
    * const recipe = new Recipe(perspective, undefined, "cookbook://desserts");
    * ```
    */
-  constructor(perspective: PerspectiveProxy, baseExpression?: string, source?: string) {
-    this.#baseExpression = baseExpression ? baseExpression : Literal.from(makeRandomId(24)).toUrl();
+  constructor(perspective: PerspectiveProxy, id?: string, source?: string) {
+    this.#id = id ? id : Literal.from(makeRandomId(24)).toUrl();
     this.#perspective = perspective;
     this.#source = source || "ad4m://self";
   }
 
   /**
-   * Gets the base expression of the subject.
+   * The unique identifier (expression URI) of this model instance.
    */
-  get baseExpression() {
-    return this.#baseExpression;
+  get id(): string {
+    return this.#id;
+  }
+
+  /**
+   * @deprecated Use `.id` instead. Will be removed in a future version.
+   */
+  get baseExpression(): string {
+    return this.#id;
   }
 
   /**
@@ -807,7 +815,7 @@ export class Ad4mModel {
 
       // Query for all links from this specific node (base expression)
       // Using formatSurrealValue to prevent SQL injection by properly escaping the value
-      const safeBaseExpression = ctor.formatSurrealValue(this.#baseExpression);
+      const safeBaseExpression = ctor.formatSurrealValue(this.#id);
       // Note: We use ORDER BY timestamp ASC because:
       // - For collections: we want chronological order (oldest to newest)
       // - For properties: we select the LAST element to get "latest wins" semantics
@@ -899,7 +907,7 @@ export class Ad4mModel {
               for (const value of values) {
                 let condition = collMeta.where.condition
                   .replace(/\$perspective/g, `'${this.#perspective.uuid}'`)
-                  .replace(/\$base/g, `'${this.#baseExpression}'`)
+                  .replace(/\$base/g, `'${this.#id}'`)
                   .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
                 
                 // If condition starts with WHERE, wrap it in array length check pattern
@@ -979,7 +987,7 @@ export class Ad4mModel {
         }
       }
     } catch (e) {
-      console.error(`SurrealDB getData also failed for ${this.#baseExpression}:`, e);
+      console.error(`SurrealDB getData also failed for ${this.#id}:`, e);
     }
 
     return this;
@@ -1021,7 +1029,7 @@ export class Ad4mModel {
     perspective: PerspectiveProxy,
     metadata: any
   ) {
-    const safeBaseExpression = this.formatSurrealValue(instance.baseExpression);
+    const safeBaseExpression = this.formatSurrealValue(instance.id);
 
     // Evaluate property getters
     for (const [propName, propMeta] of Object.entries(metadata.properties)) {
@@ -1845,9 +1853,9 @@ WHERE ${whereConditions.join(' AND ')}
         if (requestedProperties.length > 0 || requestedCollections.length > 0) {
           const requestedAttributes = [...requestedProperties, ...requestedCollections];
           Object.keys(instance).forEach((key) => {
-            // Keep only requested attributes, plus always keep createdAt, updatedAt, author, and baseExpression
+            // Keep only requested attributes, plus always keep createdAt, updatedAt, author, id, and baseExpression (deprecated alias)
             // Note: timestamp is a getter alias for createdAt, so we preserve createdAt instead
-            if (!requestedAttributes.includes(key) && key !== 'createdAt' && key !== 'updatedAt' && key !== 'author' && key !== 'baseExpression') {
+            if (!requestedAttributes.includes(key) && key !== 'createdAt' && key !== 'updatedAt' && key !== 'author' && key !== 'id' && key !== 'baseExpression') {
               delete instance[key];
             }
           });
@@ -2270,7 +2278,7 @@ WHERE ${whereConditions.join(' AND ')}
       value = await this.#perspective.createExpression(value, resolveLanguage);
     }
 
-    await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
+    await this.#perspective.executeAction(actions, this.#id, [{ name: "value", value }], batchId);
   }
 
   private async setRelationValues(key: string, value: any, batchId?: string) {
@@ -2288,12 +2296,12 @@ WHERE ${whereConditions.join(' AND ')}
       if (Array.isArray(value)) {
         await this.#perspective.executeAction(
           actions,
-          this.#baseExpression,
+          this.#id,
           value.map((v) => ({ name: "value", value: v })),
           batchId
         );
       } else {
-        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
+        await this.#perspective.executeAction(actions, this.#id, [{ name: "value", value }], batchId);
       }
     }
   }
@@ -2313,11 +2321,11 @@ WHERE ${whereConditions.join(' AND ')}
       if (Array.isArray(value)) {
         await Promise.all(
           value.map((v) =>
-            this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
+            this.#perspective.executeAction(actions, this.#id, [{ name: "value", value: v }], batchId)
           )
         );
       } else {
-        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
+        await this.#perspective.executeAction(actions, this.#id, [{ name: "value", value }], batchId);
       }
     }
   }
@@ -2337,11 +2345,11 @@ WHERE ${whereConditions.join(' AND ')}
       if (Array.isArray(value)) {
         await Promise.all(
           value.map((v) =>
-            this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
+            this.#perspective.executeAction(actions, this.#id, [{ name: "value", value: v }], batchId)
           )
         );
       } else {
-        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
+        await this.#perspective.executeAction(actions, this.#id, [{ name: "value", value }], batchId);
       }
     }
   }
@@ -2391,14 +2399,14 @@ WHERE ${whereConditions.join(' AND ')}
     // Create the subject with the initial values
     await this.perspective.createSubject(
       className,
-      this.#baseExpression,
+      this.#id,
       initialValues,
       batchId
     );
 
     // Link the subject to the source
     await this.#perspective.add(
-      new Link({ source: this.#source, predicate: "ad4m://has_child", target: this.baseExpression }),
+      new Link({ source: this.#source, predicate: "ad4m://has_child", target: this.id }),
       'shared',
       batchId
     );
@@ -2533,7 +2541,7 @@ WHERE ${whereConditions.join(' AND ')}
    * ```
    */
   async delete(batchId?: string) {
-    await this.#perspective.removeSubject(this, this.#baseExpression, batchId);
+    await this.#perspective.removeSubject(this, this.#id, batchId);
   }
 
   /**

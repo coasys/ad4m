@@ -283,7 +283,7 @@ describe("Prolog + Literals", () => {
                     // Safe to access todos[0] since we've checked todos.length > 0 above
                     todo = todos[0]
                     // @ts-ignore
-                    const existingLinks = await perspective!.get(new LinkQuery({source: todo.baseExpression, predicate: "todo://has_title"}))
+                    const existingLinks = await perspective!.get(new LinkQuery({source: todo.id, predicate: "todo://has_title"}))
                     for (const link of existingLinks) {
                         await perspective!.remove(link)
                     }
@@ -297,7 +297,7 @@ describe("Prolog + Literals", () => {
                 expect(await todo.title).to.equal("new title")
 
                 //@ts-ignore
-                let links = await perspective!.get(new LinkQuery({source: todo.baseExpression, predicate: "todo://has_title"}))
+                let links = await perspective!.get(new LinkQuery({source: todo.id, predicate: "todo://has_title"}))
                 expect(links.length).to.equal(1)
                 let literal = Literal.fromUrl(links[0].data.target).get()
                 expect(literal.data).to.equal("new title")
@@ -3116,7 +3116,7 @@ describe("Prolog + Literals", () => {
                 // Test instance creation
                 const person = new PersonClass(perspective!)
                 expect(person).to.be.instanceOf(Ad4mModel)
-                expect(person.baseExpression).to.be.a('string')
+                expect(person.id).to.be.a('string')
 
                 // Test property assignment
                 // @ts-ignore - properties are added dynamically from JSON Schema
