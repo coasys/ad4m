@@ -515,6 +515,14 @@ impl AgentService {
             .map_err(|e| anyhow!("Agent language not available: {}", e))?;
 
         let agent = Self::get_agent_for_context(context)?;
+        let context_did = did_for_context(context)?;
+        if agent.did != context_did {
+            return Err(anyhow!(
+                "DID mismatch: stored profile has DID {} but signing context resolves to {}",
+                agent.did,
+                context_did
+            ));
+        }
         let agent_json = agent_to_publish_json(&agent)?;
         controller
             .expression_create(agent_lang.address(), agent_json, context)
