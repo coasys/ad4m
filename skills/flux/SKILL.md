@@ -84,7 +84,7 @@ The Tauri desktop build embeds the executor — it's a standalone app that manag
 |---------|----------|-----|---------|
 | `@coasys/ad4m` | `core/` | Published | TypeScript types, `Ad4mClient`, GraphQL schema |
 | `@coasys/ad4m-connect` | `connect/` | Published | Connection + auth library |
-| `@coasys/flux-ui` | External | `^0.9.0` | Flux UI components (imported by `ui/`) |
+| `@coasys/flux-ui` | External | See `ui/package.json` | Flux UI components (imported by `ui/`) |
 | `ad4m-launcher` | `ui/` | Not published | Desktop/web shell |
 | `@coasys/dapp` | `dapp/` | Not published | Separate dapp web interface |
 
@@ -104,7 +104,7 @@ cd ../ui && pnpm dev        # Flux dev server picks up changes
 | Flux loads but can't connect | Executor not running or wrong URL | Check executor is at `http://127.0.0.1:12100` |
 | WebSocket fails to remote executor | Self-signed cert not accepted | Visit `https://<ip>:12001` in browser first |
 | Auth prompt appears repeatedly | Admin credential mismatch | Use same `--admin-credential` value |
-| Blank page after build | Stale build cache | `rm -rf ui/node_modules/.vite && pnpm dev` |
+| Blank page after build | Stale build cache | `cd ui && pnpm dev -- --force` (clears Vite dep cache) |
 | `@coasys/ad4m` types missing | Core not built | `cd core && pnpm build` |
 | Neighbourhood appears empty | Languages still loading | Wait for "AD4M init complete" in executor logs |
 | Flux connects but no communities visible | Agent not initialised | Run `agentGenerate` mutation on executor first |
