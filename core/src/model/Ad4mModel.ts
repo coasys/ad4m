@@ -78,7 +78,6 @@ export interface IncludeMap {
 }
 
 export type Query = {
-  source?: string;
   /**
    * Filter to instances that are the target of a link from a given parent.
    *
@@ -166,12 +165,6 @@ export interface ModelMetadata {
 
 function capitalize(word: string): string {
   return word.charAt(0).toUpperCase() + word.slice(1);
-}
-
-function buildSourceQuery(source?: string): string {
-  // Constrains the query to instances that have the provided source
-  if (!source) return "";
-  return `triple("${source}", "ad4m://has_child", Base)`;
 }
 
 /**
@@ -485,7 +478,6 @@ function isNumericType(schema: JSONSchemaProperty): boolean {
 export class Ad4mModel {
   #id: string;
   #subjectClassName: string;
-  #source: string;
   #perspective: PerspectiveProxy;
   #snapshot: Record<string, any> | null = null;
   author: string;
@@ -682,15 +674,11 @@ export class Ad4mModel {
    * 
    * // Create with specific id
    * const recipe = new Recipe(perspective, "recipe://chocolate-cake");
-   * 
-   * // Create with source link
-   * const recipe = new Recipe(perspective, undefined, "cookbook://desserts");
    * ```
    */
-  constructor(perspective: PerspectiveProxy, id?: string, source?: string) {
+  constructor(perspective: PerspectiveProxy, id?: string) {
     this.#id = id ? id : Literal.from(makeRandomId(24)).toUrl();
     this.#perspective = perspective;
-    this.#source = source || "ad4m://self";
   }
 
   /**
@@ -1282,7 +1270,7 @@ export class Ad4mModel {
 
   // Todo: Only return AllInstances (InstancesWithOffset, SortedInstances, & UnsortedInstances not required)
   public static async queryToProlog(perspective: PerspectiveProxy, query: Query, modelClassName?: string | null) {
-    const { source, properties, collections, where, order, offset, limit, count } = query;
+    const { properties, collections, where, order, offset, limit, count } = query;
     const className = modelClassName || (await this.getClassName(perspective));
 
     // Resolve parent predicate from model metadata if needed
@@ -1292,7 +1280,6 @@ export class Ad4mModel {
 
     const instanceQueries = [
       buildAuthorAndTimestampQuery(),
-      buildSourceQuery(source),
       buildParentQuery(query.parent, resolvedParentPredicate),
       buildPropertiesQuery(properties),
       buildCollectionsQuery(collections),
@@ -1489,19 +1476,10 @@ export class Ad4mModel {
    */
   public static async queryToSurrealQL(perspective: PerspectiveProxy, query: Query): Promise<string> {
     const metadata = this.getModelMetadata();
-    const { source, where, order, offset, limit } = query;
+    const { where, order, offset, limit } = query;
 
     // Build list of graph traversal filters for required predicates
     const graphTraversalFilters: string[] = [];
-
-    // Add source filter if specified (filter to nodes that are children of this source)
-    // Source filter means: find targets of 'ad4m://has_child' links from the specified source
-    if (source) {
-      // Use graph traversal: node must be target of has_child link from source
-      graphTraversalFilters.push(
-        `count(<-link[WHERE perspective = $perspective AND in.uri = ${this.formatSurrealValue(source)} AND predicate = 'ad4m://has_child']) > 0`
-      );
-    }
 
     // Add parent filter if specified (filter to nodes linked from a parent via a specific predicate)
     if (query.parent) {
@@ -2387,12 +2365,12 @@ WHERE ${whereConditions.join(' AND ')}
   }
 
   static async countQueryToProlog(perspective: PerspectiveProxy, query: Query = {}, modelClassName?: string | null) {
-    const { source, where } = query;
+    const { where } = query;
     const className = modelClassName || (await this.getClassName(perspective));
     const resolvedParentPredicate = query.parent
       ? resolveParentPredicate(query.parent, this)
       : undefined;
-    const instanceQueries = [buildAuthorAndTimestampQuery(), buildSourceQuery(source), buildParentQuery(query.parent, resolvedParentPredicate), buildWhereQuery(where)];
+    const instanceQueries = [buildAuthorAndTimestampQuery(), buildParentQuery(query.parent, resolvedParentPredicate), buildWhereQuery(where)];
     const resultSetQueries = [buildCountQuery(true), buildOrderQuery(), buildOffsetQuery(), buildLimitQuery()];
 
     const fullQuery = `
@@ -2608,13 +2586,6 @@ WHERE ${whereConditions.join(' AND ')}
       batchId
     );
 
-    // Link the subject to the source
-    await this.#perspective.add(
-      new Link({ source: this.#source, predicate: "ad4m://has_child", target: this.id }),
-      'shared',
-      batchId
-    );
-
     // Set collections
     await this.innerUpdate(false, batchId)
 
@@ -2780,9 +2751,8 @@ WHERE ${whereConditions.join(' AND ')}
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     data: Record<string, any> = {},
-    source?: string,
   ): Promise<T> {
-    const instance = new this(perspective, undefined, source) as T;
+    const instance = new this(perspective) as T;
     Object.assign(instance, data);
     await instance.save();
     return instance;
@@ -3421,22 +3391,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   offset(offset: number): ModelQueryBuilder<T> {
     this.queryParams.offset = offset;
-    return this;
-  }
-
-  /**
-   * Sets the source filter for the query.
-   * 
-   * @param source - The source to filter by
-   * @returns The query builder for chaining
-   * 
-   * @example
-   * ```typescript
-   * .source("ad4m://self")
-   * ```
-   */
-  source(source: string): ModelQueryBuilder<T> {
-    this.queryParams.source = source;
     return this;
   }
 
