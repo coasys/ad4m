@@ -21,6 +21,7 @@
 //! - `dynamic` — auto-generated SHACL-based tools
 
 pub mod auth;
+pub mod children;
 pub mod dynamic;
 pub mod flows;
 pub mod neighbourhoods;
@@ -229,6 +230,9 @@ impl Ad4mMcpHandler {
                 Self::set_agent_public_perspective_tool_attr(),
                 Self::set_agent_public_perspective,
             ))
+            // children.rs
+            .with_route((Self::add_child_tool_attr(), Self::add_child))
+            .with_route((Self::get_children_tool_attr(), Self::get_children))
             // subscriptions.rs
             .with_route((
                 Self::generate_waker_query_tool_attr(),
