@@ -87,7 +87,6 @@ export type Query = {
    */
   parent?: { id: string; model?: typeof Ad4mModel; predicate?: string };
   properties?: string[];
-  collections?: string[];
   include?: IncludeMap;
   where?: Where;
   order?: Order;
@@ -234,20 +233,6 @@ function buildPropertiesQuery(properties?: string[]): string {
       ${properties ? `member(PropertyName, [${properties.map((name) => `"${name}"`).join(", ")}]),` : ""}
       resolve_property(SubjectClass, Base, PropertyName, PropertyValue, Resolve)
     ), Properties)
-  `;
-}
-
-function buildCollectionsQuery(collections?: string[]): string {
-  // Gets the name and array of values for all (or some) collections on a Ad4mModel instance
-  // If no collections are provided, all are included
-  return `
-    findall([CollectionName, CollectionValues], (
-      % Constrain to specified collections if provided
-      ${collections ? `member(CollectionName, [${collections.map((name) => `"${name}"`).join(", ")}]),` : ""}
-
-      collection(SubjectClass, CollectionName),
-      collection_getter(SubjectClass, Base, CollectionName, CollectionValues)
-    ), Collections)
   `;
 }
 
@@ -1270,7 +1255,7 @@ export class Ad4mModel {
 
   // Todo: Only return AllInstances (InstancesWithOffset, SortedInstances, & UnsortedInstances not required)
   public static async queryToProlog(perspective: PerspectiveProxy, query: Query, modelClassName?: string | null) {
-    const { properties, collections, where, order, offset, limit, count } = query;
+    const { properties, where, order, offset, limit, count } = query;
     const className = modelClassName || (await this.getClassName(perspective));
 
     // Resolve parent predicate from model metadata if needed
@@ -1282,7 +1267,6 @@ export class Ad4mModel {
       buildAuthorAndTimestampQuery(),
       buildParentQuery(query.parent, resolvedParentPredicate),
       buildPropertiesQuery(properties),
-      buildCollectionsQuery(collections),
       buildWhereQuery(where),
     ];
 
@@ -1951,15 +1935,15 @@ WHERE ${whereConditions.join(' AND ')}
   ): Promise<ResultsWithTotalCount<T>> {
     if (!result?.[0]?.AllInstances) return { results: [], totalCount: 0 };
     // Map results to instances
-    const requestedAttribtes = [...(query?.properties || []), ...(query?.collections || [])];
+    const requestedProperties = query?.properties || [];
     const allInstances = await Promise.all(
       result[0].AllInstances.map(async ([Base, Properties, Collections, Timestamp, Author]) => {
         try {
           const instance = new this(perspective, Base) as any;
           // Remove unrequested attributes from instance
-          if (requestedAttribtes.length) {
+          if (requestedProperties.length) {
             Object.keys(instance).forEach((key) => {
-              if (!requestedAttribtes.includes(key)) delete instance[key];
+              if (!requestedProperties.includes(key) && key !== 'createdAt' && key !== 'updatedAt' && key !== 'author' && key !== 'id' && key !== 'baseExpression') delete instance[key];
             });
           }
           // Collect values to assign to instance
@@ -1998,7 +1982,6 @@ WHERE ${whereConditions.join(' AND ')}
     
     const metadata = this.getModelMetadata();
     const requestedProperties = query?.properties || [];
-    const requestedCollections = query?.collections || [];
     
     // The query used GROUP BY with graph traversal, so each row has:
     // - source: the node ID (e.g., "node:abc123")
@@ -2024,12 +2007,11 @@ WHERE ${whereConditions.join(' AND ')}
         // Core hydration via unified helper
         await this.hydrateFromLinks(instance, links, metadata, perspective);
 
-        // Filter by requested attributes if specified
-        if (requestedProperties.length > 0 || requestedCollections.length > 0) {
-          const requestedAttributes = [...requestedProperties, ...requestedCollections];
+        // Filter by requested properties if specified
+        if (requestedProperties.length > 0) {
           Object.keys(instance).forEach((key) => {
-            // Keep only requested attributes, plus always keep createdAt, updatedAt, author, id, and baseExpression (deprecated alias)
-            if (!requestedAttributes.includes(key) && key !== 'createdAt' && key !== 'updatedAt' && key !== 'author' && key !== 'id' && key !== 'baseExpression') {
+            // Keep only requested properties, plus always keep createdAt, updatedAt, author, id, and baseExpression (deprecated alias)
+            if (!requestedProperties.includes(key) && key !== 'createdAt' && key !== 'updatedAt' && key !== 'author' && key !== 'id' && key !== 'baseExpression') {
               delete instance[key];
             }
           });
@@ -3456,22 +3438,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   properties(properties: string[]): ModelQueryBuilder<T> {
     this.queryParams.properties = properties;
-    return this;
-  }
-
-  /**
-   * Specifies which collections to include in the results.
-   * 
-   * @param collections - Array of collection names to include
-   * @returns The query builder for chaining
-   * 
-   * @example
-   * ```typescript
-   * .collections(["ingredients", "steps"])
-   * ```
-   */
-  collections(collections: string[]): ModelQueryBuilder<T> {
-    this.queryParams.collections = collections;
     return this;
   }
 
