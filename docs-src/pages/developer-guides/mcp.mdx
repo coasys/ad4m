@@ -6,10 +6,6 @@ import { Tab, Tabs } from "nextra-theme-docs";
 AD4M includes a built-in [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server, enabling AI agents to interact with AD4M's spanning layer natively — creating perspectives, managing data models, joining neighbourhoods, and participating in distributed collective intelligence through a standardised protocol.
 
 <Callout type="info">
-**What is AD4M?** AD4M is an agent-centric spanning layer built on top of the internet, bridging fragmented ecosystems (P2P, federated, centralized) into a unified semantic layer. Each user runs their own executor (local runtime), owns their data in perspectives (knowledge graphs), and chooses which protocols (languages) to speak. Think of it as a new layer in the internet stack that doesn't replace existing protocols but harmonizes them.
-</Callout>
-
-<Callout type="info">
 **What is MCP?** The Model Context Protocol is an open standard that lets AI applications discover and use tools exposed by external services. Any MCP-compatible client (OpenClaw, Claude Desktop, Cursor, etc.) can connect to AD4M's MCP server.
 </Callout>
 
@@ -59,10 +55,6 @@ Once connected, your agent can call any AD4M tool directly. An [OpenClaw skill](
 ### Other MCP Clients
 
 Any MCP client supporting Streamable HTTP transport can connect to `http://localhost:3001/mcp`. Refer to your client's documentation for configuration.
-
-<Callout type="info">
-**Deployment & Security:** For guidance on running executors (agent-only vs multi-user mode) and securing remote access with TLS, see the [AD4M skill file](https://github.com/coasys/ad4m/tree/dev/skills/ad4m) for AI agents.
-</Callout>
 
 ## Authentication
 
@@ -142,29 +134,44 @@ AD4M's MCP server **introspects SHACL subject class definitions** in perspective
 - **Constructors** → `{class}_create` (required properties become parameters)
 - **Actions** (SHACL Flow) → `{class}_{action_name}` (state transitions, custom logic)
 
-**Example:** A `Channel` SDNA with:
-```turtle
-:ChannelShape a sh:NodeShape ;
-  sh:targetClass :Channel ;
-  sh:property [
-    sh:path :name ;
-    sh:datatype xsd:string ;
-    sh:maxCount 1 ;
-    sh:minCount 1 ;  # Required for constructor
-  ] ;
-  sh:property [
-    sh:path :description ;
-    sh:datatype xsd:string ;
-    sh:maxCount 1 ;
-  ] ;
-  sh:property [
-    sh:path :members ;
-    sh:class :Agent ;  # Collection of Agents
-  ] ;
-  sh:property [
-    sh:path :messages ;
-    sh:class :Message ;  # Collection of Messages
-  ] .
+**Example:** A `Channel` SDNA added via `add_model(class_name: "Channel", shacl_json: ...)`:
+```json
+{
+  "target_class": "app://Channel",
+  "properties": [
+    {
+      "path": "app://has_name",
+      "name": "name",
+      "datatype": "xsd:string",
+      "min_count": 1,
+      "max_count": 1,
+      "writable": true,
+      "resolve_language": "literal"
+    },
+    {
+      "path": "app://has_description",
+      "name": "description",
+      "datatype": "xsd:string",
+      "max_count": 1,
+      "writable": true,
+      "resolve_language": "literal"
+    },
+    {
+      "path": "app://has_member",
+      "name": "members",
+      "node_kind": "sh:IRI"
+    },
+    {
+      "path": "app://has_message",
+      "name": "messages",
+      "node_kind": "sh:IRI"
+    }
+  ],
+  "constructor": [
+    { "action": "addLink", "source": "this", "predicate": "rdf://type", "target": "app://Channel" },
+    { "action": "setSingleTarget", "source": "this", "predicate": "app://has_name", "target": "name" }
+  ]
+}
 ```
 
 Generates these MCP tools:

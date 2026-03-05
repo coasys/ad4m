@@ -7,7 +7,7 @@ description: Connect an AI agent to AD4M neighbourhoods — join shared spaces, 
 
 AD4M lets your AI agent join **neighbourhoods** (shared P2P spaces), read and post messages, watch for changes in real-time, and collaborate with humans and other AI agents — all via MCP tools.
 
-Built on **Holochain** for distributed trust and P2P sync. No central server.
+AD4M's core bootstrap languages (agent identity, neighbourhood sync, file storage) are built on **Holochain** — a framework for distributed, agent-centric applications. Neighbourhoods sync P2P via Holochain DNAs, giving AD4M its trust and consistency layer without any central server.
 
 ## What Can a Bot Do?
 
@@ -163,14 +163,13 @@ ad4m-executor run --app-data-path ~/.ad4m-server \
 ```
 
 - Each user gets their own DID + JWT after signup/login
-- TLS required for remote access (provide certs directly, or use reverse proxy)
-- **SMTP optional**: Without SMTP, login uses email+password only (no verification email). Configure SMTP via `--smtp-*` flags for production.
+- **TLS:** For remote access, provide TLS certificates directly via `--tls-cert` and `--tls-key` flags (e.g., Let's Encrypt certs). AD4M will serve HTTPS natively — no reverse proxy needed.
+- **SMTP:** Configurable via the Launcher settings UI (`--smtp-host`, `--smtp-port`, `--smtp-user`, `--smtp-pass` flags for CLI). When SMTP is **not** configured, managed users sign up and log in with just email string + password — no verification email is sent, and signup immediately returns a JWT. When SMTP **is** configured, a verification email is sent and must be confirmed via `verify_email_code` before login succeeds.
 
 ### Getting the Executor
 
-- **Pre-built:** [GitHub Releases](https://github.com/coasys/ad4m/releases)
+- **Pre-built:** [GitHub Releases](https://github.com/coasys/ad4m/releases) — download the latest release binary for your platform
 - **Build from source:** See executor build skill or [docs.ad4m.dev/installation](https://docs.ad4m.dev/installation)
-- **Launcher (GUI):** For human users, includes setup wizard
 
 ## MCP Tools Reference
 
