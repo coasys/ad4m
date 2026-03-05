@@ -1357,9 +1357,21 @@ export class Ad4mModel {
         const raw = (inst as any)[relName];
         if (raw == null) continue;
         if (Array.isArray(raw)) {
-          (inst as any)[relName] = raw.map((v: any) =>
+          const resolved = raw.map((v: any) =>
             typeof v === 'string' && hydrated.has(v) ? hydrated.get(v) : v,
           );
+
+          // Enforce maxCount guard — single-valued relations keep only the last item
+          if (meta.maxCount === 1) {
+            if (resolved.length > 1) {
+              console.warn(
+                `include: relation "${relName}" has maxCount 1 but ${resolved.length} values found; keeping the last`,
+              );
+            }
+            (inst as any)[relName] = resolved.length > 0 ? resolved[resolved.length - 1] : null;
+          } else {
+            (inst as any)[relName] = resolved;
+          }
         } else if (typeof raw === 'string' && hydrated.has(raw)) {
           (inst as any)[relName] = hydrated.get(raw);
         }
