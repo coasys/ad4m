@@ -465,9 +465,9 @@ export class Ad4mModel {
    * - Collection metadata (predicates, filters, etc.)
    * 
    * For models created via `fromJSONSchema()`, this method will derive metadata from
-   * the stored `__properties` and `__collections` structures that were populated during
-   * the dynamic class creation. If these structures are empty but a JSON schema was
-   * attached to the class, it can fall back to deriving metadata from that schema.
+   * the WeakMap registries that were populated during the dynamic class creation.
+   * If these structures are empty but a JSON schema was attached to the class,
+   * it can fall back to deriving metadata from that schema.
    * 
    * @returns Structured metadata object containing className, properties, and collections
    * @throws Error if the class doesn't have @Model decorator
@@ -502,10 +502,9 @@ export class Ad4mModel {
     // Extract className
     const className = prototype.className;
     
-    // Extract properties from WeakMap registry (with __properties fallback for dynamic classes)
+    // Extract properties from WeakMap registry
     const propertiesMetadata: Record<string, PropertyMetadata> = {};
-    const registryProperties = getPropertiesMetadata(this);
-    const prototypeProperties = Object.keys(registryProperties).length > 0 ? registryProperties : (prototype.__properties || {});
+    const prototypeProperties = getPropertiesMetadata(this);
     
     for (const [propertyName, opts] of Object.entries(prototypeProperties)) {
       const options = opts as PropertyOptions & { required?: boolean; flag?: boolean; writable?: boolean };
@@ -525,10 +524,9 @@ export class Ad4mModel {
       };
     }
     
-    // Extract collections from WeakMap registry (with __collections fallback for dynamic classes)
+    // Extract collections from WeakMap registry
     const collectionsMetadata: Record<string, CollectionMetadata> = {};
-    const registryCollections = getCollectionsMetadata(this);
-    const prototypeCollections = Object.keys(registryCollections).length > 0 ? registryCollections : (prototype.__collections || {});
+    const prototypeCollections = getCollectionsMetadata(this);
     
     for (const [collectionName, opts] of Object.entries(prototypeCollections)) {
       const options = opts as CollectionOptions;
@@ -639,10 +637,7 @@ export class Ad4mModel {
   private getPropertyMetadata(key: string): PropertyOptions | undefined {
     const ctor = this.constructor;
     const props = getPropertiesMetadata(ctor);
-    if (props[key]) return props[key];
-    // Fallback to prototype for dynamic classes
-    const proto = Object.getPrototypeOf(this);
-    return proto.__properties?.[key];
+    return props[key];
   }
 
   /**
@@ -652,10 +647,7 @@ export class Ad4mModel {
   private getCollectionMetadata(key: string): CollectionOptions | undefined {
     const ctor = this.constructor;
     const colls = getCollectionsMetadata(ctor);
-    if (colls[key]) return colls[key];
-    // Fallback to prototype for dynamic classes
-    const proto = Object.getPrototypeOf(this);
-    return proto.__collections?.[key];
+    return colls[key];
   }
 
   /**
@@ -761,7 +753,7 @@ export class Ad4mModel {
           }
           // Apply transform function if it exists
           const propsMeta = getPropertiesMetadata(instance.constructor);
-          const transform = propsMeta[name]?.transform ?? instance["__properties"]?.[name]?.transform;
+          const transform = propsMeta[name]?.transform;
           if (transform && typeof transform === "function") {
             finalValue = transform(finalValue);
           }
@@ -2778,10 +2770,6 @@ WHERE ${whereConditions.join(' AND ')}
     for (const [collName, collMeta] of Object.entries(collections)) {
       setCollectionRegistryEntry(DynamicModelClass, collName, collMeta as any);
     }
-    
-    // Legacy: keep __properties/__collections on prototype for backward compatibility
-    (DynamicModelClass.prototype as any).__properties = properties;
-    (DynamicModelClass.prototype as any).__collections = collections;
     
     // Store the JSON schema and options on the prototype for potential fallback use by getModelMetadata()
     (DynamicModelClass.prototype as any).__jsonSchema = schema;

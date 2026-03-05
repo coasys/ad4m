@@ -383,11 +383,6 @@ function applyPropertyMetadata(opts: PropertyOptions) {
         if (!propertyRegistry.has(ctor)) propertyRegistry.set(ctor, {});
         propertyRegistry.get(ctor)![key as string] = { ...opts, writable } as any;
 
-        // Legacy: keep __properties in sync until all consumers are migrated
-        target["__properties"] = target["__properties"] || {};
-        target["__properties"][key] = target["__properties"][key] || {};
-        target["__properties"][key] = { ...target["__properties"][key], ...opts, writable }
-
         if (writable) {
             const value = key as string
             target[`set${capitalize(value)}`] = () => {}
@@ -516,14 +511,6 @@ export function Flag(opts: FlagOptions) {
         if (!propertyRegistry.has(ctor)) propertyRegistry.set(ctor, {});
         propertyRegistry.get(ctor)![key as string] = entry as any;
 
-        // Legacy: keep __properties in sync
-        target["__properties"] = target["__properties"] || {};
-        target["__properties"][key] = target["__properties"][key] || {};
-        target["__properties"][key] = {
-            ...target["__properties"][key],
-            ...entry
-        }
-
         // @ts-ignore
         target[key] = opts.value;
 
@@ -639,10 +626,6 @@ function Collection(opts: CollectionOptions) {
         const ctor = (target as any).constructor;
         if (!collectionRegistry.has(ctor)) collectionRegistry.set(ctor, {});
         collectionRegistry.get(ctor)![key as string] = opts;
-
-        // Legacy: keep __collections in sync
-        target["__collections"] = target["__collections"] || {};
-        target["__collections"][key] = opts;
 
         const value = key as string
         target[`add${capitalize(value)}`] = () => {}
