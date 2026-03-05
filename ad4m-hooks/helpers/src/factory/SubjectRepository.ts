@@ -128,10 +128,10 @@ export class SubjectRepository<SubjectClass extends { [x: string]: any }> {
 
   private async getSubjectData(entry: any) {
     let links = await this.perspective.get(
-      new LinkQuery({ source: entry.baseExpression })
+      new LinkQuery({ source: entry.id })
     );
 
-    let data: any = await this.perspective.getSubjectData(this.subject, entry.baseExpression)
+    let data: any = await this.perspective.getSubjectData(this.subject, entry.id)
 
     for (const key in data) {
       const propsMeta = getPropertiesMetadata(this.tempSubject);
@@ -142,7 +142,7 @@ export class SubjectRepository<SubjectClass extends { [x: string]: any }> {
     }
 
     return {
-      id: entry.baseExpression,
+      id: entry.id,
       timestamp: links[0].timestamp,
       author: links[0].author,
       ...data,

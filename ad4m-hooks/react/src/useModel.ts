@@ -34,8 +34,8 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
 
   function preserveEntryReferences(oldEntries: T[], newEntries: T[]): T[] {
     // Merge new results into old results, preserving references for optimized rendering
-    const existingMap = new Map(oldEntries.map((entry) => [entry.baseExpression, entry]));
-    return newEntries.map((newEntry) => existingMap.get(newEntry.baseExpression) || newEntry);
+    const existingMap = new Map(oldEntries.map((entry) => [entry.id, entry]));
+    return newEntries.map((newEntry) => existingMap.get(newEntry.id) || newEntry);
   }
 
   function handleNewEntires(newEntries: T[]) {
