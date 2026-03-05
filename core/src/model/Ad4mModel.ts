@@ -1,7 +1,7 @@
 import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { makeRandomId, PropertyOptions, CollectionOptions, Model, getPropertiesMetadata, getCollectionsMetadata, setPropertyRegistryEntry, setCollectionRegistryEntry, PropertyMetadataEntry } from "./decorators";
+import { makeRandomId, PropertyOptions, CollectionOptions, Model, getPropertiesMetadata, getCollectionsMetadata, getRelationsMetadata, setPropertyRegistryEntry, setCollectionRegistryEntry, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
 import { singularToPlural, pluralToSingular, propertyNameToSetterName, collectionToAdderName, collectionToRemoverName, collectionToSetterName } from "./util";
 import { escapeSurrealString } from "../utils";
 
@@ -58,10 +58,30 @@ type WhereCondition = string | number | boolean | string[] | number[] | { [K in 
 type Where = { [propertyName: string]: WhereCondition };
 type Order = { [propertyName: string]: "ASC" | "DESC" };
 
+/**
+ * Describes which relations to eager-load when querying.
+ *
+ * * `true` hydrates the relation one level deep.
+ * * A nested `IncludeMap` hydrates sub-relations recursively.
+ *
+ * @example
+ * ```typescript
+ * // Load comments (one level)
+ * { comments: true }
+ *
+ * // Load comments and each comment's author
+ * { comments: { author: true } }
+ * ```
+ */
+export interface IncludeMap {
+  [relation: string]: boolean | IncludeMap;
+}
+
 export type Query = {
   source?: string;
   properties?: string[];
-  collections?: string[]; // replace with include: Query[]
+  collections?: string[];
+  include?: IncludeMap;
   where?: Where;
   order?: Order;
   offset?: number;
@@ -1070,6 +1090,90 @@ export class Ad4mModel {
         } catch (error) {
           console.warn(`Failed to evaluate getter for ${collName}:`, error);
         }
+      }
+    }
+  }
+
+  /**
+   * Hydrates relation fields on instances according to the provided IncludeMap.
+   *
+   * For each relation listed in `includeMap`, the raw expression-URI strings
+   * stored on the instance are replaced with fully-hydrated model instances
+   * (fetched via the relation's `target()` class).  Nested IncludeMaps are
+   * supported for multi-level eager loading.
+   *
+   * @param instances - The instances whose relations should be hydrated
+   * @param perspective - The perspective to fetch related instances from
+   * @param includeMap - Describes which relations to hydrate
+   * @private
+   */
+  private static async hydrateRelations<T extends Ad4mModel>(
+    instances: T[],
+    perspective: PerspectiveProxy,
+    includeMap: IncludeMap | undefined,
+  ): Promise<void> {
+    if (!includeMap || Object.keys(includeMap).length === 0) return;
+
+    const relMeta = getRelationsMetadata(this);
+
+    for (const [relName, includeValue] of Object.entries(includeMap)) {
+      const meta: RelationMetadataEntry | undefined = relMeta[relName];
+      if (!meta) {
+        console.warn(`include: relation "${relName}" not found in metadata, skipping`);
+        continue;
+      }
+
+      const TargetClass = meta.target() as unknown as typeof Ad4mModel;
+
+      // Nested include map (if the value is an object, not just `true`)
+      const nestedInclude: IncludeMap | undefined =
+        typeof includeValue === 'object' ? includeValue as IncludeMap : undefined;
+
+      // Collect all unique URIs across all instances for batch-friendly lookup
+      const uriSet = new Set<string>();
+      for (const inst of instances) {
+        const raw = (inst as any)[relName];
+        if (raw == null) continue;
+        if (Array.isArray(raw)) {
+          for (const v of raw) if (typeof v === 'string') uriSet.add(v);
+        } else if (typeof raw === 'string') {
+          uriSet.add(raw);
+        }
+      }
+
+      if (uriSet.size === 0) continue;
+
+      // Hydrate each unique URI into a model instance
+      const hydrated = new Map<string, Ad4mModel>();
+      await Promise.all(
+        Array.from(uriSet).map(async (uri) => {
+          try {
+            const related = new TargetClass(perspective, uri);
+            await related.get();
+            hydrated.set(uri, related);
+          } catch (e) {
+            console.warn(`include: failed to hydrate "${relName}" URI ${uri}:`, e);
+          }
+        }),
+      );
+
+      // Replace raw URIs with hydrated instances on each parent instance
+      for (const inst of instances) {
+        const raw = (inst as any)[relName];
+        if (raw == null) continue;
+        if (Array.isArray(raw)) {
+          (inst as any)[relName] = raw.map((v: any) =>
+            typeof v === 'string' && hydrated.has(v) ? hydrated.get(v) : v,
+          );
+        } else if (typeof raw === 'string' && hydrated.has(raw)) {
+          (inst as any)[relName] = hydrated.get(raw);
+        }
+      }
+
+      // Recurse for nested includes
+      if (nestedInclude) {
+        const hydratedInstances = Array.from(hydrated.values()) as (typeof TargetClass extends new (...a: any[]) => infer I ? I : Ad4mModel)[];
+        await TargetClass.hydrateRelations(hydratedInstances, perspective, nestedInclude);
       }
     }
   }
@@ -3262,6 +3366,37 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     return this;
   }
 
+  /**
+   * Specifies which relations to eager-load (hydrate into model instances).
+   *
+   * Without `include`, relation fields contain raw expression URIs (strings).
+   * With `include`, the URIs are resolved into fully-hydrated model instances
+   * using the `target` class declared in the relation decorator.
+   *
+   * Supports nested includes for multi-level eager loading.
+   *
+   * @param map - An IncludeMap describing which relations to hydrate
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * // Hydrate comments one level deep
+   * const recipes = await Recipe.query(perspective)
+   *   .include({ comments: true })
+   *   .run();
+   * // recipe.comments is now Comment[] (model instances), not string[]
+   *
+   * // Nested: hydrate comments AND each comment's author
+   * const recipes = await Recipe.query(perspective)
+   *   .include({ comments: { author: true } })
+   *   .run();
+   * ```
+   */
+  include(map: IncludeMap): ModelQueryBuilder<T> {
+    this.queryParams.include = map;
+    return this;
+  }
+
   overrideModelClassName(className: string): ModelQueryBuilder<T> {
     this.modelClassName = className;
     return this;
@@ -3310,17 +3445,23 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async get(): Promise<T[]> {
+    let results: T[];
     if (this.useSurrealDBFlag) {
       const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
       const result = await this.perspective.querySurrealDB(surrealQuery);
-      const { results } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
-      return results as T[];
+      ({ results } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result) as { results: T[] });
     } else {
       const query = await this.ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
       const result = await this.perspective.infer(query);
-      const { results } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
-      return results as T[];
+      ({ results } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result) as { results: T[] });
     }
+
+    // Eager-load relations specified by .include()
+    if (this.queryParams.include) {
+      await (this.ctor as any).hydrateRelations(results, this.perspective, this.queryParams.include);
+    }
+
+    return results;
   }
 
   /**
@@ -3358,43 +3499,46 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     // Clean up any existing subscription
     this.dispose();
 
+    const includeMap = this.queryParams.include;
+    const ctor = this.ctor;
+
     if (this.useSurrealDBFlag) {
-        const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
+        const surrealQuery = await ctor.queryToSurrealQL(this.perspective, this.queryParams);
         this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
 
         const processResults = async (result: any) => {
-            // The result from live query subscription update (handled in PerspectiveInstance listener)
-            // is the new full set of results (because we re-query in Rust).
-            // So we just need to map it to instances.
-            const { results } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
+            const { results } = await ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
+            if (includeMap) await (ctor as any).hydrateRelations(results, this.perspective, includeMap);
             callback(results as T[]);
         };
 
         this.currentSubscription.onResult(processResults);
         
         // Process initial result
-        const { results } = await this.ctor.instancesFromSurrealResult(
+        const { results } = await ctor.instancesFromSurrealResult(
             this.perspective, 
             this.queryParams, 
             this.currentSubscription.result
         );
+        if (includeMap) await (ctor as any).hydrateRelations(results, this.perspective, includeMap);
         return results as T[];
     } else {
-        // Note: Subscriptions currently only work with Prolog
-        const query = await this.ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
+        const query = await ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
         this.currentSubscription = await this.perspective.subscribeInfer(query);
 
         const processResults = async (result: AllInstancesResult) => {
-            const { results } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
+            const { results } = await ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
+            if (includeMap) await (ctor as any).hydrateRelations(results, this.perspective, includeMap);
             callback(results as T[]);
         };
 
         this.currentSubscription.onResult(processResults);
-        const { results } = await this.ctor.instancesFromPrologResult(
+        const { results } = await ctor.instancesFromPrologResult(
             this.perspective,
             this.queryParams,
             this.currentSubscription.result
         );
+        if (includeMap) await (ctor as any).hydrateRelations(results, this.perspective, includeMap);
         return results as T[];
     }
   }
