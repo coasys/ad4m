@@ -48,13 +48,9 @@ cd ../cli && pnpm build
 # This runs: cargo build --release
 ```
 
-### ⚠️ Binary collision
+### ⚠️ Binary note
 
-Both crates produce a binary named `ad4m-executor` in `target/release/`. The CLI crate's version has all runtime flags (MCP, TLS, multi-user). **Always build CLI last**, or target it explicitly:
-
-```bash
-cargo build --release -p ad4m
-```
+Only the CLI crate produces binaries (`ad4m-executor` and `ad4m` in `target/release/`). The `rust-executor` crate is a library — it doesn't create standalone binaries, but its build step generates the Deno snapshot required by the CLI. **Always build `rust-executor` before `cli`.**
 
 ### Rebuild after changes
 
@@ -77,13 +73,17 @@ The bootstrap seed determines how languages are distributed. **This is the most 
 | **Mainnet** | `cli/mainnet_seed.json` | Cloudflare proxy (`bootstrap-store-gateway.perspect3vism.workers.dev`) | Development, standalone operation |
 | **Test** | `tests/js/bootstrapSeed.json` | Local filesystem (`./tst-tmp/languages/`) | Test pipeline only (requires `prepare-test`) |
 
-**Always use the mainnet seed for development:**
+**The mainnet seed is embedded in the binary.** Running `ad4m-executor init` creates `~/.ad4m` (or the specified `--data-path`) and writes the included mainnet seed as `mainnet_seed.seed`. No extra flags needed for standard development:
+
 ```bash
-ad4m-executor init --data-path /tmp/ad4m-data \
-  --network-bootstrap-seed ./cli/mainnet_seed.json
+ad4m-executor init --data-path /tmp/ad4m-data
 ```
 
-Without `--network-bootstrap-seed`, the executor looks for `mainnet_seed.seed` in the data path — a file that doesn't exist after init. This fails silently: the executor starts, agent generates, but all languages fail to resolve.
+Use `--network-bootstrap-seed` only to override with a different seed (e.g., for testing):
+```bash
+ad4m-executor init --data-path /tmp/ad4m-data \
+  --network-bootstrap-seed ./tests/js/bootstrapSeed.json
+```
 
 ### Diagnosing language failures
 
@@ -92,14 +92,13 @@ If logs show:
 Did not find language source for given address: QmzSYwd...
 Did not find meta file for given address: QmzSYwd...
 ```
-→ Wrong bootstrap seed. Switch to `cli/mainnet_seed.json`.
+→ The data directory has a corrupted or wrong seed. Re-run `ad4m-executor init` to regenerate `mainnet_seed.seed`.
 
 ## Run the Executor
 
 ### Minimal (development)
 ```bash
-ad4m-executor init --data-path /tmp/ad4m-data \
-  --network-bootstrap-seed ./cli/mainnet_seed.json
+ad4m-executor init --data-path /tmp/ad4m-data
 
 ad4m-executor run --app-data-path /tmp/ad4m-data
 ```
@@ -415,12 +414,12 @@ ad4m/
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Languages fail to resolve | Test bootstrap seed | Use `cli/mainnet_seed.json` |
+| Languages fail to resolve | Corrupted or missing bootstrap seed | Re-run `ad4m-executor init` to regenerate `mainnet_seed.seed` |
 | `ad4m-executor` missing MCP flags | Built rust-executor last (wrong binary) | Rebuild with `cd cli && pnpm build` |
 | Empty MCP responses | Missing `notifications/initialized` | Send notification after initialize |
-| Port bind error | Previous executor still running | `lsof -ti:12100 \| xargs kill` (use `kill -9` only if needed) |
+| Port bind error | Previous executor still running | <code>lsof -ti:12100 &#124; xargs -r kill</code> (use `kill -9` only if needed) |
 | Agent generates but nothing works | Init still in progress | Wait for "AD4M init complete" in logs |
-| `mainnet_seed.seed` not found | No seed provided to init | Use `--network-bootstrap-seed cli/mainnet_seed.json` |
+| `mainnet_seed.seed` not found | Data directory corrupted or init not run | Re-run `ad4m-executor init` |
 | `main key not found` on login | `agentGenerate` never called | Run `agentGenerate` mutation once |
 | `Capability not matched... LOGIN` | Multi-user mode disabled | `runtimeSetMultiUserEnabled(enabled: true)` |
 | WebSocket closes after 15s | Wrong auth format in `connection_init` | Use `payload: { headers: { authorization: '...' } }` |
