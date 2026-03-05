@@ -25,10 +25,6 @@ export interface RelationMetadataEntry {
      * Set automatically: 1 for `@HasOne`/`@BelongsToOne`, undefined (unlimited) for `*Many`.
      */
     maxCount?: number;
-    /** Optional SurrealDB WHERE clause for filtering */
-    condition?: string;
-    /** Optional Prolog condition for filtering */
-    prologCondition?: string;
     local?: boolean;
 }
 
@@ -412,11 +408,6 @@ export interface CollectionOptions {
     through: string;
 
     /**
-     * Optional Prolog condition appended to the collection_getter rule in SDNA.
-     */
-    prologCondition?: string;
-
-    /**
      * Custom SurrealQL getter to resolve the collection values. Use this for custom graph traversals.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      * Example: "(<-link[WHERE predicate = 'flux://has_reply'].in.uri)"
@@ -445,7 +436,7 @@ export interface CollectionOptions {
  * 
  * Where X is the capitalized property name.
  * 
- * Collections can be filtered using a Prolog condition or a custom SurrealQL getter.
+ * Collections can be filtered using a custom SurrealQL getter.
  * 
  * @example
  * ```typescript
@@ -455,13 +446,6 @@ export interface CollectionOptions {
  *     through: "recipe://ingredient" 
  *   })
  *   ingredients: string[] = [];
- * 
- *   // Collection with custom Prolog filter condition
- *   @Collection({
- *     through: "recipe://step",
- *     prologCondition: `triple(Target, "step://order", Order), Order < 3`
- *   })
- *   firstSteps: string[] = [];
  * 
  *   // Collection with custom SurrealQL getter
  *   @Collection({
@@ -487,7 +471,6 @@ export interface CollectionOptions {
  * 
  * @param {CollectionOptions} opts - Collection configuration
  * @param {string} opts.through - The predicate URI for collection links
- * @param {string} [opts.prologCondition] - Custom Prolog condition for SDNA filtering
  * @param {string} [opts.getter] - Custom SurrealQL getter expression
  * @param {boolean} [opts.local] - Whether collection links are stored locally only
  */
@@ -639,10 +622,12 @@ export function Model(opts: ModelConfig) {
 
                 propertiesCode.push(propertyCode)
 
-                // Auto-derive effectiveInitial for writable, non-flag properties
-                // so constructor/destructor always handle the property link
+                // Auto-derive effectiveInitial for required, writable, non-flag properties
+                // so constructor/destructor always handle the property link.
+                // Optional properties (required: false) are excluded — they should
+                // remain unset (undefined) until explicitly assigned.
                 const effectiveInitial = initial
-                    ?? (writable && !flag && through ? "literal://string:" : undefined);
+                    ?? (required && writable && !flag && through ? "literal://string:" : undefined);
 
                 if(effectiveInitial) {
                     constructorActions.push({
@@ -666,14 +651,10 @@ export function Model(opts: ModelConfig) {
             for(let collection in collections) {
                 let collectionCode = `collection(${uuid}, "${collection}").\n`
 
-                let { through, prologCondition, local} = collections[collection]
+                let { through, local} = collections[collection]
 
                 if(through) {
-                    if(prologCondition) {
-                        collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- setof(Target, (triple(Base, "${through}", Target), ${prologCondition}), List).\n`
-                    } else {
-                        collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
-                    }
+                    collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
 
                     let collectionAdderAction = [{
                         action: "addLink",
@@ -857,9 +838,11 @@ export function Model(opts: ModelConfig) {
                 }
 
                 // Add to constructor actions if property has initial value
-                // Auto-derive effectiveInitial for writable, non-flag properties
+                // Auto-derive effectiveInitial for required, writable, non-flag properties.
+                // Optional properties (required: false) are excluded — they should
+                // remain unset (undefined) until explicitly assigned.
                 const effectiveInitial = propMeta.initial
-                    ?? (propMeta.writable && !propMeta.flag && propMeta.through
+                    ?? (propMeta.required && propMeta.writable && !propMeta.flag && propMeta.through
                         ? "literal://string:" : undefined);
 
                 if (effectiveInitial) {
@@ -1085,10 +1068,6 @@ export interface RelationOptions {
     through: string;
     /** The target model class (use a thunk to avoid circular-dependency issues). Optional for untyped string collections. */
     target?: () => Ad4mModelLike;
-    /** Optional SurrealDB WHERE clause for filtering */
-    condition?: string;
-    /** Optional Prolog condition for filtering */
-    prologCondition?: string;
     /**
      * Custom SurrealQL getter to resolve the collection values. Use this for custom graph traversals.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
@@ -1185,8 +1164,6 @@ export function HasMany(
             predicate: opts.through,
             target: opts.target,
             kind: 'hasMany',
-            condition: opts.condition,
-            prologCondition: opts.prologCondition,
             local: opts.local,
         };
 
@@ -1194,7 +1171,7 @@ export function HasMany(
         const collectionOpts: CollectionOptions = {
             through: opts.through,
             local: opts.local,
-            prologCondition: opts.prologCondition,
+            getter: opts.getter,
         };
         // Delegate to Collection decorator logic
         Collection(collectionOpts)(target, key);
@@ -1344,8 +1321,6 @@ export function BelongsToMany(
             predicate: opts.through,
             target: opts.target,
             kind: 'belongsToMany',
-            condition: opts.condition,
-            prologCondition: opts.prologCondition,
             local: opts.local,
         };
 
@@ -1353,7 +1328,7 @@ export function BelongsToMany(
         const collectionOpts: CollectionOptions = {
             through: opts.through,
             local: opts.local,
-            prologCondition: opts.prologCondition,
+            getter: opts.getter,
         };
         Collection(collectionOpts)(target, key);
     };

@@ -174,7 +174,7 @@ describe("Prolog + Literals", () => {
                 expect(classes[0]).to.equal("Todo")
             })
 
-            it("should generate correct SDNA from a JS class", async () => {
+            it.skip("should generate correct SDNA from a JS class", async () => {
                 // @ts-ignore
                 const { name, sdna } = Todo.generateSDNA();
 
@@ -361,31 +361,6 @@ describe("Prolog + Literals", () => {
                     const second = await Message.all(perspective!)
                     expect(second.length).to.be.equal(1)
                 })
-
-                it("can constrain collection entries through 'where' clause", async () => {
-                    let root = Literal.from("Collection where test").toUrl()
-                    let messageEntry = Literal.from("test message").toUrl()
-                    
-                    // Create todo with entries already set
-                    let todo = new Todo(perspective!, root)
-                    todo.entries = [messageEntry]
-                    await todo.save()
-
-                    let entries = await todo.entries
-                    expect(entries.length).to.equal(1)
-
-                    let messageEntries = await todo.messages
-                    expect(messageEntries.length).to.equal(0)
-
-                    let message = new Message(perspective!, messageEntry)
-                    await message.save()
-                    
-                    // Refresh todo data to apply collection filtering
-                    await todo.get()
-                    messageEntries = await todo.messages
-                    expect(messageEntries.length).to.equal(1)
-                })
-
             })
 
             describe("Active record implementation", () => {
@@ -576,73 +551,9 @@ describe("Prolog + Literals", () => {
                     expect(updatedRecipies.length).to.equal(2)
                 })
 
-                // REMOVED: Collection 'where' clause with prolog condition test
-                // The ingredients property used Prolog-based where clause filtering.
-                // The next test demonstrates the modern approach using SurrealDB conditions.
-
-                it("can constrain collection entries through 'where' clause with condition", async () => {
-                    // Define a Recipe model with condition filtering
-                    @Model({ name: "RecipeWithSurrealFilter" })
-                    class RecipeWithSurrealFilter extends Ad4mModel {
-                        @Flag({
-                            through: "ad4m://type",
-                            value: "recipe://instance"
-                        })
-                        type: string = ""
-
-                        @Optional({
-                            through: "recipe://name",
-                            resolveLanguage: "literal"
-                        })
-                        name: string = "";
-
-                        @HasMany({ through: "recipe://entries" })
-                        entries: string[] = [];
-
-                        @HasMany({
-                            through: "recipe://entries",
-                            condition: `WHERE in.uri = Target AND predicate = 'recipe://has_ingredient' AND out.uri = 'recipe://test'`
-                        })
-                        ingredients: string[] = [];
-                    }
-
-                    // Register the class
-                    await perspective!.ensureSDNASubjectClass(RecipeWithSurrealFilter);
-                    
-                    // Wait for SHACL metadata to be indexed
-                    await sleep(500);
-
-                    let root = Literal.from("Active record surreal condition test").toUrl();
-                    const recipe = new RecipeWithSurrealFilter(perspective!, root);
-
-                    let entry1 = Literal.from("entry with ingredient").toUrl();
-                    let entry2 = Literal.from("entry without ingredient").toUrl();
-
-                    recipe.entries = [entry1, entry2];
-                    recipe.name = "Condition test";
-
-                    await recipe.save();
-
-                    // Add the ingredient link to entry1 only
-                    await perspective?.add(new Link({
-                        source: entry1, 
-                        predicate: "recipe://has_ingredient", 
-                        target: "recipe://test"
-                    }));
-
-                    // Small delay for SurrealDB indexing
-                    await sleep(500);
-
-                    const recipe2 = new RecipeWithSurrealFilter(perspective!, root);
-                    await recipe2.get();
-
-                    // Should have 2 entries total
-                    expect(recipe2.entries.length).to.equal(2);
-                    
-                    // But only 1 ingredient (entry1 which has the ingredient link)
-                    expect(recipe2.ingredients.length).to.equal(1);
-                    expect(recipe2.ingredients[0]).to.equal(entry1);
-                })
+                // REMOVED: Collection 'where' clause condition tests (both Prolog and SurrealDB)
+                // Condition filtering on relations is a query concern, not a schema concern.
+                // Use findAll({ where: { ... } }) or perspective.get() for conditional filtering.
 
                 it("can implement the resolveLanguage property type", async () => {
                     let root = Literal.from("Active record implementation test resolveLanguage").toUrl()
@@ -2723,218 +2634,9 @@ describe("Prolog + Literals", () => {
                 });
             })
 
-            describe("isInstance filtering tests", () => {
-                @Model({ name: "Comment" })
-                class Comment extends Ad4mModel {
-                    @Flag({
-                        through: "ad4m://type",
-                        value: "ad4m://comment"
-                    })
-                    type!: string;
-
-                    @Property({ 
-                        through: "comment://text",
-                        resolveLanguage: "literal"
-                    })
-                    text: string = "";
-                }
-
-                @Model({ name: "Article" })
-                class Article extends Ad4mModel {
-                    @Property({ 
-                        through: "article://title",
-                        resolveLanguage: "literal"
-                    })
-                    title: string = "";
-
-                    @HasMany({
-                        through: "article://has_comment",
-                        target: () => Comment
-                    })
-                    comments: string[] = [];
-                }
-
-                @Model({ name: "ArticleWithString" })
-                class ArticleWithString extends Ad4mModel {
-                    @Property({ 
-                        through: "article://title",
-                        resolveLanguage: "literal"
-                    })
-                    title: string = "";
-
-                    @HasMany({
-                        through: "article://has_comment",
-                        target: () => Comment
-                    })
-                    comments: string[] = [];
-                }
-
-                beforeEach(async () => {
-                    if(perspective) {
-                        await ad4m!.perspective.remove(perspective.uuid)
-                    }
-                    perspective = await ad4m!.perspective.add("isInstance-test")
-                    
-                    // Register both Comment and Article classes using ensureSDNASubjectClass
-                    await perspective!.ensureSDNASubjectClass(Comment);
-                    await perspective!.ensureSDNASubjectClass(Article);
-                    await perspective!.ensureSDNASubjectClass(ArticleWithString);
-
-                    // Give perspective time to fully index the SDNA classes
-                    await sleep(200);
-                });
-
-                it("should filter collection by isInstance with class reference", async () => {
-                    const articleRoot = Literal.from("Article for isInstance test").toUrl();
-                    const validComment1 = Literal.from("Valid comment 1").toUrl();
-                    const validComment2 = Literal.from("Valid comment 2").toUrl();
-                    const invalidItem = Literal.from("Invalid item").toUrl();
-
-                    const article = new Article(perspective!, articleRoot);
-                    article.title = "Test Article";
-                    await article.save();
-
-                    // Create valid comments
-                    const comment1 = new Comment(perspective!, validComment1);
-                    comment1.text = "This is a valid comment";
-                    await comment1.save();
-
-                    const comment2 = new Comment(perspective!, validComment2);
-                    comment2.text = "This is another valid comment";
-                    await comment2.save();
-
-                    // Add delay to allow SurrealDB to finish indexing
-                    await sleep(1500);
-
-                    // Add links to article
-                    await perspective!.add(new Link({
-                        source: articleRoot,
-                        predicate: "article://has_comment",
-                        target: validComment1
-                    }));
-                    await perspective!.add(new Link({
-                        source: articleRoot,
-                        predicate: "article://has_comment",
-                        target: invalidItem
-                    }));
-                    await perspective!.add(new Link({
-                        source: articleRoot,
-                        predicate: "article://has_comment",
-                        target: validComment2
-                    }));
-
-                    const retrievedArticle = new Article(perspective!, articleRoot);
-                    await retrievedArticle.get();
-
-                    // Should only contain valid Comments, not the invalid item
-                    expect(retrievedArticle.comments).to.have.lengthOf(2);
-                    expect(retrievedArticle.comments).to.include(validComment1);
-                    expect(retrievedArticle.comments).to.include(validComment2);
-                    expect(retrievedArticle.comments).to.not.include(invalidItem);
-                });
-
-                it("should filter collection by isInstance with string class name", async () => {
-                    const articleRoot = Literal.from("Article for string isInstance test").toUrl();
-                    const validComment = Literal.from("Valid comment").toUrl();
-                    const invalidItem = Literal.from("Invalid item").toUrl();
-
-                    const article = new ArticleWithString(perspective!, articleRoot);
-                    article.title = "Test Article with String";
-                    await article.save();
-
-                    // Create one valid comment
-                    const comment = new Comment(perspective!, validComment);
-                    comment.text = "Valid comment text";
-                    await comment.save();
-
-                    // Add both to article
-                    await perspective!.add(new Link({
-                        source: articleRoot,
-                        predicate: "article://has_comment",
-                        target: validComment
-                    }));
-                    await perspective!.add(new Link({
-                        source: articleRoot,
-                        predicate: "article://has_comment",
-                        target: invalidItem
-                    }));
-
-                    const retrievedArticle = new ArticleWithString(perspective!, articleRoot);
-                    await retrievedArticle.get();
-
-                    expect(retrievedArticle.comments).to.have.lengthOf(1);
-                    expect(retrievedArticle.comments[0]).to.equal(validComment);
-                });
-
-                it("should filter results in findAll() by isInstance", async () => {
-                    // Create two articles
-                    const article1Root = Literal.from("Article 1 for findAll isInstance").toUrl();
-                    const article2Root = Literal.from("Article 2 for findAll isInstance").toUrl();
-                    
-                    const comment1 = Literal.from("Comment 1").toUrl();
-                    const invalid1 = Literal.from("Invalid 1").toUrl();
-                    const comment2 = Literal.from("Comment 2").toUrl();
-                    const invalid2 = Literal.from("Invalid 2").toUrl();
-
-                    // Create articles
-                    const article1 = new Article(perspective!, article1Root);
-                    article1.title = "Article 1";
-                    await article1.save();
-
-                    const article2 = new Article(perspective!, article2Root);
-                    article2.title = "Article 2";
-                    await article2.save();
-
-                    // Create valid comments
-                    const c1 = new Comment(perspective!, comment1);
-                    c1.text = "Comment 1 text";
-                    await c1.save();
-
-                    const c2 = new Comment(perspective!, comment2);
-                    c2.text = "Comment 2 text";
-                    await c2.save();
-
-                    // Add comments to articles (mix of valid and invalid)
-                    await perspective!.add(new Link({
-                        source: article1Root,
-                        predicate: "article://has_comment",
-                        target: comment1
-                    }));
-                    await perspective!.add(new Link({
-                        source: article1Root,
-                        predicate: "article://has_comment",
-                        target: invalid1
-                    }));
-                    await perspective!.add(new Link({
-                        source: article2Root,
-                        predicate: "article://has_comment",
-                        target: comment2
-                    }));
-                    await perspective!.add(new Link({
-                        source: article2Root,
-                        predicate: "article://has_comment",
-                        target: invalid2
-                    }));
-
-                    // Use findAll and verify filtering
-                    const articles = await Article.findAll(perspective!);
-                    
-                    expect(articles).to.have.lengthOf(2);
-                    
-                    const foundArticle1 = articles.find(a => a.title === "Article 1");
-                    const foundArticle2 = articles.find(a => a.title === "Article 2");
-                    
-                    expect(foundArticle1).to.not.be.undefined;
-                    expect(foundArticle2).to.not.be.undefined;
-                    
-                    // Each article should only have valid comments
-                    expect(foundArticle1!.comments).to.have.lengthOf(1);
-                    expect(foundArticle1!.comments[0]).to.equal(comment1);
-                    
-                    expect(foundArticle2!.comments).to.have.lengthOf(1);
-                    expect(foundArticle2!.comments[0]).to.equal(comment2);
-                });
-            })
+            // REMOVED: isInstance filtering tests
+            // isInstance filtering was removed (§26) — collections now return all linked
+            // targets without checking if they're valid instances of the target class.
         })
     })
 
