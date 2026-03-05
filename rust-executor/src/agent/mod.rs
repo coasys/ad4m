@@ -12,6 +12,20 @@ use crate::wallet::Wallet;
 pub mod capabilities;
 pub mod signatures;
 
+/// Validate that a user email is safe to use as a filesystem path segment.
+/// Rejects path separators, "..", null bytes, and other unsafe characters.
+fn validate_user_email_for_path(email: &str) -> Result<(), AnyError> {
+    if email.is_empty() {
+        return Err(anyhow!("User email cannot be empty"));
+    }
+    if email.contains('/') || email.contains('\\') || email.contains('\0') || email.contains("..") {
+        return Err(anyhow!(
+            "Invalid user email: contains unsafe path characters"
+        ));
+    }
+    Ok(())
+}
+
 /// Context for determining which agent to use for operations
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentContext {
@@ -477,6 +491,7 @@ impl AgentService {
         user_email: &str,
         agent: &Agent,
     ) -> Result<(), AnyError> {
+        validate_user_email_for_path(user_email)?;
         // Create user-specific profile directory
         let user_profile_dir = format!("{}/{}", self.users_dir, user_email);
         std::fs::create_dir_all(&user_profile_dir)?;
@@ -528,6 +543,7 @@ impl AgentService {
 
     /// Load agent profile for a specific user
     pub fn load_user_agent_profile(&self, user_email: &str) -> Result<Option<Agent>, AnyError> {
+        validate_user_email_for_path(user_email)?;
         let profile_path = format!("{}/{}/profile.json", self.users_dir, user_email);
 
         if !std::path::Path::new(&profile_path).exists() {
