@@ -20,6 +20,11 @@ export interface RelationMetadataEntry {
     predicate: string;
     target: () => Ad4mModelLike;
     kind: 'hasMany' | 'hasOne' | 'belongsToOne' | 'belongsToMany';
+    /**
+     * Maximum number of related instances.
+     * Set automatically: 1 for `@HasOne`/`@BelongsToOne`, undefined (unlimited) for `*Many`.
+     */
+    maxCount?: number;
     /** Optional SurrealDB WHERE clause for filtering */
     condition?: string;
     /** Optional Prolog condition for filtering */
@@ -1229,6 +1234,7 @@ export function HasOne(
             predicate: opts.through,
             target: opts.target,
             kind: 'hasOne',
+            maxCount: 1,
             local: opts.local,
         };
 
@@ -1280,6 +1286,7 @@ export function BelongsToOne(
             predicate: opts.through,
             target: opts.target,
             kind: 'belongsToOne',
+            maxCount: 1,
             local: opts.local,
         };
 
