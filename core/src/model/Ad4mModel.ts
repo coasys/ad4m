@@ -487,6 +487,7 @@ export class Ad4mModel {
   #subjectClassName: string;
   #source: string;
   #perspective: PerspectiveProxy;
+  #snapshot: Record<string, any> | null = null;
   author: string;
   createdAt: any;
   updatedAt: any;
@@ -876,6 +877,102 @@ export class Ad4mModel {
     Object.assign(instance, writableProps);
   }
 
+  // ──────────────────────────────────────────────────────────
+  //  Snapshot / dirty tracking
+  // ──────────────────────────────────────────────────────────
+
+  /**
+   * Captures a shallow snapshot of the instance's current property and
+   * collection values.  Called automatically after hydration (`get()`,
+   * query results).  The snapshot is used by `isDirty()`,
+   * `changedFields()`, and by `update()` to skip unchanged fields.
+   * @private
+   */
+  private takeSnapshot(): void {
+    const ctor = this.constructor as typeof Ad4mModel;
+    const metadata = ctor.getModelMetadata();
+    const snap: Record<string, any> = {};
+
+    for (const propName of Object.keys(metadata.properties)) {
+      const val = (this as any)[propName];
+      // Shallow-clone arrays so mutation doesn't silently defeat the check
+      snap[propName] = Array.isArray(val) ? [...val] : val;
+    }
+    for (const collName of Object.keys(metadata.relations)) {
+      const val = (this as any)[collName];
+      snap[collName] = Array.isArray(val) ? [...val] : val;
+    }
+
+    this.#snapshot = snap;
+  }
+
+  /**
+   * Returns `true` if any tracked property or collection has changed
+   * since the last hydration (or since `takeSnapshot()` was last called).
+   *
+   * Always returns `true` if no snapshot exists (e.g. a freshly
+   * constructed instance that hasn't been fetched yet).
+   *
+   * @example
+   * ```typescript
+   * const recipe = await Recipe.create(perspective, { name: "Pasta" });
+   * recipe.isDirty();        // false — just hydrated
+   * recipe.name = "Risotto";
+   * recipe.isDirty();        // true
+   * ```
+   */
+  isDirty(): boolean {
+    if (!this.#snapshot) return true;
+    return this.changedFields().length > 0;
+  }
+
+  /**
+   * Returns the names of properties/collections that differ from the
+   * snapshot taken at the last hydration.
+   *
+   * Returns **all** field names if no snapshot exists.
+   *
+   * @example
+   * ```typescript
+   * recipe.name = "New Name";
+   * recipe.changedFields(); // ["name"]
+   * ```
+   */
+  changedFields(): string[] {
+    const ctor = this.constructor as typeof Ad4mModel;
+    const metadata = ctor.getModelMetadata();
+
+    if (!this.#snapshot) {
+      return [
+        ...Object.keys(metadata.properties),
+        ...Object.keys(metadata.relations),
+      ];
+    }
+
+    const changed: string[] = [];
+    const allFields = [
+      ...Object.keys(metadata.properties),
+      ...Object.keys(metadata.relations),
+    ];
+
+    for (const field of allFields) {
+      const current = (this as any)[field];
+      const original = this.#snapshot[field];
+
+      if (Array.isArray(current) || Array.isArray(original)) {
+        // Compare arrays element-by-element
+        const a = Array.isArray(current) ? current : [];
+        const b = Array.isArray(original) ? original : [];
+        if (a.length !== b.length || a.some((v: any, i: number) => v !== b[i])) {
+          changed.push(field);
+        }
+      } else if (current !== original) {
+        changed.push(field);
+      }
+    }
+    return changed;
+  }
+
   private async getData() {
     // Builds an object with the author, timestamp, all properties, & all collections on the Ad4mModel and saves it to the instance
     // Use SurrealDB for data queries
@@ -1060,6 +1157,7 @@ export class Ad4mModel {
       console.error(`SurrealDB getData also failed for ${this.#id}:`, e);
     }
 
+    this.takeSnapshot();
     return this;
   }
 
@@ -1771,6 +1869,7 @@ WHERE ${whereConditions.join(' AND ')}
           const values = [...Properties, ...Collections, ["createdAt", Timestamp], ["author", Author]];
           await Ad4mModel.assignValuesToInstance(perspective, instance, values);
 
+          instance.takeSnapshot();
           return instance;
         } catch (error) {
           console.error(`Failed to process instance ${Base}:`, error);
@@ -2154,6 +2253,11 @@ WHERE ${whereConditions.join(' AND ')}
       const start = query.offset || 0;
       const end = query.limit ? start + query.limit : undefined;
       paginatedInstances = filteredInstances.slice(start, end);
+    }
+
+    // Take snapshots for dirty tracking after all hydration is complete
+    for (const inst of paginatedInstances) {
+      (inst as Ad4mModel).takeSnapshot();
     }
 
     return {
@@ -2608,8 +2712,14 @@ WHERE ${whereConditions.join(' AND ')}
   private async innerUpdate(setProperties: boolean = true, batchId?: string) {
     this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this.cleanCopy());
 
+    // Determine which fields actually changed (skip unchanged when snapshot exists)
+    const dirty = this.#snapshot ? new Set(this.changedFields()) : null;
+
     const entries = Object.entries(this);
     for (const [key, value] of entries) {
+      // Skip unchanged fields when a snapshot is available
+      if (dirty && !dirty.has(key)) continue;
+
       if (value !== undefined && value !== null) {
         if (value?.action) {
           switch (value.action) {
