@@ -461,10 +461,10 @@ function isNumericType(schema: JSONSchemaProperty): boolean {
  * ```
  */
 export class Ad4mModel {
-  #id: string;
-  #subjectClassName: string;
-  #perspective: PerspectiveProxy;
-  #snapshot: Record<string, any> | null = null;
+  private _id: string;
+  private _subjectClassName: string;
+  private _perspective: PerspectiveProxy;
+  private _snapshot: Record<string, any> | null = null;
   author: string;
   createdAt: any;
   updatedAt: any;
@@ -662,22 +662,22 @@ export class Ad4mModel {
    * ```
    */
   constructor(perspective: PerspectiveProxy, id?: string) {
-    this.#id = id ? id : Literal.from(makeRandomId(24)).toUrl();
-    this.#perspective = perspective;
+    this._id = id ? id : Literal.from(makeRandomId(24)).toUrl();
+    this._perspective = perspective;
   }
 
   /**
    * The unique identifier (expression URI) of this model instance.
    */
   get id(): string {
-    return this.#id;
+    return this._id;
   }
 
   /**
    * @deprecated Use `.id` instead. Will be removed in a future version.
    */
   get baseExpression(): string {
-    return this.#id;
+    return this._id;
   }
 
   /**
@@ -685,7 +685,7 @@ export class Ad4mModel {
    * Allows subclasses to access the perspective while keeping it private from external code.
    */
   protected get perspective(): PerspectiveProxy {
-    return this.#perspective;
+    return this._perspective;
   }
 
   /**
@@ -1093,7 +1093,7 @@ export class Ad4mModel {
       snap[collName] = Array.isArray(val) ? [...val] : val;
     }
 
-    this.#snapshot = snap;
+    this._snapshot = snap;
   }
 
   /**
@@ -1112,7 +1112,7 @@ export class Ad4mModel {
    * ```
    */
   isDirty(): boolean {
-    if (!this.#snapshot) return true;
+    if (!this._snapshot) return true;
     return this.changedFields().length > 0;
   }
 
@@ -1132,7 +1132,7 @@ export class Ad4mModel {
     const ctor = this.constructor as typeof Ad4mModel;
     const metadata = ctor.getModelMetadata();
 
-    if (!this.#snapshot) {
+    if (!this._snapshot) {
       return [
         ...Object.keys(metadata.properties),
         ...Object.keys(metadata.relations),
@@ -1147,7 +1147,7 @@ export class Ad4mModel {
 
     for (const field of allFields) {
       const current = (this as any)[field];
-      const original = this.#snapshot[field];
+      const original = this._snapshot[field];
 
       if (Array.isArray(current) || Array.isArray(original)) {
         // Compare arrays element-by-element
@@ -1171,18 +1171,18 @@ export class Ad4mModel {
       const metadata = ctor.getModelMetadata();
 
       // Query for all links from this specific node (base expression)
-      const safeBaseExpression = ctor.formatSurrealValue(this.#id);
+      const safeBaseExpression = ctor.formatSurrealValue(this._id);
       const linksQuery = `
         SELECT id, predicate, out.uri AS target, author, timestamp
         FROM link
         WHERE in.uri = ${safeBaseExpression}
         ORDER BY timestamp ASC
       `;
-      const links = await this.#perspective.querySurrealDB(linksQuery);
+      const links = await this._perspective.querySurrealDB(linksQuery);
 
       if (links && links.length > 0) {
         // Core hydration: properties (latest-wins), collections, timestamps/author
-        await ctor.hydrateFromLinks(this, links, metadata, this.#perspective);
+        await ctor.hydrateFromLinks(this, links, metadata, this._perspective);
 
         // Post-hydration collection filtering (where.condition, where.isInstance)
         // These filters can't be part of hydrateFromLinks because they require
@@ -1198,14 +1198,14 @@ export class Ad4mModel {
               const filteredValues: string[] = [];
               for (const value of values) {
                 let condition = collMeta.where.condition
-                  .replace(/\$perspective/g, `'${this.#perspective.uuid}'`)
-                  .replace(/\$base/g, `'${this.#id}'`)
+                  .replace(/\$perspective/g, `'${this._perspective.uuid}'`)
+                  .replace(/\$base/g, `'${this._id}'`)
                   .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
                 if (condition.trim().startsWith('WHERE')) {
                   condition = `array::len(SELECT * FROM link ${condition}) > 0`;
                 }
                 const filterQuery = `RETURN ${condition}`;
-                const result = await this.#perspective.querySurrealDB(filterQuery);
+                const result = await this._perspective.querySurrealDB(filterQuery);
                 const isTrue = result === true || (Array.isArray(result) && result.length > 0 && result[0] === true);
                 if (isTrue) filteredValues.push(value);
               }
@@ -1221,9 +1221,9 @@ export class Ad4mModel {
               const className = typeof collMeta.where.isInstance === 'string'
                 ? collMeta.where.isInstance
                 : collMeta.where.isInstance.name;
-              const filterMetadata = await this.#perspective.getSubjectClassMetadataFromSDNA(className);
+              const filterMetadata = await this._perspective.getSubjectClassMetadataFromSDNA(className);
               if (filterMetadata) {
-                values = await this.#perspective.batchCheckSubjectInstances(values, filterMetadata);
+                values = await this._perspective.batchCheckSubjectInstances(values, filterMetadata);
               }
             } catch (error) {
               // Keep unfiltered values on error
@@ -1235,7 +1235,7 @@ export class Ad4mModel {
       }
 
       // Evaluate SurrealQL getters
-      await ctor.evaluateCustomGettersForInstance(this, this.#perspective, metadata);
+      await ctor.evaluateCustomGettersForInstance(this, this._perspective, metadata);
 
       // Apply where.isInstance filtering to getter collections
       // (non-getter collections were already filtered above)
@@ -1245,9 +1245,9 @@ export class Ad4mModel {
             const className = typeof collMeta.where.isInstance === 'string'
               ? collMeta.where.isInstance
               : collMeta.where.isInstance.name;
-            const filterMetadata = await this.#perspective.getSubjectClassMetadataFromSDNA(className);
+            const filterMetadata = await this._perspective.getSubjectClassMetadataFromSDNA(className);
             if (filterMetadata) {
-              const filtered = await this.#perspective.batchCheckSubjectInstances((this as any)[collName], filterMetadata);
+              const filtered = await this._perspective.batchCheckSubjectInstances((this as any)[collName], filterMetadata);
               (this as any)[collName] = filtered;
             }
           } catch (error) {
@@ -1256,7 +1256,7 @@ export class Ad4mModel {
         }
       }
     } catch (e) {
-      console.error(`SurrealDB getData also failed for ${this.#id}:`, e);
+      console.error(`SurrealDB getData also failed for ${this._id}:`, e);
     }
 
     this.takeSnapshot();
@@ -2439,10 +2439,10 @@ WHERE ${whereConditions.join(' AND ')}
     }
 
     if (resolveLanguage) {
-      value = await this.#perspective.createExpression(value, resolveLanguage);
+      value = await this._perspective.createExpression(value, resolveLanguage);
     }
 
-    await this.#perspective.executeAction(actions, this.#id, [{ name: "value", value }], batchId);
+    await this._perspective.executeAction(actions, this._id, [{ name: "value", value }], batchId);
   }
 
   private async setRelationValues(key: string, value: any, batchId?: string) {
@@ -2458,14 +2458,14 @@ WHERE ${whereConditions.join(' AND ')}
 
     if (value != null) {
       if (Array.isArray(value)) {
-        await this.#perspective.executeAction(
+        await this._perspective.executeAction(
           actions,
-          this.#id,
+          this._id,
           value.map((v) => ({ name: "value", value: v })),
           batchId
         );
       } else {
-        await this.#perspective.executeAction(actions, this.#id, [{ name: "value", value }], batchId);
+        await this._perspective.executeAction(actions, this._id, [{ name: "value", value }], batchId);
       }
     }
   }
@@ -2485,11 +2485,11 @@ WHERE ${whereConditions.join(' AND ')}
       if (Array.isArray(value)) {
         await Promise.all(
           value.map((v) =>
-            this.#perspective.executeAction(actions, this.#id, [{ name: "value", value: v }], batchId)
+            this._perspective.executeAction(actions, this._id, [{ name: "value", value: v }], batchId)
           )
         );
       } else {
-        await this.#perspective.executeAction(actions, this.#id, [{ name: "value", value }], batchId);
+        await this._perspective.executeAction(actions, this._id, [{ name: "value", value }], batchId);
       }
     }
   }
@@ -2509,11 +2509,11 @@ WHERE ${whereConditions.join(' AND ')}
       if (Array.isArray(value)) {
         await Promise.all(
           value.map((v) =>
-            this.#perspective.executeAction(actions, this.#id, [{ name: "value", value: v }], batchId)
+            this._perspective.executeAction(actions, this._id, [{ name: "value", value: v }], batchId)
           )
         );
       } else {
-        await this.#perspective.executeAction(actions, this.#id, [{ name: "value", value }], batchId);
+        await this._perspective.executeAction(actions, this._id, [{ name: "value", value }], batchId);
       }
     }
   }
@@ -2546,7 +2546,7 @@ WHERE ${whereConditions.join(' AND ')}
    */
   async save(batchId?: string) {
     // Existing instance → update path (has been fetched / hydrated before)
-    if (this.#snapshot) {
+    if (this._snapshot) {
       await this.innerUpdate(true, batchId);
       await this.getData();
       return;
@@ -2574,7 +2574,7 @@ WHERE ${whereConditions.join(' AND ')}
     // Create the subject with the initial values
     await this.perspective.createSubject(
       className,
-      this.#id,
+      this._id,
       initialValues,
       batchId
     );
@@ -2603,10 +2603,10 @@ WHERE ${whereConditions.join(' AND ')}
   }
 
   private async innerUpdate(setProperties: boolean = true, batchId?: string) {
-    this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this.cleanCopy());
+    this._subjectClassName = await this._perspective.stringOrTemplateObjectToSubjectClassName(this.cleanCopy());
 
     // Determine which fields actually changed (skip unchanged when snapshot exists)
-    const dirty = this.#snapshot ? new Set(this.changedFields()) : null;
+    const dirty = this._snapshot ? new Set(this.changedFields()) : null;
 
     const entries = Object.entries(this);
     for (const [key, value] of entries) {
@@ -2668,7 +2668,7 @@ WHERE ${whereConditions.join(' AND ')}
    * ```
    */
   async get() {
-    this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this.cleanCopy());
+    this._subjectClassName = await this._perspective.stringOrTemplateObjectToSubjectClassName(this.cleanCopy());
 
     return await this.getData();
   }
@@ -2691,7 +2691,7 @@ WHERE ${whereConditions.join(' AND ')}
    * ```
    */
   async delete(batchId?: string) {
-    await this.#perspective.removeSubject(this, this.#id, batchId);
+    await this._perspective.removeSubject(this, this._id, batchId);
   }
 
   // ──────────────────────────────────────────────────────────
