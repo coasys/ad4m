@@ -805,6 +805,213 @@ export class Ad4mModel {
     }];
   }
 
+  // ──────────────────────────────────────────────────────────
+  //  Unified hydration helpers
+  // ──────────────────────────────────────────────────────────
+
+  /**
+   * Resolves a raw link target value into a hydrated property value.
+   *
+   * Handles, in order:
+   * 1. Non-literal expression resolution (`perspective.getExpression`)
+   * 2. Literal URI parsing (`Literal.fromUrl(…).get()`)
+   * 3. Primitive type coercion (string → number / boolean)
+   * 4. Transform function application
+   *
+   * @param target        - The raw target string from the link
+   * @param propMeta      - Property metadata from the decorator registry
+   * @param perspective   - The perspective for expression resolution
+   * @param expectedType  - Optional JS typeof hint for coercion (e.g. 'number')
+   * @returns The resolved value
+   * @private
+   */
+  private static async hydratePropertyValue(
+    target: string,
+    propMeta: PropertyMetadata,
+    perspective: PerspectiveProxy,
+    expectedType?: string,
+  ): Promise<any> {
+    let value: any = target;
+
+    if (target !== undefined && target !== null && target !== '') {
+      // Non-literal expression resolution
+      if (
+        propMeta.resolveLanguage != null &&
+        propMeta.resolveLanguage !== 'literal' &&
+        typeof target === 'string' &&
+        !target.startsWith('literal://')
+      ) {
+        try {
+          const expression = await perspective.getExpression(target);
+          if (expression) {
+            try { value = JSON.parse(expression.data); } catch { value = expression.data; }
+          }
+        } catch (e) {
+          console.warn(`hydratePropertyValue: failed to resolve expression for "${propMeta.name}":`, e);
+        }
+      }
+      // Literal URI parsing
+      else if (
+        propMeta.resolveLanguage === 'literal' &&
+        typeof target === 'string' &&
+        target.startsWith('literal://')
+      ) {
+        try {
+          const parsed = Literal.fromUrl(target).get();
+          value = parsed.data !== undefined ? parsed.data : parsed;
+        } catch {
+          // Keep raw value
+        }
+      }
+      // Primitive type coercion
+      else if (typeof target === 'string' && expectedType) {
+        if (expectedType === 'number') value = Number(target);
+        else if (expectedType === 'boolean') value = target === 'true' || target === '1';
+      }
+    }
+
+    // Transform function
+    if (propMeta.transform && typeof propMeta.transform === 'function') {
+      value = propMeta.transform(value);
+    }
+
+    return value;
+  }
+
+  /**
+   * Link shape accepted by `hydrateFromLinks`.
+   * Both `getData()` and `instancesFromSurrealResult()` produce this shape.
+   */
+  private static readonly _linkShape: undefined;  // type-only marker
+
+  /**
+   * Hydrates an instance from an array of raw links.
+   *
+   * Processes properties (latest-wins semantics), collections
+   * (chronological accumulation), and timestamps/author in a single
+   * pass over the links array.
+   *
+   * @param instance     - The blank model instance to populate
+   * @param links        - Array of link objects (predicate, target, author?, timestamp?)
+   * @param metadata     - Model metadata from `getModelMetadata()`
+   * @param perspective  - The perspective for expression resolution
+   * @private
+   */
+  private static async hydrateFromLinks(
+    instance: any,
+    links: Array<{ predicate: string; target: string; author?: string; timestamp?: string | number }>,
+    metadata: ModelMetadata,
+    perspective: PerspectiveProxy,
+  ): Promise<void> {
+    if (!links || links.length === 0) return;
+
+    let minTimestamp: string | number | null = null;
+    let maxTimestamp: string | number | null = null;
+    let originalAuthor: string | null = null;
+    let latestAuthor: string | null = null;
+
+    // Build predicate→propName and predicate→collName lookup maps for O(1) matching
+    const predToProperty = new Map<string, [string, PropertyMetadata]>();
+    for (const [propName, propMeta] of Object.entries(metadata.properties)) {
+      if (propMeta.getter) continue;  // Handled via custom getter evaluation
+      predToProperty.set(propMeta.predicate, [propName, propMeta]);
+    }
+
+    const predToCollection = new Map<string, [string, RelationMetadata]>();
+    for (const [collName, collMeta] of Object.entries(metadata.relations)) {
+      if (collMeta.getter) continue;
+      predToCollection.set(collMeta.predicate, [collName, collMeta]);
+    }
+
+    // Per-property accumulator: track all matching targets so we can pick the last (latest-wins)
+    const propertyLatest = new Map<string, { target: string; timestamp?: string | number }>();
+
+    // Per-collection accumulator: ordered targets with metadata for sorting
+    const collectionAccum = new Map<string, Array<{ target: string; timestamp: string | number; index: number }>>();
+
+    // Single pass over all links
+    for (let i = 0; i < links.length; i++) {
+      const link = links[i];
+      const { predicate, target, author, timestamp } = link;
+      if (target === 'None' || target === undefined || target === null) continue;
+
+      // Track timestamps/authors
+      if (timestamp != null) {
+        if (minTimestamp == null || timestamp < minTimestamp) {
+          minTimestamp = timestamp;
+          originalAuthor = author ?? null;
+        }
+        if (maxTimestamp == null || timestamp > maxTimestamp) {
+          maxTimestamp = timestamp;
+          latestAuthor = author ?? null;
+        }
+      }
+
+      // Property match — accumulate for latest-wins
+      const propEntry = predToProperty.get(predicate);
+      if (propEntry) {
+        const existing = propertyLatest.get(propEntry[0]);
+        // Latest-wins: always overwrite (links are ordered ASC so last = latest)
+        propertyLatest.set(propEntry[0], { target, timestamp });
+        continue;
+      }
+
+      // Collection match — accumulate all
+      const collEntry = predToCollection.get(predicate);
+      if (collEntry) {
+        const [collName] = collEntry;
+        let arr = collectionAccum.get(collName);
+        if (!arr) {
+          arr = [];
+          collectionAccum.set(collName, arr);
+        }
+        arr.push({ target, timestamp: timestamp ?? '', index: i });
+      }
+    }
+
+    // Resolve properties
+    for (const [propName, { target }] of propertyLatest) {
+      const [, propMeta] = predToProperty.get(
+        metadata.properties[propName].predicate
+      )!;
+      const expectedType = typeof instance[propName];
+      instance[propName] = await this.hydratePropertyValue(
+        target,
+        propMeta,
+        perspective,
+        expectedType !== 'undefined' ? expectedType : undefined,
+      );
+    }
+
+    // Resolve collections: sort by timestamp (stable via index tiebreaker), filter empties
+    for (const [collName, items] of collectionAccum) {
+      items.sort((a, b) => {
+        const cmp = String(a.timestamp).localeCompare(String(b.timestamp));
+        return cmp !== 0 ? cmp : a.index - b.index;
+      });
+      instance[collName] = items
+        .map(i => i.target)
+        .filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None');
+    }
+
+    // Assign author / timestamps
+    if (originalAuthor) instance.author = originalAuthor;
+    if (minTimestamp != null) {
+      instance.createdAt = typeof minTimestamp === 'string' && minTimestamp.includes('T')
+        ? new Date(minTimestamp).getTime()
+        : typeof minTimestamp === 'string'
+          ? (isNaN(parseInt(minTimestamp, 10)) ? minTimestamp : parseInt(minTimestamp, 10))
+          : minTimestamp;
+    }
+    if (maxTimestamp != null) {
+      instance.updatedAt = typeof maxTimestamp === 'string' && maxTimestamp.includes('T')
+        ? new Date(maxTimestamp).getTime()
+        : typeof maxTimestamp === 'string'
+          ? (isNaN(parseInt(maxTimestamp, 10)) ? maxTimestamp : parseInt(maxTimestamp, 10))
+          : maxTimestamp;
+    }
+  }
+
   public static async assignValuesToInstance(perspective: PerspectiveProxy, instance: Ad4mModel, values: ValueTuple[]) {
     // Map properties to object
     const propsObject = Object.fromEntries(
@@ -981,11 +1188,7 @@ export class Ad4mModel {
       const metadata = ctor.getModelMetadata();
 
       // Query for all links from this specific node (base expression)
-      // Using formatSurrealValue to prevent SQL injection by properly escaping the value
       const safeBaseExpression = ctor.formatSurrealValue(this.#id);
-      // Note: We use ORDER BY timestamp ASC because:
-      // - For collections: we want chronological order (oldest to newest)
-      // - For properties: we select the LAST element to get "latest wins" semantics
       const linksQuery = `
         SELECT id, predicate, out.uri AS target, author, timestamp
         FROM link
@@ -995,118 +1198,46 @@ export class Ad4mModel {
       const links = await this.#perspective.querySurrealDB(linksQuery);
 
       if (links && links.length > 0) {
-        let minTimestamp = null;
-        let maxTimestamp = null;
-        let latestAuthor = null;
-        let originalAuthor = null;
+        // Core hydration: properties (latest-wins), collections, timestamps/author
+        await ctor.hydrateFromLinks(this, links, metadata, this.#perspective);
 
-        // Process properties (skip those with custom getter)
-        for (const [propName, propMeta] of Object.entries(metadata.properties)) {
-          if (propMeta.getter) continue; // Handle via custom getter evaluation
-          const matching = links.filter((l: any) => l.predicate === propMeta.predicate);
-          if (matching.length > 0) {
-            // "Latest wins" semantics: select the last element since links are ordered ASC.
-            // The last element has the most recent timestamp and represents the current property value.
-            const link = matching[matching.length - 1];
-            let value = link.target;
-
-            // Track timestamps/authors for createdAt and updatedAt
-            if (link.timestamp) {
-              if (!minTimestamp || link.timestamp < minTimestamp) {
-                minTimestamp = link.timestamp;
-                originalAuthor = link.author;
-              }
-              if (!maxTimestamp || link.timestamp > maxTimestamp) {
-                maxTimestamp = link.timestamp;
-                latestAuthor = link.author;
-              }
-            }
-
-            // Handle resolveLanguage
-            if (propMeta.resolveLanguage && propMeta.resolveLanguage !== 'literal') {
-              try {
-                const expression = await this.#perspective.getExpression(value);
-                if (expression) {
-                  try {
-                    value = JSON.parse(expression.data);
-                  } catch {
-                    value = expression.data;
-                  }
-                }
-              } catch (e) {
-                console.warn(`Failed to resolve expression for ${propName}:`, e);
-              }
-            } else if (propMeta.resolveLanguage === 'literal' && typeof value === 'string' && value.startsWith('literal://')) {
-              // Only parse literal URIs when resolveLanguage is explicitly 'literal'.
-              // Without this guard, properties pointing to baseExpressions of other models
-              // (which may be literal:// strings) would get unwrapped, breaking link URI validation.
-              try {
-                const parsed = Literal.fromUrl(value).get();
-                value = parsed.data !== undefined ? parsed.data : parsed;
-              } catch (e) {
-                // Keep original value
-              }
-            }
-
-            // Apply transform if exists
-            if (propMeta.transform && typeof propMeta.transform === 'function') {
-              value = propMeta.transform(value);
-            }
-
-            (this as any)[propName] = value;
-          }
-        }
-
-        // Process collections (skip those with custom getter)
+        // Post-hydration collection filtering (where.condition, where.isInstance)
+        // These filters can't be part of hydrateFromLinks because they require
+        // SurrealDB queries or batch instance checks against SDNA.
         for (const [collName, collMeta] of Object.entries(metadata.collections)) {
-          if (collMeta.getter) continue; // Handle via custom getter evaluation
-          const matching = links.filter((l: any) => l.predicate === collMeta.predicate);
-          // Collections preserve chronological order: links are sorted ASC by timestamp,
-          // so the collection reflects the order in which items were added (oldest to newest).
-          let values = matching.map((l: any) => l.target);
-          
+          if (collMeta.getter) continue;
+          let values: any[] = (this as any)[collName];
+          if (!values || !Array.isArray(values)) continue;
+
           // Apply where.condition filtering if present
           if (collMeta.where?.condition && values.length > 0) {
             try {
-              // Filter values by evaluating condition for each value
               const filteredValues: string[] = [];
-              
               for (const value of values) {
                 let condition = collMeta.where.condition
                   .replace(/\$perspective/g, `'${this.#perspective.uuid}'`)
                   .replace(/\$base/g, `'${this.#id}'`)
                   .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
-                
-                // If condition starts with WHERE, wrap it in array length check pattern
-                // Using array::len() to properly count matching links
                 if (condition.trim().startsWith('WHERE')) {
                   condition = `array::len(SELECT * FROM link ${condition}) > 0`;
                 }
-                
                 const filterQuery = `RETURN ${condition}`;
                 const result = await this.#perspective.querySurrealDB(filterQuery);
-                
-                // RETURN can return the value directly or in an array
                 const isTrue = result === true || (Array.isArray(result) && result.length > 0 && result[0] === true);
-                if (isTrue) {
-                  filteredValues.push(value);
-                }
+                if (isTrue) filteredValues.push(value);
               }
-              
               values = filteredValues;
             } catch (error) {
               console.warn(`Failed to apply condition filter for ${collName}:`, error);
-              // Keep unfiltered values on error
             }
           }
-          
+
           // Apply where.isInstance filtering if present
           if (collMeta.where?.isInstance && values.length > 0) {
             try {
-              const className = typeof collMeta.where.isInstance === 'string' 
-                ? collMeta.where.isInstance 
+              const className = typeof collMeta.where.isInstance === 'string'
+                ? collMeta.where.isInstance
                 : collMeta.where.isInstance.name;
-              
               const filterMetadata = await this.#perspective.getSubjectClassMetadataFromSDNA(className);
               if (filterMetadata) {
                 values = await this.#perspective.batchCheckSubjectInstances(values, filterMetadata);
@@ -1115,25 +1246,14 @@ export class Ad4mModel {
               // Keep unfiltered values on error
             }
           }
-          
-          (this as any)[collName] = values;
-        }
 
-        // Set author and timestamps
-        if (originalAuthor) {
-          (this as any).author = originalAuthor;
-        }
-        if (minTimestamp) {
-          (this as any).createdAt = minTimestamp;
-        }
-        if (maxTimestamp) {
-          (this as any).updatedAt = maxTimestamp;
+          (this as any)[collName] = values;
         }
       }
 
       // Evaluate SurrealQL getters
       await ctor.evaluateCustomGettersForInstance(this, this.#perspective, metadata);
-      
+
       // Apply where.isInstance filtering to getter collections
       // (non-getter collections were already filtered above)
       for (const [collName, collMeta] of Object.entries(metadata.collections)) {
@@ -1142,7 +1262,6 @@ export class Ad4mModel {
             const className = typeof collMeta.where.isInstance === 'string'
               ? collMeta.where.isInstance
               : collMeta.where.isInstance.name;
-            
             const filterMetadata = await this.#perspective.getSubjectClassMetadataFromSDNA(className);
             if (filterMetadata) {
               const filtered = await this.#perspective.batchCheckSubjectInstances((this as any)[collName], filterMetadata);
@@ -1923,205 +2042,15 @@ WHERE ${whereConditions.join(' AND ')}
         const links = row.links || [];
         
         const instance = new this(perspective, base) as any;
-        
-        // Track both earliest (createdAt) and most recent (updatedAt) timestamps
-        let minTimestamp = null;
-        let maxTimestamp = null;
-        let originalAuthor = null;
-        let latestAuthor = null;
-        
-        // Process each link (track index for collection ordering)
-        for (let linkIndex = 0; linkIndex < links.length; linkIndex++) {
-          const link = links[linkIndex];
-          const predicate = link.predicate;
-          const target = link.target;
-          
-          // Skip 'None' values
-          if (target === 'None') continue;
-          
-          // Track both earliest (createdAt) and latest (updatedAt) timestamps with their authors
-          if (link.timestamp) {
-            if (!minTimestamp || link.timestamp < minTimestamp) {
-              minTimestamp = link.timestamp;
-              originalAuthor = link.author;
-            }
-            if (!maxTimestamp || link.timestamp > maxTimestamp) {
-              maxTimestamp = link.timestamp;
-              latestAuthor = link.author;
-            }
-          }
-          
-          // Find matching property (skip those with getter)
-          let foundProperty = false;
-          for (const [propName, propMeta] of Object.entries(metadata.properties)) {
-            if (propMeta.getter) continue; // Handle via getter evaluation
-            if (propMeta.predicate === predicate) {
-              // For properties, take the first value (or we could use timestamp to get latest)
-              // Note: Empty objects {} are truthy, so we need to check for them explicitly
-              const currentValue = instance[propName];
-              const isEmptyObject = typeof currentValue === 'object' && currentValue !== null && !Array.isArray(currentValue) && Object.keys(currentValue).length === 0;
-              if (!currentValue || currentValue === "" || currentValue === 0 || isEmptyObject) {
-                let convertedValue = target;
-                
-                // Only process if target has a value
-                if (target !== undefined && target !== null && target !== '') {
-                  // Check if we need to resolve a non-literal language expression.
-                  // resolveLanguage must be defined and not 'literal' to trigger expression resolution.
-                  // Also skip if the target itself is a literal:// URI — those are handled by the
-                  // literal-parsing branch below (avoids calling getExpression on empty literals like
-                  // "literal://string:" which would cause a deserialization error).
-                  if (propMeta.resolveLanguage != undefined && propMeta.resolveLanguage !== 'literal' && typeof target === 'string' && !target.startsWith('literal://')) {
-                    // For non-literal languages, resolve the expression via perspective.getExpression()
-                    // Note: Literals are already parsed by SurrealDB's fn::parse_literal()
-                    try {
-                      const expression = await perspective.getExpression(target);
-                      if (expression) {
-                        // Parse the expression data if it's a JSON string
-                        try {
-                          convertedValue = JSON.parse(expression.data);
-                        } catch {
-                          // If parsing fails, use the data as-is
-                          convertedValue = expression.data;
-                        }
-                      }
-                    } catch (e) {
-                      console.warn(`Failed to resolve expression for ${propName} with target "${target}":`, e);
-                      console.warn("Falling back to raw value");
-                      convertedValue = target; // Fall back to raw value
-                    }
-                  } else if (propMeta.resolveLanguage === 'literal' && typeof target === 'string' && target.startsWith('literal://')) {
-                    // Only parse literal URIs when resolveLanguage is explicitly set to 'literal'.
-                    // Without this check, properties pointing to baseExpressions of other models
-                    // (which may be literal:// strings) would get unwrapped, breaking link URI validation.
-                    try {
-                      const parsed = Literal.fromUrl(target).get();
-                      if(parsed.data !== undefined) {
-                        convertedValue = parsed.data;
-                      } else {
-                        convertedValue = parsed;
-                      }
-                    } catch (e) {
-                      // If literal parsing fails, just use the value as-is (don't bail)
-                      convertedValue = target;
-                    }
-                  } else if (typeof target === 'string') {
-                    // Type conversion: check the instance property's current type
-                    const expectedType = typeof instance[propName];
-                    if (expectedType === 'number') {
-                      convertedValue = Number(target);
-                    } else if (expectedType === 'boolean') {
-                      convertedValue = target === 'true' || target === '1';
-                    }
-                  }
-                }
 
-                // Apply transform function if it exists
-                if (propMeta.transform && typeof propMeta.transform === 'function') {
-                  convertedValue = propMeta.transform(convertedValue);
-                }
+        // Core hydration via unified helper
+        await this.hydrateFromLinks(instance, links, metadata, perspective);
 
-                instance[propName] = convertedValue;
-              }
-              foundProperty = true;
-              break;
-            }
-          }
-          
-          // If not a property, check if it's a collection (skip those with getter)
-          if (!foundProperty) {
-            for (const [collName, collMeta] of Object.entries(metadata.collections)) {
-              if (collMeta.getter) continue; // Handle via getter evaluation
-              if (collMeta.predicate === predicate) {
-                // For collections, accumulate all values with their timestamps and indices for sorting
-                if (!instance[collName]) {
-                  instance[collName] = [];
-                }
-                // Initialize timestamp tracking array if not already done
-                const timestampsKey = `__${collName}_timestamps`;
-                const indicesKey = `__${collName}_indices`;
-                if (!instance[timestampsKey]) {
-                  instance[timestampsKey] = [];
-                }
-                if (!instance[indicesKey]) {
-                  instance[indicesKey] = [];
-                }
-                if (!instance[collName].includes(target)) {
-                  instance[collName].push(target);
-                  instance[timestampsKey].push(link.timestamp || '');
-                  // Track original position in the links array for stable sorting
-                  instance[indicesKey].push(linkIndex);
-                }
-                break;
-              }
-            }
-          }
-        }
-        
-        // Set author and timestamps
-        if (originalAuthor) {
-          instance.author = originalAuthor;
-        }
-        
-        // Set createdAt from earliest timestamp
-        if (minTimestamp) {
-          if (typeof minTimestamp === 'string' && minTimestamp.includes('T')) {
-            instance.createdAt = new Date(minTimestamp).getTime();
-          } else if (typeof minTimestamp === 'string') {
-            const parsed = parseInt(minTimestamp, 10);
-            instance.createdAt = isNaN(parsed) ? minTimestamp : parsed;
-          } else {
-            instance.createdAt = minTimestamp;
-          }
-        }
-        
-        // Set updatedAt from most recent timestamp
-        if (maxTimestamp) {
-          if (typeof maxTimestamp === 'string' && maxTimestamp.includes('T')) {
-            instance.updatedAt = new Date(maxTimestamp).getTime();
-          } else if (typeof maxTimestamp === 'string') {
-            const parsed = parseInt(maxTimestamp, 10);
-            instance.updatedAt = isNaN(parsed) ? maxTimestamp : parsed;
-          } else {
-            instance.updatedAt = maxTimestamp;
-          }
-        }
-        
-        // Sort collections by timestamp to maintain insertion order
-        for (const [collName, collMeta] of Object.entries(metadata.collections)) {
-          const timestampsKey = `__${collName}_timestamps`;
-          const indicesKey = `__${collName}_indices`;
-          if (instance[collName] && instance[timestampsKey]) {
-            // Create array of [value, timestamp, index] tuples
-            const pairs = instance[collName].map((value: any, index: number) => ({
-              value,
-              timestamp: instance[timestampsKey][index] || '',
-              originalIndex: instance[indicesKey]?.[index] ?? index
-            }));
-            // Sort by timestamp first, then by original index for stable sorting
-            pairs.sort((a, b) => {
-              const tsA = String(a.timestamp || '');
-              const tsB = String(b.timestamp || '');
-              const tsCompare = tsA.localeCompare(tsB);
-              if (tsCompare !== 0) return tsCompare;
-              // Use original index as tiebreaker for stable sorting
-              return a.originalIndex - b.originalIndex;
-            });
-            // Replace collection with sorted values, filtering out empty strings and None
-            instance[collName] = pairs
-              .map(p => p.value)
-              .filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None');
-            // Clean up temporary arrays
-            delete instance[timestampsKey];
-            delete instance[indicesKey];
-          }
-        }
-        
         // Filter by requested attributes if specified
         if (requestedProperties.length > 0 || requestedCollections.length > 0) {
           const requestedAttributes = [...requestedProperties, ...requestedCollections];
           Object.keys(instance).forEach((key) => {
             // Keep only requested attributes, plus always keep createdAt, updatedAt, author, id, and baseExpression (deprecated alias)
-            // Note: timestamp is a getter alias for createdAt, so we preserve createdAt instead
             if (!requestedAttributes.includes(key) && key !== 'createdAt' && key !== 'updatedAt' && key !== 'author' && key !== 'id' && key !== 'baseExpression') {
               delete instance[key];
             }
