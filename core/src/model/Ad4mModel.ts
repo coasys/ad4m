@@ -868,6 +868,9 @@ export class Ad4mModel {
    * @param links        - Array of link objects (predicate, target, author?, timestamp?)
    * @param metadata     - Model metadata from `getModelMetadata()`
    * @param perspective  - The perspective for expression resolution
+   * @param requestedProperties - Optional sparse fieldset; when provided, only these
+   *                              property names are hydrated (collections are unaffected).
+   *                              Omit or pass `undefined` to hydrate all properties.
    * @private
    */
   private static async hydrateFromLinks(
@@ -875,6 +878,7 @@ export class Ad4mModel {
     links: Array<{ predicate: string; target: string; author?: string; timestamp?: string | number }>,
     metadata: ModelMetadata,
     perspective: PerspectiveProxy,
+    requestedProperties?: string[],
   ): Promise<void> {
     if (!links || links.length === 0) return;
 
@@ -884,9 +888,15 @@ export class Ad4mModel {
     let latestAuthor: string | null = null;
 
     // Build predicate→propName and predicate→collName lookup maps for O(1) matching
+    // When requestedProperties is provided, only include those properties in the map
+    const propFilter = requestedProperties && requestedProperties.length > 0
+      ? new Set(requestedProperties)
+      : null;
+
     const predToProperty = new Map<string, [string, PropertyMetadata]>();
     for (const [propName, propMeta] of Object.entries(metadata.properties)) {
       if (propMeta.getter) continue;  // Handled via custom getter evaluation
+      if (propFilter && !propFilter.has(propName)) continue;  // Skip unrequested properties
       predToProperty.set(propMeta.predicate, [propName, propMeta]);
     }
 
@@ -2004,18 +2014,8 @@ WHERE ${whereConditions.join(' AND ')}
         
         const instance = new this(perspective, base) as any;
 
-        // Core hydration via unified helper
-        await this.hydrateFromLinks(instance, links, metadata, perspective);
-
-        // Filter by requested properties if specified
-        if (requestedProperties.length > 0) {
-          Object.keys(instance).forEach((key) => {
-            // Keep only requested properties, plus always keep createdAt, updatedAt, author, id, and baseExpression (deprecated alias)
-            if (!requestedProperties.includes(key) && key !== 'createdAt' && key !== 'updatedAt' && key !== 'author' && key !== 'id' && key !== 'baseExpression') {
-              delete instance[key];
-            }
-          });
-        }
+        // Core hydration via unified helper (pass requestedProperties for sparse fieldset)
+        await this.hydrateFromLinks(instance, links, metadata, perspective, requestedProperties.length > 0 ? requestedProperties : undefined);
         
         instances.push(instance);
       } catch (error) {
