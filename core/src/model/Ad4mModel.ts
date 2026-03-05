@@ -79,6 +79,8 @@ export interface IncludeMap {
 
 export type Query = {
   source?: string;
+  /** Filter to instances that are the target of a link from a given parent via a specific predicate */
+  parent?: { id: string; predicate: string };
   properties?: string[];
   collections?: string[];
   include?: IncludeMap;
@@ -164,6 +166,12 @@ function buildSourceQuery(source?: string): string {
   // Constrains the query to instances that have the provided source
   if (!source) return "";
   return `triple("${source}", "ad4m://has_child", Base)`;
+}
+
+function buildParentQuery(parent?: { id: string; predicate: string }): string {
+  // Constrains the query to instances linked from a specific parent via a specific predicate
+  if (!parent) return "";
+  return `triple("${parent.id}", "${parent.predicate}", Base)`;
 }
 
 // todo: only return Timestamp & Author from query (Base, AllLinks, and SortLinks not required)
@@ -1021,6 +1029,7 @@ export class Ad4mModel {
     const instanceQueries = [
       buildAuthorAndTimestampQuery(),
       buildSourceQuery(source),
+      buildParentQuery(query.parent),
       buildPropertiesQuery(properties),
       buildCollectionsQuery(collections),
       buildWhereQuery(where),
@@ -1227,6 +1236,14 @@ export class Ad4mModel {
       // Use graph traversal: node must be target of has_child link from source
       graphTraversalFilters.push(
         `count(<-link[WHERE perspective = $perspective AND in.uri = ${this.formatSurrealValue(source)} AND predicate = 'ad4m://has_child']) > 0`
+      );
+    }
+
+    // Add parent filter if specified (filter to nodes linked from a parent via a specific predicate)
+    if (query.parent) {
+      const { id: parentId, predicate: parentPredicate } = query.parent;
+      graphTraversalFilters.push(
+        `count(<-link[WHERE perspective = $perspective AND in.uri = ${this.formatSurrealValue(parentId)} AND predicate = '${escapeSurrealString(parentPredicate)}']) > 0`
       );
     }
 
@@ -2292,7 +2309,7 @@ WHERE ${whereConditions.join(' AND ')}
   static async countQueryToProlog(perspective: PerspectiveProxy, query: Query = {}, modelClassName?: string | null) {
     const { source, where } = query;
     const className = modelClassName || (await this.getClassName(perspective));
-    const instanceQueries = [buildAuthorAndTimestampQuery(), buildSourceQuery(source), buildWhereQuery(where)];
+    const instanceQueries = [buildAuthorAndTimestampQuery(), buildSourceQuery(source), buildParentQuery(query.parent), buildWhereQuery(where)];
     const resultSetQueries = [buildCountQuery(true), buildOrderQuery(), buildOffsetQuery(), buildLimitQuery()];
 
     const fullQuery = `
@@ -3331,6 +3348,38 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   source(source: string): ModelQueryBuilder<T> {
     this.queryParams.source = source;
+    return this;
+  }
+
+  /**
+   * Scopes the query to instances linked from a parent via a specific predicate.
+   *
+   * When called without a `predicate`, defaults to `ad4m://has_child`
+   * (equivalent to `.source()`).  When a predicate is supplied the query
+   * filters to instances that are the target of a link with that predicate
+   * from the given parent.
+   *
+   * @param idOrInstance - The parent's expression URI **or** an Ad4mModel instance
+   * @param predicate    - Optional predicate URI (default: `ad4m://has_child`)
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * // Children of a cookbook (ad4m://has_child)
+   * Recipe.query(perspective).parent(cookbook).get();
+   *
+   * // Comments linked from a post via a custom predicate
+   * Comment.query(perspective).parent(post, "post://comment").get();
+   * Comment.query(perspective).parent(post.id, "post://comment").get();
+   * ```
+   */
+  parent(idOrInstance: string | Ad4mModel, predicate?: string): ModelQueryBuilder<T> {
+    const id = typeof idOrInstance === 'string' ? idOrInstance : idOrInstance.id;
+    if (predicate) {
+      this.queryParams.parent = { id, predicate };
+    } else {
+      this.queryParams.source = id;
+    }
     return this;
   }
 
