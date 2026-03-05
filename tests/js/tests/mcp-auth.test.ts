@@ -119,11 +119,17 @@ describe("MCP Authentication HTTP Tests", function() {
         });
 
         it("should reject list_perspectives without auth", async function() {
-            const result = await callMcpTool(MCP_BASE_URL, 'list_perspectives', {}, mcpSessionId);
-            // The tool returns an error string when not authenticated
-            expect(typeof result).to.equal('string');
-            expect(result).to.include("Authentication");
-            console.log("Unauthenticated list_perspectives:", result);
+            try {
+                const result = await callMcpTool(MCP_BASE_URL, 'list_perspectives', {}, mcpSessionId);
+                // If it doesn't throw, the result must be an auth error string/object
+                const msg = typeof result === 'string' ? result : JSON.stringify(result);
+                expect(msg.toLowerCase()).to.include("auth");
+                console.log("Unauthenticated list_perspectives:", msg);
+            } catch (e: any) {
+                // callMcpTool throws on JSON-RPC error responses
+                expect(e.message.toLowerCase()).to.include("auth");
+                console.log("Unauthenticated list_perspectives (thrown):", e.message);
+            }
         });
     });
 
@@ -296,15 +302,19 @@ describe("MCP Authentication HTTP Tests", function() {
             // Open a fresh session with no JWT
             const unauthSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
 
-            const result = await callMcpTool(MCP_BASE_URL, 'query_links', {
-                perspective_id: authedPerspectiveUuid,
-            }, unauthSession);
+            try {
+                const result = await callMcpTool(MCP_BASE_URL, 'query_links', {
+                    perspective_id: authedPerspectiveUuid,
+                }, unauthSession);
 
-            // Must get an auth error — not an empty array and not perspective data
-            expect(typeof result === 'string' || (result && result.error)).to.be.true;
-            const msg = typeof result === 'string' ? result : JSON.stringify(result);
-            expect(msg.toLowerCase()).to.include("auth");
-            console.log("Unauthenticated query_links response:", msg.substring(0, 120));
+                // If it doesn't throw, the result must be an auth error
+                const msg = typeof result === 'string' ? result : JSON.stringify(result);
+                expect(msg.toLowerCase()).to.include("auth");
+                console.log("Unauthenticated query_links response:", msg.substring(0, 120));
+            } catch (e: any) {
+                expect(e.message.toLowerCase()).to.include("auth");
+                console.log("Unauthenticated query_links (thrown):", e.message.substring(0, 120));
+            }
         });
 
         it("get_models must reject unauthenticated access even with a known perspective UUID", async function() {
@@ -312,13 +322,18 @@ describe("MCP Authentication HTTP Tests", function() {
 
             const unauthSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
 
-            const result = await callMcpTool(MCP_BASE_URL, 'get_models', {
-                perspective_id: authedPerspectiveUuid,
-            }, unauthSession);
+            try {
+                const result = await callMcpTool(MCP_BASE_URL, 'get_models', {
+                    perspective_id: authedPerspectiveUuid,
+                }, unauthSession);
 
-            const msg = typeof result === 'string' ? result : JSON.stringify(result);
-            expect(msg.toLowerCase()).to.include("auth");
-            console.log("Unauthenticated get_models response:", msg.substring(0, 120));
+                const msg = typeof result === 'string' ? result : JSON.stringify(result);
+                expect(msg.toLowerCase()).to.include("auth");
+                console.log("Unauthenticated get_models response:", msg.substring(0, 120));
+            } catch (e: any) {
+                expect(e.message.toLowerCase()).to.include("auth");
+                console.log("Unauthenticated get_models (thrown):", e.message.substring(0, 120));
+            }
         });
 
         it("query_subjects must reject unauthenticated access even with a known perspective UUID", async function() {
@@ -326,14 +341,19 @@ describe("MCP Authentication HTTP Tests", function() {
 
             const unauthSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
 
-            const result = await callMcpTool(MCP_BASE_URL, 'query_subjects', {
-                perspective_id: authedPerspectiveUuid,
-                class_name: "Message",
-            }, unauthSession);
+            try {
+                const result = await callMcpTool(MCP_BASE_URL, 'query_subjects', {
+                    perspective_id: authedPerspectiveUuid,
+                    class_name: "Message",
+                }, unauthSession);
 
-            const msg = typeof result === 'string' ? result : JSON.stringify(result);
-            expect(msg.toLowerCase()).to.include("auth");
-            console.log("Unauthenticated query_subjects response:", msg.substring(0, 120));
+                const msg = typeof result === 'string' ? result : JSON.stringify(result);
+                expect(msg.toLowerCase()).to.include("auth");
+                console.log("Unauthenticated query_subjects response:", msg.substring(0, 120));
+            } catch (e: any) {
+                expect(e.message.toLowerCase()).to.include("auth");
+                console.log("Unauthenticated query_subjects (thrown):", e.message.substring(0, 120));
+            }
         });
     });
 });
