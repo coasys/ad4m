@@ -15,6 +15,16 @@ use crate::types::Link;
 
 const HAS_CHILD_PREDICATE: &str = "ad4m://has_child";
 
+/// Wrap a value as a literal URI only if it doesn't already look like a URI.
+/// Values that contain "://" are assumed to be URIs and left as-is.
+fn maybe_encode_literal(value: &str) -> String {
+    if value.contains("://") {
+        value.to_string()
+    } else {
+        Ad4mMcpHandler::encode_literal(value)
+    }
+}
+
 // ============================================================================
 // Parameter Types
 // ============================================================================
@@ -58,8 +68,8 @@ impl Ad4mMcpHandler {
 
         match self.get_writable_perspective(&p.perspective_id).await {
             Ok((mut perspective, agent_context)) => {
-                let source = Self::encode_literal(&p.parent_address);
-                let target = Self::encode_literal(&p.child_address);
+                let source = maybe_encode_literal(&p.parent_address);
+                let target = maybe_encode_literal(&p.child_address);
 
                 let link = Link {
                     source,
@@ -101,7 +111,7 @@ impl Ad4mMcpHandler {
 
         match self.get_readable_perspective(&p.perspective_id).await {
             Ok(perspective) => {
-                let source = Self::encode_literal(&p.parent_address);
+                let source = maybe_encode_literal(&p.parent_address);
 
                 let query = LinkQuery {
                     source: Some(source),
