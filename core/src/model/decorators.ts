@@ -562,7 +562,7 @@ export interface CollectionOptions {
  * For each collection property, the following methods are automatically generated:
  * - `addX(value)` - Add a value to the collection
  * - `removeX(value)` - Remove a value from the collection
- * - `setCollectionX(values)` - Replace all values in the collection
+ * - `setX(values)` - Replace all values in the collection
  * 
  * Where X is the capitalized property name.
  * 
@@ -612,7 +612,7 @@ export interface CollectionOptions {
  * const recipe = new Recipe(perspective);
  * await recipe.addIngredients("ingredient://flour");
  * await recipe.removeIngredients("ingredient://sugar");
- * await recipe.setCollectionIngredients(["ingredient://butter", "ingredient://eggs"]);
+ * await recipe.setIngredients(["ingredient://butter", "ingredient://eggs"]);
  * ```
  * 
  * @param {CollectionOptions} opts - Collection configuration
@@ -632,7 +632,7 @@ function Collection(opts: CollectionOptions) {
         const value = key as string
         target[`add${capitalize(value)}`] = () => {}
         target[`remove${capitalize(value)}`] = () => {}
-        target[`setCollection${capitalize(value)}`] = () => {}
+        target[`set${capitalize(value)}`] = () => {}
 
         Object.defineProperty(target, key, {configurable: true, writable: true});
     };
@@ -1268,14 +1268,14 @@ export interface RelationOptions {
  *
  *   post.addComment(value)
  *   post.removeComment(value)
- *   post.setCollectionComment(values)
+ *   post.setComment(values)
  */
 export type HasManyMethods<Keys extends string> = {
     [K in Keys as `add${Capitalize<K>}`]: (value: string) => Promise<void>;
 } & {
     [K in Keys as `remove${Capitalize<K>}`]: (value: string) => Promise<void>;
 } & {
-    [K in Keys as `setCollection${Capitalize<K>}`]: (values: string[]) => Promise<void>;
+    [K in Keys as `set${Capitalize<K>}`]: (values: string[]) => Promise<void>;
 };
 
 /**

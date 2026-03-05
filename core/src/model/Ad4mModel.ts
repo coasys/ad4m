@@ -2662,7 +2662,7 @@ WHERE ${whereConditions.join(' AND ')}
           // Add collection methods
           const adderName = `add${capitalize(propertyName)}`;
           const removerName = `remove${capitalize(propertyName)}`;
-          const setterName = `setCollection${capitalize(propertyName)}`;
+          const setterName = `set${capitalize(propertyName)}`;
           
           (DynamicModelClass.prototype as any)[adderName] = function() {
             // Placeholder function for SDNA generation
