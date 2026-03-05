@@ -2544,6 +2544,113 @@ WHERE ${whereConditions.join(' AND ')}
     await this.#perspective.removeSubject(this, this.#id, batchId);
   }
 
+  // ──────────────────────────────────────────────────────────
+  //  Static convenience methods
+  // ──────────────────────────────────────────────────────────
+
+  /**
+   * Creates and saves a new model instance in one step.
+   *
+   * @param perspective - The perspective to create the instance in
+   * @param data - Property values to assign before saving
+   * @param source - Optional source expression to link from
+   * @returns The saved model instance
+   *
+   * @example
+   * ```typescript
+   * const recipe = await Recipe.create(perspective, {
+   *   name: "Spaghetti",
+   *   rating: 5,
+   *   ingredients: ["pasta", "tomato sauce"],
+   * });
+   * console.log(recipe.id); // auto-generated
+   * ```
+   */
+  static async create<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    data: Record<string, any> = {},
+    source?: string,
+  ): Promise<T> {
+    const instance = new this(perspective, undefined, source) as T;
+    Object.assign(instance, data);
+    await instance.save();
+    return instance;
+  }
+
+  /**
+   * Updates an existing model instance identified by `id`.
+   *
+   * Fetches the instance, applies the provided changes, calls `update()`,
+   * and returns the refreshed instance.
+   *
+   * @param perspective - The perspective containing the instance
+   * @param id - The expression URI of the instance to update
+   * @param data - Property values to merge before saving
+   * @returns The updated model instance
+   *
+   * @example
+   * ```typescript
+   * const recipe = await Recipe.update(perspective, recipeId, {
+   *   rating: 10,
+   * });
+   * ```
+   */
+  static async update<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    id: string,
+    data: Record<string, any>,
+  ): Promise<T> {
+    const instance = new this(perspective, id) as T;
+    await instance.get();
+    Object.assign(instance, data);
+    await instance.update();
+    return instance;
+  }
+
+  /**
+   * Deletes an existing model instance identified by `id`.
+   *
+   * @param perspective - The perspective containing the instance
+   * @param id - The expression URI of the instance to delete
+   *
+   * @example
+   * ```typescript
+   * await Recipe.remove(perspective, recipeId);
+   * ```
+   */
+  static async remove(
+    this: typeof Ad4mModel & (new (...args: any[]) => Ad4mModel),
+    perspective: PerspectiveProxy,
+    id: string,
+  ): Promise<void> {
+    const instance = new this(perspective, id);
+    await instance.delete();
+  }
+
+  /**
+   * Registers this model's SHACL schema on the given perspective.
+   *
+   * This ensures the perspective knows about the model's shape
+   * (properties, relations, constraints) so instances can be
+   * created, queried, and validated.
+   *
+   * @param perspective - The perspective to register the model on
+   *
+   * @example
+   * ```typescript
+   * await Recipe.register(perspective);
+   * // Now you can create / query Recipe instances on this perspective
+   * ```
+   */
+  static async register(
+    this: typeof Ad4mModel,
+    perspective: PerspectiveProxy,
+  ): Promise<void> {
+    await perspective.ensureSDNASubjectClass(this);
+  }
+
   /**
    * Creates a query builder for fluent query construction.
    * 
