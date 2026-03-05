@@ -7,7 +7,7 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     Flag,
     Property,
     ReadOnly,
-    Collection,
+    HasMany,
     Model,
     Optional,
     PropertyOptions,
@@ -142,20 +142,19 @@ describe("Prolog + Literals", () => {
 
                 @Optional({
                     through: "todo://has_title",
-                    writable: true,
                     resolveLanguage: "literal"
                 })
                 title?: string
 
-                @Collection({ through: "todo://comment" })
+                @HasMany({ through: "todo://comment" })
                 comments: string[] = []
 
-                @Collection({ through: "flux://entry_type" })
+                @HasMany({ through: "flux://entry_type" })
                 entries: string[] = []
 
-                @Collection({
+                @HasMany({
                     through: "flux://entry_type",
-                    where: { isInstance: Message }
+                    target: () => Message
                 })
                 messages: string[] = []
             }
@@ -420,10 +419,10 @@ describe("Prolog + Literals", () => {
                     })
                     number: number = 0
 
-                    @Collection({ through: "recipe://entries" })
+                    @HasMany({ through: "recipe://entries" })
                     entries: string[] = []
 
-                    @Collection({ through: "recipe://comment" })
+                    @HasMany({ through: "recipe://comment" })
                     comments: string[] = []
 
                     @Optional({
@@ -594,14 +593,12 @@ describe("Prolog + Literals", () => {
                         })
                         name: string = "";
 
-                        @Collection({ through: "recipe://entries" })
+                        @HasMany({ through: "recipe://entries" })
                         entries: string[] = [];
 
-                        @Collection({
+                        @HasMany({
                             through: "recipe://entries",
-                            where: { 
-                                condition: `WHERE in.uri = Target AND predicate = 'recipe://has_ingredient' AND out.uri = 'recipe://test'` 
-                            }
+                            condition: `WHERE in.uri = Target AND predicate = 'recipe://has_ingredient' AND out.uri = 'recipe://test'`
                         })
                         ingredients: string[] = [];
                     }
@@ -1128,7 +1125,6 @@ describe("Prolog + Literals", () => {
 
                         @Property({
                             through: "task://priority",
-                            writable: true,
                             resolveLanguage: "literal"
                         })
                         priority: number = 0;
@@ -2051,7 +2047,7 @@ describe("Prolog + Literals", () => {
                         })
                         name: string = "";
 
-                        @Collection({ through: "recipe://ingredients" })
+                        @HasMany({ through: "recipe://ingredients" })
                         ingredients: string[] = [];
                     }
 
@@ -2459,7 +2455,6 @@ describe("Prolog + Literals", () => {
 
                         @Property({
                             through: "flux://body",
-                            writable: true,
                             resolveLanguage: "literal"
                         })
                         body: string = ""
@@ -2647,7 +2642,7 @@ describe("Prolog + Literals", () => {
                     })
                     parentPost: string | undefined;
 
-                    @Collection({
+                    @HasMany({
                         through: "blog://tags",
                         getter: "(->link[WHERE perspective = $perspective AND predicate = 'blog://tagged_with'].out.uri)"
                     })
@@ -2759,9 +2754,9 @@ describe("Prolog + Literals", () => {
                     })
                     title: string = "";
 
-                    @Collection({
+                    @HasMany({
                         through: "article://has_comment",
-                        where: { isInstance: Comment }
+                        target: () => Comment
                     })
                     comments: string[] = [];
                 }
@@ -2774,9 +2769,9 @@ describe("Prolog + Literals", () => {
                     })
                     title: string = "";
 
-                    @Collection({
+                    @HasMany({
                         through: "article://has_comment",
-                        where: { isInstance: "Comment" }
+                        target: () => Comment
                     })
                     comments: string[] = [];
                 }

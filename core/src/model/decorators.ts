@@ -268,9 +268,10 @@ export interface PropertyOptions {
     required?: boolean;
 
     /**
-     * Indicates whether the property is writable. If true, a setter will be available in the prolog engine.
+     * Indicates whether the property is read-only. If true, no setter will be generated.
+     * Defaults to false (property is writable).
      */
-    writable?: boolean;
+    readOnly?: boolean;
 
     /**
      * The language used to store the property. Can be the default `Literal` Language or a custom language address.
@@ -343,7 +344,7 @@ export interface PropertyOptions {
  *   // Read-only property with custom getter
  *   @Optional({
  *     through: "recipe://rating",
- *     writable: false,
+ *     readOnly: true,
  *     getter: `
  *       findall(Rating, triple(Base, "recipe://user_rating", Rating), Ratings),
  *       sum_list(Ratings, Sum),
@@ -381,7 +382,7 @@ export interface PropertyOptions {
  * @param {string} opts.through - The predicate URI for the property
  * @param {string} [opts.initial] - Initial value (required if property is required)
  * @param {boolean} [opts.required] - Whether the property must have a value
- * @param {boolean} [opts.writable=true] - Whether the property can be modified
+ * @param {boolean} [opts.readOnly=false] - Whether the property is read-only (no setter generated)
  * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
@@ -389,9 +390,8 @@ export interface PropertyOptions {
  */
 export function Optional(opts: PropertyOptions) {
     return function <T>(target: T, key: keyof T) {
-        if(typeof opts.writable === "undefined" && opts.through) {
-            opts.writable = true
-        }
+        // Map readOnly → internal writable for SDNA/SHACL compatibility
+        const writable = opts.readOnly ? false : (opts.through ? true : false);
         
         if (opts.required && !opts.initial) {
             throw new Error("SubjectProperty requires an 'initial' option if 'required' is true");
@@ -403,9 +403,9 @@ export function Optional(opts: PropertyOptions) {
 
         target["__properties"] = target["__properties"] || {};
         target["__properties"][key] = target["__properties"][key] || {};
-        target["__properties"][key] = { ...target["__properties"][key], ...opts }
+        target["__properties"][key] = { ...target["__properties"][key], ...opts, writable }
 
-        if (opts.writable) {
+        if (writable) {
             const value = key as string
             target[`set${capitalize(value)}`] = () => {}
         }
@@ -612,7 +612,7 @@ export interface CollectionOptions {
  * @param {string} [opts.where.prologCondition] - Custom Prolog condition for filtering
  * @param {boolean} [opts.local] - Whether collection links are stored locally only
  */
-export function Collection(opts: CollectionOptions) {
+function Collection(opts: CollectionOptions) {
     return function <T>(target: T, key: keyof T) {
         target["__collections"] = target["__collections"] || {};
         target["__collections"][key] = opts;
@@ -1144,7 +1144,8 @@ export function Property(opts: PropertyOptions) {
     return Optional({
         ...opts,
         required: true,
-        writable: true,
+        readOnly: false,
+        resolveLanguage: opts.resolveLanguage || "literal",
         initial: opts.initial || "literal://string:uninitialized"
     });
 }
@@ -1207,7 +1208,7 @@ export function Property(opts: PropertyOptions) {
 export function ReadOnly(opts: PropertyOptions) {
     return Optional({
         ...opts,
-        writable: false
+        readOnly: true
     });
 }
 
@@ -1221,8 +1222,8 @@ export function ReadOnly(opts: PropertyOptions) {
 export interface RelationOptions {
     /** The predicate URI used to link the two models */
     through: string;
-    /** The target model class (use a thunk to avoid circular-dependency issues) */
-    target: () => Ad4mModelLike;
+    /** The target model class (use a thunk to avoid circular-dependency issues). Optional for untyped string collections. */
+    target?: () => Ad4mModelLike;
     /** Optional SurrealDB WHERE clause for filtering */
     condition?: string;
     /** Optional Prolog condition for filtering */
@@ -1327,7 +1328,7 @@ export function HasOne(opts: RelationOptions) {
         // Register as a writable property
         Optional({
             through: opts.through,
-            writable: true,
+            readOnly: false,
             local: opts.local,
         })(target, key);
     };
@@ -1362,7 +1363,7 @@ export function BelongsToOne(opts: RelationOptions) {
         // Read-only property (the owning side manages the link)
         Optional({
             through: opts.through,
-            writable: false,
+            readOnly: true,
             local: opts.local,
         })(target, key);
     };
