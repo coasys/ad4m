@@ -1089,6 +1089,12 @@ export interface RelationOptions {
     condition?: string;
     /** Optional Prolog condition for filtering */
     prologCondition?: string;
+    /**
+     * Custom SurrealQL getter to resolve the collection values. Use this for custom graph traversals.
+     * The expression can reference 'Base' which will be replaced with the instance's base expression.
+     * Example: "(<-link[WHERE predicate = 'flux://has_reply'].out.uri)"
+     */
+    getter?: string;
     /** Whether the link is stored locally (not shared on the network) */
     local?: boolean;
 }

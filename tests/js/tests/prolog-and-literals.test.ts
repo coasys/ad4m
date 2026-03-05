@@ -199,13 +199,13 @@ describe("Prolog + Literals", () => {
                 let todo2 = new Todo(perspective!, root2)
                 await todo2.save()
                 todo2.state = "todo://done"
-                await todo2.update()
+                await todo2.save()
                 
                 let root3 = Literal.from("Done todo 2").toUrl()
                 let todo3 = new Todo(perspective!, root3)
                 await todo3.save()
                 todo3.state = "todo://done"
-                await todo3.update()
+                await todo3.save()
                 
                 // construct new subject intance using Ad4mModel API
                 let root = Literal.from("Decorated class construction test").toUrl()
@@ -232,7 +232,7 @@ describe("Prolog + Literals", () => {
                 expect(todo).to.have.property("comments")
                 
                 todo.state = "todo://review"
-                await todo.update()
+                await todo.save()
                 const stateAfter = await todo.state
                 
                 expect(stateAfter).to.equal("todo://review")
@@ -240,7 +240,7 @@ describe("Prolog + Literals", () => {
 
                 let comment = Literal.from("new comment").toUrl()
                 todo.comments = [comment]
-                await todo.update()
+                await todo.save()
                 expect(await todo.comments).to.deep.equal([comment])
             })
 
@@ -296,7 +296,7 @@ describe("Prolog + Literals", () => {
 
                 // Use direct assignment + update() pattern (setters are stubs)
                 todo.title = "new title"
-                await todo.update()
+                await todo.save()
                 expect(await todo.title).to.equal("new title")
 
                 //@ts-ignore
@@ -487,7 +487,7 @@ describe("Prolog + Literals", () => {
                     recipe.name = "Update test";
                     recipe.plain = "recipe://update_test";
 
-                    await recipe.update();
+                    await recipe.save();
 
                     const recipe2 = new Recipe(perspective!, root);
 
@@ -847,27 +847,31 @@ describe("Prolog + Literals", () => {
                 it("findAll() works with source prop", async () => {
                     const source1 = Literal.from("Source 1").toUrl()
                     const source2 = Literal.from("Source 2").toUrl()
+                    const parentPredicate = "ad4m://has_child"
                     
-                    const recipe1 = new Recipe(perspective!, undefined, source1)
+                    const recipe1 = new Recipe(perspective!)
                     recipe1.name = "Recipe 1: Name";
                     await recipe1.save();
+                    await perspective!.add(new Link({ source: source1, predicate: parentPredicate, target: recipe1.id }))
 
-                    const recipe2 = new Recipe(perspective!, undefined, source2)
+                    const recipe2 = new Recipe(perspective!)
                     recipe2.name = "Recipe 2: Name";
                     await recipe2.save();
+                    await perspective!.add(new Link({ source: source2, predicate: parentPredicate, target: recipe2.id }))
 
-                    const recipe3 = new Recipe(perspective!, undefined, source2)
+                    const recipe3 = new Recipe(perspective!)
                     recipe3.name = "Recipe 3: Name";
                     await recipe3.save();
+                    await perspective!.add(new Link({ source: source2, predicate: parentPredicate, target: recipe3.id }))
 
                     const allRecipes = await Recipe.findAll(perspective!);
                     expect(allRecipes.length).to.equal(3);
 
-                    const source1Recipes = await Recipe.findAll(perspective!, { source: source1 });
+                    const source1Recipes = await Recipe.findAll(perspective!, { parent: { id: source1, predicate: parentPredicate } });
                     expect(source1Recipes.length).to.equal(1);
                     expect(source1Recipes[0].name).to.equal("Recipe 1: Name");
 
-                    const source2Recipes = await Recipe.findAll(perspective!, { source: source2 });
+                    const source2Recipes = await Recipe.findAll(perspective!, { parent: { id: source2, predicate: parentPredicate } });
                     expect(source2Recipes.length).to.equal(2);
                 })
 
@@ -903,27 +907,17 @@ describe("Prolog + Literals", () => {
                     expect(recipesWithAuthorOnly[0].author).to.equal(me!.did)
                 })
 
-                it("findAll() works with collections query", async () => {
+                it("findAll() returns all relations on instances", async () => {
                     let root = Literal.from("findAll test 1").toUrl()
                     const recipe = new Recipe(perspective!, root);
                     recipe.comments = ["recipe://comment/1", "recipe://comment/2"];
                     recipe.entries = ["recipe://entry/1", "recipe://entry/2"];
                     await recipe.save();
 
-                    // Test recipes with all collections
-                    const recipesWithAllCollections = await Recipe.findAll(perspective!);
-                    expect(recipesWithAllCollections[0].comments.length).to.equal(2)
-                    expect(recipesWithAllCollections[0].entries.length).to.equal(2)
-                    
-                    // Test recipes with comments only
-                    const recipesWithCommentsOnly = await Recipe.findAll(perspective!, { collections: ["comments"] });
-                    expect(recipesWithCommentsOnly[0].comments.length).to.equal(2)
-                    expect(recipesWithCommentsOnly[0].entries).to.be.undefined
-
-                    // Test recipes with entries only
-                    const recipesWithEntriesOnly = await Recipe.findAll(perspective!, { collections: ["entries"] });
-                    expect(recipesWithEntriesOnly[0].comments).to.be.undefined
-                    expect(recipesWithEntriesOnly[0].entries.length).to.equal(2)
+                    // All relations are always returned (use include map for eager-loading related models)
+                    const recipes = await Recipe.findAll(perspective!);
+                    expect(recipes[0].comments.length).to.equal(2)
+                    expect(recipes[0].entries.length).to.equal(2)
                 })
 
                 it("findAll() works with basic where queries", async () => {
@@ -1311,21 +1305,17 @@ describe("Prolog + Literals", () => {
                     const allRecipes = await Recipe.findAll(perspective!);
                     expect(allRecipes.length).to.equal(2);
 
-                    // Test with where, properties, and collections
-                    const recipes1 = await Recipe.findAll(perspective!, { where: { name: "Recipe 1" }, properties: ["name"], collections: ["comments"] });
+                    // Test with where and properties
+                    const recipes1 = await Recipe.findAll(perspective!, { where: { name: "Recipe 1" }, properties: ["name"] });
                     expect(recipes1.length).to.equal(1);
                     expect(recipes1[0].name).to.equal("Recipe 1");
                     expect(recipes1[0].booleanTest).to.be.undefined;
-                    expect(recipes1[0].comments.length).to.equal(2);
-                    expect(recipes1[0].entries).to.be.undefined;
 
-                    // Test with different where, properties, and collections
-                    const recipes2 = await Recipe.findAll(perspective!, { where: { name: "Recipe 2" }, properties: ["booleanTest"], collections: ["entries"] });
+                    // Test with different where and properties
+                    const recipes2 = await Recipe.findAll(perspective!, { where: { name: "Recipe 2" }, properties: ["booleanTest"] });
                     expect(recipes2.length).to.equal(1);
                     expect(recipes2[0].name).to.be.undefined;
                     expect(recipes2[0].booleanTest).to.equal(false);
-                    expect(recipes2[0].comments).to.be.undefined;
-                    expect(recipes2[0].entries.length).to.equal(2);
                 })
 
                 it("findAll() works with constraining resolved literal properties", async () => {
@@ -1801,7 +1791,7 @@ describe("Prolog + Literals", () => {
 
                     // Mark notification1 as read - should trigger subscription to remove it
                     notification1.read = true;
-                    await notification1.update();
+                    await notification1.save();
                     for (let i = 0; i < 30; i++) {
                         if (notifications.length === 1) break;
                         await sleep(50);
@@ -1989,7 +1979,7 @@ describe("Prolog + Literals", () => {
 
                     // Mark task1 as completed - should trigger subscription to remove it
                     task1.completed = true;
-                    await task1.update();
+                    await task1.save();
                     
                     // Wait for subscription to fire with proper condition checking
                     await waitForCondition(
@@ -2116,10 +2106,10 @@ describe("Prolog + Literals", () => {
                     // Test updating models in batch
                     const updateBatchId = await perspective!.createBatch();
                     recipe.ingredients.push("recipe://ingredient/garlic");
-                    await recipe.update(updateBatchId);
+                    await recipe.save(updateBatchId);
 
                     note.content = "Updated: Use fresh ingredients and add garlic";
-                    await note.update(updateBatchId);
+                    await note.save(updateBatchId);
 
                     // Verify models haven't changed before commit
                     const recipesBeforeUpdate = await BatchRecipe.findAll(perspective!);
