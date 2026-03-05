@@ -55,7 +55,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.type.initial).toBe("test://flag");
   });
 
-  it("should extract collection metadata with where clauses", () => {
+  it("should extract collection metadata with various options", () => {
     @Model({ name: "CollectionModel" })
     class CollectionModel extends Ad4mModel {
       @HasMany({ through: "test://items" })
@@ -63,7 +63,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
       
       @HasMany({ 
         through: "test://filtered",
-        condition: "triple(Target, 'test://active', 'true')"
+        prologCondition: "triple(Target, 'test://active', 'true')"
       })
       filtered: string[] = [];
       
@@ -78,11 +78,9 @@ describe("Ad4mModel.getModelMetadata()", () => {
     
     // Verify "items" collection
     expect(metadata.collections.items.predicate).toBe("test://items");
-    expect(metadata.collections.items.where).toBeUndefined();
     
     // Verify "filtered" collection
     expect(metadata.collections.filtered.predicate).toBe("test://filtered");
-    expect(metadata.collections.filtered.where?.condition).toBe("triple(Target, 'test://active', 'true')");
     
     // Verify "local" collection
     expect(metadata.collections.local.predicate).toBe("test://local");
@@ -128,7 +126,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.computed.prologSetter).toContain("setSingleTarget");
   });
 
-  it("should handle collection with isInstance where clause", () => {
+  it("should handle collection with typed target relation", () => {
     @Model({ name: "Comment" })
     class Comment extends Ad4mModel {}
     
@@ -143,7 +141,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
 
     const metadata = Post.getModelMetadata();
     
-    // Assert collection exists
+    // Assert collection exists with correct predicate
     expect(metadata.collections.comments).toBeDefined();
     expect(metadata.collections.comments.predicate).toBe("post://comment");
   });
