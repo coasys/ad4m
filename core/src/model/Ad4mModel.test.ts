@@ -61,26 +61,17 @@ describe("Ad4mModel.getModelMetadata()", () => {
       @HasMany({ through: "test://items" })
       items: string[] = [];
       
-      @HasMany({ 
-        through: "test://filtered",
-        prologCondition: "triple(Target, 'test://active', 'true')"
-      })
-      filtered: string[] = [];
-      
       @HasMany({ through: "test://local", local: true })
       local: string[] = [];
     }
 
     const metadata = CollectionModel.getModelMetadata();
     
-    // Should have 3 collections
-    expect(Object.keys(metadata.collections)).toHaveLength(3);
+    // Should have 2 collections
+    expect(Object.keys(metadata.collections)).toHaveLength(2);
     
     // Verify "items" collection
     expect(metadata.collections.items.predicate).toBe("test://items");
-    
-    // Verify "filtered" collection
-    expect(metadata.collections.filtered.predicate).toBe("test://filtered");
     
     // Verify "local" collection
     expect(metadata.collections.local.predicate).toBe("test://local");
