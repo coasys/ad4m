@@ -1268,10 +1268,17 @@ function resolveRelationArgs(
     first: (() => Ad4mModelLike) | RelationOptions,
     second?: Omit<RelationOptions, 'target'>,
 ): RelationOptions {
-    if (typeof first === 'function') {
-        return { ...second!, target: first };
+    const opts = typeof first === 'function'
+        ? { ...second!, target: first }
+        : first;
+
+    if (!opts.through) {
+        throw new Error(
+            `Relation decorator requires a { through: '...' } option specifying the predicate URI.`
+        );
     }
-    return first;
+
+    return opts;
 }
 
 /**
