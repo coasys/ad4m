@@ -5,10 +5,10 @@
 
 use super::Ad4mMcpHandler;
 use crate::agent::capabilities::user_email_from_token;
-use crate::agent::{AgentContext, AgentService};
+use crate::agent::{create_signed_expression, AgentContext, AgentService};
 use crate::graphql::graphql_types::{Agent, Perspective};
 use crate::languages::LanguageController;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
+use crate::types::{DecoratedLinkExpression, Link, VerifiedExpression};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -137,30 +137,27 @@ async fn update_agent_perspective(
     }
 }
 
-/// Build a DecoratedLinkExpression with empty proof (profile links don't need signatures).
+/// Build a properly signed DecoratedLinkExpression for a profile link.
 fn make_profile_link(
-    author: &str,
-    timestamp: &str,
     source: &str,
     predicate: &str,
     target: &str,
-) -> DecoratedLinkExpression {
-    DecoratedLinkExpression {
-        author: author.to_string(),
-        timestamp: timestamp.to_string(),
-        data: Link {
-            source: source.to_string(),
-            predicate: Some(predicate.to_string()),
-            target: target.to_string(),
-        },
-        proof: DecoratedExpressionProof {
-            key: String::new(),
-            signature: String::new(),
-            valid: Some(false),
-            invalid: Some(true),
-        },
+    context: &AgentContext,
+) -> Result<DecoratedLinkExpression, String> {
+    let link = Link {
+        source: source.to_string(),
+        predicate: Some(predicate.to_string()),
+        target: target.to_string(),
+    };
+    let signed = create_signed_expression(link, context).map_err(|e| e.to_string())?;
+    let verified: VerifiedExpression<Link> = signed.into();
+    Ok(DecoratedLinkExpression {
+        author: verified.author,
+        timestamp: verified.timestamp,
+        data: verified.data,
+        proof: verified.proof,
         status: None,
-    }
+    })
 }
 
 // ============================================================================
@@ -226,7 +223,7 @@ impl Ad4mMcpHandler {
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };
 
-        let did = &agent.did;
+        let context = AgentContext::from_auth_token(token.clone());
         let current_links = agent
             .perspective
             .as_ref()
@@ -255,7 +252,6 @@ impl Ad4mMcpHandler {
         }
 
         let p = &params.0;
-        let now = chrono::Utc::now();
 
         let fields: Vec<(&str, Option<&String>)> = vec![
             ("sioc://has_username", p.username.as_ref()),
@@ -266,7 +262,7 @@ impl Ad4mMcpHandler {
         ];
 
         let mut all_links = preserved_links;
-        for (i, (predicate, new_value)) in fields.iter().enumerate() {
+        for (predicate, new_value) in &fields {
             let target = match new_value {
                 Some(v) => Self::encode_literal(v),
                 None => match current_values.get(*predicate) {
@@ -274,14 +270,13 @@ impl Ad4mMcpHandler {
                     None => continue,
                 },
             };
-            let ts = now + chrono::Duration::milliseconds(i as i64);
-            all_links.push(make_profile_link(
-                did,
-                &ts.to_rfc3339(),
-                "flux://profile",
-                predicate,
-                &target,
-            ));
+            match make_profile_link("flux://profile", predicate, &target, &context) {
+                Ok(link) => all_links.push(link),
+                Err(e) => {
+                    return json!({"error": format!("Failed to sign profile link: {}", e)})
+                        .to_string()
+                }
+            }
         }
 
         match update_agent_perspective(&token, all_links).await {
@@ -362,7 +357,7 @@ impl Ad4mMcpHandler {
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };
 
-        let did = &agent.did;
+        let context = AgentContext::from_auth_token(token.clone());
         let current_links = agent
             .perspective
             .as_ref()
@@ -380,21 +375,30 @@ impl Ad4mMcpHandler {
             all_links.push(link.clone());
         }
 
-        let now = chrono::Utc::now().to_rfc3339();
-        all_links.push(make_profile_link(
-            did,
-            &now,
+        let image_link = match make_profile_link(
             "flux://profile",
             "sioc://has_profile_image",
             &profile_img,
-        ));
-        all_links.push(make_profile_link(
-            did,
-            &now,
+            &context,
+        ) {
+            Ok(l) => l,
+            Err(e) => {
+                return json!({"error": format!("Failed to sign profile link: {}", e)}).to_string()
+            }
+        };
+        let thumb_link = match make_profile_link(
             "flux://profile",
             "sioc://has_profile_thumbnail_image",
             &profile_img,
-        ));
+            &context,
+        ) {
+            Ok(l) => l,
+            Err(e) => {
+                return json!({"error": format!("Failed to sign profile link: {}", e)}).to_string()
+            }
+        };
+        all_links.push(image_link);
+        all_links.push(thumb_link);
 
         match update_agent_perspective(&token, all_links).await {
             Ok(_) => json!({
