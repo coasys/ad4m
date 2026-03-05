@@ -77,15 +77,22 @@ export interface IncludeMap {
   [relation: string]: boolean | IncludeMap;
 }
 
+/**
+ * Discriminated union for parent-scoped queries.
+ *
+ * **Model form** (preferred) — predicate auto-resolved from the parent model's
+ * relation metadata. Use `field` to disambiguate when the parent has multiple
+ * relations targeting the same child class.
+ *
+ * **Raw form** — explicit predicate string, no metadata lookup.
+ */
+export type ParentScope =
+  | { model: typeof Ad4mModel; id: string; field?: string }
+  | { id: string; predicate: string };
+
 export type Query = {
-  /**
-   * Filter to instances that are the target of a link from a given parent.
-   *
-   * Supply **either** `model` (preferred — predicate auto-resolved from the
-   * parent model's relation metadata) **or** `predicate` (raw escape hatch).
-   * If both are provided, `predicate` wins.
-   */
-  parent?: { id: string; model?: typeof Ad4mModel; predicate?: string };
+  /** Filter to instances that are the target of a link from a given parent. */
+  parent?: ParentScope;
   properties?: string[];
   include?: IncludeMap;
   where?: Where;
@@ -167,43 +174,51 @@ function capitalize(word: string): string {
 /**
  * Resolves the predicate for a parent query.
  *
- * Resolution order:
- * 1. Explicit `predicate` string — used as-is
- * 2. `model` class — scan its relation metadata for a relation whose
- *    `target()` matches `childCtor`, use that relation's `predicate`
- * 3. Neither — throw
+ * Uses TS discriminated union narrowing:
+ * - Raw form (`{ id, predicate }`) → predicate used as-is
+ * - Model form (`{ model, id, field? }`) → lookup from relation metadata
+ *   - With `field`: direct key lookup
+ *   - Without `field`: scan for a relation whose `target()` matches `childCtor`
  */
 function resolveParentPredicate(
-  parent: { id: string; model?: { new(...args: any[]): any }; predicate?: string },
+  parent: ParentScope,
   childCtor: Function,
 ): string {
-  if (parent.predicate) return parent.predicate;
+  // Raw form — explicit predicate
+  if ('predicate' in parent) return parent.predicate;
 
-  if (parent.model) {
-    const relMeta = getRelationsMetadata(parent.model);
-    for (const [, entry] of Object.entries(relMeta)) {
-      if (entry.target() === childCtor) {
-        return entry.predicate;
-      }
+  // Model form — resolve from relation metadata
+  const { model } = parent;
+  const relMeta = getRelationsMetadata(model);
+
+  // Direct lookup by field name when provided
+  if (parent.field) {
+    const entry = relMeta[parent.field];
+    if (!entry) {
+      throw new Error(
+        `parent(): field "${parent.field}" is not a registered relation on ${model.name}`,
+      );
     }
-    throw new Error(
-      `parent(): could not resolve predicate — no relation on ${parent.model.name} targets ${(childCtor as any).name || 'the queried class'}`,
-    );
+    return entry.predicate;
   }
 
+  // Fallback: scan for a relation whose target matches the child class
+  for (const [, entry] of Object.entries(relMeta)) {
+    if (entry.target() === childCtor) {
+      return entry.predicate;
+    }
+  }
   throw new Error(
-    'parent() requires either a model class or an explicit predicate to resolve the link predicate',
+    `parent(): could not resolve predicate — no relation on ${model.name} targets ${(childCtor as any).name || 'the queried class'}`,
   );
 }
 
 function buildParentQuery(
-  parent: { id: string; predicate?: string } | undefined,
+  parent: ParentScope | undefined,
   resolvedPredicate?: string,
 ): string {
-  if (!parent) return '';
-  const predicate = resolvedPredicate || parent.predicate;
-  if (!predicate) return '';
-  return `triple("${parent.id}", "${predicate}", Base)`;
+  if (!parent || !resolvedPredicate) return '';
+  return `triple("${parent.id}", "${resolvedPredicate}", Base)`;
 }
 
 // todo: only return Timestamp & Author from query (Base, AllLinks, and SortLinks not required)
@@ -3264,14 +3279,19 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * 1. **Instance only** — the parent's constructor is used as the model
    *    class; its relation metadata is scanned for a relation whose
    *    `target()` matches the queried model class.
-   * 2. **String id + model class** — same metadata scan.
-   * 3. **String id + string predicate** — raw escape hatch, no metadata lookup.
+   * 2. **Instance + options with `field`** — direct field-name lookup on
+   *    the parent model's relation metadata (disambiguates when a parent
+   *    has multiple relations targeting the same child class).
+   * 3. **String id + model class** — same metadata scan (or field lookup if
+   *    options include `field`).
+   * 4. **String id + string predicate** — raw escape hatch, no metadata lookup.
    *
    * Passing a plain string id with no second argument throws because the
    * predicate cannot be resolved without a model class.
    *
    * @param idOrInstance - The parent's expression URI **or** an Ad4mModel instance
    * @param modelOrPredicate - A model class (predicate auto-resolved) **or** a raw predicate string
+   * @param options - Optional settings: `field` for direct relation-name lookup
    * @returns The query builder for chaining
    *
    * @example
@@ -3279,25 +3299,45 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * // Instance — predicate auto-resolved from Cookbook's @HasMany(() => Recipe)
    * Recipe.query(perspective).parent(cookbook).get();
    *
+   * // Instance + field — disambiguate when parent has multiple relations to same child
+   * Recipe.query(perspective).parent(cookbook, { field: "recipes" }).get();
+   *
    * // String id + model class
    * Recipe.query(perspective).parent(cookbookId, Cookbook).get();
+   *
+   * // String id + model class + field
+   * Recipe.query(perspective).parent(cookbookId, Cookbook, { field: "recipes" }).get();
    *
    * // String id + raw predicate (escape hatch)
    * Recipe.query(perspective).parent(cookbookId, "cookbook://recipe").get();
    * ```
    */
-  parent(idOrInstance: string | Ad4mModel, modelOrPredicate?: typeof Ad4mModel | string): ModelQueryBuilder<T> {
+  parent(idOrInstance: string | Ad4mModel, modelOrPredicate?: typeof Ad4mModel | string | { field: string }, options?: { field?: string }): ModelQueryBuilder<T> {
     const id = typeof idOrInstance === 'string' ? idOrInstance : idOrInstance.id;
 
+    // Handle options-object as second arg: parent(instance, { field: "recipes" })
+    if (typeof modelOrPredicate === 'object' && modelOrPredicate !== null && !('prototype' in modelOrPredicate)) {
+      if (typeof idOrInstance === 'string') {
+        throw new Error(
+          'parent() called with a string id and options object requires a model class as second argument',
+        );
+      }
+      const model = idOrInstance.constructor as typeof Ad4mModel;
+      this.queryParams.parent = { id, model, field: (modelOrPredicate as { field: string }).field };
+      return this;
+    }
+
+    const field = options?.field;
+
     if (typeof modelOrPredicate === 'string') {
-      // Raw predicate string
+      // Raw predicate string → raw form of ParentScope
       this.queryParams.parent = { id, predicate: modelOrPredicate };
     } else if (typeof modelOrPredicate === 'function') {
-      // Model class
-      this.queryParams.parent = { id, model: modelOrPredicate };
+      // Model class → model form of ParentScope
+      this.queryParams.parent = { id, model: modelOrPredicate, ...(field && { field }) };
     } else if (typeof idOrInstance !== 'string') {
       // Ad4mModel instance — derive model class from constructor
-      this.queryParams.parent = { id, model: idOrInstance.constructor as typeof Ad4mModel };
+      this.queryParams.parent = { id, model: idOrInstance.constructor as typeof Ad4mModel, ...(field && { field }) };
     } else {
       throw new Error(
         'parent() called with a string id requires a second argument: either a model class or a predicate string',
