@@ -1,5 +1,6 @@
 import { Literal } from "../Literal";
 import { Link } from "../links/Links";
+import { LinkQuery } from "../perspectives/LinkQuery";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomId, PropertyOptions, CollectionOptions, Model, getPropertiesMetadata, getCollectionsMetadata, getRelationsMetadata, setPropertyRegistryEntry, setCollectionRegistryEntry, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
 import { singularToPlural, pluralToSingular, propertyNameToSetterName, collectionToAdderName, collectionToRemoverName, collectionToSetterName } from "./util";
@@ -2643,7 +2644,19 @@ WHERE ${whereConditions.join(' AND ')}
    * ```
    */
   async delete(batchId?: string) {
+    // Remove the subject itself (destructor actions)
     await this._perspective.removeSubject(this, this._id, batchId);
+
+    // Clean up incoming links — remove any links that point **to** this instance
+    try {
+      const incomingLinks = await this._perspective.get(new LinkQuery({ target: this._id }));
+      if (incomingLinks.length > 0) {
+        await this._perspective.removeLinks(incomingLinks, batchId);
+      }
+    } catch (e) {
+      // Non-fatal: the subject was already deleted; incoming link cleanup is best-effort
+      console.warn(`delete(): failed to clean up incoming links for ${this._id}:`, e);
+    }
   }
 
   // ──────────────────────────────────────────────────────────
@@ -2713,15 +2726,40 @@ WHERE ${whereConditions.join(' AND ')}
   /**
    * Deletes an existing model instance identified by `id`.
    *
+   * Also cleans up any incoming links that point to this instance.
+   *
    * @param perspective - The perspective containing the instance
    * @param id - The expression URI of the instance to delete
    *
    * @example
    * ```typescript
-   * await Recipe.remove(perspective, recipeId);
+   * await Recipe.delete(perspective, recipeId);
    * ```
+   *
+   * @deprecated Use the name `delete` — `remove` is preserved as an alias.
    */
   static async remove(
+    this: typeof Ad4mModel & (new (...args: any[]) => Ad4mModel),
+    perspective: PerspectiveProxy,
+    id: string,
+  ): Promise<void> {
+    return this.delete(perspective, id);
+  }
+
+  /**
+   * Deletes an existing model instance identified by `id`.
+   *
+   * Also cleans up any incoming links that point to this instance.
+   *
+   * @param perspective - The perspective containing the instance
+   * @param id - The expression URI of the instance to delete
+   *
+   * @example
+   * ```typescript
+   * await Recipe.delete(perspective, recipeId);
+   * ```
+   */
+  static async delete(
     this: typeof Ad4mModel & (new (...args: any[]) => Ad4mModel),
     perspective: PerspectiveProxy,
     id: string,
