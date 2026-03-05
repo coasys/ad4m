@@ -17,6 +17,7 @@ import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep, startExecutor, killByPorts } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch';
+import { mcpHttpRequest, callMcpTool, initializeMcp } from './mcp-utils';
 
 //@ts-ignore
 global.fetch = fetch;
@@ -26,99 +27,6 @@ chai.use(chaiAsPromised);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// ============================================================================
-// MCP HTTP Client Helpers
-// ============================================================================
-
-async function parseSSEStream(response: any): Promise<McpResponse> {
-    return new Promise(function(resolve, reject) {
-        var buffer = '';
-        var resolved = false;
-        var timeout = setTimeout(function() {
-            if (!resolved) { resolved = true; reject(new Error('SSE timeout. Buffer: ' + buffer)); }
-        }, 30000);
-        var body = response.body;
-        if (!body) { clearTimeout(timeout); reject(new Error('No response body')); return; }
-        body.on('data', function(chunk: Buffer) {
-            buffer += chunk.toString();
-            var lines = buffer.split('\n');
-            for (var i = 0; i < lines.length - 1; i++) {
-                var line = lines[i].trim();
-                if (line.indexOf('data:') === 0) {
-                    var payload = line.substring(5).trim();
-                    if (payload.length > 0 && !resolved) {
-                        try {
-                            var parsed = JSON.parse(payload);
-                            if (parsed.jsonrpc) { resolved = true; clearTimeout(timeout); resolve(parsed); body.destroy(); return; }
-                        } catch (e) { /* skip */ }
-                    }
-                }
-            }
-            buffer = lines[lines.length - 1];
-        });
-        body.on('end', function() {
-            if (!resolved) { resolved = true; clearTimeout(timeout); reject(new Error('SSE ended without data')); }
-        });
-        body.on('error', function(err: Error) {
-            if (!resolved) { resolved = true; clearTimeout(timeout); reject(err); }
-        });
-    });
-}
-
-interface McpResponse {
-    jsonrpc: string;
-    id: number;
-    result?: any;
-    error?: { code: number; message: string; data?: any };
-}
-
-let requestIdCounter = 0;
-
-async function mcpHttpRequest(mcpBaseUrl: string, method: string, params: any = {}, sessionId?: string): Promise<McpResponse> {
-    const id = ++requestIdCounter;
-    const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream' };
-    if (sessionId) headers['Mcp-Session-Id'] = sessionId;
-    const response = await fetch(mcpBaseUrl, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: "2.0", id, method, params }) });
-    if (!response.ok) throw new Error('HTTP error: ' + response.status);
-    const ct = response.headers.get('content-type') || '';
-    if (ct.indexOf('text/event-stream') >= 0) return await parseSSEStream(response);
-    return await response.json() as McpResponse;
-}
-
-async function callMcpTool(mcpBaseUrl: string, toolName: string, args: Record<string, any>, sessionId?: string): Promise<any> {
-    const response = await mcpHttpRequest(mcpBaseUrl, "tools/call", { name: toolName, arguments: args }, sessionId);
-    if (response.error) throw new Error('MCP error [' + toolName + ']: ' + response.error.message);
-    const content = response.result?.content;
-    if (content?.[0]?.text) {
-        try { return JSON.parse(content[0].text); } catch { return content[0].text; }
-    }
-    return response.result;
-}
-
-async function initializeMcp(mcpBaseUrl: string): Promise<{ sessionId: string }> {
-    const id = ++requestIdCounter;
-    const resp = await fetch(mcpBaseUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream' },
-        body: JSON.stringify({ jsonrpc: "2.0", id, method: "initialize", params: {
-            protocolVersion: "2024-11-05",
-            capabilities: { roots: { listChanged: false } },
-            clientInfo: { name: "neighbourhood-test", version: "1.0.0" }
-        }})
-    });
-    if (!resp.ok) throw new Error('MCP init HTTP error: ' + resp.status);
-    const sid = resp.headers.get('mcp-session-id') || "test-session";
-    const result = await parseSSEStream(resp);
-    if (result.error) throw new Error('MCP init error: ' + result.error.message);
-    // Send initialized notification
-    await fetch(mcpBaseUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream', 'Mcp-Session-Id': sid },
-        body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })
-    });
-    return { sessionId: sid };
-}
 
 // ============================================================================
 // Test configuration
