@@ -120,17 +120,24 @@ impl ServerHandler for Ad4mMcpHandler {
         if !AUTH_TOOLS.contains(&tool_name.as_str()) {
             // Check admin credential first
             if let Some(ref admin_cred) = self.context.admin_credential {
-                let token = self.context.auth_token.read().await;
-                if let Some(ref t) = *token {
-                    if t == admin_cred {
-                        // Admin credential matches, allow access
-                        drop(token);
-                        return self.dispatch_tool(request, context).await;
-                    }
+                let token = self.context.auth_token.read().await.clone().unwrap_or_default();
+                if token == *admin_cred {
+                    // Admin credential matches — allow access immediately
+                    return self.dispatch_tool(request, context).await;
+                }
+
+                // Admin credential is configured but token doesn't match.
+                // An empty token must NOT be allowed to fall through and act as
+                // the main agent — that would let unauthenticated clients access
+                // all main-agent perspectives in multi-user mode.
+                if token.is_empty() {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        json!({"error": "Authentication required. Use request_capability + generate_jwt, login_email, or signup to authenticate."}).to_string()
+                    )]));
                 }
             }
 
-            // Then check JWT-based auth
+            // Check JWT-based auth (covers JWT tokens and single-user mode with no admin_credential)
             let capabilities = self.get_capabilities().await;
             if capabilities.is_err() {
                 return Ok(CallToolResult::error(vec![Content::text(
@@ -304,14 +311,6 @@ impl Ad4mMcpHandler {
         resp.to_string()
     }
 
-    /// Get agent context for read operations - allows unauthenticated access for local/main agent
-    pub(crate) async fn get_agent_context_for_read(&self) -> AgentContext {
-        match self.get_auth_token().await {
-            Some(token) if !token.is_empty() => AgentContext::from_auth_token(token),
-            _ => AgentContext::from_auth_token(String::new()),
-        }
-    }
-
     /// Get the user's email from the JWT token (for multi-user perspective isolation)
     pub(crate) async fn get_user_email(&self) -> Option<String> {
         let token = self.get_auth_token().await.unwrap_or_default();
@@ -357,11 +356,27 @@ impl Ad4mMcpHandler {
         Ok((perspective, agent_context))
     }
 
-    /// Convenience wrapper for read operations — checks perspective access but no write capability
+    /// Convenience wrapper for read operations — checks perspective access but no write capability.
+    ///
+    /// In multi-user mode (admin_credential is set), authentication is required before checking
+    /// perspective ownership. This prevents unauthenticated clients from reading main-agent
+    /// perspectives by exploiting the "no JWT → main agent context" fallback.
+    ///
+    /// In single-user mode (no admin_credential), behaviour mirrors GraphQL: local trust model,
+    /// unauthenticated access is allowed (same as GQL localhost behaviour).
     pub(crate) async fn get_readable_perspective(
         &self,
         perspective_id: &str,
     ) -> Result<PerspectiveInstance, String> {
+        // Defense in depth: in multi-user/admin mode, require a valid auth token before
+        // checking perspective ownership. call_tool() should already have blocked
+        // unauthenticated requests, but we enforce this here too to be safe.
+        if self.context.admin_credential.is_some() {
+            self.get_agent_context().await.map_err(|e| {
+                json!({"error": e}).to_string()
+            })?;
+        }
+
         let perspective = get_perspective(perspective_id).ok_or_else(|| {
             json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string()
         })?;

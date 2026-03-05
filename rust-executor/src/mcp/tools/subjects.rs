@@ -548,8 +548,6 @@ impl Ad4mMcpHandler {
 
         match self.get_readable_perspective(&p.perspective_id).await {
             Ok(perspective) => {
-                let _agent_context = self.get_agent_context_for_read().await;
-
                 let predicate = match self
                     .resolve_property_predicate(&perspective, &p.class_name, &p.collection_name)
                     .await
@@ -694,8 +692,6 @@ impl Ad4mMcpHandler {
 
         match self.get_readable_perspective(&p.perspective_id).await {
             Ok(perspective) => {
-                let _agent_context = self.get_agent_context_for_read().await;
-
                 let links = perspective
                     .get_links(&LinkQuery {
                         source: Some(p.expression_address.clone()),

@@ -253,8 +253,6 @@ impl Ad4mMcpHandler {
 
         match self.get_readable_perspective(&p.perspective_id).await {
             Ok(perspective) => {
-                let _agent_context = self.get_agent_context_for_read().await;
-
                 let query = LinkQuery {
                     source: p.source.clone(),
                     predicate: p.predicate.clone(),
