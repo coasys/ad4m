@@ -216,7 +216,16 @@ fn agent_to_publish_json(agent: &Agent) -> Result<serde_json::Value, AnyError> {
     use crate::types::{LinkExpression, Perspective as PlainPerspective};
 
     let plain_perspective = agent.perspective.as_ref().map(|p| PlainPerspective {
-        links: p.links.iter().cloned().map(LinkExpression::from).collect(),
+        links: p
+            .links
+            .iter()
+            .cloned()
+            .map(|d| {
+                let mut le = LinkExpression::from(d);
+                le.status = None;
+                le
+            })
+            .collect(),
     });
 
     Ok(serde_json::json!({
