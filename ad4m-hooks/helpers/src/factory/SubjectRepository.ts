@@ -135,7 +135,7 @@ export class SubjectRepository<SubjectClass extends { [x: string]: any }> {
 
     for (const key in data) {
       const propsMeta = getPropertiesMetadata(this.tempSubject);
-      const transform = propsMeta[key]?.transform ?? this.tempSubject.prototype?.__properties?.[key]?.transform;
+      const transform = propsMeta[key]?.transform;
       if (transform) {
         data[key] = transform(data[key]);
       }

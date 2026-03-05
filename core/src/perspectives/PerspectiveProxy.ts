@@ -11,6 +11,7 @@ import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 import { AIClient } from "../ai/AIClient";
 import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
 import { gql } from "@apollo/client/core";
+import { getPropertiesMetadata, getCollectionsMetadata } from "../model/decorators";
 import { AllInstancesResult } from "../model/Ad4mModel";
 import { escapeSurrealString } from "../utils";
 import { SHACLShape } from "../shacl/SHACLShape";
@@ -1942,15 +1943,18 @@ export class PerspectiveProxy {
         let properties: string[] = [];
         let collections: string[] = [];
         const proto = Object.getPrototypeOf(obj);
+        const ctor = proto?.constructor;
 
-        if (proto?.__properties) {
-            properties = Object.keys(proto.__properties);
+        const registryProps = ctor ? getPropertiesMetadata(ctor) : {};
+        if (Object.keys(registryProps).length > 0) {
+            properties = Object.keys(registryProps);
         } else {
             properties = Object.keys(obj).filter(key => !Array.isArray((obj as any)[key]));
         }
 
-        if (proto?.__collections) {
-            collections = Object.keys(proto.__collections).filter(key => key !== 'isSubjectInstance');
+        const registryColls = ctor ? getCollectionsMetadata(ctor) : {};
+        if (Object.keys(registryColls).length > 0) {
+            collections = Object.keys(registryColls).filter(key => key !== 'isSubjectInstance');
         } else {
             collections = Object.keys(obj).filter(key => Array.isArray((obj as any)[key]) && key !== 'isSubjectInstance');
         }
