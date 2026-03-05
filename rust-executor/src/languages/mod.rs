@@ -92,10 +92,6 @@ pub struct LanguageController {
 
     // Cached language names (address -> name)
     language_names: Arc<TokioMutex<HashMap<String, String>>>,
-
-    // Watch channel for signaling when all languages are ready
-    languages_ready_tx: Arc<tokio::sync::watch::Sender<bool>>,
-    languages_ready_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 impl LanguageController {
@@ -114,14 +110,11 @@ impl LanguageController {
     }
 
     fn new() -> Self {
-        let (languages_ready_tx, languages_ready_rx) = tokio::sync::watch::channel(false);
         Self {
             runtimes: Arc::new(TokioMutex::new(HashMap::new())),
             system_addresses: Arc::new(TokioMutex::new(SystemLanguageAddresses::default())),
             language_aliases: Arc::new(TokioMutex::new(HashMap::new())),
             language_names: Arc::new(TokioMutex::new(HashMap::new())),
-            languages_ready_tx: Arc::new(languages_ready_tx),
-            languages_ready_rx,
         }
     }
 
@@ -521,15 +514,10 @@ impl LanguageController {
             .load_system_languages_inner(language_language_only)
             .await;
 
-        // Always signal that languages are ready, even on failure.
-        // During the transition period, the JS-side LanguageController handles
-        // language loading and the Rust side may fail. Other operations like
-        // install_language() wait on this signal and must not be blocked forever.
-        let _ = self.languages_ready_tx.send(true);
         if result.is_ok() {
             info!("All languages loaded and ready");
         } else {
-            warn!("System language loading had errors, but signaling ready for JS-side fallback");
+            warn!("System language loading had errors");
         }
 
         result

@@ -1426,7 +1426,6 @@ impl Mutation {
                 .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
 
             let input_name = input.meta.name.clone();
-            let input_address = input.meta.address.clone();
 
             // Save the templated bundle locally so it can be loaded into a runtime
             if let Err(e) = controller.save_language_bundle(&input.bundle, None) {
