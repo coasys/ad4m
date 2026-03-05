@@ -2664,31 +2664,62 @@ WHERE ${whereConditions.join(' AND ')}
   // ──────────────────────────────────────────────────────────
 
   /**
+   * Options for `Ad4mModel.create()`.
+   */
+  static readonly CreateOptions: undefined; // type-only anchor for JSDoc
+
+  /**
    * Creates and saves a new model instance in one step.
    *
    * @param perspective - The perspective to create the instance in
    * @param data - Property values to assign before saving
-   * @param source - Optional source expression to link from
+   * @param options - Optional settings:
+   *   - `parent` — a `ParentScope` (model form or raw form) whose `id` will
+   *     be used to create an incoming link from the parent to the new instance.
+   *   - `batchId` — an existing batch id; when provided the link write and
+   *     `save()` are added to the batch instead of committed immediately.
    * @returns The saved model instance
    *
    * @example
    * ```typescript
+   * // Simple create
    * const recipe = await Recipe.create(perspective, {
    *   name: "Spaghetti",
    *   rating: 5,
-   *   ingredients: ["pasta", "tomato sauce"],
    * });
-   * console.log(recipe.id); // auto-generated
+   *
+   * // Create under a parent (link auto-created)
+   * const comment = await Comment.create(perspective, { text: "Great!" }, {
+   *   parent: { model: Post, id: postId },
+   * });
+   *
+   * // Create inside a transaction
+   * await Ad4mModel.transaction(perspective, async (batchId) => {
+   *   await Recipe.create(perspective, { name: "Pasta" }, { batchId });
+   * });
    * ```
    */
   static async create<T extends Ad4mModel>(
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     data: Record<string, any> = {},
+    options?: { parent?: ParentScope; batchId?: string },
   ): Promise<T> {
     const instance = new this(perspective) as T;
     Object.assign(instance, data);
-    await instance.save();
+    await instance.save(options?.batchId);
+
+    // Create parent → child link if a parent scope was provided
+    if (options?.parent) {
+      const predicate = resolveParentPredicate(options.parent, this);
+      const link = new Link({
+        source: options.parent.id,
+        predicate,
+        target: instance.id,
+      });
+      await perspective.add(link, 'shared', options?.batchId);
+    }
+
     return instance;
   }
 
