@@ -79,6 +79,8 @@ export function getRelationsMetadata(ctor: Function): Record<string, RelationMet
 /**
  * Retrieve collection metadata for a given class constructor.
  * Walks the prototype chain so subclass decorators compose with parent decorators.
+ * @deprecated Use getRelationsMetadata() for typed relation info. This function
+ *             returns raw CollectionOptions used internally by SDNA/SHACL generators.
  */
 export function getCollectionsMetadata(ctor: Function): Record<string, CollectionOptions> {
     const result: Record<string, CollectionOptions> = {};
@@ -111,6 +113,7 @@ export function setPropertyRegistryEntry(
 /**
  * Programmatically register collection metadata for a given constructor.
  * Used by `fromJSONSchema()` and other dynamic model builders.
+ * @deprecated Prefer registering via relation decorators.
  */
 export function setCollectionRegistryEntry(
     ctor: Function,
