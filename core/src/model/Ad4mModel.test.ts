@@ -637,7 +637,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     
   });
 
-  it("should only select requested collections", async () => {
+  it("should select all link data for relations", async () => {
     @Model({ name: "MultiCollectionModel" })
     class MultiCollectionModel extends Ad4mModel {
       @HasMany({ through: "test://coll1" })
@@ -647,9 +647,9 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
       coll2: string[] = [];
     }
 
-    const query = await MultiCollectionModel.queryToSurrealQL(mockPerspective, { collections: ["coll1"] });
+    const query = await MultiCollectionModel.queryToSurrealQL(mockPerspective, {});
 
-    // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
+    // With array::group(), all link data is selected
     expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
     
   });
@@ -847,16 +847,8 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     expect(query).not.toContain("ORDER BY");
   });
 
-  it("should generate query with only properties, no collections", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { properties: ["name", "rating"], collections: [] });
-
-    // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
-    expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
-    
-  });
-
-  it("should generate query with only collections, no properties", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { properties: [], collections: ["ingredients"] });
+  it("should generate query with only properties specified", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { properties: ["name", "rating"] });
 
     // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
     expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
@@ -972,7 +964,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     expect(recipe.timestamp).toBe(new Date("2023-01-01T00:00:00Z").getTime());
   });
 
-  it("should filter collections when query specifies collections", async () => {
+  it("should filter properties when query specifies properties", async () => {
     const surrealResults = [
       {
         source: "node:abc123",
@@ -988,15 +980,14 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
 
     const result = await Recipe.instancesFromSurrealResult(
       mockPerspective,
-      { collections: ["ingredients"] },
+      { properties: ["name"] },
       surrealResults
     );
 
     expect(result.results).toHaveLength(1);
     const recipe = result.results[0];
-    expect(recipe.ingredients).toEqual(["pasta", "tomato"]);
-    // name and rating should be removed since only "ingredients" was requested
-    expect(recipe.name).toBeUndefined();
+    expect(recipe.name).toBe("Pasta");
+    // rating and ingredients should be removed since only "name" was requested
     expect(recipe.rating).toBeUndefined();
   });
 
