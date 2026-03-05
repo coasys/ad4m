@@ -1168,9 +1168,9 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(result.children).to.be.an('array');
             expect(result.children.length).to.equal(2);
 
-            // Children should be sorted by timestamp
+            // Children should be sorted by timestamp (ISO strings are lexicographically sortable)
             var timestamps = result.children.map((c: any) => c.timestamp);
-            expect(timestamps[0]).to.be.at.most(timestamps[1]);
+            expect(timestamps[0] <= timestamps[1]).to.be.true;
         });
 
         it("should return empty children for unknown parent", async function() {
