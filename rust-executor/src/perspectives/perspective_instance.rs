@@ -826,53 +826,7 @@ impl PerspectiveInstance {
         log::debug!("telepresence_signal_from_link_language: perspective={}, recipient_did={:?}, signal_author={}",
             handle.uuid, recipient_did, signal.author);
 
-        // If recipient_did is specified, only publish to that specific recipient
-        // Otherwise, publish to all owners (broadcast)
-        if let Some(recipient) = recipient_did {
-            log::debug!("Publishing signal to specific recipient: {}", recipient);
-            get_global_pubsub()
-                .await
-                .publish(
-                    &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                    &serde_json::to_string(&NeighbourhoodSignalFilter {
-                        perspective: handle.clone(),
-                        signal: signal.clone(),
-                        recipient: Some(recipient),
-                    })
-                    .unwrap(),
-                )
-                .await;
-        } else if let Some(owners) = &handle.owners {
-            // Broadcast to all owners
-            for owner_did in owners {
-                get_global_pubsub()
-                    .await
-                    .publish(
-                        &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                        &serde_json::to_string(&NeighbourhoodSignalFilter {
-                            perspective: handle.clone(),
-                            signal: signal.clone(),
-                            recipient: Some(owner_did.clone()),
-                        })
-                        .unwrap(),
-                    )
-                    .await;
-            }
-        } else {
-            // No owners - publish without recipient for backwards compatibility
-            get_global_pubsub()
-                .await
-                .publish(
-                    &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                    &serde_json::to_string(&NeighbourhoodSignalFilter {
-                        perspective: handle,
-                        signal,
-                        recipient: None,
-                    })
-                    .unwrap(),
-                )
-                .await;
-        }
+        super::publish_telepresence_signal(handle, signal, recipient_did).await;
     }
 
     pub async fn add_link(

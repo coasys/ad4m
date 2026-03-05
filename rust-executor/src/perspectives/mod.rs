@@ -484,7 +484,7 @@ pub fn handle_telepresence_signal_from_link_language(
 }
 
 /// Publish a telepresence signal to PubSub for delivery to GraphQL subscribers
-async fn publish_telepresence_signal(
+pub(crate) async fn publish_telepresence_signal(
     handle: PerspectiveHandle,
     signal: PerspectiveExpression,
     recipient_did: Option<String>,
@@ -577,7 +577,7 @@ fn publish_telepresence_signal_sync(
 }
 
 pub async fn handle_telepresence_signal_from_link_language_impl(
-    mut signal: PerspectiveExpression,
+    signal: PerspectiveExpression,
     language_address: String,
     recipient_did: Option<String>,
 ) {
