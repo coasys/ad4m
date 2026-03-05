@@ -1,5 +1,5 @@
 import { Ad4mModel } from "./Ad4mModel";
-import { Model, Property, Optional, ReadOnly, Collection, Flag } from "./decorators";
+import { Model, Property, Optional, ReadOnly, HasMany, Flag } from "./decorators";
 
 describe("Ad4mModel.getModelMetadata()", () => {
   it("should extract basic model metadata with className", () => {
@@ -19,7 +19,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
       @Property({ through: "test://name", resolveLanguage: "literal" })
       name: string = "";
       
-      @Optional({ through: "test://optional", writable: true })
+      @Optional({ through: "test://optional" })
       optional: string = "";
       
       @ReadOnly({ through: "test://readonly", prologGetter: "custom_getter" })
@@ -37,16 +37,16 @@ describe("Ad4mModel.getModelMetadata()", () => {
     // Verify "name" property
     expect(metadata.properties.name.predicate).toBe("test://name");
     expect(metadata.properties.name.required).toBe(true);
-    expect(metadata.properties.name.writable).toBe(true);
+    expect(metadata.properties.name.readOnly).toBe(false);
     expect(metadata.properties.name.resolveLanguage).toBe("literal");
     
     // Verify "optional" property
     expect(metadata.properties.optional.predicate).toBe("test://optional");
-    expect(metadata.properties.optional.writable).toBe(true);
+    expect(metadata.properties.optional.readOnly).toBe(false);
     
     // Verify "readonly" property
     expect(metadata.properties.readonly.predicate).toBe("test://readonly");
-    expect(metadata.properties.readonly.writable).toBe(false);
+    expect(metadata.properties.readonly.readOnly).toBe(true);
     expect(metadata.properties.readonly.prologGetter).toBe("custom_getter");
     
     // Verify "type" property (flag)
@@ -58,16 +58,16 @@ describe("Ad4mModel.getModelMetadata()", () => {
   it("should extract collection metadata with where clauses", () => {
     @Model({ name: "CollectionModel" })
     class CollectionModel extends Ad4mModel {
-      @Collection({ through: "test://items" })
+      @HasMany({ through: "test://items" })
       items: string[] = [];
       
-      @Collection({ 
+      @HasMany({ 
         through: "test://filtered",
-        where: { condition: "triple(Target, 'test://active', 'true')" }
+        condition: "triple(Target, 'test://active', 'true')"
       })
       filtered: string[] = [];
       
-      @Collection({ through: "test://local", local: true })
+      @HasMany({ through: "test://local", local: true })
       local: string[] = [];
     }
 
@@ -134,17 +134,18 @@ describe("Ad4mModel.getModelMetadata()", () => {
     
     @Model({ name: "Post" })
     class Post extends Ad4mModel {
-      @Collection({ 
+      @HasMany({ 
         through: "post://comment",
-        where: { isInstance: Comment }
+        target: () => Comment
       })
       comments: string[] = [];
     }
 
     const metadata = Post.getModelMetadata();
     
-    // Assert isInstance is defined
-    expect(metadata.collections.comments.where?.isInstance).toBeDefined();
+    // Assert collection exists
+    expect(metadata.collections.comments).toBeDefined();
+    expect(metadata.collections.comments.predicate).toBe("post://comment");
   });
 
   it("should throw error for class without @Model decorator", () => {
@@ -166,10 +167,10 @@ describe("Ad4mModel.getModelMetadata()", () => {
       @ReadOnly({ through: "recipe://rating", prologGetter: "avg_rating(Base, Value)" })
       rating: number = 0;
       
-      @Collection({ through: "recipe://ingredient" })
+      @HasMany({ through: "recipe://ingredient" })
       ingredients: string[] = [];
       
-      @Collection({ through: "recipe://step", local: true })
+      @HasMany({ through: "recipe://step", local: true })
       steps: string[] = [];
     }
 
@@ -230,7 +231,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.properties.name).toBeDefined();
     expect(metadata.properties.name.predicate).toBe("product://name");
     expect(metadata.properties.name.required).toBe(true);
-    expect(metadata.properties.name.writable).toBe(true);
+    expect(metadata.properties.name.readOnly).toBe(false);
     expect(metadata.properties.name.resolveLanguage).toBe("literal");
 
     expect(metadata.properties.price).toBeDefined();
@@ -321,7 +322,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     // Verify x-ad4m metadata is respected
     expect(metadata.properties.name.predicate).toBe("foaf://name");
     expect(metadata.properties.name.resolveLanguage).toBe("literal");
-    expect(metadata.properties.name.writable).toBe(true);
+    expect(metadata.properties.name.readOnly).toBe(false);
     expect(metadata.properties.name.required).toBe(true);
 
     expect(metadata.properties.email.predicate).toBe("foaf://mbox");
@@ -455,7 +456,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     @Property({ through: "recipe://rating" })
     rating: number = 0;
     
-    @Collection({ through: "recipe://ingredient" })
+    @HasMany({ through: "recipe://ingredient" })
     ingredients: string[] = [];
   }
 
@@ -639,10 +640,10 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   it("should only select requested collections", async () => {
     @Model({ name: "MultiCollectionModel" })
     class MultiCollectionModel extends Ad4mModel {
-      @Collection({ through: "test://coll1" })
+      @HasMany({ through: "test://coll1" })
       coll1: string[] = [];
 
-      @Collection({ through: "test://coll2" })
+      @HasMany({ through: "test://coll2" })
       coll2: string[] = [];
     }
 
@@ -873,7 +874,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     @Property({ through: "recipe://rating" })
     rating: number = 0;
     
-    @Collection({ through: "recipe://ingredient" })
+    @HasMany({ through: "recipe://ingredient" })
     ingredients: string[] = [];
   }
 
@@ -1239,7 +1240,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     @Property({ through: "recipe://rating" })
     rating: number = 0;
     
-    @Collection({ through: "recipe://ingredient" })
+    @HasMany({ through: "recipe://ingredient" })
     ingredients: string[] = [];
   }
 

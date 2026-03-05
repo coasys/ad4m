@@ -529,7 +529,6 @@ describe("Multi-User Simple integration tests", () => {
             class TestSubjectClass {
                 @Property({
                     through: "test://name",
-                    writable: true,
                     initial: "test://initial",
                     resolveLanguage: "literal"
                 })
@@ -1167,7 +1166,6 @@ describe("Multi-User Simple integration tests", () => {
             class User1Model extends Ad4mModel {
                 @Property({
                     through: "test://user1-property",
-                    writable: true,
                     initial: "test://user1-initial",
                     resolveLanguage: "literal"
                 })
@@ -1212,7 +1210,6 @@ describe("Multi-User Simple integration tests", () => {
             class User2Model extends Ad4mModel {
                 @Property({
                     through: "test://user2-property",
-                    writable: true,
                     initial: "test://user2-initial",
                     resolveLanguage: "literal"
                 })

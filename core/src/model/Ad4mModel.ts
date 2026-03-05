@@ -83,8 +83,8 @@ export interface PropertyMetadata {
   predicate: string;
   /** Whether the property is required */
   required: boolean;
-  /** Whether the property is writable */
-  writable: boolean;
+  /** Whether the property is read-only */
+  readOnly: boolean;
   /** Initial value if specified */
   initial?: string;
   /** Language for resolution (e.g., "literal") */
@@ -507,12 +507,12 @@ export class Ad4mModel {
     const prototypeProperties = prototype.__properties || {};
     
     for (const [propertyName, opts] of Object.entries(prototypeProperties)) {
-      const options = opts as PropertyOptions & { required?: boolean; flag?: boolean };
+      const options = opts as PropertyOptions & { required?: boolean; flag?: boolean; writable?: boolean };
       propertiesMetadata[propertyName] = {
         name: propertyName,
         predicate: options.through || "",
         required: options.required || false,
-        writable: options.writable || false,
+        readOnly: !(options.writable ?? false),
         ...(options.initial !== undefined && { initial: options.initial }),
         ...(options.resolveLanguage !== undefined && { resolveLanguage: options.resolveLanguage }),
         ...(options.prologGetter !== undefined && { prologGetter: options.prologGetter }),
@@ -573,7 +573,7 @@ export class Ad4mModel {
               name: propertyName,
               predicate: predicate,
               required: isRequired,
-              writable: propertySchema["x-ad4m"]?.writable !== false,
+              readOnly: propertySchema["x-ad4m"]?.writable === false,
               ...(propertySchema["x-ad4m"]?.resolveLanguage && { resolveLanguage: propertySchema["x-ad4m"].resolveLanguage }),
               ...(propertySchema["x-ad4m"]?.initial && { initial: propertySchema["x-ad4m"].initial }),
               ...(propertySchema["x-ad4m"]?.local !== undefined && { local: propertySchema["x-ad4m"].local })
@@ -655,7 +655,7 @@ export class Ad4mModel {
    */
   private generatePropertySetterAction(key: string, metadata: PropertyOptions): any[] {
     // Check if property is read-only
-    if (metadata.writable === false) {
+    if (metadata.readOnly) {
       throw new Error(`Property "${key}" is read-only and cannot be written`);
     }
 
@@ -2664,7 +2664,13 @@ WHERE ${whereConditions.join(' AND ')}
             resolveLanguage = options.resolveLanguage;
           }
           const local = this.getPropertyOption(propertyName, propertySchema, options, 'local');
-          const writable = this.getPropertyOption(propertyName, propertySchema, options, 'writable', true);
+          // Determine readOnly: check PropertyOptions first, then x-ad4m.writable (inverted) for JSON Schema wire format
+          let readOnly = this.getPropertyOption(propertyName, propertySchema, options, 'readOnly');
+          if (readOnly === undefined) {
+            const xWritable = propertySchema["x-ad4m"]?.writable;
+            readOnly = xWritable !== undefined ? !xWritable : false;
+          }
+          const writable = !readOnly;
           let initial = this.getPropertyOption(propertyName, propertySchema, options, 'initial');
           
           // Handle nested objects by serializing to JSON
