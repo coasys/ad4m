@@ -2520,28 +2520,39 @@ WHERE ${whereConditions.join(' AND ')}
 
   /**
    * Saves the model instance to the perspective.
-   * Creates a new instance with the base expression and links it to the source.
+   *
+   * **New instances** (no snapshot yet): creates the subject via
+   * `createSubject` with initial scalar values, then sets collections
+   * via `innerUpdate`.
+   *
+   * **Existing instances** (snapshot present, i.e. fetched via `get()`
+   * or a query): updates only dirty fields via `innerUpdate`, then
+   * refreshes from the perspective.
    * 
    * @param batchId - Optional batch ID for batch operations
    * @throws Will throw if instance creation, linking, or updating fails
    * 
    * @example
    * ```typescript
+   * // Create
    * const recipe = new Recipe(perspective);
    * recipe.name = "Spaghetti";
-   * recipe.ingredients = ["pasta", "tomato sauce"];
    * await recipe.save();
    * 
-   * // Or with batch operations:
-   * const batchId = await perspective.createBatch();
-   * await recipe.save(batchId);
-   * await perspective.commitBatch(batchId);
+   * // Update
+   * recipe.rating = 10;
+   * await recipe.save();
    * ```
    */
   async save(batchId?: string) {
-    // We use createSubject's initialValues to set properties (but not collections)
-    // We then later use innerUpdate to set collections
+    // Existing instance → update path (has been fetched / hydrated before)
+    if (this.#snapshot) {
+      await this.innerUpdate(true, batchId);
+      await this.getData();
+      return;
+    }
 
+    // New instance → create path
     let batchCreatedHere = false;
     if(!batchId) {
       batchId = await this.perspective.createBatch()
@@ -2644,30 +2655,6 @@ WHERE ${whereConditions.join(' AND ')}
   }
 
   /**
-   * Updates the model instance's properties and collections.
-   * 
-   * @param batchId - Optional batch ID for batch operations
-   * @throws Will throw if property setting or collection updates fail
-   * 
-   * @example
-   * ```typescript
-   * const recipe = await Recipe.findAll(perspective)[0];
-   * recipe.rating = 5;
-   * recipe.ingredients.push("garlic");
-   * await recipe.update();
-   * 
-   * // Or with batch operations:
-   * const batchId = await perspective.createBatch();
-   * await recipe.update(batchId);
-   * await perspective.commitBatch(batchId);
-   * ```
-   */
-  async update(batchId?: string) {
-    await this.innerUpdate(true, batchId);
-    await this.getData();
-  }
-
-  /**
    * Gets the model instance with all properties and collections populated.
    * 
    * @returns The populated model instance
@@ -2743,7 +2730,7 @@ WHERE ${whereConditions.join(' AND ')}
   /**
    * Updates an existing model instance identified by `id`.
    *
-   * Fetches the instance, applies the provided changes, calls `update()`,
+   * Fetches the instance, applies the provided changes, calls `save()`,
    * and returns the refreshed instance.
    *
    * @param perspective - The perspective containing the instance
@@ -2767,7 +2754,7 @@ WHERE ${whereConditions.join(' AND ')}
     const instance = new this(perspective, id) as T;
     await instance.get();
     Object.assign(instance, data);
-    await instance.update();
+    await instance.save();
     return instance;
   }
 
