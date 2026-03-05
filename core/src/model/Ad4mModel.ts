@@ -1971,6 +1971,22 @@ WHERE ${whereConditions.join(' AND ')}
         // Core hydration via unified helper (pass requestedProperties for sparse fieldset)
         await this.hydrateFromLinks(instance, links, metadata, perspective, requestedProperties.length > 0 ? requestedProperties : undefined);
         
+        // When specific properties are requested, delete unrequested properties
+        // so they return undefined instead of their constructor defaults (e.g. 0, [])
+        if (requestedProperties.length > 0) {
+          const requested = new Set(requestedProperties);
+          for (const propName of Object.keys(metadata.properties)) {
+            if (!requested.has(propName)) {
+              delete instance[propName];
+            }
+          }
+          for (const collName of Object.keys(metadata.relations)) {
+            if (!requested.has(collName)) {
+              delete instance[collName];
+            }
+          }
+        }
+
         instances.push(instance);
       } catch (error) {
         console.error(`Failed to process SurrealDB instance ${base}:`, error);
