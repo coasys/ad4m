@@ -350,6 +350,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     let executorProcess: ChildProcess | null = null;
     let perspectiveUuid: string = "";
     let mcpSessionId: string = "";
+    let agentDid: string = "";
 
     // Addresses for the populated perspective
     let channel1Addr: string = "";
@@ -388,8 +389,9 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
         // Generate agent via GraphQL (no MCP equivalent yet)
         const adminClient = new Ad4mClient(apolloClient(gqlPort, adminCredential), false);
-        await adminClient.agent.generate("test-passphrase");
-        console.log("Agent generated via GraphQL");
+        const agentStatus = await adminClient.agent.generate("test-passphrase");
+        agentDid = agentStatus.did!;
+        console.log("Agent generated via GraphQL, DID:", agentDid);
     });
 
     after(async () => {
@@ -1212,6 +1214,134 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             // Channel already has messages/tasks added as children via SHACL tools
             expect(result.count).to.be.at.least(1);
             console.log("Generic get_children works with SHACL-created subjects");
+        });
+    });
+
+    // ========================================================================
+    // 7. Agent Profile Tools
+    // ========================================================================
+
+    describe("7. Agent Profile Tools", function() {
+        it("should get initial profile with DID but no fields set", async function() {
+            var profile = await callMcpTool('get_agent_profile', {}, mcpSessionId);
+            expect(profile.did).to.equal(agentDid);
+            expect(profile.username).to.be.undefined;
+            expect(profile.given_name).to.be.undefined;
+            expect(profile.bio).to.be.undefined;
+            console.log("Initial profile:", JSON.stringify(profile));
+        });
+
+        it("should set profile fields and read them back", async function() {
+            var setResult = await callMcpTool('set_agent_profile', {
+                username: "testbot",
+                given_name: "Test",
+                family_name: "Bot",
+                email: "testbot@example.com",
+                bio: "I am a test bot",
+            }, mcpSessionId);
+            expect(setResult.success).to.be.true;
+            expect(setResult.username).to.equal("testbot");
+
+            var profile = await callMcpTool('get_agent_profile', {}, mcpSessionId);
+            expect(profile.did).to.equal(agentDid);
+            expect(profile.username).to.equal("testbot");
+            expect(profile.given_name).to.equal("Test");
+            expect(profile.family_name).to.equal("Bot");
+            expect(profile.email).to.equal("testbot@example.com");
+            expect(profile.bio).to.equal("I am a test bot");
+            console.log("Profile round-trip OK:", JSON.stringify(profile));
+        });
+
+        it("should do partial update preserving existing fields", async function() {
+            var setResult = await callMcpTool('set_agent_profile', {
+                bio: "Updated bio only",
+            }, mcpSessionId);
+            expect(setResult.success).to.be.true;
+
+            var profile = await callMcpTool('get_agent_profile', {}, mcpSessionId);
+            expect(profile.username).to.equal("testbot");
+            expect(profile.given_name).to.equal("Test");
+            expect(profile.family_name).to.equal("Bot");
+            expect(profile.email).to.equal("testbot@example.com");
+            expect(profile.bio).to.equal("Updated bio only");
+            console.log("Partial update preserved other fields");
+        });
+
+        it("should overwrite a previously set field", async function() {
+            await callMcpTool('set_agent_profile', {
+                username: "testbot-v2",
+            }, mcpSessionId);
+
+            var profile = await callMcpTool('get_agent_profile', {}, mcpSessionId);
+            expect(profile.username).to.equal("testbot-v2");
+            expect(profile.given_name).to.equal("Test");
+            expect(profile.bio).to.equal("Updated bio only");
+            console.log("Field overwrite works");
+        });
+
+        it("should get own public perspective with profile links", async function() {
+            var result = await callMcpTool('get_agent_public_perspective', {}, mcpSessionId);
+            expect(result.did).to.equal(agentDid);
+            expect(result.perspective).to.exist;
+            expect(result.perspective.links).to.be.an('array');
+            expect(result.perspective.links.length).to.be.greaterThan(0);
+
+            var profileLinks = result.perspective.links.filter(
+                function(l: any) { return l.data.source === "flux://profile"; }
+            );
+            expect(profileLinks.length).to.be.greaterThan(0);
+            console.log("Public perspective has", result.perspective.links.length, "links");
+        });
+
+        it("should set raw links via set_agent_public_perspective and read back via get_agent_profile", async function() {
+            var customLinks = [
+                {
+                    author: agentDid,
+                    timestamp: new Date().toISOString(),
+                    data: {
+                        source: "flux://profile",
+                        predicate: "sioc://has_username",
+                        target: "literal://string:raw-link-user",
+                    },
+                    proof: { key: "", signature: "", valid: false, invalid: true },
+                },
+                {
+                    author: agentDid,
+                    timestamp: new Date().toISOString(),
+                    data: {
+                        source: "flux://profile",
+                        predicate: "sioc://has_bio",
+                        target: "literal://string:Set via raw links",
+                    },
+                    proof: { key: "", signature: "", valid: false, invalid: true },
+                },
+            ];
+
+            var setResult = await callMcpTool('set_agent_public_perspective', {
+                links_json: JSON.stringify(customLinks),
+            }, mcpSessionId);
+            expect(setResult.did).to.equal(agentDid);
+            expect(setResult.perspective).to.exist;
+            expect(setResult.perspective.links).to.have.lengthOf(2);
+
+            var profile = await callMcpTool('get_agent_profile', {}, mcpSessionId);
+            expect(profile.username).to.equal("raw-link-user");
+            expect(profile.bio).to.equal("Set via raw links");
+            // Fields we didn't include should be gone (replaces all)
+            expect(profile.given_name).to.be.undefined;
+            console.log("Raw link round-trip works");
+        });
+
+        it("should restore profile via set_agent_profile after raw link override", async function() {
+            await callMcpTool('set_agent_profile', {
+                username: "restored-user",
+                bio: "Restored after raw link test",
+            }, mcpSessionId);
+
+            var profile = await callMcpTool('get_agent_profile', {}, mcpSessionId);
+            expect(profile.username).to.equal("restored-user");
+            expect(profile.bio).to.equal("Restored after raw link test");
+            console.log("Profile restored after raw link override");
         });
     });
 });
