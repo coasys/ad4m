@@ -1117,4 +1117,101 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             console.log("Updated message body via message_set_body");
         });
     });
+
+    describe("6. Generic Child Tools (add_child / get_children)", function() {
+        let parentAddr: string = "";
+        let child1Addr: string = "";
+        let child2Addr: string = "";
+        let child3Addr: string = "";
+
+        it("should list add_child and get_children in available tools", async function() {
+            var tools = await listMcpTools(mcpSessionId);
+            var toolNames = tools.map((t: any) => t.name);
+            expect(toolNames).to.include('add_child');
+            expect(toolNames).to.include('get_children');
+            console.log("add_child and get_children tools are registered");
+        });
+
+        it("should add children to a parent address", async function() {
+            // Use a plain string parent — tool should auto-wrap as literal://string:
+            parentAddr = "test-parent-" + Date.now();
+            child1Addr = "test-child-1-" + Date.now();
+            child2Addr = "test-child-2-" + Date.now();
+
+            var result = await callMcpTool('add_child', {
+                perspective_id: perspectiveUuid,
+                parent_address: parentAddr,
+                child_address: child1Addr,
+            }, mcpSessionId);
+            console.log("add_child result 1:", JSON.stringify(result));
+            expect(result.success).to.be.true;
+            expect(result.link.predicate).to.equal("ad4m://has_child");
+
+            result = await callMcpTool('add_child', {
+                perspective_id: perspectiveUuid,
+                parent_address: parentAddr,
+                child_address: child2Addr,
+            }, mcpSessionId);
+            expect(result.success).to.be.true;
+            console.log("Added 2 children to parent");
+        });
+
+        it("should get children of a parent", async function() {
+            var result = await callMcpTool('get_children', {
+                perspective_id: perspectiveUuid,
+                parent_address: parentAddr,
+            }, mcpSessionId);
+            console.log("get_children result:", JSON.stringify(result));
+            expect(result.count).to.equal(2);
+            expect(result.children).to.be.an('array');
+            expect(result.children.length).to.equal(2);
+
+            // Children should be sorted by timestamp
+            var timestamps = result.children.map((c: any) => c.timestamp);
+            expect(timestamps[0]).to.be.at.most(timestamps[1]);
+        });
+
+        it("should return empty children for unknown parent", async function() {
+            var result = await callMcpTool('get_children', {
+                perspective_id: perspectiveUuid,
+                parent_address: "nonexistent-parent-" + Date.now(),
+            }, mcpSessionId);
+            expect(result.count).to.equal(0);
+            expect(result.children).to.be.an('array');
+            expect(result.children.length).to.equal(0);
+        });
+
+        it("should handle pre-wrapped literal URIs", async function() {
+            // If parent is already a literal://string: URI, should not double-wrap
+            var wrappedParent = "literal://string:pre-wrapped-parent-" + Date.now();
+            child3Addr = "test-child-3-" + Date.now();
+
+            var result = await callMcpTool('add_child', {
+                perspective_id: perspectiveUuid,
+                parent_address: wrappedParent,
+                child_address: child3Addr,
+            }, mcpSessionId);
+            expect(result.success).to.be.true;
+
+            // Should be retrievable with the same wrapped parent
+            result = await callMcpTool('get_children', {
+                perspective_id: perspectiveUuid,
+                parent_address: wrappedParent,
+            }, mcpSessionId);
+            expect(result.count).to.equal(1);
+            console.log("Pre-wrapped URI handled correctly");
+        });
+
+        it("should work with existing channel as parent (interop with SHACL tools)", async function() {
+            // Use channel1Addr from earlier tests as parent
+            var result = await callMcpTool('get_children', {
+                perspective_id: perspectiveUuid,
+                parent_address: channel1Addr,
+            }, mcpSessionId);
+            console.log("get_children for channel1:", JSON.stringify(result));
+            // Channel already has messages/tasks added as children via SHACL tools
+            expect(result.count).to.be.at.least(1);
+            console.log("Generic get_children works with SHACL-created subjects");
+        });
+    });
 });
