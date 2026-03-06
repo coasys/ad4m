@@ -160,13 +160,16 @@ ad4m-executor init
 ad4m-executor run --enable-mcp true --mcp-port 3001
 
 # Generate agent (first time only):
+# ⚠️ REMEMBER THIS PASSPHRASE — store it securely! You'll need it after every restart.
 ad4m agent generate --passphrase <your-passphrase>
 
-# Unlock after restart:
-# mutation { agentUnlock(passphrase: "...", holochain: true) { isUnlocked } }
+# After restart: unlock the agent wallet before MCP auth works:
+ad4m agent unlock --passphrase <your-passphrase>
+# Or via GraphQL: mutation { agentUnlock(passphrase: "...", holochain: true) { isUnlocked } }
 ```
 
-- **Store the passphrase immediately** — you'll need it after every restart
+- **Store the passphrase immediately** — you'll need it after every restart to unlock the wallet
+- The executor cannot use Holochain/DHT features until the wallet is unlocked
 - No multi-user setup — single agent DID
 - Admin credential auth — no email/password needed (optional `--admin-credential`)
 - Local HTTP only — `http://localhost:3001/mcp`
