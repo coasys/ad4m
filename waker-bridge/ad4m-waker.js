@@ -10,6 +10,9 @@
  * Usage:
  *   node ad4m-waker.js --config waker-config.json
  *
+ * To generate waker subscription configs (e.g. mention-tracking queries),
+ * use the AD4M MCP tool `get_mention_waker_config` or `generate_waker_query`.
+ *
  * Config format:
  *   {
  *     "executorUrl": "ws://localhost:12100/graphql",
@@ -157,67 +160,6 @@ async function startWaker(config) {
   };
 }
 
-// ── Mention query builder ──────────────────────────────────────────
-
-/**
- * Build a single combined SurrealQL mention query for the given agent.
- *
- * Query design:
- * - No predicate constraint: watches all link targets.
- * - Full DID (not just base58 suffix): colons in "did:key:" are URL-encoded
- *   to "%3A" in JSON body targets, so CONTAINS 'did:key:...' never fires on
- *   the author field of encoded bodies — only matches raw literal targets.
- * - Names are alphanumeric and appear unencoded in URL-encoded JSON, so
- *   CONTAINS '<name>' correctly matches message bodies containing the name.
- * - All provided names are ORed together with the DID into one query to
- *   avoid multiple distinct wake events per mention.
- *
- * TODO: for finer precision, parse literal://json: targets and restrict
- * matching to the "data" field only (requires URL-decode in SurrealDB or waker).
- *
- * @param {string}   did   - Full DID, e.g. "did:key:z6MksZb..."
- * @param {string[]} names - Display names to watch for (e.g. ["Marvin", "MarvinBot"])
- * @returns {string} SurrealQL query string
- */
-function buildMentionQuery(did, names) {
-  const nameList = Array.isArray(names) ? names : (names ? [names] : []);
-  const conditions = [
-    ...nameList.map((n) => `target CONTAINS '${n}'`),
-    `target CONTAINS '${did}'`,
-  ];
-  return `SELECT * FROM link WHERE ${conditions.join(" OR ")}`;
-}
-
-/**
- * Build a single waker subscription config entry for mention tracking.
- *
- * @param {string}   did           - Agent DID
- * @param {string[]} names         - Display names (may be empty array)
- * @param {string}   perspectiveId - Neighbourhood perspective UUID
- * @returns {{id: string, perspective: string, query: string}}
- */
-function buildMentionSubscription(did, names, perspectiveId) {
-  const query = buildMentionQuery(did, names);
-  const suffix = did.slice(-12);
-  return {
-    id: `mention-${suffix}`,
-    perspective: perspectiveId,
-    query,
-  };
-}
-
-// Keep plural form as alias for backwards compat
-function buildMentionSubscriptions(did, name, perspectiveId) {
-  const names = name ? [name] : [];
-  return [buildMentionSubscription(did, names, perspectiveId)];
-}
-
-// Keep old two-return form as alias
-function buildMentionQueries(did, name) {
-  const query = buildMentionQuery(did, name ? [name] : []);
-  return { didQuery: query, nameQuery: null };
-}
-
 // ── CLI ────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
@@ -250,22 +192,17 @@ Requires @coasys/ad4m ^0.12.0
 
 Usage:
   node ad4m-waker.js --config <path>
-  node ad4m-waker.js --setup-mentions --perspective <uuid> [--config <path>] [--name <name>] [--executor-url <url>] [--token <tok>]
 
-Modes:
-  --config <path>            Run the waker using the given config file (normal mode).
-  --setup-mentions           Auto-generate mention subscriptions for a neighbourhood
-                             and optionally append them to a config file.
+Options:
+  --config <path>   Path to waker config JSON file (required).
+  --help            Show this message.
 
-Options for --setup-mentions:
-  --perspective <uuid>       Neighbourhood perspective UUID to watch (required).
-  --config <path>            If provided, append new subscriptions to this config file.
-                             Otherwise, print the subscription JSON to stdout.
-  --name <name>              Override the display name used in the query (default: profile name).
-  --executor-url <url>       AD4M executor WebSocket URL (default: ws://localhost:12100/graphql).
-  --token <tok>              AD4M capability token (default: none).
+To generate subscription configs (mention tracking, model changes, etc.),
+use the AD4M MCP tools:
+  - get_mention_waker_config   — mention-tracking query for a neighbourhood
+  - generate_waker_query       — SHACL-based query for subject class changes
 
-Config file format (JSON):
+Config file format:
   {
     "executorUrl": "ws://localhost:12100/graphql",
     "token": "optional-ad4m-credential",
@@ -274,99 +211,13 @@ Config file format (JSON):
     "debounceMs": 2000,
     "subscriptions": [
       {
-        "id": "flux-messages",
+        "id": "my-subscription",
         "perspective": "perspective-uuid",
-        "query": "SELECT * FROM link WHERE source = 'literal://string:channel-id' AND predicate = 'ad4m://has_child'"
-      },
-      {
-        "id": "mention-did-z6MksZbUemc",
-        "perspective": "perspective-uuid",
-        "query": "SELECT * FROM link WHERE predicate = 'flux://body' AND target CONTAINS 'z6MksZbUemcXmxjUeez8RSAbg7jkMFwkpSRRe5nLDKwDuATB'"
-      },
-      {
-        "id": "mention-name-marvin",
-        "perspective": "perspective-uuid",
-        "query": "SELECT * FROM link WHERE predicate = 'flux://body' AND target CONTAINS 'Marvin'"
+        "query": "SELECT * FROM link WHERE ..."
       }
     ]
   }
 `);
-    process.exit(0);
-  }
-
-  // ── Setup mode: add mention subscriptions for a neighbourhood ────
-  if (args["setup-mentions"]) {
-    const executorUrl = args["executor-url"] || "ws://localhost:12100/graphql";
-    const token = args.token || "";
-    const perspectiveId = args.perspective;
-    const nameOverride = args.name || null;
-    const configPath = args.config ? path.resolve(args.config) : null;
-
-    if (!perspectiveId) {
-      console.error("Error: --setup-mentions requires --perspective <uuid>");
-      process.exit(1);
-    }
-
-    const client = createAd4mClient(executorUrl, token);
-
-    // Fetch agent DID and profile name
-    const status = await client.agent.status();
-    const did = status.did;
-
-    // Collect all profile names
-    const names = nameOverride ? [nameOverride] : [];
-    if (!nameOverride) {
-      try {
-        const agentExpr = await client.agent.me();
-        const links = agentExpr?.perspective?.links || [];
-        const NAME_PREDS = [
-          "sioc://has_username",
-          "sioc://has_given_name",
-          "sioc://has_family_name",
-        ];
-        for (const link of links) {
-          if (link.data.source === "flux://profile" && NAME_PREDS.includes(link.data.predicate)) {
-            const val = link.data.target.replace(/^literal:\/\/string:/, "");
-            if (val && !names.includes(val)) names.push(val);
-          }
-        }
-      } catch (e) {
-        console.warn("[setup] Could not fetch profile names:", e.message);
-      }
-    }
-
-    // One combined subscription
-    const newSub = buildMentionSubscription(did, names, perspectiveId);
-
-    console.log(`[setup] Agent DID : ${did}`);
-    console.log(`[setup] Names     : ${names.length ? names.join(", ") : "(none)"}`);
-    console.log(`[setup] Perspective: ${perspectiveId}`);
-    console.log(`[setup] Query: ${newSub.query}`);
-
-    if (configPath) {
-      let config = { subscriptions: [] };
-      if (fs.existsSync(configPath)) {
-        config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-        config.subscriptions = config.subscriptions || [];
-      }
-
-      // Replace existing mention-* entry for this perspective, or append
-      const idx = config.subscriptions.findIndex((s) => s.id === newSub.id);
-      if (idx >= 0) {
-        config.subscriptions[idx] = newSub;
-        console.log(`[setup] Updated existing subscription '${newSub.id}' in ${configPath}`);
-      } else {
-        config.subscriptions.push(newSub);
-        console.log(`[setup] Added subscription '${newSub.id}' to ${configPath}`);
-      }
-
-      fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-      console.log("[setup] Restart the waker to activate.");
-    } else {
-      console.log("\nAdd this to your waker config subscriptions array:");
-      console.log(JSON.stringify(newSub, null, 2));
-    }
-
     process.exit(0);
   }
 
@@ -400,11 +251,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = {
-  startWaker,
-  buildMentionQuery,
-  buildMentionSubscription,
-  // Legacy aliases kept for backwards compat
-  buildMentionQueries,
-  buildMentionSubscriptions,
-};
+module.exports = { startWaker };
