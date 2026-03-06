@@ -180,6 +180,35 @@ function parseArgs(argv) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
+  if (args.help) {
+    console.log(`
+AD4M Waker — watches AD4M perspectives via QuerySubscriptionProxy (SurrealDB)
+and wakes an OpenClaw agent when query results change.
+
+Requires @coasys/ad4m ^0.12.0
+
+Usage:
+  node ad4m-waker.js --config <path>
+
+Config file format (JSON):
+  {
+    "executorUrl": "ws://localhost:12100/graphql",
+    "token": "optional-ad4m-credential",
+    "wakeUrl": "http://localhost:18789/hooks/wake",
+    "wakeToken": "your-openclaw-wake-token",
+    "debounceMs": 2000,
+    "subscriptions": [
+      {
+        "id": "flux-messages",
+        "perspective": "perspective-uuid",
+        "query": "SELECT * FROM link WHERE source = 'literal://string:channel-id' AND predicate = 'ad4m://has_child'"
+      }
+    ]
+  }
+`);
+    process.exit(0);
+  }
+
   if (!args.config) {
     console.error("Error: provide --config <path>");
     process.exit(1);
