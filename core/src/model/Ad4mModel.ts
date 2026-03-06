@@ -79,6 +79,16 @@ export interface IncludeMap {
 }
 
 /**
+ * Options accepted by the instance `get()` method.
+ */
+export interface GetOptions {
+  /** Eager-load the specified relations (same map as `Query.include`). */
+  include?: IncludeMap;
+  /** Sparse fieldset — only hydrate these property names. */
+  properties?: string[];
+}
+
+/**
  * Discriminated union for parent-scoped queries.
  *
  * **Model form** (preferred) — predicate auto-resolved from the parent model's
@@ -1173,7 +1183,7 @@ export class Ad4mModel {
     return changed;
   }
 
-  private async getData() {
+  private async getData(opts?: GetOptions) {
     // Builds an object with the author, timestamp, all properties, & all collections on the Ad4mModel and saves it to the instance
     // Use SurrealDB for data queries
     try {
@@ -1192,11 +1202,17 @@ export class Ad4mModel {
 
       if (links && links.length > 0) {
         // Core hydration: properties (latest-wins), collections, timestamps/author
-        await ctor.hydrateFromLinks(this, links, metadata, this._perspective);
+        const requestedProperties = opts?.properties && opts.properties.length > 0 ? opts.properties : undefined;
+        await ctor.hydrateFromLinks(this, links, metadata, this._perspective, requestedProperties);
       }
 
       // Evaluate SurrealQL getters
       await ctor.evaluateCustomGettersForInstance(this, this._perspective, metadata);
+
+      // Eager-load relations if requested
+      if (opts?.include) {
+        await ctor.hydrateRelations([this], this._perspective, opts.include);
+      }
     } catch (e) {
       console.error(`SurrealDB getData also failed for ${this._id}:`, e);
     }
@@ -2633,21 +2649,27 @@ WHERE ${whereConditions.join(' AND ')}
 
   /**
    * Gets the model instance with all properties and collections populated.
-   * 
+   *
+   * @param opts - Optional hydration options:
+   *   - `include` — eager-load the specified relations (e.g. `{ comments: true }`)
+   *   - `properties` — sparse fieldset, only hydrate the listed property names
    * @returns The populated model instance
    * @throws Will throw if data retrieval fails
-   * 
+   *
    * @example
    * ```typescript
    * const recipe = new Recipe(perspective, existingId);
    * await recipe.get();
    * console.log(recipe.name, recipe.ingredients);
+   *
+   * // With eager-loaded relations:
+   * await recipe.get({ include: { ingredients: true } });
    * ```
    */
-  async get() {
+  async get(opts?: GetOptions) {
     this._subjectClassName = await this._perspective.stringOrTemplateObjectToSubjectClassName(this.cleanCopy());
 
-    return await this.getData();
+    return await this.getData(opts);
   }
 
   /**
