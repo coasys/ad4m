@@ -139,7 +139,7 @@ impl Ad4mMcpHandler {
 
     /// Generate a single waker subscription config for mention tracking
     #[tool(
-        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. Uses a two-branch SurrealQL query: for literal://json: targets (e.g. Flux message bodies), fn::parse_literal() extracts only the .data field before matching — avoiding false positives from the author DID present in every message JSON; for all other targets, matches the raw value directly. Returns one subscription ORing all profile names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
+        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. Uses fn::parse_literal() + fn::contains() — the same pattern as the flux notification trigger system. fn::parse_literal extracts only the .data field from literal://json: targets (Flux message bodies), avoiding false positives from the author DID in the surrounding JSON; for all other targets it returns the value unchanged. Returns one subscription ORing all profile names and the full DID. Both functions are already defined in the SurrealDB setup (same as notifications — no extra setup needed). Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
     )]
     pub async fn get_mention_waker_config(
         &self,
@@ -158,7 +158,10 @@ impl Ad4mMcpHandler {
         let did = agent.did.clone();
 
         // Validate perspective
-        if let Err(e) = self.get_readable_perspective(&params.0.perspective_id).await {
+        if let Err(e) = self
+            .get_readable_perspective(&params.0.perspective_id)
+            .await
+        {
             return json!({"error": format!("Perspective not accessible: {}", e)}).to_string();
         }
 
@@ -173,9 +176,7 @@ impl Ad4mMcpHandler {
                     let pred = link.data.predicate.as_deref().unwrap_or("");
                     if matches!(
                         pred,
-                        "sioc://has_username"
-                            | "sioc://has_given_name"
-                            | "sioc://has_family_name"
+                        "sioc://has_username" | "sioc://has_given_name" | "sioc://has_family_name"
                     ) {
                         let val = Self::resolve_literal_value(&link.data.target);
                         if !val.is_empty() && !names.contains(&val) {
@@ -195,47 +196,34 @@ impl Ad4mMcpHandler {
 
         let perspective_id = &params.0.perspective_id;
 
-        // Build a two-branch SurrealQL query:
+        // Build the SurrealQL query using fn::parse_literal + fn::contains —
+        // the same pattern used by the flux notification trigger test.
         //
-        // Branch 1 — literal://json: targets (e.g. Flux message bodies):
-        //   fn::parse_literal(target) URL-decodes and parses the JSON, returning
-        //   only the .data field (the actual message text). This avoids false
-        //   positives from the "author" field in the same JSON object — the agent's
-        //   DID would otherwise appear in every message it sends.
+        // fn::parse_literal(target) handles both cases automatically:
+        //   - For literal://json: targets (Flux message bodies): extracts only the
+        //     .data field, so the author DID embedded in the JSON object does NOT
+        //     cause false-positive mention matches.
+        //   - For all other targets (raw strings, URIs, DIDs): returns the value
+        //     unchanged, so explicit DID-as-target links are still matched correctly.
         //
-        // Branch 2 — all other targets (raw strings, URIs, DIDs, etc.):
-        //   Match directly against the target value. This correctly catches explicit
-        //   DID-as-target links (e.g. mention/follow links) and string literals.
+        // fn::contains(parsed, term) does a substring check (str.includes).
         //
-        // No predicate constraint: watch all link targets.
+        // Both functions are already defined in SurrealDBService::new() — same setup
+        // that powers the notification trigger system.
         let all_terms: Vec<String> = names
             .iter()
-            .map(|n| n.clone())
+            .cloned()
             .chain(std::iter::once(did.clone()))
             .collect();
 
-        let parsed_conditions: Vec<String> = all_terms
+        let conditions: Vec<String> = all_terms
             .iter()
-            .map(|t| format!("fn::parse_literal(target) CONTAINS '{}'", t))
+            .map(|t| format!("fn::contains(fn::parse_literal(target), '{}')", t))
             .collect();
 
-        let raw_conditions: Vec<String> = all_terms
-            .iter()
-            .map(|t| format!("target CONTAINS '{}'", t))
-            .collect();
+        let query = format!("SELECT * FROM link WHERE {}", conditions.join(" OR "),);
 
-        let query = format!(
-            "SELECT * FROM link WHERE \
-             (string::starts_with(target, 'literal://json:') AND ({})) \
-             OR (NOT string::starts_with(target, 'literal://json:') AND ({}))",
-            parsed_conditions.join(" OR "),
-            raw_conditions.join(" OR "),
-        );
-
-        let sub_id = format!(
-            "mention-{}",
-            &did[did.len().saturating_sub(12)..]
-        );
+        let sub_id = format!("mention-{}", &did[did.len().saturating_sub(12)..]);
 
         let subscription = json!({
             "id": sub_id,
