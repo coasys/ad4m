@@ -140,16 +140,25 @@ describe("Ad4mModel — Inheritance & Polymorphism", function () {
   // ── 7. Polymorphic base-class query can return derived instances ──────────
 
   it("base-class findAll returns BOTH base and derived instances", async () => {
-    await TestBaseModel.create(perspective, { content: "pure base" });
-    await TestDerivedModel.create(perspective, {
+    const base = await TestBaseModel.create(perspective, { content: "pure base" });
+    const derived = await TestDerivedModel.create(perspective, {
       content: "also base",
       question: "q",
     });
 
-    // Base model has no @Flag — so findAll should return everything that has
-    // the base predicates.  Depending on the implementation the derived might
-    // or might not show up, so we only assert ≥1 result.
-    const all = await TestBaseModel.findAll(perspective);
-    expect(all.length).to.be.gte(1);
+    // Base model has no @Flag — findAll should return everything that carries
+    // the base predicates, including derived instances.
+    // Poll until both created ids are present (handles eventual consistency).
+    const deadline = Date.now() + 20_000;
+    let all: TestBaseModel[] = [];
+    while (Date.now() < deadline) {
+      all = await TestBaseModel.findAll(perspective);
+      const ids = all.map((r) => r.id);
+      if (ids.includes(base.id) && ids.includes(derived.id)) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    const ids = all.map((r) => r.id);
+    expect(ids, "base instance missing from TestBaseModel.findAll").to.include(base.id);
+    expect(ids, "derived instance missing from TestBaseModel.findAll").to.include(derived.id);
   });
 });
