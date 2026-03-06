@@ -135,18 +135,51 @@ Reference docs: `skills/ad4m/references/waker.md`
 
 AI agents need a running AD4M executor to connect to via MCP.
 
+### ⚠️ Pre-flight: Check for Existing Data
+
+Before running `ad4m-executor init`, **check if `~/.ad4m` already exists**:
+
+```bash
+ls -d ~/.ad4m 2>/dev/null && echo "EXISTS — ask human!" || echo "Safe to create"
+```
+
+- **If `~/.ad4m` exists:** This is likely your human's existing Flux/AD4M data. **Do NOT overwrite it.** Ask your human how to proceed — they may want you to connect to their existing executor, or use a separate data path.
+- **If `~/.ad4m` does not exist:** Safe to run `ad4m-executor init` and use the default path.
+
+The default data path is `~/.ad4m` — use it unless there's a reason not to. If you need a non-default location, first check whether that path already exists and ask the human before reusing it:
+
+```bash
+ls -d <path> 2>/dev/null && echo "EXISTS — ask human!" || echo "Safe to create"
+```
+
+Then use:
+- `ad4m-executor init --data-path <path>` for initialization
+- `ad4m-executor run --app-data-path <path>` when starting the executor
+
 ### Mode 1: Agent-Only Executor (Recommended)
 
 Single agent, local, simple:
 
 ```bash
-ad4m-executor run --app-data-path ~/.ad4m-agent \
-  --admin-credential <your-secret> \
-  --enable-mcp true --mcp-port 3001
+# First time only:
+ad4m-executor init
+
+# Then run (uses ~/.ad4m by default):
+ad4m-executor run --enable-mcp true --mcp-port 3001
+
+# Generate agent (first time only):
+# ⚠️ REMEMBER THIS PASSPHRASE — store it securely! You'll need it after every restart.
+ad4m agent generate --passphrase <your-passphrase>
+
+# After restart: unlock the agent wallet before MCP auth works:
+ad4m agent unlock --passphrase <your-passphrase>
+# Or via GraphQL: mutation { agentUnlock(passphrase: "...", holochain: true) { isUnlocked } }
 ```
 
+- **Store the passphrase immediately** — you'll need it after every restart to unlock the wallet
+- The executor cannot use Holochain/DHT features until the wallet is unlocked
 - No multi-user setup — single agent DID
-- Admin credential auth — no email/password needed
+- Optional `--admin-credential` for single-user mode — if set, MCP clients **must** send that credential on non-auth tool calls; no email/password flow is needed
 - Local HTTP only — `http://localhost:3001/mcp`
 
 ### Mode 2: Multi-User Executor
