@@ -1,62 +1,102 @@
 # AD4M Waker Bridge
 
-Watches an AD4M executor for perspective link changes via GraphQL WebSocket subscriptions and POSTs to an OpenClaw `/hooks/wake` endpoint when matching links are detected.
+Watches AD4M perspectives via `QuerySubscriptionProxy` (SurrealDB-backed, same mechanism as Flux UI) and POSTs to an OpenClaw `/hooks/wake` endpoint when matching links are detected.
 
-## Usage
+Requires `@coasys/ad4m ^0.12.0`.
+
+---
+
+## Quick start
 
 ```bash
-deno run --allow-net ad4m-waker.ts \
-  --executor-url ws://localhost:12000/graphql \
-  --perspective <uuid> \
-  --class Message \
-  --source "flux://channel-general" \
-  --wake-url http://localhost:18789/hooks/wake \
-  --wake-token "my-wake-token" \
-  --wake-message "New message in #general"
+cd waker-bridge
+npm install
+node ad4m-waker.js --config waker-config.json
 ```
 
-## Options
+---
 
-| Flag | Required | Description |
-|------|----------|-------------|
-| `--perspective` | ✅ | Perspective UUID to watch |
-| `--wake-url` | ✅ | OpenClaw wake endpoint URL |
-| `--wake-token` | ✅ | Bearer token for authentication |
-| `--executor-url` | | AD4M GraphQL WS URL (default: `ws://localhost:12000/graphql`) |
-| `--class` | | Subject class to filter (e.g. `Message`) |
-| `--source` | | Filter links by source URI |
-| `--wake-message` | | Message in wake payload |
-| `--token` | | AD4M capability token |
-| `--also-removed` | | Also watch link removals |
+## Generating subscription configs
+
+The waker is a config-driven runner — it executes whatever SurrealQL queries you give it. Query generation is handled by the AD4M MCP tools:
+
+- **`get_mention_waker_config`** — generates a mention-tracking subscription for a neighbourhood (fires when messages contain the agent's name or DID)
+- **`generate_waker_query`** — generates a subscription from a SHACL subject class definition
+
+Typical flow:
+1. Agent joins a neighbourhood via `neighbourhood_join_from_url`
+2. Agent calls `get_mention_waker_config` with the perspective UUID
+3. Agent appends the returned subscription entry to the waker config file
+4. Agent restarts the waker
+
+---
+
+## Config file format
+
+```json
+{
+  "executorUrl": "ws://localhost:12100/graphql",
+  "token": "optional-ad4m-credential",
+  "wakeUrl": "http://localhost:18789/hooks/wake",
+  "wakeToken": "your-openclaw-wake-token",
+  "debounceMs": 2000,
+  "subscriptions": [
+    {
+      "id": "flux-all-messages",
+      "perspective": "<neighbourhood-uuid>",
+      "query": "SELECT * FROM link WHERE source = 'literal://string:<channel-id>' AND predicate = 'ad4m://has_child'"
+    },
+    {
+      "id": "mention-<did-suffix>",
+      "perspective": "<neighbourhood-uuid>",
+      "query": "SELECT * FROM link WHERE target CONTAINS 'Marvin' OR target CONTAINS 'did:key:z6Mks...'"
+    }
+  ]
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `executorUrl` | ✅ | AD4M executor WebSocket URL |
+| `token` | | AD4M capability token |
+| `wakeUrl` | ✅ | OpenClaw wake endpoint |
+| `wakeToken` | ✅ | Bearer token for the wake endpoint |
+| `debounceMs` | | Debounce delay in ms (default: 2000) |
+| `subscriptions` | ✅ | Array of subscription objects |
+
+Each subscription:
+
+| Field | Description |
+|-------|-------------|
+| `id` | Unique identifier (included in wake POST body) |
+| `perspective` | Perspective UUID to subscribe to |
+| `query` | SurrealQL query — fires when the result set changes |
+
+---
 
 ## How it works
 
-1. Connects to AD4M executor via `graphql-transport-ws` WebSocket protocol
-2. Subscribes to `perspectiveLinkAdded` for the given perspective
-3. Filters links by class (matches `rdf://type` or `ad4m://has_child` predicates) and optional source
-4. Debounces rapid changes (2s default)
-5. POSTs matching events to the wake URL with link context
+1. Connects to the AD4M executor via GraphQL WebSocket
+2. For each subscription, creates a `QuerySubscriptionProxy` with the given SurrealQL query
+3. When the query result set changes, debounces and POSTs to the wake URL
+4. The wake POST body contains the subscription `id` so the agent knows what changed
+
+---
+
+## Programmatic use
+
+```js
+const { startWaker } = require("./ad4m-waker");
+
+const waker = await startWaker(config);
+// Later:
+waker.close();
+```
+
+---
 
 ## Testing
 
 ```bash
-deno test --allow-net ad4m-waker.test.ts
-```
-
-## As a module
-
-```typescript
-import { startWaker, WakerConfig } from "./ad4m-waker.ts";
-
-const waker = await startWaker({
-  executorUrl: "ws://localhost:12000/graphql",
-  perspective: "my-uuid",
-  className: "Message",
-  wakeUrl: "http://localhost:18789/hooks/wake",
-  wakeToken: "my-token",
-  wakeMessage: "New message",
-});
-
-// Later:
-waker.close();
+npm test
 ```

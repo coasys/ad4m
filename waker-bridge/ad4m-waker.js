@@ -2,13 +2,16 @@
 /**
  * AD4M Waker — Node.js
  *
- * Watches AD4M perspectives via PerspectiveProxy.subscribeSurrealDB()
+ * Watches AD4M perspectives via QuerySubscriptionProxy (SurrealDB-backed)
  * and wakes an OpenClaw agent when query results change.
  *
- * Uses @coasys/ad4m client — same code path as Flux UI.
+ * Requires @coasys/ad4m ^0.12.0
  *
  * Usage:
  *   node ad4m-waker.js --config waker-config.json
+ *
+ * To generate waker subscription configs (e.g. mention-tracking queries),
+ * use the AD4M MCP tool `get_mention_waker_config` or `generate_waker_query`.
  *
  * Config format:
  *   {
@@ -27,7 +30,7 @@
  *   }
  */
 
-const { Ad4mClient } = require("@coasys/ad4m");
+const { Ad4mClient, QuerySubscriptionProxy } = require("@coasys/ad4m");
 const { ApolloClient, InMemoryCache } = require("@apollo/client/core");
 const { GraphQLWsLink } = require("@apollo/client/link/subscriptions");
 const { createClient } = require("graphql-ws");
@@ -55,7 +58,7 @@ function createAd4mClient(url, token) {
   const wsLink = new GraphQLWsLink(wsClient);
   const apolloClient = new ApolloClient({
     link: wsLink,
-    cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
+    cache: new InMemoryCache(),
     defaultOptions: {
       watchQuery: { fetchPolicy: "no-cache" },
       query: { fetchPolicy: "no-cache" },
@@ -84,7 +87,7 @@ function postWake(config, sub, detail) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${config.wakeToken}`,
+      "Authorization": `Bearer ${config.wakeToken}`,
       "Content-Length": Buffer.byteLength(body),
     },
   }, (res) => {
@@ -113,34 +116,25 @@ async function startWaker(config) {
 
   // Verify connection
   const status = await client.agent.status();
-  console.log(`[waker] connected — agent: ${status.did.substring(0, 30)}...`);
+  console.log(`[waker] connected — agent: ${status.did.substring(0, 40)}...`);
 
-  // Per-subscription debounce state
   const debounceTimers = new Map();
   const proxies = [];
 
   for (const sub of config.subscriptions) {
-    console.log(`[waker] setting up subscription ${sub.id}: ${sub.query.substring(0, 80)}...`);
+    console.log(`[waker] setting up SurrealDB subscription ${sub.id}: ${sub.query.substring(0, 80)}...`);
 
-    // Get a PerspectiveProxy for this perspective
-    const perspective = await client.perspective.byUUID(sub.perspective);
-    if (!perspective) {
-      console.error(`[waker] perspective not found: ${sub.perspective}`);
-      continue;
-    }
+    // Use QuerySubscriptionProxy directly with SurrealDB query
+    const proxy = new QuerySubscriptionProxy(sub.perspective, sub.query, client.perspective);
+    await proxy.subscribe();
+    await proxy.initialized;
 
-    // Subscribe using PerspectiveProxy.subscribeSurrealDB — same as Flux UI
-    const proxy = await perspective.subscribeSurrealDB(sub.query);
-    proxies.push(proxy);
+    console.log(`[waker] ${sub.id} subscribed, initial result count: ${Array.isArray(proxy.result) ? proxy.result.length : '?'}`);
 
-    console.log(`[waker] ${sub.id} subscribed`);
-
-    // Register callback for changes via onResult (QuerySubscriptionProxy API)
     proxy.onResult((result) => {
       const count = Array.isArray(result) ? result.length : "?";
       console.log(`[waker] ${sub.id}: query result changed (${count} items)`);
 
-      // Debounce
       const existing = debounceTimers.get(sub.id);
       if (existing) clearTimeout(existing);
       debounceTimers.set(
@@ -152,7 +146,8 @@ async function startWaker(config) {
       );
     });
 
-    console.log(`[waker] ${sub.id} fully active`);
+    proxies.push(proxy);
+    console.log(`[waker] ${sub.id} active`);
   }
 
   return {
@@ -190,25 +185,35 @@ async function main() {
 
   if (args.help) {
     console.log(`
-AD4M Waker — watches perspectives via PerspectiveProxy.subscribeSurrealDB()
+AD4M Waker — watches AD4M perspectives via QuerySubscriptionProxy (SurrealDB)
+and wakes an OpenClaw agent when query results change.
 
-Same mechanism as Flux UI. Uses @coasys/ad4m client.
+Requires @coasys/ad4m ^0.12.0
 
 Usage:
   node ad4m-waker.js --config <path>
 
-Config file format (JSON):
+Options:
+  --config <path>   Path to waker config JSON file (required).
+  --help            Show this message.
+
+To generate subscription configs (mention tracking, model changes, etc.),
+use the AD4M MCP tools:
+  - get_mention_waker_config   — mention-tracking query for a neighbourhood
+  - generate_waker_query       — SHACL-based query for subject class changes
+
+Config file format:
   {
     "executorUrl": "ws://localhost:12100/graphql",
-    "token": "optional-ad4m-token",
+    "token": "optional-ad4m-credential",
     "wakeUrl": "http://localhost:18789/hooks/wake",
-    "wakeToken": "your-wake-token",
+    "wakeToken": "your-openclaw-wake-token",
     "debounceMs": 2000,
     "subscriptions": [
       {
-        "id": "flux-messages",
+        "id": "my-subscription",
         "perspective": "perspective-uuid",
-        "query": "SELECT * FROM link WHERE source = '...' AND predicate = 'ad4m://has_child'"
+        "query": "SELECT * FROM link WHERE ..."
       }
     ]
   }
@@ -234,6 +239,9 @@ Config file format (JSON):
 
   process.on("SIGINT", () => { console.log("\n[waker] shutting down..."); waker.close(); process.exit(0); });
   process.on("SIGTERM", () => { waker.close(); process.exit(0); });
+
+  console.log("[waker] running — waiting for query changes...");
+  setInterval(() => {}, 60000);
 }
 
 if (require.main === module) {
