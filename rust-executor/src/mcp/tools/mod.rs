@@ -242,6 +242,10 @@ impl Ad4mMcpHandler {
                 Self::generate_waker_query_tool_attr(),
                 Self::generate_waker_query,
             ))
+            .with_route((
+                Self::get_mention_waker_config_tool_attr(),
+                Self::get_mention_waker_config,
+            ))
             // neighbourhoods.rs
             .with_route((
                 Self::neighbourhood_publish_from_perspective_tool_attr(),
