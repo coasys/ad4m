@@ -2414,6 +2414,14 @@ WHERE ${whereConditions.join(' AND ')}
     await this._perspective.executeAction(actions, this._id, [{ name: "value", value }], batchId);
   }
 
+  /** Resolve a relation argument to a plain string ID. Accepts either a raw
+   * string ID or an Ad4mModel instance (in which case `.id` is used). */
+  private resolveRelationId(value: any): string {
+    if (typeof value === 'string') return value;
+    if (value && typeof value === 'object' && typeof value.id === 'string') return value.id;
+    return String(value);
+  }
+
   private async setRelationValues(key: string, value: any, batchId?: string) {
     // Phase 1: Use metadata instead of Prolog queries
     const metadata = this.getRelationOptions(key);
@@ -2430,11 +2438,11 @@ WHERE ${whereConditions.join(' AND ')}
         await this._perspective.executeAction(
           actions,
           this._id,
-          value.map((v) => ({ name: "value", value: v })),
+          value.map((v) => ({ name: "value", value: this.resolveRelationId(v) })),
           batchId
         );
       } else {
-        await this._perspective.executeAction(actions, this._id, [{ name: "value", value }], batchId);
+        await this._perspective.executeAction(actions, this._id, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
       }
     }
   }
@@ -2454,11 +2462,11 @@ WHERE ${whereConditions.join(' AND ')}
       if (Array.isArray(value)) {
         await Promise.all(
           value.map((v) =>
-            this._perspective.executeAction(actions, this._id, [{ name: "value", value: v }], batchId)
+            this._perspective.executeAction(actions, this._id, [{ name: "value", value: this.resolveRelationId(v) }], batchId)
           )
         );
       } else {
-        await this._perspective.executeAction(actions, this._id, [{ name: "value", value }], batchId);
+        await this._perspective.executeAction(actions, this._id, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
       }
     }
   }
@@ -2478,11 +2486,11 @@ WHERE ${whereConditions.join(' AND ')}
       if (Array.isArray(value)) {
         await Promise.all(
           value.map((v) =>
-            this._perspective.executeAction(actions, this._id, [{ name: "value", value: v }], batchId)
+            this._perspective.executeAction(actions, this._id, [{ name: "value", value: this.resolveRelationId(v) }], batchId)
           )
         );
       } else {
-        await this._perspective.executeAction(actions, this._id, [{ name: "value", value }], batchId);
+        await this._perspective.executeAction(actions, this._id, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
       }
     }
   }

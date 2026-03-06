@@ -1088,11 +1088,11 @@ export interface RelationOptions {
  *   post.setComment(values)
  */
 export type HasManyMethods<Keys extends string> = {
-    [K in Keys as `add${Capitalize<K>}`]: (value: string) => Promise<void>;
+    [K in Keys as `add${Capitalize<K>}`]: (value: string | Ad4mModelLike) => Promise<void>;
 } & {
-    [K in Keys as `remove${Capitalize<K>}`]: (value: string) => Promise<void>;
+    [K in Keys as `remove${Capitalize<K>}`]: (value: string | Ad4mModelLike) => Promise<void>;
 } & {
-    [K in Keys as `set${Capitalize<K>}`]: (values: string[]) => Promise<void>;
+    [K in Keys as `set${Capitalize<K>}`]: (values: (string | Ad4mModelLike)[]) => Promise<void>;
 };
 
 /**
