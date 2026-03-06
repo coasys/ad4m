@@ -431,7 +431,11 @@ impl SurrealDBService {
                     if (body.startsWith('json:')) {
                         try {
                             const json = decodeURIComponent(body.substring(5));
-                            return JSON.parse(json);
+                            const parsed = JSON.parse(json);
+                            if (parsed.data !== undefined) {
+                                return parsed.data;
+                            }
+                            return parsed;
                         } catch (e) {
                             return url;
                         }

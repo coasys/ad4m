@@ -139,7 +139,7 @@ impl Ad4mMcpHandler {
 
     /// Generate a single waker subscription config for mention tracking
     #[tool(
-        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. Uses fn::contains(fn::json_path(fn::parse_literal(target), 'data'), term) — the same three-function chain as the flux notification trigger system. fn::parse_literal() returns the full expression shape for literal://json: targets (author+timestamp+data+proof object); fn::json_path(..., 'data') then extracts only the message body, preventing false positives from the author DID present in every message the agent sends. All three functions (fn::parse_literal, fn::json_path, fn::contains) are already defined in SurrealDBService::new(). Returns one subscription ORing all profile names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
+        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. Uses fn::contains(fn::parse_literal(target), term): fn::parse_literal extracts only the .data field from literal://json: Flux message bodies, so the author DID in the surrounding expression shape does not produce false-positive wakes; for literal://string: targets it returns the decoded value; for non-literal strings (raw DIDs etc.) it returns the value unchanged so explicit DID-as-target mention links still match. Both functions are already defined in SurrealDBService::new(). Returns one subscription ORing all profile names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
     )]
     pub async fn get_mention_waker_config(
         &self,
@@ -196,24 +196,20 @@ impl Ad4mMcpHandler {
 
         let perspective_id = &params.0.perspective_id;
 
-        // Build the SurrealQL query using the same three-function chain as the
-        // flux notification trigger system:
+        // Build the SurrealQL query using fn::contains + fn::parse_literal.
         //
-        //   fn::contains(fn::json_path(fn::parse_literal(target), 'data'), term)
+        // fn::parse_literal(target) handles all target types:
+        //   - literal://json: targets (Flux message bodies): parses the expression
+        //     shape and returns only the .data field — e.g. "Hey @Marvin!" — so the
+        //     author DID embedded in the surrounding JSON is never seen by fn::contains,
+        //     preventing false-positive wakes on every message the agent sends.
+        //   - literal://string: targets (profile names etc.): returns the decoded string.
+        //   - Non-literal strings (raw DIDs, URIs): returned unchanged, so explicit
+        //     DID-as-target mention/follow links are still matched correctly.
         //
-        // fn::parse_literal(target) → parses the literal URL, returning the full
-        //   expression object for literal://json: targets:
-        //   {"author": "did:key:...", "timestamp": "...", "data": "...", "proof": {...}}
-        //   For non-literal values, returns the raw string unchanged.
+        // fn::contains(parsed, term) → substring check (str.includes).
         //
-        // fn::json_path(..., 'data') → extracts only the .data field from the
-        //   expression shape. This is the CRITICAL step: without it, fn::contains
-        //   would match the author DID embedded in every message the agent sends,
-        //   producing false-positive wakes on all of the agent's own messages.
-        //
-        // fn::contains(..., term) → substring check (str.includes) on the data string.
-        //
-        // All three functions are already defined in SurrealDBService::new().
+        // Both functions are already defined in SurrealDBService::new().
         let all_terms: Vec<String> = names
             .iter()
             .cloned()
@@ -222,12 +218,7 @@ impl Ad4mMcpHandler {
 
         let conditions: Vec<String> = all_terms
             .iter()
-            .map(|t| {
-                format!(
-                    "fn::contains(fn::json_path(fn::parse_literal(target), 'data'), '{}')",
-                    t
-                )
-            })
+            .map(|t| format!("fn::contains(fn::parse_literal(target), '{}')", t))
             .collect();
 
         let query = format!("SELECT * FROM link WHERE {}", conditions.join(" OR "),);
