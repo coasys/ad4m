@@ -28,13 +28,13 @@ pub fn generate_jwt(
     let wallet_ref = wallet_lock.as_ref().expect("wallet instance");
     let name = "main".to_string();
 
-    let secret_key = wallet_ref
-        .get_secret_key(&name)
-        .ok_or(anyhow!("main signing key not found. Agent may not have been initialized (agentGenerate)."))?;
+    let secret_key = wallet_ref.get_secret_key(&name).ok_or(anyhow!(
+        "main signing key not found. Agent may not have been initialized (agentGenerate)."
+    ))?;
 
-    let did_document = wallet_ref
-        .get_did_document(&name)
-        .ok_or(anyhow!("main DID document not found. Agent may not have been initialized (agentGenerate)."))?;
+    let did_document = wallet_ref.get_did_document(&name).ok_or(anyhow!(
+        "main DID document not found. Agent may not have been initialized (agentGenerate)."
+    ))?;
 
     let payload = Claims::new(did_document.id, audience, expiration_time, capabilities);
 
@@ -55,9 +55,9 @@ pub fn decode_jwt(token: String) -> Result<Claims, AnyError> {
     let wallet_ref = wallet_lock.as_ref().expect("wallet instance");
     let name = "main".to_string();
 
-    let secret_key = wallet_ref
-        .get_secret_key(&name)
-        .ok_or(anyhow!("main signing key not found. Agent may not have been initialized (agentGenerate)."))?;
+    let secret_key = wallet_ref.get_secret_key(&name).ok_or(anyhow!(
+        "main signing key not found. Agent may not have been initialized (agentGenerate)."
+    ))?;
 
     let result = jsonwebtoken::decode::<Claims>(
         &token,
@@ -172,14 +172,22 @@ mod tests {
         }
 
         let result = generate_jwt("test-audience".to_string(), 9999999999, test_auth_info());
-        assert!(result.is_ok(), "generate_jwt should succeed when wallet is unlocked: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "generate_jwt should succeed when wallet is unlocked: {:?}",
+            result.err()
+        );
 
         let token = result.unwrap();
         assert!(!token.is_empty());
 
         // Verify round-trip: decode should also work
         let decoded = decode_jwt(token);
-        assert!(decoded.is_ok(), "decode_jwt should succeed: {:?}", decoded.err());
+        assert!(
+            decoded.is_ok(),
+            "decode_jwt should succeed: {:?}",
+            decoded.err()
+        );
     }
 
     /// Verifies the error message when wallet is unlocked but "main" key is missing
