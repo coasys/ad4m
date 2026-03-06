@@ -180,7 +180,7 @@ ad4m-executor run --app-data-path ~/.ad4m-server \
 **⚠️ The agent wallet must be unlocked before MCP auth works.** After starting or restarting the executor, unlock via GraphQL first:
 
 ```bash
-curl -s http://localhost:12100/graphql \
+curl -s http://localhost:12000/graphql \
   -H "Content-Type: application/json" \
   -H "Authorization: <admin-credential>" \
   -d '{"query":"mutation { agentUnlock(passphrase: \\"<passphrase>\\", holochain: true) { isUnlocked } }"}'
