@@ -52,6 +52,7 @@ use serde_json::json;
 
 // HTTP request parts injected by rmcp's streamable-HTTP transport into each request's extensions.
 // Used to extract the Authorization header for admin-credential bypass.
+use crate::utils::constant_time_eq;
 use axum::http::request::Parts as HttpRequestParts;
 
 // ============================================================================
@@ -131,7 +132,7 @@ impl ServerHandler for Ad4mMcpHandler {
                     .await
                     .clone()
                     .unwrap_or_default();
-                if token == *admin_cred {
+                if constant_time_eq(&token, admin_cred) {
                     // Admin credential matches — allow access immediately
                     return self.dispatch_tool(request, context).await;
                 }
@@ -148,9 +149,10 @@ impl ServerHandler for Ad4mMcpHandler {
                         .and_then(|parts| parts.headers.get(axum::http::header::AUTHORIZATION))
                         .and_then(|h| h.to_str().ok())
                         .map(|h| {
-                            // Accept both bare token and "Bearer <token>" forms
+                            // Accept both bare token and "Bearer <token>" forms.
+                            // Use constant-time comparison to prevent timing attacks.
                             let bare = h.strip_prefix("Bearer ").unwrap_or(h);
-                            bare == admin_cred.as_str()
+                            constant_time_eq(bare, admin_cred.as_str())
                         })
                         .unwrap_or(false);
 
