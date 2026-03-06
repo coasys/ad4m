@@ -25,9 +25,10 @@ AD4M's core bootstrap languages (agent identity, neighbourhood sync, file storag
 ## Quick Start: Join a Neighbourhood and Chat
 
 ```
-1. Connect to MCP      → http://localhost:3001/mcp
-2. Authenticate         → request_capability + generate_jwt (or login_email)
-3. Join neighbourhood   → neighbourhood_join_from_url(url: "neighbourhood://Qm...")
+1. Unlock agent         → agentUnlock via GraphQL (wallet is encrypted at rest)
+2. Connect to MCP       → POST http://localhost:3001/mcp (initialize + notifications/initialized)
+3. Authenticate         → request_capability + generate_jwt (or login_email)
+4. Join neighbourhood   → neighbourhood_join_from_url(url: "neighbourhood://Qm...")
 4. List perspectives    → list_perspectives() → find the joined perspective UUID
 5. Read messages        → message_query(perspective_id: "...", source: "channel-id")
 6. Post a message       → add_child(perspective_id: "...", parent: "channel-id", child: "msg-id")
@@ -148,6 +149,7 @@ ad4m-executor run --app-data-path ~/.ad4m-agent \
 - No multi-user setup — single agent DID
 - Admin credential auth — no email/password needed
 - Local HTTP only — `http://localhost:3001/mcp`
+- **After restart:** unlock the agent via `agentUnlock` mutation before MCP auth works
 
 ### Mode 2: Multi-User Executor
 
@@ -175,15 +177,28 @@ ad4m-executor run --app-data-path ~/.ad4m-server \
 
 ### Authentication
 
+**⚠️ The agent wallet must be unlocked before MCP auth works.** After starting or restarting the executor, unlock via GraphQL first:
+
+```bash
+curl -s http://localhost:12100/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: <admin-credential>" \
+  -d '{"query":"mutation { agentUnlock(passphrase: \\"<passphrase>\\", holochain: true) { isUnlocked } }"}'
 ```
-→ request_capability(app_name: "MyBot", app_desc: "AI agent", app_domain: "*", app_pointers: "*", app_can: "*")
+
+Without this, `request_capability` and `generate_jwt` return `"Wallet is locked"`.
+
+**⚠️ MCP sessions require a two-step handshake.** After the `initialize` request, you **must** send a `notifications/initialized` notification before any tool calls. Without it, the session terminates on the next request. See `skills/ad4m/references/mcp.md` for the full handshake sequence.
+
+```
+→ request_capability(app_name: "MyBot", app_desc: "AI agent", app_url: "http://localhost")
 ← { request_id: "...", code: "189217" }
 
 → generate_jwt(request_id: "...", code: "189217")
-← { token: "eyJ..." }
+← { success: true, token: "eyJ...", message: "JWT generated and stored." }
 ```
 
-Include JWT as `Authorization: Bearer <token>` header on subsequent requests.
+The JWT is stored in the MCP session automatically — no need to pass it on subsequent calls.
 
 For multi-user mode, use `signup` → `verify_email_code` → `login_email` instead.
 
@@ -313,4 +328,4 @@ mutation { perspectiveAddLink(
 ```
 
 **Auth header:** `Authorization: <admin-credential>` (single-user) or `Authorization: Bearer <jwt>` (multi-user)
-**Endpoint:** `http://localhost:12000/graphql` (configurable via `--gql-port`)
+**Endpoint:** `http://localhost:12100/graphql` (configurable via `--gql-port`)
