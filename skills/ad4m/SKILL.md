@@ -31,7 +31,7 @@ AD4M's core bootstrap languages (agent identity, neighbourhood sync, file storag
 2. Connect to MCP       → POST http://localhost:3001/mcp (initialize + notifications/initialized)
 3. Authenticate         → request_capability + generate_jwt (or login_email)
 4. Create profile       → set_agent_profile(username: "...", ...)
-5. Set profile image    → set_agetn_profile_picture(image_base64: "34Aff...")
+5. Set profile image    → set_agent_profile_picture(image_base64: "34Aff...")
 ```
 
 ### Join a Flux Neighbourhood and Chat
@@ -237,8 +237,8 @@ Without this, `request_capability` and `generate_jwt` return `"Wallet is locked"
 
 **⚠️ MCP sessions require a two-step handshake.** After the `initialize` request, you **must** send a `notifications/initialized` notification before any tool calls. Without it, the session terminates on the next request. See `skills/ad4m/references/mcp.md` for the full handshake sequence.
 
-```
-→ request_capability(app_name: "MyBot", app_desc: "AI agent", app_url: "http://localhost")
+```text
+→ request_capability(app_name: "MyBot", app_desc: "AI agent", app_domain: "mybot.local", app_url: "http://localhost")
 ← { request_id: "...", code: "189217" }
 
 → generate_jwt(request_id: "...", code: "189217")

@@ -3,29 +3,21 @@ use crate::wallet::Wallet;
 use deno_core::{anyhow::anyhow, error::AnyError};
 use jsonwebtoken::{encode, Algorithm, DecodingKey, EncodingKey, Header};
 
-/// Check that the wallet singleton is unlocked, returning a clear error if not.
-fn require_unlocked_wallet() -> Result<(), AnyError> {
-    let wallet = Wallet::instance();
-    let wallet_lock = wallet.lock().expect("wallet lock");
-    let wallet_ref = wallet_lock.as_ref().expect("wallet instance");
-    if !wallet_ref.is_unlocked() {
-        return Err(anyhow!(
-            "Wallet is locked. The agent must be unlocked (agentUnlock) before generating JWTs."
-        ));
-    }
-    Ok(())
-}
-
 pub fn generate_jwt(
     audience: String,
     expiration_time: u64,
     capabilities: AuthInfo,
 ) -> Result<String, AnyError> {
-    require_unlocked_wallet()?;
-
     let wallet = Wallet::instance();
     let wallet_lock = wallet.lock().expect("wallet lock");
     let wallet_ref = wallet_lock.as_ref().expect("wallet instance");
+
+    if !wallet_ref.is_unlocked() {
+        return Err(anyhow!(
+            "Wallet is locked. The agent must be unlocked (agentUnlock) before generating JWTs."
+        ));
+    }
+
     let name = "main".to_string();
 
     let secret_key = wallet_ref.get_secret_key(&name).ok_or(anyhow!(
@@ -48,11 +40,16 @@ pub fn generate_jwt(
 }
 
 pub fn decode_jwt(token: String) -> Result<Claims, AnyError> {
-    require_unlocked_wallet()?;
-
     let wallet = Wallet::instance();
     let wallet_lock = wallet.lock().expect("wallet lock");
     let wallet_ref = wallet_lock.as_ref().expect("wallet instance");
+
+    if !wallet_ref.is_unlocked() {
+        return Err(anyhow!(
+            "Wallet is locked. The agent must be unlocked (agentUnlock) before generating JWTs."
+        ));
+    }
+
     let name = "main".to_string();
 
     let secret_key = wallet_ref.get_secret_key(&name).ok_or(anyhow!(
