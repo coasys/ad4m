@@ -260,6 +260,20 @@ export function sleep(ms: number) {
 }
 
 /**
+ * Clears all links in a perspective in a single removeLinks() batch call.
+ * Import from here or from helpers/assertions to get a clean slate before each test.
+ */
+export async function wipePerspective(
+  perspective: import("@coasys/ad4m").PerspectiveProxy,
+): Promise<void> {
+  const { LinkQuery } = await import("@coasys/ad4m");
+  const links = await perspective.get(new LinkQuery({}));
+  if (links.length > 0) {
+    await perspective.removeLinks(links);
+  }
+}
+
+/**
  * Kill any process listening on the given ports.
  * Use as a safety net in after() hooks — catches executors that survived kill().
  */

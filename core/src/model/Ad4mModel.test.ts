@@ -554,8 +554,8 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     expect(query).not.toContain("SELECT source FROM node");
   });
 
-  it.skip("should handle contains operator on special field (base)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: { contains: "test" } } });
+  it.skip("should handle contains operator on special field (id)", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { contains: "test" } } });
     
     expect(query).toContain("WHERE source CONTAINS 'test'");
   });
@@ -705,45 +705,45 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     expect(query).not.toContain("START");
   });
 
-  it("should handle base special field", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: "literal://test" } });
+  it("should handle id special field", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: "literal://test" } });
     
     expect(query).toContain("uri = 'literal://test'");
   });
 
-  it("should handle base special field with array (IN clause)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: ["literal://test1", "literal://test2"] } });
+  it("should handle id special field with array (IN clause)", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: ["literal://test1", "literal://test2"] } });
     
     expect(query).toContain("uri IN ['literal://test1', 'literal://test2']");
   });
 
-  it("should handle base special field with not operator", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: { not: "literal://test" } } });
+  it("should handle id special field with not operator", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { not: "literal://test" } } });
     
     expect(query).toContain("uri != 'literal://test'");
   });
 
-  it("should handle base special field with not operator and array (NOT IN)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: { not: ["literal://test1", "literal://test2"] } } });
+  it("should handle id special field with not operator and array (NOT IN)", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { not: ["literal://test1", "literal://test2"] } } });
     
     expect(query).toContain("uri NOT IN ['literal://test1', 'literal://test2']");
   });
 
-  it("should handle base special field with between operator", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: { between: ["literal://a", "literal://z"] } } } as any);
+  it("should handle id special field with between operator", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { between: ["literal://a", "literal://z"] } } } as any);
     
     const normalized = normalizeQuery(query);
     expect(normalized).toContain("uri >= 'literal://a' AND uri <= 'literal://z'");
   });
 
-  it("should handle base special field with gt operator", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: { gt: "literal://m" } } } as any);
+  it("should handle id special field with gt operator", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { gt: "literal://m" } } } as any);
     
     expect(query).toContain("uri > 'literal://m'");
   });
 
-  it("should handle base special field with gte and lte operators", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: { gte: "literal://a", lte: "literal://z" } } } as any);
+  it("should handle id special field with gte and lte operators", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { gte: "literal://a", lte: "literal://z" } } } as any);
     
     const normalized = normalizeQuery(query);
     expect(normalized).toContain("uri >= 'literal://a'");
@@ -947,10 +947,9 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     // rating and ingredients should be removed since only "name" was requested
     expect(recipe.rating).toBeUndefined();
     expect(recipe.ingredients).toBeUndefined();
-    // author and timestamp should still be present
-    expect(recipe.author).toBe("did:key:alice");
-    // Timestamp is converted to Unix epoch (milliseconds)
-    expect(recipe.timestamp).toBe(new Date("2023-01-01T00:00:00Z").getTime());
+    // author, createdAt, updatedAt are also stripped unless explicitly requested
+    expect(recipe.author).toBeUndefined();
+    expect(recipe.timestamp).toBeUndefined();
   });
 
   it("should filter properties when query specifies properties", async () => {

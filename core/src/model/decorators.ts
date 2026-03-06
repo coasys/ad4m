@@ -1134,6 +1134,18 @@ export function HasOne(
             readOnly: false,
             local: opts.local,
         })(target, key);
+
+        // Add prototype methods for add/remove/set (mirroring @HasMany)
+        const collKey = key as string;
+        (target as any)[`add${capitalize(collKey)}`] = async function(this: any, arg: any) {
+            return (this as any).addRelationValue(collKey, arg);
+        };
+        (target as any)[`remove${capitalize(collKey)}`] = async function(this: any, arg: any) {
+            return (this as any).removeRelationValue(collKey, arg);
+        };
+        (target as any)[`set${capitalize(collKey)}`] = async function(this: any, arg: any) {
+            return (this as any).setRelationValues(collKey, arg);
+        };
     };
 }
 
