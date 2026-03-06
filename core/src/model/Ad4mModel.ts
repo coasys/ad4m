@@ -2710,8 +2710,8 @@ WHERE ${whereConditions.join(' AND ')}
    * });
    *
    * // Create inside a transaction
-   * await Ad4mModel.transaction(perspective, async (batchId) => {
-   *   await Recipe.create(perspective, { name: "Pasta" }, { batchId });
+   * await Ad4mModel.transaction(perspective, async (tx) => {
+   *   await Recipe.create(perspective, { name: "Pasta" }, { batchId: tx.batchId });
    * });
    * ```
    */
@@ -2846,30 +2846,30 @@ WHERE ${whereConditions.join(' AND ')}
    * partial writes.
    *
    * @param perspective - The perspective to operate on
-   * @param fn - Async callback that receives a `batchId` string.
-   *             Pass this id to `save(batchId)`, `update(batchId)`,
-   *             `delete(batchId)`, etc.
+   * @param fn - Async callback that receives a `TransactionContext` object.
+   *             Pass `tx.batchId` to `save(tx.batchId)`, `update(tx.batchId)`,
+   *             `delete(tx.batchId)`, etc.
    * @returns The value returned by `fn`
    *
    * @example
    * ```typescript
-   * await Ad4mModel.transaction(perspective, async (batchId) => {
+   * await Ad4mModel.transaction(perspective, async (tx) => {
    *   const recipe = new Recipe(perspective);
    *   recipe.name = "Spaghetti";
-   *   await recipe.save(batchId);
+   *   await recipe.save(tx.batchId);
    *
    *   const old = await Recipe.query(perspective).where({ name: "Stale" }).run();
-   *   for (const r of old) await r.delete(batchId);
+   *   for (const r of old) await r.delete(tx.batchId);
    * });
    * // All changes committed atomically here
    * ```
    */
   static async transaction<R = void>(
     perspective: PerspectiveProxy,
-    fn: (batchId: string) => Promise<R>,
+    fn: (tx: { batchId: string }) => Promise<R>,
   ): Promise<R> {
     const batchId = await perspective.createBatch();
-    const result = await fn(batchId);
+    const result = await fn({ batchId });
     await perspective.commitBatch(batchId);
     return result;
   }
