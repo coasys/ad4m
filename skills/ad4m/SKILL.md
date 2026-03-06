@@ -195,10 +195,10 @@ Without this, `request_capability` and `generate_jwt` return `"Wallet is locked"
 ← { request_id: "...", code: "189217" }
 
 → generate_jwt(request_id: "...", code: "189217")
-← { success: true, token: "eyJ...", message: "JWT generated and stored." }
+← { token: "eyJ..." }
 ```
 
-The JWT is stored in the MCP session automatically — no need to pass it on subsequent calls.
+Include JWT as `Authorization: Bearer <token>` header on subsequent requests.
 
 For multi-user mode, use `signup` → `verify_email_code` → `login_email` instead.
 
@@ -328,4 +328,4 @@ mutation { perspectiveAddLink(
 ```
 
 **Auth header:** `Authorization: <admin-credential>` (single-user) or `Authorization: Bearer <jwt>` (multi-user)
-**Endpoint:** `http://localhost:12100/graphql` (configurable via `--gql-port`)
+**Endpoint:** `http://localhost:12000/graphql` (configurable via `--gql-port`)
