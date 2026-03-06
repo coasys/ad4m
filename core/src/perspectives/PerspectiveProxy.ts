@@ -2036,17 +2036,13 @@ export class PerspectiveProxy {
      * @param obj The template object
      */
     async subjectClassesByTemplate(obj: object): Promise<string[]> {
-        // SHACL-based lookup: try property matching first (more precise), fall back to className
-        try {
-            const match = await this.findClassByProperties(obj);
-            if (match) {
-                return [match];
-            }
-        } catch (e) {
-            console.warn('subjectClassesByTemplate: property matching failed:', e);
-        }
-
-        // Fall back to className lookup
+        // className lookup first: the @Model decorator sets a precise className on the prototype,
+        // so this is always more specific than property-set matching.
+        // Property matching alone has a superset-ambiguity problem: if DerivedModel adds
+        // properties to BaseModel, then DerivedModel's shape is a superset of BaseModel's
+        // property list, so findClassByProperties could wrongly return DerivedModel for a
+        // BaseModel instance (causing the derived SDNA constructor to fire and inject extra
+        // links into what should be a plain base instance).
         try {
             // @ts-ignore - className is added dynamically by decorators
             const className = obj.className || obj.constructor?.className || obj.constructor?.prototype?.className;
@@ -2058,6 +2054,16 @@ export class PerspectiveProxy {
             }
         } catch (e) {
             console.warn('subjectClassesByTemplate: className lookup failed:', e);
+        }
+
+        // Fall back to SHACL-based property matching for undecorated / dynamic objects
+        try {
+            const match = await this.findClassByProperties(obj);
+            if (match) {
+                return [match];
+            }
+        } catch (e) {
+            console.warn('subjectClassesByTemplate: property matching failed:', e);
         }
 
         return [];
