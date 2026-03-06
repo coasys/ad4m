@@ -146,7 +146,9 @@ ls -d ~/.ad4m 2>/dev/null && echo "EXISTS — ask human!" || echo "Safe to creat
 - **If `~/.ad4m` exists:** This is likely your human's existing Flux/AD4M data. **Do NOT overwrite it.** Ask your human how to proceed — they may want you to connect to their existing executor, or use a separate data path.
 - **If `~/.ad4m` does not exist:** Safe to run `ad4m-executor init` and use the default path.
 
-The default data path is `~/.ad4m` — use it unless there's a reason not to. Don't pass `--app-data-path` unless you need a non-default location.
+The default data path is `~/.ad4m` — use it unless there's a reason not to. If you need a non-default location:
+- Use `ad4m-executor init --data-path <path>` for initialization
+- Use `ad4m-executor run --app-data-path <path>` when starting the executor
 
 ### Mode 1: Agent-Only Executor (Recommended)
 
