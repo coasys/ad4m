@@ -5,6 +5,7 @@
 //! avoiding hardcoded type-specific predicates.
 
 use super::Ad4mMcpHandler;
+use crate::agent::AgentService;
 use crate::mcp::shacl;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -33,6 +34,15 @@ pub struct SubscribeToModelParams {
     /// Target value to match when filtering by predicate.
     /// Used together with `predicate` to narrow the subscription scope.
     pub target_value: Option<String>,
+}
+
+/// Parameters for getting a mention-watcher config
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct MentionWakerConfigParams {
+    /// Perspective UUID of the neighbourhood to watch for mentions.
+    pub perspective_id: String,
+    /// Override the agent name used in the query (defaults to profile username/given_name).
+    pub name_override: Option<String>,
 }
 
 // ============================================================================
@@ -125,5 +135,110 @@ impl Ad4mMcpHandler {
                 p.parent_address.as_ref().map(|a| format!(" under parent {}", a)).unwrap_or_default()
             ),
         }).to_string()
+    }
+
+    /// Generate a waker subscription config that watches for @mentions of this agent
+    #[tool(
+        description = "Generate a waker subscription config that watches for messages mentioning this agent by name or DID in a neighbourhood. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker process config. The query fires when a flux://body link is added whose target contains the agent's display name or DID key — i.e. when another participant mentions this agent. When woken, read recent messages in the neighbourhood to find and respond to the mention. Returns two subscription configs: one for DID-based mentions, one for name-based mentions. If name_override is not provided, uses the agent's profile username or given_name."
+    )]
+    pub async fn get_mention_waker_config(
+        &self,
+        params: Parameters<MentionWakerConfigParams>,
+    ) -> String {
+        let token = self.get_auth_token().await.unwrap_or_default();
+
+        // Resolve agent DID
+        let agent = match AgentService::get_agent_for_context(
+            &crate::agent::AgentContext::from_auth_token(token.clone()),
+        ) {
+            Ok(a) => a,
+            Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
+        };
+
+        let did = agent.did.clone();
+
+        // Extract the base58 key portion of the DID (after "did:key:").
+        // This is URL-safe and appears unencoded in flux://body targets.
+        let did_key = did
+            .strip_prefix("did:key:")
+            .unwrap_or(&did)
+            .to_string();
+
+        // Resolve display name from profile or override
+        let name = if let Some(ref override_name) = params.0.name_override {
+            override_name.clone()
+        } else {
+            // Try profile links: sioc://has_username first, then sioc://has_given_name
+            let mut resolved = String::new();
+            if let Some(ref perspective) = agent.perspective {
+                for link in &perspective.links {
+                    if link.data.source == "flux://profile" {
+                        let pred = link.data.predicate.as_deref().unwrap_or("");
+                        if pred == "sioc://has_username" && resolved.is_empty() {
+                            resolved = Self::resolve_literal_value(&link.data.target);
+                        }
+                        if pred == "sioc://has_given_name" && resolved.is_empty() {
+                            resolved = Self::resolve_literal_value(&link.data.target);
+                        }
+                    }
+                }
+            }
+            resolved
+        };
+
+        let perspective_id = &params.0.perspective_id;
+
+        // Build mention queries.
+        // flux://body targets contain URL-encoded JSON like:
+        //   literal://json:{"author":"did:key:...","data":"Hey Marvin, ...","proof":{...}}
+        // The base58 DID suffix and the agent's name are unencoded and searchable via CONTAINS.
+        let did_query = format!(
+            "SELECT * FROM link WHERE predicate = 'flux://body' AND target CONTAINS '{}'",
+            did_key
+        );
+
+        let name_query = if !name.is_empty() {
+            Some(format!(
+                "SELECT * FROM link WHERE predicate = 'flux://body' AND target CONTAINS '{}'",
+                name
+            ))
+        } else {
+            None
+        };
+
+        let did_sub_id = format!("mention-did-{}", &did_key[..12.min(did_key.len())]);
+        let name_sub_id = if !name.is_empty() {
+            format!("mention-name-{}", name.to_lowercase().replace(' ', "-"))
+        } else {
+            String::new()
+        };
+
+        let mut subscriptions = vec![json!({
+            "id": did_sub_id,
+            "perspective": perspective_id,
+            "query": did_query,
+        })];
+
+        if let Some(ref nq) = name_query {
+            subscriptions.push(json!({
+                "id": name_sub_id,
+                "perspective": perspective_id,
+                "query": nq,
+            }));
+        }
+
+        json!({
+            "did": did,
+            "name": name,
+            "perspective_id": perspective_id,
+            "subscriptions": subscriptions,
+            "message": format!(
+                "Add these {} subscription(s) to your waker config to be woken when mentioned by {} or DID in perspective {}. Restart the waker after updating the config.",
+                subscriptions.len(),
+                if name.is_empty() { "DID only".to_string() } else { format!("name '{}' ", name) },
+                perspective_id
+            ),
+        })
+        .to_string()
     }
 }

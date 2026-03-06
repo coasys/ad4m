@@ -157,6 +157,67 @@ async function startWaker(config) {
   };
 }
 
+// ── Mention query builder ──────────────────────────────────────────
+
+/**
+ * Build SurrealQL queries that fire when messages mention the given agent.
+ *
+ * Flux message bodies are stored as flux://body links whose target is a
+ * URL-encoded JSON literal:
+ *   literal://json:{"author":"did:key:...","data":"Hey Marvin, ...","proof":{...}}
+ *
+ * The base58 DID key suffix and the agent's display name are URL-safe and
+ * appear unencoded, so SurrealDB CONTAINS works on them directly.
+ *
+ * @param {string} did     - Full DID, e.g. "did:key:z6MksZb..."
+ * @param {string} name    - Display name, e.g. "Marvin"
+ * @returns {{ didQuery: string, nameQuery: string|null }}
+ */
+function buildMentionQueries(did, name) {
+  // Strip "did:key:" prefix — the base58 suffix is URL-safe and unencoded in targets
+  const didKey = did.startsWith("did:key:") ? did.slice("did:key:".length) : did;
+
+  const didQuery =
+    `SELECT * FROM link WHERE predicate = 'flux://body' AND target CONTAINS '${didKey}'`;
+
+  const nameQuery = name
+    ? `SELECT * FROM link WHERE predicate = 'flux://body' AND target CONTAINS '${name}'`
+    : null;
+
+  return { didQuery, nameQuery };
+}
+
+/**
+ * Build waker subscription config entries for mention tracking.
+ *
+ * @param {string} did           - Agent DID
+ * @param {string} name          - Display name (may be empty)
+ * @param {string} perspectiveId - Neighbourhood perspective UUID
+ * @returns {Array<{id: string, perspective: string, query: string}>}
+ */
+function buildMentionSubscriptions(did, name, perspectiveId) {
+  const { didQuery, nameQuery } = buildMentionQueries(did, name);
+  const didKey = did.startsWith("did:key:") ? did.slice("did:key:".length) : did;
+
+  const subs = [
+    {
+      id: `mention-did-${didKey.slice(0, 12)}`,
+      perspective: perspectiveId,
+      query: didQuery,
+    },
+  ];
+
+  if (nameQuery && name) {
+    subs.push({
+      id: `mention-name-${name.toLowerCase().replace(/\s+/g, "-")}`,
+      perspective: perspectiveId,
+      query: nameQuery,
+    });
+  }
+
+  return subs;
+}
+
 // ── CLI ────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
@@ -189,6 +250,20 @@ Requires @coasys/ad4m ^0.12.0
 
 Usage:
   node ad4m-waker.js --config <path>
+  node ad4m-waker.js --setup-mentions --perspective <uuid> [--config <path>] [--name <name>] [--executor-url <url>] [--token <tok>]
+
+Modes:
+  --config <path>            Run the waker using the given config file (normal mode).
+  --setup-mentions           Auto-generate mention subscriptions for a neighbourhood
+                             and optionally append them to a config file.
+
+Options for --setup-mentions:
+  --perspective <uuid>       Neighbourhood perspective UUID to watch (required).
+  --config <path>            If provided, append new subscriptions to this config file.
+                             Otherwise, print the subscription JSON to stdout.
+  --name <name>              Override the display name used in the query (default: profile name).
+  --executor-url <url>       AD4M executor WebSocket URL (default: ws://localhost:12100/graphql).
+  --token <tok>              AD4M capability token (default: none).
 
 Config file format (JSON):
   {
@@ -202,10 +277,92 @@ Config file format (JSON):
         "id": "flux-messages",
         "perspective": "perspective-uuid",
         "query": "SELECT * FROM link WHERE source = 'literal://string:channel-id' AND predicate = 'ad4m://has_child'"
+      },
+      {
+        "id": "mention-did-z6MksZbUemc",
+        "perspective": "perspective-uuid",
+        "query": "SELECT * FROM link WHERE predicate = 'flux://body' AND target CONTAINS 'z6MksZbUemcXmxjUeez8RSAbg7jkMFwkpSRRe5nLDKwDuATB'"
+      },
+      {
+        "id": "mention-name-marvin",
+        "perspective": "perspective-uuid",
+        "query": "SELECT * FROM link WHERE predicate = 'flux://body' AND target CONTAINS 'Marvin'"
       }
     ]
   }
 `);
+    process.exit(0);
+  }
+
+  // ── Setup mode: add mention subscriptions for a neighbourhood ────
+  if (args["setup-mentions"]) {
+    const executorUrl = args["executor-url"] || "ws://localhost:12100/graphql";
+    const token = args.token || "";
+    const perspectiveId = args.perspective;
+    const nameOverride = args.name || null;
+    const configPath = args.config ? path.resolve(args.config) : null;
+
+    if (!perspectiveId) {
+      console.error("Error: --setup-mentions requires --perspective <uuid>");
+      process.exit(1);
+    }
+
+    const client = createAd4mClient(executorUrl, token);
+
+    // Fetch agent DID and profile name
+    const status = await client.agent.status();
+    const did = status.did;
+
+    let name = nameOverride;
+    if (!name) {
+      try {
+        const agentExpr = await client.agent.me();
+        const links = agentExpr?.perspective?.links || [];
+        for (const link of links) {
+          if (link.data.source === "flux://profile") {
+            if (link.data.predicate === "sioc://has_username" && !name) {
+              name = link.data.target.replace(/^literal:\/\/string:/, "");
+            }
+            if (link.data.predicate === "sioc://has_given_name" && !name) {
+              name = link.data.target.replace(/^literal:\/\/string:/, "");
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("[setup] Could not fetch profile name:", e.message);
+      }
+    }
+
+    const newSubs = buildMentionSubscriptions(did, name || "", perspectiveId);
+
+    console.log(`[setup] Agent DID : ${did}`);
+    console.log(`[setup] Agent name: ${name || "(none)"}`);
+    console.log(`[setup] Perspective: ${perspectiveId}`);
+    console.log(`[setup] Generated ${newSubs.length} subscription(s):`);
+    for (const s of newSubs) {
+      console.log(`  ${s.id}: ${s.query}`);
+    }
+
+    if (configPath) {
+      let config = { subscriptions: [] };
+      if (fs.existsSync(configPath)) {
+        config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+        config.subscriptions = config.subscriptions || [];
+      }
+
+      // Merge — skip duplicates by id
+      const existingIds = new Set(config.subscriptions.map((s) => s.id));
+      const toAdd = newSubs.filter((s) => !existingIds.has(s.id));
+      config.subscriptions.push(...toAdd);
+
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+      console.log(`[setup] ${toAdd.length} subscription(s) added to ${configPath}`);
+      console.log("[setup] Restart the waker to activate.");
+    } else {
+      console.log("\nAdd these to your waker config subscriptions array:");
+      console.log(JSON.stringify(newSubs, null, 2));
+    }
+
     process.exit(0);
   }
 
@@ -239,4 +396,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { startWaker };
+module.exports = { startWaker, buildMentionQueries, buildMentionSubscriptions };
