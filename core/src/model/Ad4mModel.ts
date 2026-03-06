@@ -276,6 +276,7 @@ function buildPropertiesQuery(properties?: string[]): string {
 
 function buildWhereQuery(where: Where = {}): string {
   // Constrains the query to instances that match the provided where conditions
+  // 'id' maps to the Prolog 'Base' variable (the base expression of the instance).
 
   function formatValue(value) {
     // Wrap strings in quotes
@@ -284,10 +285,10 @@ function buildWhereQuery(where: Where = {}): string {
 
   return (Object.entries(where) as [string, WhereCondition][])
     .map(([key, value]) => {
-      const isSpecial = ["base", "author", "timestamp"].includes(key);
+      const isSpecial = ["id", "author", "timestamp"].includes(key);
       const getter = `resolve_property(SubjectClass, Base, "${key}", Value${key}, _)`;
-      // const getter = `property_getter(SubjectClass, Base, "${key}", URI), literal_from_url(URI, V, _)`;
-      const field = capitalize(key);
+      // For 'id' the Prolog variable is always 'Base'
+      const field = key === "id" ? "Base" : capitalize(key);
 
       // Handle direct array values (for IN conditions)
       if (Array.isArray(value)) {
@@ -347,8 +348,22 @@ function buildCountQuery(count?: boolean): string {
 
 function buildOrderQuery(order?: Order): string {
   if (!order) return "SortedInstances = UnsortedInstances";
-  const [propertyName, direction] = Object.entries(order)[0];
-  return `sort_instances(UnsortedInstances, "${propertyName}", "${direction}", SortedInstances)`;
+  const entries = Object.entries(order);
+  if (entries.length === 1) {
+    const [propertyName, direction] = entries[0];
+    return `sort_instances(UnsortedInstances, "${propertyName}", "${direction}", SortedInstances)`;
+  }
+  // Multi-field sort: sort from least-significant to most-significant key
+  // so that the final (primary) sort preserves secondary-key ordering for equal values.
+  // The merge_sort implementation is stable (equal elements keep original order).
+  const clauses: string[] = [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const [propertyName, direction] = entries[i];
+    const inputVar = i === entries.length - 1 ? "UnsortedInstances" : `MultiSortIntermediate${i + 1}`;
+    const outputVar = i === 0 ? "SortedInstances" : `MultiSortIntermediate${i}`;
+    clauses.push(`sort_instances(${inputVar}, "${propertyName}", "${direction}", ${outputVar})`);
+  }
+  return clauses.join(",\n      ");
 }
 
 function buildOffsetQuery(offset?: number): string {
@@ -1242,6 +1257,25 @@ export class Ad4mModel {
         await ctor.hydrateFromLinks(this, links, metadata, this._perspective, requestedProperties);
       }
 
+      // Populate reverse relation fields (belongsToOne / belongsToMany) as string IDs.
+      const allRelsMeta = getRelationsMetadata(ctor as any);
+      const requestedProps = opts?.properties && opts.properties.length > 0 ? new Set(opts.properties) : null;
+      for (const [relName, relMeta] of Object.entries(allRelsMeta)) {
+        if (relMeta.kind !== 'belongsToOne' && relMeta.kind !== 'belongsToMany') continue;
+        if (requestedProps && !requestedProps.has(relName)) continue;
+        const reverseLinks = await this._perspective.get(
+          new LinkQuery({ predicate: relMeta.predicate, target: this._id })
+        );
+        const sourceIds = reverseLinks
+          .filter((l) => l.data.target === this._id)
+          .map((l) => l.data.source);
+        if (relMeta.kind === 'belongsToOne') {
+          (this as any)[relName] = sourceIds.length > 0 ? sourceIds[sourceIds.length - 1] : null;
+        } else {
+          (this as any)[relName] = sourceIds;
+        }
+      }
+
       // Evaluate SurrealQL getters
       await ctor.evaluateCustomGettersForInstance(this, this._perspective, metadata);
 
@@ -1380,6 +1414,94 @@ export class Ad4mModel {
           : undefined;
       const nestedInclude: IncludeMap | undefined = subQuery?.include;
 
+      // ── Reverse relations (belongsToOne / belongsToMany) ──────────────────
+      // The link goes target→instance, so we query backwards:
+      //   predicate = meta.predicate, target = inst.id  →  source is the related id
+      if (meta.kind === 'belongsToOne' || meta.kind === 'belongsToMany') {
+        // Per-instance reverse lookup (can't batch easily across instances)
+        for (const inst of instances) {
+          const reverseLinks = await perspective.get(
+            new LinkQuery({ predicate: meta.predicate, target: inst.id })
+          );
+          // Defensive filter: perspective.get may return extra results; ensure
+          // we only use links that genuinely point to this instance.
+          const sourceIds = reverseLinks
+            .filter(l => l.data.target === inst.id)
+            .map(l => l.data.source);
+
+          if (meta.kind === 'belongsToOne') {
+            if (sourceIds.length === 0) {
+              (inst as any)[relName] = null;
+              continue;
+            }
+            const sourceId = sourceIds[sourceIds.length - 1]; // latest-wins
+            try {
+              const related = new TargetClass(perspective, sourceId);
+              await related.get();
+              (inst as any)[relName] = related;
+            } catch {
+              (inst as any)[relName] = null;
+            }
+          } else {
+            // belongsToMany — return array of hydrated instances
+            let hydrated: Ad4mModel[] = [];
+
+            // If there's a where/order sub-query, delegate to findAll for filtering
+            if (subQuery && (subQuery.where || subQuery.order || subQuery.properties)) {
+              const whereWithIds: Record<string, any> = {
+                id: sourceIds,
+                ...(subQuery.where ?? {}),
+              };
+              hydrated = await TargetClass.findAll(perspective, {
+                where: whereWithIds as any,
+                ...(subQuery.order && { order: subQuery.order as any }),
+                ...(subQuery.properties && { properties: subQuery.properties }),
+              });
+            } else {
+              await Promise.all(sourceIds.map(async (sid) => {
+                try {
+                  const related = new TargetClass(perspective, sid);
+                  await related.get(
+                    subQuery?.properties ? { properties: subQuery.properties } : undefined
+                  );
+                  hydrated.push(related);
+                } catch { /* skip */ }
+              }));
+            }
+
+            // Apply order (client-side, if not already handled by findAll above)
+            if (subQuery?.order && !(subQuery.where || subQuery.properties)) {
+              const orderEntries = Object.entries(subQuery.order);
+              hydrated = hydrated.sort((a, b) => {
+                for (const [field, dir] of orderEntries) {
+                  const av = String((a as any)[field] ?? '');
+                  const bv = String((b as any)[field] ?? '');
+                  const diff = av.localeCompare(bv);
+                  if (diff !== 0) return dir === 'DESC' ? -diff : diff;
+                }
+                return 0;
+              });
+            }
+
+            // Apply offset and limit
+            if (subQuery?.offset != null || subQuery?.limit != null) {
+              const start = subQuery.offset ?? 0;
+              const end = subQuery.limit != null ? start + subQuery.limit : undefined;
+              hydrated = hydrated.slice(start, end);
+            }
+
+            (inst as any)[relName] = hydrated;
+
+            // Recurse for nested includes
+            if (nestedInclude && hydrated.length > 0) {
+              await TargetClass.hydrateRelations(hydrated, perspective, nestedInclude);
+            }
+          }
+        }
+        continue; // skip the forward-relation path below
+      }
+
+      // ── Forward relations (hasMany / hasOne) ──────────────────────────────
       // Collect all unique URIs across all instances for batch-friendly lookup
       const uriSet = new Set<string>();
       for (const inst of instances) {
@@ -1394,45 +1516,23 @@ export class Ad4mModel {
 
       if (uriSet.size === 0) continue;
 
-      // Hydrate related instances.
-      // When a sub-query specifies where/order/properties we delegate to findAll
-      // (which can filter and sort server-side). Otherwise fetch URIs individually.
+      // Hydrate related instances using findAll to ensure conformance checking.
+      // findAll validates model membership via graph traversal (required predicates / flags),
+      // so non-conforming linked URIs are silently dropped — matching the documented behaviour.
       const hydrated = new Map<string, Ad4mModel>();
 
-      const hasSubQueryFilters = subQuery && (
-        subQuery.where || subQuery.order || subQuery.properties ||
-        subQuery.limit != null || subQuery.offset != null
-      );
-
-      if (hasSubQueryFilters) {
-        // Merge the linked-URI set with any additional where conditions
-        const whereWithIds: Record<string, any> = {
-          id: Array.from(uriSet),
-          ...(subQuery!.where ?? {}),
-        };
-        const results = await TargetClass.findAll(perspective, {
-          where: whereWithIds as any,
-          ...(subQuery!.order && { order: subQuery!.order as any }),
-          ...(subQuery!.properties && { properties: subQuery!.properties }),
-        });
-        for (const result of results) {
-          hydrated.set(result.id, result);
-        }
-      } else {
-        // Simple fetch: hydrate each URI individually
-        await Promise.all(
-          Array.from(uriSet).map(async (uri) => {
-            try {
-              const related = new TargetClass(perspective, uri);
-              await related.get(
-                subQuery?.properties ? { properties: subQuery.properties } : undefined,
-              );
-              hydrated.set(uri, related);
-            } catch (e) {
-              console.warn(`include: failed to hydrate "${relName}" URI ${uri}:`, e);
-            }
-          }),
-        );
+      const whereWithIds: Record<string, any> = {
+        id: Array.from(uriSet),
+        ...(subQuery?.where ?? {}),
+      };
+      const fetchQuery: any = {
+        where: whereWithIds,
+        ...(subQuery?.order && { order: subQuery.order }),
+        ...(subQuery?.properties && { properties: subQuery.properties }),
+      };
+      const results = await TargetClass.findAll(perspective, fetchQuery);
+      for (const result of results) {
+        hydrated.set(result.id, result);
       }
 
       // Replace raw URIs with hydrated instances on each parent instance
@@ -1639,18 +1739,18 @@ WHERE ${whereConditions.join(' AND ')}
     const conditions: string[] = [];
 
     for (const [propertyName, condition] of Object.entries(where)) {
-      // Check if this is a special field (base, author, timestamp)
+      // Check if this is a special field (id, author, timestamp)
       // Note: author and timestamp filtering is done in JavaScript after query
-      const isSpecial = ['base', 'author', 'timestamp'].includes(propertyName);
+      const isSpecial = ['id', 'author', 'timestamp'].includes(propertyName);
 
       if (isSpecial) {
         // Skip author and timestamp - they'll be filtered in JavaScript
-        // Only handle 'base' (which maps to 'uri') here
+        // Only handle 'id' (which maps to 'uri') here
         if (propertyName === 'author' || propertyName === 'timestamp') {
           continue; // Skip - will be filtered post-query
         }
 
-        const columnName = 'uri'; // base maps to uri in node table
+        const columnName = 'uri'; // id maps to uri in node table
 
         // Handle base/uri field directly
         if (Array.isArray(condition)) {
@@ -1691,7 +1791,54 @@ WHERE ${whereConditions.join(' AND ')}
           conditions.push(`${columnName} = ${this.formatSurrealValue(condition)}`);
         }
       } else {
-        // Handle regular properties via graph traversal
+        // Handle regular properties via graph traversal.
+        // IMPORTANT: Check relation metadata first — @BelongsToOne / @BelongsToMany
+        // also write into propertyRegistry, but the link direction is inverted.
+        // If we matched the property path they would get a forward ->link filter
+        // which is wrong for belongs-to relations.
+        const allRelations = getRelationsMetadata(this);
+        const relMeta = allRelations[propertyName];
+        const isBelongs = relMeta?.kind === 'belongsToOne' || relMeta?.kind === 'belongsToMany';
+
+        if (relMeta) {
+          const predicate = escapeSurrealString(relMeta.predicate);
+
+          if (Array.isArray(condition)) {
+            const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
+            if (isBelongs) {
+              conditions.push(`count(<-link[WHERE perspective = $perspective AND predicate = '${predicate}' AND in.uri IN [${formattedValues}]]) > 0`);
+            } else {
+              conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND out.uri IN [${formattedValues}]]) > 0`);
+            }
+          } else if (typeof condition === 'object' && condition !== null) {
+            const ops = condition as any;
+            if (ops.not !== undefined) {
+              if (Array.isArray(ops.not)) {
+                const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
+                if (isBelongs) {
+                  conditions.push(`count(<-link[WHERE perspective = $perspective AND predicate = '${predicate}' AND in.uri IN [${formattedValues}]]) = 0`);
+                } else {
+                  conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND out.uri IN [${formattedValues}]]) = 0`);
+                }
+              } else {
+                if (isBelongs) {
+                  conditions.push(`count(<-link[WHERE perspective = $perspective AND predicate = '${predicate}' AND in.uri = ${this.formatSurrealValue(ops.not)}]) = 0`);
+                } else {
+                  conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND out.uri = ${this.formatSurrealValue(ops.not)}]) = 0`);
+                }
+              }
+            }
+          } else {
+            // Simple equality
+            if (isBelongs) {
+              conditions.push(`count(<-link[WHERE perspective = $perspective AND predicate = '${predicate}' AND in.uri = ${this.formatSurrealValue(condition)}]) > 0`);
+            } else {
+              conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND out.uri = ${this.formatSurrealValue(condition)}]) > 0`);
+            }
+          }
+          continue;
+        }
+
         const propMeta = metadata.properties[propertyName];
         if (!propMeta) continue; // Skip if property not found in metadata
 
@@ -1770,19 +1917,19 @@ WHERE ${whereConditions.join(' AND ')}
     const conditions: string[] = [];
     
     for (const [propertyName, condition] of Object.entries(where)) {
-      // Check if this is a special field (base, author, timestamp)
+      // Check if this is a special field (id, author, timestamp)
       // Note: author and timestamp filtering is done in JavaScript after GROUP BY
       // because they need to be computed from the grouped links first
-      const isSpecial = ['base', 'author', 'timestamp'].includes(propertyName);
+      const isSpecial = ['id', 'author', 'timestamp'].includes(propertyName);
       
       if (isSpecial) {
         // Skip author and timestamp - they'll be filtered in JavaScript
-        // Only handle 'base' (which maps to 'source') here
+        // Only handle 'id' (which maps to 'source') here
         if (propertyName === 'author' || propertyName === 'timestamp') {
           continue; // Skip - will be filtered post-query
         }
         
-        const columnName = 'source'; // base maps to source
+        const columnName = 'source'; // id maps to source
         
         // Handle base/source field directly
         if (Array.isArray(condition)) {
@@ -2097,8 +2244,14 @@ WHERE ${whereConditions.join(' AND ')}
             }
           }
           for (const collName of Object.keys(metadata.relations)) {
-            if (!requested.has(collName)) {
+            if (!requested.has(collName) && !(query.include && collName in query.include)) {
               delete instance[collName];
+            }
+          }
+          // Also strip metadata fields unless explicitly requested
+          for (const metaField of ['author', 'createdAt', 'updatedAt'] as const) {
+            if (!requested.has(metaField)) {
+              delete instance[metaField];
             }
           }
         }
@@ -2108,7 +2261,37 @@ WHERE ${whereConditions.join(' AND ')}
         console.error(`Failed to process SurrealDB instance ${base}:`, error);
       }
     }
-    
+
+    // Populate reverse relation fields (belongsToOne / belongsToMany) as string IDs.
+    // These relations point FROM other nodes TO this instance, so they cannot be resolved
+    // from the node's own outgoing links fetched above. We do a reverse-link lookup here
+    // so that these fields are populated as IDs even without an explicit include.
+    const allRelsMeta = getRelationsMetadata(this as any);
+    const reverseRelEntries = Object.entries(allRelsMeta).filter(
+      ([relName, meta]) =>
+        (meta.kind === 'belongsToOne' || meta.kind === 'belongsToMany') &&
+        (requestedProperties.length === 0 || requestedProperties.includes(relName))
+    );
+    if (reverseRelEntries.length > 0 && instances.length > 0) {
+      await Promise.all(
+        instances.map(async (inst) => {
+          for (const [relName, relMeta] of reverseRelEntries) {
+            const reverseLinks = await perspective.get(
+              new LinkQuery({ predicate: relMeta.predicate, target: inst.id })
+            );
+            const sourceIds = reverseLinks
+              .filter((l) => l.data.target === inst.id)
+              .map((l) => l.data.source);
+            if (relMeta.kind === 'belongsToOne') {
+              (inst as any)[relName] = sourceIds.length > 0 ? sourceIds[sourceIds.length - 1] : null;
+            } else {
+              (inst as any)[relName] = sourceIds;
+            }
+          }
+        })
+      );
+    }
+
     // Evaluate custom getters for all instances (single pass)
     for (const instance of instances) {
       await this.evaluateCustomGettersForInstance(instance, perspective, metadata);
@@ -2160,30 +2343,34 @@ WHERE ${whereConditions.join(' AND ')}
       (query.limit !== undefined || query.offset !== undefined ? { timestamp: 'ASC' as 'ASC' } : null);
 
     if (effectiveOrder) {
-      const orderPropName = Object.keys(effectiveOrder)[0];
-      const orderDirection = Object.values(effectiveOrder)[0];
+      const orderEntries = Object.entries(effectiveOrder);
 
       filteredInstances.sort((a: any, b: any) => {
-        let aVal = a[orderPropName];
-        let bVal = b[orderPropName];
+        for (const [orderPropName, orderDirection] of orderEntries) {
+          let aVal = a[orderPropName];
+          let bVal = b[orderPropName];
 
-        // Handle undefined values - push them to the end
-        if (aVal === undefined && bVal === undefined) return 0;
-        if (aVal === undefined) return orderDirection === 'ASC' ? 1 : -1;
-        if (bVal === undefined) return orderDirection === 'ASC' ? -1 : 1;
+          // Handle undefined values - push them to the end
+          if (aVal === undefined && bVal === undefined) continue;
+          if (aVal === undefined) return orderDirection === 'ASC' ? 1 : -1;
+          if (bVal === undefined) return orderDirection === 'ASC' ? -1 : 1;
 
-        // Compare values
-        let comparison = 0;
-        if (typeof aVal === 'number' && typeof bVal === 'number') {
-          comparison = aVal - bVal;
-        } else if (typeof aVal === 'string' && typeof bVal === 'string') {
-          comparison = aVal.localeCompare(bVal);
-        } else {
-          // Convert to strings for comparison
-          comparison = String(aVal).localeCompare(String(bVal));
+          // Compare values
+          let comparison = 0;
+          if (typeof aVal === 'number' && typeof bVal === 'number') {
+            comparison = aVal - bVal;
+          } else if (typeof aVal === 'string' && typeof bVal === 'string') {
+            comparison = aVal.localeCompare(bVal);
+          } else {
+            comparison = String(aVal).localeCompare(String(bVal));
+          }
+
+          if (comparison !== 0) {
+            return orderDirection === 'DESC' ? -comparison : comparison;
+          }
+          // comparison === 0: continue to next sort field
         }
-
-        return orderDirection === 'DESC' ? -comparison : comparison;
+        return 0;
       });
     }
 
@@ -2312,6 +2499,9 @@ WHERE ${whereConditions.join(' AND ')}
     query: Query = {},
     useSurrealDB: boolean = true
   ): Promise<T[]> {
+    if (query.properties && query.properties.length === 0) {
+      throw new Error("properties[] must not be empty — omit the field to return all properties, or specify at least one field name");
+    }
     if (useSurrealDB) {
       const surrealQuery = await this.queryToSurrealQL(perspective, query);
       const result = await perspective.querySurrealDB(surrealQuery);
