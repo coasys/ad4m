@@ -7,11 +7,13 @@ use tokio::sync::{
     oneshot,
 };
 
+use crate::agent::AgentContext;
+
 use super::language_runtime::{LanguageOperation, LanguageRuntime, LanguageRuntimeRequest};
 
 /// Handle to a per-language runtime running in its own thread.
-/// Thin communication layer (like JsCoreHandle) that sends requests
-/// to a LanguageRuntime via a channel.
+/// Thin communication layer that sends requests to a LanguageRuntime
+/// via a channel.
 #[derive(Clone)]
 pub struct LanguageRuntimeHandle {
     pub language_address: String,
@@ -99,7 +101,20 @@ impl LanguageRuntimeHandle {
     }
 
     pub async fn execute(&self, script: String) -> Result<String, String> {
-        self.send(LanguageOperation::Execute(script)).await
+        self.send(LanguageOperation::Execute(
+            script,
+            AgentContext::main_agent(),
+        ))
+        .await
+    }
+
+    pub async fn execute_with_context(
+        &self,
+        script: String,
+        agent_context: AgentContext,
+    ) -> Result<String, String> {
+        self.send(LanguageOperation::Execute(script, agent_context))
+            .await
     }
 
     pub async fn load_module(&self, path: String) -> Result<(), String> {

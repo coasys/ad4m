@@ -4,5 +4,6 @@
     "hooks": "Hooking up models to the UI",
     "batch-operations": "Using Batch Operations",
     "ai": "Local AI inference with AD4M",
+    "mcp": "MCP Server (AI Agent Integration)",
     "cli": "Using the AD4M CLI"
 }

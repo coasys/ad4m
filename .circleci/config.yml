@@ -73,6 +73,9 @@ jobs:
           command: pnpm run build-deno-snapshot
           no_output_timeout: 30m
       - run:
+          name: Remove stale binaries (self-hosted runner incremental cache)
+          command: rm -f target/release/ad4m target/release/ad4m-executor
+      - run:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
           no_output_timeout: 30m
@@ -138,6 +141,24 @@ jobs:
           command: cd ./tests/js && ./email-verification-test-with-setup.sh
           no_output_timeout: 30m
 
+  integration-tests-mcp:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - setup_integration_test_environment
+      - run:
+          name: Kill any orphaned executors from previous runs
+          command: |
+            # MCP tests use ports 16000-16002 (mcp-http) and 16010-16012 (mcp-auth)
+            # plus port 3001 (MCP HTTP server). Clear all before starting.
+            for port in 16000 16001 16002 16010 16011 16012 3001; do
+              lsof -ti:$port | xargs -r kill -9 2>/dev/null || true
+            done
+      - run:
+          name: Run MCP integration tests
+          command: cd ./tests/js && pnpm run test-mcp
+          no_output_timeout: 30m
+
   integration-tests-cli:
     machine: true
     resource_class: coasys/marvin
@@ -172,5 +193,8 @@ workflows:
           requires:
             - build-and-test
       - integration-tests-email-verification:
+          requires:
+            - build-and-test
+      - integration-tests-mcp:
           requires:
             - build-and-test

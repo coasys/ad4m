@@ -32,7 +32,7 @@ and executes code that interfaces with Languages-protocol-like abstractions that
 protocols. This instance serves as the back-end that UIs and apps connect to, providing a unified, interoperable gateway to the user's digital world.
 
 At its core, **AD4M inverts the typical app-centric model**. Instead of apps owning your data and social graph, your AD4M instance owns them,
-running on your device (or a trusted host) and exposing a GraphQL API, wrapped by our JavaScript client library, for apps to query and interact with.
+running on your device (or a trusted host) and exposing a GraphQL API and an [MCP server](/developer-guides/mcp), for apps and AI agents alike to query and interact with.
 For example, a chat app might connect to `localhost:4000/graphql` to fetch messages stored in a Perspective, addressed via a Language like
 `QmXyz123://message789`. This local runtime attaches to existing Languages-say, `http` for web content or `solid` for semantic triples-executing
 their logic to read or write Expressions (data objects). Developers don't rewrite the web; they extend it, with AD4M harmonizing these connections

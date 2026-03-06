@@ -1,0 +1,24 @@
+{
+  "executorUrl": "ws://localhost:12100/graphql",
+  "token": "your-ad4m-admin-credential",
+  "wakeUrl": "http://localhost:18789/hooks/wake",
+  "wakeToken": "your-openclaw-wake-token",
+  "debounceMs": 2000,
+  "subscriptions": [
+    {
+      "id": "flux-all-messages",
+      "perspective": "your-neighbourhood-perspective-uuid",
+      "query": "SELECT * FROM link WHERE source = 'literal://string:your-channel-id' AND predicate = 'ad4m://has_child'"
+    },
+    {
+      "id": "mention-did-z6MksZbUemc",
+      "perspective": "your-neighbourhood-perspective-uuid",
+      "query": "SELECT * FROM link WHERE predicate = 'flux://body' AND target CONTAINS 'z6MksZbUemcXmxjUeez8RSAbg7jkMFwkpSRRe5nLDKwDuATB'"
+    },
+    {
+      "id": "mention-name-myagent",
+      "perspective": "your-neighbourhood-perspective-uuid",
+      "query": "SELECT * FROM link WHERE predicate = 'flux://body' AND target CONTAINS 'MyAgentName'"
+    }
+  ]
+}

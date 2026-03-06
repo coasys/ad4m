@@ -68,6 +68,9 @@ hex = "0.4.3"
 argon2 = { version = "0.5.0", features = ["simple"] }
 rand = "0.8.5"
 base64 = "0.21.0"
+rmcp = { version = "0.15.0", features = ["server", "transport-streamable-http-server"] }
+axum = "0.8"
+schemars = "1.0"
 clap = { version = "4.0.8", features = ["derive"] }
 fs_extra = "1.3.0"
 os_info = "3.7.0"
@@ -98,9 +101,9 @@ webbrowser = "0.8.12"
 holochain_cli_run_local_services = { version = "0.5.0-dev.12" }
 kitsune_p2p_types = { version = "0.5.0-dev.9" }
 kitsune2_api = "0.1.15"
-holochain = { version = "0.7.0-dev.10", default-features = false, features = ["test_utils", "transport-iroh",   "sqlite-encrypted", "metrics_influxive", "schema", "wasmer_sys"], git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys" }
-holochain_cli_bundle = { version = "0.7.0-dev.10", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys" }
-holochain_types = { version = "0.7.0-dev.10", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys" }
+holochain = { version = "0.7.0-dev.14", default-features = false, features = ["test_utils", "transport-iroh",   "sqlite-encrypted", "schema", "wasmer_sys"], git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.13-kitsune-0.4.0-dev3-coasys" }
+holochain_cli_bundle = { version = "0.7.0-dev.13", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.13-kitsune-0.4.0-dev3-coasys" }
+holochain_types = { version = "0.7.0-dev.13", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.13-kitsune-0.4.0-dev3-coasys" }
 lair_keystore_api = { version = "0.6.3", git = "https://github.com/coasys/lair.git", branch = "0.6.3-coasys" }
 sodoken = "=0.1.0"
 
