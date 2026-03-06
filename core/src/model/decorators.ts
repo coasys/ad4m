@@ -18,7 +18,8 @@ export interface PropertyMetadataEntry extends PropertyOptions {
 /** Metadata stored for each relation via @HasMany / @HasOne / @BelongsToOne / @BelongsToMany */
 export interface RelationMetadataEntry {
     predicate: string;
-    target: () => Ad4mModelLike;
+    /** Target model class thunk. Optional for untyped string collections. */
+    target?: () => Ad4mModelLike;
     kind: 'hasMany' | 'hasOne' | 'belongsToOne' | 'belongsToMany';
     /**
      * Maximum number of related instances.
@@ -26,6 +27,11 @@ export interface RelationMetadataEntry {
      */
     maxCount?: number;
     local?: boolean;
+    /**
+     * Custom SurrealQL getter to resolve the relation values.
+     * The expression can reference 'Base' which will be replaced with the instance's base expression.
+     */
+    getter?: string;
 }
 
 /** Registry of property metadata keyed by constructor → { propName → metadata } */
@@ -34,8 +40,6 @@ const propertyRegistry = new WeakMap<Function, Record<string, PropertyMetadataEn
 /** Registry of relation metadata keyed by constructor → { propName → metadata } */
 const relationRegistry = new WeakMap<Function, Record<string, RelationMetadataEntry>>();
 
-/** Registry of collection metadata keyed by constructor → { propName → CollectionOptions } */
-const collectionRegistry = new WeakMap<Function, Record<string, CollectionOptions>>();
 
 /**
  * Retrieve property metadata for a given class constructor.
@@ -75,26 +79,6 @@ export function getRelationsMetadata(ctor: Function): Record<string, RelationMet
     return result;
 }
 
-/**
- * Retrieve collection metadata for a given class constructor.
- * Walks the prototype chain so subclass decorators compose with parent decorators.
- * @deprecated Use getRelationsMetadata() for typed relation info. This function
- *             returns raw CollectionOptions used internally by SDNA/SHACL generators.
- */
-export function getCollectionsMetadata(ctor: Function): Record<string, CollectionOptions> {
-    const result: Record<string, CollectionOptions> = {};
-    const chain: Function[] = [];
-    let current = ctor;
-    while (current && current !== Object) {
-        chain.unshift(current);
-        current = Object.getPrototypeOf(current);
-    }
-    for (const c of chain) {
-        const meta = collectionRegistry.get(c);
-        if (meta) Object.assign(result, meta);
-    }
-    return result;
-}
 
 /**
  * Programmatically register property metadata for a given constructor.
@@ -110,17 +94,16 @@ export function setPropertyRegistryEntry(
 }
 
 /**
- * Programmatically register collection metadata for a given constructor.
+ * Programmatically register relation metadata for a given constructor.
  * Used by `fromJSONSchema()` and other dynamic model builders.
- * @deprecated Prefer registering via relation decorators.
  */
-export function setCollectionRegistryEntry(
+export function setRelationRegistryEntry(
     ctor: Function,
-    collName: string,
-    meta: CollectionOptions,
+    relName: string,
+    meta: RelationMetadataEntry,
 ): void {
-    if (!collectionRegistry.has(ctor)) collectionRegistry.set(ctor, {});
-    collectionRegistry.get(ctor)![collName] = meta;
+    if (!relationRegistry.has(ctor)) relationRegistry.set(ctor, {});
+    relationRegistry.get(ctor)![relName] = meta;
 }
 
 /**
@@ -401,94 +384,7 @@ export function Flag(opts: FlagOptions) {
     };
 }
 
-export interface CollectionOptions {
-    /**
-     * The predicate of the property. All properties must have this option.
-     */
-    through: string;
 
-    /**
-     * Custom SurrealQL getter to resolve the collection values. Use this for custom graph traversals.
-     * The expression can reference 'Base' which will be replaced with the instance's base expression.
-     * Example: "(<-link[WHERE predicate = 'flux://has_reply'].in.uri)"
-     */
-    getter?: string;
-
-    /**
-     * Indicates whether the property is stored locally in the perspective and not in the network. Useful for properties that are not meant to be shared with the network.
-     */
-    local?: boolean;
-}
-
-/**
- * Decorator for defining collections on model classes.
- * 
- * @category Decorators
- * 
- * @description
- * Defines a property that represents a collection of values linked to the model instance.
- * Collections are always arrays and support operations for adding, removing, and setting values.
- * 
- * For each collection property, the following methods are automatically generated:
- * - `addX(value)` - Add a value to the collection
- * - `removeX(value)` - Remove a value from the collection
- * - `setX(values)` - Replace all values in the collection
- * 
- * Where X is the capitalized property name.
- * 
- * Collections can be filtered using a custom SurrealQL getter.
- * 
- * @example
- * ```typescript
- * class Recipe extends Ad4mModel {
- *   // Basic collection of ingredients
- *   @Collection({ 
- *     through: "recipe://ingredient" 
- *   })
- *   ingredients: string[] = [];
- * 
- *   // Collection with custom SurrealQL getter
- *   @Collection({
- *     through: "recipe://entries",
- *     getter: "(<-link[WHERE predicate = 'recipe://has_ingredient'].in.uri)"
- *   })
- *   resolvedIngredients: string[] = [];
- * 
- *   // Local-only collection not shared with network
- *   @Collection({
- *     through: "recipe://note",
- *     local: true
- *   })
- *   privateNotes: string[] = [];
- * }
- * 
- * // Using the generated methods:
- * const recipe = new Recipe(perspective);
- * await recipe.addIngredients("ingredient://flour");
- * await recipe.removeIngredients("ingredient://sugar");
- * await recipe.setIngredients(["ingredient://butter", "ingredient://eggs"]);
- * ```
- * 
- * @param {CollectionOptions} opts - Collection configuration
- * @param {string} opts.through - The predicate URI for collection links
- * @param {string} [opts.getter] - Custom SurrealQL getter expression
- * @param {boolean} [opts.local] - Whether collection links are stored locally only
- */
-function Collection(opts: CollectionOptions) {
-    return function <T>(target: T, key: keyof T) {
-        // Write to WeakMap registry
-        const ctor = (target as any).constructor;
-        if (!collectionRegistry.has(ctor)) collectionRegistry.set(ctor, {});
-        collectionRegistry.get(ctor)![key as string] = opts;
-
-        const value = key as string
-        target[`add${capitalize(value)}`] = () => {}
-        target[`remove${capitalize(value)}`] = () => {}
-        target[`set${capitalize(value)}`] = () => {}
-
-        Object.defineProperty(target, key, {configurable: true, writable: true});
-    };
-}
 
 export interface ModelConfig {
     /**
@@ -647,11 +543,14 @@ export function Model(opts: ModelConfig) {
             }
 
             let collectionsCode = []
-            let collections = getCollectionsMetadata(target)
+            const allRelationsMeta = getRelationsMetadata(target)
+            const collections = Object.fromEntries(
+                Object.entries(allRelationsMeta).filter(([, r]) => r.kind === 'hasMany' || r.kind === 'belongsToMany')
+            )
             for(let collection in collections) {
                 let collectionCode = `collection(${uuid}, "${collection}").\n`
 
-                let { through, local} = collections[collection]
+                let { predicate: through, local} = collections[collection]
 
                 if(through) {
                     collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
@@ -713,7 +612,10 @@ export function Model(opts: ModelConfig) {
             // Determine namespace from first property or collection, or use default
             let namespace = "ad4m://";
             const properties = getPropertiesMetadata(target);
-            const collections = getCollectionsMetadata(target);
+            const allRelationsMeta2 = getRelationsMetadata(target);
+            const collections = Object.fromEntries(
+                Object.entries(allRelationsMeta2).filter(([, r]) => r.kind === 'hasMany' || r.kind === 'belongsToMany')
+            );
             
             // Try properties first
             if (Object.keys(properties).length > 0) {
@@ -729,8 +631,8 @@ export function Model(opts: ModelConfig) {
             // Fall back to collections if no properties
             else if (Object.keys(collections).length > 0) {
                 const firstColl = collections[Object.keys(collections)[0]];
-                if (firstColl.through) {
-                    const match = firstColl.through.match(/^([^:]+:\/\/)/);
+                if (firstColl.predicate) {
+                    const match = firstColl.predicate.match(/^([^:]+:\/\/)/);
                     if (match) {
                         namespace = match[1];
                     }
@@ -870,11 +772,11 @@ export function Model(opts: ModelConfig) {
             for (const collName in collections) {
                 const collMeta = collections[collName];
                 
-                if (!collMeta.through) continue;
+                if (!collMeta.predicate) continue;
                 
                 const collShape: SHACLPropertyShape = {
                     name: collName, // Collection name for generating named URIs
-                    path: collMeta.through,
+                    path: collMeta.predicate,
                     // Collections have no maxCount (unlimited)
                     // minCount defaults to 0 (optional)
                 };
@@ -892,7 +794,7 @@ export function Model(opts: ModelConfig) {
                 collShape.adder = [{
                     action: "addLink",
                     source: "this",
-                    predicate: collMeta.through,
+                    predicate: collMeta.predicate,
                     target: "value",
                     ...(collMeta.local && { local: true })
                 }];
@@ -901,7 +803,7 @@ export function Model(opts: ModelConfig) {
                 collShape.remover = [{
                     action: "removeLink",
                     source: "this",
-                    predicate: collMeta.through,
+                    predicate: collMeta.predicate,
                     target: "value",
                     ...(collMeta.local && { local: true })
                 }];
@@ -1165,16 +1067,21 @@ export function HasMany(
             target: opts.target,
             kind: 'hasMany',
             local: opts.local,
+            ...(opts.getter && { getter: opts.getter }),
         };
 
-        // --- also register as a collection so existing SDNA/SHACL generators work ---
-        const collectionOpts: CollectionOptions = {
-            through: opts.through,
-            local: opts.local,
-            getter: opts.getter,
+        // Add prototype methods for add/remove/set
+        const collKey = key as string;
+        (target as any)[`add${capitalize(collKey)}`] = async function(this: any, arg: any) {
+            return (this as any).addRelationValue(collKey, arg);
         };
-        // Delegate to Collection decorator logic
-        Collection(collectionOpts)(target, key);
+        (target as any)[`remove${capitalize(collKey)}`] = async function(this: any, arg: any) {
+            return (this as any).removeRelationValue(collKey, arg);
+        };
+        (target as any)[`set${capitalize(collKey)}`] = async function(this: any, arg: any) {
+            return (this as any).setRelationValues(collKey, arg);
+        };
+        Object.defineProperty(target, collKey, { configurable: true, writable: true });
     };
 }
 
@@ -1322,15 +1229,21 @@ export function BelongsToMany(
             target: opts.target,
             kind: 'belongsToMany',
             local: opts.local,
+            ...(opts.getter && { getter: opts.getter }),
         };
 
-        // Register as a collection (read-only — owning side manages links)
-        const collectionOpts: CollectionOptions = {
-            through: opts.through,
-            local: opts.local,
-            getter: opts.getter,
+        // Add prototype methods for add/remove/set
+        const collKey = key as string;
+        (target as any)[`add${capitalize(collKey)}`] = async function(this: any, arg: any) {
+            return (this as any).addRelationValue(collKey, arg);
         };
-        Collection(collectionOpts)(target, key);
+        (target as any)[`remove${capitalize(collKey)}`] = async function(this: any, arg: any) {
+            return (this as any).removeRelationValue(collKey, arg);
+        };
+        (target as any)[`set${capitalize(collKey)}`] = async function(this: any, arg: any) {
+            return (this as any).setRelationValues(collKey, arg);
+        };
+        Object.defineProperty(target, collKey, { configurable: true, writable: true });
     };
 }
 

@@ -11,7 +11,7 @@ import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 import { AIClient } from "../ai/AIClient";
 import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
 import { gql } from "@apollo/client/core";
-import { getPropertiesMetadata, getCollectionsMetadata } from "../model/decorators";
+import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
 import { AllInstancesResult } from "../model/Ad4mModel";
 import { escapeSurrealString } from "../utils";
 import { SHACLShape } from "../shacl/SHACLShape";
@@ -1952,7 +1952,11 @@ export class PerspectiveProxy {
             properties = Object.keys(obj).filter(key => !Array.isArray((obj as any)[key]));
         }
 
-        const registryRelations = ctor ? getCollectionsMetadata(ctor) : {};
+        const registryRelations = ctor
+            ? Object.fromEntries(
+                Object.entries(getRelationsMetadata(ctor)).filter(([, r]) => r.kind === 'hasMany' || r.kind === 'belongsToMany')
+              )
+            : {};
         if (Object.keys(registryRelations).length > 0) {
             relations = Object.keys(registryRelations).filter(key => key !== 'isSubjectInstance');
         } else {

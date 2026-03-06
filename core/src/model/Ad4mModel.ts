@@ -2,7 +2,7 @@ import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { LinkQuery } from "../perspectives/LinkQuery";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { makeRandomId, PropertyOptions, CollectionOptions, Model, getPropertiesMetadata, getCollectionsMetadata, getRelationsMetadata, setPropertyRegistryEntry, setCollectionRegistryEntry, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
+import { makeRandomId, PropertyOptions, Model, getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
 import { singularToPlural, pluralToSingular, propertyNameToSetterName, collectionToAdderName, collectionToRemoverName, collectionToSetterName } from "./util";
 import { escapeSurrealString } from "../utils";
 
@@ -633,13 +633,16 @@ export class Ad4mModel {
     
     // Extract relations (collections) from WeakMap registry
     const relationsMetadata: Record<string, RelationMetadata> = {};
-    const prototypeCollections = getCollectionsMetadata(this);
+    const allRelationsMeta = getRelationsMetadata(this as any);
+    const prototypeCollections = Object.fromEntries(
+      Object.entries(allRelationsMeta).filter(([, r]) => r.kind === 'hasMany' || r.kind === 'belongsToMany')
+    );
     
     for (const [relationName, opts] of Object.entries(prototypeCollections)) {
-      const options = opts as CollectionOptions;
+      const options = opts as RelationMetadataEntry;
       relationsMetadata[relationName] = {
         name: relationName,
-        predicate: options.through || "",
+        predicate: options.predicate || "",
         ...(options.local !== undefined && { local: options.local }),
         ...(options.getter !== undefined && { getter: options.getter })
       };
@@ -755,10 +758,10 @@ export class Ad4mModel {
    * Get relation (collection) options from decorator
    * @private
    */
-  private getRelationOptions(key: string): CollectionOptions | undefined {
+  private getRelationOptions(key: string): RelationMetadataEntry | undefined {
     const ctor = this.constructor;
-    const colls = getCollectionsMetadata(ctor);
-    return colls[key];
+    const rels = getRelationsMetadata(ctor);
+    return rels[key];
   }
 
   /**
@@ -812,8 +815,8 @@ export class Ad4mModel {
       throw new Error(`Relation "${key}" has no metadata defined`);
     }
 
-    if (!metadata.through) {
-      throw new Error(`Relation "${key}" has no 'through' predicate defined`);
+    if (!metadata.predicate) {
+      throw new Error(`Relation "${key}" has no predicate defined`);
     }
 
     const actionMap = {
@@ -825,7 +828,7 @@ export class Ad4mModel {
     return [{
       action: actionMap[actionType],
       source: "this",
-      predicate: metadata.through,
+      predicate: metadata.predicate,
       target: "value",
       ...(metadata.local && { local: true })
     }];
@@ -3273,7 +3276,12 @@ WHERE ${whereConditions.join(' AND ')}
       setPropertyRegistryEntry(DynamicModelClass, propName, propMeta as any);
     }
     for (const [collName, collMeta] of Object.entries(collections)) {
-      setCollectionRegistryEntry(DynamicModelClass, collName, collMeta as any);
+      setRelationRegistryEntry(DynamicModelClass, collName, {
+        predicate: (collMeta as any).through || "",
+        kind: 'hasMany',
+        ...(( collMeta as any).getter !== undefined && { getter: (collMeta as any).getter }),
+        ...(( collMeta as any).local !== undefined && { local: (collMeta as any).local }),
+      });
     }
     
     // Store the JSON schema and options on the prototype for potential fallback use by getModelMetadata()
