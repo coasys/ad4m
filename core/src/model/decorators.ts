@@ -952,7 +952,7 @@ export function Property(opts: PropertyOptions) {
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function ReadOnly(opts: PropertyOptions) {
-    return applyPropertyMetadata({
+    return Property({
         ...opts,
         readOnly: true,
     });
