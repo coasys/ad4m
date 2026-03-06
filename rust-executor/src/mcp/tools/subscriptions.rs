@@ -139,7 +139,7 @@ impl Ad4mMcpHandler {
 
     /// Generate a single waker subscription config for mention tracking
     #[tool(
-        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. Uses fn::parse_literal() to extract the actual message text from literal://json: link targets before matching, so only the data field is searched — not the author DID in the same JSON object. Returns one subscription whose SurrealQL query ORs together all profile names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
+        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. Uses a two-branch SurrealQL query: for literal://json: targets (e.g. Flux message bodies), fn::parse_literal() extracts only the .data field before matching — avoiding false positives from the author DID present in every message JSON; for all other targets, matches the raw value directly. Returns one subscription ORing all profile names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
     )]
     pub async fn get_mention_waker_config(
         &self,
@@ -195,25 +195,41 @@ impl Ad4mMcpHandler {
 
         let perspective_id = &params.0.perspective_id;
 
-        // Build one combined SurrealQL query using fn::parse_literal() for precision.
+        // Build a two-branch SurrealQL query:
         //
-        // fn::parse_literal() is defined in the SurrealDB schema setup:
-        // - For literal://json: targets: URL-decodes and parses JSON, returns .data
-        //   field if present. This means only the message text is matched, not the
-        //   author DID in the same JSON object — no false positives on self-authored msgs.
-        // - For literal://string: targets: returns the decoded string value.
-        // - For non-literal targets: returns the raw value unchanged.
+        // Branch 1 — literal://json: targets (e.g. Flux message bodies):
+        //   fn::parse_literal(target) URL-decodes and parses the JSON, returning
+        //   only the .data field (the actual message text). This avoids false
+        //   positives from the "author" field in the same JSON object — the agent's
+        //   DID would otherwise appear in every message it sends.
         //
-        // No predicate constraint: watch all link targets, not just flux://body.
-        let mut conditions: Vec<String> = names
+        // Branch 2 — all other targets (raw strings, URIs, DIDs, etc.):
+        //   Match directly against the target value. This correctly catches explicit
+        //   DID-as-target links (e.g. mention/follow links) and string literals.
+        //
+        // No predicate constraint: watch all link targets.
+        let all_terms: Vec<String> = names
             .iter()
-            .map(|n| format!("fn::parse_literal(target) CONTAINS '{}'", n))
+            .map(|n| n.clone())
+            .chain(std::iter::once(did.clone()))
             .collect();
-        conditions.push(format!("fn::parse_literal(target) CONTAINS '{}'", did));
+
+        let parsed_conditions: Vec<String> = all_terms
+            .iter()
+            .map(|t| format!("fn::parse_literal(target) CONTAINS '{}'", t))
+            .collect();
+
+        let raw_conditions: Vec<String> = all_terms
+            .iter()
+            .map(|t| format!("target CONTAINS '{}'", t))
+            .collect();
 
         let query = format!(
-            "SELECT * FROM link WHERE {}",
-            conditions.join(" OR ")
+            "SELECT * FROM link WHERE \
+             (string::starts_with(target, 'literal://json:') AND ({})) \
+             OR (NOT string::starts_with(target, 'literal://json:') AND ({}))",
+            parsed_conditions.join(" OR "),
+            raw_conditions.join(" OR "),
         );
 
         let sub_id = format!(
