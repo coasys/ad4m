@@ -63,9 +63,9 @@ export function collectionSetterToName(setterName: string): string {
     return collectionName.charAt(0).toLowerCase() + collectionName.slice(1)
 }
 
-// e.g. "comments" -> "setComment"
+// e.g. "comments" -> "setComments"
 export function collectionToSetterName(collection: string): string {
-    return `set${capitalize(pluralToSingular(collection))}`
+    return `set${capitalize(collection)}`
 }
 
 

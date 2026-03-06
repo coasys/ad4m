@@ -1244,17 +1244,9 @@ export function BelongsToMany(
             ...(opts.getter && { getter: opts.getter }),
         };
 
-        // Add prototype methods for add/remove/set
+        // @BelongsToMany is the inverse/read-only side — do NOT generate add*/remove*/set*
+        // prototype methods.  Mutation must go through the owning side's @HasMany decorator.
         const collKey = key as string;
-        (target as any)[`add${capitalize(collKey)}`] = async function(this: any, arg: any) {
-            return (this as any).addRelationValue(collKey, arg);
-        };
-        (target as any)[`remove${capitalize(collKey)}`] = async function(this: any, arg: any) {
-            return (this as any).removeRelationValue(collKey, arg);
-        };
-        (target as any)[`set${capitalize(collKey)}`] = async function(this: any, arg: any) {
-            return (this as any).setRelationValues(collKey, arg);
-        };
         Object.defineProperty(target, collKey, { configurable: true, writable: true });
     };
 }
