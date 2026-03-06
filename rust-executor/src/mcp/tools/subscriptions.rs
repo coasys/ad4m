@@ -137,9 +137,9 @@ impl Ad4mMcpHandler {
         }).to_string()
     }
 
-    /// Generate a waker subscription config that watches for @mentions of this agent
+    /// Generate a single waker subscription config for mention tracking
     #[tool(
-        description = "Generate a waker subscription config that watches for messages mentioning this agent by name or DID in a neighbourhood. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker process config. The query fires when a flux://body link is added whose target contains the agent's display name or DID key — i.e. when another participant mentions this agent. When woken, read recent messages in the neighbourhood to find and respond to the mention. Returns two subscription configs: one for DID-based mentions, one for name-based mentions. If name_override is not provided, uses the agent's profile username or given_name."
+        description = "Generate a single waker subscription config entry that watches for any link target mentioning this agent by name(s) or DID in a neighbourhood. Returns one subscription whose SurrealQL query ORs together all known names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. When woken, read recent messages to find and respond to the mention. Profile names (username, given_name, family_name) are all included. Use name_override to add extra aliases."
     )]
     pub async fn get_mention_waker_config(
         &self,
@@ -147,7 +147,7 @@ impl Ad4mMcpHandler {
     ) -> String {
         let token = self.get_auth_token().await.unwrap_or_default();
 
-        // Resolve agent DID
+        // Resolve agent
         let agent = match AgentService::get_agent_for_context(
             &crate::agent::AgentContext::from_auth_token(token.clone()),
         ) {
@@ -157,82 +157,89 @@ impl Ad4mMcpHandler {
 
         let did = agent.did.clone();
 
-        // Extract the base58 key portion of the DID (after "did:key:").
-        // This is URL-safe and appears unencoded in flux://body targets.
-        let did_key = did.strip_prefix("did:key:").unwrap_or(&did).to_string();
+        // Validate perspective
+        if let Err(e) = self.get_readable_perspective(&params.0.perspective_id).await {
+            return json!({"error": format!("Perspective not accessible: {}", e)}).to_string();
+        }
 
-        // Resolve display name from profile or override
-        let name = if let Some(ref override_name) = params.0.name_override {
-            override_name.clone()
-        } else {
-            // Try profile links: sioc://has_username first, then sioc://has_given_name
-            let mut resolved = String::new();
-            if let Some(ref perspective) = agent.perspective {
-                for link in &perspective.links {
-                    if link.data.source == "flux://profile" {
-                        let pred = link.data.predicate.as_deref().unwrap_or("");
-                        if pred == "sioc://has_username" && resolved.is_empty() {
-                            resolved = Self::resolve_literal_value(&link.data.target);
-                        }
-                        if pred == "sioc://has_given_name" && resolved.is_empty() {
-                            resolved = Self::resolve_literal_value(&link.data.target);
+        // Collect all profile names
+        // Note on profile ontology: sioc:// predicates are currently shared with Flux;
+        // a dedicated ad4m-wide profile ontology should replace these in the future.
+        let mut names: Vec<String> = Vec::new();
+
+        if let Some(ref override_name) = params.0.name_override {
+            names.push(override_name.clone());
+        } else if let Some(ref perspective) = agent.perspective {
+            for link in &perspective.links {
+                if link.data.source == "flux://profile" {
+                    let pred = link.data.predicate.as_deref().unwrap_or("");
+                    if matches!(
+                        pred,
+                        "sioc://has_username"
+                            | "sioc://has_given_name"
+                            | "sioc://has_family_name"
+                    ) {
+                        let val = Self::resolve_literal_value(&link.data.target);
+                        if !val.is_empty() && !names.contains(&val) {
+                            names.push(val);
                         }
                     }
                 }
             }
-            resolved
-        };
+        }
 
         let perspective_id = &params.0.perspective_id;
 
-        // Build mention queries.
-        // flux://body targets contain URL-encoded JSON like:
-        //   literal://json:{"author":"did:key:...","data":"Hey Marvin, ...","proof":{...}}
-        // The base58 DID suffix and the agent's name are unencoded and searchable via CONTAINS.
-        let did_query = format!(
-            "SELECT * FROM link WHERE predicate = 'flux://body' AND target CONTAINS '{}'",
-            did_key
+        // Build one combined SurrealQL query with OR for all terms.
+        //
+        // Query design notes:
+        // - No predicate constraint: watch all link targets, not just flux://body.
+        // - Full DID (not just base58 suffix): colons in "did:key:" are URL-encoded to
+        //   "%3A" in JSON body targets, so CONTAINS 'did:key:...' never false-fires on
+        //   the author field of encoded bodies — it only matches raw literal targets.
+        // - Names are alphanumeric and appear unencoded in URL-encoded JSON, so
+        //   CONTAINS '<name>' correctly matches message bodies containing the name.
+        //
+        // TODO: for finer precision in literal://json: targets, parse the decoded JSON
+        // and restrict the match to the "data" field only (requires URL-decode support
+        // in SurrealDB or a pre-processing step in the waker).
+        let mut conditions: Vec<String> = names
+            .iter()
+            .map(|n| format!("target CONTAINS '{}'", n))
+            .collect();
+        conditions.push(format!("target CONTAINS '{}'", did));
+
+        let query = format!(
+            "SELECT * FROM link WHERE {}",
+            conditions.join(" OR ")
         );
 
-        let name_query = if !name.is_empty() {
-            Some(format!(
-                "SELECT * FROM link WHERE predicate = 'flux://body' AND target CONTAINS '{}'",
-                name
-            ))
-        } else {
-            None
-        };
+        let sub_id = format!(
+            "mention-{}",
+            &did[did.len().saturating_sub(12)..]
+        );
 
-        let did_sub_id = format!("mention-did-{}", &did_key[..12.min(did_key.len())]);
-        let name_sub_id = if !name.is_empty() {
-            format!("mention-name-{}", name.to_lowercase().replace(' ', "-"))
-        } else {
-            String::new()
-        };
-
-        let mut subscriptions = vec![json!({
-            "id": did_sub_id,
+        let subscription = json!({
+            "id": sub_id,
             "perspective": perspective_id,
-            "query": did_query,
-        })];
-
-        if let Some(ref nq) = name_query {
-            subscriptions.push(json!({
-                "id": name_sub_id,
-                "perspective": perspective_id,
-                "query": nq,
-            }));
-        }
+            "query": query,
+        });
 
         json!({
             "did": did,
-            "name": name,
+            "names": names,
             "perspective_id": perspective_id,
-            "subscriptions": subscriptions,
+            "query": query,
+            "subscription": subscription,
             "message": format!(
-                "Add these {} subscription(s) to your waker config to be woken when mentioned by {} or DID in perspective {}. Restart the waker after updating the config.",
-                subscriptions.len(),
-                if name.is_empty() { "DID only".to_string() } else { format!("name '{}' ", name) },
+                "Add the subscription entry to your waker config and restart the waker. \
+                 This single query watches for mentions of {} by {} in perspective {}.",
+                did,
+                if names.is_empty() {
+                    "DID only".to_string()
+                } else {
+                    format!("name(s) [{}] or", names.join(", "))
+                },
                 perspective_id
             ),
         })

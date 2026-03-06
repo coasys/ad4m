@@ -160,62 +160,62 @@ async function startWaker(config) {
 // ── Mention query builder ──────────────────────────────────────────
 
 /**
- * Build SurrealQL queries that fire when messages mention the given agent.
+ * Build a single combined SurrealQL mention query for the given agent.
  *
- * Flux message bodies are stored as flux://body links whose target is a
- * URL-encoded JSON literal:
- *   literal://json:{"author":"did:key:...","data":"Hey Marvin, ...","proof":{...}}
+ * Query design:
+ * - No predicate constraint: watches all link targets.
+ * - Full DID (not just base58 suffix): colons in "did:key:" are URL-encoded
+ *   to "%3A" in JSON body targets, so CONTAINS 'did:key:...' never fires on
+ *   the author field of encoded bodies — only matches raw literal targets.
+ * - Names are alphanumeric and appear unencoded in URL-encoded JSON, so
+ *   CONTAINS '<name>' correctly matches message bodies containing the name.
+ * - All provided names are ORed together with the DID into one query to
+ *   avoid multiple distinct wake events per mention.
  *
- * The base58 DID key suffix and the agent's display name are URL-safe and
- * appear unencoded, so SurrealDB CONTAINS works on them directly.
+ * TODO: for finer precision, parse literal://json: targets and restrict
+ * matching to the "data" field only (requires URL-decode in SurrealDB or waker).
  *
- * @param {string} did     - Full DID, e.g. "did:key:z6MksZb..."
- * @param {string} name    - Display name, e.g. "Marvin"
- * @returns {{ didQuery: string, nameQuery: string|null }}
+ * @param {string}   did   - Full DID, e.g. "did:key:z6MksZb..."
+ * @param {string[]} names - Display names to watch for (e.g. ["Marvin", "MarvinBot"])
+ * @returns {string} SurrealQL query string
  */
-function buildMentionQueries(did, name) {
-  // Strip "did:key:" prefix — the base58 suffix is URL-safe and unencoded in targets
-  const didKey = did.startsWith("did:key:") ? did.slice("did:key:".length) : did;
-
-  const didQuery =
-    `SELECT * FROM link WHERE predicate = 'flux://body' AND target CONTAINS '${didKey}'`;
-
-  const nameQuery = name
-    ? `SELECT * FROM link WHERE predicate = 'flux://body' AND target CONTAINS '${name}'`
-    : null;
-
-  return { didQuery, nameQuery };
+function buildMentionQuery(did, names) {
+  const nameList = Array.isArray(names) ? names : (names ? [names] : []);
+  const conditions = [
+    ...nameList.map((n) => `target CONTAINS '${n}'`),
+    `target CONTAINS '${did}'`,
+  ];
+  return `SELECT * FROM link WHERE ${conditions.join(" OR ")}`;
 }
 
 /**
- * Build waker subscription config entries for mention tracking.
+ * Build a single waker subscription config entry for mention tracking.
  *
- * @param {string} did           - Agent DID
- * @param {string} name          - Display name (may be empty)
- * @param {string} perspectiveId - Neighbourhood perspective UUID
- * @returns {Array<{id: string, perspective: string, query: string}>}
+ * @param {string}   did           - Agent DID
+ * @param {string[]} names         - Display names (may be empty array)
+ * @param {string}   perspectiveId - Neighbourhood perspective UUID
+ * @returns {{id: string, perspective: string, query: string}}
  */
+function buildMentionSubscription(did, names, perspectiveId) {
+  const query = buildMentionQuery(did, names);
+  const suffix = did.slice(-12);
+  return {
+    id: `mention-${suffix}`,
+    perspective: perspectiveId,
+    query,
+  };
+}
+
+// Keep plural form as alias for backwards compat
 function buildMentionSubscriptions(did, name, perspectiveId) {
-  const { didQuery, nameQuery } = buildMentionQueries(did, name);
-  const didKey = did.startsWith("did:key:") ? did.slice("did:key:".length) : did;
+  const names = name ? [name] : [];
+  return [buildMentionSubscription(did, names, perspectiveId)];
+}
 
-  const subs = [
-    {
-      id: `mention-did-${didKey.slice(0, 12)}`,
-      perspective: perspectiveId,
-      query: didQuery,
-    },
-  ];
-
-  if (nameQuery && name) {
-    subs.push({
-      id: `mention-name-${name.toLowerCase().replace(/\s+/g, "-")}`,
-      perspective: perspectiveId,
-      query: nameQuery,
-    });
-  }
-
-  return subs;
+// Keep old two-return form as alias
+function buildMentionQueries(did, name) {
+  const query = buildMentionQuery(did, name ? [name] : []);
+  return { didQuery: query, nameQuery: null };
 }
 
 // ── CLI ────────────────────────────────────────────────────────────
@@ -313,35 +313,35 @@ Config file format (JSON):
     const status = await client.agent.status();
     const did = status.did;
 
-    let name = nameOverride;
-    if (!name) {
+    // Collect all profile names
+    const names = nameOverride ? [nameOverride] : [];
+    if (!nameOverride) {
       try {
         const agentExpr = await client.agent.me();
         const links = agentExpr?.perspective?.links || [];
+        const NAME_PREDS = [
+          "sioc://has_username",
+          "sioc://has_given_name",
+          "sioc://has_family_name",
+        ];
         for (const link of links) {
-          if (link.data.source === "flux://profile") {
-            if (link.data.predicate === "sioc://has_username" && !name) {
-              name = link.data.target.replace(/^literal:\/\/string:/, "");
-            }
-            if (link.data.predicate === "sioc://has_given_name" && !name) {
-              name = link.data.target.replace(/^literal:\/\/string:/, "");
-            }
+          if (link.data.source === "flux://profile" && NAME_PREDS.includes(link.data.predicate)) {
+            const val = link.data.target.replace(/^literal:\/\/string:/, "");
+            if (val && !names.includes(val)) names.push(val);
           }
         }
       } catch (e) {
-        console.warn("[setup] Could not fetch profile name:", e.message);
+        console.warn("[setup] Could not fetch profile names:", e.message);
       }
     }
 
-    const newSubs = buildMentionSubscriptions(did, name || "", perspectiveId);
+    // One combined subscription
+    const newSub = buildMentionSubscription(did, names, perspectiveId);
 
     console.log(`[setup] Agent DID : ${did}`);
-    console.log(`[setup] Agent name: ${name || "(none)"}`);
+    console.log(`[setup] Names     : ${names.length ? names.join(", ") : "(none)"}`);
     console.log(`[setup] Perspective: ${perspectiveId}`);
-    console.log(`[setup] Generated ${newSubs.length} subscription(s):`);
-    for (const s of newSubs) {
-      console.log(`  ${s.id}: ${s.query}`);
-    }
+    console.log(`[setup] Query: ${newSub.query}`);
 
     if (configPath) {
       let config = { subscriptions: [] };
@@ -350,17 +350,21 @@ Config file format (JSON):
         config.subscriptions = config.subscriptions || [];
       }
 
-      // Merge — skip duplicates by id
-      const existingIds = new Set(config.subscriptions.map((s) => s.id));
-      const toAdd = newSubs.filter((s) => !existingIds.has(s.id));
-      config.subscriptions.push(...toAdd);
+      // Replace existing mention-* entry for this perspective, or append
+      const idx = config.subscriptions.findIndex((s) => s.id === newSub.id);
+      if (idx >= 0) {
+        config.subscriptions[idx] = newSub;
+        console.log(`[setup] Updated existing subscription '${newSub.id}' in ${configPath}`);
+      } else {
+        config.subscriptions.push(newSub);
+        console.log(`[setup] Added subscription '${newSub.id}' to ${configPath}`);
+      }
 
       fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-      console.log(`[setup] ${toAdd.length} subscription(s) added to ${configPath}`);
       console.log("[setup] Restart the waker to activate.");
     } else {
-      console.log("\nAdd these to your waker config subscriptions array:");
-      console.log(JSON.stringify(newSubs, null, 2));
+      console.log("\nAdd this to your waker config subscriptions array:");
+      console.log(JSON.stringify(newSub, null, 2));
     }
 
     process.exit(0);
@@ -396,4 +400,11 @@ if (require.main === module) {
   });
 }
 
-module.exports = { startWaker, buildMentionQueries, buildMentionSubscriptions };
+module.exports = {
+  startWaker,
+  buildMentionQuery,
+  buildMentionSubscription,
+  // Legacy aliases kept for backwards compat
+  buildMentionQueries,
+  buildMentionSubscriptions,
+};
