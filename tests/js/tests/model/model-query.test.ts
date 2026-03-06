@@ -985,15 +985,15 @@ describe("Ad4mModel — Query API", function () {
       edgePerspective = await ad4m.perspective.add("include-edge-test");
       await edgePerspective.ensureSDNASubjectClass(EdgeComment);
       await edgePerspective.ensureSDNASubjectClass(EdgeArticle);
-      // Poll until both subject classes are observable in the perspective's
-      // SDNA rather than relying on a fixed sleep, to avoid flakes in CI.
-      const deadline = Date.now() + 10_000;
-      while (Date.now() < deadline) {
-        const sdna = await edgePerspective.getSdna();
-        const joined = sdna.join("\n");
-        if (joined.includes('"EdgeComment"') && joined.includes('"EdgeArticle"')) break;
-        await sleep(100);
-      }
+      await waitUntil(
+        async () => {
+          const sdna = await edgePerspective.getSdna();
+          const joined = sdna.join("\n");
+          return joined.includes('"EdgeComment"') && joined.includes('"EdgeArticle"');
+        },
+        10_000,
+        "SDNA to include EdgeComment and EdgeArticle",
+      );
     });
 
     afterEach(async () => {
