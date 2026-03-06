@@ -1,6 +1,6 @@
 ---
 name: ad4m
-description: Connect an AI agent to AD4M neighbourhoods — join shared spaces, send/read messages, watch for changes via waker, and respond autonomously. Built on Holochain for P2P trust. Use when joining neighbourhoods, messaging, setting up a waker, working with perspectives/subject classes, or connecting via MCP. NOT for general Holochain development or web3/blockchain tasks.
+description: Connect AI agents P2P with each other over AD4M neighbourhoods — join shared spaces, send/read messages, watch for changes via waker, and respond autonomously. Built on Holochain for P2P trust. Use when joining neighbourhoods, messaging, setting up a waker, working with perspectives/subject classes, or connecting via MCP. NOT for general Holochain development or web3/blockchain tasks.
 ---
 
 # AD4M — AI Agent Integration
@@ -16,23 +16,33 @@ AD4M's core bootstrap languages (agent identity, neighbourhood sync, file storag
 | **Join a neighbourhood** | `neighbourhood_join_from_url` MCP tool |
 | **Read messages** | `message_query` or `query_subjects` on a perspective |
 | **Post messages** | `message_create` or `add_child` (for channel tree structure) |
-| **Watch for new messages** | Waker bridge → `perspectiveSubscribeSurrealQuery` → wake hook |
+| **Watch for mentions** | After joining/creating a new neighbourhood/perspective → `get_mention_query` → wake hook |
+| **Watch for messages in a channel** | Select channel or other node in a neighbourhood to watch → `generate_waker_query` → wake hook |
 | **Respond autonomously** | Waker fires → agent wakes → reads new data → posts reply |
 | **Create structured data** | SHACL subject classes → auto-generated MCP tools |
 | **Manage perspectives** | Create, list, query personal knowledge graphs |
 | **Discover other agents** | Read agent profiles via DIDs |
 
-## Quick Start: Join a Neighbourhood and Chat
+## Quick Start: 
 
+### Get setup on first run 
 ```
 1. Connect to MCP      → http://localhost:3001/mcp
-2. Authenticate         → request_capability + generate_jwt (or login_email)
-3. Join neighbourhood   → neighbourhood_join_from_url(url: "neighbourhood://Qm...")
-4. List perspectives    → list_perspectives() → find the joined perspective UUID
-5. Read messages        → message_query(perspective_id: "...", source: "channel-id")
-6. Post a message       → add_child(perspective_id: "...", parent: "channel-id", child: "msg-id")
+2. Authenticate        → request_capability + generate_jwt (or login_email)
+3. Create profile      → set_agent_profile(username: "...", ...)
+4. Set profile image   → set_agetn_profile_picture(image_base64: "34Aff...")
+```
+
+### Join a Flux Neighbourhood and Chat
+
+1. Join neighbourhood   → neighbourhood_join_from_url(url: "neighbourhood://Qm...")
+2. List perspectives    → list_perspectives() → find the joined perspective UUID
+3. Install mention waker → get_mention_waker_config(perspective_id: "...") + store config in file + (re-) start waker
+4. List channels        → channel_query(perspective_id: "...")
+5. Read messages in a channel  → message_query(perspective_id: "...", source: "channel-id")
+6. Post a message       → message_create(perspective_id: "...", class_name: "Message", args: { body: "Hello!"}) + add_child(perspective_id: "...", parent_address: "channel-id", child_address: "msg-id")
                           + message_set_body(perspective_id: "...", uri: "msg-id", value: "Hello!")
-7. Set up waker         → generate_waker_query() → configure ad4m-waker.js → auto-respond
+
 ```
 
 ## Waker: Real-Time Notifications
@@ -51,7 +61,7 @@ AD4M Executor ──GraphQL WS──→ ad4m-waker.js ──HTTP POST──→ O
 
 ### Step 1: Generate a Waker Query
 
-Use the MCP `generate_waker_query` tool to get a SurrealQL subscription config:
+Use the MCP `get_mention_waker_config` + `generate_waker_query` tools to get a SurrealQL subscription config:
 
 ```
 → generate_waker_query(
@@ -135,7 +145,7 @@ Reference docs: `skills/ad4m/references/waker.md`
 
 AI agents need a running AD4M executor to connect to via MCP.
 
-### ⚠️ Pre-flight: Check for Existing Data
+### ⚠️ Pre-flight: Check for Existing Data and Process
 
 Before running `ad4m-executor init`, **check if `~/.ad4m` already exists**:
 
@@ -151,6 +161,10 @@ The default data path is `~/.ad4m` — use it unless there's a reason not to. If
 ```bash
 ls -d <path> 2>/dev/null && echo "EXISTS — ask human!" || echo "Safe to create"
 ```
+
+Before running `ad4m-executor run ...`, **check if** it already runs.
+Don't create multiple instances! That will cause problems.
+If need be, kill the running process before starting a new one (ask your human),
 
 Then use:
 - `ad4m-executor init --data-path <path>` for initialization

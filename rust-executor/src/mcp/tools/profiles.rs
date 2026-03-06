@@ -321,18 +321,20 @@ impl Ad4mMcpHandler {
 
         // Find the file-storage language via the LanguageController
         let controller = LanguageController::global_instance();
-        let all_languages = controller.get_installed_languages(None).await;
-        let file_storage_lang = all_languages
-            .iter()
-            .find(|l| l.name.to_lowercase().contains("file-storage"))
-            .map(|l| l.address.clone());
+        //let all_languages = controller.get_installed_languages(None).await;
+        //let file_storage_lang = all_languages
+        //    .iter()
+        //    .find(|l| l.name.to_lowercase().contains("file-storage"))
+        //     .map(|l| l.address.clone());
 
-        let file_storage_addr = match file_storage_lang {
-            Some(addr) => addr,
-            None => {
-                return json!({"error": "File storage language not found in runtime"}).to_string()
-            }
-        };
+        //let file_storage_addr = match file_storage_lang {
+        //    Some(addr) => addr,
+        //    None => {
+        //        return json!({"error": "File storage language not found in runtime"}).to_string()
+        //    }
+        //};
+
+        let file_storage_addr = "QmzSYwdjqeP9D13Sfmyc5HcabM9jL3DtPyhadnF6dQXu4FjVSbQ".to_string();
 
         // Create expression via the language controller
         let content = json!({
