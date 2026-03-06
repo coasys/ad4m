@@ -275,6 +275,15 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
         Ad4mDb::with_global_instance(|db| {
             db.update_perspective(handle).map_err(|e| e.to_string())
         })?;
+
+        // Update the signal routing cache if this perspective has a link language.
+        // Without this, the cached PerspectiveHandle retains a stale owners list,
+        // causing signals (especially broadcasts) to not be delivered to owners
+        // added after the cache was first populated (e.g. managed users joining
+        // an existing neighbourhood).
+        if let Some(nh) = &handle.neighbourhood {
+            register_link_language_perspective(nh.data.link_language.clone(), handle.clone());
+        }
     }
 
     // Publish one event per owner so each user gets their own notification
