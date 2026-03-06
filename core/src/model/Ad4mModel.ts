@@ -506,6 +506,25 @@ export class Ad4mModel {
 
   private static classNamesByClass = new WeakMap<typeof Ad4mModel, { [perspectiveId: string]: string }>();
 
+  /**
+   * Generates the SDNA (Subject DNA) Prolog rules for this model class.
+   * Injected at class-definition time by the `@Model` decorator.
+   * Returns an empty string on un-decorated base classes.
+   */
+  static generateSDNA(): string {
+    return '';
+  }
+
+  /**
+   * Generates the SHACL shape graph for this model class.
+   * Injected at class-definition time by the `@Model` decorator.
+   * Returns `{ shape: null, name: '' }` on un-decorated base classes —
+   * the decorator's `parentSHACL?.shape?.nodeShapeUri` check handles this.
+   */
+  static generateSHACL(): { shape: any; name: string } {
+    return { shape: null, name: '' };
+  }
+
   static async getClassName(perspective: PerspectiveProxy) {
       // Check if this is the Ad4mModel class itself or a subclass
       const isBaseClass = this === Ad4mModel;
@@ -2010,7 +2029,14 @@ WHERE ${whereConditions.join(' AND ')}
         }
       })
     );
-    return { results: allInstances.filter((instance) => instance !== null), totalCount: result[0].TotalCount };
+    const instances = allInstances.filter((instance) => instance !== null) as T[];
+
+    // Eager-load relations if requested
+    if (query.include && instances.length > 0) {
+      await this.hydrateRelations(instances, perspective, query.include);
+    }
+
+    return { results: instances, totalCount: result[0].TotalCount };
   }
 
   /**
@@ -2172,6 +2198,11 @@ WHERE ${whereConditions.join(' AND ')}
     // Take snapshots for dirty tracking after all hydration is complete
     for (const inst of paginatedInstances) {
       (inst as Ad4mModel).takeSnapshot();
+    }
+
+    // Eager-load relations if requested
+    if (query.include && paginatedInstances.length > 0) {
+      await this.hydrateRelations(paginatedInstances, perspective, query.include);
     }
 
     return {
