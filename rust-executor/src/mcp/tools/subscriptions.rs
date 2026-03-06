@@ -139,7 +139,7 @@ impl Ad4mMcpHandler {
 
     /// Generate a single waker subscription config for mention tracking
     #[tool(
-        description = "Generate a single waker subscription config entry that watches for any link target mentioning this agent by name(s) or DID in a neighbourhood. Returns one subscription whose SurrealQL query ORs together all known names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. When woken, read recent messages to find and respond to the mention. Profile names (username, given_name, family_name) are all included. Use name_override to add extra aliases."
+        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. Uses fn::parse_literal() to extract the actual message text from literal://json: link targets before matching, so only the data field is searched — not the author DID in the same JSON object. Returns one subscription whose SurrealQL query ORs together all profile names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
     )]
     pub async fn get_mention_waker_config(
         &self,
@@ -162,14 +162,12 @@ impl Ad4mMcpHandler {
             return json!({"error": format!("Perspective not accessible: {}", e)}).to_string();
         }
 
-        // Collect all profile names
+        // Collect all profile names from the agent's public perspective.
         // Note on profile ontology: sioc:// predicates are currently shared with Flux;
         // a dedicated ad4m-wide profile ontology should replace these in the future.
         let mut names: Vec<String> = Vec::new();
 
-        if let Some(ref override_name) = params.0.name_override {
-            names.push(override_name.clone());
-        } else if let Some(ref perspective) = agent.perspective {
+        if let Some(ref perspective) = agent.perspective {
             for link in &perspective.links {
                 if link.data.source == "flux://profile" {
                     let pred = link.data.predicate.as_deref().unwrap_or("");
@@ -188,26 +186,30 @@ impl Ad4mMcpHandler {
             }
         }
 
+        // Append name_override as an additional alias (does not replace profile names)
+        if let Some(ref override_name) = params.0.name_override {
+            if !override_name.is_empty() && !names.contains(override_name) {
+                names.push(override_name.clone());
+            }
+        }
+
         let perspective_id = &params.0.perspective_id;
 
-        // Build one combined SurrealQL query with OR for all terms.
+        // Build one combined SurrealQL query using fn::parse_literal() for precision.
         //
-        // Query design notes:
-        // - No predicate constraint: watch all link targets, not just flux://body.
-        // - Full DID (not just base58 suffix): colons in "did:key:" are URL-encoded to
-        //   "%3A" in JSON body targets, so CONTAINS 'did:key:...' never false-fires on
-        //   the author field of encoded bodies — it only matches raw literal targets.
-        // - Names are alphanumeric and appear unencoded in URL-encoded JSON, so
-        //   CONTAINS '<name>' correctly matches message bodies containing the name.
+        // fn::parse_literal() is defined in the SurrealDB schema setup:
+        // - For literal://json: targets: URL-decodes and parses JSON, returns .data
+        //   field if present. This means only the message text is matched, not the
+        //   author DID in the same JSON object — no false positives on self-authored msgs.
+        // - For literal://string: targets: returns the decoded string value.
+        // - For non-literal targets: returns the raw value unchanged.
         //
-        // TODO: for finer precision in literal://json: targets, parse the decoded JSON
-        // and restrict the match to the "data" field only (requires URL-decode support
-        // in SurrealDB or a pre-processing step in the waker).
+        // No predicate constraint: watch all link targets, not just flux://body.
         let mut conditions: Vec<String> = names
             .iter()
-            .map(|n| format!("target CONTAINS '{}'", n))
+            .map(|n| format!("fn::parse_literal(target) CONTAINS '{}'", n))
             .collect();
-        conditions.push(format!("target CONTAINS '{}'", did));
+        conditions.push(format!("fn::parse_literal(target) CONTAINS '{}'", did));
 
         let query = format!(
             "SELECT * FROM link WHERE {}",
