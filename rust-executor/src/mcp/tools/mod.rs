@@ -50,6 +50,10 @@ use rmcp::{
 
 use serde_json::json;
 
+// HTTP request parts injected by rmcp's streamable-HTTP transport into each request's extensions.
+// Used to extract the Authorization header for admin-credential bypass.
+use axum::http::request::Parts as HttpRequestParts;
+
 // ============================================================================
 // MCP Handler
 // ============================================================================
@@ -132,11 +136,34 @@ impl ServerHandler for Ad4mMcpHandler {
                     return self.dispatch_tool(request, context).await;
                 }
 
-                // Admin credential is configured but token doesn't match.
-                // An empty token must NOT be allowed to fall through and act as
-                // the main agent — that would let unauthenticated clients access
-                // all main-agent perspectives in multi-user mode.
+                // Admin credential is configured but session token doesn't match.
+                // Before rejecting: check if the HTTP Authorization header carries
+                // the admin credential directly — this lets callers skip the
+                // request_capability + generate_jwt dance when they already hold
+                // the admin credential (it acts as a replacement JWT).
                 if token.is_empty() {
+                    let http_admin_authed = context
+                        .extensions
+                        .get::<HttpRequestParts>()
+                        .and_then(|parts| parts.headers.get(axum::http::header::AUTHORIZATION))
+                        .and_then(|h| h.to_str().ok())
+                        .map(|h| {
+                            // Accept both bare token and "Bearer <token>" forms
+                            let bare = h.strip_prefix("Bearer ").unwrap_or(h);
+                            bare == admin_cred.as_str()
+                        })
+                        .unwrap_or(false);
+
+                    if http_admin_authed {
+                        // Store admin credential as session token so that
+                        // get_agent_context() and get_capabilities() work for
+                        // the remainder of this tool call.
+                        let mut token_guard = self.context.auth_token.write().await;
+                        *token_guard = Some(admin_cred.clone());
+                        drop(token_guard);
+                        return self.dispatch_tool(request, context).await;
+                    }
+
                     return Ok(CallToolResult::error(vec![Content::text(
                         json!({"error": "Authentication required. Use request_capability + generate_jwt, login_email, or signup to authenticate."}).to_string()
                     )]));
