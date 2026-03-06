@@ -174,7 +174,6 @@ const Login = () => {
     if (aiMode !== "None") {
       const llm = { modelType: "LLM" } as ModelInput;
       if (aiMode === "Local") {
-        whisperModel = "whisper_large_v3_turbo_quantized";
         llm.name = "Qwen2.5.1-Coder-7B-Instruct";
         llm.local = { fileName: "Qwen2.5.1-Coder-7B-Instruct" };
       } else {
