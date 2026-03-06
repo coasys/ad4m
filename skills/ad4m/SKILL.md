@@ -135,18 +135,40 @@ Reference docs: `skills/ad4m/references/waker.md`
 
 AI agents need a running AD4M executor to connect to via MCP.
 
+### ⚠️ Pre-flight: Check for Existing Data
+
+Before running `ad4m-executor init`, **check if `~/.ad4m` already exists**:
+
+```bash
+ls -d ~/.ad4m 2>/dev/null && echo "EXISTS — ask human!" || echo "Safe to create"
+```
+
+- **If `~/.ad4m` exists:** This is likely your human's existing Flux/AD4M data. **Do NOT overwrite it.** Ask your human how to proceed — they may want you to connect to their existing executor, or use a separate data path.
+- **If `~/.ad4m` does not exist:** Safe to run `ad4m-executor init` and use the default path.
+
+The default data path is `~/.ad4m` — use it unless there's a reason not to. Don't pass `--app-data-path` unless you need a non-default location.
+
 ### Mode 1: Agent-Only Executor (Recommended)
 
 Single agent, local, simple:
 
 ```bash
-ad4m-executor run --app-data-path ~/.ad4m-agent \
-  --admin-credential <your-secret> \
-  --enable-mcp true --mcp-port 3001
+# First time only:
+ad4m-executor init
+
+# Then run (uses ~/.ad4m by default):
+ad4m-executor run --enable-mcp true --mcp-port 3001
+
+# Generate agent (first time only):
+ad4m agent generate --passphrase <your-passphrase>
+
+# Unlock after restart:
+# mutation { agentUnlock(passphrase: "...", holochain: true) { isUnlocked } }
 ```
 
+- **Store the passphrase immediately** — you'll need it after every restart
 - No multi-user setup — single agent DID
-- Admin credential auth — no email/password needed
+- Admin credential auth — no email/password needed (optional `--admin-credential`)
 - Local HTTP only — `http://localhost:3001/mcp`
 
 ### Mode 2: Multi-User Executor
