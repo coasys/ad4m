@@ -511,7 +511,7 @@ function isNumericType(schema: JSONSchemaProperty): boolean {
  * ```
  */
 export class Ad4mModel {
-  private _id: string;
+  private _baseExpression: string;
   private _subjectClassName: string;
   private _perspective: PerspectiveProxy;
   private _snapshot: Record<string, any> | null = null;
@@ -719,21 +719,21 @@ export class Ad4mModel {
    * Constructs a new model instance.
    * 
    * @param perspective - The perspective where this model will be stored
-   * @param id - Optional unique identifier (expression URI) for this instance.
+   * @param baseExpression - Optional expression URI for this instance.
    *             If omitted, a random Literal URL is generated.
    * @param source - Optional source expression this instance is linked to
    * 
    * @example
    * ```typescript
-   * // Create a new recipe with auto-generated id
+   * // Create a new recipe with auto-generated base expression
    * const recipe = new Recipe(perspective);
    * 
-   * // Create with specific id
-   * const recipe = new Recipe(perspective, "recipe://chocolate-cake");
+   * // Create with specific base expression
+   * const recipe = new Recipe(perspective, "literal://...");
    * ```
    */
-  constructor(perspective: PerspectiveProxy, id?: string) {
-    this._id = id ? id : Literal.from(makeRandomId(24)).toUrl();
+  constructor(perspective: PerspectiveProxy, baseExpression?: string) {
+    this._baseExpression = baseExpression ? baseExpression : Literal.from(makeRandomId(24)).toUrl();
     this._perspective = perspective;
   }
 
@@ -741,14 +741,14 @@ export class Ad4mModel {
    * The unique identifier (expression URI) of this model instance.
    */
   get id(): string {
-    return this._id;
+    return this._baseExpression;
   }
 
   /**
    * @deprecated Use `.id` instead. Will be removed in a future version.
    */
   get baseExpression(): string {
-    return this._id;
+    return this._baseExpression;
   }
 
   /**
@@ -1242,7 +1242,7 @@ export class Ad4mModel {
       const metadata = ctor.getModelMetadata();
 
       // Query for all links from this specific node (base expression)
-      const safeBaseExpression = ctor.formatSurrealValue(this._id);
+      const safeBaseExpression = ctor.formatSurrealValue(this._baseExpression);
       const linksQuery = `
         SELECT id, predicate, out.uri AS target, author, timestamp
         FROM link
@@ -1264,10 +1264,10 @@ export class Ad4mModel {
         if (relMeta.kind !== 'belongsToOne' && relMeta.kind !== 'belongsToMany') continue;
         if (requestedProps && !requestedProps.has(relName)) continue;
         const reverseLinks = await this._perspective.get(
-          new LinkQuery({ predicate: relMeta.predicate, target: this._id })
+          new LinkQuery({ predicate: relMeta.predicate, target: this._baseExpression })
         );
         const sourceIds = reverseLinks
-          .filter((l) => l.data.target === this._id)
+          .filter((l) => l.data.target === this._baseExpression)
           .map((l) => l.data.source);
         if (relMeta.kind === 'belongsToOne') {
           (this as any)[relName] = sourceIds.length > 0 ? sourceIds[sourceIds.length - 1] : null;
@@ -1284,7 +1284,7 @@ export class Ad4mModel {
         await ctor.hydrateRelations([this], this._perspective, opts.include);
       }
     } catch (e) {
-      console.error(`SurrealDB getData also failed for ${this._id}:`, e);
+      console.error(`SurrealDB getData also failed for ${this._baseExpression}:`, e);
     }
 
     this.takeSnapshot();
@@ -2722,7 +2722,7 @@ WHERE ${whereConditions.join(' AND ')}
       value = await this._perspective.createExpression(value, resolveLanguage);
     }
 
-    await this._perspective.executeAction(actions, this._id, [{ name: "value", value }], batchId);
+    await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value }], batchId);
   }
 
   /** Resolve a relation argument to a plain string ID. Accepts either a raw
@@ -2748,12 +2748,12 @@ WHERE ${whereConditions.join(' AND ')}
       if (Array.isArray(value)) {
         await this._perspective.executeAction(
           actions,
-          this._id,
+          this._baseExpression,
           value.map((v) => ({ name: "value", value: this.resolveRelationId(v) })),
           batchId
         );
       } else {
-        await this._perspective.executeAction(actions, this._id, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
+        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
       }
     }
   }
@@ -2773,11 +2773,11 @@ WHERE ${whereConditions.join(' AND ')}
       if (Array.isArray(value)) {
         await Promise.all(
           value.map((v) =>
-            this._perspective.executeAction(actions, this._id, [{ name: "value", value: this.resolveRelationId(v) }], batchId)
+            this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(v) }], batchId)
           )
         );
       } else {
-        await this._perspective.executeAction(actions, this._id, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
+        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
       }
     }
   }
@@ -2797,11 +2797,11 @@ WHERE ${whereConditions.join(' AND ')}
       if (Array.isArray(value)) {
         await Promise.all(
           value.map((v) =>
-            this._perspective.executeAction(actions, this._id, [{ name: "value", value: this.resolveRelationId(v) }], batchId)
+            this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(v) }], batchId)
           )
         );
       } else {
-        await this._perspective.executeAction(actions, this._id, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
+        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
       }
     }
   }
@@ -2862,7 +2862,7 @@ WHERE ${whereConditions.join(' AND ')}
     // Create the subject with the initial values
     await this.perspective.createSubject(
       className,
-      this._id,
+      this._baseExpression,
       initialValues,
       batchId
     );
@@ -3000,17 +3000,17 @@ WHERE ${whereConditions.join(' AND ')}
    */
   async delete(batchId?: string) {
     // Remove the subject itself (destructor actions)
-    await this._perspective.removeSubject(this, this._id, batchId);
+    await this._perspective.removeSubject(this, this._baseExpression, batchId);
 
     // Clean up incoming links — remove any links that point **to** this instance
     try {
-      const incomingLinks = await this._perspective.get(new LinkQuery({ target: this._id }));
+      const incomingLinks = await this._perspective.get(new LinkQuery({ target: this._baseExpression }));
       if (incomingLinks.length > 0) {
         await this._perspective.removeLinks(incomingLinks, batchId);
       }
     } catch (e) {
       // Non-fatal: the subject was already deleted; incoming link cleanup is best-effort
-      console.warn(`delete(): failed to clean up incoming links for ${this._id}:`, e);
+      console.warn(`delete(): failed to clean up incoming links for ${this._baseExpression}:`, e);
     }
   }
 
@@ -3062,6 +3062,28 @@ WHERE ${whereConditions.join(' AND ')}
   ): Promise<T> {
     const instance = new this(perspective) as T;
     Object.assign(instance, data);
+
+    // When a parent scope is provided without a caller-supplied batch, open a
+    // new batch ourselves so that the instance creation and the parent→child
+    // link are committed atomically.  If either step throws, commitBatch is
+    // never reached and the batch is implicitly abandoned (rollback).
+    if (options?.parent && !options?.batchId) {
+      const batchId = await perspective.createBatch();
+      await instance.save(batchId);
+      const predicate = resolveParentPredicate(options.parent, this);
+      const link = new Link({
+        source: options.parent.id,
+        predicate,
+        target: instance.id,
+      });
+      await perspective.add(link, 'shared', batchId);
+      await perspective.commitBatch(batchId);
+      // Hydrate the instance now that the batch has been committed (mirrors the
+      // behaviour of save() when it manages its own batch).
+      await instance.get();
+      return instance;
+    }
+
     await instance.save(options?.batchId);
 
     // Create parent → child link if a parent scope was provided
