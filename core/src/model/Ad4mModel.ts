@@ -60,35 +60,6 @@ type Where = { [propertyName: string]: WhereCondition };
 type Order = { [propertyName: string]: "ASC" | "DESC" };
 
 /**
- * Describes which relations to eager-load when querying.
- *
- * * `true` hydrates the relation one level deep.
- * * A nested `IncludeMap` hydrates sub-relations recursively.
- *
- * @example
- * ```typescript
- * // Load comments (one level)
- * { comments: true }
- *
- * // Load comments and each comment's author
- * { comments: { author: true } }
- * ```
- */
-export interface IncludeMap {
-  [relation: string]: boolean | IncludeMap;
-}
-
-/**
- * Options accepted by the instance `get()` method.
- */
-export interface GetOptions {
-  /** Eager-load the specified relations (same map as `Query.include`). */
-  include?: IncludeMap;
-  /** Sparse fieldset — only hydrate these property names. */
-  properties?: string[];
-}
-
-/**
  * Discriminated union for parent-scoped queries.
  *
  * **Model form** (preferred) — predicate auto-resolved from the parent model's
@@ -101,6 +72,29 @@ export type ParentScope =
   | { model: typeof Ad4mModel; id: string; field?: string }
   | { id: string; predicate: string };
 
+/**
+ * Describes which relations to eager-load when querying.
+ *
+ * Each value is either:
+ * - `true` — hydrate the relation one level deep
+ * - A `RelationSubQuery` — scoped sub-query (filter / sort / paginate / nested include)
+ *
+ * @example
+ * ```typescript
+ * // One level deep
+ * { comments: true }
+ *
+ * // Sub-query: only the 5 most-recent comments
+ * { comments: { order: { createdAt: 'DESC' }, limit: 5 } }
+ *
+ * // Nested eager-load
+ * { comments: { include: { author: true } } }
+ * ```
+ */
+export interface IncludeMap {
+  [relation: string]: boolean | RelationSubQuery;
+}
+
 export type Query = {
   /** Filter to instances that are the target of a link from a given parent. */
   parent?: ParentScope;
@@ -112,6 +106,26 @@ export type Query = {
   limit?: number;
   count?: boolean;
 };
+
+/**
+ * Sub-query options for a specific relation inside an `IncludeMap`.
+ *
+ * Equivalent to `Query` without top-level scoping (`parent`) or `count`,
+ * since the result set is already constrained to the linked relation.
+ *
+ * @example
+ * ```typescript
+ * await post.get({ include: { comments: { order: { createdAt: 'DESC' }, limit: 5 } } });
+ * ```
+ */
+export type RelationSubQuery = Omit<Query, 'parent' | 'count'>;
+
+/**
+ * Options accepted by the instance `get()` method.
+ *
+ * A subset of `Query` — only hydration controls apply to a single known instance.
+ */
+export type GetOptions = Pick<Query, 'include' | 'properties'>;
 
 export type AllInstancesResult = { AllInstances: Ad4mModel[]; TotalCount?: number; isInit?: boolean };
 export type ResultsWithTotalCount<T> = { results: T[]; totalCount?: number };
@@ -1337,9 +1351,12 @@ export class Ad4mModel {
 
       const TargetClass = meta.target() as unknown as typeof Ad4mModel;
 
-      // Nested include map (if the value is an object, not just `true`)
-      const nestedInclude: IncludeMap | undefined =
-        typeof includeValue === 'object' ? includeValue as IncludeMap : undefined;
+      // Determine if a RelationSubQuery was supplied (object) vs a plain `true`
+      const subQuery: RelationSubQuery | undefined =
+        typeof includeValue === 'object' && includeValue !== null
+          ? (includeValue as RelationSubQuery)
+          : undefined;
+      const nestedInclude: IncludeMap | undefined = subQuery?.include;
 
       // Collect all unique URIs across all instances for batch-friendly lookup
       const uriSet = new Set<string>();
@@ -1355,28 +1372,80 @@ export class Ad4mModel {
 
       if (uriSet.size === 0) continue;
 
-      // Hydrate each unique URI into a model instance
+      // Hydrate related instances.
+      // When a sub-query specifies where/order/properties we delegate to findAll
+      // (which can filter and sort server-side). Otherwise fetch URIs individually.
       const hydrated = new Map<string, Ad4mModel>();
-      await Promise.all(
-        Array.from(uriSet).map(async (uri) => {
-          try {
-            const related = new TargetClass(perspective, uri);
-            await related.get();
-            hydrated.set(uri, related);
-          } catch (e) {
-            console.warn(`include: failed to hydrate "${relName}" URI ${uri}:`, e);
-          }
-        }),
+
+      const hasSubQueryFilters = subQuery && (
+        subQuery.where || subQuery.order || subQuery.properties ||
+        subQuery.limit != null || subQuery.offset != null
       );
+
+      if (hasSubQueryFilters) {
+        // Merge the linked-URI set with any additional where conditions
+        const whereWithIds: Record<string, any> = {
+          id: Array.from(uriSet),
+          ...(subQuery!.where ?? {}),
+        };
+        const results = await TargetClass.findAll(perspective, {
+          where: whereWithIds as any,
+          ...(subQuery!.order && { order: subQuery!.order as any }),
+          ...(subQuery!.properties && { properties: subQuery!.properties }),
+        });
+        for (const result of results) {
+          hydrated.set(result.id, result);
+        }
+      } else {
+        // Simple fetch: hydrate each URI individually
+        await Promise.all(
+          Array.from(uriSet).map(async (uri) => {
+            try {
+              const related = new TargetClass(perspective, uri);
+              await related.get(
+                subQuery?.properties ? { properties: subQuery.properties } : undefined,
+              );
+              hydrated.set(uri, related);
+            } catch (e) {
+              console.warn(`include: failed to hydrate "${relName}" URI ${uri}:`, e);
+            }
+          }),
+        );
+      }
 
       // Replace raw URIs with hydrated instances on each parent instance
       for (const inst of instances) {
         const raw = (inst as any)[relName];
         if (raw == null) continue;
         if (Array.isArray(raw)) {
-          const resolved = raw.map((v: any) =>
-            typeof v === 'string' && hydrated.has(v) ? hydrated.get(v) : v,
-          );
+          // Map URIs → instances; drop those filtered out by where
+          let resolved: Ad4mModel[] = raw
+            .map((v: any) =>
+              typeof v === 'string' && hydrated.has(v) ? hydrated.get(v)! : null,
+            )
+            .filter((v): v is Ad4mModel => v !== null);
+
+          // Per-instance sort (client-side, after filtering)
+          if (subQuery?.order) {
+            const orderEntries = Object.entries(subQuery.order);
+            resolved = resolved.sort((a, b) => {
+              for (const [field, dir] of orderEntries) {
+                const av = String((a as any)[field] ?? '');
+                const bv = String((b as any)[field] ?? '');
+                const diff = av.localeCompare(bv);
+                if (diff !== 0) return dir === 'DESC' ? -diff : diff;
+              }
+              return 0;
+            });
+          }
+
+          // Per-instance limit / offset
+          if (subQuery?.offset != null || subQuery?.limit != null) {
+            const start = subQuery.offset ?? 0;
+            const end =
+              subQuery.limit != null ? start + subQuery.limit : undefined;
+            resolved = resolved.slice(start, end);
+          }
 
           // Enforce maxCount guard — single-valued relations keep only the last item
           if (meta.maxCount === 1) {
@@ -1385,7 +1454,9 @@ export class Ad4mModel {
                 `include: relation "${relName}" has maxCount 1 but ${resolved.length} values found; keeping the last`,
               );
             }
-            (inst as any)[relName] = resolved.length > 0 ? resolved[resolved.length - 1] : null;
+            (inst as any)[relName] = resolved.length > 0
+              ? resolved[resolved.length - 1]
+              : null;
           } else {
             (inst as any)[relName] = resolved;
           }
@@ -1396,7 +1467,7 @@ export class Ad4mModel {
 
       // Recurse for nested includes
       if (nestedInclude) {
-        const hydratedInstances = Array.from(hydrated.values()) as (typeof TargetClass extends new (...a: any[]) => infer I ? I : Ad4mModel)[];
+        const hydratedInstances = Array.from(hydrated.values());
         await TargetClass.hydrateRelations(hydratedInstances, perspective, nestedInclude);
       }
     }
@@ -2650,9 +2721,9 @@ WHERE ${whereConditions.join(' AND ')}
   /**
    * Gets the model instance with all properties and collections populated.
    *
-   * @param opts - Optional hydration options:
-   *   - `include` — eager-load the specified relations (e.g. `{ comments: true }`)
-   *   - `properties` — sparse fieldset, only hydrate the listed property names
+   * @param optsOrInclude - Optional hydration options. Accepts two forms:
+   *   - `GetOptions` wrapper: `{ include: { comments: true }, properties: ['title'] }`
+   *   - `IncludeMap` shorthand: `{ comments: true }` (equivalent to `{ include: { comments: true } }`)
    * @returns The populated model instance
    * @throws Will throw if data retrieval fails
    *
@@ -2662,11 +2733,25 @@ WHERE ${whereConditions.join(' AND ')}
    * await recipe.get();
    * console.log(recipe.name, recipe.ingredients);
    *
-   * // With eager-loaded relations:
-   * await recipe.get({ include: { ingredients: true } });
+   * // Shorthand — pass IncludeMap directly:
+   * await recipe.get({ ingredients: true });
+   *
+   * // Full options — includes sparse fieldset:
+   * await recipe.get({ include: { ingredients: true }, properties: ['name'] });
    * ```
    */
-  async get(opts?: GetOptions) {
+  async get(optsOrInclude?: GetOptions | IncludeMap) {
+    // Normalise: if the caller passed a plain IncludeMap shorthand (no `include`
+    // or `properties` key at the top level) wrap it in GetOptions automatically.
+    let opts: GetOptions | undefined;
+    if (!optsOrInclude) {
+      opts = undefined;
+    } else if ('include' in optsOrInclude || 'properties' in optsOrInclude) {
+      opts = optsOrInclude as GetOptions;
+    } else {
+      opts = { include: optsOrInclude as IncludeMap };
+    }
+
     this._subjectClassName = await this._perspective.stringOrTemplateObjectToSubjectClassName(this.cleanCopy());
 
     return await this.getData(opts);
