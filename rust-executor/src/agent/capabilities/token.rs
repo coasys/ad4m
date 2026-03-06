@@ -3,20 +3,29 @@ use crate::wallet::Wallet;
 use deno_core::{anyhow::anyhow, error::AnyError};
 use jsonwebtoken::{encode, Algorithm, DecodingKey, EncodingKey, Header};
 
+/// Check that the wallet singleton is unlocked, returning a clear error if not.
+fn require_unlocked_wallet() -> Result<(), AnyError> {
+    let wallet = Wallet::instance();
+    let wallet_lock = wallet.lock().expect("wallet lock");
+    let wallet_ref = wallet_lock.as_ref().expect("wallet instance");
+    if !wallet_ref.is_unlocked() {
+        return Err(anyhow!(
+            "Wallet is locked. The agent must be unlocked (agentUnlock) before generating JWTs."
+        ));
+    }
+    Ok(())
+}
+
 pub fn generate_jwt(
     audience: String,
     expiration_time: u64,
     capabilities: AuthInfo,
 ) -> Result<String, AnyError> {
-    // Get the private key
+    require_unlocked_wallet()?;
+
     let wallet = Wallet::instance();
     let wallet_lock = wallet.lock().expect("wallet lock");
     let wallet_ref = wallet_lock.as_ref().expect("wallet instance");
-
-    if !wallet_ref.is_unlocked() {
-        return Err(anyhow!("Wallet is locked. The agent must be unlocked (agentUnlock) before generating JWTs."));
-    }
-
     let name = "main".to_string();
 
     let secret_key = wallet_ref
@@ -39,15 +48,12 @@ pub fn generate_jwt(
 }
 
 pub fn decode_jwt(token: String) -> Result<Claims, AnyError> {
-    //Get the private key
+    require_unlocked_wallet()?;
+
     let wallet = Wallet::instance();
     let wallet_lock = wallet.lock().expect("wallet lock");
     let wallet_ref = wallet_lock.as_ref().expect("wallet instance");
     let name = "main".to_string();
-
-    if !wallet_ref.is_unlocked() {
-        return Err(anyhow!("Wallet is locked. The agent must be unlocked (agentUnlock) before decoding JWTs."));
-    }
 
     let secret_key = wallet_ref
         .get_secret_key(&name)
@@ -66,6 +72,11 @@ pub fn decode_jwt(token: String) -> Result<Claims, AnyError> {
 mod tests {
     use super::*;
     use crate::wallet::Wallet;
+
+    // NOTE: These tests mutate the global Wallet singleton. They MUST run
+    // with --test-threads=1 (which the executor test suite already enforces)
+    // to avoid data races. If this ever changes, add #[serial] from
+    // the serial_test crate.
 
     fn test_auth_info() -> AuthInfo {
         AuthInfo {
@@ -200,5 +211,12 @@ mod tests {
             !err_msg.contains("Wallet is locked"),
             "Should not say wallet is locked when it's unlocked"
         );
+
+        // Cleanup: restore a "main" key so other tests aren't affected
+        {
+            let mut wallet = wallet_instance.lock().unwrap();
+            let w = wallet.as_mut().unwrap();
+            w.generate_keypair("main".to_string());
+        }
     }
 }

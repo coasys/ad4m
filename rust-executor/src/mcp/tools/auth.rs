@@ -85,6 +85,20 @@ pub struct AuthStatusParams {}
 // ============================================================================
 
 impl Ad4mMcpHandler {
+    /// Check that the agent wallet is unlocked; return Err(json) if locked.
+    fn check_wallet_unlocked() -> Result<(), String> {
+        let wallet = crate::wallet::Wallet::instance();
+        let wallet_lock = wallet.lock().expect("wallet lock");
+        let wallet_ref = wallet_lock.as_ref().expect("wallet instance");
+        if !wallet_ref.is_unlocked() {
+            return Err(serde_json::json!({
+                "success": false,
+                "error": "Agent wallet is locked. Call agentUnlock first (or use login_email for multi-user mode)."
+            }).to_string());
+        }
+        Ok(())
+    }
+
     /// Login with email and password (multi-user mode)
     #[tool(
         description = "Login to a multi-user AD4M executor using email and password. Returns a JWT token on success that will be used for subsequent operations."
@@ -107,17 +121,8 @@ impl Ad4mMcpHandler {
         description = "Request a capability token (step 1/2 of local auth flow). This is the primary way to authenticate with a local/single-user AD4M executor. Returns request_id and code — pass both to generate_jwt to get a JWT token. For multi-user executors, use login_email or signup instead. Note: when using the ad4m-executor CLI, the verification code is logged to stdout."
     )]
     pub async fn request_capability(&self, params: Parameters<RequestCapabilityParams>) -> String {
-        // Check wallet is unlocked before attempting capability flow
-        {
-            let wallet = crate::wallet::Wallet::instance();
-            let wallet_lock = wallet.lock().expect("wallet lock");
-            let wallet_ref = wallet_lock.as_ref().expect("wallet instance");
-            if !wallet_ref.is_unlocked() {
-                return serde_json::json!({
-                    "success": false,
-                    "error": "Agent wallet is locked. Call agentUnlock first (or use login_email for multi-user mode)."
-                }).to_string();
-            }
+        if let Err(msg) = Self::check_wallet_unlocked() {
+            return msg;
         }
 
         let p = &params.0;
@@ -160,17 +165,8 @@ impl Ad4mMcpHandler {
         description = "Generate a JWT token (step 2/2 of local auth flow). Pass the request_id and code from request_capability. The JWT is stored in the session and used for all subsequent operations automatically."
     )]
     pub async fn generate_jwt(&self, params: Parameters<GenerateJwtParams>) -> String {
-        // Check wallet is unlocked before attempting JWT generation
-        {
-            let wallet = crate::wallet::Wallet::instance();
-            let wallet_lock = wallet.lock().expect("wallet lock");
-            let wallet_ref = wallet_lock.as_ref().expect("wallet instance");
-            if !wallet_ref.is_unlocked() {
-                return serde_json::json!({
-                    "success": false,
-                    "error": "Agent wallet is locked. Call agentUnlock first (or use login_email for multi-user mode)."
-                }).to_string();
-            }
+        if let Err(msg) = Self::check_wallet_unlocked() {
+            return msg;
         }
 
         let p = &params.0;
