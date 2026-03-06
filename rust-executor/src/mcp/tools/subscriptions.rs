@@ -159,10 +159,7 @@ impl Ad4mMcpHandler {
 
         // Extract the base58 key portion of the DID (after "did:key:").
         // This is URL-safe and appears unencoded in flux://body targets.
-        let did_key = did
-            .strip_prefix("did:key:")
-            .unwrap_or(&did)
-            .to_string();
+        let did_key = did.strip_prefix("did:key:").unwrap_or(&did).to_string();
 
         // Resolve display name from profile or override
         let name = if let Some(ref override_name) = params.0.name_override {
