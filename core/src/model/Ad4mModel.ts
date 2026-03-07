@@ -229,7 +229,7 @@ function resolveParentPredicate(
 
   // Fallback: scan for a relation whose target matches the child class
   for (const [, entry] of Object.entries(relMeta)) {
-    if (entry.target() === childCtor) {
+    if (entry.target && entry.target() === childCtor) {
       return entry.predicate;
     }
   }
