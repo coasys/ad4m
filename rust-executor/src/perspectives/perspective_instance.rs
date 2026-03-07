@@ -3320,7 +3320,8 @@ impl PerspectiveInstance {
                                 let pred_match = remove_predicate.is_none()
                                     || link_expr.data.predicate == remove_predicate;
                                 let target_match = remove_target.is_none()
-                                    || link_expr.data.target == remove_target.as_deref().unwrap_or("");
+                                    || link_expr.data.target
+                                        == remove_target.as_deref().unwrap_or("");
                                 !(source_match && pred_match && target_match)
                             });
                         }
