@@ -701,6 +701,11 @@ impl Ad4mMcpHandler {
                 Err(e) => return format!("Error resolving property '{}': {}", key, e),
             };
 
+            // Use batch to atomically remove old + add new for this property.
+            // Without batching, the remove can propagate to other nodes before the add,
+            // causing the property to appear as "uninitialized" temporarily.
+            let batch_id = perspective.create_batch().await;
+
             // Remove old values
             if let Ok(links) = perspective
                 .get_links(&LinkQuery {
@@ -711,7 +716,15 @@ impl Ad4mMcpHandler {
                 .await
             {
                 for link in links {
-                    let _ = perspective.remove_link(link.into(), None).await;
+                    if let Err(e) = perspective
+                        .remove_link(link.into(), Some(batch_id.clone()))
+                        .await
+                    {
+                        return format!(
+                            "Error removing existing '{}' link (batch abandoned): {}",
+                            key, e
+                        );
+                    }
                 }
             }
 
@@ -728,10 +741,19 @@ impl Ad4mMcpHandler {
                 target,
             };
 
-            match perspective
-                .add_link(link, LinkStatus::Shared, None, &agent_context)
+            if let Err(e) = perspective
+                .add_link(
+                    link,
+                    LinkStatus::Shared,
+                    Some(batch_id.clone()),
+                    &agent_context,
+                )
                 .await
             {
+                return format!("Error adding '{}' link (batch abandoned): {}", key, e);
+            }
+
+            match perspective.commit_batch(batch_id, &agent_context).await {
                 Ok(_) => updated.push(key.clone()),
                 Err(e) => return format!("Error setting property '{}': {}", key, e),
             }
@@ -835,21 +857,6 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Error resolving property '{}': {}", property_name, e),
         };
 
-        // Remove existing links with this predicate (setSingleTarget pattern)
-        let existing = perspective
-            .get_links(&LinkQuery {
-                source: Some(expression_address.clone()),
-                predicate: Some(predicate.clone()),
-                ..Default::default()
-            })
-            .await;
-
-        if let Ok(links) = existing {
-            for link in links {
-                let _ = perspective.remove_link(link.into(), None).await;
-            }
-        }
-
         let agent_context = match self.get_agent_context().await {
             Ok(ctx) => ctx,
             Err(e) => return format!("Authentication error: {}", e),
@@ -861,16 +868,56 @@ impl Ad4mMcpHandler {
             Self::encode_literal(&value)
         };
 
+        // Use batch to atomically remove old + add new (setSingleTarget pattern).
+        // Without batching, the remove can propagate to other nodes before the add,
+        // causing the property to appear as "uninitialized" temporarily.
+        let batch_id = perspective.create_batch().await;
+
+        // Remove existing links with this predicate
+        let existing = perspective
+            .get_links(&LinkQuery {
+                source: Some(expression_address.clone()),
+                predicate: Some(predicate.clone()),
+                ..Default::default()
+            })
+            .await;
+
+        if let Ok(links) = existing {
+            for link in links {
+                if let Err(e) = perspective
+                    .remove_link(link.into(), Some(batch_id.clone()))
+                    .await
+                {
+                    return format!(
+                        "Error removing existing '{}' link (batch abandoned): {}",
+                        property_name, e
+                    );
+                }
+            }
+        }
+
         let link = Link {
             source: expression_address.clone(),
             predicate: Some(predicate),
             target,
         };
 
-        match perspective
-            .add_link(link, LinkStatus::Shared, None, &agent_context)
+        if let Err(e) = perspective
+            .add_link(
+                link,
+                LinkStatus::Shared,
+                Some(batch_id.clone()),
+                &agent_context,
+            )
             .await
         {
+            return format!(
+                "Error adding '{}' link (batch abandoned): {}",
+                property_name, e
+            );
+        }
+
+        match perspective.commit_batch(batch_id, &agent_context).await {
             Ok(_) => serde_json::to_string_pretty(&json!({
                 "success": true,
                 "expression_address": expression_address,
