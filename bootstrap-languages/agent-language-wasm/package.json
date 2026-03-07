@@ -1,0 +1,19 @@
+{
+  "name": "@coasys/agent-language-wasm",
+  "version": "0.1.0",
+  "description": "WASM implementation of agent-expression-store using flat export pattern",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "build": "wasm-pack build --target web --out-dir pkg",
+    "test": "echo 'Tests run via ad4m-test'"
+  },
+  "files": [
+    "index.js",
+    "pkg/",
+    "README.md"
+  ],
+  "keywords": ["ad4m", "language", "wasm", "agent"],
+  "author": "Coasys",
+  "license": "MIT"
+}
