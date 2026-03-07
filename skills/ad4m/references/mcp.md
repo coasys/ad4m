@@ -41,6 +41,39 @@ These are always available regardless of SDNA:
 | `remove_link` | Remove a link from a perspective |
 | `get_models` | List available subject classes (SHACL shapes) |
 | `add_model` | Add SHACL SDNA to a perspective |
+| `infer` | Run Prolog queries for complex reasoning |
+| `language_meta` | Get metadata about a language by address |
+| `list_link_language_templates` | List available P2P sync templates for neighbourhoods |
+| `neighbourhood_publish_from_perspective` | Publish a perspective as a shared neighbourhood (auto-clones template) |
+| `neighbourhood_join_from_url` | Join an existing neighbourhood by URL |
+
+## Language & Neighbourhood Tools
+
+### Inspecting Languages
+
+Use `language_meta` to get information about any language address — name, description, author, template params, source code link.
+
+### Publishing Neighbourhoods
+
+To share a perspective as a P2P neighbourhood:
+
+```
+1. list_link_language_templates  → get available sync engines
+2. neighbourhood_publish_from_perspective(
+     perspective_uuid,
+     link_language_template: templates[0].address,
+     name: "My Neighbourhood"
+   )                             → auto-clones template, publishes, returns URL
+```
+
+The tool handles link language cloning automatically. Each neighbourhood gets a unique sync instance derived from the template.
+
+### Joining Neighbourhoods
+
+```
+neighbourhood_join_from_url(url: "neighbourhood://Qm...")
+  → creates local perspective synced with the neighbourhood
+```
 
 ## Dynamic Tools (from SHACL)
 
