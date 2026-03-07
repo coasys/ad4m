@@ -30,7 +30,7 @@ Always use the MCP tools! AD4M also has a GraphQL interface, but almost everythi
   }
 }
 ```
-If your MCP client doesn't support `headers`, the admin credential can also be passed via the `auth_status` / `request_capability` + `generate_jwt` MCP tools after connecting.
+If your MCP client doesn't support `headers`, the admin credential can also be passed via the `request_capability` + `generate_jwt` MCP tools after connecting. **Important:** when you call `request_capability`, the 6-digit verification code is printed to the ad4m-executor's **stdout** — find it in the executor log file (e.g. `/tmp/ad4m-executor.log`) or by attaching to the screen session (`screen -r ad4m-executor`). You need this code to complete `generate_jwt`.
 
 ### 2. Use --admin-credential if you setup a new ad4m-executor for you
 There are multiple ways to use/connect to an ad4m-executor. If in doubt: get the ad4m-executor binary and set it up just for you — you are the owner/admin of that ad4m instance. You start it with the `--admin-credential <random passphrase that you pick and use for all calls>` so that you don't have to request a JWT.
