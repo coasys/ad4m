@@ -152,10 +152,10 @@ impl Ad4mMcpHandler {
 
         let input_name = input.meta.name.clone();
 
-        // Save locally
-        if let Err(e) = controller.save_language_bundle(&input.bundle, None) {
-            log::warn!("Failed to save cloned language bundle locally: {}", e);
-        }
+        // Save locally and get the path
+        let (saved_hash, bundle_path) = controller
+            .save_language_bundle(&input.bundle, None)
+            .map_err(|e| format!("Failed to save cloned language bundle locally: {}", e))?;
 
         // Publish via the language language
         let input_json = serde_json::to_string(&input)
@@ -173,14 +173,30 @@ impl Ad4mMcpHandler {
 
         let address = address_raw.trim().trim_matches('"').to_string();
 
-        // Load into runtime
-        let bundle_on_disk = crate::utils::languages_directory()
-            .join(&address)
-            .join("bundle.js");
-        if bundle_on_disk.exists() {
-            if let Err(e) = controller.load_language(bundle_on_disk, false).await {
-                log::warn!("Failed to load cloned language into runtime: {}", e);
-            }
+        // Load into runtime - use the saved bundle path
+        // Verify the saved hash matches the published address
+        if saved_hash != address {
+            log::warn!(
+                "Saved language hash ({}) doesn't match published address ({}). Using published address.",
+                saved_hash, address
+            );
+        }
+
+        if bundle_path.exists() {
+            controller
+                .load_language(bundle_path, false)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Failed to load cloned language into runtime: {}. The language was published but cannot be used locally.",
+                        e
+                    )
+                })?;
+        } else {
+            return Err(format!(
+                "Language bundle not found at expected path: {:?}",
+                bundle_path
+            ));
         }
 
         log::info!(
