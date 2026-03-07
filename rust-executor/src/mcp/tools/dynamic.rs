@@ -736,7 +736,12 @@ impl Ad4mMcpHandler {
             };
 
             let _ = perspective
-                .add_link(link, LinkStatus::Shared, Some(batch_id.clone()), &agent_context)
+                .add_link(
+                    link,
+                    LinkStatus::Shared,
+                    Some(batch_id.clone()),
+                    &agent_context,
+                )
                 .await;
 
             match perspective.commit_batch(batch_id, &agent_context).await {
