@@ -12,7 +12,7 @@ export class RemoteAuthentication extends LitElement {
   @property({ type: Boolean }) passwordError: boolean = false;
   @property({ type: Boolean }) accountCreationError: boolean = false;
 
-  @state() private email = "";
+  @state() private email = sessionStorage.getItem("ad4m-connect-email") || "";
   @state() private password = "";
   @state() private emailSecurityCode: string = "";
 
@@ -73,6 +73,14 @@ export class RemoteAuthentication extends LitElement {
     // Clear sensitive fields when navigating back
     this.password = "";
     this.emailSecurityCode = "";
+  }
+
+  private useDifferentAccount() {
+    this.remoteAuthState = null;
+    this.password = "";
+    this.emailSecurityCode = "";
+    this.email = "";
+    sessionStorage.removeItem("ad4m-connect-email");
   }
 
   private emailLogin() {
@@ -141,6 +149,7 @@ export class RemoteAuthentication extends LitElement {
                 @input=${(e: Event) => {
                   const input = e.target as HTMLInputElement;
                   this.email = input.value;
+                  sessionStorage.setItem("ad4m-connect-email", input.value);
                 }}
                 @keydown=${(e: KeyboardEvent) => {
                   if (e.key === 'Enter' && !this.remoteAuthLoading && this.isValidEmail()) {
@@ -250,6 +259,12 @@ export class RemoteAuthentication extends LitElement {
                 `
               : ''
             }
+
+            <div class="login-button">
+              <button class="secondary" @click=${this.useDifferentAccount}>
+                Use Different Account
+              </button>
+            </div>
           `
           : ``
         }
@@ -295,6 +310,12 @@ export class RemoteAuthentication extends LitElement {
                 `
               : ''
             }
+
+            <div class="login-button">
+              <button class="secondary" @click=${this.useDifferentAccount}>
+                Use Different Account
+              </button>
+            </div>
           `
           : ``
         }
