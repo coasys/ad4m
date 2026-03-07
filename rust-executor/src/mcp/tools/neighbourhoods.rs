@@ -95,6 +95,8 @@ impl Ad4mMcpHandler {
                         "address": address,
                         "name": name,
                         "description": null,
+                        "author": null,
+                        "possible_template_params": null,
                     }));
                 }
             }
