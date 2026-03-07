@@ -60,38 +60,5 @@ impl Ad4mMcpHandler {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_language_meta_params_deserialize() {
-        let json = r#"{"address": "QmzSYwdnDDbtgry2DmiqYpVtoPP75MabguWZUy1Ene7NzQAQWz2"}"#;
-        let params: LanguageMetaParams = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            params.address,
-            "QmzSYwdnDDbtgry2DmiqYpVtoPP75MabguWZUy1Ene7NzQAQWz2"
-        );
-    }
-
-    #[test]
-    fn test_language_meta_response_structure() {
-        // Verify the response JSON structure includes all expected fields
-        let response = json!({
-            "address": "QmzSYwdnDDbtgry2DmiqYpVtoPP75MabguWZUy1Ene7NzQAQWz2",
-            "name": "perspective-diff-sync",
-            "description": "Holochain-based P2P sync for AD4M neighbourhoods",
-            "author": "did:key:z6MkgtBC3UaxNLt5SFJmxHtzFUUeJLCxLiP8DTqJgwF9uCkv",
-            "possible_template_params": ["uid", "name"],
-            "source_code_link": "https://github.com/coasys/ad4m",
-            "template_applied_params": null,
-            "template_source_language_address": null,
-        });
-
-        assert!(response["address"].as_str().is_some());
-        assert!(response["name"].as_str().is_some());
-        assert!(response["description"].as_str().is_some());
-        assert!(response["author"].as_str().is_some());
-        assert!(response["possible_template_params"].as_array().is_some());
-    }
-}
+// Note: Integration tests for language tools are in tests/js/tests/mcp-neighbourhood.test.ts
+// These test the actual MCP endpoints with a running executor.
