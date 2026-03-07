@@ -750,10 +750,7 @@ impl Ad4mMcpHandler {
                 )
                 .await
             {
-                return format!(
-                    "Error adding '{}' link (batch abandoned): {}",
-                    key, e
-                );
+                return format!("Error adding '{}' link (batch abandoned): {}", key, e);
             }
 
             match perspective.commit_batch(batch_id, &agent_context).await {
