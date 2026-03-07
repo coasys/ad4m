@@ -107,6 +107,7 @@ function buildWakeMessage(config, sub, detail) {
     `Perspective: ${P}`,
     `Channel: ${CH}`,
     neighbourhood ? `Neighbourhood: ${neighbourhood}` : null,
+    `Subscription: ${sub.id}`,
     `Event type: ${type}`,
   ].filter(Boolean).join("\n");
 }
@@ -169,6 +170,9 @@ async function startWaker(config) {
   const proxies = [];
 
   for (const sub of config.subscriptions) {
+    if (!sub.type) {
+      console.warn(`[waker] WARNING: subscription "${sub.id}" is missing the "type" field. Add "type": "mention" or "type": "channel-messages" to your config.`);
+    }
     console.log(`[waker] setting up SurrealDB subscription ${sub.id} (type=${sub.type || "unknown"}): ${sub.query.substring(0, 80)}...`);
 
     // Use QuerySubscriptionProxy directly with SurrealDB query

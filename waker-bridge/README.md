@@ -69,6 +69,8 @@ Typical flow:
 |-------|----------|-------------|
 | `executorUrl` | ✅ | AD4M executor WebSocket URL |
 | `token` | | AD4M admin credential or JWT |
+| `mcpEndpoint` | | MCP endpoint URL (e.g., `http://localhost:3001/mcp`) — included in wake messages so the agent knows where to connect |
+| `agentDid` | | Agent DID — included in wake messages so the agent can identify itself |
 | `wakeUrl` | ✅ | OpenClaw hooks endpoint (use `/hooks/agent` for actionable wakes) |
 | `wakeToken` | ✅ | Bearer token for the hooks endpoint |
 | `debounceMs` | | Debounce delay in ms (default: 2000) |
