@@ -51,6 +51,11 @@ soa/
 ├── src/                # TypeScript model classes
 │   ├── index.ts        # Exports + relationship predicate constants
 │   └── StateOfAffair.ts
+├── language/           # Static SoA language (ReadOnlyLanguage)
+│   └── src/
+│       ├── index.ts        # Language entry point
+│       ├── adapter.ts      # ExpressionAdapter — resolves soa:// to docs
+│       └── expressions.ts  # Registry of all soa:// expressions + docs
 └── package.json
 ```
 
@@ -103,13 +108,28 @@ SoA instances can be created via MCP tools using the auto-generated SHACL shape.
 
 ## The `soa` Language
 
-The `soa` language should be implemented as a **static language** in AD4M — defining fixed expressions that resolve to documentation:
+The `soa` language is a **static ReadOnlyLanguage** — it defines fixed expressions that resolve to structured documentation. When any agent (human or AI) resolves a `soa://` URL, they get back a rich object explaining what it means and how to use it:
 
-- `soa://rel_supports` → "This link indicates the source SoA provides evidence or argument for the target SoA"
-- `soa://rel_contradicts` → "This link indicates the source SoA provides evidence or argument against the target SoA"
-- etc.
+```typescript
+// Resolving soa://rel_supports returns:
+{
+  "@type": "SoADocumentation",
+  "address": "soa://rel_supports",
+  "name": "Supports",
+  "kind": "relationship",
+  "description": "Source provides evidence, argument, or backing for target...",
+  "example": "link(evidence_soa, \"soa://rel_supports\", claim_soa)",
+  "agentNotes": "Directional: A supports B means A is evidence FOR B..."
+}
+```
 
-This makes the ontology self-documenting and discoverable.
+This makes the ontology **self-documenting and discoverable**. AI agents encountering `soa://` predicates for the first time can resolve them to understand the ontology without external documentation.
+
+### Pattern for other languages
+
+The soa language serves as a template for how AD4M languages can act as **self-documenting semantic vocabularies**. Any domain can create a similar static language to define its own predicates — just map addresses to documentation objects.
+
+Implementation: `soa/language/src/`
 
 ## Connection to Eve
 

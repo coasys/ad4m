@@ -1,0 +1,12 @@
+{
+  "name": "@coasys/soa-language",
+  "version": "0.1.0",
+  "description": "Static self-documenting vocabulary for State of Affairs ontology",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "node esbuild.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
