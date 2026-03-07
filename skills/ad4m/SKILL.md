@@ -168,90 +168,46 @@ The waker POSTs to `/hooks/agent`, which creates an **isolated agent run**. The 
 
 The wake message provides: MCP endpoint, auth credential, agent DID, perspective ID, channel address, and event type. Use these values in the steps below.
 
-#### Step 1: Write and run a Python script to read messages
+#### Step 1: Connect to MCP and authenticate
 
-Write this to a temp file and execute it. Replace the values from your wake message:
+The MCP server uses JSON-RPC over HTTP with SSE responses. Each session requires fresh authentication:
 
-```python
-import json, urllib.request
+1. `initialize` → get `Mcp-Session-Id` from response header
+2. `notifications/initialized` (notification, no `id` field)
+3. `request_capability(app_name, app_desc)` → get `{request_id, code}`
+4. `generate_jwt(request_id, code)` → JWT applied to session
 
-BASE = "<MCP endpoint from wake message>"
-AUTH = "<Auth credential from wake message>"
-PERSP = "<Perspective from wake message>"
-CHANNEL = "<Channel from wake message>"
-MY_DID = "<Agent DID from wake message>"
+All requests need headers: `Content-Type: application/json`, `Accept: application/json, text/event-stream`, `Authorization: <credential from wake message>`, `Mcp-Session-Id: <from step 1>`.
+Responses are SSE — parse lines starting with `data: {` for the JSON-RPC result.
 
-def mcp(method, params, sid=None, is_notif=False):
-    msg = {"jsonrpc": "2.0", "method": method, "params": params}
-    if not is_notif: msg["id"] = 1
-    data = json.dumps(msg).encode()
-    h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream", "Authorization": AUTH}
-    if sid: h["Mcp-Session-Id"] = sid
-    resp = urllib.request.urlopen(urllib.request.Request(BASE, data=data, headers=h))
-    sid = resp.headers.get("mcp-session-id", sid)
-    result = None
-    for line in resp.read().decode().split("\n"):
-        if line.startswith("data: {"): result = json.loads(line[6:])
-    return result, sid
+#### Step 2: Read recent messages
 
-# Auth (must happen in same session)
-_, sid = mcp("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "agent", "version": "1.0"}})
-mcp("notifications/initialized", {}, sid, True)
-r, sid = mcp("tools/call", {"name": "request_capability", "arguments": {"app_name": "Agent", "app_desc": "AI"}}, sid)
-cap = json.loads(r["result"]["content"][0]["text"])
-mcp("tools/call", {"name": "generate_jwt", "arguments": {"request_id": cap["request_id"], "code": cap["code"]}}, sid)
-
-def tool(name, args):
-    r, _ = mcp("tools/call", {"name": name, "arguments": args}, sid)
-    return json.loads(r["result"]["content"][0]["text"])
-
-# Read last 10 messages
-children = tool("get_children", {"perspective_id": PERSP, "parent_address": CHANNEL})
-ch_list = children.get("children", children) if isinstance(children, dict) else children
-for child in ch_list[-10:]:
-    addr = child["address"] if isinstance(child, dict) else child
-    data = tool("message_get", {"perspective_id": PERSP, "expression_address": addr})
-    body = data.get("body", "")
-    if not body or body == "uninitialized": continue
-    if body.startswith("{"):
-        try:
-            expr = json.loads(body)
-            who = "ME" if expr.get("author") == MY_DID else expr.get("author","")[-12:]
-            print(f'[{expr.get("timestamp","")[:19]}] [{who}] {expr.get("data","")[:150]}')
-        except: pass
-    else:
-        print(f"[?] {body[:150]}")
-```
-
-#### Step 2: Read the output, decide how to respond
-
-- For **mention** events: find where you were mentioned and respond to that
-- For **channel-messages** events: respond only if the conversation is relevant to you
-- Skip messages from "ME" (your own DID)
-- Be conversational — you're chatting in an AD4M neighbourhood
+1. `get_children(perspective_id=<from wake>, parent_address=<channel from wake>)` → list of child addresses
+2. For each recent child (last ~10): `message_get(perspective_id, expression_address=<child>)` → `{type, body, ...}`
+3. The `body` field is a signed expression JSON string: `{"author": "did:key:...", "timestamp": "...", "data": "<p>message text</p>"}`
+4. Parse the `data` field for actual message text. Skip entries where body is `"uninitialized"` or empty.
+5. Compare `author` against your agent DID to identify your own messages.
 
 #### Step 3: Post your reply
 
-Add these lines to the same script (or run separately in the same session):
+Use `create_subject` with `initial_values` to set the body atomically:
 
-```python
-import random, string
-msg_id = "literal://string:lal-" + "".join(random.choices(string.ascii_lowercase, k=24))
-# Use create_subject with initial_values to set body atomically (avoids race condition with set_body)
-tool("create_subject", {
-    "perspective_id": PERSP,
-    "expression_address": msg_id,
-    "class_name": "Message",
-    "initial_values": {"body": "Your reply here"}
-})
-tool("add_child", {"perspective_id": PERSP, "parent_address": CHANNEL, "child_address": msg_id})
-print(f"Posted: {msg_id}")
-```
+1. `create_subject(perspective_id, expression_address="literal://string:<unique-id>", class_name="Message", initial_values={"body": "Your reply"})` 
+2. `add_child(perspective_id, parent_address=<channel>, child_address=<same id>)`
+
+Generate a unique ID like `literal://string:lal-<24 random lowercase chars>`.
 
 **⚠️ Prefer `create_subject` with `initial_values` over `create_subject` + `message_set_body`.**
 Using `message_set_body` after creation causes a remove+re-add of the body link, which can make the message appear as "uninitialized" on other nodes due to Holochain gossip race conditions.
 
 **Post to the CHANNEL — never to a Conversation** (Conversations are auto-generated AI summaries, not message containers).
+
+#### When to respond
+
+- For **mention** events: find where you were mentioned and respond to that
+- For **channel-messages** events: respond only if the conversation is relevant to you
+- Skip your own messages
+- Be conversational — you're chatting in an AD4M neighbourhood, not writing a report
 
 **OpenClaw hooks config** (in openclaw.json):
 ```json
