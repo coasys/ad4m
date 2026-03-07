@@ -52,32 +52,59 @@ pub struct NeighbourhoodJoinParams {
 impl Ad4mMcpHandler {
     /// List available link language templates for neighbourhood creation
     #[tool(
-        description = "List available link language templates that can be used when publishing a neighbourhood. Each template is a P2P synchronization engine (e.g. Holochain-based perspective-diff-sync). Pass one of these addresses as `link_language_template` when calling `neighbourhood_publish_from_perspective`."
+        description = "List available link language templates that can be used when publishing a neighbourhood. Each template is a P2P synchronization engine. Returns address, name, and description for each template. Pass the address as `link_language_template` when calling `neighbourhood_publish_from_perspective`."
     )]
     pub async fn list_link_language_templates(&self) -> String {
         let capabilities = self.get_capabilities().await;
-        if let Err(e) = check_capability(
-            &capabilities,
-            &RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
-        ) {
+        if let Err(e) =
+            check_capability(&capabilities, &RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY)
+        {
             return format!("Capability error: {}", e);
         }
 
-        match RuntimeService::with_global_instance(|runtime_service| {
+        let addresses = match RuntimeService::with_global_instance(|runtime_service| {
             Ok::<Vec<String>, String>(runtime_service.get_know_link_languages())
         }) {
-            Ok(templates) => {
-                let result = json!({
-                    "templates": templates,
-                    "count": templates.len(),
-                    "hint": "Pass one of these addresses as link_language_template when publishing a neighbourhood."
-                });
-                serde_json::to_string_pretty(&result)
-                    .unwrap_or_else(|e| format!("Error: {}", e))
+            Ok(addrs) => addrs,
+            Err(e) => {
+                return json!({"error": format!("Failed to get link language templates: {}", e)})
+                    .to_string()
             }
-            Err(e) => json!({"error": format!("Failed to get link language templates: {}", e)})
-                .to_string(),
+        };
+
+        // Fetch meta information for each template
+        let controller = LanguageController::global_instance();
+        let mut templates = Vec::new();
+        for address in &addresses {
+            let meta = controller.get_language_expression(address).await;
+            match meta {
+                Ok(m) => {
+                    templates.push(json!({
+                        "address": m.address,
+                        "name": m.name,
+                        "description": m.description,
+                        "author": m.author,
+                        "possible_template_params": m.possible_template_params,
+                    }));
+                }
+                Err(_) => {
+                    // Fallback: try to get at least the name from local runtime
+                    let name = controller.get_language_name(address).await;
+                    templates.push(json!({
+                        "address": address,
+                        "name": name,
+                        "description": null,
+                    }));
+                }
+            }
         }
+
+        let result = json!({
+            "templates": templates,
+            "count": templates.len(),
+            "hint": "Pass the address of a template as link_language_template when publishing a neighbourhood."
+        });
+        serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
     }
 
     /// Clone a link language template and publish the cloned instance.
@@ -130,9 +157,8 @@ impl Ad4mMcpHandler {
         }
 
         // Publish via the language language
-        let input_json = serde_json::to_string(&input).map_err(|e| {
-            format!("Failed to serialize cloned language: {}", e)
-        })?;
+        let input_json = serde_json::to_string(&input)
+            .map_err(|e| format!("Failed to serialize cloned language: {}", e))?;
 
         let publish_script = format!(
             r#"await globalThis.__ad4m_language_instance__.expressionAdapter.putAdapter.createPublic({})"#,
