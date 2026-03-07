@@ -24,6 +24,7 @@ pub mod auth;
 pub mod children;
 pub mod dynamic;
 pub mod flows;
+pub mod languages;
 pub mod neighbourhoods;
 pub mod perspectives;
 pub mod profiles;
@@ -275,7 +276,13 @@ impl Ad4mMcpHandler {
                 Self::get_mention_waker_config_tool_attr(),
                 Self::get_mention_waker_config,
             ))
+            // languages.rs
+            .with_route((Self::language_meta_tool_attr(), Self::language_meta))
             // neighbourhoods.rs
+            .with_route((
+                Self::list_link_language_templates_tool_attr(),
+                Self::list_link_language_templates,
+            ))
             .with_route((
                 Self::neighbourhood_publish_from_perspective_tool_attr(),
                 Self::neighbourhood_publish_from_perspective,
