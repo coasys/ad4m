@@ -25,9 +25,10 @@ npm install  # Installs: @apollo/client, @coasys/ad4m, graphql, graphql-ws, ws
 - OpenClaw hooks enabled (`openclaw.json` with hooks config)
 
 **Version compatibility:**
+
 | Skill version | AD4M executor | Node.js |
 |--------------|---------------|---------|
-| 0.3.x | ≥0.12.0-rc1 | ≥18 |
+| 0.1.0 | ≥0.12.0-rc1 | ≥18 |
 
 ## What Can a Bot Do?
 
@@ -529,7 +530,7 @@ This skill meets ClawHub's trust criteria:
 | **Tested** | ✅ | Unit tests in `waker/ad4m-waker.test.js` |
 | **Versioned** | ✅ | Semantic versioning (0.3.x) |
 | **Documented** | ✅ | Full setup + troubleshooting docs |
-| **Dependencies** | ✅ | All pinned in package.json |
+| **Dependencies** | ✅ | Uses caret ranges (not fully pinned) |
 | **Security** | ✅ | Credentials handled locally only |
 | **Maintenance** | ✅ | Actively maintained by Coasys |
 

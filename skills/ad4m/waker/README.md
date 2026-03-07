@@ -146,9 +146,11 @@ Event type: channel-messages
 ```js
 const { startWaker } = require("./ad4m-waker");
 
-const waker = await startWaker(config);
-// Later:
-waker.close();
+(async () => {
+  const waker = await startWaker(config);
+  // Later:
+  waker.close();
+})();
 ```
 
 ---

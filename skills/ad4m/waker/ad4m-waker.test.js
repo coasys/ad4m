@@ -32,14 +32,15 @@ function startMockExecutor(port) {
       const { query, variables } = JSON.parse(body);
 
       if (query.includes("perspectiveSubscribeSurrealQuery")) {
-        // Return subscription ID + initial results
-        const result = JSON.stringify({
-          subscriptionId: surrealSubId,
-          result: [{ source: "s", predicate: "p", target: "t" }]
-        });
+        // Return subscription ID + initial results (matches real GraphQL shape)
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
-          data: { perspectiveSubscribeSurrealQuery: result }
+          data: { 
+            perspectiveSubscribeSurrealQuery: {
+              subscriptionId: surrealSubId,
+              result: [{ source: "s", predicate: "p", target: "t" }]
+            }
+          }
         }));
       } else if (query.includes("perspectiveKeepAliveSurrealQuery")) {
         res.writeHead(200, { "Content-Type": "application/json" });
