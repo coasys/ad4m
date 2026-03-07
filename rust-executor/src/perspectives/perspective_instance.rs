@@ -3294,11 +3294,14 @@ impl PerspectiveInstance {
                     .await?;
                 }
                 Action::RemoveLink => {
+                    let remove_source = source.clone();
+                    let remove_predicate = predicate.clone();
+                    let remove_target = if target == "*" { None } else { Some(target) };
                     let link_expressions = self
                         .get_links(&LinkQuery {
-                            source: Some(source),
-                            predicate,
-                            target: if target == "*" { None } else { Some(target) },
+                            source: Some(remove_source.clone()),
+                            predicate: remove_predicate.clone(),
+                            target: remove_target.clone(),
                             from_date: None,
                             until_date: None,
                             limit: None,
@@ -3308,6 +3311,20 @@ impl PerspectiveInstance {
                         self.remove_link(link_expression.into(), batch_id.clone())
                             .await?;
                     }
+                    // Also prune matching links from pending batch additions
+                    if let Some(ref bid) = batch_id {
+                        let mut batches = self.batch_store.write().await;
+                        if let Some(diff) = batches.get_mut(bid) {
+                            diff.additions.retain(|link_expr| {
+                                let source_match = link_expr.data.source == remove_source;
+                                let pred_match = remove_predicate.is_none()
+                                    || link_expr.data.predicate == remove_predicate;
+                                let target_match = remove_target.is_none()
+                                    || link_expr.data.target == remove_target.as_deref().unwrap_or("");
+                                !(source_match && pred_match && target_match)
+                            });
+                        }
+                    }
                 }
                 Action::SetSingleTarget => {
                     if predicate.is_none() {
@@ -3316,6 +3333,7 @@ impl PerspectiveInstance {
                         );
                         continue;
                     }
+                    // Remove matching persisted links
                     let link_expressions = self
                         .get_links(&LinkQuery {
                             source: Some(source.clone()),
@@ -3329,6 +3347,18 @@ impl PerspectiveInstance {
                     for link_expression in link_expressions {
                         self.remove_link(link_expression.into(), batch_id.clone())
                             .await?;
+                    }
+                    // Also prune matching links from pending batch additions so
+                    // that a previous add in the same batch doesn't survive and
+                    // create a duplicate (e.g. save+update in one transaction).
+                    if let Some(ref bid) = batch_id {
+                        let mut batches = self.batch_store.write().await;
+                        if let Some(diff) = batches.get_mut(bid) {
+                            diff.additions.retain(|link_expr| {
+                                !(link_expr.data.source == source
+                                    && link_expr.data.predicate == predicate)
+                            });
+                        }
                     }
                     self.add_link(
                         Link {
@@ -3343,6 +3373,7 @@ impl PerspectiveInstance {
                     .await?;
                 }
                 Action::CollectionSetter => {
+                    // Remove matching persisted links
                     let link_expressions = self
                         .get_links(&LinkQuery {
                             source: Some(source.clone()),
@@ -3356,6 +3387,16 @@ impl PerspectiveInstance {
                     for link_expression in link_expressions {
                         self.remove_link(link_expression.into(), batch_id.clone())
                             .await?;
+                    }
+                    // Also prune matching links from pending batch additions
+                    if let Some(ref bid) = batch_id {
+                        let mut batches = self.batch_store.write().await;
+                        if let Some(diff) = batches.get_mut(bid) {
+                            diff.additions.retain(|link_expr| {
+                                !(link_expr.data.source == source
+                                    && link_expr.data.predicate == predicate)
+                            });
+                        }
                     }
                     self.add_links(
                         parameters
