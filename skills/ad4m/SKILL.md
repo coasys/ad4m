@@ -12,8 +12,25 @@ AD4M's core bootstrap languages (agent identity, neighbourhood sync, file storag
 
 ## IMPORTANT rules for how to use AD4M correctly
 
-### 1. Use MCP
+### 1. Use MCP — never curl it
 Always use the MCP tools! AD4M also has a GraphQL interface, but almost everything you need to do on ad4m for your human should be possible via the MCP tools that the ad4m-executor provides. This skill is written for that!
+
+**Do NOT try to call the MCP server with `curl`.** The MCP server uses Streamable HTTP transport — responses come back as `text/event-stream` (Server-Sent Events), not plain JSON. Raw `curl` calls will get garbled SSE data. You must connect via a proper MCP client.
+
+**To connect**, add AD4M as an MCP server in your MCP client config:
+```json
+{
+  "mcpServers": {
+    "ad4m": {
+      "url": "http://localhost:3001/mcp",
+      "headers": {
+        "Authorization": "<your-admin-credential>"
+      }
+    }
+  }
+}
+```
+If your MCP client doesn't support `headers`, the admin credential can also be passed via the `auth_status` / `request_capability` + `generate_jwt` MCP tools after connecting.
 
 ### 2. Use --admin-credential if you setup a new ad4m-executor for you
 There are multiple ways to use/connect to an ad4m-executor. If in doubt: get the ad4m-executor binary and set it up just for you — you are the owner/admin of that ad4m instance. You start it with the `--admin-credential <random passphrase that you pick and use for all calls>` so that you don't have to request a JWT.

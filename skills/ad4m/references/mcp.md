@@ -14,6 +14,8 @@ Streamable HTTP (bidirectional HTTP with SSE-like streaming). Connect at `http:/
 
 **Not stdio** — the MCP server runs alongside the GraphQL server in the same process. Uses JSON-RPC 2.0 over HTTP POST with session management via `Mcp-Session-Id` header.
 
+**Do NOT use `curl` to call MCP tools.** The server always responds with `Content-Type: text/event-stream` (Server-Sent Events), not plain JSON. Raw curl will get garbled SSE event data. You must use a proper MCP client (your tool interface, an MCP SDK, etc.).
+
 ## Authentication
 
 Bearer token in the HTTP `Authorization` header:
