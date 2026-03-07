@@ -52,6 +52,14 @@ cd ../cli && pnpm build
 
 Only the CLI crate produces binaries (`ad4m-executor` and `ad4m` in `target/release/`). The `rust-executor` crate is a library — it doesn't create standalone binaries, but its build step generates the Deno snapshot required by the CLI. **Always build `rust-executor` before `cli`.**
 
+### ⚠️ `--data-path` vs `--app-data-path`
+
+Different flag names for init vs run:
+- `ad4m-executor init --data-path /tmp/ad4m-data`
+- `ad4m-executor run --app-data-path /tmp/ad4m-data`
+
+Using the wrong flag silently creates a default data directory instead of the one you intended.
+
 ### Rebuild after changes
 
 Only need to repeat the steps that changed:
@@ -141,10 +149,23 @@ curl -s http://127.0.0.1:12100/graphql \
 ### ⚠️ agentGenerate creates the JWT signing key
 
 `agentGenerate` does two things: creates the agent DID **and** creates the wallet main key used for JWT token signing. If you skip this step and only use MCP's `request_capability`/`generate_jwt`, the multi-user login flow will fail with:
-```
+```text
 Failed to generate token: main key not found. call createMainKey() first
 ```
 **Always run `agentGenerate` once** after init, even if you plan to use MCP auth.
+
+### ⚠️ Wallet must be unlocked after every restart
+
+After restarting the executor, the agent wallet is **locked**. The encrypted keystore loads from `agent.json` but keys are not decrypted until you call `agentUnlock`:
+
+```bash
+curl -s http://127.0.0.1:12100/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: <admin-credential>" \
+  -d '{"query":"mutation { agentUnlock(passphrase: \"<passphrase>\", holochain: true) { isUnlocked did } }"}'
+```
+
+Without unlocking, MCP tools and multi-user JWT generation will fail with `"Wallet is locked"`. The `holochain: true` flag ensures Holochain services also reinitialise with the agent identity.
 
 **Wait for init to complete.** After `agentGenerate`, the executor takes 30-60 seconds to download and load bootstrap languages. Watch logs for `"AD4M init complete"` before using perspectives or neighbourhoods. There is no GraphQL readiness endpoint.
 
@@ -215,6 +236,19 @@ curl -sk https://127.0.0.1:12001/graphql \
 
 # 5. User connects via Flux at https://<ip>:12001
 ```
+
+## Trusted Agents
+
+Trusted agents can install and run languages on the executor without proof verification. Add trusted agents to allow languages published by specific DIDs:
+
+```bash
+curl -s http://127.0.0.1:12100/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: <admin-credential>" \
+  -d '{"query":"mutation { addTrustedAgents(agents: [\"did:key:z6Mk...\"] ) }"}'
+```
+
+The default AD4M language author (`did:key:z6MkvPpWxwXAnLtMcoc9sX7GEoJ96oNnQ3VcQJRLspNJfpE7`) should be added if language proof verification fails after Holochain version updates.
 
 ## Enable MCP Server
 
@@ -306,7 +340,7 @@ ad4m-executor run \
 
 Flux is the web UI for AD4M neighbourhoods. The current development deployment is:
 
-```
+```text
 https://deploy-preview-548--fluxsocial-dev.netlify.app/
 ```
 
@@ -421,6 +455,7 @@ ad4m/
 | Agent generates but nothing works | Init still in progress | Wait for "AD4M init complete" in logs |
 | `mainnet_seed.seed` not found | Data directory corrupted or init not run | Re-run `ad4m-executor init` |
 | `main key not found` on login | `agentGenerate` never called | Run `agentGenerate` mutation once |
+| `Wallet is locked` on MCP/JWT | Executor restarted, wallet not unlocked | Run `agentUnlock` mutation with passphrase |
 | `Capability not matched... LOGIN` | Multi-user mode disabled | `runtimeSetMultiUserEnabled(enabled: true)` |
 | WebSocket closes after 15s | Wrong auth format in `connection_init` | Use `payload: { headers: { authorization: '...' } }` |
 | Binary has wrong features after branch switch | Stale build from previous branch | Rebuild both `rust-executor` and `cli` |
