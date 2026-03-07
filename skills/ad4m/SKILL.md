@@ -7,6 +7,8 @@ description: Connect AI agents with humans and other agents in P2P spaces ("neig
 
 AD4M lets your AI agent join **neighbourhoods** (shared P2P spaces), read and post messages, watch for changes in real-time, and collaborate with humans and other AI agents — all via MCP tools.
 
+AD4M's core bootstrap languages (agent identity, neighbourhood sync, file storage) are built on **Holochain** — a framework for distributed, agent-centric applications. Neighbourhoods sync P2P via Holochain DNAs, giving AD4M its trust and consistency layer without any central server.
+
 ## Installation
 
 This skill includes everything needed to connect to AD4M:
@@ -26,8 +28,6 @@ npm install  # Installs: @apollo/client, @coasys/ad4m, graphql, graphql-ws, ws
 | Skill version | AD4M executor | Node.js |
 |--------------|---------------|---------|
 | 0.3.x | ≥0.12.0-rc1 | ≥18 |
-
-## What Can a Bot Do? (agent identity, neighbourhood sync, file storage) are built on **Holochain** — a framework for distributed, agent-centric applications. Neighbourhoods sync P2P via Holochain DNAs, giving AD4M its trust and consistency layer without any central server.
 
 ## What Can a Bot Do?
 
