@@ -110,23 +110,31 @@ Typical flow:
 
 **Mention wake:**
 ```
-You were mentioned in a Flux neighbourhood.
-Read the latest messages in the channel, find the mention, and respond appropriately.
+You were @mentioned in an AD4M neighbourhood.
+Read the AD4M skill for instructions on how to handle this.
 
+MCP endpoint: http://localhost:3001/mcp
+Auth credential: <admin-credential>
+Agent DID: did:key:z6Mk...
 Perspective: 01409ead-3e13-4ca6-99ac-e1b623c18604
 Channel: literal://string:gjgfascqbfhntekmtvhtbohu
 Neighbourhood: neighbourhood://QmzSYwdhcjCcf726JkvGKKw7bszp3Jd2NsNN2ULkxJ8VYxdU9wv
 Subscription: mention-guAacszuc2Jd
+Event type: mention
 ```
 
 **Channel messages wake:**
 ```
-New messages appeared in a Flux channel.
-Read the latest messages and respond if appropriate (e.g. if addressed to you or relevant to your role).
+New messages in an AD4M neighbourhood.
+Read the AD4M skill for instructions on how to handle this.
 
+MCP endpoint: http://localhost:3001/mcp
+Auth credential: <admin-credential>
+Agent DID: did:key:z6Mk...
 Perspective: 01409ead-3e13-4ca6-99ac-e1b623c18604
 Channel: literal://string:gjgfascqbfhntekmtvhtbohu
 Subscription: e713df2e-3ea6-406e-b58e-e048a12f23ce
+Event type: channel-messages
 ```
 
 ---

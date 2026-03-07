@@ -875,9 +875,15 @@ impl Ad4mMcpHandler {
 
         if let Ok(links) = existing {
             for link in links {
-                let _ = perspective
+                if let Err(e) = perspective
                     .remove_link(link.into(), Some(batch_id.clone()))
-                    .await;
+                    .await
+                {
+                    return format!(
+                        "Error removing existing '{}' link (batch abandoned): {}",
+                        property_name, e
+                    );
+                }
             }
         }
 
@@ -887,14 +893,20 @@ impl Ad4mMcpHandler {
             target,
         };
 
-        let _ = perspective
+        if let Err(e) = perspective
             .add_link(
                 link,
                 LinkStatus::Shared,
                 Some(batch_id.clone()),
                 &agent_context,
             )
-            .await;
+            .await
+        {
+            return format!(
+                "Error adding '{}' link (batch abandoned): {}",
+                property_name, e
+            );
+        }
 
         match perspective.commit_batch(batch_id, &agent_context).await {
             Ok(_) => serde_json::to_string_pretty(&json!({

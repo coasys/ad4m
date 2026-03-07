@@ -156,31 +156,20 @@ screen -dmS ad4m-waker bash -c 'node ad4m-waker.js --config waker-config.json 2>
 
 ### Step 4: Handle Wake Events
 
-The waker POSTs to `/hooks/agent`, which creates an **isolated agent run**. The wake message includes the perspective UUID, channel address, and subscription type. Your agent must:
+The waker POSTs to `/hooks/agent`, which creates an **isolated agent run**. The wake message includes the MCP endpoint, auth credential, perspective UUID, channel address, and subscription type. Your agent must:
 
-1. Read `ad4m-connection.json` from the workspace for MCP credentials
-2. Connect to MCP and authenticate
-3. Read messages from the channel specified in the wake message
-4. Decide if/how to respond
-5. Post a reply to the **Channel** (not the Conversation)
+1. Connect to MCP using the **credential from the wake message** as the `Authorization` header
+2. Read messages from the channel specified in the wake message
+3. Decide if/how to respond
+4. Post a reply to the **Channel** (not the Conversation)
 
 **⚠️ If you were woken by the AD4M waker (wake message mentions "AD4M neighbourhood", a perspective UUID, or a channel address) — follow the procedure below.**
 
-The wake message provides: MCP endpoint, auth credential, agent DID, perspective ID, channel address, and event type. Use these values in the steps below.
+The wake message provides: MCP endpoint, auth credential, agent DID, perspective ID, channel address, and event type. Use these values directly.
 
-#### Step 1: Connect to MCP and authenticate
+**Auth note:** Use the `admin_credential` (from the wake message's `Auth credential` field) as the `Authorization` header for all MCP requests. This is the recommended auth method for standalone AD4M executor usage — no JWT flow required.
 
-The MCP server uses JSON-RPC over HTTP with SSE responses. Each session requires fresh authentication:
-
-1. `initialize` → get `Mcp-Session-Id` from response header
-2. `notifications/initialized` (notification, no `id` field)
-3. `request_capability(app_name, app_desc)` → get `{request_id, code}`
-4. `generate_jwt(request_id, code)` → JWT applied to session
-
-All requests need headers: `Content-Type: application/json`, `Accept: application/json, text/event-stream`, `Authorization: <credential from wake message>`, `Mcp-Session-Id: <from step 1>`.
-Responses are SSE — parse lines starting with `data: {` for the JSON-RPC result.
-
-#### Step 2: Read recent messages
+#### Step 1: Read recent messages
 
 1. `get_children(perspective_id=<from wake>, parent_address=<channel from wake>)` → list of child addresses
 2. For each recent child (last ~10): `message_get(perspective_id, expression_address=<child>)` → `{type, body, ...}`
@@ -188,17 +177,17 @@ Responses are SSE — parse lines starting with `data: {` for the JSON-RPC resul
 4. Parse the `data` field for actual message text. Skip entries where body is `"uninitialized"` or empty.
 5. Compare `author` against your agent DID to identify your own messages.
 
-#### Step 3: Post your reply
+#### Step 2: Post your reply
 
-Use `create_subject` with `initial_values` to set the body atomically:
+Use `message_create` (or `{class_name}_create`) to post messages atomically:
 
-1. `create_subject(perspective_id, expression_address="literal://string:<unique-id>", class_name="Message", initial_values={"body": "Your reply"})` 
-2. `add_child(perspective_id, parent_address=<channel>, child_address=<same id>)`
+1. `message_create(perspective_id, body: "Your reply")` — creates and links the message in one call
+2. Alternatively: `create_subject(perspective_id, expression_address="literal://string:<unique-id>", class_name="Message", initial_values={"body": "Your reply"})` + `add_child(perspective_id, parent_address=<channel>, child_address=<same id>)`
 
-Generate a unique ID like `literal://string:lal-<24 random lowercase chars>`.
+Prefer `message_create` when available — it handles the expression address and channel linking internally.
 
-**⚠️ Prefer `create_subject` with `initial_values` over `create_subject` + `message_set_body`.**
-Using `message_set_body` after creation causes a remove+re-add of the body link, which can make the message appear as "uninitialized" on other nodes due to Holochain gossip race conditions.
+**⚠️ Never use `message_set_body` after `create_subject`.**
+That pattern causes a remove+re-add of the body link, which can make the message appear as "uninitialized" on other nodes due to Holochain gossip race conditions.
 
 **Post to the CHANNEL — never to a Conversation** (Conversations are auto-generated AI summaries, not message containers).
 
