@@ -277,6 +277,10 @@ impl Ad4mMcpHandler {
             ))
             // neighbourhoods.rs
             .with_route((
+                Self::list_link_language_templates_tool_attr(),
+                Self::list_link_language_templates,
+            ))
+            .with_route((
                 Self::neighbourhood_publish_from_perspective_tool_attr(),
                 Self::neighbourhood_publish_from_perspective,
             ))
