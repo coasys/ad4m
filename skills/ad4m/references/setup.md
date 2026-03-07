@@ -79,10 +79,11 @@ ad4m-executor run \
 | `--hc-admin-port` | 2000 | Holochain admin port |
 | `--hc-app-port` | 1337 | Holochain app interface port |
 
-**For AI agents**: Run in a screen/tmux session for persistence:
+**For AI agents**: Always run in a screen session with logging:
 ```bash
-screen -dmS ad4m-run bash -c 'ad4m-executor run --app-data-path ~/.ad4m --gql-port 12100 --admin-credential mysecret --enable-mcp true 2>&1 | tee /tmp/ad4m-run.log'
+screen -dmS ad4m-executor bash -c 'ad4m-executor run --app-data-path ~/.ad4m --gql-port 12100 --admin-credential mysecret --enable-mcp true 2>&1 | tee /tmp/ad4m-executor.log'
 ```
+After startup, **write down** the admin credential, screen session name (`ad4m-executor`), log path (`/tmp/ad4m-executor.log`), MCP endpoint, and data path so you and your human can debug later. The executor is now running in the background — don't start another one.
 
 ### Step 3: Generate Agent
 

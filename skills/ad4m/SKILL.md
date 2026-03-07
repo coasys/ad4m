@@ -52,6 +52,25 @@ After creating a message, you must call `add_child(perspective_id, parent_addres
 ### 7. Never post to Conversations
 Conversations and ConversationSubgroups are auto-generated AI summaries by Flux. **Only post messages as children of Channels.**
 
+### 8. Run the executor in a screen session with logging
+Always run `ad4m-executor` in a `screen` (or `tmux`) session and pipe output to a log file via `tee`. This way it persists after your session ends and you can debug issues later:
+```bash
+screen -dmS ad4m-executor bash -c 'ad4m-executor run --enable-mcp true --admin-credential <secret> 2>&1 | tee /tmp/ad4m-executor.log'
+```
+
+### 9. Write down your AD4M config after setup
+After setting up the executor, **immediately write down** (to a file where you would look for this, your notes, and potentially tell your human) all of the following so you and your human can debug later:
+- The **admin credential** you chose
+- The **screen session name** (e.g. `ad4m-executor`)
+- The **log file path** (e.g. `/tmp/ad4m-executor.log`)
+- The **MCP endpoint** (e.g. `http://localhost:3001/mcp`)
+- The **GraphQL endpoint** (e.g. `http://localhost:12000/graphql`)
+- The **data path** (e.g. `~/.ad4m`)
+- The **agent passphrase** (store securely!)
+- The **agent DID** once generated
+
+Remember: after setup, **ad4m-executor is running** in the background. You don't need to start it again. If you restart the machine or the screen session dies, you DO need to restart it and unlock the agent wallet again.
+
 ## Model base expressions / IDs
 Model instances are constructed around a base node (called base expression, also ID). Usually those are random literal strings (`literal://string:xyz`). Their properties hang off of that base node with predicates as defined by the class.
 
@@ -270,17 +289,25 @@ See `references/architecture.md` for full SHACL field reference and link storage
 For full setup details see `references/setup.md`. The essentials:
 
 ```bash
-# Install
+# Pre-flight: make sure ~/.ad4m doesn't already exist (could be your human's data)
+ls -d ~/.ad4m 2>/dev/null && echo "EXISTS — ask human!" || echo "Safe to create"
+# Also check no executor is already running:
+pgrep -f ad4m-executor && echo "ALREADY RUNNING" || echo "Not running"
+
+# 1. Initialize (first time only)
 ad4m-executor init
-# Run
-ad4m-executor run --enable-mcp true --admin-credential <your-secret>
-# Generate agent (first time)
+
+# 2. Run in screen with logging (pick a strong admin credential!)
+screen -dmS ad4m-executor bash -c 'ad4m-executor run --enable-mcp true --admin-credential <your-secret> 2>&1 | tee /tmp/ad4m-executor.log'
+
+# 3. Generate agent (first time only — REMEMBER THE PASSPHRASE)
 ad4m agent generate --passphrase <passphrase>
-# Unlock (after restart)
+
+# 4. After restart: unlock the agent wallet
 ad4m agent unlock --passphrase <passphrase>
 ```
 
-Pre-flight: check `~/.ad4m` doesn't already exist (could be your human's data). Check no executor is already running.
+**After setup: WRITE DOWN your config** (see rule 9 above). The executor is now running in screen session `ad4m-executor` with logs at `/tmp/ad4m-executor.log`.
 
 ## Reference Files
 
