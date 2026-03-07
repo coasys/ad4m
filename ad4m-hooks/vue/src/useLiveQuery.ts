@@ -116,8 +116,11 @@ export function useLiveQuery<T extends Ad4mModel>(
 
   const isInstance = id !== undefined;
 
-  const collectionData = ref<T[]>([]) as Ref<T[]>;
-  const instanceData = ref<T | null>(null) as Ref<T | null>;
+  // Use shallowRef for model data to prevent Vue from deep-proxying Ad4mModel instances.
+  // Deep proxying breaks JS # private fields on nested objects (e.g. PerspectiveProxy).
+  // Safe because the hook always replaces the entire array/value on subscription updates.
+  const collectionData = shallowRef<T[]>([]) as Ref<T[]>;
+  const instanceData = shallowRef<T | null>(null) as Ref<T | null>;
   const loading = ref(true);
   const error = ref<string>("");
   const pageNumber = ref(1);
