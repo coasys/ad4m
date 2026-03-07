@@ -29,14 +29,19 @@ use serde_json::json;
 pub struct NeighbourhoodPublishParams {
     /// UUID of the local perspective to publish as a shared neighbourhood
     pub perspective_uuid: String,
-    /// Address of a link language **template** to clone for this neighbourhood.
+    /// Address of a link language to use for this neighbourhood.
+    /// Can be a template address (will be cloned) or an already-cloned language.
     /// Use `list_link_language_templates` to see available templates.
-    /// The template is cloned with a unique name so each neighbourhood gets its own
-    /// link language instance (required for P2P sync isolation).
-    #[serde(alias = "link_language")]
-    pub link_language_template: String,
-    /// Human-readable name for this neighbourhood (used as the cloned language name)
+    #[serde(alias = "link_language_template")]
+    pub link_language: String,
+    /// Optional human-readable name for this neighbourhood (used as the cloned language name).
+    /// If not provided, a default name will be generated.
+    #[serde(default = "default_neighbourhood_name")]
     pub name: String,
+}
+
+fn default_neighbourhood_name() -> String {
+    "Neighbourhood".to_string()
 }
 
 /// Parameters for joining a neighbourhood
@@ -246,10 +251,7 @@ impl Ad4mMcpHandler {
         }
 
         // Clone the link language template
-        let cloned_address = match self
-            .clone_link_language(&p.link_language_template, &p.name)
-            .await
-        {
+        let cloned_address = match self.clone_link_language(&p.link_language, &p.name).await {
             Ok(addr) => addr,
             Err(e) => return json!({"error": e}).to_string(),
         };
