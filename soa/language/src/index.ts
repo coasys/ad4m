@@ -6,7 +6,6 @@ import type {
   ExpressionUI,
 } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
 import SoAExpressionAdapter from "./adapter.ts";
-import { SOA_EXPRESSIONS } from "./expressions.ts";
 
 function iconFor(_expression: Address): string {
   return "";
@@ -63,7 +62,7 @@ export default async function create(
     return true;
   };
 
-  return {
+  const language = {
     name,
     expressionAdapter,
     expressionUI,
@@ -71,5 +70,6 @@ export default async function create(
     constructorIcon,
     isImmutableExpression,
     interactions,
-  } as Language;
+  } satisfies Language;
+  return language;
 }

@@ -58,7 +58,11 @@ export default class SoAExpressionAdapter implements ExpressionAdapter {
 class SoAReadOnly implements ReadOnlyLanguage {
   async addressOf(content: object): Promise<Address> {
     // For a read-only language, the address is the key itself
-    const c = content as Record<string, string>;
-    return c.key || c.address || JSON.stringify(content);
+    const c = content as { key?: string; address?: string };
+    const addr = c.key ?? c.address;
+    if (!addr) {
+      throw new Error('SoA content must have a "key" or "address" property');
+    }
+    return addr;
   }
 }
