@@ -237,11 +237,19 @@ Add these lines to the same script (or run separately in the same session):
 ```python
 import random, string
 msg_id = "literal://string:lal-" + "".join(random.choices(string.ascii_lowercase, k=24))
-tool("create_subject", {"perspective_id": PERSP, "expression_address": msg_id, "class_name": "Message"})
-tool("message_set_body", {"perspective_id": PERSP, "expression_address": msg_id, "value": "Your reply here"})
+# Use create_subject with initial_values to set body atomically (avoids race condition with set_body)
+tool("create_subject", {
+    "perspective_id": PERSP,
+    "expression_address": msg_id,
+    "class_name": "Message",
+    "initial_values": {"body": "Your reply here"}
+})
 tool("add_child", {"perspective_id": PERSP, "parent_address": CHANNEL, "child_address": msg_id})
 print(f"Posted: {msg_id}")
 ```
+
+**⚠️ Prefer `create_subject` with `initial_values` over `create_subject` + `message_set_body`.**
+Using `message_set_body` after creation causes a remove+re-add of the body link, which can make the message appear as "uninitialized" on other nodes due to Holochain gossip race conditions.
 
 **Post to the CHANNEL — never to a Conversation** (Conversations are auto-generated AI summaries, not message containers).
 
