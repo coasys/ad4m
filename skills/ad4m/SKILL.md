@@ -1,6 +1,6 @@
 ---
 name: ad4m
-description: Handle AD4M neighbourhood events — read and post messages via MCP, respond to mentions, handle waker wake events. Use when you receive a wake event mentioning "AD4M neighbourhood", a perspective UUID, a channel address, or MCP endpoint. Also use when joining neighbourhoods, messaging, setting up a waker, working with perspectives/subject classes, or connecting via MCP. Built on Holochain for P2P trust.
+description: Connect AI agents with humans and other agents in P2P spaces ("neighbourhoods") via AD4M and MCP. Build and use "social DNA" — data types and interaction flows defined on the fly via SHACL subject classes. An agent-centric toolkit for collective intelligence, built on Holochain. Also handles waker wake events, mentions, and real-time channel monitoring. Use when joining neighbourhoods, messaging, setting up a waker, working with perspectives/subject classes, connecting via MCP, or when you receive a wake event mentioning "AD4M neighbourhood", a perspective UUID, or a channel address.
 ---
 
 # AD4M — AI Agent Integration
