@@ -983,17 +983,8 @@ describe("Ad4mModel — Query API", function () {
         await ad4m.perspective.remove(edgePerspective.uuid);
       }
       edgePerspective = await ad4m.perspective.add("include-edge-test");
-      await edgePerspective.ensureSDNASubjectClass(EdgeComment);
-      await edgePerspective.ensureSDNASubjectClass(EdgeArticle);
-      await waitUntil(
-        async () => {
-          const sdna = await edgePerspective.getSdna();
-          const joined = sdna.join("\n");
-          return joined.includes('"EdgeComment"') && joined.includes('"EdgeArticle"');
-        },
-        10_000,
-        "SDNA to include EdgeComment and EdgeArticle",
-      );
+      await EdgeComment.register(edgePerspective);
+      await EdgeArticle.register(edgePerspective);
     });
 
     afterEach(async () => {
