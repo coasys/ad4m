@@ -12,7 +12,6 @@
 
 module.exports = {
   ...(process.env.CI ? {} : {
-    spec: "tests/**/*.test.ts",
     timeout: 1200000,
     exit: true,
   }),
