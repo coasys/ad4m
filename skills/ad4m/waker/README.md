@@ -1,6 +1,6 @@
 # AD4M Waker
 
-Part of the `ad4m` skill for OpenClaw agents. Watches AD4M perspectives via `QuerySubscriptionProxy` (SurrealDB-backed, same mechanism as Flux UI) and POSTs to an OpenClaw `/hooks/agent` endpoint when matching links are detected.
+Part of the `ad4m` skill for OpenClaw agents. Watches AD4M perspectives via `QuerySubscriptionProxy` (SurrealDB-backed, same mechanism as Flux UI) and POSTs to an OpenClaw `/hooks/wake` endpoint when matching links are detected.
 
 The waker sends **actionable messages** with full context (perspective, channel, subscription type) so the agent knows exactly what happened and what to do.
 
@@ -41,7 +41,7 @@ Typical flow:
 {
   "executorUrl": "ws://localhost:12100/graphql",
   "token": "optional-ad4m-credential",
-  "wakeUrl": "http://localhost:18789/hooks/agent",
+  "wakeUrl": "http://localhost:18789/hooks/wake",
   "wakeToken": "your-openclaw-wake-token",
   "debounceMs": 2000,
   "subscriptions": [
@@ -73,7 +73,7 @@ Typical flow:
 | `token` | | AD4M admin credential or JWT |
 | `mcpEndpoint` | | MCP endpoint URL (e.g., `http://localhost:3001/mcp`) — included in wake messages so the agent knows where to connect |
 | `agentDid` | | Agent DID — included in wake messages so the agent can identify itself |
-| `wakeUrl` | ✅ | OpenClaw hooks endpoint (use `/hooks/agent` for actionable wakes) |
+| `wakeUrl` | ✅ | OpenClaw hooks endpoint — use `/hooks/wake` (keeps main session with skills loaded) |
 | `wakeToken` | ✅ | Bearer token for the hooks endpoint |
 | `debounceMs` | | Debounce delay in ms (default: 2000) |
 | `subscriptions` | ✅ | Array of subscription objects |
@@ -100,11 +100,10 @@ Typical flow:
 
 1. Connects to the AD4M executor via GraphQL WebSocket
 2. For each subscription, creates a `QuerySubscriptionProxy` with the given SurrealQL query
-3. When the query result set changes, debounces and POSTs to `/hooks/agent` with:
-   - An **actionable message** including perspective UUID, channel address, and subscription type
-   - `name: "AD4M"` so the agent session is labelled
-   - `wakeMode: "now"` for immediate processing
-4. OpenClaw runs an isolated agent turn that reads new messages via MCP and responds
+3. When the query result set changes, debounces and POSTs to `/hooks/wake` with:
+   - `text`: actionable message including perspective UUID, channel address, MCP endpoint, auth credential, and event type
+   - `mode: "now"` for immediate processing
+4. OpenClaw wakes the main agent session (which has skills loaded) to read new data via MCP and respond
 
 ---
 

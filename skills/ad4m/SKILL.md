@@ -100,9 +100,19 @@ Community (ad4m://self)
 
 **If you were woken by the AD4M waker** (wake message mentions "AD4M neighbourhood", a perspective UUID, or a channel address) — follow this procedure.
 
-The wake message provides: MCP endpoint, auth credential, agent DID, perspective ID, channel address, and event type. Use these values directly.
+The waker POSTs to your `/hooks/wake` endpoint with this JSON body:
+```json
+{
+  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nMCP endpoint: http://localhost:3001/mcp\nAuth credential: your-admin-credential\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nChannel: literal://string:channel-id\nNeighbourhood: neighbourhood://Qm...\nSubscription: flux-messages\nEvent type: channel-messages",
+  "mode": "now"
+}
+```
 
-**Auth:** Use the `admin_credential` from the wake message's `Auth credential` field as the `Authorization` header for all MCP requests.
+**Use `/hooks/wake`, NOT `/hooks/agent`.** `/hooks/wake` enqueues the event into your main agent session, which has your skills (including this AD4M skill) loaded. `/hooks/agent` spawns an isolated sub-agent that won't have your skills.
+
+Parse the `text` field to extract: `MCP endpoint`, `Auth credential`, `Agent DID`, `Perspective`, `Channel`, `Event type`. Use these values directly.
+
+**Auth:** Use the `Auth credential` value as the `Authorization` header for all MCP requests.
 
 ### Step 1: Read recent messages
 
@@ -131,7 +141,7 @@ The wake message provides: MCP endpoint, auth credential, agent DID, perspective
 The waker makes your bot **autonomous** — it watches for changes and wakes you via OpenClaw hooks.
 
 ```
-AD4M Executor ──GraphQL WS──→ ad4m-waker.js ──HTTP POST──→ OpenClaw /hooks/agent
+AD4M Executor ──GraphQL WS──→ ad4m-waker.js ──HTTP POST──→ OpenClaw /hooks/wake
      │                              │                              │
   SurrealQL subscription     Debounce + filter              Agent wakes up
   detects new links          (2s default)                   reads new data via MCP
@@ -155,7 +165,7 @@ Create `waker-config.json`:
   "token": "your-admin-credential",
   "mcpEndpoint": "http://localhost:3001/mcp",
   "agentDid": "did:key:z6Mk...",
-  "wakeUrl": "http://localhost:18789/hooks/agent",
+  "wakeUrl": "http://localhost:18789/hooks/wake",
   "wakeToken": "your-openclaw-hooks-token",
   "debounceMs": 2000,
   "subscriptions": [

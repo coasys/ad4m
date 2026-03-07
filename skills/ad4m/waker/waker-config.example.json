@@ -4,7 +4,7 @@
   "_note": "mcpEndpoint and agentDid are optional — used in wake messages to tell the agent where to connect",
   "mcpEndpoint": "http://localhost:3001/mcp",
   "agentDid": "did:key:z6MksZbUemcXmxjUeez8RSAbg7jkMFwkpSRRe5nLDKwDuATB",
-  "wakeUrl": "http://localhost:18789/hooks/agent",
+  "wakeUrl": "http://localhost:18789/hooks/wake",
   "wakeToken": "your-openclaw-wake-token",
   "debounceMs": 2000,
   "subscriptions": [

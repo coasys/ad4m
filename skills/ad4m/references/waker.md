@@ -23,7 +23,7 @@ Create `waker-config.json` (see also `waker-config.example.json`):
   "token": "your-admin-credential",
   "mcpEndpoint": "http://localhost:3001/mcp",
   "agentDid": "did:key:z6Mk...",
-  "wakeUrl": "http://localhost:18789/hooks/agent",
+  "wakeUrl": "http://localhost:18789/hooks/wake",
   "wakeToken": "your-openclaw-hooks-token",
   "debounceMs": 2000,
   "subscriptions": [
@@ -47,7 +47,7 @@ Create `waker-config.json` (see also `waker-config.example.json`):
 | `token` | Admin credential for authentication |
 | `mcpEndpoint` | (optional) MCP endpoint URL — included in wake messages |
 | `agentDid` | (optional) Agent DID — included in wake messages |
-| `wakeUrl` | OpenClaw webhook endpoint — use `/hooks/agent` for isolated agent runs |
+| `wakeUrl` | OpenClaw webhook endpoint — use `/hooks/wake` for isolated agent runs |
 | `wakeToken` | OpenClaw hooks authentication token |
 | `debounceMs` | Debounce interval (prevents rapid-fire wakes, default 2000) |
 | `subscriptions` | Array of subscription objects (see below) |
@@ -82,11 +82,27 @@ screen -dmS ad4m-waker bash -c 'node ad4m-waker.js --config waker-config.json 2>
 
 ### Wake Message Format
 
-The waker supports two endpoint formats:
-- `/hooks/agent` — sends `{ message, name: "AD4M", wakeMode: "now" }` (recommended, creates isolated agent run)
-- `/hooks/wake` — sends `{ text, mode: "now" }`
+**Use `/hooks/wake` (recommended).** It enqueues the event into the main agent session which has your skills loaded. Do NOT use `/hooks/agent` — that spawns an isolated sub-agent without your skills.
 
-The wake message includes: event description, MCP endpoint, auth credential, agent DID, perspective UUID, channel address, subscription ID, and event type.
+**`/hooks/wake` payload:**
+```json
+{
+  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nMCP endpoint: http://localhost:3001/mcp\nAuth credential: your-admin-credential\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nChannel: literal://string:channel-id\nNeighbourhood: neighbourhood://Qm...\nSubscription: flux-messages\nEvent type: channel-messages",
+  "mode": "now"
+}
+```
+
+The `text` field contains key-value pairs, one per line:
+- **Line 1** — Event description: "New messages in an AD4M neighbourhood." or "You were @mentioned in an AD4M neighbourhood."
+- **Line 2** — "Read the AD4M skill for instructions on how to handle this."
+- **MCP endpoint** — where to connect (e.g. `http://localhost:3001/mcp`)
+- **Auth credential** — admin credential for the Authorization header
+- **Agent DID** — the agent's own DID (to identify own messages)
+- **Perspective** — perspective UUID to operate on
+- **Channel** — channel address (where to read/post)
+- **Neighbourhood** — neighbourhood URL (if configured in subscription)
+- **Subscription** — subscription ID
+- **Event type** — `"mention"` or `"channel-messages"`
 
 ## Integration with OpenClaw
 

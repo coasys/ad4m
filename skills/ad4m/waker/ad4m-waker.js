@@ -17,7 +17,7 @@
  *   {
  *     "executorUrl": "ws://localhost:12100/graphql",
  *     "token": "ad4m-admin-credential",
- *     "wakeUrl": "http://localhost:18789/hooks/agent",
+ *     "wakeUrl": "http://localhost:18789/hooks/wake",
  *     "wakeToken": "openclaw-wake-token",
  *     "debounceMs": 2000,
  *     "subscriptions": [
@@ -270,7 +270,7 @@ Config file format:
   {
     "executorUrl": "ws://localhost:12100/graphql",
     "token": "optional-ad4m-credential",
-    "wakeUrl": "http://localhost:18789/hooks/agent",
+    "wakeUrl": "http://localhost:18789/hooks/wake",
     "wakeToken": "your-openclaw-wake-token",
     "debounceMs": 2000,
     "subscriptions": [
