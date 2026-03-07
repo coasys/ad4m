@@ -336,6 +336,15 @@ impl Ad4mMcpHandler {
 
         let file_storage_addr = "QmzSYwdjqeP9D13Sfmyc5HcabM9jL3DtPyhadnF6dQXu4FjVSbQ".to_string();
 
+        // Ensure the file-storage language is loaded before trying to create an expression.
+        // language_by_ref() downloads and installs the language if it isn't already running.
+        if !controller.is_language_loaded(&file_storage_addr).await {
+            if let Err(e) = controller.language_by_ref(&file_storage_addr).await {
+                return json!({"error": format!("Failed to load file-storage language: {}", e)})
+                    .to_string();
+            }
+        }
+
         // Create expression via the language controller
         let content = json!({
             "data_base64": params.0.image_base64,
