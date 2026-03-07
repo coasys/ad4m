@@ -82,58 +82,47 @@ function createAd4mClient(url, token) {
 
 // ── Build wake message ─────────────────────────────────────────────
 
-function buildWakeMessage(sub, detail) {
+function buildWakeMessage(config, sub, detail) {
   const type = sub.type || "unknown";
-  const perspective = sub.perspective || "unknown";
-  const channel = sub.channel || "unknown";
+  const P = sub.perspective || "unknown";
+  const CH = sub.channel || "unknown";
   const neighbourhood = sub.neighbourhood || "";
+  const MCP = config.mcpEndpoint || "http://localhost:3001/mcp";
+  const AUTH = config.adminCredential || config.token;
+  const DID = config.agentDid || "unknown";
 
-  if (type === "mention") {
-    return [
-      `You were mentioned in a Flux neighbourhood.`,
-      `Read the latest messages in the channel, find the mention, and respond appropriately.`,
-      ``,
-      `Perspective: ${perspective}`,
-      `Channel: ${channel}`,
-      neighbourhood ? `Neighbourhood: ${neighbourhood}` : null,
-      `Subscription: ${sub.id}`,
-    ].filter(Boolean).join("\n");
-  }
+  const event = type === "mention"
+    ? "You were @mentioned in an AD4M neighbourhood."
+    : type === "channel-messages"
+    ? "New messages in an AD4M neighbourhood."
+    : `AD4M waker event (${type}).`;
 
-  if (type === "channel-messages") {
-    return [
-      `New messages appeared in a Flux channel.`,
-      `Read the latest messages and respond if appropriate (e.g. if addressed to you or relevant to your role).`,
-      ``,
-      `Perspective: ${perspective}`,
-      `Channel: ${channel}`,
-      neighbourhood ? `Neighbourhood: ${neighbourhood}` : null,
-      `Subscription: ${sub.id}`,
-    ].filter(Boolean).join("\n");
-  }
-
-  // Fallback for unknown types
   return [
-    `AD4M waker event: ${detail}`,
+    event,
+    `Read the AD4M skill for instructions on how to handle this.`,
     ``,
-    `Subscription: ${sub.id}`,
-    `Type: ${type}`,
-    `Perspective: ${perspective}`,
-    channel !== "unknown" ? `Channel: ${channel}` : null,
+    `MCP endpoint: ${MCP}`,
+    `Auth credential: ${AUTH}`,
+    `Agent DID: ${DID}`,
+    `Perspective: ${P}`,
+    `Channel: ${CH}`,
     neighbourhood ? `Neighbourhood: ${neighbourhood}` : null,
+    `Event type: ${type}`,
   ].filter(Boolean).join("\n");
 }
 
 // ── Wake poster ────────────────────────────────────────────────────
 
 function postWake(config, sub, detail) {
-  const message = buildWakeMessage(sub, detail);
+  const message = buildWakeMessage(config, sub, detail);
 
-  const body = JSON.stringify({
-    message,
-    name: "AD4M",
-    wakeMode: "now",
-  });
+  // Support both /hooks/wake (text+mode) and /hooks/agent (message+name+wakeMode)
+  const isAgentHook = config.wakeUrl.includes("/hooks/agent");
+  const body = JSON.stringify(
+    isAgentHook
+      ? { message, name: "AD4M", wakeMode: "now" }
+      : { text: message, mode: "now" }
+  );
 
   const url = new URL(config.wakeUrl);
   const mod = url.protocol === "https:" ? https : http;
