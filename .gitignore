@@ -2,6 +2,7 @@
 *.js.map
 *.js
 !executor/scripts/*.js
+!skills/ad4m/waker/*.js
 build/*
 node_modules
 !executor/src/rollup-plugin-hc-dna.js

@@ -1,10 +1,12 @@
-# AD4M Waker Bridge
+# AD4M Waker
 
-Watches AD4M perspectives via `QuerySubscriptionProxy` (SurrealDB-backed, same mechanism as Flux UI) and POSTs to an OpenClaw `/hooks/agent` endpoint when matching links are detected.
+Part of the `ad4m` skill for OpenClaw agents. Watches AD4M perspectives via `QuerySubscriptionProxy` (SurrealDB-backed, same mechanism as Flux UI) and POSTs to an OpenClaw `/hooks/agent` endpoint when matching links are detected.
 
 The waker sends **actionable messages** with full context (perspective, channel, subscription type) so the agent knows exactly what happened and what to do.
 
 Requires `@coasys/ad4m ^0.12.0`.
+
+**Location:** This waker is bundled with the `ad4m` skill at `skills/ad4m/waker/`. See `../SKILL.md` for full documentation.
 
 ---
 
@@ -144,9 +146,11 @@ Event type: channel-messages
 ```js
 const { startWaker } = require("./ad4m-waker");
 
-const waker = await startWaker(config);
-// Later:
-waker.close();
+(async () => {
+  const waker = await startWaker(config);
+  // Later:
+  waker.close();
+})();
 ```
 
 ---

@@ -149,6 +149,9 @@ function postWake(config, sub, detail) {
       }
     });
   });
+  req.setTimeout(5000, () => {
+    req.destroy(new Error("wake POST timed out"));
+  });
   req.on("error", (e) => console.error("[waker] wake POST error:", e.message));
   req.write(body);
   req.end();
@@ -176,13 +179,23 @@ async function startWaker(config) {
     console.log(`[waker] setting up SurrealDB subscription ${sub.id} (type=${sub.type || "unknown"}): ${sub.query.substring(0, 80)}...`);
 
     // Use QuerySubscriptionProxy directly with SurrealDB query
-    const proxy = new QuerySubscriptionProxy(sub.perspective, sub.query, client.perspective);
+    const proxy = new QuerySubscriptionProxy(sub.perspective, sub.query, client.perspective, sub.params);
     await proxy.subscribe();
     await proxy.initialized;
 
     console.log(`[waker] ${sub.id} subscribed, initial result count: ${Array.isArray(proxy.result) ? proxy.result.length : '?'}`);
 
+    // Track last result to skip duplicates
+    let lastResultHash = null;
+
     proxy.onResult((result) => {
+      const serialized = JSON.stringify(result);
+      if (lastResultHash === serialized) {
+        console.log(`[waker] ${sub.id}: duplicate result, skipping`);
+        return;
+      }
+      lastResultHash = serialized;
+
       const count = Array.isArray(result) ? result.length : "?";
       console.log(`[waker] ${sub.id}: query result changed (${count} items)`);
 
