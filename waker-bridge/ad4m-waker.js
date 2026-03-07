@@ -17,17 +17,28 @@
  *   {
  *     "executorUrl": "ws://localhost:12100/graphql",
  *     "token": "ad4m-admin-credential",
- *     "wakeUrl": "http://localhost:18789/hooks/wake",
+ *     "wakeUrl": "http://localhost:18789/hooks/agent",
  *     "wakeToken": "openclaw-wake-token",
  *     "debounceMs": 2000,
  *     "subscriptions": [
  *       {
  *         "id": "flux-messages",
+ *         "type": "channel-messages",
  *         "perspective": "perspective-uuid",
+ *         "channel": "literal://string:channel-id",
+ *         "neighbourhood": "neighbourhood://Qm...",
  *         "query": "SELECT * FROM link WHERE source = 'literal://string:channel-id' AND predicate = 'ad4m://has_child'"
  *       }
  *     ]
  *   }
+ *
+ * Subscription fields:
+ *   - id:            Unique subscription identifier
+ *   - type:          "mention" | "channel-messages" — determines the wake message
+ *   - perspective:   AD4M perspective UUID
+ *   - channel:       Channel address (where to read/post messages)
+ *   - neighbourhood: (optional) Neighbourhood URL for context
+ *   - query:         SurrealQL subscription query
  */
 
 const { Ad4mClient, QuerySubscriptionProxy } = require("@coasys/ad4m");
@@ -69,12 +80,59 @@ function createAd4mClient(url, token) {
   return new Ad4mClient(apolloClient);
 }
 
+// ── Build wake message ─────────────────────────────────────────────
+
+function buildWakeMessage(sub, detail) {
+  const type = sub.type || "unknown";
+  const perspective = sub.perspective || "unknown";
+  const channel = sub.channel || "unknown";
+  const neighbourhood = sub.neighbourhood || "";
+
+  if (type === "mention") {
+    return [
+      `You were mentioned in a Flux neighbourhood.`,
+      `Read the latest messages in the channel, find the mention, and respond appropriately.`,
+      ``,
+      `Perspective: ${perspective}`,
+      `Channel: ${channel}`,
+      neighbourhood ? `Neighbourhood: ${neighbourhood}` : null,
+      `Subscription: ${sub.id}`,
+    ].filter(Boolean).join("\n");
+  }
+
+  if (type === "channel-messages") {
+    return [
+      `New messages appeared in a Flux channel.`,
+      `Read the latest messages and respond if appropriate (e.g. if addressed to you or relevant to your role).`,
+      ``,
+      `Perspective: ${perspective}`,
+      `Channel: ${channel}`,
+      neighbourhood ? `Neighbourhood: ${neighbourhood}` : null,
+      `Subscription: ${sub.id}`,
+    ].filter(Boolean).join("\n");
+  }
+
+  // Fallback for unknown types
+  return [
+    `AD4M waker event: ${detail}`,
+    ``,
+    `Subscription: ${sub.id}`,
+    `Type: ${type}`,
+    `Perspective: ${perspective}`,
+    channel !== "unknown" ? `Channel: ${channel}` : null,
+    neighbourhood ? `Neighbourhood: ${neighbourhood}` : null,
+  ].filter(Boolean).join("\n");
+}
+
 // ── Wake poster ────────────────────────────────────────────────────
 
 function postWake(config, sub, detail) {
+  const message = buildWakeMessage(sub, detail);
+
   const body = JSON.stringify({
-    text: `[AD4M waker] subscription=${sub.id} | ${detail}`,
-    mode: "now",
+    message,
+    name: "AD4M",
+    wakeMode: "now",
   });
 
   const url = new URL(config.wakeUrl);
@@ -97,7 +155,7 @@ function postWake(config, sub, detail) {
       if (res.statusCode >= 400) {
         console.error(`[waker] wake POST failed: ${res.statusCode} ${data}`);
       } else {
-        console.log(`[waker] wake sent for subscription ${sub.id}`);
+        console.log(`[waker] wake sent for subscription ${sub.id} (type=${sub.type || "unknown"})`);
       }
     });
   });
@@ -122,7 +180,7 @@ async function startWaker(config) {
   const proxies = [];
 
   for (const sub of config.subscriptions) {
-    console.log(`[waker] setting up SurrealDB subscription ${sub.id}: ${sub.query.substring(0, 80)}...`);
+    console.log(`[waker] setting up SurrealDB subscription ${sub.id} (type=${sub.type || "unknown"}): ${sub.query.substring(0, 80)}...`);
 
     // Use QuerySubscriptionProxy directly with SurrealDB query
     const proxy = new QuerySubscriptionProxy(sub.perspective, sub.query, client.perspective);
@@ -206,17 +264,28 @@ Config file format:
   {
     "executorUrl": "ws://localhost:12100/graphql",
     "token": "optional-ad4m-credential",
-    "wakeUrl": "http://localhost:18789/hooks/wake",
+    "wakeUrl": "http://localhost:18789/hooks/agent",
     "wakeToken": "your-openclaw-wake-token",
     "debounceMs": 2000,
     "subscriptions": [
       {
         "id": "my-subscription",
+        "type": "channel-messages",
         "perspective": "perspective-uuid",
+        "channel": "literal://string:channel-id",
+        "neighbourhood": "neighbourhood://Qm...",
         "query": "SELECT * FROM link WHERE ..."
       }
     ]
   }
+
+Subscription fields:
+  id             Unique identifier for this subscription
+  type           "mention" or "channel-messages" — determines wake message
+  perspective    AD4M perspective UUID
+  channel        Channel address (for reading/posting messages)
+  neighbourhood  (optional) Neighbourhood URL
+  query          SurrealQL subscription query
 `);
     process.exit(0);
   }
