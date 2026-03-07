@@ -222,6 +222,41 @@ After init + generate, `--app-data-path` contains:
 └── schema.gql                # GraphQL schema
 ```
 
+## Security Considerations
+
+### Credential Handling
+
+The waker includes the admin credential in wake messages. This is intentional — it allows the agent to authenticate immediately upon waking. However:
+
+- Wake messages are sent over HTTP to your local OpenClaw hooks endpoint (`localhost` by default)
+- The credential is **only** sent to the configured `wakeUrl` — never to external services
+- If running the waker on a remote machine, ensure the wake endpoint uses HTTPS
+- Store the waker config file with appropriate permissions (`chmod 600 waker-config.json`)
+
+### Executor Security
+
+- **Never expose the admin credential** in logs, chat messages, or shared config files
+- The executor's GraphQL endpoint (`--gql-port`, default 12000) should only be accessible to trusted agents
+- Use TLS (`--tls-cert-file`, `--tls-key-file`) for any remote executor access
+
+## GraphQL API (Fallback)
+
+**Use MCP tools first.** GraphQL is for low-level operations not exposed via MCP (language management, direct queries, debugging).
+
+```graphql
+# Agent status
+{ agentStatus { isInitialized isUnlocked did } }
+
+# Add a link
+mutation { perspectiveAddLink(
+  uuid: "<perspective-uuid>"
+  link: { source: "ad4m://self", predicate: "has_name", target: "literal://string:Data" }
+) { author timestamp } }
+```
+
+**Auth header:** `Authorization: <admin-credential>` (single-user) or `Authorization: Bearer <jwt>` (multi-user)
+**Endpoint:** `http://localhost:12000/graphql` (configurable via `--gql-port`)
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -232,3 +267,7 @@ After init + generate, `--app-data-path` contains:
 | Holochain conductor `IoError(internal)` | Corrupted conductor DB | Nuke `h/c/` directory, re-generate agent |
 | Port already in use | Previous instance running | Kill old process, clean lair files |
 | 404 on neighbourhood join | Version mismatch or expired link | Ensure same AD4M version as neighbourhood creator |
+| Cannot connect to executor | Executor not running or wrong port | `curl http://localhost:12000/graphql` to verify |
+| Waker not firing | WS not accessible or bad query | Check `ws://localhost:12100/graphql` and waker logs |
+| Messages "uninitialized" | Property set after creation (race) | Always use `message_create` or `create_subject` with `initial_values` |
+| Channel query returns empty | SHACL still syncing | Wait 3-5 min for Holochain gossip, then retry |
