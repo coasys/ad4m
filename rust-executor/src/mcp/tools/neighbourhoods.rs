@@ -33,6 +33,7 @@ pub struct NeighbourhoodPublishParams {
     /// Use `list_link_language_templates` to see available templates.
     /// The template is cloned with a unique name so each neighbourhood gets its own
     /// link language instance (required for P2P sync isolation).
+    #[serde(alias = "link_language")]
     pub link_language_template: String,
     /// Human-readable name for this neighbourhood (used as the cloned language name)
     pub name: String,
