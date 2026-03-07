@@ -2836,7 +2836,14 @@ WHERE ${whereConditions.join(' AND ')}
     // Existing instance → update path (has been fetched / hydrated before)
     if (this._snapshot) {
       await this.innerUpdate(true, batchId);
-      await this.getData();
+      if (batchId) {
+        // Batch hasn't been committed yet — getData() would fetch stale data
+        // and overwrite in-memory values. Just refresh the snapshot so further
+        // saves within the same batch diff correctly.
+        this.takeSnapshot();
+      } else {
+        await this.getData();
+      }
       return;
     }
 
@@ -2871,11 +2878,16 @@ WHERE ${whereConditions.join(' AND ')}
     await this.innerUpdate(false, batchId)
 
     // If we got a batchId passed in, we let the caller decide when to commit.
-    // But then we can call getData() since the instance won't exist in the perspective
-    // until the bacht is committedl
+    // We can't call getData() since the instance won't exist in the perspective
+    // until the batch is committed.
     if (batchCreatedHere) {
       await this.perspective.commitBatch(batchId)
       await this.getData();
+    } else {
+      // Take a snapshot so that a subsequent save() within the same batch
+      // routes through the UPDATE path instead of CREATE, avoiding duplicate
+      // links (e.g. two competing "title" values).
+      this.takeSnapshot();
     }
   }
 
