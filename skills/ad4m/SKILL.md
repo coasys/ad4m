@@ -12,27 +12,36 @@ AD4M's core bootstrap languages (agent identity, neighbourhood sync, file storag
 
 ## IMPORTANT rules for how to use AD4M correctly
 
-### Use MCP
-Always use the MCP tools! AD4M also has a GraphQL interface, but almost everything you need to do on ad4m for you human should be possible via the MCP tools that the ad4m-executor provides. This skill is written for that!
+### 1. Use MCP
+Always use the MCP tools! AD4M also has a GraphQL interface, but almost everything you need to do on ad4m for your human should be possible via the MCP tools that the ad4m-executor provides. This skill is written for that!
 
-### Use --admin-credential if you setup a new ad4m-executor for you
-There are multiple ways to use/connect to an ad4m-executor. If in doubt: get the ad4m-executor binary and set it up just for you - you are the owner/admin of that ad4m instance. You start it with the `--admin-credential <random passphrase that you pick and use for all calls>` so that you don't have to request a JWT
+### 2. Use --admin-credential if you setup a new ad4m-executor for you
+There are multiple ways to use/connect to an ad4m-executor. If in doubt: get the ad4m-executor binary and set it up just for you — you are the owner/admin of that ad4m instance. You start it with the `--admin-credential <random passphrase that you pick and use for all calls>` so that you don't have to request a JWT.
 
-### Update waker config & restart when executor changes
-If you restart ad4m-executor or switch from one executor to another (from local to remote or between remote executors) you need to restart the waker with the correct executor URL and JWT/credential in its config
+### 3. Update waker config & restart when executor changes
+If you restart ad4m-executor or switch from one executor to another (from local to remote or between remote executors) you need to restart the waker with the correct executor URL and JWT/credential in its config.
 
-### Work on the level of classes / models - not links
-Almost always, work on the level of **CLASSES**. The basic nature of Perspectives (and their shared version: Neighbourhoods) is a **graph**, consisting of edges, here called: **links**. While you can manipulate and query single links, in order to interoperate with apps (like Flux) you need to read and write matching sub-graph patterns. AD4M provides a whole type-system on-top of link/graph shapes, so that UI apps as well as AI agents (via the MCP tools described herein) don't have to worry about links, but instead register, write, query and update complex data types, classes (also called "Subject Classes" or "Ad4mModel" in the ad4m docs). Classes are represented in SHACL compatible links in the Perspective itself. So each perspective defines its own types! Ad4m's MCP server inspects the Perspective and registers dynamic tools for each class. So, for you, that means: **CREATING and MODIFYING INSTANCES OF MESSAGES, TASKS, CHANNELS, you should ALWAYS RESORT TO DYNAMIC MCP TOOLS, like: message_create, or channel_set_title**. Unless you have good reason to write links directly. But if you do, don't expect other UI apps and thus your human(s) to get that data.
+### 4. Work on the level of classes / models — not links
+Almost always, work on the level of **CLASSES**. AD4M provides a type-system on top of link/graph shapes so that UI apps (like Flux) as well as AI agents don't have to worry about links, but instead register, write, query and update complex data types ("Subject Classes"). Classes are represented in SHACL-compatible links in the Perspective itself — each perspective defines its own types. AD4M's MCP server inspects the Perspective and registers dynamic tools for each class.
 
-### Model base expressions / IDs
-Model instances are constructed around a base node (called base expression, also ID). Usually those are random literal strings (`literal://string:xyz`). Their properties hang off of that base node with predicates as defined by the class. For instance, Flux channels don't encode the channel name in that base node (since changing the name would break other links if they did), but with a link: `literal://string:pslnniztyrhdsimdigkutufq --flux://has_channel_name--> literal://string:General%20Channel`
+**For you, that means: to CREATE and MODIFY INSTANCES OF MESSAGES, TASKS, CHANNELS — ALWAYS USE DYNAMIC MCP TOOLS like `message_create` or `channel_set_name`.** Unless you have good reason to write links directly. But if you do, don't expect other UI apps and thus your human(s) to get that data.
 
-### Tree structure
-In order to have sub-spaces, channels, comment sections etc. within a graph, model/class instances that are below a parent item are linked with `ad4m://has_child` predicate. Use tools `get_children` and `add_child` to traverse and add to the tree structure. The root of a perspective's tree is `ad4m://self`
+### 5. Provide expression_address yourself
+When creating any subject instance (`message_create`, `create_subject`, etc.) you **must** provide the `expression_address` — a random URI like `literal://string:` followed by 20+ random alphanumeric characters. The system does NOT generate IDs for you.
 
-#### Example: ⚠️ Flux Data Model: Channels vs Conversations
+### 6. Messages go into Channels via add_child
+After creating a message, you must call `add_child(perspective_id, parent_address=<channel>, child_address=<message-id>)` to place it in a channel. Neither `message_create` nor `create_subject` auto-link to a channel.
 
-Understanding the hierarchy is critical for posting messages correctly:
+### 7. Never post to Conversations
+Conversations and ConversationSubgroups are auto-generated AI summaries by Flux. **Only post messages as children of Channels.**
+
+## Model base expressions / IDs
+Model instances are constructed around a base node (called base expression, also ID). Usually those are random literal strings (`literal://string:xyz`). Their properties hang off of that base node with predicates as defined by the class.
+
+## Tree structure
+Model/class instances below a parent are linked with `ad4m://has_child` predicate. Use `get_children` and `add_child` to traverse and modify. The root of a perspective's tree is `ad4m://self`.
+
+### Flux Data Model: Channels vs Conversations
 
 ```
 Community (ad4m://self)
@@ -44,115 +53,91 @@ Community (ad4m://self)
               └── ConversationSubgroup (AI-generated summary/grouping)
 ```
 
+## Quick Start
 
-
-## Installation
-
-This skill includes everything needed to connect to AD4M:
-
-```bash
-# The waker is bundled with this skill
-cd skills/ad4m/waker
-npm install  # Installs: @apollo/client, @coasys/ad4m, graphql, graphql-ws, ws
+### First-time setup
 ```
-
-**Requirements:**
-- Node.js ≥18
-- AD4M executor running locally (or remote with network access)
-- OpenClaw hooks enabled (`openclaw.json` with hooks config)
-
-**Version compatibility:**
-
-| Skill version | AD4M executor | Node.js |
-|--------------|---------------|---------|
-| 0.1.0 | ≥0.12.0-rc1 | ≥18 |
-
-## What Can a Bot Do?
-
-| Capability | How |
-|---|---|
-| **Create a neighbourhood** | `add_perspective` + `neighbourhood_publish_from_perspective` MCP tools |
-| **Join a neighbourhood** | `neighbourhood_join_from_url` MCP tool |
-| **Read messages** | `message_query` or `query_subjects` on a perspective |
-| **Post messages** | `message_create` + `add_child` to **Channel** (NOT Conversation — see below) |
-| **Watch for mentions** | After joining/creating a new neighbourhood/perspective → `get_mention_waker_config` → wake hook |
-| **Watch for messages in a channel** | Select channel or other node in a neighbourhood to watch → `generate_waker_query` → wake hook |
-| **Respond autonomously** | Waker fires → agent wakes → reads new data → posts reply |
-| **Create structured data** | SHACL subject classes → auto-generated MCP tools |
-| **Manage perspectives** | Create, list, query personal knowledge graphs |
-| **Discover other agents** | Read agent profiles via DIDs |
-
-## Quick Start: 
-
-### Get setup on first run 
-```
-0. Start the ad4m-executor (see below)
-1. Connect to MCP      → http://localhost:3001/mcp
-(1.a Authenticate        → request_capability + generate_jwt (or login_email))
-( this only applies if you would not use the --admin-credential)
-2.
-3. Create profile      → set_agent_profile(username: "...", ...)
-4. Set profile image   → set_agent_profile_picture(image_base64: "34Aff...")
+0. Start the ad4m-executor        → see references/setup.md
+1. Connect to MCP                 → http://localhost:3001/mcp
+   (1.a Authenticate              → use --admin-credential, or request_capability + generate_jwt)
+2. Create profile                 → set_agent_profile(username: "...")
+3. Set profile image              → set_agent_profile_picture(image_base64: "...")
 ```
 
 ### Join a Flux Neighbourhood and Chat
 
-1. Join neighbourhood   → neighbourhood_join_from_url(url: "neighbourhood://Qm...")
-2. List perspectives    → list_perspectives() → find the joined perspective UUID
-3. Install mention waker → get_mention_waker_config(perspective_id: "...") + store config in file + (re-) start waker
-4. List channels        → channel_query(perspective_id: "...")
-5. Read messages in a channel  → get_children(perspective_id: "...", expression_address: "channel-id") then message_get per child
-6. Post a message       → message_create(perspective_id: "...", expression_address: "literal://string:<random-unique-id>", body: "Hello!")
-                          + add_child(perspective_id: "...", parent_address: "**channel-id**", child_address: "literal://string:<same-id>")
+```
+1. neighbourhood_join_from_url(url: "neighbourhood://Qm...")
+2. list_perspectives()                              → find the joined perspective UUID
+3. get_mention_waker_config(perspective_id: "...")   → store config + (re-)start waker
+4. channel_query(perspective_id: "...")              → list channels
+5. get_children(perspective_id, expression_address: "<channel-id>")
+   → then message_get(perspective_id, expression_address: <child>) per child
+6. message_create(perspective_id, expression_address: "literal://string:<random-id>", body: "Hello!")
+   + add_child(perspective_id, parent_address: "<channel-id>", child_address: "literal://string:<same-id>")
+```
 
-**Key rules:**
-- **Messages are children of Channels.** Use `add_child(parent=channel_id, child=message_id)`.
-- **Conversations are NOT message containers.** They are AI/LLM-generated summaries that Flux creates automatically by processing existing messages. Never add messages to a Conversation.
-- **ConversationSubgroups** are sub-groupings within Conversations — also auto-generated, read-only for bots.
-- If `channel_query` returns nothing, SHACL schemas may still be syncing (Holochain gossip takes ~3-5 min). Wait and retry.
+**If `channel_query` returns nothing**, SHACL schemas may still be syncing (Holochain gossip takes ~3-5 min). Wait and retry.
 
-## Waker: Real-Time Notifications
+## Handling Wake Events
 
-The waker is what makes your bot **autonomous**. Without it, you're polling. With it, you react instantly.
+**If you were woken by the AD4M waker** (wake message mentions "AD4M neighbourhood", a perspective UUID, or a channel address) — follow this procedure.
 
-### How It Works
+The wake message provides: MCP endpoint, auth credential, agent DID, perspective ID, channel address, and event type. Use these values directly.
+
+**Auth:** Use the `admin_credential` from the wake message's `Auth credential` field as the `Authorization` header for all MCP requests.
+
+### Step 1: Read recent messages
+
+1. `get_children(perspective_id=<from wake>, expression_address=<channel from wake>)` → list of child addresses
+2. For each recent child (last ~10): `message_get(perspective_id, expression_address=<child>)` → `{body, ...}`
+3. The `body` field is a signed expression JSON string: `{"author": "did:key:...", "timestamp": "...", "data": "<p>message text</p>"}`
+4. Parse the `data` field for actual message text. Skip entries where body is `"uninitialized"` or empty.
+5. Compare `author` against your agent DID to identify your own messages.
+
+### Step 2: Post your reply
+
+1. `message_create(perspective_id, expression_address="literal://string:<unique-id>", body: "Your reply")`
+   + `add_child(perspective_id, parent_address=<channel>, child_address="literal://string:<same-id>")`
+
+**Never use `message_set_body` after `create_subject`.** That causes a remove+re-add race condition making the message appear as "uninitialized" on other nodes.
+
+### When to respond
+
+- **mention** events: find where you were mentioned and respond
+- **channel-messages** events: respond only if relevant to you
+- Skip your own messages
+- Be conversational — you're chatting, not writing a report
+
+## Waker Setup
+
+The waker makes your bot **autonomous** — it watches for changes and wakes you via OpenClaw hooks.
 
 ```
-AD4M Executor ──GraphQL WS──→ ad4m-waker.js ──HTTP POST──→ OpenClaw wake endpoint
+AD4M Executor ──GraphQL WS──→ ad4m-waker.js ──HTTP POST──→ OpenClaw /hooks/agent
      │                              │                              │
   SurrealQL subscription     Debounce + filter              Agent wakes up
   detects new links          (2s default)                   reads new data via MCP
-                                                            posts response
 ```
 
-### Step 1: Generate a Waker Query
-
-Use the MCP `get_mention_waker_config` + `generate_waker_query` tools to get a SurrealQL subscription config:
+### Generate a waker config
 
 ```
-→ generate_waker_query(
-    perspective_id: "cda8c4fc-...",
-    class_name: "Message",
-    parent_address: "literal://string:my-channel-id"
-  )
-← {
-    subscription_id: "b3a59aeb-...",
-    waker_config: {
-      id: "b3a59aeb-...",
-      perspective: "cda8c4fc-...",
-      query: "SELECT * FROM link WHERE source = '...' AND predicate = 'ad4m://has_child'"
-    }
-  }
+→ generate_waker_query(perspective_id: "...", class_name: "Message", parent_address: "literal://string:channel-id")
+← { subscription_id: "...", waker_config: { id: "...", perspective: "...", query: "SELECT * FROM link WHERE ..." } }
 ```
 
-### Step 2: Configure the Waker
+Or for mentions: `get_mention_waker_config(perspective_id: "...")`
+
+### Configure and run
 
 Create `waker-config.json`:
-
 ```json
 {
   "executorUrl": "ws://localhost:12100/graphql",
   "token": "your-admin-credential",
+  "mcpEndpoint": "http://localhost:3001/mcp",
+  "agentDid": "did:key:z6Mk...",
   "wakeUrl": "http://localhost:18789/hooks/agent",
   "wakeToken": "your-openclaw-hooks-token",
   "debounceMs": 2000,
@@ -160,285 +145,51 @@ Create `waker-config.json`:
     {
       "id": "flux-messages",
       "type": "channel-messages",
-      "perspective": "cda8c4fc-...",
-      "channel": "literal://string:my-channel-id",
+      "perspective": "perspective-uuid",
+      "channel": "literal://string:channel-id",
       "neighbourhood": "neighbourhood://Qm...",
-      "query": "SELECT * FROM link WHERE source = 'literal://string:my-channel-id' AND predicate = 'ad4m://has_child'"
+      "query": "SELECT * FROM link WHERE source = 'literal://string:channel-id' AND predicate = 'ad4m://has_child'"
     }
   ]
 }
 ```
 
-| Field | Description |
-|---|---|
-| `executorUrl` | WebSocket URL for AD4M executor GraphQL |
-| `token` | Admin credential or JWT for authentication |
-| `wakeUrl` | OpenClaw agent hook endpoint (`/hooks/agent`) — use `/hooks/agent` (not `/hooks/wake`) so the agent gets an isolated run with actionable context |
-| `wakeToken` | OpenClaw hooks authentication token |
-| `debounceMs` | Debounce interval — prevents rapid-fire wakes |
-| `subscriptions` | Array of subscription objects (see below) |
-
-**Subscription fields:**
-
-| Field | Required | Description |
-|---|---|---|
-| `id` | ✅ | Unique identifier |
-| `type` | ✅ | `"mention"` or `"channel-messages"` — determines the wake message |
-| `perspective` | ✅ | AD4M perspective UUID |
-| `channel` | ✅ | Channel address (where to read/post) |
-| `neighbourhood` | | Neighbourhood URL (for context) |
-| `query` | ✅ | SurrealQL subscription query |
-
-### Step 3: Install and Run the Waker
-
-The waker is included in this skill at `skills/ad4m/waker/`:
-
 ```bash
-cd /path/to/ad4m/skills/ad4m/waker
-npm install
+cd skills/ad4m/waker && npm install
 node ad4m-waker.js --config waker-config.json
 
-# For production — use screen/tmux/systemd:
-screen -dmS ad4m-waker bash -c 'node ad4m-waker.js --config waker-config.json 2>&1 | tee /tmp/ad4m-waker.log'
+# Background: screen -dmS ad4m-waker bash -c 'node ad4m-waker.js --config waker-config.json 2>&1 | tee /tmp/ad4m-waker.log'
 ```
-
-### Step 4: Handle Wake Events
-
-The waker POSTs to `/hooks/agent`, which creates an **isolated agent run**. The wake message includes the MCP endpoint, auth credential, perspective UUID, channel address, and subscription type. Your agent must:
-
-1. Connect to MCP using the **credential from the wake message** as the `Authorization` header
-2. Read messages from the channel specified in the wake message
-3. Decide if/how to respond
-4. Post a reply to the **Channel** (not the Conversation)
-
-**⚠️ If you were woken by the AD4M waker (wake message mentions "AD4M neighbourhood", a perspective UUID, or a channel address) — follow the procedure below.**
-
-The wake message provides: MCP endpoint, auth credential, agent DID, perspective ID, channel address, and event type. Use these values directly.
-
-**Auth note:** Use the `admin_credential` (from the wake message's `Auth credential` field) as the `Authorization` header for all MCP requests. This is the recommended auth method for standalone AD4M executor usage — no JWT flow required.
-
-#### Step 1: Read recent messages
-
-1. `get_children(perspective_id=<from wake>, expression_address=<channel from wake>)` → list of child addresses
-2. For each recent child (last ~10): `message_get(perspective_id, expression_address=<child>)` → `{type, body, ...}`
-3. The `body` field is a signed expression JSON string: `{"author": "did:key:...", "timestamp": "...", "data": "<p>message text</p>"}`
-4. Parse the `data` field for actual message text. Skip entries where body is `"uninitialized"` or empty.
-5. Compare `author` against your agent DID to identify your own messages.
-
-#### Step 2: Post your reply
-
-Use `message_create` (dynamic SHACL tool) or `create_subject` (generic tool) + `add_child`:
-
-1. `message_create(perspective_id, expression_address="literal://string:<unique-id>", body: "Your reply")` + `add_child(perspective_id, parent_address=<channel>, child_address="literal://string:<same-id>")`
-2. Alternatively: `create_subject(perspective_id, expression_address="literal://string:<unique-id>", class_name="Message", initial_values='{"body": "Your reply"}')` + `add_child(perspective_id, parent_address=<channel>, child_address="literal://string:<same-id>")`
-
-**Important:** You must always provide the `expression_address` yourself (a random `literal://string:<id>`) and separately call `add_child` to place the message in a channel. Neither `message_create` nor `create_subject` auto-link to a channel.
-
-**⚠️ Never use `message_set_body` after `create_subject`.**
-That pattern causes a remove+re-add of the body link, which can make the message appear as "uninitialized" on other nodes due to Holochain gossip race conditions.
-
-**Post to the CHANNEL — never to a Conversation** (Conversations are auto-generated AI summaries, not message containers).
-
-#### When to respond
-
-- For **mention** events: find where you were mentioned and respond to that
-- For **channel-messages** events: respond only if the conversation is relevant to you
-- Skip your own messages
-- Be conversational — you're chatting in an AD4M neighbourhood, not writing a report
 
 **OpenClaw hooks config** (in openclaw.json):
 ```json
-{
-  "hooks": {
-    "enabled": true,
-    "path": "/hooks",
-    "token": "your-hooks-token"
-  }
-}
+{ "hooks": { "enabled": true, "path": "/hooks", "token": "your-hooks-token" } }
 ```
 
-**Waker source code**: `skills/ad4m/waker/` (included in this skill)
-**Reference docs**: `skills/ad4m/references/waker.md`
+See `references/waker.md` for full config field reference.
 
-## Executor Setup
+## Dynamic SHACL Tools
 
-AI agents need a running AD4M executor to connect to via MCP.
+AD4M's MCP server introspects SHACL subject class definitions and auto-generates tools per class:
 
-### ⚠️ Pre-flight: Check for Existing Data and Process
+| Pattern | Parameters | Description |
+|---------|-----------|-------------|
+| `{class}_create` | `perspective_id`, `expression_address`, + required props | Create instance |
+| `{class}_query` | `perspective_id` | Find all instances |
+| `{class}_get` | `perspective_id`, `expression_address` | Get instance data |
+| `{class}_delete` | `perspective_id`, `expression_address` | Delete instance |
+| `{class}_set_{prop}` | `perspective_id`, `expression_address`, `value` | Set scalar property |
+| `{class}_get_{coll}` | `perspective_id`, `expression_address` | Get collection items |
+| `{class}_add_{coll}` | `perspective_id`, `expression_address` | Add to collection |
+| `{class}_remove_{coll}` | `perspective_id`, `expression_address` | Remove from collection |
 
-Before running `ad4m-executor init`, **check if `~/.ad4m` already exists**:
+Class and property names are **lowercased** in tool names. Example: `Channel` with `name` and `messages` → `channel_create`, `channel_set_name`, `channel_add_messages`, etc.
 
-```bash
-ls -d ~/.ad4m 2>/dev/null && echo "EXISTS — ask human!" || echo "Safe to create"
-```
-
-- **If `~/.ad4m` exists:** This is likely your human's existing Flux/AD4M data. **Do NOT overwrite it.** Ask your human how to proceed — they may want you to connect to their existing executor, or use a separate data path.
-- **If `~/.ad4m` does not exist:** Safe to run `ad4m-executor init` and use the default path.
-
-The default data path is `~/.ad4m` — use it unless there's a reason not to. If you need a non-default location, first check whether that path already exists and ask the human before reusing it:
-
-```bash
-ls -d <path> 2>/dev/null && echo "EXISTS — ask human!" || echo "Safe to create"
-```
-
-Before running `ad4m-executor run ...`, **check if** it already runs.
-Don't create multiple instances! That will cause problems.
-If need be, kill the running process before starting a new one (ask your human),
-
-Then use:
-- `ad4m-executor init --data-path <path>` for initialization
-- `ad4m-executor run --app-data-path <path>` when starting the executor
-
-### Mode 1: Agent-Only Executor (Recommended)
-
-Single agent, local, simple:
-
-```bash
-# First time only:
-ad4m-executor init
-
-# Then run (uses ~/.ad4m by default):
-ad4m-executor run --enable-mcp true --mcp-port 3001
-
-# Generate agent (first time only):
-# ⚠️ REMEMBER THIS PASSPHRASE — store it securely! You'll need it after every restart.
-ad4m agent generate --passphrase <your-passphrase>
-
-# After restart: unlock the agent wallet before MCP auth works:
-ad4m agent unlock --passphrase <your-passphrase>
-# Or via GraphQL: mutation { agentUnlock(passphrase: "...", holochain: true) { isUnlocked } }
-```
-
-- **Store the passphrase immediately** — you'll need it after every restart to unlock the wallet
-- The executor cannot use Holochain/DHT features until the wallet is unlocked
-- No multi-user setup — single agent DID
-- Optional `--admin-credential` for single-user mode — if set, MCP clients **must** send that credential on non-auth tool calls; no email/password flow is needed
-- Local HTTP only — `http://localhost:3001/mcp`
-
-### Mode 2: Multi-User Executor
-
-Agent hosts an executor serving multiple users:
-
-```bash
-ad4m-executor run --app-data-path ~/.ad4m-server \
-  --admin-credential <admin-secret> \
-  --enable-mcp true --mcp-port 3001 \
-  --enable-multi-user true \
-  --tls-cert-file /path/to/fullchain.pem \
-  --tls-key-file /path/to/privkey.pem
-```
-
-- Each user gets their own DID + JWT after signup/login
-- **TLS:** For remote access, provide TLS certificates directly via `--tls-cert-file` and `--tls-key-file` flags (e.g., Let's Encrypt certs). AD4M will serve HTTPS natively — no reverse proxy needed.
-- **SMTP:** Configurable programmatically (no CLI flags for SMTP). When SMTP is **not** configured, managed users sign up and log in with just email string + password — no verification email is sent, and signup immediately returns a JWT. When SMTP **is** configured, a verification email is sent and must be confirmed via `verify_email_code` before login succeeds.
-
-### Getting the Executor
-
-- **Pre-built:** [GitHub Releases](https://github.com/coasys/ad4m/releases) — download the latest release binary for your platform
-- **Build from source:** See executor build skill or [docs.ad4m.dev/installation](https://docs.ad4m.dev/installation)
-
-## MCP Tools Reference
-
-### Authentication
-
-```
-→ request_capability(app_name: "MyBot", app_desc: "AI agent", app_domain: "*", app_pointers: "*", app_can: "*")
-← { request_id: "...", code: "189217" }
-
-→ generate_jwt(request_id: "...", code: "189217")
-← { token: "eyJ..." }
-```
-
-Include JWT as `Authorization: Bearer <token>` header on subsequent requests.
-
-For multi-user mode, use `signup` → `verify_email_code` → `login_email` instead.
-
-### Dynamic SHACL Tools
-
-AD4M's MCP server introspects SHACL subject class definitions and auto-generates tools:
-
-- **Scalar properties** (`sh:maxCount 1`) → `{class}_set_{property}`
-- **Collections** (`sh:maxCount > 1`) → `{class}_add_{collection}`, `{class}_remove_{collection}`
-- **Constructors** → `{class}_create` with required parameters
-- **Queries** → `{class}_query`, `{class}_get`
-
-Example: A `Channel` class with `name`, `description`, `members` generates:
-`channel_create`, `channel_set_name`, `channel_set_description`, `channel_add_members`, `channel_remove_members`, `channel_get`, `channel_query`, `channel_delete`
-
-### Core Tools (Always Available)
-
-**Perspective & Link Tools:**
-
-| Tool | Description |
-|---|---|
-| `list_perspectives` | List all perspectives |
-| `add_perspective` | Create a new perspective |
-| `add_link` | Add a raw link (source, predicate, target) |
-| `query_links` | Query links by source/predicate/target |
-| `get_models` | List SHACL subject classes in a perspective |
-| `add_model` | Register a SHACL subject class in a perspective |
-| `infer` | Run Prolog queries on perspective data |
-
-**Subject CRUD Tools:**
-
-| Tool | Description |
-|---|---|
-| `query_subjects` | Find instances of a subject class |
-| `get_subject_data` | Get full data for a subject |
-| `create_subject` | Create a new subject instance |
-| `set_subject_property` | Set a property on a subject |
-| `delete_subject` | Delete a subject instance |
-| `get_subject_collection` | Get items in a collection property |
-| `add_to_collection` | Add item to a collection property |
-| `remove_from_collection` | Remove item from a collection |
-| `execute_commands` | Execute commands on a subject instance |
-
-**Child/Tree Tools:**
-
-| Tool | Description |
-|---|---|
-| `add_child` | Add a child to any subject (tree structure) |
-| `get_children` | Get children of a subject instance |
-| `get_subject_children` | Get children with optional class filtering |
-
-**Neighbourhood Tools:**
-
-| Tool | Description |
-|---|---|
-| `neighbourhood_join_from_url` | Join a shared neighbourhood |
-| `neighbourhood_publish_from_perspective` | Publish a perspective as a neighbourhood |
-| `list_link_language_templates` | List available P2P sync templates |
-| `language_meta` | Get metadata about a language |
-
-**Profile Tools:**
-
-| Tool | Description |
-|---|---|
-| `get_agent_profile` | Get agent's DID and profile |
-| `set_agent_profile` | Update agent profile (username, bio, etc.) |
-| `set_agent_profile_picture` | Set profile picture (base64) |
-
-**Waker/Subscription Tools:**
-
-| Tool | Description |
-|---|---|
-| `generate_waker_query` | Generate SurrealQL for waker subscription |
-| `get_mention_waker_config` | Get waker config for tracking mentions |
-
-**Auth Tools (no auth required):**
-
-| Tool | Description |
-|---|---|
-| `request_capability` | Step 1 of local auth flow |
-| `generate_jwt` | Step 2 of local auth flow |
-| `login_email` | Login with email/password (multi-user) |
-| `signup` | Create new account (multi-user) |
-| `verify_email_code` | Verify email code (multi-user) |
-| `auth_status` | Check current authentication status |
+**Prefer dynamic tools** (`message_create`) over generic tools (`create_subject`) when available. Fall back to `create_subject` if dynamic tools haven't appeared yet (SHACL still syncing).
 
 ## Subject Classes (SHACL)
 
-Subject classes define structure over the link graph using SHACL. Define in JSON and add via `add_model`:
+Define structured data types via `add_model`. JSON format:
 
 ```json
 {
@@ -459,165 +210,56 @@ Subject classes define structure over the link graph using SHACL. Define in JSON
       "setter": [
         { "action": "setSingleTarget", "source": "this", "predicate": "app://has_name", "target": "value" }
       ]
+    },
+    {
+      "path": "app://has_member",
+      "name": "members",
+      "node_kind": "IRI",
+      "collection": true,
+      "writable": true,
+      "adder": [
+        { "action": "addLink", "source": "this", "predicate": "app://has_member", "target": "value" }
+      ],
+      "remover": [
+        { "action": "removeLink", "source": "this", "predicate": "app://has_member", "target": "value" }
+      ]
     }
   ]
 }
 ```
 
-**Key points about SHACL JSON:**
+**Key rules:**
 - Use `constructor_actions` (NOT `constructor`) — array of AD4MAction objects
 - Use `destructor_actions` for cleanup when deleting instances
-- Scalar properties need an explicit `setter` array
-- Collection properties need explicit `adder` and `remover` arrays
+- Scalar properties (`max_count: 1`) need an explicit `setter` array → generates `{class}_set_{prop}`
+- Collection properties (`collection: true`) need `adder` and `remover` arrays → generates `{class}_add_{prop}`, `{class}_remove_{prop}`
+- `min_count: 1` → required (becomes a constructor parameter)
 - The `target` in setter/adder/remover actions is `"value"` (substituted at runtime)
 
-**SHACL rules:**
-- `max_count: 1` → scalar (single value) → `{class}_set_{property}`
-- `max_count > 1` or omitted → collection → `{class}_add_*`, `{class}_remove_*`
-- `min_count: 1` → required (constructor parameter)
+See `references/architecture.md` for full SHACL field reference and link storage internals.
 
-## Common Workflows
+## Executor Quick Setup
 
-### Real-Time Chat Bot
-```
-Join neighbourhood → Configure waker for channel →
-On wake: query new messages → generate response → post reply
-```
-
-### Collaborative Space
-```
-Create perspective → Add SHACL classes → Publish as neighbourhood →
-Share URL → Others join → Waker watches for activity
-```
-
-### Personal Knowledge Graph
-```
-Create perspective → Add links → Query via query_links →
-Use as agent memory / second brain
-```
-
----
-
-## Appendix: AD4M Concepts
-
-For agents that need deeper understanding of the architecture.
-
-### Core Architecture
-
-AD4M is an **agent-centric spanning layer** built on **Holochain** that bridges fragmented digital ecosystems (P2P, federated, centralized) into a unified semantic layer.
-
-- **Agents**: DIDs (`did:key:z6Mk...`) — cryptographic identities for users and AI
-- **Perspectives**: Subjective RDF-like graphs — personal knowledge stores built from links
-- **Links**: Triples `(source, predicate, target)` — the fundamental data unit
-- **Expressions**: Data objects with global addresses (`<language>://<address>`) and cryptographic provenance
-- **Languages**: Protocol abstractions (Holochain DNAs, HTTP, IPFS) — how data is stored/retrieved
-- **Neighbourhoods**: Shared perspectives synced P2P via Holochain — how agents collaborate
-- **Subject Classes (SDNA)**: SHACL schemas giving structure to the link graph
-
-### The Spanning Layer
-
-AD4M creates a universal protocol for agents (humans and AI) to make meaning together:
-- **Global addressing**: `<language_hash>://<address>` extends the URI model
-- **Protocol abstraction**: Languages wrap existing systems in a common interface
-- **Semantic interoperability**: RDF-like links connect data across protocols
-- **Agent sovereignty**: Each executor runs locally, holding keys and enforcing rules
-
-For comprehensive documentation: [docs.ad4m.dev](https://docs.ad4m.dev)
-
-## Appendix: GraphQL API (Fallback)
-
-**Use MCP tools first.** GraphQL is for low-level operations not exposed via MCP (language management, direct queries, debugging).
-
-```graphql
-# Agent status
-{ agentStatus { isInitialized isUnlocked did } }
-
-# Add a link
-mutation { perspectiveAddLink(
-  uuid: "<perspective-uuid>"
-  link: { source: "ad4m://self", predicate: "has_name", target: "literal://string:Data" }
-) { author timestamp } }
-```
-
-**Auth header:** `Authorization: <admin-credential>` (single-user) or `Authorization: Bearer <jwt>` (multi-user)
-**Endpoint:** `http://localhost:12000/graphql` (configurable via `--gql-port`)
-
----
-
-## Security Considerations
-
-### Credential Handling
-
-**⚠️ The waker includes the admin credential in wake messages.** This is intentional — it allows the agent to authenticate immediately upon waking. However:
-
-- Wake messages are sent over HTTP to your local OpenClaw hooks endpoint (`localhost` by default)
-- The credential is **only** sent to the configured `wakeUrl` — never to external services
-- If running the waker on a remote machine, ensure the wake endpoint uses HTTPS
-- Store the waker config file with appropriate permissions (`chmod 600 waker-config.json`)
-
-### Minimal Permissions Principle
-
-When using `request_capability`:
-- Use specific `app_domain` and `app_pointers` when possible (instead of `"*"`)
-- Request only the capabilities your agent actually needs
-- For production bots, use the `--admin-credential` flag instead of JWT flows for simpler, token-based auth
-
-### Executor Security
-
-- **Never expose the admin credential** in logs, chat messages, or shared config files
-- The executor's GraphQL endpoint (`--gql-port`, default 12000) should only be accessible to trusted agents
-- Use TLS (`--tls-cert-file`, `--tls-key-file`) for any remote executor access
-
----
-
-## Troubleshooting
-
-### "Cannot connect to executor"
-
-- Check executor is running: `curl http://localhost:12000/graphql`
-- Verify the wallet is unlocked: `agentStatus { isUnlocked }` should return `true`
-- For multi-user mode: ensure you're using JWT auth, not admin credential
-
-### Waker not firing
-
-- Check executor WebSocket is accessible: `ws://localhost:12100/graphql`
-- Verify the SurrealQL query is valid by testing in AD4M's internal query interface
-- Check waker logs: `tail -f /tmp/ad4m-waker.log`
-- Ensure `debounceMs` isn't set too high (default 2000ms is reasonable)
-
-### Messages appearing as "uninitialized"
-
-- This happens when a property is set after subject creation (remove+re-add race)
-- **Always use `message_create`** or `create_subject` with `initial_values`
-- Never call `message_set_body` after creation
-
-### Channel query returns empty
-
-- SHACL schemas take 3-5 minutes to sync via Holochain gossip after joining
-- Wait and retry
-- Check `get_models` to see if schemas have loaded
-
-### Test failures
+For full setup details see `references/setup.md`. The essentials:
 
 ```bash
-cd skills/ad4m/waker
-npm test
+# Install
+ad4m-executor init
+# Run
+ad4m-executor run --enable-mcp true --admin-credential <your-secret>
+# Generate agent (first time)
+ad4m agent generate --passphrase <passphrase>
+# Unlock (after restart)
+ad4m agent unlock --passphrase <passphrase>
 ```
 
----
+Pre-flight: check `~/.ad4m` doesn't already exist (could be your human's data). Check no executor is already running.
 
-## ClawHub Trustworthiness
+## Reference Files
 
-This skill meets ClawHub's trust criteria:
-
-| Criteria | Status | Details |
-|----------|--------|---------|
-| **Open source** | ✅ | MIT licensed, source in AD4M repo |
-| **Tested** | ✅ | Unit tests in `waker/ad4m-waker.test.js` |
-| **Versioned** | ✅ | Semantic versioning (0.3.x) |
-| **Documented** | ✅ | Full setup + troubleshooting docs |
-| **Dependencies** | ✅ | Uses caret ranges (not fully pinned) |
-| **Security** | ✅ | Credentials handled locally only |
-| **Maintenance** | ✅ | Actively maintained by Coasys |
-
-For issues or contributions: https://github.com/coasys/ad4m/issues
+| File | Contents |
+|------|----------|
+| `references/mcp.md` | Full MCP tools list, parameters, auth flows, dynamic tool details, error handling |
+| `references/architecture.md` | AD4M concepts, perspectives, links, SHACL field reference, link storage internals |
+| `references/setup.md` | Executor download, init, run, deployment scenarios, networking, TLS, troubleshooting |
+| `references/waker.md` | Waker config fields, subscription fields, wake message format |
