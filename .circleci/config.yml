@@ -181,3 +181,4 @@ workflows:
       - integration-tests-email-verification:
           requires:
             - build-and-test
+# Trigger CI
