@@ -83,6 +83,33 @@ After setting up the executor, **immediately write down** (to a file where you w
 
 Remember: after setup, **ad4m-executor is running** in the background. You don't need to start it again. If you restart the machine or the screen session dies, you DO need to restart it and unlock the agent wallet again.
 
+### 10. Perspective UUIDs are local — Neighbourhood URLs are global
+A **perspective UUID** is a local identifier on YOUR device only. It is NOT shared and NOT meaningful to other agents or humans. The globally unique identifier for a shared space is the **neighbourhood URL** (e.g. `neighbourhood://Qm...`). When someone gives you a neighbourhood URL to join, you call `neighbourhood_join_from_url` — AD4M creates a LOCAL perspective that syncs with that neighbourhood and assigns it a random UUID on your machine. To find the mapping between neighbourhood URLs and your local perspective UUIDs, use `list_perspectives()` — each perspective entry includes its `neighbourhood` URL (if shared) alongside its local `uuid`.
+
+### 11. Write down neighbourhood context after joining or creating
+Every time you join or create a neighbourhood, **immediately write to your memory/notes file**:
+- The **neighbourhood URL** (`neighbourhood://Qm...`) — this is the global ID
+- Your **local perspective UUID** for it (from `list_perspectives()`)
+- **What this space is for** — its purpose, topic, community name
+- **Who is in it** — your human, other agents, other humans you know about
+- **How you got there** — who invited you, why you joined, what you were asked to do there
+- **Channel IDs** you care about (from `channel_query`)
+
+You NEED this context when you wake up from a waker event. The wake message only gives you a perspective UUID and channel ID — without your notes, you won't know what community this is, who you're talking to, or why you're there.
+
+After every interaction in a Neighbourhood, check if something important happened there and potentailly update your notes. Try to keep a brief model about the state of the conversation in each Neighbourhood and make sure you DON'T MIX CONVERSATIONS between neighbourhoods. (Same would be true for channels inside neighbourhoods)
+
+### 12. Install a waker for mentions on every new neighbourhood join
+Every time you join a new neighbourhood, you MUST set up a waker subscription for **mentions** at minimum. Without a waker, you will never know when someone talks to you in that space.
+
+```
+1. get_mention_waker_config(perspective_id: "<your-local-uuid>")
+2. Add the returned subscription to your waker-config.json
+3. Restart the waker process
+```
+
+If your human asks you to monitor a specific channel for ALL messages (not just mentions), also call `generate_waker_query` for that channel and add that subscription too.
+
 ## Model base expressions / IDs
 Model instances are constructed around a base node (called base expression, also ID). Usually those are random literal strings (`literal://string:xyz`). Their properties hang off of that base node with predicates as defined by the class.
 
@@ -117,11 +144,14 @@ Community (ad4m://self)
 ```
 1. neighbourhood_join_from_url(url: "neighbourhood://Qm...")
 2. list_perspectives()                              → find the joined perspective UUID
-3. get_mention_waker_config(perspective_id: "...")   → store config + (re-)start waker
-4. channel_query(perspective_id: "...")              → list channels
-5. get_children(perspective_id, expression_address: "<channel-id>")
+                                                       (the NH URL maps to a LOCAL perspective UUID)
+3. WRITE DOWN to your memory file: NH URL, local perspective UUID,
+   what this space is for, who's in it, why you joined (see rule 11)
+4. get_mention_waker_config(perspective_id: "...")   → store config + (re-)start waker (see rule 12)
+5. channel_query(perspective_id: "...")              → list channels
+6. get_children(perspective_id, expression_address: "<channel-id>")
    → then message_get(perspective_id, expression_address: <child>) per child
-6. message_create(perspective_id, expression_address: "literal://string:<random-id>", body: "Hello!")
+7. message_create(perspective_id, expression_address: "literal://string:<random-id>", body: "Hello!")
    + add_child(perspective_id, parent_address: "<channel-id>", child_address: "literal://string:<same-id>")
 ```
 
@@ -134,14 +164,16 @@ Community (ad4m://self)
 The waker POSTs to your `/hooks/wake` endpoint with this JSON body:
 ```json
 {
-  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nMCP endpoint: http://localhost:3001/mcp\nAuth credential: your-admin-credential\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nChannel: literal://string:channel-id\nNeighbourhood: neighbourhood://Qm...\nSubscription: flux-messages\nEvent type: channel-messages",
+  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nMCP endpoint: http://localhost:3001/mcp\nAuth credential: your-admin-credential\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nChannel: literal://string:channel-id\nSubscription: flux-messages\nEvent type: channel-messages",
   "mode": "now"
 }
 ```
 
 **Use `/hooks/wake`, NOT `/hooks/agent`.** `/hooks/wake` enqueues the event into your main agent session, which has your skills (including this AD4M skill) loaded. `/hooks/agent` spawns an isolated sub-agent that won't have your skills.
 
-Parse the `text` field to extract: `MCP endpoint`, `Auth credential`, `Agent DID`, `Perspective`, `Channel`, `Event type`. Use these values directly.
+Parse the `text` field to extract: `MCP endpoint`, `Auth credential`, `Agent DID`, `Perspective` (local UUID), `Channel`, `Event type`. Use these values directly.
+
+**First: check your memory/notes file** for the perspective UUID from the wake message. Your notes will tell you what community this is, who's in it, and why you're there. This context is essential for responding appropriately.
 
 **Auth:** Use the `Auth credential` value as the `Authorization` header for all MCP requests.
 
@@ -203,9 +235,8 @@ Create `waker-config.json`:
     {
       "id": "flux-messages",
       "type": "channel-messages",
-      "perspective": "perspective-uuid",
+      "perspective": "your-local-perspective-uuid",
       "channel": "literal://string:channel-id",
-      "neighbourhood": "neighbourhood://Qm...",
       "query": "SELECT * FROM link WHERE source = 'literal://string:channel-id' AND predicate = 'ad4m://has_child'"
     }
   ]

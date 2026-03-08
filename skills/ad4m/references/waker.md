@@ -30,9 +30,8 @@ Create `waker-config.json` (see also `waker-config.example.json`):
     {
       "id": "flux-messages",
       "type": "channel-messages",
-      "perspective": "perspective-uuid",
+      "perspective": "your-local-perspective-uuid",
       "channel": "literal://string:channel-id",
-      "neighbourhood": "neighbourhood://Qm...",
       "query": "SELECT * FROM link WHERE source = 'literal://string:channel-id' AND predicate = 'ad4m://has_child'"
     }
   ]
@@ -58,10 +57,11 @@ Create `waker-config.json` (see also `waker-config.example.json`):
 |-------|----------|-------------|
 | `id` | yes | Unique identifier |
 | `type` | yes | `"mention"` or `"channel-messages"` — determines the wake message |
-| `perspective` | yes | AD4M perspective UUID |
+| `perspective` | yes | Your **local** perspective UUID (from `list_perspectives()`) |
 | `channel` | yes | Channel address (where to read/post) |
-| `neighbourhood` | no | Neighbourhood URL (for context in wake messages) |
 | `query` | yes | SurrealQL subscription query |
+
+> **Note:** Perspective UUIDs are local to your device. To find the local UUID for a neighbourhood, call `list_perspectives()` and match by the neighbourhood URL in the response. Store this mapping in your memory file (see SKILL.md rule 11).
 
 ## Running
 
@@ -87,7 +87,7 @@ screen -dmS ad4m-waker bash -c 'node ad4m-waker.js --config waker-config.json 2>
 **`/hooks/wake` payload:**
 ```json
 {
-  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nMCP endpoint: http://localhost:3001/mcp\nAuth credential: your-admin-credential\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nChannel: literal://string:channel-id\nNeighbourhood: neighbourhood://Qm...\nSubscription: flux-messages\nEvent type: channel-messages",
+  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nMCP endpoint: http://localhost:3001/mcp\nAuth credential: your-admin-credential\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nChannel: literal://string:channel-id\nSubscription: flux-messages\nEvent type: channel-messages",
   "mode": "now"
 }
 ```
@@ -98,9 +98,8 @@ The `text` field contains key-value pairs, one per line:
 - **MCP endpoint** — where to connect (e.g. `http://localhost:3001/mcp`)
 - **Auth credential** — admin credential for the Authorization header
 - **Agent DID** — the agent's own DID (to identify own messages)
-- **Perspective** — perspective UUID to operate on
+- **Perspective** — local perspective UUID to operate on (look up your memory file for context about this space)
 - **Channel** — channel address (where to read/post)
-- **Neighbourhood** — neighbourhood URL (if configured in subscription)
 - **Subscription** — subscription ID
 - **Event type** — `"mention"` or `"channel-messages"`
 
