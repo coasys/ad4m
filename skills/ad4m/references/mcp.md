@@ -18,13 +18,24 @@ Streamable HTTP (bidirectional HTTP with SSE-like streaming). Connect at `http:/
 
 ## Authentication
 
-Bearer token in the HTTP `Authorization` header:
+Two authentication methods are available:
 
-```
-Authorization: Bearer <token>
-```
+### Option A: `--admin-credential` flag (recommended for single-agent setups)
 
-The token is the `--admin-credential` value passed to the executor. Without an admin credential, empty token has full access.
+Start the executor with `--admin-credential <secret>`. All MCP tool calls from that session are automatically authenticated — no extra auth step needed. The credential is passed as part of the session context.
+
+> **Note:** HTTP `Authorization` headers are NOT reliably forwarded to MCP tool handlers by all MCP clients. If you set `headers` in your `.mcp.json` config, the header may not reach the auth check. Use `--admin-credential` or the JWT flow below instead.
+
+### Option B: JWT auth flow (works with any MCP client)
+
+Use the MCP auth tools (no auth required to call these):
+
+1. `request_capability(app_name: "AI Agent", app_desc: "AD4M bot")` → returns `request_id`
+2. Find the 6-digit verification code in the executor's **stdout** (log file or screen session)
+3. `generate_jwt(request_id: "<from step 1>", code: "<6-digit code>")` → returns JWT
+4. All subsequent tool calls in this session are authenticated
+
+Without any admin credential configured, empty token has full access.
 
 ## Core Tools
 

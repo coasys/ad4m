@@ -12,28 +12,40 @@ AD4M's core bootstrap languages (agent identity, neighbourhood sync, file storag
 
 ## IMPORTANT rules for how to use AD4M correctly
 
-### 1. Use MCP — never curl it
+
+### 1. Use --admin-credential if you setup a new ad4m-executor for you
+There are multiple ways to use/connect to an ad4m-executor. If in doubt: get the ad4m-executor binary and set it up just for you — you are the owner/admin of that ad4m instance. You start it with `--admin-credential <random passphrase>`. The credential authenticates all MCP tool calls from your session automatically. If you're connecting to someone else's executor (no admin credential), use the JWT flow from rule 1 instead.
+
+### 2. Use MCP — never curl it
 Always use the MCP tools! AD4M also has a GraphQL interface, but almost everything you need to do on ad4m for your human should be possible via the MCP tools that the ad4m-executor provides. This skill is written for that!
 
 **Do NOT try to call the MCP server with `curl`.** The MCP server uses Streamable HTTP transport — responses come back as `text/event-stream` (Server-Sent Events), not plain JSON. Raw `curl` calls will get garbled SSE data. You must connect via a proper MCP client.
 
-**To connect**, add AD4M as an MCP server in your MCP client config:
+**To connect**, add AD4M as an MCP server in your MCP client config (e.g. `~/.mcp.json`):
 ```json
 {
   "mcpServers": {
     "ad4m": {
       "url": "http://localhost:3001/mcp",
       "headers": {
-        "Authorization": "<your-admin-credential>"
+        "Authorization": "Bearer <your-admin-credential>"
       }
     }
   }
 }
 ```
-If your MCP client doesn't support `headers`, the admin credential can also be passed via the `request_capability` + `generate_jwt` MCP tools after connecting. **Important:** when you call `request_capability`, the 6-digit verification code is printed to the ad4m-executor's **stdout** — find it in the executor log file (e.g. `/tmp/ad4m-executor.log`) or by attaching to the screen session (`screen -r ad4m-executor`). You need this code to complete `generate_jwt`.
 
-### 2. Use --admin-credential if you setup a new ad4m-executor for you
-There are multiple ways to use/connect to an ad4m-executor. If in doubt: get the ad4m-executor binary and set it up just for you — you are the owner/admin of that ad4m instance. You start it with the `--admin-credential <random passphrase that you pick and use for all calls>` so that you don't have to request a JWT.
+### 3. Authentication without admin-credential
+In case your human wants to share their ad4m identity with you and runs their own ad4m-executor instance (or the UI Adam Launcher), you are not the sole owner of the executor and likely won't have / be able to choose the admin credential. 
+
+**Also, with some MCP clients, there COULD BE A PROBLEM RELAYING THE AUTHORIZATION HEADER FROM THE .mcp.json FILE.**
+
+Either way, you can also use the MCP JWT auth flow to request a JWT capability token:
+1. Call `request_capability` with `app_name`, `app_desc` (e.g. `"OpenClaw"`, `"AD4M bot - <your name>"`)
+2. The 6-digit verification code is printed to the ad4m-executor's **stdout** — find it in the executor log file (e.g. `/tmp/ad4m-executor.log`) or by attaching to the screen session (`screen -r ad4m-executor`) OR ask your human if they run a UI launcher.
+3. Call `generate_jwt` with the `request_id` (from step 1) and the `code` (6-digit string from the log)
+4. You're now authenticated for this MCP session — all subsequent tool calls will work.
+(This is similar to the GraphQL auth-flow, but different in one regard: MCP keeps an SSE connection and stores the session token server-side. That way the client doesn't need to store and re-send the JWT. You have a standing connection with a logged in session.)
 
 ### 3. Update waker config & restart when executor changes
 If you restart ad4m-executor or switch from one executor to another (from local to remote or between remote executors) you need to restart the waker with the correct executor URL and JWT/credential in its config.
