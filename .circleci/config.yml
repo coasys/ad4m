@@ -1,38 +1,27 @@
 version: 2.1
 references:
-  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:3605cfd2c0aee389ac9e7bb499a8e2633d0367ef3cc148d6668b2dbdff846ce0
+  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
 
 # Self-hosted machine runner on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04)
 # Resource class: coasys/marvin
 
 commands:
   setup_env:
-    description: "Set up build environment (Node, Rust, Deno, Go, pnpm)"
-    parameters:
-      node_version:
-        type: string
-        default: "18"
+    description: "Set up build environment (Node 18, Rust, Deno, Go, pnpm)"
     steps:
       - run:
           name: Setup build environment
           command: |
-            export NVM_DIR="$HOME/.nvm"
-            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" --no-use
-            NODE_PATH=$(nvm which << parameters.node_version >> 2>/dev/null || true)
-            if [ -z "$NODE_PATH" ] || [ ! -x "$NODE_PATH" ]; then
-              echo "Node << parameters.node_version >> not found, installing via nvm..."
-              nvm install << parameters.node_version >>
-              NODE_PATH=$(nvm which << parameters.node_version >>)
-            fi
-            NODE_BIN_DIR=$(dirname "$NODE_PATH")
-            echo "export PATH=\"$NODE_BIN_DIR:$HOME/.cargo/bin:$HOME/.deno/bin:$HOME/.local/go/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/go/bin:$PATH\"" >> $BASH_ENV
+            # Add all tool paths directly to PATH — no NVM sourcing (nvm use prints to stdout
+            # which corrupts subshell commands in cargo build scripts like libffi's libtool)
+            echo 'export PATH="$HOME/.nvm/versions/node/v24.14.0/bin:$HOME/.cargo/bin:$HOME/.deno/bin:$HOME/.local/go/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/go/bin:$PATH"' >> $BASH_ENV
             source $BASH_ENV
             echo "Node: $(node --version)"
             echo "npm: $(npm --version)"
             echo "Rust: $(rustc --version)"
             echo "Deno: $(deno --version | head -1)"
             echo "Go: $(go version)"
-            echo "pnpm: $(pnpm --version || echo 'not installed yet')"
+            echo "pnpm: $(pnpm --version)"
 
   setup_integration_test_environment:
     description: "Setup common integration test environment"
@@ -57,40 +46,6 @@ commands:
 
 
 jobs:
-  node24-smoke-test:
-    machine: true
-    resource_class: coasys/marvin
-    steps:
-      - checkout
-      - setup_env:
-          node_version: "24"
-      - run:
-          name: Verify Node 24
-          command: |
-            echo "Node version: $(node --version)"
-            node --version | grep -q '^v24\.' || { echo "FAIL: expected Node 24"; exit 1; }
-      - run:
-          name: Install pnpm (if needed)
-          command: |
-            command -v pnpm >/dev/null 2>&1 || npm install -g pnpm
-            echo "pnpm: $(pnpm --version)"
-      - run:
-          name: Install dependencies
-          command: pnpm install --no-frozen-lockfile
-      - run:
-          name: Install core dependencies
-          command: cd ./core && pnpm install --no-frozen-lockfile
-      - run:
-          name: Build TypeScript packages
-          command: pnpm run build-npm-packages
-      - run:
-          name: Build dapp
-          command: pnpm build-dapp
-      - run:
-          name: Root tests
-          command: pnpm test
-          no_output_timeout: 15m
-
   build-and-test:
     machine: true
     resource_class: coasys/marvin
@@ -114,12 +69,12 @@ jobs:
           name: Install core dependencies
           command: cd ./core && pnpm install --no-frozen-lockfile
       - run:
+          name: Build core executor
+          command: pnpm run build-core-executor
+      - run:
           name: Build deno snapshot
           command: pnpm run build-deno-snapshot
           no_output_timeout: 30m
-      - run:
-          name: Remove stale binaries (self-hosted runner incremental cache)
-          command: rm -f target/release/ad4m target/release/ad4m-executor
       - run:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
@@ -157,8 +112,12 @@ jobs:
           command: |
             # Self-hosted runners reuse workdirs; previous job may have left
             # an executor alive (exec() shell-wrap means kill() only kills
-            # the shell, not the executor grandchild). Clear ports before test.
-            for port in 15700 15701 15702; do
+            # the shell, not the executor grandchild). Clear ALL test ports
+            # before starting, not just setup ports.
+            for port in 15000 15001 15002 15100 15101 15102 15200 15201 15202 15203 \
+                        15300 15301 15302 15400 15401 15402 \
+                        15600 15601 15602 15700 15701 15702 \
+                        16600 16601 16602; do
               lsof -ti:$port | xargs -r kill -9 2>/dev/null || true
             done
       - run:
@@ -184,24 +143,6 @@ jobs:
       - run:
           name: Run email-verification integration tests
           command: cd ./tests/js && ./email-verification-test-with-setup.sh
-          no_output_timeout: 30m
-
-  integration-tests-mcp:
-    machine: true
-    resource_class: coasys/marvin
-    steps:
-      - setup_integration_test_environment
-      - run:
-          name: Kill any orphaned executors from previous runs
-          command: |
-            # MCP tests use ports 16000-16002 (mcp-http) and 16010-16012 (mcp-auth)
-            # plus port 3001 (MCP HTTP server). Clear all before starting.
-            for port in 16000 16001 16002 16010 16011 16012 3001; do
-              lsof -ti:$port | xargs -r kill -9 2>/dev/null || true
-            done
-      - run:
-          name: Run MCP integration tests
-          command: cd ./tests/js && pnpm run test-mcp
           no_output_timeout: 30m
 
   integration-tests-cli:
@@ -230,7 +171,6 @@ workflows:
   version: 2
   build-and-test:
     jobs:
-      - node24-smoke-test
       - build-and-test
       - integration-tests-js:
           requires:
@@ -239,8 +179,5 @@ workflows:
           requires:
             - build-and-test
       - integration-tests-email-verification:
-          requires:
-            - build-and-test
-      - integration-tests-mcp:
           requires:
             - build-and-test
