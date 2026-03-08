@@ -392,9 +392,7 @@ export default function ad4mPlugin(api: any) {
           if (result?.content) return result;
           return { content: [{ type: "text", text: JSON.stringify(result) }] };
         } catch (err: any) {
-          return {
-            content: [{ type: "text", text: JSON.stringify({ error: err.message }) }],
-          };
+          return { error: err.message };
         }
       },
     });
