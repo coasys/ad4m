@@ -7,21 +7,32 @@ references:
 
 commands:
   setup_env:
-    description: "Set up build environment (Node 18, Rust, Deno, Go, pnpm)"
+    description: "Set up build environment (Node, Rust, Deno, Go, pnpm)"
+    parameters:
+      node_version:
+        type: string
+        default: "18"
     steps:
       - run:
           name: Setup build environment
           command: |
-            # Add all tool paths directly to PATH — no NVM sourcing (nvm use prints to stdout
-            # which corrupts subshell commands in cargo build scripts like libffi's libtool)
-            echo 'export PATH="$HOME/.nvm/versions/node/v18.20.8/bin:$HOME/.cargo/bin:$HOME/.deno/bin:$HOME/.local/go/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/go/bin:$PATH"' >> $BASH_ENV
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" --no-use
+            NODE_PATH=$(nvm which << parameters.node_version >> 2>/dev/null || true)
+            if [ -z "$NODE_PATH" ] || [ ! -x "$NODE_PATH" ]; then
+              echo "Node << parameters.node_version >> not found, installing via nvm..."
+              nvm install << parameters.node_version >>
+              NODE_PATH=$(nvm which << parameters.node_version >>)
+            fi
+            NODE_BIN_DIR=$(dirname "$NODE_PATH")
+            echo "export PATH=\"$NODE_BIN_DIR:$HOME/.cargo/bin:$HOME/.deno/bin:$HOME/.local/go/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/go/bin:$PATH\"" >> $BASH_ENV
             source $BASH_ENV
             echo "Node: $(node --version)"
             echo "npm: $(npm --version)"
             echo "Rust: $(rustc --version)"
             echo "Deno: $(deno --version | head -1)"
             echo "Go: $(go version)"
-            echo "pnpm: $(pnpm --version)"
+            echo "pnpm: $(pnpm --version || echo 'not installed yet')"
 
   setup_integration_test_environment:
     description: "Setup common integration test environment"
@@ -46,6 +57,40 @@ commands:
 
 
 jobs:
+  node24-smoke-test:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - checkout
+      - setup_env:
+          node_version: "24"
+      - run:
+          name: Verify Node 24
+          command: |
+            echo "Node version: $(node --version)"
+            node --version | grep -q '^v24\.' || { echo "FAIL: expected Node 24"; exit 1; }
+      - run:
+          name: Install pnpm (if needed)
+          command: |
+            command -v pnpm >/dev/null 2>&1 || npm install -g pnpm
+            echo "pnpm: $(pnpm --version)"
+      - run:
+          name: Install dependencies
+          command: pnpm install --no-frozen-lockfile
+      - run:
+          name: Install core dependencies
+          command: cd ./core && pnpm install --no-frozen-lockfile
+      - run:
+          name: Build TypeScript packages
+          command: pnpm run build-npm-packages
+      - run:
+          name: Build dapp
+          command: pnpm build-dapp
+      - run:
+          name: Root tests
+          command: pnpm test
+          no_output_timeout: 15m
+
   build-and-test:
     machine: true
     resource_class: coasys/marvin
@@ -185,6 +230,7 @@ workflows:
   version: 2
   build-and-test:
     jobs:
+      - node24-smoke-test
       - build-and-test
       - integration-tests-js:
           requires:
