@@ -13,4 +13,11 @@ module.exports = {
       },
     ],
   },
+  moduleNameMapper: {
+    '^express$': '<rootDir>/__mocks__/express.js',
+  },
+  testPathIgnorePatterns: [
+    '/node_modules/',
+    'Ad4mClient.test.ts',
+  ],
 };
