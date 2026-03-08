@@ -12,5 +12,12 @@
     "url": "https://github.com/coasys/ad4m",
     "directory": "plugins/ad4m"
   },
-  "keywords": ["openclaw", "ad4m", "mcp", "p2p", "holochain", "neighbourhoods"]
+  "keywords": ["openclaw", "ad4m", "mcp", "p2p", "holochain", "neighbourhoods"],
+  "dependencies": {
+    "@coasys/ad4m": "^0.12.0-rc1-dev.2",
+    "@apollo/client": "^3.7.10",
+    "graphql": "^15.7.2",
+    "graphql-ws": "^5.14.0",
+    "ws": "^8.16.0"
+  }
 }

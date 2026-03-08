@@ -1,86 +1,37 @@
-# AD4M Waker Bridge
+# AD4M Waker (Embedded)
 
-The AD4M Waker watches perspectives for data changes via GraphQL subscriptions and wakes your OpenClaw agent when relevant events occur. This enables reactive AI agents that respond to neighbourhood activity in real-time.
-
-## Source
-
-The waker is bundled with the AD4M skill at `skills/ad4m/waker/`. It's a standalone Node.js module.
-
-## Installation
-
-```bash
-cd skills/ad4m/waker
-npm install
-```
-
-## Configuration
-
-Create `waker-config.json` (see also `waker-config.example.json`):
-
-```json
-{
-  "executorUrl": "ws://localhost:12100/graphql",
-  "token": "your-admin-credential",
-  "mcpEndpoint": "http://localhost:3001/mcp",
-  "agentDid": "did:key:z6Mk...",
-  "wakeUrl": "http://localhost:18789/hooks/wake",
-  "wakeToken": "your-openclaw-hooks-token",
-  "debounceMs": 2000,
-  "subscriptions": [
-    {
-      "id": "flux-messages",
-      "type": "channel-messages",
-      "perspective": "your-local-perspective-uuid",
-      "channel": "literal://string:channel-id",
-      "query": "SELECT * FROM link WHERE source = 'literal://string:channel-id' AND predicate = 'ad4m://has_child'"
-    }
-  ]
-}
-```
-
-### Configuration Fields
-
-| Field | Description |
-|-------|-------------|
-| `executorUrl` | WebSocket URL for AD4M executor GraphQL |
-| `token` | Admin credential for authentication |
-| `mcpEndpoint` | (optional) MCP endpoint URL — included in wake messages |
-| `agentDid` | (optional) Agent DID — included in wake messages |
-| `wakeUrl` | OpenClaw webhook endpoint — use `/hooks/wake` for isolated agent runs |
-| `wakeToken` | OpenClaw hooks authentication token |
-| `debounceMs` | Debounce interval (prevents rapid-fire wakes, default 2000) |
-| `subscriptions` | Array of subscription objects (see below) |
-
-### Subscription Fields
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `id` | yes | Unique identifier |
-| `type` | yes | `"mention"` or `"channel-messages"` — determines the wake message |
-| `perspective` | yes | Your **local** perspective UUID (from `list_perspectives()`) |
-| `channel` | yes | Channel address (where to read/post) |
-| `query` | yes | SurrealQL subscription query |
-
-> **Note:** Perspective UUIDs are local to your device. To find the local UUID for a neighbourhood, call `list_perspectives()` and match by the neighbourhood URL in the response. Store this mapping in your memory file (see SKILL.md rule 11).
-
-## Running
-
-```bash
-# Direct
-node ad4m-waker.js --config waker-config.json
-
-# As a background service (recommended)
-screen -dmS ad4m-waker bash -c 'node ad4m-waker.js --config waker-config.json 2>&1 | tee /tmp/ad4m-waker.log'
-```
+The AD4M waker watches perspectives for data changes via GraphQL WebSocket subscriptions and wakes your OpenClaw agent when relevant events occur. It runs as a background service inside the AD4M plugin — no separate process needed.
 
 ## How It Works
 
-1. Connects to AD4M executor via GraphQL WebSocket
-2. For each subscription, creates a `QuerySubscriptionProxy` with the SurrealQL query
-3. When query results change (compared via JSON serialization), debounces and POSTs to the wake endpoint
-4. OpenClaw agent wakes up and can process the new data via MCP
+1. The plugin's `ad4m-waker` service connects to the AD4M executor's GraphQL WebSocket endpoint
+2. When you call `subscribe_to_mentions` or `subscribe_to_children`, the plugin creates a `QuerySubscriptionProxy` with a SurrealQL live query
+3. When query results change, the plugin debounces and POSTs to OpenClaw's `/hooks/wake` endpoint
+4. Your agent wakes up with context about what changed and processes the new data via MCP tools
 
-### Wake Message Format
+## Plugin Config Fields
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `wakerEnabled` | `true` | Enable/disable the waker service |
+| `executorWsUrl` | `ws://localhost:12100/graphql` | AD4M executor GraphQL WebSocket URL |
+| `wakeUrl` | `http://localhost:18789/hooks/wake` | OpenClaw wake endpoint URL |
+| `wakeToken` | — | Bearer token for the wake endpoint (required for waker to function) |
+| `debounceMs` | `2000` | Debounce interval to prevent rapid-fire wakes (ms) |
+
+## Subscription Tools
+
+| Tool | Description |
+|------|-------------|
+| `subscribe_to_mentions(perspective_id)` | Watch for messages mentioning your name or DID |
+| `subscribe_to_children(perspective_id, expression_address)` | Watch for new children under a parent (e.g., messages in a channel) |
+| `unsubscribe_from_mentions(perspective_id)` | Stop watching mentions in a neighbourhood |
+| `unsubscribe_from_children(perspective_id, expression_address)` | Stop watching a channel |
+| `list_waker_subscriptions()` | List all active subscriptions |
+
+The subscribe tools call the MCP tools `get_mention_waker_config` / `generate_waker_query` internally to build the SurrealQL queries — you don't need to construct queries manually.
+
+## Wake Message Format
 
 **Use `/hooks/wake` (recommended).** It enqueues the event into the main agent session which has your skills loaded. Do NOT use `/hooks/agent` — that spawns an isolated sub-agent without your skills.
 
@@ -103,9 +54,9 @@ The `text` field contains key-value pairs, one per line:
 - **Subscription** — subscription ID
 - **Event type** — `"mention"` or `"channel-messages"`
 
-## Integration with OpenClaw
+## OpenClaw Hooks Config
 
-Add to your OpenClaw config's hooks section:
+Add to your OpenClaw config:
 ```json
 {
   "hooks": {

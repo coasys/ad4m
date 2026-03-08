@@ -20,6 +20,30 @@
         "type": "number",
         "default": 30000,
         "description": "How often to poll for new dynamic SHACL tools (ms)"
+      },
+      "wakerEnabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable the embedded AD4M waker service"
+      },
+      "executorWsUrl": {
+        "type": "string",
+        "default": "ws://localhost:12100/graphql",
+        "description": "AD4M executor GraphQL WebSocket URL for waker subscriptions"
+      },
+      "wakeUrl": {
+        "type": "string",
+        "default": "http://localhost:18789/hooks/wake",
+        "description": "OpenClaw wake endpoint URL"
+      },
+      "wakeToken": {
+        "type": "string",
+        "description": "Bearer token for the OpenClaw wake endpoint"
+      },
+      "debounceMs": {
+        "type": "number",
+        "default": 2000,
+        "description": "Debounce interval for wake events (ms)"
       }
     },
     "required": ["adminCredential"],
@@ -37,6 +61,22 @@
     "toolRefreshIntervalMs": {
       "label": "Tool Refresh Interval (ms)",
       "placeholder": "30000"
+    },
+    "executorWsUrl": {
+      "label": "Executor WebSocket URL",
+      "placeholder": "ws://localhost:12100/graphql"
+    },
+    "wakeUrl": {
+      "label": "Wake Endpoint URL",
+      "placeholder": "http://localhost:18789/hooks/wake"
+    },
+    "wakeToken": {
+      "label": "Wake Token",
+      "sensitive": true
+    },
+    "debounceMs": {
+      "label": "Debounce (ms)",
+      "placeholder": "2000"
     }
   }
 }

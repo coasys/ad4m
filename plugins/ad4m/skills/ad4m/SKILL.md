@@ -91,16 +91,21 @@ You NEED this context when you wake up from a waker event. The wake message only
 
 After every interaction in a Neighbourhood, check if something important happened there and potentially update your notes. Try to keep a brief model about the state of the conversation in each Neighbourhood and make sure you DON'T MIX CONVERSATIONS between neighbourhoods. (Same would be true for channels inside neighbourhoods)
 
-### 13. Install a waker for mentions on every new neighbourhood join
-Every time you join a new neighbourhood, you MUST set up a waker subscription for **mentions** at minimum. Without a waker, you will never know when someone talks to you in that space.
+### 13. Subscribe to mentions on every new neighbourhood join
+Every time you join a new neighbourhood, you MUST subscribe to **mentions** at minimum. Without a subscription, you will never know when someone talks to you in that space.
 
 ```
-1. get_mention_waker_config(perspective_id: "<your-local-uuid>")
-2. Add the returned subscription to your waker-config.json
-3. Restart the waker process
+subscribe_to_mentions(perspective_id: "<your-local-uuid>")
 ```
 
-If your human asks you to monitor a specific channel for ALL messages (not just mentions), also call `generate_waker_query` for that channel and add that subscription too.
+That's it — one tool call. The plugin creates a live SurrealDB subscription internally and wakes you via `/hooks/wake` when someone mentions your name or DID.
+
+If your human asks you to monitor a specific channel for ALL messages (not just mentions):
+```
+subscribe_to_children(perspective_id: "...", expression_address: "<channel-id>")
+```
+
+Use `list_waker_subscriptions()` to see active subscriptions, and `unsubscribe_from_mentions` / `unsubscribe_from_children` to remove them.
 
 ## Model base expressions / IDs
 Model instances are constructed around a base node (called base expression, also ID). Usually those are random literal strings (`literal://string:xyz`). Their properties hang off of that base node with predicates as defined by the class.
@@ -141,7 +146,7 @@ Community (ad4m://self)
                                                        (the NH URL maps to a LOCAL perspective UUID)
 3. WRITE DOWN to your memory file: NH URL, local perspective UUID,
    what this space is for, who's in it, why you joined (see rule 12)
-4. get_mention_waker_config(perspective_id: "...")   → store config + (re-)start waker (see rule 13)
+4. subscribe_to_mentions(perspective_id: "...")        → live waker subscription (see rule 13)
 5. channel_query(perspective_id: "...")              → list channels
 6. get_children(perspective_id, expression_address: "<channel-id>")
    → then message_get(perspective_id, expression_address: <child>) per child
@@ -193,55 +198,47 @@ Parse the `text` field to extract: `MCP endpoint`, `Auth credential`, `Agent DID
 - Skip your own messages
 - Be conversational — you're chatting, not writing a report
 
-## Waker Setup
+## Waker (Embedded)
 
-The waker makes your bot **autonomous** — it watches for changes and wakes you via OpenClaw hooks.
-
-```
-AD4M Executor ──GraphQL WS──→ ad4m-waker.js ──HTTP POST──→ OpenClaw /hooks/wake
-     │                              │                              │
-  SurrealQL subscription     Debounce + filter              Agent wakes up
-  detects new links          (2s default)                   reads new data via MCP
-```
-
-### Generate a waker config
+The waker makes your bot **autonomous** — it watches for changes in AD4M perspectives and wakes you via OpenClaw hooks. The waker runs inside the plugin — no separate process needed.
 
 ```
-→ generate_waker_query(perspective_id: "...", class_name: "Message", parent_address: "literal://string:channel-id")
-← { subscription_id: "...", waker_config: { id: "...", perspective: "...", query: "SELECT * FROM link WHERE ..." } }
+AD4M Executor ──GraphQL WS──→ Plugin (ad4m-waker service) ──HTTP POST──→ OpenClaw /hooks/wake
+     │                              │                                          │
+  SurrealQL subscription     Debounce + filter                           Agent wakes up
+  detects new links          (2s default)                                reads new data via MCP
 ```
 
-Or for mentions: `get_mention_waker_config(perspective_id: "...")`
+### Subscribing
 
-### Configure and run
+```
+subscribe_to_mentions(perspective_id: "...")
+subscribe_to_children(perspective_id: "...", expression_address: "<channel-id>")
+list_waker_subscriptions()
+unsubscribe_from_mentions(perspective_id: "...")
+unsubscribe_from_children(perspective_id: "...", expression_address: "<channel-id>")
+```
 
-Create `waker-config.json`:
-```json
+### Plugin config for waker
+
+The waker requires `wakeUrl` and `wakeToken` in the plugin config:
+```json5
 {
-  "executorUrl": "ws://localhost:12100/graphql",
-  "token": "your-admin-credential",
-  "mcpEndpoint": "http://localhost:3001/mcp",
-  "agentDid": "did:key:z6Mk...",
-  "wakeUrl": "http://localhost:18789/hooks/wake",
-  "wakeToken": "your-openclaw-hooks-token",
-  "debounceMs": 2000,
-  "subscriptions": [
-    {
-      "id": "flux-messages",
-      "type": "channel-messages",
-      "perspective": "your-local-perspective-uuid",
-      "channel": "literal://string:channel-id",
-      "query": "SELECT * FROM link WHERE source = 'literal://string:channel-id' AND predicate = 'ad4m://has_child'"
+  plugins: {
+    entries: {
+      "ad4m": {
+        enabled: true,
+        config: {
+          adminCredential: "your-admin-credential",
+          executorWsUrl: "ws://localhost:12100/graphql",  // default
+          wakeUrl: "http://localhost:18789/hooks/wake",    // default
+          wakeToken: "your-openclaw-hooks-token",          // required for waker
+          debounceMs: 2000                                 // default
+        }
+      }
     }
-  ]
+  }
 }
-```
-
-```bash
-cd ${CLAUDE_SKILL_DIR}/waker && npm install
-node ad4m-waker.js --config waker-config.json
-
-# Background: screen -dmS ad4m-waker bash -c 'node ad4m-waker.js --config waker-config.json 2>&1 | tee /tmp/ad4m-waker.log'
 ```
 
 **OpenClaw hooks config** (in openclaw.json):
@@ -249,7 +246,7 @@ node ad4m-waker.js --config waker-config.json
 { "hooks": { "enabled": true, "path": "/hooks", "token": "your-hooks-token" } }
 ```
 
-See `references/waker.md` for full config field reference.
+See `references/waker.md` for config field reference.
 
 ## Dynamic SHACL Tools
 
