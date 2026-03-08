@@ -100,7 +100,7 @@ jobs:
       - run:
           name: Root tests
           command: |
-            source $BASH_ENV
+            export PATH="$HOME/.cargo/bin:$PATH"
             pnpm test
           no_output_timeout: 30m
 
