@@ -7,7 +7,7 @@
   "type": "module",
   "scripts": {
     "build": "patch-package && tsc && pnpm run buildSchema && pnpm run bundle",
-    "buildSchema": "node --es-module-specifier-resolution=node lib/src/buildSchema.js",
+    "buildSchema": "node lib/src/buildSchema.js",
     "bundle": "rollup -c rollup.config.js",
     "test": "jest --forceExit"
   },
