@@ -99,7 +99,9 @@ jobs:
           command: cd ./core && pnpm install --no-frozen-lockfile
       - run:
           name: Root tests
-          command: pnpm test
+          command: |
+            source $BASH_ENV
+            pnpm test
           no_output_timeout: 30m
 
   integration-tests-js:
