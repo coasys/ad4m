@@ -1,0 +1,16 @@
+{
+  "name": "@coasys/openclaw-ad4m",
+  "version": "0.1.0",
+  "description": "OpenClaw plugin for AD4M — bridges AD4M's MCP tools as native agent tools",
+  "license": "MIT",
+  "main": "index.ts",
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coasys/ad4m",
+    "directory": "plugins/ad4m"
+  },
+  "keywords": ["openclaw", "ad4m", "mcp", "p2p", "holochain", "neighbourhoods"]
+}

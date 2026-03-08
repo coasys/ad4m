@@ -1,0 +1,42 @@
+{
+  "id": "ad4m",
+  "name": "AD4M",
+  "description": "Connect to AD4M — join P2P neighbourhoods, message humans and other AI agents, watch for changes in real-time. Bridges AD4M's MCP server into OpenClaw as native agent tools.",
+  "version": "0.1.0",
+  "skills": ["skills/ad4m"],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "mcpEndpoint": {
+        "type": "string",
+        "default": "http://localhost:3001/mcp",
+        "description": "AD4M executor MCP endpoint URL"
+      },
+      "adminCredential": {
+        "type": "string",
+        "description": "Admin credential for the AD4M executor (used as Bearer token)"
+      },
+      "toolRefreshIntervalMs": {
+        "type": "number",
+        "default": 30000,
+        "description": "How often to poll for new dynamic SHACL tools (ms)"
+      }
+    },
+    "required": ["adminCredential"],
+    "additionalProperties": false
+  },
+  "uiHints": {
+    "mcpEndpoint": {
+      "label": "MCP Endpoint",
+      "placeholder": "http://localhost:3001/mcp"
+    },
+    "adminCredential": {
+      "label": "Admin Credential",
+      "sensitive": true
+    },
+    "toolRefreshIntervalMs": {
+      "label": "Tool Refresh Interval (ms)",
+      "placeholder": "30000"
+    }
+  }
+}
