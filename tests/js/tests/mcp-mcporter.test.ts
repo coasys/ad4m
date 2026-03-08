@@ -188,17 +188,18 @@ describe("MCP mcporter Integration Tests", function() {
             };
             fs.writeFileSync(wrongConfigPath, JSON.stringify(wrongConfig, null, 2));
 
+            let result: string;
             try {
-                let result = execSync(
+                result = execSync(
                     `mcporter call ad4m.list_perspectives --config ${wrongConfigPath} --output json`,
                     { encoding: 'utf-8', timeout: 10000 }
                 );
-                let parsed = JSON.parse(result);
-                expect(parsed.error).to.include("Authentication required");
             } catch (e: any) {
-                expect(e.message.toLowerCase()).to.include("auth");
-                console.log("mcporter correctly rejected wrong credential", e.message);
+                // mcporter may exit with non-zero code on auth failure
+                result = (e.stdout || e.stderr || e.message || "").toString();
             }
+            console.log("mcporter list_perspectives with wrong credential result:", result);
+            expect(result).to.include("Authentication required");
         });
 
         it("should reject requests without admin credential", async function() {
@@ -214,17 +215,17 @@ describe("MCP mcporter Integration Tests", function() {
             };
             fs.writeFileSync(noAuthConfigPath, JSON.stringify(noAuthConfig, null, 2));
 
+            let result: string;
             try {
-                let result = execSync(
+                result = execSync(
                     `mcporter call ad4m.list_perspectives --config ${noAuthConfigPath} --output json`,
                     { encoding: 'utf-8', timeout: 10000 }
                 );
-                let parsed = JSON.parse(result);
-                expect(parsed.error).to.include("Authentication required");
             } catch (e: any) {
-                expect(e.message.toLowerCase()).to.include("auth");
-                console.log("mcporter correctly rejected missing credential");
+                result = (e.stdout || e.stderr || e.message || "").toString();
             }
+            console.log("mcporter list_perspectives without credential result:", result);
+            expect(result).to.include("Authentication required");
         });
     });
 
@@ -274,7 +275,7 @@ describe("MCP mcporter Integration Tests", function() {
                 `mcporter call ad4m.list_perspectives --config ${jwtConfigPath} --output json`,
                 { encoding: 'utf-8', timeout: 10000 }
             );
-            console.log("mcporter list_perspectives result:", listResult);
+            console.log("mcporter list_perspectives with JWT auth result:", listResult);
             const listParsed = JSON.parse(listResult);
             expect(listParsed).to.be.an('array');
             console.log("mcporter with JWT auth works!");

@@ -123,11 +123,11 @@ describe("MCP Authentication HTTP Tests", function() {
                 const result = await callMcpTool(MCP_BASE_URL, 'list_perspectives', {}, mcpSessionId);
                 // If it doesn't throw, the result must be an auth error string/object
                 const msg = typeof result === 'string' ? result : JSON.stringify(result);
-                expect(msg.toLowerCase()).to.include("auth");
+                expect(msg).to.include("Authentication required");
                 console.log("Unauthenticated list_perspectives:", msg);
             } catch (e: any) {
                 // callMcpTool throws on JSON-RPC error responses
-                expect(e.message.toLowerCase()).to.include("auth");
+                expect(e.message).to.include("Authentication required");
                 console.log("Unauthenticated list_perspectives (thrown):", e.message);
             }
         });
@@ -309,10 +309,10 @@ describe("MCP Authentication HTTP Tests", function() {
 
                 // If it doesn't throw, the result must be an auth error
                 const msg = typeof result === 'string' ? result : JSON.stringify(result);
-                expect(msg.toLowerCase()).to.include("auth");
+                expect(msg).to.include("Authentication required");
                 console.log("Unauthenticated query_links response:", msg.substring(0, 120));
             } catch (e: any) {
-                expect(e.message.toLowerCase()).to.include("auth");
+                expect(e.message).to.include("Authentication required");
                 console.log("Unauthenticated query_links (thrown):", e.message.substring(0, 120));
             }
         });
@@ -328,10 +328,10 @@ describe("MCP Authentication HTTP Tests", function() {
                 }, unauthSession);
 
                 const msg = typeof result === 'string' ? result : JSON.stringify(result);
-                expect(msg.toLowerCase()).to.include("auth");
+                expect(msg).to.include("Authentication required");
                 console.log("Unauthenticated get_models response:", msg.substring(0, 120));
             } catch (e: any) {
-                expect(e.message.toLowerCase()).to.include("auth");
+                expect(e.message).to.include("Authentication required");
                 console.log("Unauthenticated get_models (thrown):", e.message.substring(0, 120));
             }
         });
@@ -348,10 +348,10 @@ describe("MCP Authentication HTTP Tests", function() {
                 }, unauthSession);
 
                 const msg = typeof result === 'string' ? result : JSON.stringify(result);
-                expect(msg.toLowerCase()).to.include("auth");
+                expect(msg).to.include("Authentication required");
                 console.log("Unauthenticated query_subjects response:", msg.substring(0, 120));
             } catch (e: any) {
-                expect(e.message.toLowerCase()).to.include("auth");
+                expect(e.message).to.include("Authentication required");
                 console.log("Unauthenticated query_subjects (thrown):", e.message.substring(0, 120));
             }
         });
@@ -407,10 +407,10 @@ describe("MCP Authentication HTTP Tests", function() {
                     { 'Authorization': 'wrong-credential' }
                 );
                 const msg = typeof result === 'string' ? result : JSON.stringify(result);
-                expect(msg.toLowerCase()).to.include("auth");
+                expect(msg).to.include("Authentication required");
                 console.log("Wrong admin header response:", msg.substring(0, 120));
             } catch (e: any) {
-                expect(e.message.toLowerCase()).to.include("auth");
+                expect(e.message).to.include("Authentication required");
                 console.log("Wrong admin header (thrown):", e.message.substring(0, 120));
             }
         });
