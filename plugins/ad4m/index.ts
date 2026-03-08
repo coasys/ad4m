@@ -284,13 +284,26 @@ export default function ad4mPlugin(api: any) {
       async execute(_id: string, params: Record<string, any>) {
         try {
           const result = await mcpCallTool(endpoint, tool.name, params, sessionId, authToken);
-          // MCP result is already in { content: [{ type, text }] } format
-          if (result?.content) return result;
-          return { content: [{ type: "text", text: JSON.stringify(result) }] };
+          // MCP result is in { content: [{ type, text }] } format
+          // Extract the text content for OpenClaw
+          if (result?.content && Array.isArray(result.content)) {
+            const textParts = result.content
+              .filter((c: any) => c.type === "text")
+              .map((c: any) => c.text)
+              .join("\n");
+            if (textParts) {
+              try {
+                // Try to parse as JSON for structured results
+                return JSON.parse(textParts);
+              } catch {
+                // Return as plain text string
+                return textParts;
+              }
+            }
+          }
+          return result;
         } catch (err: any) {
-          return {
-            content: [{ type: "text", text: JSON.stringify({ error: err.message }) }],
-          };
+          return { error: err.message };
         }
       },
     });
