@@ -30,7 +30,7 @@ The waker is a config-driven runner — it executes whatever SurrealQL queries y
 Typical flow:
 1. Agent joins a neighbourhood via `neighbourhood_join_from_url`
 2. Agent calls `get_mention_waker_config` with the perspective UUID
-3. Agent appends the returned subscription entry to the waker config file (adding `type`, `channel`, and `neighbourhood` fields)
+3. Agent appends the returned subscription entry to the waker config file (adding `type` and `channel` fields)
 4. Agent restarts the waker
 
 ---
@@ -48,17 +48,15 @@ Typical flow:
     {
       "id": "flux-all-messages",
       "type": "channel-messages",
-      "perspective": "<neighbourhood-uuid>",
+      "perspective": "<your-local-perspective-uuid>",
       "channel": "literal://string:<channel-id>",
-      "neighbourhood": "neighbourhood://Qm...",
       "query": "SELECT * FROM link WHERE source = 'literal://string:<channel-id>' AND predicate = 'ad4m://has_child'"
     },
     {
       "id": "mention-<did-suffix>",
       "type": "mention",
-      "perspective": "<neighbourhood-uuid>",
+      "perspective": "<your-local-perspective-uuid>",
       "channel": "literal://string:<channel-id>",
-      "neighbourhood": "neighbourhood://Qm...",
       "query": "SELECT * FROM link WHERE fn::contains(string::lowercase(fn::parse_literal(target)), 'agentname') OR fn::contains(string::lowercase(fn::parse_literal(target)), 'did:key:z6Mks...')"
     }
   ]
@@ -84,9 +82,8 @@ Typical flow:
 |-------|----------|-------------|
 | `id` | ✅ | Unique identifier for this subscription |
 | `type` | ✅ | `"mention"` or `"channel-messages"` — determines the wake message content |
-| `perspective` | ✅ | AD4M perspective UUID to subscribe to |
+| `perspective` | ✅ | Your **local** perspective UUID (from `list_perspectives()`) |
 | `channel` | ✅ | Channel address (so the agent knows where to read/post messages) |
-| `neighbourhood` | | Neighbourhood URL (for additional context) |
 | `query` | ✅ | SurrealQL query — fires when the result set changes |
 
 ### Subscription types
@@ -119,7 +116,6 @@ Auth credential: <admin-credential>
 Agent DID: did:key:z6Mk...
 Perspective: 01409ead-3e13-4ca6-99ac-e1b623c18604
 Channel: literal://string:gjgfascqbfhntekmtvhtbohu
-Neighbourhood: neighbourhood://QmzSYwdhcjCcf726JkvGKKw7bszp3Jd2NsNN2ULkxJ8VYxdU9wv
 Subscription: mention-guAacszuc2Jd
 Event type: mention
 ```

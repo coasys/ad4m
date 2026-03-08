@@ -24,9 +24,8 @@
  *       {
  *         "id": "flux-messages",
  *         "type": "channel-messages",
- *         "perspective": "perspective-uuid",
+ *         "perspective": "your-local-perspective-uuid",
  *         "channel": "literal://string:channel-id",
- *         "neighbourhood": "neighbourhood://Qm...",
  *         "query": "SELECT * FROM link WHERE source = 'literal://string:channel-id' AND predicate = 'ad4m://has_child'"
  *       }
  *     ]
@@ -35,9 +34,8 @@
  * Subscription fields:
  *   - id:            Unique subscription identifier
  *   - type:          "mention" | "channel-messages" — determines the wake message
- *   - perspective:   AD4M perspective UUID
+ *   - perspective:   Local AD4M perspective UUID (from list_perspectives)
  *   - channel:       Channel address (where to read/post messages)
- *   - neighbourhood: (optional) Neighbourhood URL for context
  *   - query:         SurrealQL subscription query
  */
 
@@ -277,9 +275,8 @@ Config file format:
       {
         "id": "my-subscription",
         "type": "channel-messages",
-        "perspective": "perspective-uuid",
+        "perspective": "your-local-perspective-uuid",
         "channel": "literal://string:channel-id",
-        "neighbourhood": "neighbourhood://Qm...",
         "query": "SELECT * FROM link WHERE ..."
       }
     ]
@@ -288,9 +285,8 @@ Config file format:
 Subscription fields:
   id             Unique identifier for this subscription
   type           "mention" or "channel-messages" — determines wake message
-  perspective    AD4M perspective UUID
+  perspective    Local AD4M perspective UUID (from list_perspectives)
   channel        Channel address (for reading/posting messages)
-  neighbourhood  (optional) Neighbourhood URL
   query          SurrealQL subscription query
 `);
     process.exit(0);

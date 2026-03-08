@@ -356,4 +356,78 @@ describe("MCP Authentication HTTP Tests", function() {
             }
         });
     });
+
+    // ========================================================================
+    // 7. Admin Credential via HTTP Authorization Header
+    //
+    // Tests that a fresh (unauthenticated) MCP session can call tools by
+    // passing the admin credential in the HTTP Authorization header.
+    // This is the auth path used when agents set "headers" in .mcp.json.
+    // ========================================================================
+
+    describe("7. Admin Credential via HTTP Authorization Header", function() {
+        it("should authenticate with Authorization: <admin-credential> (bare token)", async function() {
+            const freshSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
+
+            // Call list_perspectives with admin credential in Authorization header
+            const result = await callMcpTool(
+                MCP_BASE_URL,
+                'list_perspectives',
+                {},
+                freshSession,
+                { 'Authorization': adminCredential }
+            );
+            expect(result).to.be.an('array');
+            console.log("Admin header auth (bare) list_perspectives:", JSON.stringify(result));
+        });
+
+        it("should authenticate with Authorization: Bearer <admin-credential>", async function() {
+            const freshSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
+
+            const result = await callMcpTool(
+                MCP_BASE_URL,
+                'list_perspectives',
+                {},
+                freshSession,
+                { 'Authorization': `Bearer ${adminCredential}` }
+            );
+            expect(result).to.be.an('array');
+            console.log("Admin header auth (Bearer) list_perspectives:", JSON.stringify(result));
+        });
+
+        it("should reject wrong credential in Authorization header", async function() {
+            const freshSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
+
+            try {
+                const result = await callMcpTool(
+                    MCP_BASE_URL,
+                    'list_perspectives',
+                    {},
+                    freshSession,
+                    { 'Authorization': 'wrong-credential' }
+                );
+                const msg = typeof result === 'string' ? result : JSON.stringify(result);
+                expect(msg.toLowerCase()).to.include("auth");
+                console.log("Wrong admin header response:", msg.substring(0, 120));
+            } catch (e: any) {
+                expect(e.message.toLowerCase()).to.include("auth");
+                console.log("Wrong admin header (thrown):", e.message.substring(0, 120));
+            }
+        });
+
+        it("should allow add_perspective via admin header auth", async function() {
+            const freshSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
+
+            const result = await callMcpTool(
+                MCP_BASE_URL,
+                'add_perspective',
+                { name: "admin-header-test" },
+                freshSession,
+                { 'Authorization': adminCredential }
+            );
+            expect(result.success).to.be.true;
+            expect(result.uuid).to.be.a('string');
+            console.log("Admin header add_perspective:", result.uuid);
+        });
+    });
 });

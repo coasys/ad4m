@@ -116,7 +116,8 @@ export async function mcpHttpRequest(
     mcpBaseUrl: string,
     method: string,
     params: any = {},
-    sessionId?: string
+    sessionId?: string,
+    extraHeaders?: Record<string, string>
 ): Promise<McpResponse> {
     const id = ++requestIdCounter;
     const headers: Record<string, string> = {
@@ -125,6 +126,9 @@ export async function mcpHttpRequest(
     };
     if (sessionId) {
         headers['Mcp-Session-Id'] = sessionId;
+    }
+    if (extraHeaders) {
+        Object.assign(headers, extraHeaders);
     }
 
     const response = await fetch(mcpBaseUrl, {
@@ -152,12 +156,13 @@ export async function callMcpTool(
     mcpBaseUrl: string,
     toolName: string,
     args: Record<string, any>,
-    sessionId?: string
+    sessionId?: string,
+    extraHeaders?: Record<string, string>
 ): Promise<any> {
     const response = await mcpHttpRequest(mcpBaseUrl, "tools/call", {
         name: toolName,
         arguments: args
-    }, sessionId);
+    }, sessionId, extraHeaders);
 
     if (response.error) {
         throw new Error('MCP tool error [' + toolName + ']: ' + response.error.message);
