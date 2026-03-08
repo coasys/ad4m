@@ -247,6 +247,114 @@ function createAd4mSignal(languageAddress) {
 }
 
 /**
+ * Wraps flat exports into the legacy adapter structure.
+ * Detects if a language uses the new flat export pattern and wraps it.
+ */
+function wrapFlatExports(language) {
+    // If no capabilities array, assume legacy nested adapter structure
+    if (!language.capabilities || !Array.isArray(language.capabilities)) {
+        return language;
+    }
+
+    const capabilities = language.capabilities;
+    const wrapped = {
+        name: language.name || 'unnamed-language',
+    };
+
+    // Wrap link sync functions into LinkSyncAdapter
+    if (capabilities.includes('link-sync')) {
+        wrapped.linksAdapter = {
+            writable: () => language.linkSyncWritable ? language.linkSyncWritable() : true,
+            public: () => language.linkSyncPublic ? language.linkSyncPublic() : false,
+            others: () => language.linkSyncOthers(),
+            currentRevision: () => language.linkSyncCurrentRevision(),
+            sync: () => language.linkSyncSync(),
+            render: () => language.linkSyncRender(),
+            commit: (diff) => language.linkSyncCommit(diff),
+            addCallback: (cb) => language.linkSyncAddCallback(cb),
+            addSyncStateChangeCallback: (cb) => 
+                language.linkSyncAddSyncStateChangeCallback 
+                    ? language.linkSyncAddSyncStateChangeCallback(cb) 
+                    : undefined,
+            setLocalAgents: language.linkSyncSetLocalAgents 
+                ? (agents) => language.linkSyncSetLocalAgents(agents)
+                : undefined
+        };
+    }
+
+    // Wrap expression functions into ExpressionAdapter
+    if (capabilities.includes('expression-storage')) {
+        wrapped.expressionAdapter = {
+            get: (address) => language.expressionGet(address),
+            putAdapter: {
+                createPublic: (content) => language.expressionCreatePublic(content)
+            }
+        };
+    } else if (capabilities.includes('expression-readonly')) {
+        wrapped.expressionAdapter = {
+            get: (address) => language.expressionGet(address),
+            putAdapter: {
+                addressOf: (content) => language.expressionAddressOf(content)
+            }
+        };
+    }
+
+    // Wrap telepresence functions into TelepresenceAdapter
+    if (capabilities.includes('telepresence')) {
+        wrapped.telepresenceAdapter = {
+            setOnlineStatus: (status) => language.telepresenceSetOnlineStatus(status),
+            getOnlineAgents: () => language.telepresenceGetOnlineAgents(),
+            sendSignal: (remoteDid, payload) => language.telepresenceSendSignal(remoteDid, payload),
+            sendBroadcast: (payload) => language.telepresenceSendBroadcast(payload),
+            registerSignalCallback: (cb) => language.telepresenceRegisterSignalCallback(cb)
+        };
+    }
+
+    // Wrap direct message functions into DirectMessageAdapter
+    if (capabilities.includes('direct-message')) {
+        wrapped.directMessageAdapter = {
+            recipient: () => language.directMessageRecipient(),
+            status: () => language.directMessageStatus(),
+            sendP2P: (message) => language.directMessageSendP2P(message),
+            sendInbox: (message) => language.directMessageSendInbox(message),
+            setStatus: (status) => language.directMessageSetStatus(status),
+            inbox: (filter) => language.directMessageInbox(filter),
+            addMessageCallback: (cb) => language.directMessageAddMessageCallback(cb)
+        };
+    }
+
+    // Copy interactions if present
+    if (language.interactions) {
+        wrapped.interactions = (expr) => language.interactions(expr);
+    } else {
+        wrapped.interactions = () => [];
+    }
+
+    // Copy teardown if present
+    if (language.teardown) {
+        wrapped.teardown = () => language.teardown();
+    }
+
+    // Copy isImmutableExpression if present
+    if (language.isImmutableExpression) {
+        wrapped.isImmutableExpression = (addr) => language.isImmutableExpression(addr);
+    }
+
+    // Copy UI adapters if present
+    if (language.expressionUI) {
+        wrapped.expressionUI = language.expressionUI;
+    }
+    if (language.settingsUI) {
+        wrapped.settingsUI = language.settingsUI;
+    }
+    if (language.languageAdapter) {
+        wrapped.languageAdapter = language.languageAdapter;
+    }
+
+    return wrapped;
+}
+
+/**
  * Initializes the language by parsing the context JSON, building the full
  * LanguageContext with Holochain delegate and ad4mSignal, calling the
  * language constructor, and storing the result.
@@ -283,9 +391,13 @@ async function initLanguage(contextJson) {
     };
 
     const language = await globalThis.languageConstructor(fullContext);
-    globalThis.__ad4m_language_instance__ = language;
-    globalThis.language = language;
-    return language;
+    
+    // Detect and wrap flat exports if necessary
+    const wrappedLanguage = wrapFlatExports(language);
+    
+    globalThis.__ad4m_language_instance__ = wrappedLanguage;
+    globalThis.language = wrappedLanguage;
+    return wrappedLanguage;
 }
 
 globalThis.initLanguage = initLanguage;
