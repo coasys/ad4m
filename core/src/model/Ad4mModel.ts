@@ -1166,23 +1166,54 @@ export class Ad4mModel {
     return value;
   }
 
-  private takeSnapshot(): void {
+  /**
+   * @param includedRelations  Controls which relation fields are recorded
+   *   in the snapshot for dirty-tracking:
+   *     • `undefined` (default) — snapshot ALL relations (used by `.get()`,
+   *       `.create()`, `.save()` etc. where full hydration has occurred).
+   *     • `IncludeMap` object (e.g. `{ views: true }`) — only snapshot the
+   *       relations named in the map.  Fields not listed are omitted from
+   *       the snapshot so that `changedFields()` ignores them.
+   *     • `null` / empty object — skip ALL relations (used by bare
+   *       subscriptions that don't eagerly load relations).
+   */
+  private takeSnapshot(includedRelations?: Record<string, any> | null): void {
     const ctor = this.constructor as typeof Ad4mModel;
     const metadata = ctor.getModelMetadata();
     const snap: Record<string, any> = {};
 
+    // Always snapshot properties
     for (const propName of Object.keys(metadata.properties)) {
       const val = (this as any)[propName];
       snap[propName] = Ad4mModel.normalizeValue(
         Array.isArray(val) ? [...val] : val,
       );
     }
-    for (const collName of Object.keys(metadata.relations)) {
-      const val = (this as any)[collName];
-      snap[collName] = Ad4mModel.normalizeValue(
-        Array.isArray(val) ? [...val] : val,
-      );
+
+    // Snapshot relations only when appropriate:
+    //   undefined → all relations (backward compat)
+    //   IncludeMap → only the keys present in the map
+    //   null / {} → none
+    if (includedRelations === undefined) {
+      // Full snapshot — e.g. after getData() / create()
+      for (const collName of Object.keys(metadata.relations)) {
+        const val = (this as any)[collName];
+        snap[collName] = Ad4mModel.normalizeValue(
+          Array.isArray(val) ? [...val] : val,
+        );
+      }
+    } else if (includedRelations && Object.keys(includedRelations).length > 0) {
+      // Partial snapshot — only the explicitly included relations
+      for (const collName of Object.keys(includedRelations)) {
+        if (collName in metadata.relations) {
+          const val = (this as any)[collName];
+          snap[collName] = Ad4mModel.normalizeValue(
+            Array.isArray(val) ? [...val] : val,
+          );
+        }
+      }
     }
+    // else: null or empty object → skip all relations
 
     this._snapshot = snap;
   }
@@ -1237,6 +1268,14 @@ export class Ad4mModel {
     ];
 
     for (const field of allFields) {
+      // Skip fields that were not recorded in the snapshot (e.g. relation
+      // fields omitted because the originating query had no `include`).
+      // Without this guard, a relation populated by hydrateFromLinks with
+      // raw string IDs would appear "dirty" against a missing snapshot
+      // entry and trigger an unnecessary (and potentially destructive)
+      // setRelationValues call during innerUpdate.
+      if (!(field in this._snapshot)) continue;
+
       const current = Ad4mModel.normalizeValue((this as any)[field]);
       const original = this._snapshot[field];
 
@@ -1523,15 +1562,29 @@ export class Ad4mModel {
       }
 
       // ── Forward relations (hasMany / hasOne) ──────────────────────────────
-      // Collect all unique URIs across all instances for batch-friendly lookup
+      // Collect all unique URIs across all instances for batch-friendly lookup.
+      // IMPORTANT: We cache each instance's raw value NOW (before the async
+      // findAll) so that concurrent getData() calls on the same instance can't
+      // overwrite the relation field between the uriSet collection and the
+      // post-await assignment loop.  Without this cache, a concurrent call
+      // can replace the raw URI strings with hydrated model objects, causing
+      // the `typeof v === 'string'` check to fail and the array to end up empty.
       const uriSet = new Set<string>();
+      const rawCache = new Map<T, any>();
       for (const inst of instances) {
         const raw = (inst as any)[relName];
+        rawCache.set(inst, Array.isArray(raw) ? [...raw] : raw);
         if (raw == null) continue;
         if (Array.isArray(raw)) {
-          for (const v of raw) if (typeof v === 'string') uriSet.add(v);
+          for (const v of raw) {
+            if (typeof v === 'string') uriSet.add(v);
+            // Handle already-hydrated instances (from a concurrent call)
+            else if (v && typeof v === 'object' && typeof v.id === 'string') uriSet.add(v.id);
+          }
         } else if (typeof raw === 'string') {
           uriSet.add(raw);
+        } else if (raw && typeof raw === 'object' && typeof raw.id === 'string') {
+          uriSet.add(raw.id);
         }
       }
 
@@ -1556,16 +1609,26 @@ export class Ad4mModel {
         hydrated.set(result.id, result);
       }
 
-      // Replace raw URIs with hydrated instances on each parent instance
+      // Replace raw URIs with hydrated instances on each parent instance.
+      // Use the cached raw values captured BEFORE the async findAll to avoid
+      // the race condition where a concurrent getData() already replaced the
+      // strings with hydrated objects.
       for (const inst of instances) {
-        const raw = (inst as any)[relName];
+        const raw = rawCache.get(inst);
         if (raw == null) continue;
         if (Array.isArray(raw)) {
-          // Map URIs → instances; drop those filtered out by where
+          // Map URIs → instances; handle both raw strings and already-hydrated objects
           let resolved: Ad4mModel[] = raw
-            .map((v: any) =>
-              typeof v === 'string' && hydrated.has(v) ? hydrated.get(v)! : null,
-            )
+            .map((v: any) => {
+              if (typeof v === 'string') {
+                return hydrated.has(v) ? hydrated.get(v)! : null;
+              }
+              // Already a hydrated model instance (from a concurrent call)
+              if (v && typeof v === 'object' && typeof v.id === 'string') {
+                return hydrated.has(v.id) ? hydrated.get(v.id)! : v;
+              }
+              return null;
+            })
             .filter((v): v is Ad4mModel => v !== null);
 
           // Per-instance sort (client-side, after filtering)
@@ -1605,6 +1668,9 @@ export class Ad4mModel {
           }
         } else if (typeof raw === 'string' && hydrated.has(raw)) {
           (inst as any)[relName] = hydrated.get(raw);
+        } else if (raw && typeof raw === 'object' && typeof raw.id === 'string') {
+          // Already-hydrated object — look up refreshed version or keep as-is
+          (inst as any)[relName] = hydrated.has(raw.id) ? hydrated.get(raw.id) : raw;
         }
       }
 
@@ -2207,9 +2273,11 @@ WHERE ${whereConditions.join(' AND ')}
     }
 
     // Take snapshots for dirty tracking after ALL hydration is complete
-    // (including eager-loaded relations)
+    // (including eager-loaded relations).
+    // Pass `query.include` so only hydrated relations are snapshotted.
+    const snapshotRelations = query.include || null;
     for (const inst of instances) {
-      (inst as Ad4mModel).takeSnapshot();
+      (inst as Ad4mModel).takeSnapshot(snapshotRelations);
     }
 
     return { results: instances, totalCount: result[0].TotalCount };
@@ -2417,9 +2485,14 @@ WHERE ${whereConditions.join(' AND ')}
     }
 
     // Take snapshots for dirty tracking after ALL hydration is complete
-    // (including eager-loaded relations)
+    // (including eager-loaded relations).
+    // Pass `query.include` so that only relations that were actually
+    // eager-loaded are recorded in the snapshot.  Bare queries (no
+    // include) pass `null`, preventing relation fields from polluting
+    // the snapshot and causing false dirty detection on later save().
+    const snapshotRelations = query.include || null;
     for (const inst of paginatedInstances) {
-      (inst as Ad4mModel).takeSnapshot();
+      (inst as Ad4mModel).takeSnapshot(snapshotRelations);
     }
 
     return {
@@ -2946,11 +3019,6 @@ WHERE ${whereConditions.join(' AND ')}
 
     // Determine which fields actually changed (skip unchanged when snapshot exists)
     const dirty = this._snapshot ? new Set(this.changedFields()) : null;
-
-    // --- DEBUG: remove after confirming fix ---
-    const _className = ctor.name ?? 'unknown';
-    console.log(`[Ad4mModel.innerUpdate] ${_className} id=${(this as any).id ?? '?'} dirty=${dirty ? JSON.stringify([...dirty]) : 'ALL (no snapshot)'} setProperties=${setProperties}`);
-    // --- END DEBUG ---
 
     // Only iterate schema-declared fields, not internal ORM properties
     const metadata = ctor.getModelMetadata();
