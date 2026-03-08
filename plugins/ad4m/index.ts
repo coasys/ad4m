@@ -345,11 +345,21 @@ async function postWake(
 // ---------------------------------------------------------------------------
 
 export default function ad4mPlugin(api: any) {
-  const config: PluginConfig = api.getConfig?.() ?? {};
+  const config: PluginConfig = (api.pluginConfig as PluginConfig) ?? {};
   const endpoint = config.mcpEndpoint ?? "http://localhost:3001/mcp";
   const authToken = config.adminCredential;
   const refreshInterval = config.toolRefreshIntervalMs ?? 30000;
   const logger = api.logger;
+
+  // Debug: log config values
+  logger.info(`[ad4m] Config received: ${JSON.stringify({ 
+    mcpEndpoint: config.mcpEndpoint, 
+    adminCredential: config.adminCredential ? "*** (length: " + config.adminCredential.length + ")" : "UNDEFINED",
+    wakeUrl: config.wakeUrl,
+    wakeToken: config.wakeToken ? "*** (length: " + config.wakeToken.length + ")" : "UNDEFINED",
+    wakerEnabled: config.wakerEnabled,
+    executorWsUrl: config.executorWsUrl
+  })}`);
 
   // -- MCP bridge state --
   let sessionId = "";
