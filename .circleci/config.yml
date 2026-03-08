@@ -7,7 +7,7 @@ references:
 
 commands:
   setup_env:
-    description: "Set up build environment (Node 18, Rust, Deno, Go, pnpm)"
+    description: "Set up build environment (Node 24, Rust, Deno, Go, pnpm)"
     steps:
       - run:
           name: Setup build environment
