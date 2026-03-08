@@ -173,6 +173,8 @@ export interface RelationMetadata {
   getter?: string;
   /** Whether stored locally only */
   local?: boolean;
+  /** Link direction: 'forward' for HasMany/HasOne, 'reverse' for BelongsToMany/BelongsToOne */
+  direction?: 'forward' | 'reverse';
 }
 
 /** @deprecated Use RelationMetadata */
@@ -659,7 +661,8 @@ export class Ad4mModel {
         name: relationName,
         predicate: options.predicate || "",
         ...(options.local !== undefined && { local: options.local }),
-        ...(options.getter !== undefined && { getter: options.getter })
+        ...(options.getter !== undefined && { getter: options.getter }),
+        direction: (options.kind === 'belongsToMany' || options.kind === 'belongsToOne') ? 'reverse' : 'forward',
       };
     }
     
@@ -1149,6 +1152,20 @@ export class Ad4mModel {
    * `changedFields()`, and by `update()` to skip unchanged fields.
    * @private
    */
+  /**
+   * Normalize a value for snapshot storage.
+   * Arrays of model instances are reduced to their `.id` strings so that
+   * dirty-tracking compares stable identifiers instead of object references.
+   */
+  private static normalizeValue(value: any): any {
+    if (Array.isArray(value)) {
+      return value.map((v: any) =>
+        v && typeof v === 'object' && typeof v.id === 'string' ? v.id : v,
+      );
+    }
+    return value;
+  }
+
   private takeSnapshot(): void {
     const ctor = this.constructor as typeof Ad4mModel;
     const metadata = ctor.getModelMetadata();
@@ -1156,12 +1173,15 @@ export class Ad4mModel {
 
     for (const propName of Object.keys(metadata.properties)) {
       const val = (this as any)[propName];
-      // Shallow-clone arrays so mutation doesn't silently defeat the check
-      snap[propName] = Array.isArray(val) ? [...val] : val;
+      snap[propName] = Ad4mModel.normalizeValue(
+        Array.isArray(val) ? [...val] : val,
+      );
     }
     for (const collName of Object.keys(metadata.relations)) {
       const val = (this as any)[collName];
-      snap[collName] = Array.isArray(val) ? [...val] : val;
+      snap[collName] = Ad4mModel.normalizeValue(
+        Array.isArray(val) ? [...val] : val,
+      );
     }
 
     this._snapshot = snap;
@@ -1217,13 +1237,14 @@ export class Ad4mModel {
     ];
 
     for (const field of allFields) {
-      const current = (this as any)[field];
+      const current = Ad4mModel.normalizeValue((this as any)[field]);
       const original = this._snapshot[field];
 
       if (Array.isArray(current) || Array.isArray(original)) {
-        // Compare arrays element-by-element
-        const a = Array.isArray(current) ? current : [];
-        const b = Array.isArray(original) ? original : [];
+        // Order-insensitive comparison (sorted) so reordering alone
+        // doesn't mark a collection as dirty.
+        const a = Array.isArray(current) ? [...current].sort() : [];
+        const b = Array.isArray(original) ? [...original].sort() : [];
         if (a.length !== b.length || a.some((v: any, i: number) => v !== b[i])) {
           changed.push(field);
         }
@@ -2170,7 +2191,6 @@ WHERE ${whereConditions.join(' AND ')}
           const values = [...Properties, ...Collections, ["createdAt", Timestamp], ["author", Author]];
           await Ad4mModel.assignValuesToInstance(perspective, instance, values);
 
-          instance.takeSnapshot();
           return instance;
         } catch (error) {
           console.error(`Failed to process instance ${Base}:`, error);
@@ -2181,9 +2201,15 @@ WHERE ${whereConditions.join(' AND ')}
     );
     const instances = allInstances.filter((instance) => instance !== null) as T[];
 
-    // Eager-load relations if requested
+    // Eager-load relations if requested (BEFORE snapshot so dirty tracking is accurate)
     if (query.include && instances.length > 0) {
       await this.hydrateRelations(instances, perspective, query.include);
+    }
+
+    // Take snapshots for dirty tracking after ALL hydration is complete
+    // (including eager-loaded relations)
+    for (const inst of instances) {
+      (inst as Ad4mModel).takeSnapshot();
     }
 
     return { results: instances, totalCount: result[0].TotalCount };
@@ -2385,14 +2411,15 @@ WHERE ${whereConditions.join(' AND ')}
       paginatedInstances = filteredInstances.slice(start, end);
     }
 
-    // Take snapshots for dirty tracking after all hydration is complete
-    for (const inst of paginatedInstances) {
-      (inst as Ad4mModel).takeSnapshot();
-    }
-
-    // Eager-load relations if requested
+    // Eager-load relations if requested (BEFORE snapshot so dirty tracking is accurate)
     if (query.include && paginatedInstances.length > 0) {
       await this.hydrateRelations(paginatedInstances, perspective, query.include);
+    }
+
+    // Take snapshots for dirty tracking after ALL hydration is complete
+    // (including eager-loaded relations)
+    for (const inst of paginatedInstances) {
+      (inst as Ad4mModel).takeSnapshot();
     }
 
     return {
@@ -2892,9 +2919,20 @@ WHERE ${whereConditions.join(' AND ')}
   }
 
   private cleanCopy() {
-    const cleanCopy = {};
-    const props = Object.entries(this);
-    for (const [key, value] of props) {
+    const ctor = this.constructor as typeof Ad4mModel;
+    const metadata = ctor.getModelMetadata();
+    const cleanCopy: Record<string, any> = {};
+
+    // Only include schema-declared fields (properties + relations),
+    // preserving internal ORM machinery (_id, _perspective, generated
+    // addX/removeX/setX methods, _snapshot, etc.)
+    const schemaFields = new Set([
+      ...Object.keys(metadata.properties),
+      ...Object.keys(metadata.relations),
+    ]);
+
+    for (const key of schemaFields) {
+      const value = (this as any)[key];
       if (value !== undefined && value !== null && key !== "author" && key !== "timestamp") {
         cleanCopy[key] = value;
       }
@@ -2903,13 +2941,28 @@ WHERE ${whereConditions.join(' AND ')}
   }
 
   private async innerUpdate(setProperties: boolean = true, batchId?: string) {
+    const ctor = this.constructor as typeof Ad4mModel;
     this._subjectClassName = await this._perspective.stringOrTemplateObjectToSubjectClassName(this.cleanCopy());
 
     // Determine which fields actually changed (skip unchanged when snapshot exists)
     const dirty = this._snapshot ? new Set(this.changedFields()) : null;
 
+    // --- DEBUG: remove after confirming fix ---
+    const _className = ctor.name ?? 'unknown';
+    console.log(`[Ad4mModel.innerUpdate] ${_className} id=${(this as any).id ?? '?'} dirty=${dirty ? JSON.stringify([...dirty]) : 'ALL (no snapshot)'} setProperties=${setProperties}`);
+    // --- END DEBUG ---
+
+    // Only iterate schema-declared fields, not internal ORM properties
+    const metadata = ctor.getModelMetadata();
+    const schemaFields = new Set([
+      ...Object.keys(metadata.properties),
+      ...Object.keys(metadata.relations),
+    ]);
+
     const entries = Object.entries(this);
     for (const [key, value] of entries) {
+      // Only process schema-declared fields
+      if (!schemaFields.has(key)) continue;
       // Skip unchanged fields when a snapshot is available
       if (dirty && !dirty.has(key)) continue;
 
@@ -3958,11 +4011,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       ({ results } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result) as { results: T[] });
     }
 
-    // Eager-load relations specified by .include()
-    if (this.queryParams.include) {
-      await (this.ctor as any).hydrateRelations(results, this.perspective, this.queryParams.include);
-    }
-
     return results;
   }
 
@@ -4021,7 +4069,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     // Clean up any existing subscription
     this.dispose();
 
-    const includeMap = this.queryParams.include;
     const ctor = this.ctor;
 
     if (this.useSurrealDBFlag) {
@@ -4030,7 +4077,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
         const processResults = async (result: any) => {
             const { results } = await ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
-            if (includeMap) await (ctor as any).hydrateRelations(results, this.perspective, includeMap);
             callback(results as T[]);
         };
 
@@ -4042,7 +4088,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
             this.queryParams, 
             this.currentSubscription.result
         );
-        if (includeMap) await (ctor as any).hydrateRelations(results, this.perspective, includeMap);
         return results as T[];
     } else {
         const query = await ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
@@ -4050,7 +4095,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
         const processResults = async (result: AllInstancesResult) => {
             const { results } = await ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
-            if (includeMap) await (ctor as any).hydrateRelations(results, this.perspective, includeMap);
             callback(results as T[]);
         };
 
@@ -4060,7 +4104,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
             this.queryParams,
             this.currentSubscription.result
         );
-        if (includeMap) await (ctor as any).hydrateRelations(results, this.perspective, includeMap);
         return results as T[];
     }
   }
@@ -4257,4 +4300,120 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       return { results, totalCount, pageSize, pageNumber };
     }
   }
+}
+
+// ── Standalone Prolog fact generator ──────────────────────────────────────────
+
+/**
+ * Convert a camelCase or PascalCase identifier to snake_case.
+ * Examples: "TestPost" -> "test_post", "createdAt" -> "created_at"
+ */
+function toSnakeCase(str: string): string {
+  return str
+    .replace(/([A-Z])/g, "_$1")
+    .toLowerCase()
+    .replace(/^_/, "");
+}
+
+function buildInstanceClause(predicateName: string, metadata: ModelMetadata): string | null {
+  const props = metadata.properties;
+  // Collect flags first — these are the strongest recognizers
+  const flags = Object.values(props).filter((p) => p.flag && p.predicate && p.initial);
+  if (flags.length > 0) {
+    const conditions = flags
+      .map((p) => `triple(X, '${p.predicate}', '${p.initial}')`)
+      .join(",\n    ");
+    return `${predicateName}(X) :-\n    ${conditions}.`;
+  }
+  // Fallback: required non-flag properties
+  const required = Object.values(props).filter((p) => p.required && p.predicate && !p.flag);
+  if (required.length > 0) {
+    const conditions = required
+      .map((p) => `triple(X, '${p.predicate}', _)`)
+      .join(",\n    ");
+    return `${predicateName}(X) :-\n    ${conditions}.`;
+  }
+  return null;
+}
+
+function buildPropertyClause(modelPredicateName: string, prop: PropertyMetadata): string | null {
+  if (prop.flag) return null;
+  if (!prop.predicate) return null;
+  const clauseName = `${modelPredicateName}_${toSnakeCase(prop.name)}`;
+  return `${clauseName}(X, Value) :- triple(X, '${prop.predicate}', Value).`;
+}
+
+function buildCollectionClause(modelPredicateName: string, coll: RelationMetadata): string | null {
+  if (!coll.predicate) return null;
+  const clauseName = `${modelPredicateName}_${toSnakeCase(coll.name)}`;
+  if (coll.direction === "reverse") {
+    return `${clauseName}(X, Values) :- findall(V, triple(V, '${coll.predicate}', X), Values).`;
+  }
+  return `${clauseName}(X, Values) :- findall(V, triple(X, '${coll.predicate}', V), Values).`;
+}
+
+/**
+ * Generate Prolog predicate facts from a model class's decorator metadata.
+ *
+ * Given a model class decorated with `@Model` (and its `@Flag`, `@Property`,
+ * `@HasMany`, `@BelongsToMany` decorators), this function emits a string of
+ * Prolog clauses that can be prepended to any `perspective.infer()` call.
+ *
+ * The generated predicates are:
+ * - **Instance recognizer** — `modelName(X)` — matches instances of the model
+ * - **Property getters** — `modelName_propName(X, Value)` — one per property
+ * - **Collection getters** — `modelName_collName(X, Values)` — one per collection
+ *
+ * @example
+ * ```typescript
+ * import { generatePrologFacts } from '@coasys/ad4m';
+ *
+ * const facts = generatePrologFacts(Poll);
+ * const result = await perspective.infer(\`
+ *   \${facts}
+ *   recent_popular_poll(X) :-
+ *     poll(X),
+ *     poll_vote_count(X, N), N > 10.
+ * \`);
+ * ```
+ *
+ * @param ModelClass - A class decorated with `@Model` that extends `Ad4mModel`
+ * @returns A multi-line Prolog string ready for use with `perspective.infer()`
+ */
+export function generatePrologFacts(ModelClass: typeof Ad4mModel): string {
+  const metadata = ModelClass.getModelMetadata();
+  const predicateName = toSnakeCase(metadata.className);
+  const lines: string[] = [];
+
+  lines.push(`% ${metadata.className} — generated Prolog facts`);
+
+  // Instance recognizer
+  const instanceClause = buildInstanceClause(predicateName, metadata);
+  if (instanceClause) {
+    lines.push("");
+    lines.push(`% Instance recognizer`);
+    lines.push(instanceClause);
+  }
+
+  // Property getters
+  const propClauses = Object.values(metadata.properties)
+    .map((p) => buildPropertyClause(predicateName, p))
+    .filter((c): c is string => c !== null);
+  if (propClauses.length > 0) {
+    lines.push("");
+    lines.push(`% Field getters`);
+    lines.push(...propClauses);
+  }
+
+  // Relation getters
+  const collClauses = Object.values(metadata.relations)
+    .map((c) => buildCollectionClause(predicateName, c))
+    .filter((c): c is string => c !== null);
+  if (collClauses.length > 0) {
+    lines.push("");
+    lines.push(`% Relation getters`);
+    lines.push(...collClauses);
+  }
+
+  return lines.join("\n");
 }
