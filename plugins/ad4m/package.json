@@ -1,7 +1,7 @@
 {
-  "name": "@coasys/openclaw-ad4m",
+  "name": "@coasys/ad4m-openclaw-plugin",
   "version": "0.1.0",
-  "description": "OpenClaw plugin for AD4M — bridges AD4M's MCP tools as native agent tools",
+  "description": "OpenClaw plugin for AD4M — bridges AD4M's MCP tools as native agent tools and turns subscriptions into waker events",
   "license": "MIT",
   "main": "index.ts",
   "openclaw": {
