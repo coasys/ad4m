@@ -322,6 +322,25 @@ export default function ad4mPlugin(api: any) {
     }
   }
 
+  // -- Manual refresh tool for agents to call after add_model / schema changes --
+
+  api.registerTool({
+    name: "refresh_ad4m_tools",
+    description:
+      "Re-fetch the AD4M MCP tool list and register any new tools. " +
+      "Call this after add_model, adding SHACL subject classes, or joining a neighbourhood " +
+      "to immediately discover new dynamic tools without waiting for the next poll cycle.",
+    parameters: { type: "object", properties: {}, required: [] },
+    async execute() {
+      const newCount = await refreshTools();
+      const msg =
+        newCount > 0
+          ? `Discovered and registered ${newCount} new tool(s). Total tools: ${registeredTools.size}.`
+          : `No new tools found. Total tools: ${registeredTools.size}.`;
+      return { content: [{ type: "text", text: msg }] };
+    },
+  });
+
   // -- Background service: maintains MCP session and polls for dynamic tools --
 
   api.registerService({

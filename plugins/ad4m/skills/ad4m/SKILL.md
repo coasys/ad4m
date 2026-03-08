@@ -270,6 +270,8 @@ Class and property names are **lowercased** in tool names. Example: `Channel` wi
 
 **Prefer dynamic tools** (`message_create`) over generic tools (`create_subject`) when available. Fall back to `create_subject` if dynamic tools haven't appeared yet (SHACL still syncing).
 
+**After `add_model` or joining a neighbourhood**, call `refresh_ad4m_tools()` to immediately discover the new dynamic tools. Otherwise you'll have to wait for the next automatic poll cycle (~30s).
+
 ## Subject Classes (SHACL)
 
 Define structured data types via `add_model`. JSON format:
