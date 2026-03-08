@@ -14,7 +14,9 @@
     "dapp",
     "ad4m-hooks/react",
     "ad4m-hooks/vue",
-    "ad4m-hooks/helpers"
+    "ad4m-hooks/helpers",
+    "soa",
+    "soa/language"
   ],
   "private": true,
   "scripts": {
