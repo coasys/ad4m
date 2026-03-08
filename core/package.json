@@ -6,7 +6,7 @@
   "types": "lib/src/index.d.ts",
   "type": "module",
   "scripts": {
-    "build": "patch-package && tsc && pnpm run buildSchema && pnpm run bundle",
+    "build": "patch-package && tsc && node fix-imports.mjs lib/src && pnpm run buildSchema && pnpm run bundle",
     "buildSchema": "node lib/src/buildSchema.js",
     "bundle": "rollup -c rollup.config.js",
     "test": "jest --forceExit"
