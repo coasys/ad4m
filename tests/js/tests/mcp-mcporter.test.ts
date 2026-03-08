@@ -189,14 +189,15 @@ describe("MCP mcporter Integration Tests", function() {
             fs.writeFileSync(wrongConfigPath, JSON.stringify(wrongConfig, null, 2));
 
             try {
-                execSync(
+                let result = execSync(
                     `mcporter call ad4m.list_perspectives --config ${wrongConfigPath} --output json`,
                     { encoding: 'utf-8', timeout: 10000 }
                 );
-                expect.fail("Should have thrown an error");
+                let parsed = JSON.parse(result);
+                expect(parsed.error).to.include("Authentication required");
             } catch (e: any) {
                 expect(e.message.toLowerCase()).to.include("auth");
-                console.log("mcporter correctly rejected wrong credential");
+                console.log("mcporter correctly rejected wrong credential", e.message);
             }
         });
 
@@ -214,11 +215,12 @@ describe("MCP mcporter Integration Tests", function() {
             fs.writeFileSync(noAuthConfigPath, JSON.stringify(noAuthConfig, null, 2));
 
             try {
-                execSync(
+                let result = execSync(
                     `mcporter call ad4m.list_perspectives --config ${noAuthConfigPath} --output json`,
                     { encoding: 'utf-8', timeout: 10000 }
                 );
-                expect.fail("Should have thrown an error");
+                let parsed = JSON.parse(result);
+                expect(parsed.error).to.include("Authentication required");
             } catch (e: any) {
                 expect(e.message.toLowerCase()).to.include("auth");
                 console.log("mcporter correctly rejected missing credential");
@@ -272,6 +274,7 @@ describe("MCP mcporter Integration Tests", function() {
                 `mcporter call ad4m.list_perspectives --config ${jwtConfigPath} --output json`,
                 { encoding: 'utf-8', timeout: 10000 }
             );
+            console.log("mcporter list_perspectives result:", listResult);
             const listParsed = JSON.parse(listResult);
             expect(listParsed).to.be.an('array');
             console.log("mcporter with JWT auth works!");
