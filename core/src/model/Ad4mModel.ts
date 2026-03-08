@@ -2274,8 +2274,10 @@ WHERE ${whereConditions.join(' AND ')}
 
     // Take snapshots for dirty tracking after ALL hydration is complete
     // (including eager-loaded relations).
-    // Pass `query.include` so only hydrated relations are snapshotted.
-    const snapshotRelations = query.include || null;
+    // When `include` is specified, only snapshot those relations.
+    // Otherwise snapshot ALL fields (properties + relations) since
+    // hydrateFromLinks populates collections with stable raw IDs.
+    const snapshotRelations = query.include;
     for (const inst of instances) {
       (inst as Ad4mModel).takeSnapshot(snapshotRelations);
     }
@@ -2486,11 +2488,11 @@ WHERE ${whereConditions.join(' AND ')}
 
     // Take snapshots for dirty tracking after ALL hydration is complete
     // (including eager-loaded relations).
-    // Pass `query.include` so that only relations that were actually
-    // eager-loaded are recorded in the snapshot.  Bare queries (no
-    // include) pass `null`, preventing relation fields from polluting
-    // the snapshot and causing false dirty detection on later save().
-    const snapshotRelations = query.include || null;
+    // When `include` is specified, only snapshot those relations.
+    // Otherwise snapshot ALL fields (properties + relations) since
+    // hydrateFromLinks populates collections with stable raw IDs —
+    // this ensures push-to-array + save() correctly detects dirty relations.
+    const snapshotRelations = query.include;
     for (const inst of paginatedInstances) {
       (inst as Ad4mModel).takeSnapshot(snapshotRelations);
     }
@@ -3539,6 +3541,13 @@ WHERE ${whereConditions.join(' AND ')}
           if ((resolveLanguage === undefined || resolveLanguage === null) && isNumericType(propertySchema)) {
             resolveLanguage = 'literal';
           }
+
+          // Default resolveLanguage to 'literal' for all remaining property types,
+          // matching the @Property decorator behaviour. Without this, string values
+          // stored as literal:// URLs are returned unparsed.
+          if (resolveLanguage === undefined || resolveLanguage === null) {
+            resolveLanguage = 'literal';
+          }
           
           // If property is required, ensure it has an initial value
           if (isRequired && !initial) {
@@ -4156,6 +4165,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
             this.queryParams, 
             this.currentSubscription.result
         );
+        // Also invoke callback with initial results so subscribers see them
+        callback(results as T[]);
         return results as T[];
     } else {
         const query = await ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
@@ -4172,6 +4183,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
             this.queryParams,
             this.currentSubscription.result
         );
+        // Also invoke callback with initial results so subscribers see them
+        callback(results as T[]);
         return results as T[];
     }
   }
@@ -4254,6 +4267,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
         this.queryParams, 
         this.currentSubscription.result
       );
+      callback(totalCount);
       return totalCount;
     } else {
       const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
@@ -4265,7 +4279,9 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       };
 
       this.currentSubscription.onResult(processResults);
-      return this.currentSubscription.result?.[0]?.TotalCount || 0;
+      const initialCount = this.currentSubscription.result?.[0]?.TotalCount || 0;
+      callback(initialCount);
+      return initialCount;
     }
   }
 
@@ -4353,7 +4369,9 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
       this.currentSubscription.onResult(processResults);
       const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, this.currentSubscription.result)) as ResultsWithTotalCount<T>;
-      return { results, totalCount, pageSize, pageNumber };
+      const initialPage = { results, totalCount, pageSize, pageNumber };
+      callback(initialPage);
+      return initialPage;
     } else {
       const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);
       this.currentSubscription = await this.perspective.subscribeInfer(prologQuery);
@@ -4365,7 +4383,9 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
       this.currentSubscription.onResult(processResults);
       const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, this.currentSubscription.result)) as ResultsWithTotalCount<T>;
-      return { results, totalCount, pageSize, pageNumber };
+      const initialPrologPage = { results, totalCount, pageSize, pageNumber };
+      callback(initialPrologPage);
+      return initialPrologPage;
     }
   }
 }

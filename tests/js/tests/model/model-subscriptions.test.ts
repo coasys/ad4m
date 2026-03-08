@@ -53,6 +53,7 @@ describe("Ad4mModel — Subscriptions (SurrealDB)", function () {
     await TestPost.register(perspective);
     await TestComment.register(perspective);
     await TestTag.register(perspective);
+    await TestChannel.register(perspective);
   });
 
   // ── 1. Immediate initial callback ─────────────────────────────────────────
