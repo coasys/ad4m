@@ -38,7 +38,7 @@ ENV GOPATH=/go
 ENV PATH="$GOPATH/bin:/usr/local/go/bin:$PATH"
 
 # Install Node
-RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && apt-get install -y nodejs
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs
 
 
 USER circleci

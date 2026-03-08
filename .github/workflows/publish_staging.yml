@@ -16,7 +16,7 @@ jobs:
       - name: setup node
         uses: actions/setup-node@v3
         with:
-          node-version: 18
+          node-version: 24
 
       - uses: pnpm/action-setup@v4
 
@@ -276,10 +276,10 @@ jobs:
 
     - uses: pnpm/action-setup@v4
 
-    - name: Use Node.js 18.x
+    - name: Use Node.js 24.x
       uses: actions/setup-node@v3
       with:
-        node-version: 18.x
+        node-version: 24.x
         cache: 'pnpm'
 
     # Cache Homebrew packages
@@ -456,10 +456,10 @@ jobs:
 
     - uses: pnpm/action-setup@v4
 
-    - name: Use Node.js 18.x
+    - name: Use Node.js 24.x
       uses: actions/setup-node@v3
       with:
-        node-version: 18.x
+        node-version: 24.x
         cache: 'pnpm'
 
     - name: Install protobuf compiler
@@ -545,10 +545,10 @@ jobs:
 
       - uses: pnpm/action-setup@v4
 
-      - name: Use Node.js 18.x
+      - name: Use Node.js 24.x
         uses: actions/setup-node@v3
         with:
-          node-version: 18.x
+          node-version: 24.x
           registry-url: 'https://registry.npmjs.org'
 
       - name: Extract version

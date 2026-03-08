@@ -16,7 +16,7 @@ jobs:
       - name: setup node
         uses: actions/setup-node@v3
         with:
-          node-version: 18
+          node-version: 24
 
       - uses: pnpm/action-setup@v4
 
@@ -46,7 +46,7 @@ jobs:
       matrix:
         #platform: [GH-hosted-ubuntu, macos-latest, windows-latest]
         platform: [GH-hosted-ubuntu, macos-latest]
-        node-version: [18.x]
+        node-version: [24.x]
 
     needs:
       - create-release
@@ -493,7 +493,7 @@ jobs:
   
      - uses: actions/setup-node@v3
        with:
-         node-version: '18.x'
+         node-version: '24.x'
   
      - name: Cache cargo
        id: cache-cargo
