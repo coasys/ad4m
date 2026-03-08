@@ -143,34 +143,31 @@ impl ServerHandler for Ad4mMcpHandler {
                 // the admin credential directly — this lets callers skip the
                 // request_capability + generate_jwt dance when they already hold
                 // the admin credential (it acts as a replacement JWT).
-                if token.is_empty() {
-                    let http_admin_authed = context
-                        .extensions
-                        .get::<HttpRequestParts>()
-                        .and_then(|parts| parts.headers.get(axum::http::header::AUTHORIZATION))
-                        .and_then(|h| h.to_str().ok())
-                        .map(|h| {
-                            // Accept both bare token and "Bearer <token>" forms.
-                            // Use constant-time comparison to prevent timing attacks.
-                            let bare = h.strip_prefix("Bearer ").unwrap_or(h);
-                            constant_time_eq(bare, admin_cred.as_str())
-                        })
-                        .unwrap_or(false);
+                let http_admin_authed = context
+                    .extensions
+                    .get::<HttpRequestParts>()
+                    .and_then(|parts| parts.headers.get(axum::http::header::AUTHORIZATION))
+                    .and_then(|h| h.to_str().ok())
+                    .map(|h| {
+                        // Accept both bare token and "Bearer <token>" forms.
+                        // Use constant-time comparison to prevent timing attacks.
+                        let bare = h.strip_prefix("Bearer ").unwrap_or(h);
+                        constant_time_eq(bare, admin_cred.as_str())
+                    })
+                    .unwrap_or(false);
 
-                    if http_admin_authed {
-                        // Store admin credential as session token so that
-                        // get_agent_context() and get_capabilities() work for
-                        // the remainder of this tool call.
-                        let mut token_guard = self.context.auth_token.write().await;
-                        *token_guard = Some(admin_cred.clone());
-                        drop(token_guard);
-                        return self.dispatch_tool(request, context).await;
-                    }
-
-                    return Ok(CallToolResult::error(vec![Content::text(
-                        json!({"error": "Authentication required. Use request_capability + generate_jwt, login_email, or signup to authenticate."}).to_string()
-                    )]));
+                if http_admin_authed {
+                    // Store admin credential as session token so that
+                    // get_agent_context() and get_capabilities() work for
+                    // the remainder of this tool call.
+                    let mut token_guard = self.context.auth_token.write().await;
+                    *token_guard = Some(admin_cred.clone());
+                    drop(token_guard);
+                    return self.dispatch_tool(request, context).await;
                 }
+
+                // No valid admin credential in session or HTTP header
+                // Fall through to JWT validation below
             }
 
             // Check JWT-based auth (covers JWT tokens and single-user mode with no admin_credential)
