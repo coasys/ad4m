@@ -11,7 +11,7 @@ commands:
     parameters:
       node_version:
         type: string
-        default: "18"
+        default: "24"
     steps:
       - run:
           name: Setup build environment
