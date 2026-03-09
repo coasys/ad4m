@@ -1037,11 +1037,11 @@ export interface RelationOptions {
  *   post.setComment(values)
  */
 export type HasManyMethods<Keys extends string> = {
-    [K in Keys as `add${Capitalize<K>}`]: (value: string | { id: string }) => Promise<void>;
+    [K in Keys as `add${Capitalize<K>}`]: (value: string | { id: string }, batchId?: string) => Promise<void>;
 } & {
-    [K in Keys as `remove${Capitalize<K>}`]: (value: string | { id: string }) => Promise<void>;
+    [K in Keys as `remove${Capitalize<K>}`]: (value: string | { id: string }, batchId?: string) => Promise<void>;
 } & {
-    [K in Keys as `set${Capitalize<K>}`]: (values: (string | { id: string })[]) => Promise<void>;
+    [K in Keys as `set${Capitalize<K>}`]: (values: (string | { id: string })[], batchId?: string) => Promise<void>;
 };
 
 /**
@@ -1119,14 +1119,14 @@ export function HasMany(
 
         // Add prototype methods for add/remove/set
         const relKey = key as string;
-        (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any) {
-            return (this as any).addRelationValue(relKey, arg);
+        (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+            return (this as any).addRelationValue(relKey, arg, batchId);
         };
-        (target as any)[`remove${capitalize(relKey)}`] = async function(this: any, arg: any) {
-            return (this as any).removeRelationValue(relKey, arg);
+        (target as any)[`remove${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+            return (this as any).removeRelationValue(relKey, arg, batchId);
         };
-        (target as any)[`set${capitalize(relKey)}`] = async function(this: any, arg: any) {
-            return (this as any).setRelationValues(relKey, arg);
+        (target as any)[`set${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+            return (this as any).setRelationValues(relKey, arg, batchId);
         };
         Object.defineProperty(target, relKey, { configurable: true, writable: true });
     };
