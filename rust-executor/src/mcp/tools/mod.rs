@@ -285,6 +285,7 @@ impl Ad4mMcpHandler {
             .with_route((Self::verify_email_code_tool_attr(), Self::verify_email_code))
             .with_route((Self::auth_status_tool_attr(), Self::auth_status))
             // profiles.rs
+            .with_route((Self::get_my_did_tool_attr(), Self::get_my_did))
             .with_route((Self::get_agent_profile_tool_attr(), Self::get_agent_profile))
             .with_route((Self::set_agent_profile_tool_attr(), Self::set_agent_profile))
             .with_route((
