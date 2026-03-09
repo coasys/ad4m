@@ -447,7 +447,7 @@ export class PerspectiveProxy {
      * - `addLink`: Creates a new link
      * - `removeLink`: Removes an existing link
      * - `setSingleTarget`: Removes all existing links with the same source/predicate and adds a new one
-     * - `collectionSetter`: Special command for setting collection properties
+     * - `collectionSetter`: Special command for setting relation properties
      * 
      * When used with parameters, the special value "value" in the target field will be 
      * replaced with the actual parameter value.
@@ -1097,7 +1097,7 @@ export class PerspectiveProxy {
      * shape.addProperty({
      *   name: 'ingredients',
      *   path: 'recipe://has_ingredient',
-     *   // No maxCount = collection
+     *   // No maxCount = relation
      * });
      * 
      * await perspective.addShacl('Recipe', shape);
@@ -1555,7 +1555,7 @@ export class PerspectiveProxy {
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
         properties: Map<string, { predicate: string, resolveLanguage?: string }>,
-        collections: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
+        relations: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
     } | null> {
         try {
             // Use getShacl() to retrieve the shape via SHACLShape.fromLinks()
@@ -1568,9 +1568,9 @@ export class PerspectiveProxy {
             const requiredPredicates: string[] = [];
             const requiredTriples: Array<{predicate: string, target?: string}> = [];
             const properties = new Map<string, { predicate: string, resolveLanguage?: string }>();
-            const collections = new Map<string, { predicate: string, instanceFilter?: string }>();
+            const relations = new Map<string, { predicate: string, instanceFilter?: string }>();
 
-            // Build property/collection maps and track writable predicates from shape properties
+            // Build property/relation maps and track writable predicates from shape properties
             const writablePredicates = new Set<string>();
             for (const prop of shape.properties) {
                 if (!prop.path || !prop.name) continue;
@@ -1579,9 +1579,9 @@ export class PerspectiveProxy {
                     writablePredicates.add(prop.path);
                 }
 
-                const isCollection = prop.adder && prop.adder.length > 0;
-                if (isCollection) {
-                    collections.set(prop.name, { predicate: prop.path });
+                const isRelation = prop.adder && prop.adder.length > 0;
+                if (isRelation) {
+                    relations.set(prop.name, { predicate: prop.path });
                 } else {
                     properties.set(prop.name, {
                         predicate: prop.path,
@@ -1605,7 +1605,7 @@ export class PerspectiveProxy {
                 }
             }
 
-            return { requiredPredicates, requiredTriples, properties, collections };
+            return { requiredPredicates, requiredTriples, properties, relations };
         } catch (e) {
             console.error(`Error getting SHACL metadata for ${className}:`, e);
             return null;
@@ -1618,7 +1618,7 @@ export class PerspectiveProxy {
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
         properties: Map<string, { predicate: string, resolveLanguage?: string }>,
-        collections: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
+        relations: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
     }): string {
         if (metadata.requiredTriples.length === 0) {
             // No required triples - any node with links is an instance
@@ -1685,23 +1685,23 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Gets collection values using SurrealDB when Prolog fails.
+     * Gets relation values using SurrealDB when Prolog fails.
      * This is used as a fallback in SdnaOnly mode where link data isn't in Prolog.
      * Note: This is used by Subject.ts (legacy pattern). Ad4mModel.ts uses getModelMetadata() instead.
      */
-    async getCollectionValuesViaSurreal(baseExpression: string, className: string, collectionName: string): Promise<any[]> {
+    async getRelationValuesViaSurreal(baseExpression: string, className: string, relationName: string): Promise<any[]> {
         const metadata = await this.getSubjectClassMetadataFromSDNA(className);
         if (!metadata) {
             return [];
         }
 
-        const collMeta = metadata.collections.get(collectionName);
-        if (!collMeta) {
+        const relMeta = metadata.relations.get(relationName);
+        if (!relMeta) {
             return [];
         }
 
         const escapedBaseExpression = escapeSurrealString(baseExpression);
-        const escapedPredicate = escapeSurrealString(collMeta.predicate);
+        const escapedPredicate = escapeSurrealString(relMeta.predicate);
         const query = `SELECT out.uri AS value, timestamp FROM link WHERE in.uri = '${escapedBaseExpression}' AND predicate = '${escapedPredicate}' ORDER BY timestamp ASC`;
         const result = await this.querySurrealDB(query);
 
@@ -1712,12 +1712,12 @@ export class PerspectiveProxy {
         let values = result.map(r => r.value).filter(v => v !== "" && v !== '');
         
         // Apply condition filtering if present
-        if (collMeta.condition && values.length > 0) {
+        if (relMeta.condition && values.length > 0) {
             try {
                 const filteredValues: string[] = [];
                 
                 for (const value of values) {
-                    let condition = collMeta.condition
+                    let condition = relMeta.condition
                         .replace(/\$perspective/g, `'${this.uuid}'`)
                         .replace(/\$base/g, `'${baseExpression}'`)
                         .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
@@ -1736,23 +1736,23 @@ export class PerspectiveProxy {
                 
                 values = filteredValues;
             } catch (error) {
-                console.warn(`Failed to apply condition filter for ${collectionName}:`, error);
+                console.warn(`Failed to apply condition filter for ${relationName}:`, error);
             }
         }
 
         // Apply instance filter if present - batch-check all values at once
-        if (collMeta.instanceFilter) {
+        if (relMeta.instanceFilter) {
             try {
-                const filterMetadata = await this.getSubjectClassMetadataFromSDNA(collMeta.instanceFilter);
+                const filterMetadata = await this.getSubjectClassMetadataFromSDNA(relMeta.instanceFilter);
                 if (!filterMetadata) {
                     // Fallback to sequential checks if metadata isn't available
-                    return this.filterInstancesSequential(values, collMeta.instanceFilter);
+                    return this.filterInstancesSequential(values, relMeta.instanceFilter);
                 }
 
                 return await this.batchCheckSubjectInstances(values, filterMetadata);
             } catch (err) {
                 // Fallback to sequential checks on error
-                return this.filterInstancesSequential(values, collMeta.instanceFilter);
+                return this.filterInstancesSequential(values, relMeta.instanceFilter);
             }
         }
 
@@ -1769,7 +1769,7 @@ export class PerspectiveProxy {
             requiredPredicates: string[],
             requiredTriples: Array<{predicate: string, target?: string}>,
             properties: Map<string, { predicate: string, resolveLanguage?: string }>,
-            collections: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
+            relations: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
         }
     ): Promise<string[]> {
         if (expressions.length === 0) {
@@ -1934,7 +1934,7 @@ export class PerspectiveProxy {
 
 
     /**
-     * Find a subject class by matching an object's properties/collections against SHACL shapes.
+     * Find a subject class by matching an object's properties/relations against SHACL shapes.
      * Queries SHACL links client-side to find a class whose properties contain all required ones.
      * @returns The matching class name, or null if no match found.
      */
@@ -1967,7 +1967,7 @@ export class PerspectiveProxy {
             return null;
         }
 
-        // Single SurrealDB query to find all classes and their properties/collections
+        // Single SurrealDB query to find all classes and their properties/relations
         const query = `SELECT 
             in.uri AS shape_source, 
             predicate, 
@@ -1978,8 +1978,8 @@ export class PerspectiveProxy {
         const results = await this.querySurrealDB(query);
         if (!results || results.length === 0) return null;
 
-        // Build a map of className -> { properties, collections }
-        const classShapes: Map<string, { shapeUri: string, properties: string[], collections: string[] }> = new Map();
+        // Build a map of className -> { properties, relations }
+        const classShapes: Map<string, { shapeUri: string, properties: string[], relations: string[] }> = new Map();
 
         // First pass: find all subject classes
         for (const r of results) {
@@ -1989,11 +1989,11 @@ export class PerspectiveProxy {
                 if (sepIdx < 0) continue;
                 const className = source.substring(sepIdx + 3).split('/').pop();
                 if (!className) continue;
-                classShapes.set(className, { shapeUri: source, properties: [], collections: [] });
+                classShapes.set(className, { shapeUri: source, properties: [], relations: [] });
             }
         }
 
-        // Second pass: collect properties and collections for each class
+        // Second pass: collect properties and relations for each class
         for (const r of results) {
             if (r.predicate === 'sh://property' || r.predicate === 'sh://collection') {
                 // Match shape source to class (e.g., "recipe://RecipeShape" -> "Recipe")
@@ -2005,7 +2005,7 @@ export class PerspectiveProxy {
                         if (r.predicate === 'sh://property') {
                             shape.properties.push(name);
                         } else {
-                            shape.collections.push(name);
+                            shape.relations.push(name);
                         }
                     }
                 }
@@ -2015,7 +2015,7 @@ export class PerspectiveProxy {
         // Find a class that has all required properties and relations
         for (const [className, shape] of classShapes) {
             const hasAllProps = properties.every(p => shape.properties.includes(p));
-            const hasAllRels = relations.every(c => shape.collections.includes(c));
+            const hasAllRels = relations.every(c => shape.relations.includes(c));
             if (hasAllProps && hasAllRels) {
                 return className;
             }
@@ -2026,9 +2026,9 @@ export class PerspectiveProxy {
 
     /** Returns all subject classes that match the given template object.
      * This function looks at the properties of the template object and
-     * its setters and collections to create a Prolog query that finds
+     * its setters and relations to create a Prolog query that finds
      * all subject classes that would be converted to a proxy object
-     * with exactly the same properties and collections.
+     * with exactly the same properties and relations.
      *
      * Since there could be multiple subject classes that match the given
      * criteria, this function returns a list of class names.

@@ -1,6 +1,6 @@
 {
   "include": [
-    "*.ts", "tests/agent-language.ts", "tests/agent.ts", "tests/app.test.ts", "tests/authentication.test.ts", "tests/direct-messages.ts", "tests/expression.ts", "tests/integration.test.ts", "tests/prolog-and-literals.test.ts", "tests/language.ts", "tests/neighbourhood.ts", "tests/perspective.ts", "tests/runtime.ts", "tests/simple.test.ts", "tests/social-dna-flow.ts", "tests/multi-user-simple.test.ts", "utils/utils.ts", "tests/model/**/*.ts"  ],
+    "*.ts", "tests/agent-language.ts", "tests/agent.ts", "tests/app.test.ts", "tests/authentication.test.ts", "tests/direct-messages.ts", "tests/expression.ts", "tests/integration.test.ts", "tests/prolog-and-literals.test.ts", "tests/language.ts", "tests/neighbourhood.ts", "tests/perspective.ts", "tests/runtime.ts", "tests/simple.test.ts", "tests/social-dna-flow.ts", "tests/multi-user.test.ts", "tests/multi-user-simple.test.ts", "tests/multi-user-connect.test.ts", "tests/email-verification.test.ts", "tests/mcp-http.test.ts", "tests/mcp-auth.test.ts", "tests/mcp-neighbourhood.test.ts", "utils/utils.ts", "tests/model/**/*.ts"  ],
   "exclude": ["./src/tests/*", "./src/**/*.test.ts", "./src/testsutils/*"],
   "compilerOptions": {
     /* Visit https://aka.ms/tsconfig.json to read more about this file */

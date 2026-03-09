@@ -3,7 +3,7 @@ import { Link } from "../links/Links";
 import { LinkQuery } from "../perspectives/LinkQuery";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomId, PropertyOptions, Model, getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
-import { singularToPlural, pluralToSingular, propertyNameToSetterName, collectionToAdderName, collectionToRemoverName, collectionToSetterName } from "./util";
+import { singularToPlural, pluralToSingular, propertyNameToSetterName, relationToAdderName, relationToRemoverName, relationToSetterName } from "./util";
 import { escapeSurrealString } from "../utils";
 
 // JSON Schema type definitions
@@ -162,7 +162,7 @@ export interface PropertyMetadata {
 }
 
 /**
- * Metadata for a single relation (collection) extracted from decorators.
+ * Metadata for a single relation extracted from decorators.
  */
 export interface RelationMetadata {
   /** The relation name */
@@ -177,8 +177,7 @@ export interface RelationMetadata {
   direction?: 'forward' | 'reverse';
 }
 
-/** @deprecated Use RelationMetadata */
-export type CollectionMetadata = RelationMetadata;
+
 
 /**
  * Complete model metadata extracted from decorators.
@@ -190,8 +189,6 @@ export interface ModelMetadata {
   properties: Record<string, PropertyMetadata>;
   /** Map of relation name to metadata */
   relations: Record<string, RelationMetadata>;
-  /** @deprecated Use relations */
-  collections: Record<string, RelationMetadata>;
 }
 
 function capitalize(word: string): string {
@@ -421,14 +418,14 @@ function isNumericType(schema: JSONSchemaProperty): boolean {
  * 
  * @description
  * Ad4mModel provides the foundation for creating data models that are stored in AD4M perspectives.
- * Each model instance is represented as a subgraph in the perspective, with properties and collections
+ * Each model instance is represented as a subgraph in the perspective, with properties and relations
  * mapped to links in that graph. The class uses Prolog-based queries to efficiently search and filter
  * instances based on their properties and relationships.
  * 
  * Key concepts:
  * - Each model instance has a unique base expression that serves as its identifier
  * - Properties are stored as links with predicates defined by the `through` option
- * - Collections represent one-to-many relationships as sets of links
+ * - Relations represent one-to-many relationships as sets of links
  * - Queries are translated to Prolog for efficient graph pattern matching
  * - Changes are tracked through the perspective's subscription system
  * 
@@ -463,11 +460,11 @@ function isNumericType(schema: JSONSchemaProperty): boolean {
  *   })
  *   averageRating: number = 0;
  * 
- *   // Collection of ingredients
- *   @Collection({ through: "recipe://ingredient" })
- *   ingredients: string[] = [];
+ *   // Relation of ingredients
+   *   @HasMany({ through: "recipe://ingredient" })
+   *   ingredients: string[] = [];
  * 
- *   // Collection of comments linked to another model
+ *   // Relation of comments linked to another model
  *   @HasMany(() => Comment, { through: "recipe://comment" })
  *   comments: Comment[] = [];
  * }
@@ -579,21 +576,21 @@ export class Ad4mModel {
    * Extracts metadata from decorators for query building.
    * 
    * @description
-   * This method reads the metadata stored by decorators (@Property, @Collection, etc.)
+   * This method reads the metadata stored by decorators (@Property, @HasMany, etc.)
    * and returns it in a structured format that's easier to work with for query builders
    * and other systems that need to introspect model structure.
    * 
    * The metadata includes:
    * - Class name from @Model
    * - Property metadata (predicates, types, constraints, etc.)
-   * - Collection metadata (predicates, filters, etc.)
+   * - Relation metadata (predicates, filters, etc.)
    * 
    * For models created via `fromJSONSchema()`, this method will derive metadata from
    * the WeakMap registries that were populated during the dynamic class creation.
    * If these structures are empty but a JSON schema was attached to the class,
    * it can fall back to deriving metadata from that schema.
    * 
-   * @returns Structured metadata object containing className, properties, and collections
+   * @returns Structured metadata object containing className, properties, and relations
    * @throws Error if the class doesn't have @Model decorator
    * 
    * @example
@@ -603,14 +600,14 @@ export class Ad4mModel {
    *   @Property({ through: "recipe://name", resolveLanguage: "literal" })
    *   name: string = "";
    *   
-   *   @Collection({ through: "recipe://ingredient" })
+   *   @HasMany({ through: "recipe://ingredient" })
    *   ingredients: string[] = [];
    * }
    * 
    * const metadata = Recipe.getModelMetadata();
    * console.log(metadata.className); // "Recipe"
    * console.log(metadata.properties.name.predicate); // "recipe://name"
-   * console.log(metadata.collections.ingredients.predicate); // "recipe://ingredient"
+   * console.log(metadata.relations.ingredients.predicate); // "recipe://ingredient"
    * ```
    */
   public static getModelMetadata(): ModelMetadata {
@@ -648,14 +645,14 @@ export class Ad4mModel {
       };
     }
     
-    // Extract relations (collections) from WeakMap registry
+    // Extract relations (relations) from WeakMap registry
     const relationsMetadata: Record<string, RelationMetadata> = {};
     const allRelationsMeta = getRelationsMetadata(this as any);
-    const prototypeCollections = Object.fromEntries(
+    const prototypeRelations = Object.fromEntries(
       Object.entries(allRelationsMeta).filter(([, r]) => r.kind === 'hasMany' || r.kind === 'belongsToMany')
     );
     
-    for (const [relationName, opts] of Object.entries(prototypeCollections)) {
+    for (const [relationName, opts] of Object.entries(prototypeRelations)) {
       const options = opts as RelationMetadataEntry;
       relationsMetadata[relationName] = {
         name: relationName,
@@ -714,7 +711,6 @@ export class Ad4mModel {
       className,
       properties: propertiesMetadata,
       relations: relationsMetadata,
-      collections: relationsMetadata,
     };
   }
 
@@ -773,7 +769,7 @@ export class Ad4mModel {
   }
 
   /**
-   * Get relation (collection) options from decorator
+   * Get relation options from decorator
    * @private
    */
   private getRelationOptions(key: string): RelationMetadataEntry | undefined {
@@ -823,7 +819,7 @@ export class Ad4mModel {
   }
 
   /**
-   * Generate collection action from metadata (Phase 1: Prolog-free refactor)
+   * Generate relation action from metadata (Phase 1: Prolog-free refactor)
    * Replaces Prolog queries: collection_adder, collection_remover, collection_setter
    * @private
    */
@@ -934,7 +930,7 @@ export class Ad4mModel {
   /**
    * Hydrates an instance from an array of raw links.
    *
-   * Processes properties (latest-wins semantics), collections
+   * Processes properties (latest-wins semantics), relations
    * (chronological accumulation), and timestamps/author in a single
    * pass over the links array.
    *
@@ -943,7 +939,7 @@ export class Ad4mModel {
    * @param metadata     - Model metadata from `getModelMetadata()`
    * @param perspective  - The perspective for expression resolution
    * @param requestedProperties - Optional sparse fieldset; when provided, only these
-   *                              property names are hydrated (collections are unaffected).
+   *                              property names are hydrated (relations are unaffected).
    *                              Omit or pass `undefined` to hydrate all properties.
    * @private
    */
@@ -961,7 +957,7 @@ export class Ad4mModel {
     let originalAuthor: string | null = null;
     let latestAuthor: string | null = null;
 
-    // Build predicate→propName and predicate→collName lookup maps for O(1) matching
+    // Build predicate→propName and predicate→relName lookup maps for O(1) matching
     // When requestedProperties is provided, only include those properties in the map
     const propFilter = requestedProperties && requestedProperties.length > 0
       ? new Set(requestedProperties)
@@ -974,17 +970,17 @@ export class Ad4mModel {
       predToProperty.set(propMeta.predicate, [propName, propMeta]);
     }
 
-    const predToCollection = new Map<string, [string, RelationMetadata]>();
-    for (const [collName, collMeta] of Object.entries(metadata.relations)) {
-      if (collMeta.getter) continue;
-      predToCollection.set(collMeta.predicate, [collName, collMeta]);
+    const predToRelation = new Map<string, [string, RelationMetadata]>();
+    for (const [relName, relMeta] of Object.entries(metadata.relations)) {
+      if (relMeta.getter) continue;
+      predToRelation.set(relMeta.predicate, [relName, relMeta]);
     }
 
     // Per-property accumulator: track all matching targets so we can pick the last (latest-wins)
     const propertyLatest = new Map<string, { target: string; timestamp?: string | number }>();
 
-    // Per-collection accumulator: ordered targets with metadata for sorting
-    const collectionAccum = new Map<string, Array<{ target: string; timestamp: string | number; index: number }>>();
+    // Per-relation accumulator: ordered targets with metadata for sorting
+    const relationAccum = new Map<string, Array<{ target: string; timestamp: string | number; index: number }>>();
 
     // Single pass over all links
     for (let i = 0; i < links.length; i++) {
@@ -1013,14 +1009,14 @@ export class Ad4mModel {
         continue;
       }
 
-      // Collection match — accumulate all
-      const collEntry = predToCollection.get(predicate);
-      if (collEntry) {
-        const [collName] = collEntry;
-        let arr = collectionAccum.get(collName);
+      // Relation match — accumulate all
+      const relEntry = predToRelation.get(predicate);
+      if (relEntry) {
+        const [relName] = relEntry;
+        let arr = relationAccum.get(relName);
         if (!arr) {
           arr = [];
-          collectionAccum.set(collName, arr);
+          relationAccum.set(relName, arr);
         }
         arr.push({ target, timestamp: timestamp ?? '', index: i });
       }
@@ -1040,13 +1036,13 @@ export class Ad4mModel {
       );
     }
 
-    // Resolve collections: sort by timestamp (stable via index tiebreaker), filter empties
-    for (const [collName, items] of collectionAccum) {
+    // Resolve relations: sort by timestamp (stable via index tiebreaker), filter empties
+    for (const [relName, items] of relationAccum) {
       items.sort((a, b) => {
         const cmp = String(a.timestamp).localeCompare(String(b.timestamp));
         return cmp !== 0 ? cmp : a.index - b.index;
       });
-      instance[collName] = items
+      instance[relName] = items
         .map(i => i.target)
         .filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None');
     }
@@ -1147,7 +1143,7 @@ export class Ad4mModel {
 
   /**
    * Captures a shallow snapshot of the instance's current property and
-   * collection values.  Called automatically after hydration (`get()`,
+   * relation values.  Called automatically after hydration (`get()`,
    * query results).  The snapshot is used by `isDirty()`,
    * `changedFields()`, and by `update()` to skip unchanged fields.
    * @private
@@ -1196,18 +1192,18 @@ export class Ad4mModel {
     //   null / {} → none
     if (includedRelations === undefined) {
       // Full snapshot — e.g. after getData() / create()
-      for (const collName of Object.keys(metadata.relations)) {
-        const val = (this as any)[collName];
-        snap[collName] = Ad4mModel.normalizeValue(
+      for (const relName of Object.keys(metadata.relations)) {
+        const val = (this as any)[relName];
+        snap[relName] = Ad4mModel.normalizeValue(
           Array.isArray(val) ? [...val] : val,
         );
       }
     } else if (includedRelations && Object.keys(includedRelations).length > 0) {
       // Partial snapshot — only the explicitly included relations
-      for (const collName of Object.keys(includedRelations)) {
-        if (collName in metadata.relations) {
-          const val = (this as any)[collName];
-          snap[collName] = Ad4mModel.normalizeValue(
+      for (const relName of Object.keys(includedRelations)) {
+        if (relName in metadata.relations) {
+          const val = (this as any)[relName];
+          snap[relName] = Ad4mModel.normalizeValue(
             Array.isArray(val) ? [...val] : val,
           );
         }
@@ -1219,7 +1215,7 @@ export class Ad4mModel {
   }
 
   /**
-   * Returns `true` if any tracked property or collection has changed
+   * Returns `true` if any tracked property or relation has changed
    * since the last hydration (or since `takeSnapshot()` was last called).
    *
    * Always returns `true` if no snapshot exists (e.g. a freshly
@@ -1239,7 +1235,7 @@ export class Ad4mModel {
   }
 
   /**
-   * Returns the names of properties/collections that differ from the
+   * Returns the names of properties/relations that differ from the
    * snapshot taken at the last hydration.
    *
    * Returns **all** field names if no snapshot exists.
@@ -1281,7 +1277,7 @@ export class Ad4mModel {
 
       if (Array.isArray(current) || Array.isArray(original)) {
         // Order-insensitive comparison (sorted) so reordering alone
-        // doesn't mark a collection as dirty.
+        // doesn't mark a relation as dirty.
         const a = Array.isArray(current) ? [...current].sort() : [];
         const b = Array.isArray(original) ? [...original].sort() : [];
         if (a.length !== b.length || a.some((v: any, i: number) => v !== b[i])) {
@@ -1295,7 +1291,7 @@ export class Ad4mModel {
   }
 
   private async getData(opts?: GetOptions) {
-    // Builds an object with the author, timestamp, all properties, & all collections on the Ad4mModel and saves it to the instance
+    // Builds an object with the author, timestamp, all properties, & all relations on the Ad4mModel and saves it to the instance
     // Use SurrealDB for data queries
     try {
       const ctor = this.constructor as typeof Ad4mModel;
@@ -1312,7 +1308,7 @@ export class Ad4mModel {
       const links = await this._perspective.querySurrealDB(linksQuery);
 
       if (links && links.length > 0) {
-        // Core hydration: properties (latest-wins), collections, timestamps/author
+        // Core hydration: properties (latest-wins), relations, timestamps/author
         const requestedProperties = opts?.properties && opts.properties.length > 0 ? opts.properties : undefined;
         await ctor.hydrateFromLinks(this, links, metadata, this._perspective, requestedProperties);
       }
@@ -1383,7 +1379,7 @@ export class Ad4mModel {
   }
 
   /**
-   * Evaluates custom SurrealQL getters for properties and collections on a specific instance.
+   * Evaluates custom SurrealQL getters for properties and relations on a specific instance.
    * @private
    */
   private static async evaluateCustomGettersForInstance(
@@ -1412,25 +1408,25 @@ export class Ad4mModel {
       }
     }
 
-    // Evaluate collection getters
-    for (const [collName, collMeta] of Object.entries(metadata.collections)) {
-      if ((collMeta as any).getter) {
+    // Evaluate relation getters
+    for (const [relName, relMeta] of Object.entries(metadata.relations)) {
+      if ((relMeta as any).getter) {
         try {
           // Replace 'Base' placeholder with actual base expression
-          const query = (collMeta as any).getter.replace(/Base/g, safeBaseExpression);
+          const query = (relMeta as any).getter.replace(/Base/g, safeBaseExpression);
           // Query from node table to have graph traversal context
           const result = await perspective.querySurrealDB(
             `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`
           );
           if (result && result.length > 0 && result[0].value !== undefined && result[0].value !== null) {
-            // Filter out 'None' from collection results
+            // Filter out 'None' from relation results
             const value = result[0].value;
-            instance[collName] = Array.isArray(value) 
+            instance[relName] = Array.isArray(value) 
               ? value.filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None')
               : value;
           }
         } catch (error) {
-          console.warn(`Failed to evaluate getter for ${collName}:`, error);
+          console.warn(`Failed to evaluate getter for ${relName}:`, error);
         }
       }
     }
@@ -1565,7 +1561,7 @@ export class Ad4mModel {
       // Collect all unique URIs across all instances for batch-friendly lookup.
       // IMPORTANT: We cache each instance's raw value NOW (before the async
       // findAll) so that concurrent getData() calls on the same instance can't
-      // overwrite the relation field between the uriSet collection and the
+      // overwrite the relation field between the uriSet relation and the
       // post-await assignment loop.  Without this cache, a concurrent call
       // can replace the raw URI strings with hydrated model objects, causing
       // the `typeof v === 'string'` check to fail and the array to end up empty.
@@ -1693,18 +1689,18 @@ export class Ad4mModel {
    * 
    * The generated query uses a CTE (Common Table Expression) pattern:
    * 1. First, identify candidate base expressions by filtering links based on where conditions
-   * 2. Then, for each candidate base, resolve properties and collections via subqueries
+   * 2. Then, for each candidate base, resolve properties and relations via subqueries
    * 3. Finally, apply ordering, pagination (LIMIT/START) at the SQL level
    * 
    * Key architectural notes:
    * - SurrealDB stores only raw links (source, predicate, target, author, timestamp)
    * - No SDNA knowledge at the database level
    * - Properties are resolved via subqueries that look for links with specific predicates
-   * - Collections are similar but return multiple values instead of one
+   * - Relations are similar but return multiple values instead of one
    * - Special fields (base, author, timestamp) are accessed directly, not via subqueries
    * 
    * @param perspective - The perspective to query (used for metadata extraction)
-   * @param query - Query parameters (where, order, limit, offset, properties, collections)
+   * @param query - Query parameters (where, order, limit, offset, properties, relations)
    * @returns Complete SurrealQL query string ready for execution
    * 
    * @example
@@ -1736,6 +1732,11 @@ export class Ad4mModel {
     // Add filters for required properties
     for (const [propName, propMeta] of Object.entries(metadata.properties)) {
       if (propMeta.required) {
+        // Skip properties with a getter — they are computed dynamically
+        // and may not have a stored link with their predicate, so requiring their
+        // presence would wrongly exclude valid model instances.
+        if (propMeta.getter) continue;
+
         // For flag properties, also filter by the target value
         if (propMeta.flag && propMeta.initial) {
           graphTraversalFilters.push(
@@ -2108,26 +2109,26 @@ WHERE ${whereConditions.join(' AND ')}
    * Builds the SELECT fields for SurrealQL queries.
    * 
    * @description
-   * Generates the field list for the SELECT clause, resolving properties and collections
+   * Generates the field list for the SELECT clause, resolving properties and relations
    * via subqueries. Each property is fetched with a subquery that finds the link with the
-   * appropriate predicate and returns its target. Collections are similar but don't use LIMIT 1.
+   * appropriate predicate and returns its target. Relations are similar but don't use LIMIT 1.
    * 
    * Field types:
    * - Properties: `(SELECT VALUE target FROM link WHERE source = $parent.base AND predicate = 'X' LIMIT 1) AS propName`
-   * - Collections: `(SELECT VALUE target FROM link WHERE source = $parent.base AND predicate = 'X') AS collName`
+   * - Relations: `(SELECT VALUE target FROM link WHERE source = $parent.base AND predicate = 'X') AS relName`
    * - Author/Timestamp: Always included to provide metadata about each instance
    * 
-   * If properties or collections arrays are provided, only those fields are included.
-   * Otherwise, all properties/collections from metadata are included.
+   * If properties or relations arrays are provided, only those fields are included.
+   * Otherwise, all properties/relations from metadata are included.
    * 
-   * @param metadata - Model metadata containing property and collection predicates
+   * @param metadata - Model metadata containing property and relation predicates
    * @param properties - Optional array of property names to include (default: all)
-   * @param collections - Optional array of collection names to include (default: all)
+   * @param relations - Optional array of relation names to include (default: all)
    * @returns Comma-separated SELECT field list
    * 
    * @private
    */
-  private static buildSurrealSelectFields(metadata: ModelMetadata, properties?: string[], collections?: string[]): string {
+  private static buildSurrealSelectFields(metadata: ModelMetadata, properties?: string[], relations?: string[]): string {
     const fields: string[] = [];
     
     // Determine properties to fetch
@@ -2141,15 +2142,15 @@ WHERE ${whereConditions.join(' AND ')}
       fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}' LIMIT 1) AS ${propName}`);
     }
     
-    // Determine collections to fetch
-    const collsToFetch = collections || Object.keys(metadata.collections);
-    for (const collName of collsToFetch) {
-      const collMeta = metadata.collections[collName];
-      if (!collMeta) continue; // Skip if not found
+    // Determine relations to fetch
+    const relsToFetch = relations || Object.keys(metadata.relations);
+    for (const relName of relsToFetch) {
+      const relMeta = metadata.relations[relName];
+      if (!relMeta) continue; // Skip if not found
       
       // Reference source directly since we're selecting from link table
-      const escapedPredicate = escapeSurrealString(collMeta.predicate);
-      fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}') AS ${collName}`);
+      const escapedPredicate = escapeSurrealString(relMeta.predicate);
+      fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}') AS ${relName}`);
     }
     
     // Always add author and timestamp fields
@@ -2166,7 +2167,7 @@ WHERE ${whereConditions.join(' AND ')}
    * 
    * @private
    */
-  private static buildSurrealSelectFieldsWithAggregation(metadata: ModelMetadata, properties?: string[], collections?: string[]): string {
+  private static buildSurrealSelectFieldsWithAggregation(metadata: ModelMetadata, properties?: string[], relations?: string[]): string {
     const fields: string[] = [];
     
     // Determine properties to fetch
@@ -2180,15 +2181,15 @@ WHERE ${whereConditions.join(' AND ')}
       fields.push(`array::first(target[WHERE predicate = '${escapedPredicate}']) AS ${propName}`);
     }
     
-    // Determine collections to fetch
-    const collsToFetch = collections || Object.keys(metadata.collections);
-    for (const collName of collsToFetch) {
-      const collMeta = metadata.collections[collName];
-      if (!collMeta) continue; // Skip if not found
+    // Determine relations to fetch
+    const relsToFetch = relations || Object.keys(metadata.relations);
+    for (const relName of relsToFetch) {
+      const relMeta = metadata.relations[relName];
+      if (!relMeta) continue; // Skip if not found
       
       // Use array filtering to get all target values for this predicate
-      const escapedPredicate = escapeSurrealString(collMeta.predicate);
-      fields.push(`target[WHERE predicate = '${escapedPredicate}'] AS ${collName}`);
+      const escapedPredicate = escapeSurrealString(relMeta.predicate);
+      fields.push(`target[WHERE predicate = '${escapedPredicate}'] AS ${relName}`);
     }
     
     // Always add author and timestamp fields
@@ -2276,7 +2277,7 @@ WHERE ${whereConditions.join(' AND ')}
     // (including eager-loaded relations).
     // When `include` is specified, only snapshot those relations.
     // Otherwise snapshot ALL fields (properties + relations) since
-    // hydrateFromLinks populates collections with stable raw IDs.
+    // hydrateFromLinks populates relations with stable raw IDs.
     const snapshotRelations = query.include;
     for (const inst of instances) {
       (inst as Ad4mModel).takeSnapshot(snapshotRelations);
@@ -2339,9 +2340,9 @@ WHERE ${whereConditions.join(' AND ')}
               delete instance[propName];
             }
           }
-          for (const collName of Object.keys(metadata.relations)) {
-            if (!requested.has(collName) && !(query.include && collName in query.include)) {
-              delete instance[collName];
+          for (const relName of Object.keys(metadata.relations)) {
+            if (!requested.has(relName) && !(query.include && relName in query.include)) {
+              delete instance[relName];
             }
           }
           // Also strip metadata fields unless explicitly requested
@@ -2490,7 +2491,7 @@ WHERE ${whereConditions.join(' AND ')}
     // (including eager-loaded relations).
     // When `include` is specified, only snapshot those relations.
     // Otherwise snapshot ALL fields (properties + relations) since
-    // hydrateFromLinks populates collections with stable raw IDs —
+    // hydrateFromLinks populates relations with stable raw IDs —
     // this ensures push-to-array + save() correctly detects dirty relations.
     const snapshotRelations = query.include;
     for (const inst of paginatedInstances) {
@@ -2912,7 +2913,7 @@ WHERE ${whereConditions.join(' AND ')}
    * Saves the model instance to the perspective.
    *
    * **New instances** (no snapshot yet): creates the subject via
-   * `createSubject` with initial scalar values, then sets collections
+   * `createSubject` with initial scalar values, then sets relations
    * via `innerUpdate`.
    *
    * **Existing instances** (snapshot present, i.e. fetched via `get()`
@@ -2957,7 +2958,7 @@ WHERE ${whereConditions.join(' AND ')}
     }
     
 
-    // First filter out the properties that are not collections (arrays)
+    // First filter out the properties that are not relations (arrays)
     const initialValues = {};
     for (const [key, value] of Object.entries(this)) {
       if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
@@ -2976,7 +2977,7 @@ WHERE ${whereConditions.join(' AND ')}
       batchId
     );
 
-    // Set collections
+    // Set relations
     await this.innerUpdate(false, batchId)
 
     // If we got a batchId passed in, we let the caller decide when to commit.
@@ -3078,7 +3079,7 @@ WHERE ${whereConditions.join(' AND ')}
   }
 
   /**
-   * Gets the model instance with all properties and collections populated.
+   * Gets the model instance with all properties and relations populated.
    *
    * @param optsOrInclude - Optional hydration options. Accepts two forms:
    *   - `GetOptions` wrapper: `{ include: { comments: true }, properties: ['title'] }`
@@ -3473,9 +3474,9 @@ WHERE ${whereConditions.join(' AND ')}
     (DynamicModelClass as any).className = options.name;
     (DynamicModelClass.prototype as any).className = options.name;
     
-    // Generate properties and collections metadata
+    // Generate properties and relations metadata
     const properties: any = {};
-    const collections: any = {};
+    const relations: any = {};
     
     if (schema.properties) {
       for (const [propertyName, propertySchema] of Object.entries(schema.properties)) {
@@ -3485,9 +3486,9 @@ WHERE ${whereConditions.join(' AND ')}
         const isArray = isArrayType(propertySchema);
         
         if (isArray) {
-          // Handle arrays as collections
-          // Store the singular form as the collection key since SDNA generation expects singular
-          collections[propertyName] = {
+          // Handle arrays as relations
+          // Store the singular form as the relation key since SDNA generation expects singular
+          relations[propertyName] = {
             through: predicate,
             local: this.getPropertyOption(propertyName, propertySchema, options, 'local')
           };
@@ -3499,7 +3500,7 @@ WHERE ${whereConditions.join(' AND ')}
             value: []
           });
           
-          // Add collection methods
+          // Add relation methods
           const adderName = `add${capitalize(propertyName)}`;
           const removerName = `remove${capitalize(propertyName)}`;
           const setterName = `set${capitalize(propertyName)}`;
@@ -3587,7 +3588,7 @@ WHERE ${whereConditions.join(' AND ')}
     }
     
     // Validate that at least one property has an initial value (needed for valid SDNA constructor)
-    // Collections don't create constructor actions, only properties with initial values do
+    // Relations don't create constructor actions, only properties with initial values do
     const hasPropertyWithInitial = Object.values(properties).some((prop: any) => prop.initial);
     
     if (!hasPropertyWithInitial) {
@@ -3629,12 +3630,12 @@ WHERE ${whereConditions.join(' AND ')}
     for (const [propName, propMeta] of Object.entries(properties)) {
       setPropertyRegistryEntry(DynamicModelClass, propName, propMeta as any);
     }
-    for (const [collName, collMeta] of Object.entries(collections)) {
-      setRelationRegistryEntry(DynamicModelClass, collName, {
-        predicate: (collMeta as any).through || "",
+    for (const [relName, relMeta] of Object.entries(relations)) {
+      setRelationRegistryEntry(DynamicModelClass, relName, {
+        predicate: (relMeta as any).through || "",
         kind: 'hasMany',
-        ...(( collMeta as any).getter !== undefined && { getter: (collMeta as any).getter }),
-        ...(( collMeta as any).local !== undefined && { local: (collMeta as any).local }),
+        ...(( relMeta as any).getter !== undefined && { getter: (relMeta as any).getter }),
+        ...(( relMeta as any).local !== undefined && { local: (relMeta as any).local }),
       });
     }
     
@@ -4431,13 +4432,13 @@ function buildPropertyClause(modelPredicateName: string, prop: PropertyMetadata)
   return `${clauseName}(X, Value) :- triple(X, '${prop.predicate}', Value).`;
 }
 
-function buildCollectionClause(modelPredicateName: string, coll: RelationMetadata): string | null {
-  if (!coll.predicate) return null;
-  const clauseName = `${modelPredicateName}_${toSnakeCase(coll.name)}`;
-  if (coll.direction === "reverse") {
-    return `${clauseName}(X, Values) :- findall(V, triple(V, '${coll.predicate}', X), Values).`;
+function buildRelationClause(modelPredicateName: string, relation: RelationMetadata): string | null {
+  if (!relation.predicate) return null;
+  const clauseName = `${modelPredicateName}_${toSnakeCase(relation.name)}`;
+  if (relation.direction === "reverse") {
+    return `${clauseName}(X, Values) :- findall(V, triple(V, '${relation.predicate}', X), Values).`;
   }
-  return `${clauseName}(X, Values) :- findall(V, triple(X, '${coll.predicate}', V), Values).`;
+  return `${clauseName}(X, Values) :- findall(V, triple(X, '${relation.predicate}', V), Values).`;
 }
 
 /**
@@ -4450,7 +4451,7 @@ function buildCollectionClause(modelPredicateName: string, coll: RelationMetadat
  * The generated predicates are:
  * - **Instance recognizer** — `modelName(X)` — matches instances of the model
  * - **Property getters** — `modelName_propName(X, Value)` — one per property
- * - **Collection getters** — `modelName_collName(X, Values)` — one per collection
+ * - **Relation getters** — `modelName_relName(X, Values)` — one per relation
  *
  * @example
  * ```typescript
@@ -4494,13 +4495,13 @@ export function generatePrologFacts(ModelClass: typeof Ad4mModel): string {
   }
 
   // Relation getters
-  const collClauses = Object.values(metadata.relations)
-    .map((c) => buildCollectionClause(predicateName, c))
+  const relClauses = Object.values(metadata.relations)
+    .map((c) => buildRelationClause(predicateName, c))
     .filter((c): c is string => c !== null);
-  if (collClauses.length > 0) {
+  if (relClauses.length > 0) {
     lines.push("");
     lines.push(`% Relation getters`);
-    lines.push(...collClauses);
+    lines.push(...relClauses);
   }
 
   return lines.join("\n");

@@ -31,41 +31,41 @@ export function pluralToSingular(plural: string): string {
 }
 
 // e.g. "comments" -> "addComment"
-export function collectionToAdderName(collection: string): string {
-    return `add${capitalize(pluralToSingular(collection))}`
+export function relationToAdderName(relation: string): string {
+    return `add${capitalize(pluralToSingular(relation))}`
 }
 
 // e.g. "addComments" -> "comments"
-export function collectionAdderToName(adderName: string): string {
-    // Extract the collection name after "add" and lowercase first char
-    // The method name already has the plural collection name (e.g., "addComments")
-    let collectionName = adderName.substring(3)
-    return collectionName.charAt(0).toLowerCase() + collectionName.slice(1)
+export function relationAdderToName(adderName: string): string {
+    // Extract the relation name after "add" and lowercase first char
+    // The method name already has the plural relation name (e.g., "addComments")
+    let relationName = adderName.substring(3)
+    return relationName.charAt(0).toLowerCase() + relationName.slice(1)
 }
 
 // e.g. "comments" -> "removeComment"
-export function collectionToRemoverName(collection: string): string {
-    return `remove${capitalize(pluralToSingular(collection))}`
+export function relationToRemoverName(relation: string): string {
+    return `remove${capitalize(pluralToSingular(relation))}`
 }
 
 // e.g. "removeComments" -> "comments"  
-export function collectionRemoverToName(removerName: string): string {
-    // Extract the collection name after "remove" and lowercase first char
-    // The method name already has the plural collection name (e.g., "removeComments")
-    let collectionName = removerName.substring(6)
-    return collectionName.charAt(0).toLowerCase() + collectionName.slice(1)
+export function relationRemoverToName(removerName: string): string {
+    // Extract the relation name after "remove" and lowercase first char
+    // The method name already has the plural relation name (e.g., "removeComments")
+    let relationName = removerName.substring(6)
+    return relationName.charAt(0).toLowerCase() + relationName.slice(1)
 }
 
-export function collectionSetterToName(setterName: string): string {
-    // Extract the collection name after "set" and lowercase first char
-    // The method name already has the plural collection name (e.g., "setComments")
-    let collectionName = setterName.substring(3)
-    return collectionName.charAt(0).toLowerCase() + collectionName.slice(1)
+export function relationSetterToName(setterName: string): string {
+    // Extract the relation name after "set" and lowercase first char
+    // The method name already has the plural relation name (e.g., "setComments")
+    let relationName = setterName.substring(3)
+    return relationName.charAt(0).toLowerCase() + relationName.slice(1)
 }
 
 // e.g. "comments" -> "setComments"
-export function collectionToSetterName(collection: string): string {
-    return `set${capitalize(collection)}`
+export function relationToSetterName(relation: string): string {
+    return `set${capitalize(relation)}`
 }
 
 

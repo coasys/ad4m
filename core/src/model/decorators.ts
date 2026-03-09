@@ -18,7 +18,7 @@ export interface PropertyMetadataEntry extends PropertyOptions {
 /** Metadata stored for each relation via @HasMany / @HasOne / @BelongsToOne / @BelongsToMany */
 export interface RelationMetadataEntry {
     predicate: string;
-    /** Target model class thunk. Optional for untyped string collections. */
+    /** Target model class thunk. Optional for untyped string relations. */
     target?: () => Ad4mModelLike;
     kind: 'hasMany' | 'hasOne' | 'belongsToOne' | 'belongsToMany';
     /**
@@ -405,8 +405,8 @@ export interface ModelConfig {
  * 
  * This decorator:
  * - Registers the class with a unique name in the AD4M system
- * - Generates the necessary SDNA code for the model's properties and collections
- * - Enables the use of other model decorators (@Property, @Collection, etc.)
+ * - Generates the necessary SDNA code for the model's properties and relations
+ * - Enables the use of other model decorators (@Property, @HasMany, etc.)
  * - Provides static query methods through the Ad4mModel base class
  * 
  * @example
@@ -419,7 +419,7 @@ export interface ModelConfig {
  *   })
  *   name: string = "";
  * 
- *   @Collection({ through: "recipe://ingredient" })
+ *   @HasMany({ through: "recipe://ingredient" })
  *   ingredients: string[] = [];
  * 
  *   // Static query methods from Ad4mModel:
@@ -542,20 +542,20 @@ export function Model(opts: ModelConfig) {
                 }
             }
 
-            let collectionsCode = []
+            let relationsCode = []
             const allRelationsMeta = getRelationsMetadata(target)
-            const collections = Object.fromEntries(
+            const relations = Object.fromEntries(
                 Object.entries(allRelationsMeta).filter(([, r]) => r.kind === 'hasMany' || r.kind === 'belongsToMany')
             )
-            for(let collection in collections) {
-                let collectionCode = `collection(${uuid}, "${collection}").\n`
+            for(let relation in relations) {
+                let relationCode = `collection(${uuid}, "${relation}").\n`
 
-                let { predicate: through, local} = collections[collection]
+                let { predicate: through, local} = relations[relation]
 
                 if(through) {
-                    collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
+                    relationCode += `collection_getter(${uuid}, Base, "${relation}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
 
-                    let collectionAdderAction = [{
+                    let relationAdderAction = [{
                         action: "addLink",
                         source: "this",
                         predicate: through,
@@ -563,26 +563,26 @@ export function Model(opts: ModelConfig) {
                         ...(local && { local: true })
                     }]
 
-                    let collectionRemoverAction = [{
+                    let relationRemoverAction = [{
                         action: "removeLink",
                         source: "this",
                         predicate: through,
                         target: "value",
                     }]
 
-                    let collectionSetterAction = [{
+                    let relationSetterAction = [{
                         action: "collectionSetter",
                         source: "this",
                         predicate: through,
                         target: "value",
                         ...(local && { local: true })
                     }]
-                    collectionCode += `collection_adder(${uuid}, "${collection}", '${stringifyObjectLiteral(collectionAdderAction)}').\n`
-                    collectionCode += `collection_remover(${uuid}, "${collection}", '${stringifyObjectLiteral(collectionRemoverAction)}').\n`
-                    collectionCode += `collection_setter(${uuid}, "${collection}", '${stringifyObjectLiteral(collectionSetterAction)}').\n`
+                    relationCode += `collection_adder(${uuid}, "${relation}", '${stringifyObjectLiteral(relationAdderAction)}').\n`
+                    relationCode += `collection_remover(${uuid}, "${relation}", '${stringifyObjectLiteral(relationRemoverAction)}').\n`
+                    relationCode += `collection_setter(${uuid}, "${relation}", '${stringifyObjectLiteral(relationSetterAction)}').\n`
                 }
 
-                collectionsCode.push(collectionCode)
+                relationsCode.push(relationCode)
             }
 
             let subjectContructorJSONString = stringifyObjectLiteral(constructorActions)
@@ -596,7 +596,7 @@ export function Model(opts: ModelConfig) {
             sdna += "\n"
             sdna += propertiesCode.join("\n")
             sdna += "\n"
-            sdna += collectionsCode.join("\n")
+            sdna += relationsCode.join("\n")
 
             return {
                 sdna,
@@ -609,11 +609,11 @@ export function Model(opts: ModelConfig) {
             const subjectName = opts.name;
             const obj = target.prototype;
 
-            // Determine namespace from first property or collection, or use default
+            // Determine namespace from first property or relation, or use default
             let namespace = "ad4m://";
             const properties = getPropertiesMetadata(target);
             const allRelationsMeta2 = getRelationsMetadata(target);
-            const collections = Object.fromEntries(
+            const relations = Object.fromEntries(
                 Object.entries(allRelationsMeta2).filter(([, r]) => r.kind === 'hasMany' || r.kind === 'belongsToMany')
             );
             
@@ -628,11 +628,11 @@ export function Model(opts: ModelConfig) {
                     }
                 }
             } 
-            // Fall back to collections if no properties
-            else if (Object.keys(collections).length > 0) {
-                const firstColl = collections[Object.keys(collections)[0]];
-                if (firstColl.predicate) {
-                    const match = firstColl.predicate.match(/^([^:]+:\/\/)/);
+            // Fall back to relations if no properties
+            else if (Object.keys(relations).length > 0) {
+                const firstRel = relations[Object.keys(relations)[0]];
+                if (firstRel.predicate) {
+                    const match = firstRel.predicate.match(/^([^:]+:\/\/)/);
                     if (match) {
                         namespace = match[1];
                     }
@@ -697,7 +697,7 @@ export function Model(opts: ModelConfig) {
                 }
 
                 // Single-valued properties get maxCount 1
-                // (collections are handled separately below)
+                // (relations are handled separately below)
                 propShape.maxCount = 1;
 
                 // Flag properties have fixed value
@@ -767,48 +767,48 @@ export function Model(opts: ModelConfig) {
                 shape.addProperty(propShape);
             }
             
-            // Convert collections to SHACL property shapes
-            // (collections variable already declared above for namespace inference)
-            for (const collName in collections) {
-                const collMeta = collections[collName];
+            // Convert relations to SHACL property shapes
+            // (relations variable already declared above for namespace inference)
+            for (const relName in relations) {
+                const relMeta = relations[relName];
                 
-                if (!collMeta.predicate) continue;
+                if (!relMeta.predicate) continue;
                 
-                const collShape: SHACLPropertyShape = {
-                    name: collName, // Collection name for generating named URIs
-                    path: collMeta.predicate,
-                    // Collections have no maxCount (unlimited)
+                const relShape: SHACLPropertyShape = {
+                    name: relName, // Relation name for generating named URIs
+                    path: relMeta.predicate,
+                    // Relations have no maxCount (unlimited)
                     // minCount defaults to 0 (optional)
                 };
                 
-                // Determine node kind — collections typically contain IRIs
-                collShape.nodeKind = 'IRI';
+                // Determine node kind — relations typically contain IRIs
+                relShape.nodeKind = 'IRI';
                 
                 // AD4M-specific metadata
-                if (collMeta.local !== undefined) {
-                    collShape.local = collMeta.local;
+                if (relMeta.local !== undefined) {
+                    relShape.local = relMeta.local;
                 }
 
-                // === Extract Collection Actions (adder/remover) ===
-                // Adder action - adds a link to the collection
-                collShape.adder = [{
+                // === Extract Relation Actions (adder/remover) ===
+                // Adder action - adds a link to the relation
+                relShape.adder = [{
                     action: "addLink",
                     source: "this",
-                    predicate: collMeta.predicate,
+                    predicate: relMeta.predicate,
                     target: "value",
-                    ...(collMeta.local && { local: true })
+                    ...(relMeta.local && { local: true })
                 }];
 
-                // Remover action - removes a link from the collection
-                collShape.remover = [{
+                // Remover action - removes a link from the relation
+                relShape.remover = [{
                     action: "removeLink",
                     source: "this",
-                    predicate: collMeta.predicate,
+                    predicate: relMeta.predicate,
                     target: "value",
-                    ...(collMeta.local && { local: true })
+                    ...(relMeta.local && { local: true })
                 }];
 
-                shape.addProperty(collShape);
+                shape.addProperty(relShape);
             }
 
             // Set constructor and destructor actions on the shape
@@ -968,10 +968,10 @@ export function ReadOnly(opts: PropertyOptions) {
 export interface RelationOptions {
     /** The predicate URI used to link the two models */
     through: string;
-    /** The target model class (use a thunk to avoid circular-dependency issues). Optional for untyped string collections. */
+    /** The target model class (use a thunk to avoid circular-dependency issues). Optional for untyped string relations. */
     target?: () => Ad4mModelLike;
     /**
-     * Custom SurrealQL getter to resolve the collection values. Use this for custom graph traversals.
+     * Custom SurrealQL getter to resolve the relation values. Use this for custom graph traversals.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      * Example: "(<-link[WHERE predicate = 'flux://has_reply'].out.uri)"
      */
@@ -1029,7 +1029,7 @@ function resolveRelationArgs(
  * @description
  * Declares that the decorated property is an array of related model instances.
  * Under the hood it registers the relation in the relation registry and also
- * creates the corresponding `@Collection` entry so that the SDNA / SHACL
+ * creates the corresponding relation entry so that the SDNA / SHACL
  * generators continue to emit the correct subject-class code.
  *
  * Supports two calling conventions:
@@ -1071,17 +1071,17 @@ export function HasMany(
         };
 
         // Add prototype methods for add/remove/set
-        const collKey = key as string;
-        (target as any)[`add${capitalize(collKey)}`] = async function(this: any, arg: any) {
-            return (this as any).addRelationValue(collKey, arg);
+        const relKey = key as string;
+        (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any) {
+            return (this as any).addRelationValue(relKey, arg);
         };
-        (target as any)[`remove${capitalize(collKey)}`] = async function(this: any, arg: any) {
-            return (this as any).removeRelationValue(collKey, arg);
+        (target as any)[`remove${capitalize(relKey)}`] = async function(this: any, arg: any) {
+            return (this as any).removeRelationValue(relKey, arg);
         };
-        (target as any)[`set${capitalize(collKey)}`] = async function(this: any, arg: any) {
-            return (this as any).setRelationValues(collKey, arg);
+        (target as any)[`set${capitalize(relKey)}`] = async function(this: any, arg: any) {
+            return (this as any).setRelationValues(relKey, arg);
         };
-        Object.defineProperty(target, collKey, { configurable: true, writable: true });
+        Object.defineProperty(target, relKey, { configurable: true, writable: true });
     };
 }
 
@@ -1136,15 +1136,15 @@ export function HasOne(
         })(target, key);
 
         // Add prototype methods for add/remove/set (mirroring @HasMany)
-        const collKey = key as string;
-        (target as any)[`add${capitalize(collKey)}`] = async function(this: any, arg: any) {
-            return (this as any).addRelationValue(collKey, arg);
+        const relKey = key as string;
+        (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any) {
+            return (this as any).addRelationValue(relKey, arg);
         };
-        (target as any)[`remove${capitalize(collKey)}`] = async function(this: any, arg: any) {
-            return (this as any).removeRelationValue(collKey, arg);
+        (target as any)[`remove${capitalize(relKey)}`] = async function(this: any, arg: any) {
+            return (this as any).removeRelationValue(relKey, arg);
         };
-        (target as any)[`set${capitalize(collKey)}`] = async function(this: any, arg: any) {
-            return (this as any).setRelationValues(collKey, arg);
+        (target as any)[`set${capitalize(relKey)}`] = async function(this: any, arg: any) {
+            return (this as any).setRelationValues(relKey, arg);
         };
     };
 }
@@ -1208,7 +1208,7 @@ export function BelongsToOne(
  *
  * @description
  * Declares the non-owning (inverse) side of a many-to-many relationship.
- * The property is a read-only collection since the owning side manages links.
+ * The property is a read-only relation since the owning side manages links.
  *
  * Supports two calling conventions:
  * ```typescript
@@ -1246,8 +1246,8 @@ export function BelongsToMany(
 
         // @BelongsToMany is the inverse/read-only side — do NOT generate add*/remove*/set*
         // prototype methods.  Mutation must go through the owning side's @HasMany decorator.
-        const collKey = key as string;
-        Object.defineProperty(target, collKey, { configurable: true, writable: true });
+        const relKey = key as string;
+        Object.defineProperty(target, relKey, { configurable: true, writable: true });
     };
 }
 

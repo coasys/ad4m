@@ -10,7 +10,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
     
     expect(metadata.className).toBe("SimpleModel");
     expect(metadata.properties).toEqual({});
-    expect(metadata.collections).toEqual({});
+    expect(metadata.relations).toEqual({});
   });
 
   it("should extract property metadata with all fields", () => {
@@ -55,9 +55,9 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.type.initial).toBe("test://flag");
   });
 
-  it("should extract collection metadata with various options", () => {
-    @Model({ name: "CollectionModel" })
-    class CollectionModel extends Ad4mModel {
+  it("should extract relation metadata with various options", () => {
+    @Model({ name: "RelationModel" })
+    class RelationModel extends Ad4mModel {
       @HasMany({ through: "test://items" })
       items: string[] = [];
       
@@ -65,17 +65,17 @@ describe("Ad4mModel.getModelMetadata()", () => {
       local: string[] = [];
     }
 
-    const metadata = CollectionModel.getModelMetadata();
+    const metadata = RelationModel.getModelMetadata();
     
-    // Should have 2 collections
-    expect(Object.keys(metadata.collections)).toHaveLength(2);
+    // Should have 2 relations
+    expect(Object.keys(metadata.relations)).toHaveLength(2);
     
-    // Verify "items" collection
-    expect(metadata.collections.items.predicate).toBe("test://items");
+    // Verify "items" relation
+    expect(metadata.relations.items.predicate).toBe("test://items");
     
-    // Verify "local" collection
-    expect(metadata.collections.local.predicate).toBe("test://local");
-    expect(metadata.collections.local.local).toBe(true);
+    // Verify "local" relation
+    expect(metadata.relations.local.predicate).toBe("test://local");
+    expect(metadata.relations.local.local).toBe(true);
   });
 
   it("should extract transform function from property metadata", () => {
@@ -117,7 +117,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.computed.prologSetter).toContain("setSingleTarget");
   });
 
-  it("should handle collection with typed target relation", () => {
+  it("should handle relation with typed target relation", () => {
     @Model({ name: "Comment" })
     class Comment extends Ad4mModel {}
     
@@ -132,9 +132,9 @@ describe("Ad4mModel.getModelMetadata()", () => {
 
     const metadata = Post.getModelMetadata();
     
-    // Assert collection exists with correct predicate
-    expect(metadata.collections.comments).toBeDefined();
-    expect(metadata.collections.comments.predicate).toBe("post://comment");
+    // Assert relation exists with correct predicate
+    expect(metadata.relations.comments).toBeDefined();
+    expect(metadata.relations.comments.predicate).toBe("post://comment");
   });
 
   it("should throw error for class without @Model decorator", () => {
@@ -144,7 +144,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(() => NoDecoratorModel.getModelMetadata()).toThrow("Model class must be decorated with @Model");
   });
 
-  it("should handle complex model with mixed property and collection types", () => {
+  it("should handle complex model with mixed property and relation types", () => {
     @Model({ name: "Recipe" })
     class Recipe extends Ad4mModel {
       @Property({ through: "recipe://name", resolveLanguage: "literal" })
@@ -174,10 +174,10 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.description).toBeDefined();
     expect(metadata.properties.rating).toBeDefined();
     
-    // Assert collections has 2 entries
-    expect(Object.keys(metadata.collections)).toHaveLength(2);
-    expect(metadata.collections.ingredients).toBeDefined();
-    expect(metadata.collections.steps).toBeDefined();
+    // Assert relations has 2 entries
+    expect(Object.keys(metadata.relations)).toHaveLength(2);
+    expect(metadata.relations.ingredients).toBeDefined();
+    expect(metadata.relations.steps).toBeDefined();
     
     // Verify all metadata fields are correctly extracted
     expect(metadata.properties.name.predicate).toBe("recipe://name");
@@ -185,9 +185,9 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.description.predicate).toBe("recipe://description");
     expect(metadata.properties.rating.predicate).toBe("recipe://rating");
     expect(metadata.properties.rating.prologGetter).toBe("avg_rating(Base, Value)");
-    expect(metadata.collections.ingredients.predicate).toBe("recipe://ingredient");
-    expect(metadata.collections.steps.predicate).toBe("recipe://step");
-    expect(metadata.collections.steps.local).toBe(true);
+    expect(metadata.relations.ingredients.predicate).toBe("recipe://ingredient");
+    expect(metadata.relations.steps.predicate).toBe("recipe://step");
+    expect(metadata.relations.steps.local).toBe(true);
   });
 });
 
@@ -233,7 +233,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.properties.description.required).toBe(false);
   });
 
-  it("should extract collections from a model created via fromJSONSchema with arrays", () => {
+  it("should extract relations from a model created via fromJSONSchema with arrays", () => {
     const schema = {
       title: "Post",
       type: "object",
@@ -261,13 +261,13 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     // Verify className
     expect(metadata.className).toBe("Post");
 
-    // Verify collections are extracted
-    expect(Object.keys(metadata.collections).length).toBeGreaterThan(0);
-    expect(metadata.collections.tags).toBeDefined();
-    expect(metadata.collections.tags.predicate).toBe("post://tags");
+    // Verify relations are extracted
+    expect(Object.keys(metadata.relations).length).toBeGreaterThan(0);
+    expect(metadata.relations.tags).toBeDefined();
+    expect(metadata.relations.tags.predicate).toBe("post://tags");
 
-    expect(metadata.collections.comments).toBeDefined();
-    expect(metadata.collections.comments.predicate).toBe("post://comments");
+    expect(metadata.relations.comments).toBeDefined();
+    expect(metadata.relations.comments.predicate).toBe("post://comments");
 
     // Verify properties (should include at least title)
     expect(metadata.properties.title).toBeDefined();
@@ -393,13 +393,13 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.properties.published.predicate).toBe("article://published");
     expect(metadata.properties.published.required).toBe(true);
 
-    // Verify collections
-    expect(metadata.collections.authors).toBeDefined();
-    expect(metadata.collections.authors.predicate).toBe("article://authors");
+    // Verify relations
+    expect(metadata.relations.authors).toBeDefined();
+    expect(metadata.relations.authors.predicate).toBe("article://authors");
 
-    expect(metadata.collections.tags).toBeDefined();
-    expect(metadata.collections.tags.predicate).toBe("article://tags");
-    expect(metadata.collections.tags.local).toBe(true);
+    expect(metadata.relations.tags).toBeDefined();
+    expect(metadata.relations.tags.predicate).toBe("article://tags");
+    expect(metadata.relations.tags.local).toBe(true);
   });
 
   it("should handle models with only an auto-generated type flag", () => {
@@ -627,8 +627,8 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   });
 
   it("should select all link data for relations", async () => {
-    @Model({ name: "MultiCollectionModel" })
-    class MultiCollectionModel extends Ad4mModel {
+    @Model({ name: "MultiRelationModel" })
+    class MultiRelationModel extends Ad4mModel {
       @HasMany({ through: "test://coll1" })
       coll1: string[] = [];
 
@@ -636,7 +636,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
       coll2: string[] = [];
     }
 
-    const query = await MultiCollectionModel.queryToSurrealQL(mockPerspective, {});
+    const query = await MultiRelationModel.queryToSurrealQL(mockPerspective, {});
 
     // With array::group(), all link data is selected
     expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
