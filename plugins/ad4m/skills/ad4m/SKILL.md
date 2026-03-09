@@ -59,6 +59,16 @@ When creating any subject instance (`message_create`, etc.), you can now **omit*
 message_create(perspective_id="...", body="Hello!", parent="<channel-id>")
 ```
 
+### 7. All `{class}_create` tools support the `parent` parameter
+
+**Any** `*_create` tool (channel_create, conversation_create, app_create, message_create, etc.) can optionally take a `parent` parameter to automatically add the new instance as a child of a parent in one step:
+
+```
+[class]_create(perspective_id, expression_address?, parent=<parent-id>, ...other props)
+```
+
+This eliminates the need for a separate `add_child` call. The parent parameter is optional — if not provided, you can still call `add_child` separately.
+
 ### 7. Messages go into Channels via parent parameter (or add_child)
 
 When creating a message or other child item, you can now pass the `parent` parameter to automatically add it as a child of a channel:
@@ -72,6 +82,45 @@ This is equivalent to calling `message_create` + `add_child` in one step. The pa
 ### 8. Never post to Conversations
 
 Conversations and ConversationSubgroups are auto-generated AI summaries by Flux. **Only post messages as children of Channels.**
+
+### 8b. Creating Visible Flux Channels
+
+For a channel to appear in the Flux UI, it must be a child of `ad4m://self`. There are two types:
+
+**Conversation Channels** (like Discord/Slack channels with chat history):
+
+```
+1. channel_create(perspective_id, name="My Channel", isConversation="true", parent="ad4m://self")
+   → creates channel AND adds as child of ad4m://self in one step
+2. conversation_create(perspective_id, expression_address=<conv-id>, parent=<channel-id>)
+   → creates conversation AND adds as child of channel in one step
+3. message_create(..., parent=<channel-id>)  ← messages go into the channel
+```
+
+**Space Channels** (like Discord categories/containers):
+
+```
+1. channel_create(perspective_id, name="My Space", parent="ad4m://self")
+   → creates space AND adds as child of ad4m://self
+2. message_create(..., parent=<channel-id>)  ← messages go directly into the space
+```
+
+**Adding Chat View (Optional but recommended):**
+**ALWAYS DO THIS if a human asks you to create a channel from within a Flux channel** (they couldn't answer you in the new channel otherwise)
+To show a chat view in the channel:
+
+```
+app_create(perspective_id, expression_address=<app-id>, name="Chat", icon="chat",
+           pkg="@coasys/flux-chat-view", type="flux://has_app", parent=<channel-id>)
+   → creates app AND adds as child of channel in one step
+```
+
+**Key Rules:**
+
+- All channels MUST be children of `ad4m://self` to be visible
+- Conversation channels need a `Conversation` child AND `isConversation="true"`
+- Space channels have neither and show messages directly
+- Messages always go into the channel (via `parent` parameter or `add_child`)
 
 ### 9. Run the executor in a screen session with logging
 
@@ -257,7 +306,15 @@ message_create(
 - Use the SAME `parent` from the wake message
 - **Never** add your message to a different parent
 
-**Never use `message_set_body` after `create_subject`.** That causes a remove+re-add race condition making the message appear as "uninitialized" on other nodes.
+**Always use `message_create` with the body in initial values — never call `message_set_body` afterward.** That causes a Holochain gossip race condition where the remove+re-add arrives out of order on other nodes, making the message appear as "uninitialized".
+
+Correct pattern:
+
+```
+message_create(perspective_id, body="Your reply", parent=<channel>)
+```
+
+That's it. Do not call `message_set_body` after `message_create`.
 
 ### When to respond
 
