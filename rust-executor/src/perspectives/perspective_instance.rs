@@ -3461,7 +3461,7 @@ impl PerspectiveInstance {
     }
 
     /// Get resolve language from SHACL links
-    async fn get_resolve_language_from_shacl(
+    pub async fn get_resolve_language_from_shacl(
         &self,
         class_name: &str,
         property: &str,
@@ -3506,7 +3506,7 @@ impl PerspectiveInstance {
             .await
     }
 
-    async fn resolve_property_value(
+    pub async fn resolve_property_value(
         &self,
         class_name: &str,
         property: &str,

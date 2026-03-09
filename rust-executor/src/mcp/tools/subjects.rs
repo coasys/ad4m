@@ -507,11 +507,14 @@ impl Ad4mMcpHandler {
                     }
                 }
 
-                let target = if p.value.starts_with("literal://") || p.value.contains("://") {
-                    p.value.clone()
-                } else {
-                    Self::encode_literal(&p.value)
-                };
+                let target = Self::create_property_expression(
+                    &perspective,
+                    &p.class_name,
+                    &p.property_name,
+                    &p.value,
+                    &agent_context,
+                )
+                .await;
 
                 let link = Link {
                     source: p.expression_address.clone(),

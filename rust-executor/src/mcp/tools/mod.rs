@@ -571,4 +571,69 @@ impl Ad4mMcpHandler {
     ) -> Result<String, String> {
         super::shacl::resolve_property_predicate(perspective, class_name, property_name).await
     }
+
+    /// Resolve a property value through the appropriate language, respecting
+    /// the SHACL `resolve_language` setting for the property.
+    ///
+    /// If the value already has a URI scheme (e.g. `literal://...`, `did:...`),
+    /// it is returned as-is. Otherwise, the value is parsed as JSON to recover
+    /// its native type (boolean, number, etc.) and resolved through the
+    /// perspective's `resolve_property_value` method, which uses the language
+    /// controller when a `resolve_language` is set on the property.
+    ///
+    /// Handles case-insensitive property name matching: dynamic tool names are
+    /// lowercased but SHACL stores original case. We resolve to the original
+    /// case before calling into the perspective.
+    pub(crate) async fn create_property_expression(
+        perspective: &PerspectiveInstance,
+        class_name: &str,
+        property_name: &str,
+        value: &str,
+        agent_context: &crate::agent::AgentContext,
+    ) -> String {
+        if value.starts_with("literal://") || value.contains("://") {
+            return value.to_string();
+        }
+
+        // Resolve the original-cased property name from SHACL.
+        // Dynamic tools lowercase the property name (e.g. "isconversation"),
+        // but the SHACL links store the original case (e.g. "isConversation").
+        let original_property_name = {
+            let props: Vec<crate::mcp::shacl::ShaclProperty> =
+                crate::mcp::shacl::load_class_properties(perspective, class_name).await;
+            let prop_lower = property_name.to_lowercase();
+            props
+                .into_iter()
+                .find(|p| p.name == property_name || p.name.to_lowercase() == prop_lower)
+                .map(|p| p.name)
+                .unwrap_or_else(|| property_name.to_string())
+        };
+
+        // Try to parse as JSON to recover native types (bool, number).
+        // MCP tool schemas declare all values as strings, so "false" arrives
+        // as the string "false" — but the language controller needs json!(false).
+        let json_value: serde_json::Value = serde_json::from_str(value)
+            .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
+
+        match perspective
+            .resolve_property_value(
+                class_name,
+                &original_property_name,
+                &json_value,
+                agent_context,
+            )
+            .await
+        {
+            Ok(url) => url,
+            Err(e) => {
+                log::warn!(
+                    "Failed to resolve property value for {}.{}: {}, falling back to encode_literal",
+                    class_name,
+                    original_property_name,
+                    e
+                );
+                Self::encode_literal(value)
+            }
+        }
+    }
 }

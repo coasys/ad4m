@@ -396,14 +396,23 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        // Build initial_values from non-system property args
+        // Build initial_values from non-system property args.
+        // Values are parsed from their JSON-string representation to recover
+        // native types (booleans, numbers) so that resolve_property_value can
+        // hand them to the language controller with the correct JSON type.
         let initial_values: Option<serde_json::Value> = {
             let props: serde_json::Map<String, serde_json::Value> = args
                 .iter()
                 .filter(|(k, _)| {
                     k.as_str() != "perspective_id" && k.as_str() != "expression_address"
                 })
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), json!(s))))
+                .map(|(k, v)| {
+                    let parsed = match v.as_str() {
+                        Some(s) => serde_json::from_str(s).unwrap_or_else(|_| json!(s)),
+                        None => v.clone(),
+                    };
+                    (k.clone(), parsed)
+                })
                 .collect();
             if props.is_empty() {
                 None
@@ -728,12 +737,14 @@ impl Ad4mMcpHandler {
                 }
             }
 
-            // Add new value
-            let target = if value_str.starts_with("literal://") || value_str.contains("://") {
-                value_str.clone()
-            } else {
-                Self::encode_literal(&value_str)
-            };
+            let target = Self::create_property_expression(
+                &perspective,
+                class_name,
+                key,
+                &value_str,
+                &agent_context,
+            )
+            .await;
 
             let link = Link {
                 source: expression_address.clone(),
@@ -862,11 +873,14 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Authentication error: {}", e),
         };
 
-        let target = if value.starts_with("literal://") || value.contains("://") {
-            value.clone()
-        } else {
-            Self::encode_literal(&value)
-        };
+        let target = Self::create_property_expression(
+            &perspective,
+            class_name,
+            property_name,
+            &value,
+            &agent_context,
+        )
+        .await;
 
         // Use batch to atomically remove old + add new (setSingleTarget pattern).
         // Without batching, the remove can propagate to other nodes before the add,
@@ -1014,11 +1028,14 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Authentication error: {}", e),
         };
 
-        let target = if value.starts_with("literal://") || value.contains("://") {
-            value.clone()
-        } else {
-            Self::encode_literal(&value)
-        };
+        let target = Self::create_property_expression(
+            &perspective,
+            class_name,
+            collection_name,
+            &value,
+            &agent_context,
+        )
+        .await;
 
         let link = Link {
             source: expression_address.clone(),
