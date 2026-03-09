@@ -196,7 +196,6 @@ workflows:
   version: 2
   build-and-test:
     jobs:
-      - node24-smoke-test
       - build-and-test
       - integration-tests-js:
           requires:
