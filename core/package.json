@@ -69,5 +69,5 @@
       "graphql@15.7.2": "patches/graphql@15.7.2.patch"
     }
   },
-  "version": "0.12.0-rc1-dev.2"
+  "version": "0.12.0-rc1-dev.3"
 }
