@@ -173,11 +173,8 @@ impl Ad4mMcpHandler {
         // 2. Session token is a valid JWT → pass
         if !session_token.is_empty() {
             let caps = capabilities_from_token(session_token.clone(), admin_cred.map(String::from));
-            if let Ok(ref c) = caps {
-                if !c.is_empty() && check_capability(&caps, &PERSPECTIVE_CREATE_CAPABILITY).is_ok()
-                {
-                    return true;
-                }
+            if caps.is_ok() {
+                return true;
             }
         }
 
@@ -188,7 +185,17 @@ impl Ad4mMcpHandler {
             .get::<HttpRequestParts>()
             .and_then(|parts| parts.headers.get(axum::http::header::AUTHORIZATION))
             .and_then(|h| h.to_str().ok())
-            .map(|h| h.strip_prefix("Bearer ").unwrap_or(h).to_string());
+            .map(|h| {
+                let mut parts = h.splitn(2, char::is_whitespace);
+                let scheme = parts.next().unwrap_or_default();
+                let value = parts.next().unwrap_or_default().trim_start();
+
+                if scheme.eq_ignore_ascii_case("bearer") && !value.is_empty() {
+                    value.to_string()
+                } else {
+                    h.to_string()
+                }
+            });
 
         if let Some(ref header_token) = http_header_value {
             // 3a. Header matches admin credential → store & pass
@@ -204,14 +211,10 @@ impl Ad4mMcpHandler {
             if !header_token.is_empty() {
                 let caps =
                     capabilities_from_token(header_token.clone(), admin_cred.map(String::from));
-                if let Ok(ref c) = caps {
-                    if !c.is_empty()
-                        && check_capability(&caps, &PERSPECTIVE_CREATE_CAPABILITY).is_ok()
-                    {
-                        let mut guard = self.context.auth_token.write().await;
-                        *guard = Some(header_token.clone());
-                        return true;
-                    }
+                if caps.is_ok() {
+                    let mut guard = self.context.auth_token.write().await;
+                    *guard = Some(header_token.clone());
+                    return true;
                 }
             }
         }

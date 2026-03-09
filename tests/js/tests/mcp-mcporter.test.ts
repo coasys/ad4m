@@ -6,7 +6,8 @@ import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep, startExecutor, killByPorts } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import fetch from "node-fetch";
 
 //@ts-ignore
 global.fetch = fetch;
@@ -47,6 +48,10 @@ describe("MCP mcporter Integration Tests", function() {
     let mcporterConfigPath: string;
 
     before(async () => {
+        // Kill any lingering executors to avoid port conflicts
+        killByPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        await sleep(1000);
+
         // Clean up and create test directory
         if (fs.existsSync(appDataPath)) {
             fs.rmSync(appDataPath, { recursive: true });
@@ -112,8 +117,9 @@ describe("MCP mcporter Integration Tests", function() {
 
     describe("1. mcporter Basic Connectivity", function() {
         it("should list AD4M server via mcporter", async function() {
-            const result = execSync(
-                `mcporter list ad4m --config ${mcporterConfigPath}`,
+            const result = execFileSync(
+                "mcporter",
+                ["list", "ad4m", "--config", mcporterConfigPath],
                 { encoding: 'utf-8', timeout: 10000 }
             );
             expect(result).to.include("ad4m");
@@ -121,8 +127,9 @@ describe("MCP mcporter Integration Tests", function() {
         });
 
         it("should list tools via mcporter", async function() {
-            const result = execSync(
-                `mcporter list ad4m --schema --config ${mcporterConfigPath}`,
+            const result = execFileSync(
+                "mcporter",
+                ["list", "ad4m", "--schema", "--config", mcporterConfigPath],
                 { encoding: 'utf-8', timeout: 10000 }
             );
             expect(result).to.include("list_perspectives");
@@ -137,8 +144,9 @@ describe("MCP mcporter Integration Tests", function() {
 
     describe("2. mcporter Admin Credential Auth", function() {
         it("should call list_perspectives with admin credential", async function() {
-            const result = execSync(
-                `mcporter call ad4m.list_perspectives --config ${mcporterConfigPath} --output json`,
+            const result = execFileSync(
+                "mcporter",
+                ["call", "ad4m.list_perspectives", "--config", mcporterConfigPath, "--output", "json"],
                 { encoding: 'utf-8', timeout: 10000 }
             );
             const parsed = JSON.parse(result);
@@ -147,8 +155,9 @@ describe("MCP mcporter Integration Tests", function() {
         });
 
         it("should create a perspective via mcporter", async function() {
-            const result = execSync(
-                `mcporter call ad4m.add_perspective name="mcporter-test-perspective" --config ${mcporterConfigPath} --output json`,
+            const result = execFileSync(
+                "mcporter",
+                ["call", "ad4m.add_perspective", "name=mcporter-test-perspective", "--config", mcporterConfigPath, "--output", "json"],
                 { encoding: 'utf-8', timeout: 10000 }
             );
             const parsed = JSON.parse(result);
@@ -158,8 +167,9 @@ describe("MCP mcporter Integration Tests", function() {
         });
 
         it("should get agent profile via mcporter", async function() {
-            const result = execSync(
-                `mcporter call ad4m.get_agent_profile --config ${mcporterConfigPath} --output json`,
+            const result = execFileSync(
+                "mcporter",
+                ["call", "ad4m.get_agent_profile", "--config", mcporterConfigPath, "--output", "json"],
                 { encoding: 'utf-8', timeout: 10000 }
             );
             const parsed = JSON.parse(result);
@@ -190,8 +200,9 @@ describe("MCP mcporter Integration Tests", function() {
 
             let result: string;
             try {
-                result = execSync(
-                    `mcporter call ad4m.list_perspectives --config ${wrongConfigPath} --output json`,
+                result = execFileSync(
+                    "mcporter",
+                    ["call", "ad4m.list_perspectives", "--config", wrongConfigPath, "--output", "json"],
                     { encoding: 'utf-8', timeout: 10000 }
                 );
             } catch (e: any) {
@@ -217,8 +228,9 @@ describe("MCP mcporter Integration Tests", function() {
 
             let result: string;
             try {
-                result = execSync(
-                    `mcporter call ad4m.list_perspectives --config ${noAuthConfigPath} --output json`,
+                result = execFileSync(
+                    "mcporter",
+                    ["call", "ad4m.list_perspectives", "--config", noAuthConfigPath, "--output", "json"],
                     { encoding: 'utf-8', timeout: 10000 }
                 );
             } catch (e: any) {
@@ -236,8 +248,9 @@ describe("MCP mcporter Integration Tests", function() {
     describe("4. mcporter JWT Auth Flow", function() {
         it("should authenticate via request_capability + generate_jwt", async function() {
             // Step 1: Request capability
-            const capResult = execSync(
-                `mcporter call ad4m.request_capability app_name="mcporter-jwt-test" app_desc="Testing JWT auth" --config ${mcporterConfigPath} --output json`,
+            const capResult = execFileSync(
+                "mcporter",
+                ["call", "ad4m.request_capability", "app_name=mcporter-jwt-test", "app_desc=Testing JWT auth", "--config", mcporterConfigPath, "--output", "json"],
                 { encoding: 'utf-8', timeout: 10000 }
             );
             const capParsed = JSON.parse(capResult);
@@ -246,8 +259,10 @@ describe("MCP mcporter Integration Tests", function() {
             console.log("Capability requested:", capParsed.request_id);
 
             // Step 2: Generate JWT
-            const jwtResult = execSync(
-                `mcporter call ad4m.generate_jwt --args '{"request_id":"${capParsed.request_id}","code":"${capParsed.code}"}' --config ${mcporterConfigPath} --output json`,
+            const jwtArgs = JSON.stringify({request_id: capParsed.request_id, code: capParsed.code});
+            const jwtResult = execFileSync(
+                "mcporter",
+                ["call", "ad4m.generate_jwt", "--args", jwtArgs, "--config", mcporterConfigPath, "--output", "json"],
                 { encoding: 'utf-8', timeout: 10000 }
             );
             const jwtParsed = JSON.parse(jwtResult);
@@ -271,8 +286,9 @@ describe("MCP mcporter Integration Tests", function() {
             fs.writeFileSync(jwtConfigPath, JSON.stringify(jwtConfig, null, 2));
 
             // Step 4: Use JWT to call protected tool
-            const listResult = execSync(
-                `mcporter call ad4m.list_perspectives --config ${jwtConfigPath} --output json`,
+            const listResult = execFileSync(
+                "mcporter",
+                ["call", "ad4m.list_perspectives", "--config", jwtConfigPath, "--output", "json"],
                 { encoding: 'utf-8', timeout: 10000 }
             );
             console.log("mcporter list_perspectives with JWT auth result:", listResult);
