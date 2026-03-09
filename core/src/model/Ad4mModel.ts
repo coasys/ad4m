@@ -523,10 +523,10 @@ export class Ad4mModel {
   /**
    * Generates the SDNA (Subject DNA) Prolog rules for this model class.
    * Injected at class-definition time by the `@Model` decorator.
-   * Returns an empty string on un-decorated base classes.
+   * Returns a default value on un-decorated base classes.
    */
-  static generateSDNA(): string {
-    return '';
+  static generateSDNA(): { sdna: string; name: string } {
+    return { sdna: '', name: '' };
   }
 
   /**
