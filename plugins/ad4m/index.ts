@@ -509,18 +509,24 @@ export default function ad4mPlugin(api: any) {
 
       // For mention subscriptions, the query returns has_child links pointing to messages with mentions
       // The source of each has_child link is the parent (channel), target is the message
-      if (!parentChannel && sub.type === "mention" && Array.isArray(result) && result.length > 0) {
+      if (
+        !parentChannel &&
+        sub.type === "mention" &&
+        Array.isArray(result) &&
+        result.length > 0
+      ) {
         // Each result is a has_child link where the target is a message with a mention
         // The source is the parent (channel)
-        const parentLink = result.find((link: any) => 
-          link && link.predicate === "ad4m://has_child" && link.source
+        const parentLink = result.find(
+          (link: any) =>
+            link && link.predicate === "ad4m://has_child" && link.source,
         );
-        
+
         if (parentLink) {
           parentChannel = parentLink.source;
-          logger.info(`[ad4m-waker] ${sub.id}: found parent ${parentChannel} from has_child link`);
-        }
-      }
+          logger.info(
+            `[ad4m-waker] ${sub.id}: found parent ${parentChannel} from has_child link`,
+          );
         }
       }
 
