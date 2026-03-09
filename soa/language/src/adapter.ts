@@ -34,15 +34,8 @@ export default class SoAExpressionAdapter implements ExpressionAdapter {
 
     const doc = SOA_EXPRESSIONS[key];
     if (!doc) {
-      // Return a helpful error expression for unknown addresses
-      const knownKeys = Object.keys(SOA_EXPRESSIONS);
-      const expression = await this.#agent.createSignedExpression({
-        error: `Unknown SoA expression: ${key}`,
-        message: `"${key}" is not a recognized SoA expression.`,
-        knownExpressions: knownKeys.map(k => `soa://${k}`),
-        hint: 'Use one of the known expressions listed above. Properties go on StateOfAffair nodes, relationships link between them.',
-      });
-      return expression;
+      // Return null for unknown addresses per ExpressionAdapter contract
+      return null;
     }
 
     // Return the documentation as a signed expression
@@ -63,6 +56,10 @@ class SoAReadOnly implements ReadOnlyLanguage {
     if (!addr) {
       throw new Error('SoA content must have a "key" or "address" property');
     }
-    return addr;
+    // Canonicalize to soa:// form
+    if (addr.startsWith('soa://')) {
+      return addr;
+    }
+    return `soa://${addr}`;
   }
 }
