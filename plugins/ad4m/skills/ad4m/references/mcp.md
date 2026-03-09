@@ -43,72 +43,73 @@ These are always available regardless of SDNA:
 
 **Perspective & Link Tools:**
 
-| Tool | Description |
-|------|-------------|
-| `list_perspectives` | List all perspectives |
-| `add_perspective` | Create a new perspective |
-| `add_link` | Add a link to a perspective |
-| `query_links` | Query links in a perspective |
-| `get_models` | List available subject classes (SHACL shapes) |
-| `add_model` | Add SHACL SDNA to a perspective |
-| `infer` | Run Prolog queries for complex reasoning |
+| Tool                | Description                                   |
+| ------------------- | --------------------------------------------- |
+| `list_perspectives` | List all perspectives                         |
+| `add_perspective`   | Create a new perspective                      |
+| `add_link`          | Add a link to a perspective                   |
+| `query_links`       | Query links in a perspective                  |
+| `get_models`        | List available subject classes (SHACL shapes) |
+| `add_model`         | Add SHACL SDNA to a perspective               |
+| `infer`             | Run Prolog queries for complex reasoning      |
 
 **Subject CRUD Tools:**
 
-| Tool | Description |
-|------|-------------|
-| `query_subjects` | Find instances of a subject class |
-| `get_subject_data` | Get full data for a subject instance |
-| `create_subject` | Create a new subject instance |
-| `set_subject_property` | Set a property on a subject |
-| `delete_subject` | Delete a subject instance |
-| `get_subject_collection` | Get items in a collection property |
-| `add_to_collection` | Add item to a collection |
-| `remove_from_collection` | Remove item from a collection |
-| `execute_commands` | Execute commands on a subject instance |
+| Tool                     | Description                            |
+| ------------------------ | -------------------------------------- |
+| `query_subjects`         | Find instances of a subject class      |
+| `get_subject_data`       | Get full data for a subject instance   |
+| `create_subject`         | Create a new subject instance          |
+| `set_subject_property`   | Set a property on a subject            |
+| `delete_subject`         | Delete a subject instance              |
+| `get_subject_collection` | Get items in a collection property     |
+| `add_to_collection`      | Add item to a collection               |
+| `remove_from_collection` | Remove item from a collection          |
+| `execute_commands`       | Execute commands on a subject instance |
 
 **Child/Tree Tools:**
 
-| Tool | Description |
-|------|-------------|
-| `add_child` | Add a child to a subject |
-| `get_children` | Get children of a subject |
+| Tool                   | Description                                |
+| ---------------------- | ------------------------------------------ |
+| `add_child`            | Add a child to a subject                   |
+| `get_children`         | Get children of a subject                  |
 | `get_subject_children` | Get children with optional class filtering |
 
 **Profile Tools:**
 
-| Tool | Description |
-|------|-------------|
-| `get_agent_profile` | Get agent's DID and profile |
-| `set_agent_profile` | Update agent profile fields |
-| `set_agent_profile_picture` | Set agent's profile picture |
+| Tool                        | Description                                              |
+| --------------------------- | -------------------------------------------------------- |
+| `get_my_did`                | Get the current agent's DID (for filtering own messages) |
+| `get_agent_profile`         | Get agent's DID and profile                              |
+| `set_agent_profile`         | Update agent profile fields                              |
+| `set_agent_profile_picture` | Set agent's profile picture                              |
 
 **Neighbourhood & Language Tools:**
 
-| Tool | Description |
-|------|-------------|
-| `language_meta` | Get metadata about a language by address |
-| `list_link_language_templates` | List available P2P sync templates for neighbourhoods |
+| Tool                                     | Description                                                            |
+| ---------------------------------------- | ---------------------------------------------------------------------- |
+| `language_meta`                          | Get metadata about a language by address                               |
+| `list_link_language_templates`           | List available P2P sync templates for neighbourhoods                   |
 | `neighbourhood_publish_from_perspective` | Publish a perspective as a shared neighbourhood (auto-clones template) |
-| `neighbourhood_join_from_url` | Join an existing neighbourhood by URL |
+| `neighbourhood_join_from_url`            | Join an existing neighbourhood by URL                                  |
 
 **Waker/Subscription Tools:**
 
-| Tool | Description |
-|------|-------------|
-| `generate_waker_query` | Generate SurrealQL for waker subscription |
-| `get_mention_waker_config` | Get waker config for tracking mentions |
+| Tool                       | Description                               |
+| -------------------------- | ----------------------------------------- |
+| `generate_waker_query`     | Generate SurrealQL for waker subscription |
+| `get_mention_waker_config` | Get waker config for tracking mentions    |
 
 **Auth Tools (no auth required):**
 
-| Tool | Description |
-|------|-------------|
-| `request_capability` | Step 1 of local auth flow |
-| `generate_jwt` | Step 2 of local auth flow |
-| `login_email` | Login with email/password (multi-user) |
-| `signup` | Create new account (multi-user) |
-| `verify_email_code` | Verify email code (multi-user) |
-| `auth_status` | Check current authentication status |
+| Tool                 | Description                            |
+| -------------------- | -------------------------------------- |
+| `request_capability` | Step 1 of local auth flow              |
+| `generate_jwt`       | Step 2 of local auth flow              |
+| `login_email`        | Login with email/password (multi-user) |
+| `signup`             | Create new account (multi-user)        |
+| `verify_email_code`  | Verify email code (multi-user)         |
+| `auth_status`        | Check current authentication status    |
 
 ## Language & Neighbourhood Tools
 
@@ -144,25 +145,27 @@ When a perspective has SHACL SDNA, tools are generated per class:
 
 For a class `Channel` with scalar `name`, scalar `description`, and collection `messages`:
 
-| Tool | Description |
-|------|-------------|
-| `channel_create` | Create a Channel instance (required props as params + `expression_address`) |
-| `channel_query` | Query all Channel instances in the perspective |
-| `channel_get` | Get a Channel by expression address |
-| `channel_delete` | Delete a Channel instance |
-| `channel_set_name` | Set the name property |
-| `channel_set_description` | Set the description property |
-| `channel_get_messages` | Get all messages in the collection |
-| `channel_add_messages` | Add a message to the collection |
-| `channel_remove_messages` | Remove a message from the collection |
+| Tool                      | Description                                                                 |
+| ------------------------- | --------------------------------------------------------------------------- |
+| `channel_create`          | Create a Channel instance (required props as params + `expression_address`) |
+| `channel_query`           | Query all Channel instances in the perspective                              |
+| `channel_get`             | Get a Channel by expression address                                         |
+| `channel_delete`          | Delete a Channel instance                                                   |
+| `channel_set_name`        | Set the name property                                                       |
+| `channel_set_description` | Set the description property                                                |
+| `channel_get_messages`    | Get all messages in the collection                                          |
+| `channel_add_messages`    | Add a message to the collection                                             |
+| `channel_remove_messages` | Remove a message from the collection                                        |
 
 ### Naming Convention
 
 Class names are **lowercased** in tool names: `{class_lower}_{action}` or `{class_lower}_{action}_{property_lower}`.
 
 Generated tool patterns per class:
-- `{class}_create` — create instance (requires `perspective_id`, `expression_address`, + required properties)
+
+- `{class}_create` — create instance (requires `perspective_id`, `expression_address`, + required properties; optional `parent` param to add as child)
 - `{class}_query` — query all instances (requires `perspective_id`)
+- `{class}_list` — list instances that are children of a parent (requires `perspective_id`, `parent`)
 - `{class}_get` — get instance data (requires `perspective_id`, `expression_address`)
 - `{class}_delete` — delete instance (requires `perspective_id`, `expression_address`)
 - `{class}_set_{property}` — set scalar property (requires `perspective_id`, `expression_address`, `value`)
@@ -173,29 +176,37 @@ Generated tool patterns per class:
 ### Tool Parameters
 
 All dynamic tools include:
+
 - `perspective_id` — which perspective to operate on (NOT `perspective_uuid`)
 - `expression_address` — the subject instance URI (for non-query tools)
+- `parent` — optional parent address to add the new instance as a child of (e.g., channel ID)
 - Property-specific params (type-checked against SHACL datatype)
 
 ## Workflow Example
 
 ```
-1. get_agent_profile           → verify identity
-2. add_perspective             → create workspace
-3. add_model                   → add SHACL schema
-4. get_models                  → verify schema loaded
-5. channel_create              → create a Channel (provide expression_address + required props)
-6. message_create              → create a Message (provide expression_address + body)
-7. add_child                   → add message as child of channel
+1. get_my_did                  → get your DID for filtering own messages
+2. get_agent_profile           → verify identity
+3. add_perspective             → create workspace
+4. add_model                   → add SHACL schema
+5. get_models                  → verify schema loaded
+6. channel_create              → create a Channel (provide expression_address + required props)
+7. message_create              → create a Message (provide expression_address + body + parent=<channel>)
+   OR (if parent not supported):
+7a. message_create             → create a Message (provide expression_address + body)
+7b. add_child                  → add message as child of channel
+8. message_list(perspective_id, parent=<channel>) → list all messages in channel
 ```
 
 ## Error Handling
 
 MCP tool calls return JSON-RPC responses:
+
 - Success: `{ "result": { "content": [{ "type": "text", "text": "..." }] } }`
 - Error: `{ "error": { "code": -32000, "message": "..." } }`
 
 Common errors:
+
 - `Perspective not found` — invalid UUID
 - `Subject class not found` — SDNA not added to perspective
 - `Unauthorized` — missing or invalid auth token
