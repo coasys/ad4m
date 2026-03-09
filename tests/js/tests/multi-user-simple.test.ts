@@ -797,6 +797,9 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         it("should publish managed users to the agent language", async () => {
+            // Ensure multi-user is enabled
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+
             // Create two users
             const user1Result = await adminAd4mClient!.agent.createUser("agentlang1@example.com", "password1");
             const user2Result = await adminAd4mClient!.agent.createUser("agentlang2@example.com", "password2");
