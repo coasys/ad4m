@@ -46,6 +46,7 @@ impl Ad4mMcpHandler {
 
                 tools.push(Self::make_create_tool(&class.name, &class.properties));
                 tools.push(Self::make_query_tool(&class.name));
+                tools.push(Self::make_list_tool(&class.name));
                 tools.push(Self::make_get_tool(&class.name));
                 tools.push(Self::make_delete_tool(&class.name));
                 // Per-property set tools and collection tools
@@ -91,6 +92,10 @@ impl Ad4mMcpHandler {
                 "expression_address".to_string(),
                 format!("Address for the new {} instance", class_name),
             ),
+            (
+                "parent".to_string(),
+                "Optional parent expression address to add this instance as a child of (e.g., channel ID). If not provided, use add_child separately.".to_string(),
+            ),
         ];
         for p in properties {
             if !p.is_collection {
@@ -120,7 +125,7 @@ impl Ad4mMcpHandler {
         Tool::new(
             format!("{}_create", name_lower),
             format!(
-                "Create a new {} instance. Properties: {} (* = required)",
+                "Create a new {} instance. Properties: {} (* = required). Optionally add as child of a parent (e.g., add a message to a channel) by providing the parent parameter.",
                 class_name,
                 prop_descs.join(", ")
             ),
@@ -139,6 +144,24 @@ impl Ad4mMcpHandler {
             Self::make_tool_schema(
                 vec![("perspective_id", "Perspective UUID")],
                 vec!["perspective_id"],
+            ),
+        )
+    }
+
+    fn make_list_tool(class_name: &str) -> Tool {
+        let name_lower = class_name.to_lowercase();
+        Tool::new(
+            format!("{}_list", name_lower),
+            format!(
+                "List all {} instances that are children of a given parent (e.g., all messages in a channel). Returns expression addresses sorted by timestamp. Use this instead of query when you want items in a specific channel/parent.",
+                class_name
+            ),
+            Self::make_tool_schema(
+                vec![
+                    ("perspective_id", "Perspective UUID"),
+                    ("parent", "Parent expression address (e.g., channel ID) to list children from"),
+                ],
+                vec!["perspective_id", "parent"],
             ),
         )
     }
@@ -290,7 +313,7 @@ impl Ad4mMcpHandler {
 
         if !matches!(
             operation,
-            "create" | "query" | "get" | "update" | "delete" | "set" | "add" | "remove"
+            "create" | "query" | "list" | "get" | "update" | "delete" | "set" | "add" | "remove"
         ) {
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "Unknown tool: {}",
@@ -336,6 +359,10 @@ impl Ad4mMcpHandler {
             }
             "query" => {
                 self.handle_dynamic_query(&perspective_id, &class_name)
+                    .await
+            }
+            "list" => {
+                self.handle_dynamic_list(&perspective_id, &class_name, &args)
                     .await
             }
             "get" => {
@@ -396,6 +423,12 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
+        // Check for optional parent parameter
+        let parent: Option<String> = args
+            .get("parent")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         // Build initial_values from non-system property args.
         // Values are parsed from their JSON-string representation to recover
         // native types (booleans, numbers) so that resolve_property_value can
@@ -404,7 +437,9 @@ impl Ad4mMcpHandler {
             let props: serde_json::Map<String, serde_json::Value> = args
                 .iter()
                 .filter(|(k, _)| {
-                    k.as_str() != "perspective_id" && k.as_str() != "expression_address"
+                    k.as_str() != "perspective_id" 
+                        && k.as_str() != "expression_address"
+                        && k.as_str() != "parent"
                 })
                 .map(|(k, v)| {
                     let parsed = match v.as_str() {
@@ -428,7 +463,7 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Error: {}", e),
         };
 
-        let (mut perspective, _agent_ctx) =
+        let (mut perspective, agent_context) =
             match self.get_writable_perspective(perspective_id).await {
                 Ok(p) => p,
                 Err(e) => return e,
@@ -444,13 +479,53 @@ impl Ad4mMcpHandler {
             )
             .await
         {
-            Ok(_) => serde_json::to_string_pretty(&json!({
-                "created": true,
-                "perspective_id": perspective_id,
-                "class_name": class_name,
-                "expression_address": expression_address
-            }))
-            .unwrap_or_else(|e| format!("Error: {}", e)),
+            Ok(_) => {
+                // If parent is provided, add as child
+                if let Some(parent_addr) = parent {
+                    let parent_encoded = Self::encode_literal(&parent_addr);
+                    let child_encoded = Self::encode_literal(&expression_address);
+                    
+                    let link = Link {
+                        source: parent_encoded,
+                        predicate: Some("ad4m://has_child".to_string()),
+                        target: child_encoded,
+                    };
+
+                    if let Err(e) = perspective
+                        .add_link(link, LinkStatus::Shared, None, &agent_context)
+                        .await
+                    {
+                        return serde_json::to_string_pretty(&json!({
+                            "created": true,
+                            "added_to_parent": false,
+                            "parent_error": format!("Created subject but failed to add as child: {}", e),
+                            "perspective_id": perspective_id,
+                            "class_name": class_name,
+                            "expression_address": expression_address,
+                            "parent": parent_addr,
+                        }))
+                        .unwrap_or_else(|e| format!("Error: {}", e));
+                    }
+
+                    serde_json::to_string_pretty(&json!({
+                        "created": true,
+                        "added_to_parent": true,
+                        "perspective_id": perspective_id,
+                        "class_name": class_name,
+                        "expression_address": expression_address,
+                        "parent": parent_addr,
+                    }))
+                    .unwrap_or_else(|e| format!("Error: {}", e))
+                } else {
+                    serde_json::to_string_pretty(&json!({
+                        "created": true,
+                        "perspective_id": perspective_id,
+                        "class_name": class_name,
+                        "expression_address": expression_address
+                    }))
+                    .unwrap_or_else(|e| format!("Error: {}", e))
+                }
+            }
             Err(e) => format!("Error creating subject: {}", e),
         }
     }
@@ -564,6 +639,107 @@ impl Ad4mMcpHandler {
             .map(|l| l.data.source.clone())
             .collect();
         serde_json::to_string_pretty(&instances).unwrap_or_else(|e| format!("Error: {}", e))
+    }
+
+    async fn handle_dynamic_list(
+        &self,
+        perspective_id: &str,
+        class_name: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+    ) -> String {
+        let parent = match Self::require_arg(args, "parent") {
+            Ok(v) => v.to_string(),
+            Err(e) => return e,
+        };
+
+        let perspective = match self.get_readable_perspective(perspective_id).await {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+
+        // First get all children of the parent via ad4m://has_child
+        let parent_encoded = Self::encode_literal(&parent);
+        let child_links = match perspective
+            .get_links(&LinkQuery {
+                source: Some(parent_encoded),
+                predicate: Some("ad4m://has_child".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) => links,
+            Err(e) => return format!("Error getting children: {}", e),
+        };
+
+        // Filter to only those children that are instances of the given class
+        // We need to find the type marker for the class
+        let shape_links = Self::get_shacl_shape_links(&perspective, class_name).await;
+
+        let mut instances: Vec<String> = Vec::new();
+
+        if let Some(shape_link) = shape_links.first() {
+            let shape_uri = &shape_link.data.target;
+            let constructor_links = perspective
+                .get_links(&LinkQuery {
+                    source: Some(shape_uri.clone()),
+                    predicate: Some("ad4m://constructor".to_string()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_or_default();
+
+            if let Some(constructor_link) = constructor_links.first() {
+                let actions_str = Self::resolve_literal_value(&constructor_link.data.target);
+                if let Ok(actions) = serde_json::from_str::<Vec<serde_json::Value>>(&actions_str) {
+                    if let Some(type_action) = actions.iter().find(|a| {
+                        a.get("action").and_then(|v| v.as_str()) == Some("addLink")
+                            && a.get("source").and_then(|v| v.as_str()) == Some("this")
+                    }) {
+                        let predicate = type_action
+                            .get("predicate")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let target = type_action
+                            .get("target")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        if !predicate.is_empty() && !target.is_empty() {
+                            // For each child, check if it has a link with this type marker
+                            for child_link in &child_links {
+                                let child_addr = &child_link.data.target;
+                                let type_links = perspective
+                                    .get_links(&LinkQuery {
+                                        source: Some(child_addr.clone()),
+                                        predicate: Some(predicate.to_string()),
+                                        target: Some(target.to_string()),
+                                        ..Default::default()
+                                    })
+                                    .await
+                                    .unwrap_or_default();
+
+                                if !type_links.is_empty() {
+                                    instances.push(child_addr.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // If no SHACL found, return all children (fallback)
+        if instances.is_empty() {
+            instances = child_links.iter().map(|l| l.data.target.clone()).collect();
+        }
+
+        serde_json::to_string_pretty(&json!({
+            "parent": parent,
+            "class_name": class_name,
+            "instances": instances,
+            "count": instances.len(),
+        }))
+        .unwrap_or_else(|e| format!("Error: {}", e))
     }
 
     async fn handle_dynamic_get(
