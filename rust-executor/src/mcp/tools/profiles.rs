@@ -170,7 +170,10 @@ impl Ad4mMcpHandler {
         description = "Get the DID (Decentralized Identifier) of the current agent. Use this to identify your own messages when filtering — compare the 'author' field in message data against your DID."
     )]
     pub async fn get_my_did(&self, _params: Parameters<GetAgentProfileParams>) -> String {
-        let token = self.get_auth_token().await.unwrap_or_default();
+        let token = match self.get_auth_token().await {
+            Some(t) => t,
+            None => return json!({"error": "Failed to get auth token"}).to_string(),
+        };
 
         let agent = match get_current_agent(&token) {
             Ok(a) => a,

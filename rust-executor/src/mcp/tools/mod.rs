@@ -592,7 +592,11 @@ impl Ad4mMcpHandler {
         value: &str,
         agent_context: &crate::agent::AgentContext,
     ) -> String {
-        if value.starts_with("literal://") || value.contains("://") {
+        // Use anchored regex to check if value is a full URI scheme (not just contains "://")
+        static URI_SCHEME_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let re = URI_SCHEME_RE
+            .get_or_init(|| regex::Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-._]*:").unwrap());
+        if re.is_match(value) {
             return value.to_string();
         }
 

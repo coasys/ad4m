@@ -145,17 +145,18 @@ When a perspective has SHACL SDNA, tools are generated per class:
 
 For a class `Channel` with scalar `name`, scalar `description`, and collection `messages`:
 
-| Tool                      | Description                                                                 |
-| ------------------------- | --------------------------------------------------------------------------- |
-| `channel_create`          | Create a Channel instance (required props as params + `expression_address`) |
-| `channel_query`           | Query all Channel instances in the perspective                              |
-| `channel_get`             | Get a Channel by expression address                                         |
-| `channel_delete`          | Delete a Channel instance                                                   |
-| `channel_set_name`        | Set the name property                                                       |
-| `channel_set_description` | Set the description property                                                |
-| `channel_get_messages`    | Get all messages in the collection                                          |
-| `channel_add_messages`    | Add a message to the collection                                             |
-| `channel_remove_messages` | Remove a message from the collection                                        |
+| Tool                      | Description                                                                                                            |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `channel_create`          | Create a Channel instance (required props as params; `expression_address` optional; `parent` optional to add as child) |
+| `channel_query`           | Query all Channel instances in the perspective                                                                         |
+| `channel_list`            | List Channel instances that are children of a parent (requires `parent`)                                               |
+| `channel_get`             | Get a Channel by expression address                                                                                    |
+| `channel_delete`          | Delete a Channel instance                                                                                              |
+| `channel_set_name`        | Set the name property                                                                                                  |
+| `channel_set_description` | Set the description property                                                                                           |
+| `channel_get_messages`    | Get all messages in the collection                                                                                     |
+| `channel_add_messages`    | Add a message to the collection                                                                                        |
+| `channel_remove_messages` | Remove a message from the collection                                                                                   |
 
 ### Naming Convention
 
@@ -163,22 +164,21 @@ Class names are **lowercased** in tool names: `{class_lower}_{action}` or `{clas
 
 Generated tool patterns per class:
 
-- `{class}_create` — create instance (requires `perspective_id`, `expression_address`, + required properties; optional `parent` param to add as child)
-- `{class}_query` — query all instances (requires `perspective_id`)
-- `{class}_list` — list instances that are children of a parent (requires `perspective_id`, `parent`)
-- `{class}_get` — get instance data (requires `perspective_id`, `expression_address`)
-- `{class}_delete` — delete instance (requires `perspective_id`, `expression_address`)
-- `{class}_set_{property}` — set scalar property (requires `perspective_id`, `expression_address`, `value`)
-- `{class}_get_{collection}` — get collection items
-- `{class}_add_{collection}` — add to collection
-- `{class}_remove_{collection}` — remove from collection
+- `{class}_create` — create instance (`perspective_id`, optional `expression_address`, optional `parent`, + required properties)
+- `{class}_query` — query all instances (`perspective_id`)
+- `{class}_list` — list instances that are children of a parent (`perspective_id`, `parent`)
+- `{class}_get` — get instance data (`perspective_id`, `expression_address`)
+- `{class}_delete` — delete instance (`perspective_id`, `expression_address`)
+- `{class}_set_{property}` — set scalar property (`perspective_id`, `expression_address`, `value`)
+- `{class}_get_{collection}` — get collection items (`perspective_id`, `expression_address`)
+- `{class}_add_{collection}` — add to collection (`perspective_id`, `expression_address`, `value`)
+- `{class}_remove_{collection}` — remove from collection (`perspective_id`, `expression_address`, `value`)
 
 ### Tool Parameters
 
-All dynamic tools include:
-
-- `perspective_id` — which perspective to operate on (NOT `perspective_uuid`)
-- `expression_address` — optional. If not provided, a random address is auto-generated
+- `perspective_id` — which perspective to operate on (NOT `perspective_uuid`) — required for all tools
+- `expression_address` — optional on `{class}_create` only (auto-generated if omitted); required on get/update/delete operations
+- `parent` — optional on `{class}_create` only (adds as child); required on `{class}_list`
 - `parent` — optional parent address to add the new instance as a child of (e.g., channel ID)
 - Property-specific params (type-checked against SHACL datatype)
 

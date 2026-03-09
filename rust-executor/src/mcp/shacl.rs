@@ -425,7 +425,7 @@ pub async fn resolve_property_predicate(
 
 /// Resolve a property's resolve_language for a given class.
 /// Returns `Ok(Some(language))` if the property has a resolve language,
-/// `Ok(None)` if it doesn't, or `Err` if the class/property is not found.
+/// or `Err` if the class/property is not found.
 /// Matching is case-insensitive because dynamic tool names are lowercased.
 pub async fn resolve_property_resolve_language(
     perspective: &PerspectiveInstance,
@@ -442,5 +442,10 @@ pub async fn resolve_property_resolve_language(
             return Ok(prop.resolve_language.clone());
         }
     }
-    Ok(None)
+    Err(format!(
+        "Property '{}' not found in class '{}'. Available properties: {}",
+        property_name,
+        class_name,
+        properties.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", ")
+    ))
 }
