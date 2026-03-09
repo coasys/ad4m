@@ -329,8 +329,10 @@ export class SHACLShape {
       });
     }
 
-    // Constructor actions
-    if (this.constructor_actions && this.constructor_actions.length > 0) {
+    // Constructor actions — always emit, even for an empty array.
+    // An empty `[]` tells the executor the shape is valid but has no
+    // required initial links (all-optional model with no @Flag).
+    if (this.constructor_actions) {
       links.push({
         source: this.nodeShapeUri,
         predicate: "ad4m://constructor",
@@ -338,8 +340,8 @@ export class SHACLShape {
       });
     }
 
-    // Destructor actions
-    if (this.destructor_actions && this.destructor_actions.length > 0) {
+    // Destructor actions — same rationale as constructor.
+    if (this.destructor_actions) {
       links.push({
         source: this.nodeShapeUri,
         predicate: "ad4m://destructor",

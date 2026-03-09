@@ -3119,7 +3119,7 @@ describe("Prolog + Literals", () => {
                 }).to.throw(/Cannot infer namespace/)
             })
 
-            it("should automatically add type flag when no required properties are provided", async () => {
+            it("should handle all-optional properties without auto-generating a type flag", async () => {
                 const schema = {
                     "$schema": "http://json-schema.org/draft-07/schema#",
                     "title": "OptionalOnly",
@@ -3131,7 +3131,7 @@ describe("Prolog + Literals", () => {
                     // No required array - all properties are optional
                 }
 
-                // Should not throw error - instead adds automatic type flag
+                // Should not throw error — open-world structural matching applies
                 const OptionalClass = Ad4mModel.fromJSONSchema(schema, { 
                     name: "OptionalOnly",
                     namespace: "test://" 
@@ -3141,16 +3141,15 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - className is added dynamically
                 expect(OptionalClass.className).to.equal("OptionalOnly")
 
-                // Should have automatic type flag
+                // Should NOT have automatic type flag
                 const instance = new OptionalClass(perspective!)
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                expect(instance.__ad4m_type).to.equal("test://instance")
+                expect(instance.__ad4m_type).to.be.undefined
 
-                // Verify SDNA includes the automatic type flag
+                // Verify SDNA does NOT include ad4m://type auto-flag
                 // @ts-ignore - generateSDNA is added dynamically
                 const sdna = OptionalClass.generateSDNA()
-                expect(sdna.sdna).to.include('ad4m://type')
-                expect(sdna.sdna).to.include('test://instance')
+                expect(sdna.sdna).to.not.include('ad4m://type')
             })
 
             it("should work when properties have explicit initial values even if not required", async () => {

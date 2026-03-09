@@ -811,53 +811,13 @@ export function Model(opts: ModelConfig) {
                 shape.addProperty(relShape);
             }
 
-            // If no constructor actions exist (all properties are optional and no @Flag),
-            // auto-generate a type flag so the SHACL constructor is valid and the model
-            // can be identified in queries.
-            if (constructorActions.length === 0) {
-                const autoTypePredicate = 'ad4m://type';
-                const autoTypeValue = `ad4m://type/${subjectName}`;
-
-                constructorActions.push({
-                    action: "addLink",
-                    source: "this",
-                    predicate: autoTypePredicate,
-                    target: autoTypeValue,
-                });
-                destructorActions.push({
-                    action: "removeLink",
-                    source: "this",
-                    predicate: autoTypePredicate,
-                    target: "*",
-                });
-
-                // Also add the auto-generated flag as a property shape so queries can match on it
-                shape.addProperty({
-                    name: '__ad4m_type',
-                    path: autoTypePredicate,
-                    hasValue: autoTypeValue,
-                    minCount: 1,
-                    maxCount: 1,
-                });
-
-                // Register the auto-flag in the property WeakMap so getModelMetadata()
-                // and queryToSurrealQL() can use it for instance identification
-                setPropertyRegistryEntry(target, '__ad4m_type', {
-                    through: autoTypePredicate,
-                    required: true,
-                    writable: false,
-                    initial: autoTypeValue,
-                    flag: true,
-                } as any);
-            }
-
-            // Set constructor and destructor actions on the shape
-            if (constructorActions.length > 0) {
-                shape.setConstructorActions(constructorActions);
-            }
-            if (destructorActions.length > 0) {
-                shape.setDestructorActions(destructorActions);
-            }
+            // Always set constructor and destructor actions on the shape, even
+            // when empty.  An empty array serialises to `literal://string:[]`
+            // which the Rust executor parses as a valid (no-op) command list,
+            // avoiding "No SHACL constructor found" errors for models whose
+            // properties are all optional and have no @Flag.
+            shape.setConstructorActions(constructorActions);
+            shape.setDestructorActions(destructorActions);
 
             return {
                 shape,

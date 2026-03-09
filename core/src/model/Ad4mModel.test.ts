@@ -402,7 +402,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.relations.tags.local).toBe(true);
   });
 
-  it("should handle models with only an auto-generated type flag", () => {
+  it("should handle models with no properties (open-world, no auto-flag)", () => {
     const schema = {
       title: "EmptyModel",
       type: "object",
@@ -419,11 +419,14 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     // Should have className
     expect(metadata.className).toBe("EmptyModel");
 
-    // Should have the auto-generated __ad4m_type property
-    expect(metadata.properties.__ad4m_type).toBeDefined();
-    expect(metadata.properties.__ad4m_type.predicate).toBe("ad4m://type");
-    expect(metadata.properties.__ad4m_type.initial).toBe("empty://instance");
-    expect(metadata.properties.__ad4m_type.flag).toBe(true);
+    // Should NOT have an auto-generated __ad4m_type property —
+    // models with all-optional properties use open-world structural matching.
+    expect(metadata.properties.__ad4m_type).toBeUndefined();
+
+    // SHACL shape should still be valid with empty constructor/destructor
+    const { shape } = (EmptyModelClass as any).generateSHACL();
+    expect(shape.constructor_actions).toEqual([]);
+    expect(shape.destructor_actions).toEqual([]);
   });
 });
 

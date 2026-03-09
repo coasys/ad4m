@@ -1750,12 +1750,11 @@ export class Ad4mModel {
       }
     }
 
-    // If no required properties, we need at least one property to define the model
-    // Use any property with an initial value as the defining characteristic
+    // If no required properties produced filters, try properties with initial
+    // values (e.g. @Flag or @Property with an explicit initial).
     if (graphTraversalFilters.length === 0) {
       for (const [propName, propMeta] of Object.entries(metadata.properties)) {
         if (propMeta.initial) {
-          // For flag properties, also filter by the target value
           if (propMeta.flag) {
             graphTraversalFilters.push(
               `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
@@ -1765,8 +1764,33 @@ export class Ad4mModel {
               `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`
             );
           }
-          break; // Just need one defining property
+          break;
         }
+      }
+    }
+
+    // Still no filters → open-world structural matching.
+    // Require the node to have at least one link whose predicate is declared
+    // by this model (property OR relation).  This prevents the query from
+    // matching every node in the perspective.
+    if (graphTraversalFilters.length === 0) {
+      const structuralPredicates: string[] = [];
+      for (const [, propMeta] of Object.entries(metadata.properties)) {
+        if (propMeta.predicate) {
+          structuralPredicates.push(`predicate = '${escapeSurrealString(propMeta.predicate)}'`);
+        }
+      }
+      if (metadata.relations) {
+        for (const [, relMeta] of Object.entries(metadata.relations)) {
+          if (relMeta.predicate) {
+            structuralPredicates.push(`predicate = '${escapeSurrealString(relMeta.predicate)}'`);
+          }
+        }
+      }
+      if (structuralPredicates.length > 0) {
+        graphTraversalFilters.push(
+          `count(->link[WHERE perspective = $perspective AND (${structuralPredicates.join(' OR ')})]) > 0`
+        );
       }
     }
 
@@ -2958,27 +2982,41 @@ WHERE ${whereConditions.join(' AND ')}
     }
     
 
-    // First filter out the properties that are not relations (arrays)
-    const initialValues = {};
-    for (const [key, value] of Object.entries(this)) {
-      if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
-        initialValues[key] = value;
-      }
-    }
-
-    // Get the class name instead of passing the instance to avoid Prolog query generation
-    const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
-
-    // Create the subject with the initial values
-    await this.perspective.createSubject(
-      className,
-      this._baseExpression,
-      initialValues,
-      batchId
+    // Check if the model has any constructor actions (required properties or
+    // flags).  Models whose properties are all optional and have no @Flag
+    // produce an empty SHACL constructor, so calling createSubject would fail
+    // on the Rust side ("No SHACL constructor found").  In that case we skip
+    // createSubject entirely and let innerUpdate write the links directly.
+    const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
+    const hasConstructor = Object.values(metadata.properties).some(
+      (p) => p.required || p.flag
     );
 
-    // Set relations
-    await this.innerUpdate(false, batchId)
+    if (hasConstructor) {
+      // First filter out the properties that are not relations (arrays)
+      const initialValues = {};
+      for (const [key, value] of Object.entries(this)) {
+        if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
+          initialValues[key] = value;
+        }
+      }
+
+      // Get the class name instead of passing the instance to avoid Prolog query generation
+      const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
+
+      // Create the subject with the initial values
+      await this.perspective.createSubject(
+        className,
+        this._baseExpression,
+        initialValues,
+        batchId
+      );
+    }
+
+    // Set properties and relations via innerUpdate.
+    // When createSubject was skipped (no constructor actions), we must enable
+    // property writing so that scalar values are persisted as links.
+    await this.innerUpdate(!hasConstructor, batchId)
 
     // If we got a batchId passed in, we let the caller decide when to commit.
     // We can't call getData() since the instance won't exist in the perspective
@@ -3135,8 +3173,29 @@ WHERE ${whereConditions.join(' AND ')}
    * ```
    */
   async delete(batchId?: string) {
-    // Remove the subject itself (destructor actions)
-    await this._perspective.removeSubject(this, this._baseExpression, batchId);
+    // Check if the model has a destructor (required properties or flags).
+    // Models whose properties are all optional and have no @Flag produce an
+    // empty SHACL destructor, so calling removeSubject would fail.  In that
+    // case we skip the destructor and just remove all outgoing links directly.
+    const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
+    const hasDestructor = Object.values(metadata.properties).some(
+      (p) => p.required || p.flag
+    );
+
+    if (hasDestructor) {
+      // Remove the subject itself (destructor actions)
+      await this._perspective.removeSubject(this, this._baseExpression, batchId);
+    } else {
+      // No destructor — manually remove all outgoing links from this node
+      try {
+        const outgoingLinks = await this._perspective.get(new LinkQuery({ source: this._baseExpression }));
+        if (outgoingLinks.length > 0) {
+          await this._perspective.removeLinks(outgoingLinks, batchId);
+        }
+      } catch (e) {
+        console.warn(`delete(): failed to remove outgoing links for ${this._baseExpression}:`, e);
+      }
+    }
 
     // Clean up incoming links — remove any links that point **to** this instance
     try {
@@ -3587,44 +3646,9 @@ WHERE ${whereConditions.join(' AND ')}
       }
     }
     
-    // Validate that at least one property has an initial value (needed for valid SDNA constructor)
-    // Relations don't create constructor actions, only properties with initial values do
-    const hasPropertyWithInitial = Object.values(properties).some((prop: any) => prop.initial);
-    
-    if (!hasPropertyWithInitial) {
-      // If no properties have initial values, add a type identifier automatically
-      const typeProperty = `ad4m://type`;
-      let typeValue: string;
-      if (namespace.includes('://')) {
-        const [scheme, rest] = namespace.split('://');
-        const path = (rest || '').replace(/\/+$/,'');
-        if (path) {
-          typeValue = `${scheme}://${path}/instance`;
-        } else {
-          typeValue = `${scheme}://instance`;
-        }
-      } else {
-        const path = namespace.replace(/\/+$/,'');
-        typeValue = `${path}/instance`;
-      }
-      
-      properties['__ad4m_type'] = {
-        through: typeProperty,
-        required: true,
-        writable: false,
-        initial: typeValue,
-        flag: true
-      };
-      
-      // Add the type property to the prototype
-      Object.defineProperty(DynamicModelClass.prototype, '__ad4m_type', {
-        configurable: true,
-        writable: false,
-        value: typeValue
-      });
-      
-      console.warn(`No properties with initial values found. Added automatic type flag: ${typeProperty} = ${typeValue}`);
-    }
+    // No auto-flag generation — models with all-optional properties use
+    // open-world structural matching.  Consumers who need type discrimination
+    // should add an explicit @Flag to their model definition.
     
     // Attach metadata to WeakMap registries
     for (const [propName, propMeta] of Object.entries(properties)) {
@@ -4421,6 +4445,23 @@ function buildInstanceClause(predicateName: string, metadata: ModelMetadata): st
       .map((p) => `triple(X, '${p.predicate}', _)`)
       .join(",\n    ");
     return `${predicateName}(X) :-\n    ${conditions}.`;
+  }
+  // Open-world structural fallback: match nodes that have at least one of the
+  // model's declared property predicates.  Uses disjunction (;) so any single
+  // predicate is enough.
+  const allPredicates = Object.values(props)
+    .filter((p) => p.predicate)
+    .map((p) => p.predicate!);
+  if (metadata.relations) {
+    for (const rel of Object.values(metadata.relations)) {
+      if (rel.predicate) allPredicates.push(rel.predicate);
+    }
+  }
+  if (allPredicates.length > 0) {
+    const disjunction = allPredicates
+      .map((pred) => `triple(X, '${pred}', _)`)
+      .join(" ;\n    ");
+    return `${predicateName}(X) :-\n    (${disjunction}).`;
   }
   return null;
 }

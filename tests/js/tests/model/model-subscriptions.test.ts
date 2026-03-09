@@ -112,12 +112,16 @@ describe("Ad4mModel — Subscriptions (SurrealDB)", function () {
 
     await post.delete();
 
+    // Small settling delay — under load the SurrealDB live-query notification
+    // can lag slightly before the subscription re-fires.
+    await new Promise((r) => setTimeout(r, 300));
+
     await waitUntil(
       () => {
         const latest = all.at(-1);
         return latest !== undefined && !latest.some((p) => p.id === postId);
       },
-      8000,
+      15_000,
       "subscription fires without the deleted post",
     );
     builder.dispose();

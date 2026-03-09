@@ -332,7 +332,7 @@ describe("Ad4mModel.fromJSONSchema", () => {
       }).to.throw(/Cannot infer namespace/);
     });
 
-    it("should automatically add type flag when no required properties are provided", async () => {
+    it("should handle all-optional properties without auto-generating a type flag", async () => {
       const schema = {
         $schema: "http://json-schema.org/draft-07/schema#",
         title: "OptionalOnly",
@@ -344,7 +344,7 @@ describe("Ad4mModel.fromJSONSchema", () => {
         // No required array - all properties are optional
       };
 
-      // Should not throw error - instead adds automatic type flag
+      // Should not throw error — open-world structural matching applies
       const OptionalClass = Ad4mModel.fromJSONSchema(schema, {
         name: "OptionalOnly",
         namespace: "test://",
@@ -353,20 +353,19 @@ describe("Ad4mModel.fromJSONSchema", () => {
       expect(OptionalClass).to.be.a("function");
       expect(OptionalClass.className).to.equal("OptionalOnly");
 
-      // Should have automatic type flag
+      // Should NOT have automatic type flag
       const instance = new OptionalClass(perspective!);
-      expect(instance.__ad4m_type).to.equal("test://instance");
+      expect(instance.__ad4m_type).to.be.undefined;
 
-      // Verify SHACL includes the automatic type flag
+      // SHACL should NOT include an ad4m://type property
       const { shape: optionalShape } = OptionalClass.generateSHACL();
       expect(
         optionalShape.properties.some((p: any) => p.path === "ad4m://type"),
-      ).to.be.true;
-      expect(
-        optionalShape.properties.some(
-          (p: any) => p.hasValue === "test://instance",
-        ),
-      ).to.be.true;
+      ).to.be.false;
+
+      // Constructor/destructor should exist but be empty
+      expect(optionalShape.constructor_actions).to.deep.equal([]);
+      expect(optionalShape.destructor_actions).to.deep.equal([]);
     });
 
     it("should work when properties have explicit initial values even if not required", async () => {
