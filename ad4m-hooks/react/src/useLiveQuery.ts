@@ -131,7 +131,7 @@ export function useLiveQuery<T extends Ad4mModel>(
 
     // Single-instance mode: filter to specific node URI
     if (id !== undefined) {
-      q.where = { ...q.where, base: id };
+      q.where = { ...q.where, id: id };
     }
 
     return q;

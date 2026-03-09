@@ -2996,11 +2996,26 @@ FETCH links
       (p) => p.required || p.flag || p.initial !== undefined
     );
 
+    // Track properties that have resolveLanguage (non-literal) so they can be
+    // set via setProperty after createSubject (which doesn't resolve languages).
+    const deferredResolveLanguageProps: string[] = [];
+
     if (hasConstructor) {
       // First filter out the properties that are not relations (arrays)
       const initialValues = {};
       for (const [key, value] of Object.entries(this)) {
         if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
+          // Check if this property requires language resolution (e.g. file storage).
+          // If so, resolve the expression *before* passing to createSubject so
+          // the constructor receives a valid URI instead of raw data.
+          const propMeta = metadata.properties[key];
+          if (propMeta?.resolveLanguage && propMeta.resolveLanguage !== 'literal' && typeof value === 'object') {
+            // Defer these properties — they need createExpression which may
+            // fail inside a batch context on some languages.  We'll set them
+            // via setProperty after createSubject.
+            deferredResolveLanguageProps.push(key);
+            continue;
+          }
           initialValues[key] = value;
         }
       }
@@ -3021,6 +3036,16 @@ FETCH links
     // When createSubject was skipped (no constructor actions), we must enable
     // property writing so that scalar values are persisted as links.
     await this.innerUpdate(!hasConstructor, batchId)
+
+    // Now handle any deferred resolveLanguage properties that were excluded
+    // from initialValues.  setProperty will call createExpression to upload
+    // the data to the appropriate language and store the resulting URI.
+    for (const key of deferredResolveLanguageProps) {
+      const value = (this as any)[key];
+      if (value !== undefined && value !== null) {
+        await this.setProperty(key, value, batchId);
+      }
+    }
 
     // If we got a batchId passed in, we let the caller decide when to commit.
     // We can't call getData() since the instance won't exist in the perspective
