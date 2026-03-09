@@ -446,7 +446,7 @@ impl Ad4mMcpHandler {
             let props: serde_json::Map<String, serde_json::Value> = args
                 .iter()
                 .filter(|(k, _)| {
-                    k.as_str() != "perspective_id" 
+                    k.as_str() != "perspective_id"
                         && k.as_str() != "expression_address"
                         && k.as_str() != "parent"
                 })
@@ -493,7 +493,7 @@ impl Ad4mMcpHandler {
                 if let Some(parent_addr) = parent {
                     let parent_encoded = Self::encode_literal(&parent_addr);
                     let child_encoded = Self::encode_literal(&expression_address);
-                    
+
                     let link = Link {
                         source: parent_encoded,
                         predicate: Some("ad4m://has_child".to_string()),
