@@ -178,7 +178,7 @@ Generated tool patterns per class:
 All dynamic tools include:
 
 - `perspective_id` — which perspective to operate on (NOT `perspective_uuid`)
-- `expression_address` — the subject instance URI (for non-query tools)
+- `expression_address` — optional. If not provided, a random address is auto-generated
 - `parent` — optional parent address to add the new instance as a child of (e.g., channel ID)
 - Property-specific params (type-checked against SHACL datatype)
 
@@ -190,11 +190,8 @@ All dynamic tools include:
 3. add_perspective             → create workspace
 4. add_model                   → add SHACL schema
 5. get_models                  → verify schema loaded
-6. channel_create              → create a Channel (provide expression_address + required props)
-7. message_create              → create a Message (provide expression_address + body + parent=<channel>)
-   OR (if parent not supported):
-7a. message_create             → create a Message (provide expression_address + body)
-7b. add_child                  → add message as child of channel
+6. channel_create              → create a Channel (expression_address optional)
+7. message_create              → create a Message (expression_address auto-generated, provide body + parent=<channel>)
 8. message_list(perspective_id, parent=<channel>) → list all messages in channel
 ```
 

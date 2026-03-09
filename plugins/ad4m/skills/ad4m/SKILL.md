@@ -51,9 +51,13 @@ Almost always, work on the level of **CLASSES**. AD4M provides a type-system on 
 
 **For you, that means: to CREATE and MODIFY INSTANCES OF MESSAGES, TASKS, CHANNELS — ALWAYS USE DYNAMIC MCP TOOLS like `message_create` or `channel_set_name`.** Unless you have good reason to write links directly. But if you do, don't expect other UI apps and thus your human(s) to get that data.
 
-### 6. Provide expression_address yourself
+### 6. expression_address is now optional
 
-When creating any subject instance (`message_create`, `create_subject`, etc.) you **must** provide the `expression_address` — a random URI like `literal://string:` followed by 20+ random alphanumeric characters. The system does NOT generate IDs for you.
+When creating any subject instance (`message_create`, etc.), you can now **omit** the `expression_address` — a random address is automatically generated for you. Only provide it if you need a specific ID.
+
+```
+message_create(perspective_id="...", body="Hello!", parent="<channel-id>")
+```
 
 ### 7. Messages go into Channels via parent parameter (or add_child)
 
@@ -186,8 +190,8 @@ The waker now tells you which **channel** the event happened in, so you know exa
 5. channel_query(perspective_id: "...")              → list channels
 6. message_list(perspective_id, parent="<channel-id>")
    → returns message addresses, then message_get() per message
-7. message_create(perspective_id, expression_address="literal://string:<random-id>", body="Hello!", parent="<channel-id>")
-   → creates message AND adds to channel in one step
+7. message_create(perspective_id, body="Hello!", parent="<channel-id>")
+   → creates message AND adds to channel in one step (expression_address auto-generated)
 ```
 
 **If `channel_query` returns nothing**, SHACL schemas may still be syncing (Holochain gossip takes ~3-5 min). Wait and retry.

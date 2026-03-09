@@ -90,7 +90,7 @@ impl Ad4mMcpHandler {
             ("perspective_id".to_string(), "Perspective UUID".to_string()),
             (
                 "expression_address".to_string(),
-                format!("Address for the new {} instance", class_name),
+                format!("Optional unique address for the new {} instance. If not provided, a random address is generated.", class_name),
             ),
             (
                 "parent".to_string(),
@@ -125,11 +125,11 @@ impl Ad4mMcpHandler {
         Tool::new(
             format!("{}_create", name_lower),
             format!(
-                "Create a new {} instance. Properties: {} (* = required). Optionally add as child of a parent (e.g., add a message to a channel) by providing the parent parameter.",
+                "Create a new {} instance. Properties: {} (* = required). Optionally add as child of a parent by providing the parent parameter. Leave expression_address empty to auto-generate a random address.",
                 class_name,
                 prop_descs.join(", ")
             ),
-            Self::make_tool_schema(props, vec!["perspective_id", "expression_address"]),
+            Self::make_tool_schema(props, vec!["perspective_id"]),
         )
     }
 
@@ -413,14 +413,23 @@ impl Ad4mMcpHandler {
         class_name: &str,
         args: &serde_json::Map<String, serde_json::Value>,
     ) -> String {
-        let agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
-        let expression_address = match Self::require_arg(args, "expression_address") {
-            Ok(v) => v.to_string(),
-            Err(e) => return e,
+        // expression_address is optional - generate random if not provided
+        let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
+            Some(addr) if !addr.is_empty() => addr.to_string(),
+            _ => {
+                // Generate random 24-character alphanumeric string
+                let random_id: String = (0..24)
+                    .map(|_| {
+                        let idx = rand::random::<u8>() % 36;
+                        if idx < 10 {
+                            (b'0' + idx) as char
+                        } else {
+                            (b'a' + idx - 10) as char
+                        }
+                    })
+                    .collect();
+                format!("literal://string:{}", random_id)
+            }
         };
 
         // Check for optional parent parameter
