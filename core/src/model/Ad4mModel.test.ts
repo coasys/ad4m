@@ -36,7 +36,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
     
     // Verify "name" property
     expect(metadata.properties.name.predicate).toBe("test://name");
-    expect(metadata.properties.name.required).toBe(true);
+    expect(metadata.properties.name.required).toBe(false);
     expect(metadata.properties.name.readOnly).toBe(false);
     expect(metadata.properties.name.resolveLanguage).toBe("literal");
     
@@ -436,13 +436,13 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     return query.replace(/\s+/g, ' ').trim();
   }
 
-  // Test Recipe model
+  // Test Recipe model — explicit required: true to test required-property query filters
   @Model({ name: "Recipe" })
   class Recipe extends Ad4mModel {
-    @Property({ through: "recipe://name" })
+    @Property({ through: "recipe://name", required: true })
     name: string = "";
     
-    @Property({ through: "recipe://rating" })
+    @Property({ through: "recipe://rating", required: true })
     rating: number = 0;
     
     @HasMany({ through: "recipe://ingredient" })

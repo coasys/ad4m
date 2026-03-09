@@ -811,6 +811,46 @@ export function Model(opts: ModelConfig) {
                 shape.addProperty(relShape);
             }
 
+            // If no constructor actions exist (all properties are optional and no @Flag),
+            // auto-generate a type flag so the SHACL constructor is valid and the model
+            // can be identified in queries.
+            if (constructorActions.length === 0) {
+                const autoTypePredicate = 'ad4m://type';
+                const autoTypeValue = `ad4m://type/${subjectName}`;
+
+                constructorActions.push({
+                    action: "addLink",
+                    source: "this",
+                    predicate: autoTypePredicate,
+                    target: autoTypeValue,
+                });
+                destructorActions.push({
+                    action: "removeLink",
+                    source: "this",
+                    predicate: autoTypePredicate,
+                    target: "*",
+                });
+
+                // Also add the auto-generated flag as a property shape so queries can match on it
+                shape.addProperty({
+                    name: '__ad4m_type',
+                    path: autoTypePredicate,
+                    hasValue: autoTypeValue,
+                    minCount: 1,
+                    maxCount: 1,
+                });
+
+                // Register the auto-flag in the property WeakMap so getModelMetadata()
+                // and queryToSurrealQL() can use it for instance identification
+                setPropertyRegistryEntry(target, '__ad4m_type', {
+                    through: autoTypePredicate,
+                    required: true,
+                    writable: false,
+                    initial: autoTypeValue,
+                    flag: true,
+                } as any);
+            }
+
             // Set constructor and destructor actions on the shape
             if (constructorActions.length > 0) {
                 shape.setConstructorActions(constructorActions);
@@ -839,54 +879,61 @@ export function Model(opts: ModelConfig) {
  * (@Optional, @ReadOnly) are thin wrappers that adjust these defaults.
  * 
  * Smart defaults (all overridable):
- * - `required` → `true`
+ * - `required` → `false`
  * - `readOnly` → `false`
  * - `resolveLanguage` → `"literal"`
- * - `initial` → `"literal://string:uninitialized"` (when required)
+ * - `initial` → `undefined` (no link created until a value is explicitly set)
+ * 
+ * Properties are optional by default. When a model instance is created without
+ * providing a value for an optional property, no link is added to the graph.
+ * Set `required: true` explicitly when a property must always be present (this
+ * also adds a `"literal://string:uninitialized"` sentinel as the initial value
+ * so that the SDNA constructor creates a placeholder link).
  * 
  * @example
  * ```typescript
  * class User extends Ad4mModel {
- *   // Basic required property with default initial value
+ *   // Optional property (default) — no link created until a value is set
  *   @Property({
  *     through: "user://name"
  *   })
  *   name: string = "";
  * 
- *   // Required property with custom initial value
+ *   // Explicitly required property with sentinel initial value
  *   @Property({
  *     through: "user://status",
- *     initial: "user://active"
+ *     required: true
  *   })
  *   status: string = "";
  * 
- *   // Required property with literal resolution
+ *   // Required property with custom initial value
+ *   @Property({
+ *     through: "user://role",
+ *     required: true,
+ *     initial: "user://member"
+ *   })
+ *   role: string = "";
+ * 
+ *   // Optional property with literal resolution
  *   @Property({
  *     through: "user://bio",
  *     resolveLanguage: "literal"
  *   })
  *   bio: string = "";
- * 
- *   // Required property with custom getter/setter
- *   @Property({
- *     through: "user://age",
- *     getter: `triple(Base, "user://birthYear", Year), Value is 2024 - Year`,
- *     setter: `Year is 2024 - Value, Actions = [{"action": "setSingleTarget", "source": "this", "predicate": "user://birthYear", "target": Year}]`
- *   })
- *   age: number = 0;
  * }
  * ```
  * 
  * @param {PropertyOptions} opts - Property configuration
  * @param {string} opts.through - The predicate URI for the property
- * @param {string} [opts.initial] - Initial value (defaults to "literal://string:uninitialized")
+ * @param {boolean} [opts.required=false] - Whether the property is required (adds query filters and sentinel initial value)
+ * @param {string} [opts.initial] - Initial value (defaults to "literal://string:uninitialized" when required)
  * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function Property(opts: PropertyOptions) {
-    const required = opts.required ?? true;
+    const required = opts.required ?? false;
     return applyPropertyMetadata({
         ...opts,
         required,
