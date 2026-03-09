@@ -124,58 +124,7 @@ impl ServerHandler for Ad4mMcpHandler {
 
         // Check if tool requires authentication
         if !AUTH_TOOLS.contains(&tool_name.as_str()) {
-            // Check admin credential first
-            if let Some(ref admin_cred) = self.context.admin_credential {
-                let token = self
-                    .context
-                    .auth_token
-                    .read()
-                    .await
-                    .clone()
-                    .unwrap_or_default();
-                if constant_time_eq(&token, admin_cred) {
-                    // Admin credential matches — allow access immediately
-                    return self.dispatch_tool(request, context).await;
-                }
-
-                // Admin credential is configured but session token doesn't match.
-                // Before rejecting: check if the HTTP Authorization header carries
-                // the admin credential directly — this lets callers skip the
-                // request_capability + generate_jwt dance when they already hold
-                // the admin credential (it acts as a replacement JWT).
-                if token.is_empty() {
-                    let http_admin_authed = context
-                        .extensions
-                        .get::<HttpRequestParts>()
-                        .and_then(|parts| parts.headers.get(axum::http::header::AUTHORIZATION))
-                        .and_then(|h| h.to_str().ok())
-                        .map(|h| {
-                            // Accept both bare token and "Bearer <token>" forms.
-                            // Use constant-time comparison to prevent timing attacks.
-                            let bare = h.strip_prefix("Bearer ").unwrap_or(h);
-                            constant_time_eq(bare, admin_cred.as_str())
-                        })
-                        .unwrap_or(false);
-
-                    if http_admin_authed {
-                        // Store admin credential as session token so that
-                        // get_agent_context() and get_capabilities() work for
-                        // the remainder of this tool call.
-                        let mut token_guard = self.context.auth_token.write().await;
-                        *token_guard = Some(admin_cred.clone());
-                        drop(token_guard);
-                        return self.dispatch_tool(request, context).await;
-                    }
-
-                    return Ok(CallToolResult::error(vec![Content::text(
-                        json!({"error": "Authentication required. Use request_capability + generate_jwt, login_email, or signup to authenticate."}).to_string()
-                    )]));
-                }
-            }
-
-            // Check JWT-based auth (covers JWT tokens and single-user mode with no admin_credential)
-            let capabilities = self.get_capabilities().await;
-            if capabilities.is_err() {
+            if !self.check_auth(&tool_name, &context).await {
                 return Ok(CallToolResult::error(vec![Content::text(
                     json!({"error": "Authentication required. Use request_capability + generate_jwt, login_email, or signup to authenticate."}).to_string()
                 )]));
@@ -192,6 +141,92 @@ impl Ad4mMcpHandler {
             context,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Unified authentication check for MCP tool calls.
+    ///
+    /// Different MCP clients provide credentials in different ways:
+    /// - Some store the JWT/credential in the MCP session (via generate_jwt/login_email)
+    /// - Some send it per-request in the HTTP Authorization header (mcporter, .mcp.json headers)
+    /// - Some do both
+    ///
+    /// This method checks all sources and stores the token in the session if found
+    /// via HTTP header, so downstream helpers (get_agent_context, get_capabilities) work.
+    async fn check_auth(&self, _tool_name: &str, context: &RequestContext<RoleServer>) -> bool {
+        let session_token = self
+            .context
+            .auth_token
+            .read()
+            .await
+            .clone()
+            .unwrap_or_default();
+
+        let admin_cred = self.context.admin_credential.as_deref();
+
+        // 1. Session token matches admin credential → pass
+        if let Some(cred) = admin_cred {
+            if !session_token.is_empty() && constant_time_eq(&session_token, cred) {
+                return true;
+            }
+        }
+
+        // 2. Session token is a valid JWT → pass
+        if !session_token.is_empty() {
+            let caps = capabilities_from_token(session_token.clone(), admin_cred.map(String::from));
+            if caps.is_ok() {
+                return true;
+            }
+        }
+
+        // 3. Try HTTP Authorization header (for clients like mcporter that send
+        //    credentials per-request rather than using the MCP session)
+        let http_header_value = context
+            .extensions
+            .get::<HttpRequestParts>()
+            .and_then(|parts| parts.headers.get(axum::http::header::AUTHORIZATION))
+            .and_then(|h| h.to_str().ok())
+            .map(|h| {
+                let mut parts = h.splitn(2, char::is_whitespace);
+                let scheme = parts.next().unwrap_or_default();
+                let value = parts.next().unwrap_or_default().trim_start();
+
+                if scheme.eq_ignore_ascii_case("bearer") && !value.is_empty() {
+                    value.to_string()
+                } else {
+                    h.to_string()
+                }
+            });
+
+        if let Some(ref header_token) = http_header_value {
+            // 3a. Header matches admin credential → store & pass
+            if let Some(cred) = admin_cred {
+                if constant_time_eq(header_token, cred) {
+                    let mut guard = self.context.auth_token.write().await;
+                    *guard = Some(cred.to_string());
+                    return true;
+                }
+            }
+
+            // 3b. Header is a valid JWT → store & pass
+            if !header_token.is_empty() {
+                let caps =
+                    capabilities_from_token(header_token.clone(), admin_cred.map(String::from));
+                if caps.is_ok() {
+                    let mut guard = self.context.auth_token.write().await;
+                    *guard = Some(header_token.clone());
+                    return true;
+                }
+            }
+        }
+
+        // 4. No admin credential configured and no token → single-user local mode
+        //    (mirrors GraphQL localhost trust model)
+        if admin_cred.is_none() && session_token.is_empty() && http_header_value.is_none() {
+            return true;
+        }
+
+        // Everything else → reject
+        false
     }
 
     /// Build the tool router manually, registering all tools from domain modules.
