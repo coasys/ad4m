@@ -1,27 +1,38 @@
 version: 2.1
 references:
-  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
+  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:3605cfd2c0aee389ac9e7bb499a8e2633d0367ef3cc148d6668b2dbdff846ce0
 
 # Self-hosted machine runner on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04)
 # Resource class: coasys/marvin
 
 commands:
   setup_env:
-    description: "Set up build environment (Node 18, Rust, Deno, Go, pnpm)"
+    description: "Set up build environment (Node, Rust, Deno, Go, pnpm)"
+    parameters:
+      node_version:
+        type: string
+        default: "24"
     steps:
       - run:
           name: Setup build environment
           command: |
-            # Add all tool paths directly to PATH — no NVM sourcing (nvm use prints to stdout
-            # which corrupts subshell commands in cargo build scripts like libffi's libtool)
-            echo 'export PATH="$HOME/.nvm/versions/node/v18.20.8/bin:$HOME/.cargo/bin:$HOME/.deno/bin:$HOME/.local/go/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/go/bin:$PATH"' >> $BASH_ENV
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" --no-use
+            NODE_PATH=$(nvm which << parameters.node_version >> 2>/dev/null || true)
+            if [ -z "$NODE_PATH" ] || [ ! -x "$NODE_PATH" ]; then
+              echo "Node << parameters.node_version >> not found, installing via nvm..."
+              nvm install << parameters.node_version >>
+              NODE_PATH=$(nvm which << parameters.node_version >>)
+            fi
+            NODE_BIN_DIR=$(dirname "$NODE_PATH")
+            echo "export PATH=\"$NODE_BIN_DIR:$HOME/.cargo/bin:$HOME/.deno/bin:$HOME/.local/go/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/go/bin:$PATH\"" >> $BASH_ENV
             source $BASH_ENV
             echo "Node: $(node --version)"
             echo "npm: $(npm --version)"
             echo "Rust: $(rustc --version)"
             echo "Deno: $(deno --version | head -1)"
             echo "Go: $(go version)"
-            echo "pnpm: $(pnpm --version)"
+            echo "pnpm: $(pnpm --version || echo 'not installed yet')"
 
   setup_integration_test_environment:
     description: "Setup common integration test environment"
