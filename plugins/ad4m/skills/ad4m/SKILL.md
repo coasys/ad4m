@@ -204,14 +204,28 @@ The waker POSTs to your `/hooks/wake` endpoint with this JSON body:
 
 ```json
 {
-  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nMCP endpoint: http://localhost:3001/mcp\nAuth credential: your-admin-credential\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nChannel: literal://string:channel-id\nSubscription: flux-messages\nEvent type: channel-messages",
+  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nMCP endpoint: http://localhost:3001/mcp\nAuth credential: your-admin-credential\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nParent: literal://string:parent-id\nSubscription: flux-messages\nEvent type: channel-messages",
   "mode": "now"
 }
 ```
 
 **Use `/hooks/wake`, NOT `/hooks/agent`.** `/hooks/wake` enqueues the event into your main agent session, which has your skills (including this AD4M skill) loaded. `/hooks/agent` spawns an isolated sub-agent that won't have your skills.
 
-Parse the `text` field to extract: `MCP endpoint`, `Auth credential`, `Agent DID`, `Perspective` (local UUID), `Channel`, `Event type`. Use these values directly.
+Parse the `text` field to extract: `MCP endpoint`, `Auth credential`, `Agent DID`, `Perspective` (local UUID), `Parent`, `Event type`. Use these values directly.
+
+### Channel Concept: Each Parent is a Separate Conversation Space
+
+**The Parent field tells you which "space" the event happened in.** In AD4M/Flux, the perspective graph is a tree:
+
+- `ad4m://self` is the root (the Community)
+- Channels/Parents are direct children of the community
+- Messages are children of channels/parents
+
+**When the waker gives you a Parent, that is YOUR conversation space.**
+
+- Read messages FROM THAT PARENT only using `message_list(parent=<parent>)`
+- Respond TO THAT PARENT by passing `parent=<parent>` to `message_create`
+- **DO NOT** respond to a different parent or add your message as a child of a different parent (unless you have a reason to do that AS WELL, but your direct response to the expression that mentioned you must be under the same parent)
 
 **First: check your memory/notes file** for the perspective UUID from the wake message. Your notes will tell you what community this is, who's in it, and why you're there. This context is essential for responding appropriately.
 
@@ -220,7 +234,8 @@ Parse the `text` field to extract: `MCP endpoint`, `Auth credential`, `Agent DID
 ### Step 1: Read recent messages
 
 1. `get_my_did()` → get your agent DID for filtering
-2. `message_list(perspective_id=<from wake>, parent=<channel from wake>)` → list of message addresses
+2. `message_list(perspective_id=<from wake>, parent=<parent from wake>)` → list of message addresses
+   - **Use the Parent from the wake message!**
 3. For each recent message: `message_get(perspective_id, expression_address=<message>)` → `{body, ...}`
 4. The `body` field is a signed expression JSON string: `{"author": "did:key:...", "timestamp": "...", "data": "<p>message text</p>"}`
 5. Parse the `data` field for actual message text. Skip entries where body is `"uninitialized"` or empty.
@@ -228,8 +243,19 @@ Parse the `text` field to extract: `MCP endpoint`, `Auth credential`, `Agent DID
 
 ### Step 2: Post your reply
 
-1. `message_create(perspective_id, expression_address="literal://string:<unique-id>", body="Your reply", parent="<channel>")`
-   → creates message AND adds to channel in one call
+**Always respond to the same parent that woke you:**
+
+```
+message_create(
+  perspective_id=<from wake>,
+  body="Your reply",
+  parent=<parent from wake>
+)
+```
+
+- Omit `expression_address` — it will be auto-generated
+- Use the SAME `parent` from the wake message
+- **Never** add your message to a different parent
 
 **Never use `message_set_body` after `create_subject`.** That causes a remove+re-add race condition making the message appear as "uninitialized" on other nodes.
 

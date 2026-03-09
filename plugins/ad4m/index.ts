@@ -304,6 +304,7 @@ function buildWakeMessage(
   config: PluginConfig,
   sub: WakerSubscription,
   agentDid: string,
+  parent: string,
 ): string {
   const event =
     sub.type === "mention"
@@ -318,7 +319,7 @@ function buildWakeMessage(
     `Auth credential: ${config.adminCredential}`,
     `Agent DID: ${agentDid}`,
     `Perspective: ${sub.perspective}`,
-    `Channel: ${sub.channel}`,
+    parent ? `Parent: ${parent}` : null,
     sub.neighbourhood ? `Neighbourhood: ${sub.neighbourhood}` : null,
     `Subscription: ${sub.id}`,
     `Event type: ${sub.type}`,
@@ -332,8 +333,10 @@ async function postWake(
   sub: WakerSubscription,
   agentDid: string,
   logger: any,
+  parentChannel?: string,
 ): Promise<void> {
-  const message = buildWakeMessage(config, sub, agentDid);
+  const effectiveChannel = parentChannel || sub.channel;
+  const message = buildWakeMessage(config, sub, agentDid, effectiveChannel);
   const body = JSON.stringify({ text: message, mode: "now" });
 
   try {
@@ -491,7 +494,7 @@ export default function ad4mPlugin(api: any) {
 
     let lastResultHash: string | null = null;
 
-    proxy.onResult((result: any) => {
+    proxy.onResult(async (result: any) => {
       const serialized = JSON.stringify(result);
       if (lastResultHash === serialized) return;
       lastResultHash = serialized;
@@ -501,13 +504,33 @@ export default function ad4mPlugin(api: any) {
         `[ad4m-waker] ${sub.id}: query result changed (${count} items)`,
       );
 
+      // Determine the parent from the result
+      let parentChannel = sub.channel;
+
+      // For mention subscriptions, the query returns has_child links pointing to messages with mentions
+      // The source of each has_child link is the parent (channel), target is the message
+      if (!parentChannel && sub.type === "mention" && Array.isArray(result) && result.length > 0) {
+        // Each result is a has_child link where the target is a message with a mention
+        // The source is the parent (channel)
+        const parentLink = result.find((link: any) => 
+          link && link.predicate === "ad4m://has_child" && link.source
+        );
+        
+        if (parentLink) {
+          parentChannel = parentLink.source;
+          logger.info(`[ad4m-waker] ${sub.id}: found parent ${parentChannel} from has_child link`);
+        }
+      }
+        }
+      }
+
       const existing = wakerDebounceTimers.get(sub.id);
       if (existing) clearTimeout(existing);
 
       wakerDebounceTimers.set(
         sub.id,
         setTimeout(() => {
-          postWake(config, sub, wakerAgentDid, logger);
+          postWake(config, sub, wakerAgentDid, logger, parentChannel);
           wakerDebounceTimers.delete(sub.id);
         }, debounceMs),
       );
