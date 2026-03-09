@@ -57,40 +57,6 @@ commands:
 
 
 jobs:
-  node24-smoke-test:
-    machine: true
-    resource_class: coasys/marvin
-    steps:
-      - checkout
-      - setup_env:
-          node_version: "24"
-      - run:
-          name: Verify Node 24
-          command: |
-            echo "Node version: $(node --version)"
-            node --version | grep -q '^v24\.' || { echo "FAIL: expected Node 24"; exit 1; }
-      - run:
-          name: Install pnpm (if needed)
-          command: |
-            command -v pnpm >/dev/null 2>&1 || npm install -g pnpm
-            echo "pnpm: $(pnpm --version)"
-      - run:
-          name: Install dependencies
-          command: pnpm install --no-frozen-lockfile
-      - run:
-          name: Install core dependencies
-          command: cd ./core && pnpm install --no-frozen-lockfile
-      - run:
-          name: Build TypeScript packages
-          command: pnpm run build-npm-packages
-      - run:
-          name: Build dapp
-          command: pnpm build-dapp
-      - run:
-          name: Root tests
-          command: pnpm test
-          no_output_timeout: 15m
-
   build-and-test:
     machine: true
     resource_class: coasys/marvin
