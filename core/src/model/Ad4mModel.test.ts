@@ -458,7 +458,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     expect(query).toContain("id AS source");
     expect(query).toContain("uri AS source_uri");
     expect(query).toContain("FROM node");
-    expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
+    expect(query).toContain("->link AS links");
     expect(query).toContain("WHERE");
     // Should have graph traversal filters for required properties
     expect(query).toContain("count(->link[WHERE");
@@ -468,17 +468,17 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: "Pasta" } });
     
     // Should have graph traversal filters for required properties and user filter
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name']) > 0");
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://rating']) > 0");
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name']) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://rating']) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
   });
 
   it("should generate query with multiple property filters", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: "Pasta", rating: 5 } });
     
     expect(query).toContain("WHERE");
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://rating' AND fn::parse_literal(out.uri) = 5]) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://rating' AND fn::parse_literal(out.uri) = 5]) > 0");
     expect(query).toContain("AND");
   });
 
@@ -514,14 +514,14 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: { not: "Salad" } } });
 
     // Not operator uses graph traversal with count = 0
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Salad']) = 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Salad']) = 0");
   });
 
   it("should handle not operator with array (NOT IN)", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: { not: ["Salad", "Soup"] } } });
 
     // Not operator with array uses graph traversal with count = 0
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND fn::parse_literal(out.uri) IN ['Salad', 'Soup']]) = 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) IN ['Salad', 'Soup']]) = 0");
   });
 
   it("should handle between operator (filtered in JavaScript, not SQL)", async () => {
@@ -566,7 +566,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   it("should handle array values (IN clause)", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: ["Pasta", "Pizza"] } });
     
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND fn::parse_literal(out.uri) IN ['Pasta', 'Pizza']]) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) IN ['Pasta', 'Pizza']]) > 0");
   });
 
   it.skip("should handle special fields (author, timestamp) without subqueries", async () => {
@@ -611,7 +611,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
     // WHERE clause uses graph traversal filters
     expect(query).toContain("WHERE");
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
     // Comparison operators (gt) are filtered in JavaScript, not SQL
     expect(query).not.toContain("out.uri > 4");
     expect(query).not.toContain("target > 4");
@@ -625,7 +625,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { properties: ["name"] });
 
     // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
-    expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
+    expect(query).toContain("->link AS links");
     
   });
 
@@ -642,7 +642,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await MultiRelationModel.queryToSurrealQL(mockPerspective, {});
 
     // With array::group(), all link data is selected
-    expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
+    expect(query).toContain("->link AS links");
     
   });
 
@@ -675,7 +675,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const normalized = normalizeQuery(query);
 
     // Verify graph traversal filters are present
-    expect(normalized).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
+    expect(normalized).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
     // Comparison operators (gte, lte) are filtered in JavaScript, not SQL
     expect(normalized).not.toContain("out.uri >= 4");
     expect(normalized).not.toContain("target >= 4");
@@ -702,8 +702,8 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     
     // Should have WHERE clause filtering for required properties using graph traversal
     expect(query).toContain("WHERE");
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name']) > 0");
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://rating']) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name']) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://rating']) > 0");
     expect(query).not.toContain("ORDER BY");
     expect(query).not.toContain("START");
   });
@@ -786,7 +786,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
     const normalized = normalizeQuery(query);
     // Regular properties use graph traversal filters
-    expect(normalized).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
+    expect(normalized).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
     // Comparison operators (gt) are filtered in JavaScript, not SQL
     expect(normalized).not.toContain("out.uri > 4");
     expect(normalized).not.toContain("target > 4");
@@ -809,7 +809,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   it("should handle array of numbers", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { rating: [4, 5] } });
     
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://rating' AND fn::parse_literal(out.uri) IN [4, 5]]) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://rating' AND fn::parse_literal(out.uri) IN [4, 5]]) > 0");
   });
 
   it("should skip unknown properties in where clause", async () => {
@@ -843,7 +843,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { properties: ["name", "rating"] });
 
     // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
-    expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
+    expect(query).toContain("->link AS links");
     
   });
 });

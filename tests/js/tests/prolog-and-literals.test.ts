@@ -1653,9 +1653,10 @@ describe("Prolog + Literals", () => {
                             updateCount++;
                         });
 
-                    // Initially no results
+                    // Initially no results (subscribe() invokes callback with initial results)
                     expect(initialResults.length).to.equal(0);
-                    expect(updateCount).to.equal(0);
+                    // Reset updateCount since subscribe() fires the callback once with initial results
+                    updateCount = 0;
 
                     // Add matching notification - should trigger subscription
                     const notification1 = new Notification(perspective!);
@@ -1727,7 +1728,8 @@ describe("Prolog + Literals", () => {
 
                         @Property({
                             through: "note1://content",
-                            resolveLanguage: "literal"
+                            resolveLanguage: "literal",
+                            required: true,
                         })
                         content1: string = "";
                     }
@@ -1744,7 +1746,8 @@ describe("Prolog + Literals", () => {
 
                         @Property({
                             through: "note2://content",
-                            resolveLanguage: "literal"
+                            resolveLanguage: "literal",
+                            required: true,
                         })
                         content2: string = "";
                     }
@@ -1833,7 +1836,8 @@ describe("Prolog + Literals", () => {
 
                     // Initially no results
                     expect(initialResults.length).to.equal(0);
-                    expect(updateCount).to.equal(0);
+                    // Reset updateCount since subscribe() fires the callback once with initial results
+                    updateCount = 0;
 
                     // Add matching task - should trigger subscription
                     const task1 = new Task(perspective!);
@@ -2183,16 +2187,18 @@ describe("Prolog + Literals", () => {
                         await model1.save();
 
                         // Wait for subscription update with proper condition checking
+                        // subscribe() fires callback once immediately with initial results (callCount=1),
+                        // so we wait for callCount >= 2 to capture the real update after model save
                         await waitForCondition(
-                            () => callback1.called,
+                            () => callback1.callCount >= 2,
                             { 
                                 timeoutMs: 5000, 
                                 errorMessage: 'First callback was not called after model save' 
                             }
                         );
 
-                        // Verify callback was called
-                        expect(callback1.called).to.be.true;
+                        // Verify callback was called with the saved model
+                        expect(callback1.callCount).to.be.at.least(2);
                         expect(callback1.lastCall.args[0]).to.be.an('array');
                         expect(callback1.lastCall.args[0].length).to.equal(1);
                         expect(callback1.lastCall.args[0][0].name).to.equal("Test 1");
@@ -2209,17 +2215,20 @@ describe("Prolog + Literals", () => {
                         await model2.save();
 
                         // Wait for subscription update with proper condition checking
+                        // subscribe() fires callback2 once immediately (callCount=1),
+                        // so we wait for callCount >= 2 to capture the update after model2 save
                         await waitForCondition(
-                            () => callback2.called,
+                            () => callback2.callCount >= 2,
                             { 
                                 timeoutMs: 5000, 
                                 errorMessage: 'Second callback was not called after model save' 
                             }
                         );
 
-                        // Verify only second callback was called
-                        expect(callback1.callCount).to.equal(1); // No new calls
-                        expect(callback2.called).to.be.true;
+                        // Verify only second callback was called (callback1 was disposed)
+                        // callback1: 1 (subscribe initial) + 1 (model1 save) = 2, no more after that
+                        expect(callback1.callCount).to.equal(2);
+                        expect(callback2.callCount).to.be.at.least(2);
                         expect(callback2.lastCall.args[0]).to.be.an('array');
                         expect(callback2.lastCall.args[0].length).to.equal(2);
 
@@ -2235,9 +2244,11 @@ describe("Prolog + Literals", () => {
                         // Wait to ensure no callbacks
                         await sleep(1000);
 
-                        // Verify no new callbacks
-                        expect(callback1.callCount).to.equal(1);
-                        expect(callback2.callCount).to.equal(1);
+                        // Verify no new callbacks after dispose
+                        // callback1: 2 (subscribe initial + model1 save)
+                        // callback2: 2 (subscribe initial + model2 save)
+                        expect(callback1.callCount).to.equal(2);
+                        expect(callback2.callCount).to.equal(2);
                     });
 
                     it('handles count subscriptions and disposal', async () => {
@@ -2258,9 +2269,10 @@ describe("Prolog + Literals", () => {
                         await model.save();
 
                         // Wait for subscription update with proper condition checking
-                        // Use longer timeout for CI environments which may be slower
+                        // countSubscribe() fires callback once immediately with initial count (0),
+                        // so we wait for callCount >= 2 to capture the update after model save
                         await waitForCondition(
-                            () => countCallback.called,
+                            () => countCallback.callCount >= 2,
                             {
                                 timeoutMs: 15000,
                                 errorMessage: 'Count callback was not called after model save'
@@ -2268,7 +2280,7 @@ describe("Prolog + Literals", () => {
                         );
 
                         // Verify callback was called with new count
-                        expect(countCallback.called).to.be.true;
+                        expect(countCallback.callCount).to.be.at.least(2);
                         expect(countCallback.lastCall.args[0]).to.equal(1);
                         let count = countCallback.callCount
 
@@ -2478,7 +2490,8 @@ describe("Prolog + Literals", () => {
 
                         // Initially no results
                         expect(initialResults.length).to.equal(0);
-                        expect(updateCount).to.equal(0);
+                        // Reset updateCount since subscribe() fires the callback once with initial results
+                        updateCount = 0;
 
                         // Create a message after setting up subscription - should trigger callback
                         const subscriptionMessage = new EmojiMessage(perspective!);

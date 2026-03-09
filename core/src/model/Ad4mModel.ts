@@ -1725,7 +1725,7 @@ export class Ad4mModel {
     if (query.parent) {
       const parentPredicate = resolveParentPredicate(query.parent, this);
       graphTraversalFilters.push(
-        `count(<-link[WHERE perspective = $perspective AND in.uri = ${this.formatSurrealValue(query.parent.id)} AND predicate = '${escapeSurrealString(parentPredicate)}']) > 0`
+        `count(<-link[WHERE in.uri = ${this.formatSurrealValue(query.parent.id)} AND predicate = '${escapeSurrealString(parentPredicate)}']) > 0`
       );
     }
 
@@ -1740,11 +1740,11 @@ export class Ad4mModel {
         // For flag properties, also filter by the target value
         if (propMeta.flag && propMeta.initial) {
           graphTraversalFilters.push(
-            `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
+            `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
           );
         } else {
           graphTraversalFilters.push(
-            `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`
+            `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`
           );
         }
       }
@@ -1757,11 +1757,11 @@ export class Ad4mModel {
         if (propMeta.initial) {
           if (propMeta.flag) {
             graphTraversalFilters.push(
-              `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
+              `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
             );
           } else {
             graphTraversalFilters.push(
-              `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`
+              `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`
             );
           }
           break;
@@ -1789,7 +1789,7 @@ export class Ad4mModel {
       }
       if (structuralPredicates.length > 0) {
         graphTraversalFilters.push(
-          `count(->link[WHERE perspective = $perspective AND (${structuralPredicates.join(' OR ')})]) > 0`
+          `count(->link[WHERE (${structuralPredicates.join(' OR ')})]) > 0`
         );
       }
     }
@@ -1808,18 +1808,21 @@ export class Ad4mModel {
       whereConditions.push(userWhereClause);
     }
 
-    // Always ensure node has at least one link in this perspective
-    whereConditions.push(`count(->link[WHERE perspective = $perspective]) > 0`);
+    // Always ensure node has at least one link (each perspective has its own isolated DB)
+    whereConditions.push(`count(->link) > 0`);
 
     // Build the query FROM node using direct graph traversal in WHERE
     // This avoids slow subqueries and uses graph indexes for fast traversal
+    // FETCH links expands the link record IDs into full record objects
+    // (without FETCH, ->link returns only IDs like "link:abc123")
     const fullQuery = `
 SELECT
     id AS source,
     uri AS source_uri,
-    ->link[WHERE perspective = $perspective] AS links
+    ->link AS links
 FROM node
 WHERE ${whereConditions.join(' AND ')}
+FETCH links
     `.trim();
 
     return fullQuery;
@@ -1918,9 +1921,9 @@ WHERE ${whereConditions.join(' AND ')}
           if (Array.isArray(condition)) {
             const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
             if (isBelongs) {
-              conditions.push(`count(<-link[WHERE perspective = $perspective AND predicate = '${predicate}' AND in.uri IN [${formattedValues}]]) > 0`);
+              conditions.push(`count(<-link[WHERE predicate = '${predicate}' AND in.uri IN [${formattedValues}]]) > 0`);
             } else {
-              conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND out.uri IN [${formattedValues}]]) > 0`);
+              conditions.push(`count(->link[WHERE predicate = '${predicate}' AND out.uri IN [${formattedValues}]]) > 0`);
             }
           } else if (typeof condition === 'object' && condition !== null) {
             const ops = condition as any;
@@ -1928,24 +1931,24 @@ WHERE ${whereConditions.join(' AND ')}
               if (Array.isArray(ops.not)) {
                 const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
                 if (isBelongs) {
-                  conditions.push(`count(<-link[WHERE perspective = $perspective AND predicate = '${predicate}' AND in.uri IN [${formattedValues}]]) = 0`);
+                  conditions.push(`count(<-link[WHERE predicate = '${predicate}' AND in.uri IN [${formattedValues}]]) = 0`);
                 } else {
-                  conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND out.uri IN [${formattedValues}]]) = 0`);
+                  conditions.push(`count(->link[WHERE predicate = '${predicate}' AND out.uri IN [${formattedValues}]]) = 0`);
                 }
               } else {
                 if (isBelongs) {
-                  conditions.push(`count(<-link[WHERE perspective = $perspective AND predicate = '${predicate}' AND in.uri = ${this.formatSurrealValue(ops.not)}]) = 0`);
+                  conditions.push(`count(<-link[WHERE predicate = '${predicate}' AND in.uri = ${this.formatSurrealValue(ops.not)}]) = 0`);
                 } else {
-                  conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND out.uri = ${this.formatSurrealValue(ops.not)}]) = 0`);
+                  conditions.push(`count(->link[WHERE predicate = '${predicate}' AND out.uri = ${this.formatSurrealValue(ops.not)}]) = 0`);
                 }
               }
             }
           } else {
             // Simple equality
             if (isBelongs) {
-              conditions.push(`count(<-link[WHERE perspective = $perspective AND predicate = '${predicate}' AND in.uri = ${this.formatSurrealValue(condition)}]) > 0`);
+              conditions.push(`count(<-link[WHERE predicate = '${predicate}' AND in.uri = ${this.formatSurrealValue(condition)}]) > 0`);
             } else {
-              conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND out.uri = ${this.formatSurrealValue(condition)}]) > 0`);
+              conditions.push(`count(->link[WHERE predicate = '${predicate}' AND out.uri = ${this.formatSurrealValue(condition)}]) > 0`);
             }
           }
           continue;
@@ -1961,7 +1964,7 @@ WHERE ${whereConditions.join(' AND ')}
         if (Array.isArray(condition)) {
           // Array values (IN clause)
           const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
-          conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND ${targetField} IN [${formattedValues}]]) > 0`);
+          conditions.push(`count(->link[WHERE predicate = '${predicate}' AND ${targetField} IN [${formattedValues}]]) > 0`);
         } else if (typeof condition === 'object' && condition !== null) {
           // Operator object
           const ops = condition as any;
@@ -1969,10 +1972,10 @@ WHERE ${whereConditions.join(' AND ')}
             if (Array.isArray(ops.not)) {
               // For NOT IN with array: must NOT have a link with value in the array
               const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
-              conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND ${targetField} IN [${formattedValues}]]) = 0`);
+              conditions.push(`count(->link[WHERE predicate = '${predicate}' AND ${targetField} IN [${formattedValues}]]) = 0`);
             } else {
               // For NOT with single value: must NOT have this value
-              conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(ops.not)}]) = 0`);
+              conditions.push(`count(->link[WHERE predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(ops.not)}]) = 0`);
             }
           }
           // Note: gt, gte, lt, lte, between, contains operators are filtered in JavaScript
@@ -1985,11 +1988,11 @@ WHERE ${whereConditions.join(' AND ')}
                                    ops.between !== undefined || ops.contains !== undefined;
           if (hasComparisonOps) {
             // Ensure we only get nodes that have this property
-            conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}']) > 0`);
+            conditions.push(`count(->link[WHERE predicate = '${predicate}']) > 0`);
           }
         } else {
           // Simple equality
-          conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(condition)}]) > 0`);
+          conditions.push(`count(->link[WHERE predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(condition)}]) > 0`);
         }
       }
     }
@@ -2982,14 +2985,15 @@ WHERE ${whereConditions.join(' AND ')}
     }
     
 
-    // Check if the model has any constructor actions (required properties or
-    // flags).  Models whose properties are all optional and have no @Flag
-    // produce an empty SHACL constructor, so calling createSubject would fail
-    // on the Rust side ("No SHACL constructor found").  In that case we skip
-    // createSubject entirely and let innerUpdate write the links directly.
+    // Check if the model has any constructor actions (required properties,
+    // flags, or properties with initial values).  Models whose properties are
+    // all optional, have no @Flag, and have no initial values produce an empty
+    // SHACL constructor, so calling createSubject would fail on the Rust side
+    // ("No SHACL constructor found").  In that case we skip createSubject
+    // entirely and let innerUpdate write the links directly.
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
     const hasConstructor = Object.values(metadata.properties).some(
-      (p) => p.required || p.flag
+      (p) => p.required || p.flag || p.initial !== undefined
     );
 
     if (hasConstructor) {
@@ -3173,13 +3177,14 @@ WHERE ${whereConditions.join(' AND ')}
    * ```
    */
   async delete(batchId?: string) {
-    // Check if the model has a destructor (required properties or flags).
-    // Models whose properties are all optional and have no @Flag produce an
-    // empty SHACL destructor, so calling removeSubject would fail.  In that
-    // case we skip the destructor and just remove all outgoing links directly.
+    // Check if the model has a destructor (required properties, flags, or
+    // properties with initial values).  Models whose properties are all
+    // optional, have no @Flag, and have no initial values produce an empty
+    // SHACL destructor, so calling removeSubject would fail.  In that case
+    // we skip the destructor and just remove all outgoing links directly.
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
     const hasDestructor = Object.values(metadata.properties).some(
-      (p) => p.required || p.flag
+      (p) => p.required || p.flag || p.initial !== undefined
     );
 
     if (hasDestructor) {
