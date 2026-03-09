@@ -17,16 +17,15 @@
  *   {
  *     "executorUrl": "ws://localhost:12100/graphql",
  *     "token": "ad4m-admin-credential",
- *     "wakeUrl": "http://localhost:18789/hooks/agent",
+ *     "wakeUrl": "http://localhost:18789/hooks/wake",
  *     "wakeToken": "openclaw-wake-token",
  *     "debounceMs": 2000,
  *     "subscriptions": [
  *       {
  *         "id": "flux-messages",
  *         "type": "channel-messages",
- *         "perspective": "perspective-uuid",
+ *         "perspective": "your-local-perspective-uuid",
  *         "channel": "literal://string:channel-id",
- *         "neighbourhood": "neighbourhood://Qm...",
  *         "query": "SELECT * FROM link WHERE source = 'literal://string:channel-id' AND predicate = 'ad4m://has_child'"
  *       }
  *     ]
@@ -35,9 +34,8 @@
  * Subscription fields:
  *   - id:            Unique subscription identifier
  *   - type:          "mention" | "channel-messages" — determines the wake message
- *   - perspective:   AD4M perspective UUID
+ *   - perspective:   Local AD4M perspective UUID (from list_perspectives)
  *   - channel:       Channel address (where to read/post messages)
- *   - neighbourhood: (optional) Neighbourhood URL for context
  *   - query:         SurrealQL subscription query
  */
 
@@ -149,6 +147,9 @@ function postWake(config, sub, detail) {
       }
     });
   });
+  req.setTimeout(5000, () => {
+    req.destroy(new Error("wake POST timed out"));
+  });
   req.on("error", (e) => console.error("[waker] wake POST error:", e.message));
   req.write(body);
   req.end();
@@ -176,13 +177,23 @@ async function startWaker(config) {
     console.log(`[waker] setting up SurrealDB subscription ${sub.id} (type=${sub.type || "unknown"}): ${sub.query.substring(0, 80)}...`);
 
     // Use QuerySubscriptionProxy directly with SurrealDB query
-    const proxy = new QuerySubscriptionProxy(sub.perspective, sub.query, client.perspective);
+    const proxy = new QuerySubscriptionProxy(sub.perspective, sub.query, client.perspective, sub.params);
     await proxy.subscribe();
     await proxy.initialized;
 
     console.log(`[waker] ${sub.id} subscribed, initial result count: ${Array.isArray(proxy.result) ? proxy.result.length : '?'}`);
 
+    // Track last result to skip duplicates
+    let lastResultHash = null;
+
     proxy.onResult((result) => {
+      const serialized = JSON.stringify(result);
+      if (lastResultHash === serialized) {
+        console.log(`[waker] ${sub.id}: duplicate result, skipping`);
+        return;
+      }
+      lastResultHash = serialized;
+
       const count = Array.isArray(result) ? result.length : "?";
       console.log(`[waker] ${sub.id}: query result changed (${count} items)`);
 
@@ -257,16 +268,15 @@ Config file format:
   {
     "executorUrl": "ws://localhost:12100/graphql",
     "token": "optional-ad4m-credential",
-    "wakeUrl": "http://localhost:18789/hooks/agent",
+    "wakeUrl": "http://localhost:18789/hooks/wake",
     "wakeToken": "your-openclaw-wake-token",
     "debounceMs": 2000,
     "subscriptions": [
       {
         "id": "my-subscription",
         "type": "channel-messages",
-        "perspective": "perspective-uuid",
+        "perspective": "your-local-perspective-uuid",
         "channel": "literal://string:channel-id",
-        "neighbourhood": "neighbourhood://Qm...",
         "query": "SELECT * FROM link WHERE ..."
       }
     ]
@@ -275,9 +285,8 @@ Config file format:
 Subscription fields:
   id             Unique identifier for this subscription
   type           "mention" or "channel-messages" — determines wake message
-  perspective    AD4M perspective UUID
+  perspective    Local AD4M perspective UUID (from list_perspectives)
   channel        Channel address (for reading/posting messages)
-  neighbourhood  (optional) Neighbourhood URL
   query          SurrealQL subscription query
 `);
     process.exit(0);

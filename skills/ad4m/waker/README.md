@@ -1,10 +1,12 @@
-# AD4M Waker Bridge
+# AD4M Waker
 
-Watches AD4M perspectives via `QuerySubscriptionProxy` (SurrealDB-backed, same mechanism as Flux UI) and POSTs to an OpenClaw `/hooks/agent` endpoint when matching links are detected.
+Part of the `ad4m` skill for OpenClaw agents. Watches AD4M perspectives via `QuerySubscriptionProxy` (SurrealDB-backed, same mechanism as Flux UI) and POSTs to an OpenClaw `/hooks/wake` endpoint when matching links are detected.
 
 The waker sends **actionable messages** with full context (perspective, channel, subscription type) so the agent knows exactly what happened and what to do.
 
 Requires `@coasys/ad4m ^0.12.0`.
+
+**Location:** This waker is bundled with the `ad4m` skill at `skills/ad4m/waker/`. See `../SKILL.md` for full documentation.
 
 ---
 
@@ -28,7 +30,7 @@ The waker is a config-driven runner — it executes whatever SurrealQL queries y
 Typical flow:
 1. Agent joins a neighbourhood via `neighbourhood_join_from_url`
 2. Agent calls `get_mention_waker_config` with the perspective UUID
-3. Agent appends the returned subscription entry to the waker config file (adding `type`, `channel`, and `neighbourhood` fields)
+3. Agent appends the returned subscription entry to the waker config file (adding `type` and `channel` fields)
 4. Agent restarts the waker
 
 ---
@@ -39,24 +41,22 @@ Typical flow:
 {
   "executorUrl": "ws://localhost:12100/graphql",
   "token": "optional-ad4m-credential",
-  "wakeUrl": "http://localhost:18789/hooks/agent",
+  "wakeUrl": "http://localhost:18789/hooks/wake",
   "wakeToken": "your-openclaw-wake-token",
   "debounceMs": 2000,
   "subscriptions": [
     {
       "id": "flux-all-messages",
       "type": "channel-messages",
-      "perspective": "<neighbourhood-uuid>",
+      "perspective": "<your-local-perspective-uuid>",
       "channel": "literal://string:<channel-id>",
-      "neighbourhood": "neighbourhood://Qm...",
       "query": "SELECT * FROM link WHERE source = 'literal://string:<channel-id>' AND predicate = 'ad4m://has_child'"
     },
     {
       "id": "mention-<did-suffix>",
       "type": "mention",
-      "perspective": "<neighbourhood-uuid>",
+      "perspective": "<your-local-perspective-uuid>",
       "channel": "literal://string:<channel-id>",
-      "neighbourhood": "neighbourhood://Qm...",
       "query": "SELECT * FROM link WHERE fn::contains(string::lowercase(fn::parse_literal(target)), 'agentname') OR fn::contains(string::lowercase(fn::parse_literal(target)), 'did:key:z6Mks...')"
     }
   ]
@@ -71,7 +71,7 @@ Typical flow:
 | `token` | | AD4M admin credential or JWT |
 | `mcpEndpoint` | | MCP endpoint URL (e.g., `http://localhost:3001/mcp`) — included in wake messages so the agent knows where to connect |
 | `agentDid` | | Agent DID — included in wake messages so the agent can identify itself |
-| `wakeUrl` | ✅ | OpenClaw hooks endpoint (use `/hooks/agent` for actionable wakes) |
+| `wakeUrl` | ✅ | OpenClaw hooks endpoint — use `/hooks/wake` (keeps main session with skills loaded) |
 | `wakeToken` | ✅ | Bearer token for the hooks endpoint |
 | `debounceMs` | | Debounce delay in ms (default: 2000) |
 | `subscriptions` | ✅ | Array of subscription objects |
@@ -82,9 +82,8 @@ Typical flow:
 |-------|----------|-------------|
 | `id` | ✅ | Unique identifier for this subscription |
 | `type` | ✅ | `"mention"` or `"channel-messages"` — determines the wake message content |
-| `perspective` | ✅ | AD4M perspective UUID to subscribe to |
+| `perspective` | ✅ | Your **local** perspective UUID (from `list_perspectives()`) |
 | `channel` | ✅ | Channel address (so the agent knows where to read/post messages) |
-| `neighbourhood` | | Neighbourhood URL (for additional context) |
 | `query` | ✅ | SurrealQL query — fires when the result set changes |
 
 ### Subscription types
@@ -98,11 +97,10 @@ Typical flow:
 
 1. Connects to the AD4M executor via GraphQL WebSocket
 2. For each subscription, creates a `QuerySubscriptionProxy` with the given SurrealQL query
-3. When the query result set changes, debounces and POSTs to `/hooks/agent` with:
-   - An **actionable message** including perspective UUID, channel address, and subscription type
-   - `name: "AD4M"` so the agent session is labelled
-   - `wakeMode: "now"` for immediate processing
-4. OpenClaw runs an isolated agent turn that reads new messages via MCP and responds
+3. When the query result set changes, debounces and POSTs to `/hooks/wake` with:
+   - `text`: actionable message including perspective UUID, channel address, MCP endpoint, auth credential, and event type
+   - `mode: "now"` for immediate processing
+4. OpenClaw wakes the main agent session (which has skills loaded) to read new data via MCP and respond
 
 ---
 
@@ -118,7 +116,6 @@ Auth credential: <admin-credential>
 Agent DID: did:key:z6Mk...
 Perspective: 01409ead-3e13-4ca6-99ac-e1b623c18604
 Channel: literal://string:gjgfascqbfhntekmtvhtbohu
-Neighbourhood: neighbourhood://QmzSYwdhcjCcf726JkvGKKw7bszp3Jd2NsNN2ULkxJ8VYxdU9wv
 Subscription: mention-guAacszuc2Jd
 Event type: mention
 ```
@@ -144,9 +141,11 @@ Event type: channel-messages
 ```js
 const { startWaker } = require("./ad4m-waker");
 
-const waker = await startWaker(config);
-// Later:
-waker.close();
+(async () => {
+  const waker = await startWaker(config);
+  // Later:
+  waker.close();
+})();
 ```
 
 ---

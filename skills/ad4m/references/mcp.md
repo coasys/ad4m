@@ -10,42 +10,105 @@ ad4m-executor run --enable-mcp true --mcp-port 3001 ...
 
 ## Transport
 
-HTTP with Server-Sent Events (SSE). Connect at `http://localhost:3001/`.
+Streamable HTTP (bidirectional HTTP with SSE-like streaming). Connect at `http://localhost:3001/mcp`.
 
-**Not stdio** — the MCP server runs alongside the GraphQL server in the same process.
+**Not stdio** — the MCP server runs alongside the GraphQL server in the same process. Uses JSON-RPC 2.0 over HTTP POST with session management via `Mcp-Session-Id` header.
+
+**Do NOT use `curl` to call MCP tools.** The server always responds with `Content-Type: text/event-stream` (Server-Sent Events), not plain JSON. Raw curl will get garbled SSE event data. You must use a proper MCP client (your tool interface, an MCP SDK, etc.).
 
 ## Authentication
 
-Bearer token in the HTTP `Authorization` header:
+Two authentication methods are available:
 
-```
-Authorization: Bearer <token>
-```
+### Option A: `--admin-credential` flag (recommended for single-agent setups)
 
-The token is the `--admin-credential` value passed to the executor. Without an admin credential, empty token has full access.
+Start the executor with `--admin-credential <secret>`. All MCP tool calls from that session are automatically authenticated — no extra auth step needed. The credential is passed as part of the session context.
+
+> **Note:** HTTP `Authorization` headers are NOT reliably forwarded to MCP tool handlers by all MCP clients. If you set `headers` in your `.mcp.json` config, the header may not reach the auth check. Use `--admin-credential` or the JWT flow below instead.
+
+### Option B: JWT auth flow (works with any MCP client)
+
+Use the MCP auth tools (no auth required to call these):
+
+1. `request_capability(app_name: "AI Agent", app_desc: "AD4M bot")` → returns `request_id`
+2. Find the 6-digit verification code in the executor's **stdout** (log file or screen session)
+3. `generate_jwt(request_id: "<from step 1>", code: "<6-digit code>")` → returns JWT
+4. All subsequent tool calls in this session are authenticated
+
+Without any admin credential configured, empty token has full access.
 
 ## Core Tools
 
 These are always available regardless of SDNA:
 
+**Perspective & Link Tools:**
+
 | Tool | Description |
 |------|-------------|
-| `agent_me` | Get current agent DID and status |
-| `agent_generate` | Generate new agent keys (first run only) |
-| `agent_unlock` | Unlock agent with passphrase |
-| `agent_lock` | Lock agent keys |
-| `perspective_create` | Create a new perspective |
-| `perspective_list` | List all perspectives |
+| `list_perspectives` | List all perspectives |
+| `add_perspective` | Create a new perspective |
 | `add_link` | Add a link to a perspective |
-| `get_links` | Query links in a perspective |
-| `remove_link` | Remove a link from a perspective |
+| `query_links` | Query links in a perspective |
 | `get_models` | List available subject classes (SHACL shapes) |
 | `add_model` | Add SHACL SDNA to a perspective |
 | `infer` | Run Prolog queries for complex reasoning |
+
+**Subject CRUD Tools:**
+
+| Tool | Description |
+|------|-------------|
+| `query_subjects` | Find instances of a subject class |
+| `get_subject_data` | Get full data for a subject instance |
+| `create_subject` | Create a new subject instance |
+| `set_subject_property` | Set a property on a subject |
+| `delete_subject` | Delete a subject instance |
+| `get_subject_collection` | Get items in a collection property |
+| `add_to_collection` | Add item to a collection |
+| `remove_from_collection` | Remove item from a collection |
+| `execute_commands` | Execute commands on a subject instance |
+
+**Child/Tree Tools:**
+
+| Tool | Description |
+|------|-------------|
+| `add_child` | Add a child to a subject |
+| `get_children` | Get children of a subject |
+| `get_subject_children` | Get children with optional class filtering |
+
+**Profile Tools:**
+
+| Tool | Description |
+|------|-------------|
+| `get_agent_profile` | Get agent's DID and profile |
+| `set_agent_profile` | Update agent profile fields |
+| `set_agent_profile_picture` | Set agent's profile picture |
+
+**Neighbourhood & Language Tools:**
+
+| Tool | Description |
+|------|-------------|
 | `language_meta` | Get metadata about a language by address |
 | `list_link_language_templates` | List available P2P sync templates for neighbourhoods |
 | `neighbourhood_publish_from_perspective` | Publish a perspective as a shared neighbourhood (auto-clones template) |
 | `neighbourhood_join_from_url` | Join an existing neighbourhood by URL |
+
+**Waker/Subscription Tools:**
+
+| Tool | Description |
+|------|-------------|
+| `generate_waker_query` | Generate SurrealQL for waker subscription |
+| `get_mention_waker_config` | Get waker config for tracking mentions |
+
+**Auth Tools (no auth required):**
+
+| Tool | Description |
+|------|-------------|
+| `request_capability` | Step 1 of local auth flow |
+| `generate_jwt` | Step 2 of local auth flow |
+| `login_email` | Login with email/password (multi-user) |
+| `signup` | Create new account (multi-user) |
+| `verify_email_code` | Verify email code (multi-user) |
+| `auth_status` | Check current authentication status |
 
 ## Language & Neighbourhood Tools
 
@@ -83,8 +146,10 @@ For a class `Channel` with scalar `name`, scalar `description`, and collection `
 
 | Tool | Description |
 |------|-------------|
-| `channel_create` | Create a Channel instance (required props as params) |
-| `channel_get` | Get a Channel by URI |
+| `channel_create` | Create a Channel instance (required props as params + `expression_address`) |
+| `channel_query` | Query all Channel instances in the perspective |
+| `channel_get` | Get a Channel by expression address |
+| `channel_delete` | Delete a Channel instance |
 | `channel_set_name` | Set the name property |
 | `channel_set_description` | Set the description property |
 | `channel_get_messages` | Get all messages in the collection |
@@ -93,29 +158,35 @@ For a class `Channel` with scalar `name`, scalar `description`, and collection `
 
 ### Naming Convention
 
-Class-first: `{class}_{action}` or `{class}_{action}_{property}`.
+Class names are **lowercased** in tool names: `{class_lower}_{action}` or `{class_lower}_{action}_{property_lower}`.
 
-Examples:
-- `task_create`, `task_set_title`, `task_get_assignees`
-- `post_create`, `post_set_content`, `post_add_comment`
+Generated tool patterns per class:
+- `{class}_create` — create instance (requires `perspective_id`, `expression_address`, + required properties)
+- `{class}_query` — query all instances (requires `perspective_id`)
+- `{class}_get` — get instance data (requires `perspective_id`, `expression_address`)
+- `{class}_delete` — delete instance (requires `perspective_id`, `expression_address`)
+- `{class}_set_{property}` — set scalar property (requires `perspective_id`, `expression_address`, `value`)
+- `{class}_get_{collection}` — get collection items
+- `{class}_add_{collection}` — add to collection
+- `{class}_remove_{collection}` — remove from collection
 
 ### Tool Parameters
 
 All dynamic tools include:
-- `perspective_uuid` — which perspective to operate on
+- `perspective_id` — which perspective to operate on (NOT `perspective_uuid`)
+- `expression_address` — the subject instance URI (for non-query tools)
 - Property-specific params (type-checked against SHACL datatype)
 
 ## Workflow Example
 
 ```
-1. agent_me                    → verify identity
-2. perspective_create          → create workspace
+1. get_agent_profile           → verify identity
+2. add_perspective             → create workspace
 3. add_model                   → add SHACL schema
 4. get_models                  → verify schema loaded
-5. channel_create              → create a Channel
-6. channel_set_name            → set its name
-7. message_create              → create a Message
-8. channel_add_messages        → add message to channel
+5. channel_create              → create a Channel (provide expression_address + required props)
+6. message_create              → create a Message (provide expression_address + body)
+7. add_child                   → add message as child of channel
 ```
 
 ## Error Handling

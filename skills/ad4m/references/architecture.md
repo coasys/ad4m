@@ -22,10 +22,10 @@ Perspective "My Notes"
 Perspectives are local by default. Publishing a perspective as a neighbourhood makes it shared.
 
 ### Key Operations
-- `perspectiveAdd(name)` — create
-- `perspectiveQueryLinks(uuid, query)` — query links by source/predicate/target
-- `perspectiveAddLink(uuid, link)` — add a link
-- `perspectiveRemoveLink(uuid, link)` — remove a link
+- `add_perspective(name)` — create a new perspective
+- `query_links(perspective_id, source?, predicate?, target?)` — query links by source/predicate/target
+- `add_link(perspective_id, source, predicate, target)` — add a link
+- `add_model(perspective_id, class_name, shacl_json)` — register a subject class schema
 
 ## Links
 
@@ -94,54 +94,142 @@ Subject classes impose structure on the link graph using SHACL (Shapes Constrain
 
 ### How It Works
 
-A SHACL NodeShape defines a class. PropertyShapes define properties that map to specific link patterns in the graph.
+Classes are registered via the `add_model` MCP tool (or `add_sdna()` in Rust) using a JSON representation of a SHACL shape. The JSON is parsed by `SHACLShape` / `PropertyShape` structs and converted to RDF links in the perspective.
 
-```turtle
-:MessageShape a sh:NodeShape ;
-  sh:targetClass :Message ;
-  sh:property [
-    sh:path :body ;             # predicate used in links
-    sh:datatype xsd:string ;
-    sh:maxCount 1 ;             # scalar property
-    sh:minCount 1 ;             # required
-  ] ;
-  sh:property [
-    sh:path :reactions ;
-    sh:class :Reaction ;        # typed collection
-    # no maxCount = unbounded collection
-  ] .
+### SHACL JSON Format
+
+```json
+{
+  "target_class": "message://Message",
+  "constructor_actions": [
+    {
+      "action": "addLink",
+      "source": "this",
+      "predicate": "rdf://type",
+      "target": "message://Message"
+    }
+  ],
+  "destructor_actions": [
+    {
+      "action": "removeLink",
+      "source": "this",
+      "predicate": "rdf://type",
+      "target": "message://Message"
+    }
+  ],
+  "properties": [
+    {
+      "path": "message://body",
+      "name": "body",
+      "datatype": "xsd://string",
+      "min_count": 1,
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "message://body",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "message://reactions",
+      "name": "reactions",
+      "node_kind": "IRI",
+      "collection": true,
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "message://reactions",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "message://reactions",
+          "target": "value"
+        }
+      ]
+    }
+  ]
+}
 ```
 
-### Property Types
+### Top-Level Fields
 
-| SHACL constraint | Interpretation | Generated tools |
-|-----------------|----------------|-----------------|
-| `sh:maxCount 1` | Scalar property | `{class}_set_{prop}` |
-| No `sh:maxCount` or `> 1` | Collection | `{class}_add_{prop}`, `{class}_remove_{prop}`, `{class}_get_{prop}` |
-| `sh:minCount 1` | Required on creation | Included in `{class}_create` params |
-| `sh:datatype xsd:string` | String value | Value stored as `literal://string:...` |
-| `sh:class :Other` | Reference to another subject class | Value is a URI |
+| Field | Type | Description |
+|-------|------|-------------|
+| `target_class` | string (URI) | Fully qualified class URI. The scheme becomes the namespace (e.g. `message://Message` → namespace `message://`) |
+| `constructor_actions` | AD4MAction[] | Link operations executed when creating an instance |
+| `destructor_actions` | AD4MAction[] | Link operations executed when deleting an instance |
+| `properties` | PropertyShape[] | Property definitions (see below) |
+
+### PropertyShape Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `path` | string (URI) | Predicate URI used in links for this property |
+| `name` | string? | Property name (derived from `path` if omitted) |
+| `datatype` | string? | Value type constraint, e.g. `xsd://string`, `xsd://dateTime` |
+| `min_count` | number? | Minimum cardinality. `1` = required on creation |
+| `max_count` | number? | Maximum cardinality. `1` = scalar property. Omit or `> 1` = collection |
+| `writable` | bool? | Whether the property can be updated after creation |
+| `collection` | bool? | Explicit collection flag (alternative to omitting `max_count`) |
+| `node_kind` | string? | `"IRI"` for references to other entities, `"Literal"` for values |
+| `local` | bool? | If true, links are stored locally (not shared in neighbourhood) |
+| `resolve_language` | string? | Language to use when resolving expression URIs (e.g. `"literal"`) |
+| `setter` | AD4MAction[] | Actions for setting a scalar property value |
+| `adder` | AD4MAction[] | Actions for adding to a collection |
+| `remover` | AD4MAction[] | Actions for removing from a collection |
+
+### AD4MAction Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `action` | string | Operation: `"addLink"`, `"removeLink"`, or `"setSingleTarget"` |
+| `source` | string | `"this"` (instance URI) or a literal URI |
+| `predicate` | string | Predicate URI for the link |
+| `target` | string | `"value"` (substituted at runtime) or a literal URI |
+| `local` | bool? | If true, the link is local-only |
+
+### Generated MCP Tools
+
+Once registered, dynamic tools are auto-generated:
+
+| Property type | Generated tools |
+|--------------|-----------------|
+| Scalar (`max_count: 1`) | `{class}_set_{prop}` |
+| Collection (`collection: true` or no `max_count`) | `{class}_add_{prop}`, `{class}_remove_{prop}` |
+| Required (`min_count: 1`) | Parameter included in `{class}_create` |
 
 ### Link Mapping
 
 When you set `message.body = "Hello"` via a subject class:
 ```
-Link: (<message-instance-uri>) --:body--> (literal://string:Hello)
+Link: (<message-instance-uri>) --message://body--> (literal://string:Hello)
 ```
 
-When you add to a collection `channel.messages.add(msg)`:
+When you add to a collection `message.reactions.add(uri)`:
 ```
-Link: (<channel-instance-uri>) --:messages--> (<message-instance-uri>)
-```
-
-### SDNA in Perspectives
-
-SHACL definitions are stored as links in the perspective itself:
-```
-Link: (ad4m://self) --ad4m://has_sdna--> (literal://json:<shacl-json>)
+Link: (<message-instance-uri>) --message://reactions--> (<reaction-uri>)
 ```
 
-Query available models: `get_models` (MCP) or retrieve links with predicate `ad4m://has_sdna`.
+### SDNA Storage in Perspectives
+
+SHACL definitions are decomposed into RDF links in the perspective. Key link patterns:
+```
+(ad4m://self) --ad4m://has_shacl--> (literal://string:shacl://Message)
+(literal://string:shacl://Message) --ad4m://shacl_shape_uri--> (message://MessageShape)
+(message://Message) --rdf://type--> (ad4m://SubjectClass)
+(message://MessageShape) --sh://property--> (message://Message.body)
+```
+
+Query available models: `get_models` (MCP) or retrieve links with predicate `ad4m://has_shacl`.
 
 ## Built-in Services
 
