@@ -201,7 +201,7 @@ export async function ensureExecutorRunning(
         "true",
         "--admin-credential",
         adminCredential,
-        "--port",
+        "--mcp-port",
         "3001",
       ],
       {
