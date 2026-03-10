@@ -64,6 +64,42 @@ const CHANNEL_SHACL = JSON.stringify({
             ]
         },
         {
+            path: "flux://channel_description",
+            name: "description",
+            datatype: "xsd:string",
+            min_count: 0,
+            max_count: 1,
+            writable: true,
+            resolve_language: "literal",
+            setter: [
+                { action: "setSingleTarget", source: "this", predicate: "flux://channel_description", target: "value", local: false }
+            ]
+        },
+        {
+            path: "flux://channel_is_conversation",
+            name: "isConversation",
+            datatype: "xsd:boolean",
+            min_count: 0,
+            max_count: 1,
+            writable: true,
+            resolve_language: "literal",
+            setter: [
+                { action: "setSingleTarget", source: "this", predicate: "flux://channel_is_conversation", target: "value", local: false }
+            ]
+        },
+        {
+            path: "flux://channel_is_pinned",
+            name: "isPinned",
+            datatype: "xsd:boolean",
+            min_count: 0,
+            max_count: 1,
+            writable: true,
+            resolve_language: "literal",
+            setter: [
+                { action: "setSingleTarget", source: "this", predicate: "flux://channel_is_pinned", target: "value", local: false }
+            ]
+        },
+        {
             path: "ad4m://has_child",
             name: "messages",
             collection: true,
@@ -517,6 +553,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             // Dynamic tools for Channel (CRUD + per-property + collections)
             expect(toolNames).to.include('channel_create');
             expect(toolNames).to.include('channel_query');
+            expect(toolNames).to.include('channel_list');
             expect(toolNames).to.include('channel_get');
             expect(toolNames).to.include('channel_delete');
             expect(toolNames).to.include('channel_set_name');
@@ -527,6 +564,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             // Dynamic tools for Message (CRUD + per-property)
             expect(toolNames).to.include('message_create');
             expect(toolNames).to.include('message_query');
+            expect(toolNames).to.include('message_list');
             expect(toolNames).to.include('message_get');
             expect(toolNames).to.include('message_delete');
             expect(toolNames).to.include('message_set_body');
@@ -548,7 +586,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(schema.properties).to.have.property('expression_address');
             expect(schema.properties).to.have.property('name');
             expect(schema.required).to.include('perspective_id');
-            expect(schema.required).to.include('expression_address');
+            expect(schema.required).to.not.include('expression_address'); // now optional
         });
 
         it("should query channels via typed channel_query tool", async function() {
@@ -891,6 +929,130 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(result.success).to.be.true;
             expect(result.property).to.equal("body");
             console.log("Updated message body via message_set_body");
+        });
+    });
+
+    // ========================================================================
+    // 5b. Resolve Language — verify properties with resolve_language produce
+    //     proper literal://json: expressions instead of literal://string:
+    // ========================================================================
+
+    describe("5b. Resolve Language for Boolean/String Properties", function() {
+        let resolveTestChannelAddr: string;
+
+        it("should create a channel with boolean initial values via channel_create", async function() {
+            resolveTestChannelAddr = "flux://channel-resolve-test-" + Date.now();
+            var result = await callMcpTool(MCP_BASE_URL,'channel_create', {
+                perspective_id: perspectiveUuid,
+                expression_address: resolveTestChannelAddr,
+                name: "Resolve Test Channel",
+                isConversation: "false",
+                isPinned: "true",
+            }, mcpSessionId);
+            var resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+            expect(resultStr).to.include('true');
+            console.log("channel_create with booleans:", resultStr);
+        });
+
+        it("should store boolean properties as literal://json: expressions, not literal://string:", async function() {
+            // Query the raw links to verify the encoding format
+            var links = await callMcpTool(MCP_BASE_URL,'query_links', {
+                perspective_id: perspectiveUuid,
+                source: resolveTestChannelAddr,
+                predicate: "flux://channel_is_conversation",
+            }, mcpSessionId);
+            console.log("isConversation links:", JSON.stringify(links));
+
+            // The target should be a literal://json: expression (signed expression),
+            // NOT literal://string:false
+            var linksArr = Array.isArray(links) ? links : (links.links || []);
+            expect(linksArr.length).to.be.greaterThan(0);
+            var target = linksArr[0].data?.target || linksArr[0].target || '';
+            console.log("isConversation target:", target);
+            expect(target).to.not.include("literal://string:false");
+            expect(target).to.include("literal://json:");
+        });
+
+        it("should store string properties as literal://json: expressions when resolve_language is set", async function() {
+            var links = await callMcpTool(MCP_BASE_URL,'query_links', {
+                perspective_id: perspectiveUuid,
+                source: resolveTestChannelAddr,
+                predicate: "flux://channel_name",
+            }, mcpSessionId);
+            console.log("name links:", JSON.stringify(links));
+
+            var linksArr = Array.isArray(links) ? links : (links.links || []);
+            expect(linksArr.length).to.be.greaterThan(0);
+            var target = linksArr[0].data?.target || linksArr[0].target || '';
+            console.log("name target:", target);
+            // Should be a signed expression (literal://json:) not a raw string literal
+            expect(target).to.include("literal://json:");
+        });
+
+        it("should resolve boolean values via channel_set_isconversation", async function() {
+            var result = await callMcpTool(MCP_BASE_URL,'channel_set_isconversation', {
+                perspective_id: perspectiveUuid,
+                expression_address: resolveTestChannelAddr,
+                value: "true",
+            }, mcpSessionId);
+            expect(result.success).to.be.true;
+
+            // Verify the stored link target is a proper expression
+            var links = await callMcpTool(MCP_BASE_URL,'query_links', {
+                perspective_id: perspectiveUuid,
+                source: resolveTestChannelAddr,
+                predicate: "flux://channel_is_conversation",
+            }, mcpSessionId);
+            var linksArr = Array.isArray(links) ? links : (links.links || []);
+            expect(linksArr.length).to.be.greaterThan(0);
+            var target = linksArr[0].data?.target || linksArr[0].target || '';
+            console.log("Updated isConversation target:", target);
+            expect(target).to.not.include("literal://string:true");
+            expect(target).to.include("literal://json:");
+        });
+
+        it("should resolve string values via set_subject_property with resolve_language", async function() {
+            var result = await callMcpTool(MCP_BASE_URL,'set_subject_property', {
+                perspective_id: perspectiveUuid,
+                class_name: "Channel",
+                expression_address: resolveTestChannelAddr,
+                property_name: "description",
+                value: "A test description",
+            }, mcpSessionId);
+            expect(result.success).to.be.true;
+
+            // Verify the stored link target uses literal://json: (signed expression)
+            var links = await callMcpTool(MCP_BASE_URL,'query_links', {
+                perspective_id: perspectiveUuid,
+                source: resolveTestChannelAddr,
+                predicate: "flux://channel_description",
+            }, mcpSessionId);
+            var linksArr = Array.isArray(links) ? links : (links.links || []);
+            expect(linksArr.length).to.be.greaterThan(0);
+            var target = linksArr[0].data?.target || linksArr[0].target || '';
+            console.log("description target:", target);
+            expect(target).to.include("literal://json:");
+        });
+
+        it("should resolve boolean values via channel_update (dynamic update)", async function() {
+            var result = await callMcpTool(MCP_BASE_URL,'channel_update', {
+                perspective_id: perspectiveUuid,
+                expression_address: resolveTestChannelAddr,
+                isPinned: "false",
+            }, mcpSessionId);
+            expect(result.success).to.be.true;
+
+            var links = await callMcpTool(MCP_BASE_URL,'query_links', {
+                perspective_id: perspectiveUuid,
+                source: resolveTestChannelAddr,
+                predicate: "flux://channel_is_pinned",
+            }, mcpSessionId);
+            var linksArr = Array.isArray(links) ? links : (links.links || []);
+            expect(linksArr.length).to.be.greaterThan(0);
+            var target = linksArr[0].data?.target || linksArr[0].target || '';
+            console.log("Updated isPinned target:", target);
+            expect(target).to.not.include("literal://string:false");
+            expect(target).to.include("literal://json:");
         });
     });
 

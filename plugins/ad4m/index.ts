@@ -29,7 +29,7 @@ interface McpTool {
 
 interface PluginConfig {
   mcpEndpoint?: string;
-  adminCredential: string;
+  adminCredential?: string;
   toolRefreshIntervalMs?: number;
   wakerEnabled?: boolean;
   executorWsUrl?: string;
@@ -219,7 +219,13 @@ async function mcpInitialize(
   }
 
   // Complete handshake
-  await mcpNotify(endpoint, "notifications/initialized", {}, sessionId, authToken);
+  await mcpNotify(
+    endpoint,
+    "notifications/initialized",
+    {},
+    sessionId,
+    authToken,
+  );
 
   return { sessionId, serverInfo: result.result };
 }
@@ -232,7 +238,13 @@ async function mcpListTools(
   sessionId: string,
   authToken?: string,
 ): Promise<McpTool[]> {
-  const resp = await mcpRequest(endpoint, "tools/list", {}, sessionId, authToken);
+  const resp = await mcpRequest(
+    endpoint,
+    "tools/list",
+    {},
+    sessionId,
+    authToken,
+  );
   return resp.result?.tools ?? [];
 }
 
@@ -255,7 +267,11 @@ async function mcpCallTool(
   );
 
   if (resp.error) {
-    return { content: [{ type: "text", text: JSON.stringify({ error: resp.error.message }) }] };
+    return {
+      content: [
+        { type: "text", text: JSON.stringify({ error: resp.error.message }) },
+      ],
+    };
   }
 
   return resp.result;
@@ -288,6 +304,7 @@ function buildWakeMessage(
   config: PluginConfig,
   sub: WakerSubscription,
   agentDid: string,
+  parent: string,
 ): string {
   const event =
     sub.type === "mention"
@@ -302,7 +319,7 @@ function buildWakeMessage(
     `Auth credential: ${config.adminCredential}`,
     `Agent DID: ${agentDid}`,
     `Perspective: ${sub.perspective}`,
-    `Channel: ${sub.channel}`,
+    parent ? `Parent: ${parent}` : null,
     sub.neighbourhood ? `Neighbourhood: ${sub.neighbourhood}` : null,
     `Subscription: ${sub.id}`,
     `Event type: ${sub.type}`,
@@ -316,8 +333,10 @@ async function postWake(
   sub: WakerSubscription,
   agentDid: string,
   logger: any,
+  parentChannel?: string,
 ): Promise<void> {
-  const message = buildWakeMessage(config, sub, agentDid);
+  const effectiveChannel = parentChannel || sub.channel;
+  const message = buildWakeMessage(config, sub, agentDid, effectiveChannel);
   const body = JSON.stringify({ text: message, mode: "now" });
 
   try {
@@ -351,15 +370,54 @@ export default function ad4mPlugin(api: any) {
   const refreshInterval = config.toolRefreshIntervalMs ?? 30000;
   const logger = api.logger;
 
+  // Check for required config
+  if (!config.adminCredential) {
+    logger.warn(
+      `[ad4m] Warning: adminCredential not configured. MCP tools will not be available. Please configure adminCredential in plugin settings.`,
+    );
+  }
+
+  // -- Setup helper tool --
+
+  api.registerTool({
+    name: "ad4m_get_sample_config",
+    description:
+      "Get a sample OpenClaw plugin config for AD4M. Use this to see the required configuration format.",
+    parameters: { type: "object", properties: {} },
+    async execute() {
+      const sampleConfig = {
+        mcpEndpoint: "http://localhost:3001/mcp",
+        adminCredential: "YOUR_SECRET_PASSWORD",
+        wakerEnabled: true,
+        wakeUrl: "http://localhost:18789/hooks/wake",
+        executorWsUrl: "ws://localhost:12100/graphql",
+      };
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Add this to your OpenClaw plugins.entries:\n\n${JSON.stringify({ ad4m: sampleConfig }, null, 2)}`,
+          },
+        ],
+      };
+    },
+  });
+
   // Debug: log config values
-  logger.info(`[ad4m] Config received: ${JSON.stringify({ 
-    mcpEndpoint: config.mcpEndpoint, 
-    adminCredential: config.adminCredential ? "*** (length: " + config.adminCredential.length + ")" : "UNDEFINED",
-    wakeUrl: config.wakeUrl,
-    wakeToken: config.wakeToken ? "*** (length: " + config.wakeToken.length + ")" : "UNDEFINED",
-    wakerEnabled: config.wakerEnabled,
-    executorWsUrl: config.executorWsUrl
-  })}`);
+  logger.info(
+    `[ad4m] Config received: ${JSON.stringify({
+      mcpEndpoint: config.mcpEndpoint,
+      adminCredential: config.adminCredential
+        ? "*** (length: " + config.adminCredential.length + ")"
+        : "UNDEFINED",
+      wakeUrl: config.wakeUrl,
+      wakeToken: config.wakeToken
+        ? "*** (length: " + config.wakeToken.length + ")"
+        : "UNDEFINED",
+      wakerEnabled: config.wakerEnabled,
+      executorWsUrl: config.executorWsUrl,
+    })}`,
+  );
 
   // -- MCP bridge state --
   let sessionId = "";
@@ -398,7 +456,13 @@ export default function ad4mPlugin(api: any) {
       parameters: toParameters(tool),
       async execute(_id: string, params: Record<string, any>) {
         try {
-          const result = await mcpCallTool(endpoint, tool.name, params, sessionId, authToken);
+          const result = await mcpCallTool(
+            endpoint,
+            tool.name,
+            params,
+            sessionId,
+            authToken,
+          );
           if (result?.content) return result;
           return { content: [{ type: "text", text: JSON.stringify(result) }] };
         } catch (err: any) {
@@ -424,7 +488,9 @@ export default function ad4mPlugin(api: any) {
         }
       }
       if (newCount > 0) {
-        logger.info(`[ad4m] Registered ${newCount} new tool(s), total: ${registeredTools.size}`);
+        logger.info(
+          `[ad4m] Registered ${newCount} new tool(s), total: ${registeredTools.size}`,
+        );
       }
       return newCount;
     } catch (err: any) {
@@ -439,7 +505,9 @@ export default function ad4mPlugin(api: any) {
    */
   async function createLiveSubscription(sub: WakerSubscription): Promise<void> {
     if (!wakerClient) {
-      throw new Error("Waker service not connected. Ensure ad4m-executor is running and wakerEnabled is true.");
+      throw new Error(
+        "Waker service not connected. Ensure ad4m-executor is running and wakerEnabled is true.",
+      );
     }
 
     // Dispose existing subscription with same id if any
@@ -459,13 +527,41 @@ export default function ad4mPlugin(api: any) {
 
     let lastResultHash: string | null = null;
 
-    proxy.onResult((result: any) => {
+    proxy.onResult(async (result: any) => {
       const serialized = JSON.stringify(result);
       if (lastResultHash === serialized) return;
       lastResultHash = serialized;
 
       const count = Array.isArray(result) ? result.length : "?";
-      logger.info(`[ad4m-waker] ${sub.id}: query result changed (${count} items)`);
+      logger.info(
+        `[ad4m-waker] ${sub.id}: query result changed (${count} items)`,
+      );
+
+      // Determine the parent from the result
+      let parentChannel = sub.channel;
+
+      // For mention subscriptions, the query returns has_child links pointing to messages with mentions
+      // The source of each has_child link is the parent (channel), target is the message
+      if (
+        !parentChannel &&
+        sub.type === "mention" &&
+        Array.isArray(result) &&
+        result.length > 0
+      ) {
+        // Each result is a has_child link where the target is a message with a mention
+        // The source is the parent (channel)
+        const parentLink = result.find(
+          (link: any) =>
+            link && link.predicate === "ad4m://has_child" && link.source,
+        );
+
+        if (parentLink) {
+          parentChannel = parentLink.source;
+          logger.info(
+            `[ad4m-waker] ${sub.id}: found parent ${parentChannel} from has_child link`,
+          );
+        }
+      }
 
       const existing = wakerDebounceTimers.get(sub.id);
       if (existing) clearTimeout(existing);
@@ -473,7 +569,7 @@ export default function ad4mPlugin(api: any) {
       wakerDebounceTimers.set(
         sub.id,
         setTimeout(() => {
-          postWake(config, sub, wakerAgentDid, logger);
+          postWake(config, sub, wakerAgentDid, logger, parentChannel);
           wakerDebounceTimers.delete(sub.id);
         }, debounceMs),
       );
@@ -482,7 +578,9 @@ export default function ad4mPlugin(api: any) {
     wakerProxies.set(sub.id, proxy);
     wakerSubscriptions.set(sub.id, sub);
 
-    logger.info(`[ad4m-waker] Subscription ${sub.id} active (type=${sub.type}, perspective=${sub.perspective})`);
+    logger.info(
+      `[ad4m-waker] Subscription ${sub.id} active (type=${sub.type}, perspective=${sub.perspective})`,
+    );
   }
 
   /**
@@ -540,7 +638,10 @@ export default function ad4mPlugin(api: any) {
     parameters: {
       type: "object",
       properties: {
-        perspective_id: { type: "string", description: "Local perspective UUID of the neighbourhood" },
+        perspective_id: {
+          type: "string",
+          description: "Local perspective UUID of the neighbourhood",
+        },
       },
       required: ["perspective_id"],
     },
@@ -561,7 +662,9 @@ export default function ad4mPlugin(api: any) {
         }
 
         const subscription: WakerSubscription = {
-          id: data.subscription?.id ?? `mention-${params.perspective_id.substring(0, 8)}`,
+          id:
+            data.subscription?.id ??
+            `mention-${params.perspective_id.substring(0, 8)}`,
           type: "mention",
           perspective: params.perspective_id,
           channel: "",
@@ -570,18 +673,28 @@ export default function ad4mPlugin(api: any) {
         };
 
         if (!subscription.query) {
-          return { content: [{ type: "text", text: "Error: MCP tool did not return a query. Is the perspective accessible?" }] };
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Error: MCP tool did not return a query. Is the perspective accessible?",
+              },
+            ],
+          };
         }
 
         await createLiveSubscription(subscription);
 
         return {
-          content: [{
-            type: "text",
-            text: `Subscribed to mentions in perspective ${params.perspective_id}. ` +
-              `Subscription ID: ${subscription.id}. ` +
-              `Watching for: ${(data.names ?? []).join(", ")} and DID ${data.did ?? "unknown"}.`,
-          }],
+          content: [
+            {
+              type: "text",
+              text:
+                `Subscribed to mentions in perspective ${params.perspective_id}. ` +
+                `Subscription ID: ${subscription.id}. ` +
+                `Watching for: ${(data.names ?? []).join(", ")} and DID ${data.did ?? "unknown"}.`,
+            },
+          ],
         };
       } catch (err: any) {
         return { content: [{ type: "text", text: `Error: ${err.message}` }] };
@@ -595,7 +708,10 @@ export default function ad4mPlugin(api: any) {
     parameters: {
       type: "object",
       properties: {
-        perspective_id: { type: "string", description: "Local perspective UUID" },
+        perspective_id: {
+          type: "string",
+          description: "Local perspective UUID",
+        },
       },
       required: ["perspective_id"],
     },
@@ -603,19 +719,24 @@ export default function ad4mPlugin(api: any) {
       // Find subscription by perspective
       let found = false;
       for (const [id, sub] of wakerSubscriptions) {
-        if (sub.perspective === params.perspective_id && sub.type === "mention") {
+        if (
+          sub.perspective === params.perspective_id &&
+          sub.type === "mention"
+        ) {
           disposeLiveSubscription(id);
           found = true;
           break;
         }
       }
       return {
-        content: [{
-          type: "text",
-          text: found
-            ? `Unsubscribed from mentions in perspective ${params.perspective_id}.`
-            : `No mention subscription found for perspective ${params.perspective_id}.`,
-        }],
+        content: [
+          {
+            type: "text",
+            text: found
+              ? `Unsubscribed from mentions in perspective ${params.perspective_id}.`
+              : `No mention subscription found for perspective ${params.perspective_id}.`,
+          },
+        ],
       };
     },
   });
@@ -629,12 +750,21 @@ export default function ad4mPlugin(api: any) {
     parameters: {
       type: "object",
       properties: {
-        perspective_id: { type: "string", description: "Local perspective UUID" },
-        expression_address: { type: "string", description: "Parent expression address (e.g., channel ID)" },
+        perspective_id: {
+          type: "string",
+          description: "Local perspective UUID",
+        },
+        expression_address: {
+          type: "string",
+          description: "Parent expression address (e.g., channel ID)",
+        },
       },
       required: ["perspective_id", "expression_address"],
     },
-    async execute(_id: string, params: { perspective_id: string; expression_address: string }) {
+    async execute(
+      _id: string,
+      params: { perspective_id: string; expression_address: string },
+    ) {
       try {
         // Call the MCP tool to generate the waker query
         const result = await mcpCallTool(
@@ -654,7 +784,10 @@ export default function ad4mPlugin(api: any) {
           return { content: [{ type: "text", text: `Error: ${data.error}` }] };
         }
 
-        const subId = data.waker_config?.id ?? data.subscription_id ?? `children-${params.perspective_id.substring(0, 8)}`;
+        const subId =
+          data.waker_config?.id ??
+          data.subscription_id ??
+          `children-${params.perspective_id.substring(0, 8)}`;
 
         const subscription: WakerSubscription = {
           id: subId,
@@ -665,17 +798,24 @@ export default function ad4mPlugin(api: any) {
         };
 
         if (!subscription.query) {
-          return { content: [{ type: "text", text: "Error: MCP tool did not return a query." }] };
+          return {
+            content: [
+              { type: "text", text: "Error: MCP tool did not return a query." },
+            ],
+          };
         }
 
         await createLiveSubscription(subscription);
 
         return {
-          content: [{
-            type: "text",
-            text: `Subscribed to children of ${params.expression_address} in perspective ${params.perspective_id}. ` +
-              `Subscription ID: ${subscription.id}.`,
-          }],
+          content: [
+            {
+              type: "text",
+              text:
+                `Subscribed to children of ${params.expression_address} in perspective ${params.perspective_id}. ` +
+                `Subscription ID: ${subscription.id}.`,
+            },
+          ],
         };
       } catch (err: any) {
         return { content: [{ type: "text", text: `Error: ${err.message}` }] };
@@ -685,16 +825,26 @@ export default function ad4mPlugin(api: any) {
 
   api.registerTool({
     name: "unsubscribe_from_children",
-    description: "Remove the child subscription for a specific parent in a perspective.",
+    description:
+      "Remove the child subscription for a specific parent in a perspective.",
     parameters: {
       type: "object",
       properties: {
-        perspective_id: { type: "string", description: "Local perspective UUID" },
-        expression_address: { type: "string", description: "Parent expression address (e.g., channel ID)" },
+        perspective_id: {
+          type: "string",
+          description: "Local perspective UUID",
+        },
+        expression_address: {
+          type: "string",
+          description: "Parent expression address (e.g., channel ID)",
+        },
       },
       required: ["perspective_id", "expression_address"],
     },
-    async execute(_id: string, params: { perspective_id: string; expression_address: string }) {
+    async execute(
+      _id: string,
+      params: { perspective_id: string; expression_address: string },
+    ) {
       let found = false;
       for (const [id, sub] of wakerSubscriptions) {
         if (
@@ -708,12 +858,14 @@ export default function ad4mPlugin(api: any) {
         }
       }
       return {
-        content: [{
-          type: "text",
-          text: found
-            ? `Unsubscribed from children of ${params.expression_address} in perspective ${params.perspective_id}.`
-            : `No child subscription found for ${params.expression_address} in perspective ${params.perspective_id}.`,
-        }],
+        content: [
+          {
+            type: "text",
+            text: found
+              ? `Unsubscribed from children of ${params.expression_address} in perspective ${params.perspective_id}.`
+              : `No child subscription found for ${params.expression_address} in perspective ${params.perspective_id}.`,
+          },
+        ],
       };
     },
   });
@@ -725,12 +877,24 @@ export default function ad4mPlugin(api: any) {
     async execute() {
       const subs = Array.from(wakerSubscriptions.values());
       if (subs.length === 0) {
-        return { content: [{ type: "text", text: "No active waker subscriptions." }] };
+        return {
+          content: [{ type: "text", text: "No active waker subscriptions." }],
+        };
       }
       const summary = subs
-        .map((s) => `- ${s.id} (${s.type}) perspective=${s.perspective}${s.channel ? ` channel=${s.channel}` : ""}`)
+        .map(
+          (s) =>
+            `- ${s.id} (${s.type}) perspective=${s.perspective}${s.channel ? ` channel=${s.channel}` : ""}`,
+        )
         .join("\n");
-      return { content: [{ type: "text", text: `Active subscriptions (${subs.length}):\n${summary}` }] };
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Active subscriptions (${subs.length}):\n${summary}`,
+          },
+        ],
+      };
     },
   });
 
@@ -755,7 +919,9 @@ export default function ad4mPlugin(api: any) {
         for (const tool of tools) {
           registerMcpTool(tool);
         }
-        logger.info(`[ad4m] Registered ${registeredTools.size} initial tool(s)`);
+        logger.info(
+          `[ad4m] Registered ${registeredTools.size} initial tool(s)`,
+        );
 
         // Start periodic polling for dynamic SHACL tools
         refreshTimer = setInterval(() => {
@@ -790,11 +956,14 @@ export default function ad4mPlugin(api: any) {
       }
 
       if (!config.wakeUrl || !config.wakeToken) {
-        logger.info("[ad4m-waker] Waker not configured (wakeUrl and wakeToken required). Skipping.");
+        logger.info(
+          "[ad4m-waker] Waker not configured (wakeUrl and wakeToken required). Skipping.",
+        );
         return;
       }
 
-      const executorWsUrl = config.executorWsUrl ?? "ws://localhost:12100/graphql";
+      const executorWsUrl =
+        config.executorWsUrl ?? "ws://localhost:12100/graphql";
       const token = config.adminCredential;
 
       try {
@@ -814,7 +983,9 @@ export default function ad4mPlugin(api: any) {
           retryAttempts: Infinity,
           retryWait: async (retries: number) => {
             const delay = Math.min(1000 * Math.pow(2, retries), 30000);
-            logger.info(`[ad4m-waker] reconnecting in ${delay}ms (attempt ${retries + 1})...`);
+            logger.info(
+              `[ad4m-waker] reconnecting in ${delay}ms (attempt ${retries + 1})...`,
+            );
             await new Promise((r: any) => setTimeout(r, delay));
           },
         });
@@ -835,7 +1006,9 @@ export default function ad4mPlugin(api: any) {
         // Verify connection + get agent DID
         const status = await wakerClient.agent.status();
         wakerAgentDid = status.did;
-        logger.info(`[ad4m-waker] Connected — agent: ${status.did.substring(0, 40)}...`);
+        logger.info(
+          `[ad4m-waker] Connected — agent: ${status.did.substring(0, 40)}...`,
+        );
       } catch (err: any) {
         logger.error(`[ad4m-waker] Failed to connect: ${err.message}`);
         logger.error(

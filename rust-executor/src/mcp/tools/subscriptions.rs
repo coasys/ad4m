@@ -222,7 +222,7 @@ impl Ad4mMcpHandler {
             .chain(std::iter::once(did.clone())) // DIDs already lowercase
             .collect();
 
-        let conditions: Vec<String> = all_terms
+        let mention_conditions: Vec<String> = all_terms
             .iter()
             .map(|t| {
                 format!(
@@ -232,7 +232,15 @@ impl Ad4mMcpHandler {
             })
             .collect();
 
-        let query = format!("SELECT * FROM link WHERE {}", conditions.join(" OR "),);
+        let mention_predicate = format!("({})", mention_conditions.join(" OR "));
+
+        // Use graph traversal to find has_child links where the target (message) contains a mention.
+        // The query traverses from has_child links to message body links using the -> operator.
+        // This returns has_child links only for messages that have mentions.
+        let query = format!(
+            "SELECT * FROM link WHERE predicate = 'ad4m://has_child' AND out->link[WHERE {}].source IS NOT NONE",
+            mention_predicate
+        );
 
         let sub_id = format!("mention-{}", &did[did.len().saturating_sub(12)..]);
 

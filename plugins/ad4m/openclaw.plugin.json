@@ -46,7 +46,7 @@
         "description": "Debounce interval for wake events (ms)"
       }
     },
-    "required": ["adminCredential"],
+    "required": [],
     "additionalProperties": false
   },
   "uiHints": {
