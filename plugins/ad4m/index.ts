@@ -527,7 +527,6 @@ export function buildWakeMessage(
     "Read the AD4M skill for instructions on how to handle this.",
     "",
     `MCP endpoint: ${config.mcpEndpoint ?? "http://localhost:3001/mcp"}`,
-    `Auth credential: ${config.adminCredential}`,
     `Agent DID: ${agentDid}`,
     `Perspective: ${sub.perspective}`,
     parent ? `Parent: ${parent}` : null,

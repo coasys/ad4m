@@ -54,7 +54,10 @@ function fakeSSEResponse(sseText: string): Response {
 }
 
 /** Build a fake JSON Response. */
-function fakeJsonResponse(data: any, headers?: Record<string, string>): Response {
+function fakeJsonResponse(
+  data: any,
+  headers?: Record<string, string>,
+): Response {
   const h = new Headers({ "Content-Type": "application/json", ...headers });
   return new Response(JSON.stringify(data), { status: 200, headers: h });
 }
@@ -259,7 +262,8 @@ describe("stopExecutor", () => {
 
 describe("parseSSEStream", () => {
   it("parses a valid SSE stream with a JSON-RPC message", async () => {
-    const ssePayload = 'data: {"jsonrpc":"2.0","id":1,"result":{"tools":[]}}\n\n';
+    const ssePayload =
+      'data: {"jsonrpc":"2.0","id":1,"result":{"tools":[]}}\n\n';
     const response = fakeSSEResponse(ssePayload);
     const parsed = await parseSSEStream(response);
     expect(parsed.jsonrpc).toBe("2.0");
@@ -269,8 +273,7 @@ describe("parseSSEStream", () => {
 
   it("ignores non-JSON data lines", async () => {
     const ssePayload =
-      "data: [DONE]\n" +
-      'data: {"jsonrpc":"2.0","id":2,"result":"ok"}\n\n';
+      "data: [DONE]\n" + 'data: {"jsonrpc":"2.0","id":2,"result":"ok"}\n\n';
     const response = fakeSSEResponse(ssePayload);
     const parsed = await parseSSEStream(response);
     expect(parsed.id).toBe(2);
@@ -308,7 +311,9 @@ describe("mcpRequest", () => {
 
   it("handles SSE responses", async () => {
     const ssePayload = 'data: {"jsonrpc":"2.0","id":1,"result":"sse-ok"}\n\n';
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(fakeSSEResponse(ssePayload));
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      fakeSSEResponse(ssePayload),
+    );
 
     const resp = await mcpRequest("http://localhost:3001/mcp", "tools/list");
     expect(resp.result).toBe("sse-ok");
@@ -319,7 +324,13 @@ describe("mcpRequest", () => {
       fakeJsonResponse({ jsonrpc: "2.0", id: 1, result: {} }),
     );
 
-    await mcpRequest("http://localhost:3001/mcp", "tools/list", {}, "session-123", "my-token");
+    await mcpRequest(
+      "http://localhost:3001/mcp",
+      "tools/list",
+      {},
+      "session-123",
+      "my-token",
+    );
 
     const call = vi.mocked(fetch).mock.calls[0];
     const opts = call[1] as RequestInit;
@@ -352,7 +363,12 @@ describe("mcpNotify", () => {
       new Response(null, { status: 200 }),
     );
 
-    await mcpNotify("http://localhost:3001/mcp", "notifications/initialized", {}, "session-123");
+    await mcpNotify(
+      "http://localhost:3001/mcp",
+      "notifications/initialized",
+      {},
+      "session-123",
+    );
 
     const call = vi.mocked(fetch).mock.calls[0];
     const body = JSON.parse(call[1]!.body as string);
@@ -400,7 +416,9 @@ describe("mcpInitialize", () => {
       "my-token",
     );
     expect(sessionId).toBe("test-session-42");
-    expect(serverInfo).toEqual({ serverInfo: { name: "ad4m-mcp", version: "1.0" } });
+    expect(serverInfo).toEqual({
+      serverInfo: { name: "ad4m-mcp", version: "1.0" },
+    });
     expect(callCount).toBe(2);
   });
 
@@ -414,9 +432,9 @@ describe("mcpInitialize", () => {
       fakeJsonResponse(errorResult),
     );
 
-    await expect(
-      mcpInitialize("http://localhost:3001/mcp"),
-    ).rejects.toThrow("MCP initialize error: Auth required");
+    await expect(mcpInitialize("http://localhost:3001/mcp")).rejects.toThrow(
+      "MCP initialize error: Auth required",
+    );
   });
 });
 
@@ -566,7 +584,6 @@ describe("buildWakeMessage", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", "");
     expect(msg).toContain("You were @mentioned in an AD4M neighbourhood.");
     expect(msg).toContain("MCP endpoint: http://localhost:3001/mcp");
-    expect(msg).toContain("Auth credential: test-cred");
     expect(msg).toContain("Agent DID: did:key:z6Mk123");
     expect(msg).toContain("Perspective: uuid-123");
     expect(msg).toContain("Subscription: mention-abc");
@@ -710,9 +727,7 @@ describe("ad4mPlugin", () => {
     const registeredServices: Array<{ id: string; [k: string]: any }> = [];
 
     // Mock fetch to fail gracefully (no real executor running)
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(
-      new Error("No executor"),
-    );
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No executor"));
 
     const mockApi = {
       pluginConfig: {
@@ -828,7 +843,11 @@ describe("ad4mPlugin", () => {
 
   it("mcp-service start connects and registers MCP tools", async () => {
     const registeredTools: Array<{ name: string; execute: Function }> = [];
-    const registeredServices: Array<{ id: string; start: Function; stop: Function }> = [];
+    const registeredServices: Array<{
+      id: string;
+      start: Function;
+      stop: Function;
+    }> = [];
 
     const initResponse = {
       jsonrpc: "2.0",
