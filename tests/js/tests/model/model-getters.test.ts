@@ -39,14 +39,14 @@ describe("Ad4mModel — Custom Getters", function () {
     @Property({
       through: "blog://parent",
       getter:
-        "(->link[WHERE perspective = $perspective AND predicate = 'blog://reply_to'].out.uri)[0]",
+        "(->link[WHERE predicate = 'blog://reply_to'].out.uri)[0]",
     })
     parentPost: string | undefined;
 
     @HasMany({
       through: "blog://tags",
       getter:
-        "(->link[WHERE perspective = $perspective AND predicate = 'blog://tagged_with'].out.uri)",
+        "(->link[WHERE predicate = 'blog://tagged_with'].out.uri)",
     })
     tags: string[] = [];
   }

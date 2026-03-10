@@ -2641,13 +2641,13 @@ describe("Prolog + Literals", () => {
 
                     @Optional({
                         through: "blog://parent",
-                        getter: "(->link[WHERE perspective = $perspective AND predicate = 'blog://reply_to'].out.uri)[0]"
+                        getter: "(->link[WHERE predicate = 'blog://reply_to'].out.uri)[0]"
                     })
                     parentPost: string | undefined;
 
                     @HasMany({
                         through: "blog://tags",
-                        getter: "(->link[WHERE perspective = $perspective AND predicate = 'blog://tagged_with'].out.uri)"
+                        getter: "(->link[WHERE predicate = 'blog://tagged_with'].out.uri)"
                     })
                     tags: string[] = [];
                 }
