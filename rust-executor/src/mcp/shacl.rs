@@ -446,6 +446,10 @@ pub async fn resolve_property_resolve_language(
         "Property '{}' not found in class '{}'. Available properties: {}",
         property_name,
         class_name,
-        properties.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", ")
+        properties
+            .iter()
+            .map(|p| p.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
     ))
 }
