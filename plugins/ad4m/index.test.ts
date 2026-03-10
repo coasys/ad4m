@@ -1277,6 +1277,300 @@ describe("ad4mPlugin", () => {
     }
   });
 
+  it("refreshTools recovers from 422 by re-initializing session", async () => {
+    const registeredTools: Array<{ name: string; execute: Function }> = [];
+    const registeredServices: Array<{
+      id: string;
+      start: Function;
+      stop: Function;
+    }> = [];
+
+    // Track fetch calls to simulate 422 on first tools/list, then success
+    let toolsListCallCount = 0;
+    let initializeCallCount = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
+      const body = JSON.parse((opts as any).body as string);
+
+      if (body.method === "initialize") {
+        initializeCallCount++;
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: { serverInfo: { name: "ad4m" } },
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "Mcp-Session-Id": `sess-${initializeCallCount}`,
+            },
+          },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 200 });
+      }
+      if (body.method === "tools/list") {
+        toolsListCallCount++;
+        if (toolsListCallCount === 1) {
+          // First tools/list → 422 (expired session)
+          return new Response("Unprocessable Entity", {
+            status: 422,
+            statusText: "Unprocessable Entity",
+          });
+        }
+        // Retry succeeds
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            tools: [
+              {
+                name: "recovered_tool",
+                description: "A tool discovered after session recovery",
+                inputSchema: { type: "object", properties: {} },
+              },
+            ],
+          },
+        });
+      }
+      return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
+    });
+
+    const mockApi = {
+      pluginConfig: {
+        mode: "external",
+        mcpEndpoint: "http://localhost:3001/mcp",
+        adminCredential: "test-cred",
+      },
+      logger: makeMockLogger(),
+      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
+      registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+    };
+
+    await ad4mPlugin(mockApi);
+
+    // Start the MCP service — ensureSession + refreshTools with 422 recovery
+    const mcpService = registeredServices.find((s) => s.id === "ad4m-mcp");
+    expect(mcpService).toBeDefined();
+    await mcpService!.start();
+
+    // Session should have been initialized twice (once initially, once after 422)
+    expect(initializeCallCount).toBe(2);
+    // tools/list should have been called twice (once 422, once success)
+    expect(toolsListCallCount).toBe(2);
+
+    // The recovered tool should be registered
+    const toolNames = registeredTools.map((t) => t.name);
+    expect(toolNames).toContain("recovered_tool");
+
+    // Logger should show re-initialization
+    const infoMsgs = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
+    expect(
+      infoMsgs.some((m: string) => m.includes("re-initializing")),
+    ).toBe(true);
+
+    mcpService!.stop();
+  });
+
+  it("MCP tool execute recovers from 422 by re-initializing session", async () => {
+    const registeredTools: Array<{ name: string; execute: Function }> = [];
+    const registeredServices: Array<{
+      id: string;
+      start: Function;
+      stop: Function;
+    }> = [];
+
+    let initializeCallCount = 0;
+    let toolCallCount = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
+      const body = JSON.parse((opts as any).body as string);
+
+      if (body.method === "initialize") {
+        initializeCallCount++;
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: { serverInfo: { name: "ad4m" } },
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "Mcp-Session-Id": `sess-${initializeCallCount}`,
+            },
+          },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 200 });
+      }
+      if (body.method === "tools/list") {
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            tools: [
+              {
+                name: "test_tool",
+                description: "A test tool",
+                inputSchema: { type: "object", properties: {} },
+              },
+            ],
+          },
+        });
+      }
+      if (body.method === "tools/call") {
+        toolCallCount++;
+        if (toolCallCount === 1) {
+          // First call → 422 (expired session)
+          return new Response("Unprocessable Entity", {
+            status: 422,
+            statusText: "Unprocessable Entity",
+          });
+        }
+        // Retry succeeds
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            content: [{ type: "text", text: '{"status":"ok"}' }],
+          },
+        });
+      }
+      return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
+    });
+
+    const mockApi = {
+      pluginConfig: {
+        mode: "external",
+        mcpEndpoint: "http://localhost:3001/mcp",
+        adminCredential: "test-cred",
+      },
+      logger: makeMockLogger(),
+      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
+      registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+    };
+
+    await ad4mPlugin(mockApi);
+
+    // Start the MCP service to register tools
+    const mcpService = registeredServices.find((s) => s.id === "ad4m-mcp");
+    await mcpService!.start();
+
+    // Find the dynamically registered MCP tool
+    const testTool = registeredTools.find((t) => t.name === "test_tool");
+    expect(testTool).toBeDefined();
+
+    // Reset counters to track just the tool call
+    initializeCallCount = 0;
+    toolCallCount = 0;
+
+    // Execute the tool — first call gets 422, should recover
+    const result = await testTool!.execute("call-1", {});
+
+    // Should have re-initialized session
+    expect(initializeCallCount).toBe(1); // one re-init after 422
+    // Should have called the tool twice (first 422, then success)
+    expect(toolCallCount).toBe(2);
+    // Should return the successful result
+    expect(result.content[0].text).toContain("ok");
+
+    mcpService!.stop();
+  });
+
+  it("non-4xx errors are not retried and propagate", async () => {
+    const registeredTools: Array<{ name: string; execute: Function }> = [];
+    const registeredServices: Array<{
+      id: string;
+      start: Function;
+      stop: Function;
+    }> = [];
+
+    let initializeCallCount = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
+      const body = JSON.parse((opts as any).body as string);
+
+      if (body.method === "initialize") {
+        initializeCallCount++;
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: { serverInfo: { name: "ad4m" } },
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "Mcp-Session-Id": `sess-${initializeCallCount}`,
+            },
+          },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 200 });
+      }
+      if (body.method === "tools/list") {
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            tools: [
+              {
+                name: "failing_tool",
+                description: "Tool that fails with 500",
+                inputSchema: { type: "object", properties: {} },
+              },
+            ],
+          },
+        });
+      }
+      if (body.method === "tools/call") {
+        // 500 error — should NOT trigger session recovery
+        return new Response("Internal Server Error", {
+          status: 500,
+          statusText: "Internal Server Error",
+        });
+      }
+      return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
+    });
+
+    const mockApi = {
+      pluginConfig: {
+        mode: "external",
+        mcpEndpoint: "http://localhost:3001/mcp",
+        adminCredential: "test-cred",
+      },
+      logger: makeMockLogger(),
+      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
+      registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+    };
+
+    await ad4mPlugin(mockApi);
+
+    const mcpService = registeredServices.find((s) => s.id === "ad4m-mcp");
+    await mcpService!.start();
+
+    const failingTool = registeredTools.find((t) => t.name === "failing_tool");
+    expect(failingTool).toBeDefined();
+
+    initializeCallCount = 0;
+
+    // Execute — should get error but NOT re-initialize session
+    const result = await failingTool!.execute("call-1", {});
+
+    // Should NOT have re-initialized (500 is not 4xx)
+    expect(initializeCallCount).toBe(0);
+    // Should return an error
+    expect(result.error).toBeDefined();
+    expect(result.error).toContain("500");
+
+    mcpService!.stop();
+  });
+
   it("warns when adminCredential is not configured in external mode", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No executor"));
 

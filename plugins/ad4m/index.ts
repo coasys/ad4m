@@ -832,6 +832,57 @@ Notes:
   const wakerSubscriptions = new Map<string, WakerSubscription>();
 
   /**
+   * (Re-)initialize the MCP session. Called on first connect and when the
+   * session becomes invalid (e.g. executor restart, session expiry → 422).
+   */
+  async function ensureSession(): Promise<string> {
+    if (sessionId) return sessionId;
+    logger.info(`[ad4m] Initializing MCP session at ${endpoint}`);
+    const init = await mcpInitialize(endpoint, authToken);
+    sessionId = init.sessionId;
+    logger.info(`[ad4m] MCP session established (id: ${sessionId})`);
+    return sessionId;
+  }
+
+  /**
+   * Drop the current session so the next ensureSession() re-initializes.
+   */
+  function invalidateSession(): void {
+    sessionId = "";
+  }
+
+  /**
+   * Call an MCP tool with automatic session recovery.
+   * If the call fails with a 4xx (likely 422 = invalid session), re-initialize
+   * the session once and retry.
+   */
+  async function callToolWithRetry(
+    toolName: string,
+    args: Record<string, any>,
+  ): Promise<any> {
+    await ensureSession();
+    try {
+      return await mcpCallTool(endpoint, toolName, args, sessionId, authToken);
+    } catch (err: any) {
+      if (err.message && /MCP HTTP 4\d\d/.test(err.message)) {
+        logger.info(
+          `[ad4m] Session error calling ${toolName}, re-initializing...`,
+        );
+        invalidateSession();
+        await ensureSession();
+        return await mcpCallTool(
+          endpoint,
+          toolName,
+          args,
+          sessionId,
+          authToken,
+        );
+      }
+      throw err;
+    }
+  }
+
+  /**
    * Convert an MCP tool definition's inputSchema to OpenClaw parameters format.
    * Strips `$schema` (and `$id`) because AD4M's schemars 1.0 emits
    * draft 2020-12 which OpenClaw's validator doesn't recognise.
@@ -856,13 +907,7 @@ Notes:
       parameters: toParameters(tool),
       async execute(_id: string, params: Record<string, any>) {
         try {
-          const result = await mcpCallTool(
-            endpoint,
-            tool.name,
-            params,
-            sessionId,
-            authToken,
-          );
+          const result = await callToolWithRetry(tool.name, params);
           if (result?.content) return result;
           return { content: [{ type: "text", text: JSON.stringify(result) }] };
         } catch (err: any) {
@@ -876,23 +921,51 @@ Notes:
 
   /**
    * Fetch tools from MCP and register any new ones.
+   * Automatically re-initializes the session on 4xx errors.
    */
   async function refreshTools(): Promise<number> {
     try {
-      const tools = await mcpListTools(endpoint, sessionId, authToken);
-      let newCount = 0;
-      for (const tool of tools) {
-        if (!registeredTools.has(tool.name)) {
-          registerMcpTool(tool);
-          newCount++;
+      await ensureSession();
+      try {
+        const tools = await mcpListTools(endpoint, sessionId, authToken);
+        let newCount = 0;
+        for (const tool of tools) {
+          if (!registeredTools.has(tool.name)) {
+            registerMcpTool(tool);
+            newCount++;
+          }
         }
+        if (newCount > 0) {
+          logger.info(
+            `[ad4m] Registered ${newCount} new tool(s), total: ${registeredTools.size}`,
+          );
+        }
+        return newCount;
+      } catch (err: any) {
+        // Session error → re-initialize and retry once
+        if (err.message && /MCP HTTP 4\d\d/.test(err.message)) {
+          logger.info(
+            `[ad4m] Session error during tool refresh, re-initializing...`,
+          );
+          invalidateSession();
+          await ensureSession();
+          const tools = await mcpListTools(endpoint, sessionId, authToken);
+          let newCount = 0;
+          for (const tool of tools) {
+            if (!registeredTools.has(tool.name)) {
+              registerMcpTool(tool);
+              newCount++;
+            }
+          }
+          if (newCount > 0) {
+            logger.info(
+              `[ad4m] Registered ${newCount} new tool(s), total: ${registeredTools.size}`,
+            );
+          }
+          return newCount;
+        }
+        throw err;
       }
-      if (newCount > 0) {
-        logger.info(
-          `[ad4m] Registered ${newCount} new tool(s), total: ${registeredTools.size}`,
-        );
-      }
-      return newCount;
     } catch (err: any) {
       logger.warn(`[ad4m] Tool refresh failed: ${err.message}`);
       return 0;
@@ -1048,12 +1121,9 @@ Notes:
     async execute(_id: string, params: { perspective_id: string }) {
       try {
         // Call the MCP tool to generate the mention query
-        const result = await mcpCallTool(
-          endpoint,
+        const result = await callToolWithRetry(
           "get_mention_waker_config",
           { perspective_id: params.perspective_id },
-          sessionId,
-          authToken,
         );
         const data = extractMcpResultData(result);
 
@@ -1167,16 +1237,13 @@ Notes:
     ) {
       try {
         // Call the MCP tool to generate the waker query
-        const result = await mcpCallTool(
-          endpoint,
+        const result = await callToolWithRetry(
           "generate_waker_query",
           {
             perspective_id: params.perspective_id,
             class_name: "Message",
             parent_address: params.expression_address,
           },
-          sessionId,
-          authToken,
         );
         const data = extractMcpResultData(result);
 
@@ -1310,15 +1377,10 @@ Notes:
       logger.info(`[ad4m] Connecting to AD4M MCP at ${endpoint}`);
 
       try {
-        const init = await mcpInitialize(endpoint, authToken);
-        sessionId = init.sessionId;
-        logger.info(`[ad4m] MCP session established (id: ${sessionId})`);
+        await ensureSession();
 
         // Initial tool discovery
-        const tools = await mcpListTools(endpoint, sessionId, authToken);
-        for (const tool of tools) {
-          registerMcpTool(tool);
-        }
+        await refreshTools();
         logger.info(
           `[ad4m] Registered ${registeredTools.size} initial tool(s)`,
         );
