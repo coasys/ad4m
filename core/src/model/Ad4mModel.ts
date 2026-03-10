@@ -3345,11 +3345,6 @@ FETCH links
    * ```
    */
   async delete(batchId?: string) {
-    // Check if the model has a destructor (required properties, flags, or
-    // properties with initial values).  Models whose properties are all
-    // optional, have no @Flag, and have no initial values produce an empty
-    // SHACL destructor, so calling removeSubject would fail.  In that case
-    // we skip the destructor and just remove all outgoing links directly.
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
     const hasDestructor = Object.values(metadata.properties).some(
       (p) => p.required || p.flag || p.initial !== undefined
@@ -3359,18 +3354,40 @@ FETCH links
       // Remove the subject itself (destructor actions)
       await this._perspective.removeSubject(this, this._baseExpression, batchId);
     } else {
-      // No destructor — manually remove all outgoing links from this node
+      // No destructor (all-optional model).
+      // SAFETY: We must NOT remove all outgoing links because another model
+      // class may be instantiated on the same base expression.  Removing
+      // everything would silently destroy that other instance's data — and
+      // if that instance has a destructor, it can no longer be called
+      // cleanly, leaving link debris.
+      //
+      // Instead we only remove outgoing links whose predicate is declared
+      // by THIS model's schema (properties + relations).
       try {
+        const knownPredicates = new Set<string>();
+        for (const p of Object.values(metadata.properties)) {
+          if (p.predicate) knownPredicates.add(p.predicate);
+        }
+        for (const r of Object.values(metadata.relations)) {
+          if (r.predicate) knownPredicates.add(r.predicate);
+        }
+
         const outgoingLinks = await this._perspective.get(new LinkQuery({ source: this._baseExpression }));
-        if (outgoingLinks.length > 0) {
-          await this._perspective.removeLinks(outgoingLinks, batchId);
+        const ownLinks = outgoingLinks.filter(
+          (link) => link.data.predicate && knownPredicates.has(link.data.predicate)
+        );
+        if (ownLinks.length > 0) {
+          await this._perspective.removeLinks(ownLinks, batchId);
         }
       } catch (e) {
         console.warn(`delete(): failed to remove outgoing links for ${this._baseExpression}:`, e);
       }
     }
 
-    // Clean up incoming links — remove any links that point **to** this instance
+    // Clean up incoming links — remove any links that point **to** this instance.
+    // Unlike outgoing links (scoped above), incoming links originate from OTHER
+    // nodes.  Removing them doesn't damage sibling models on this node; it
+    // prevents dangling references elsewhere (e.g. a parent's has_child link).
     try {
       const incomingLinks = await this._perspective.get(new LinkQuery({ target: this._baseExpression }));
       if (incomingLinks.length > 0) {
