@@ -1129,8 +1129,40 @@ Notes:
   /**
    * Register a single MCP tool with OpenClaw.
    */
+  // Tools that create/join neighbourhoods — auto-subscribe to mentions after success.
+  const NEIGHBOURHOOD_TOOLS = new Set([
+    "neighbourhood_join_from_url",
+    "neighbourhood_publish_from_perspective",
+  ]);
+
+  /**
+   * Extract the perspective UUID from a successful neighbourhood tool result.
+   * Returns null if the result doesn't look like a success or has no UUID.
+   */
+  function extractPerspectiveUuid(
+    toolName: string,
+    result: any,
+  ): string | null {
+    // The result may be wrapped in MCP content format
+    let data = result;
+    if (result?.content?.[0]?.text) {
+      try {
+        data = JSON.parse(result.content[0].text);
+      } catch {
+        return null;
+      }
+    }
+    if (!data?.success) return null;
+
+    // neighbourhood_join_from_url returns { perspective_uuid }
+    // neighbourhood_publish_from_perspective returns { perspective_uuid }
+    return data.perspective_uuid ?? null;
+  }
+
   function registerMcpTool(tool: McpTool) {
     if (registeredTools.has(tool.name)) return;
+
+    const isNeighbourhoodTool = NEIGHBOURHOOD_TOOLS.has(tool.name);
 
     api.registerTool({
       name: tool.name,
@@ -1139,6 +1171,16 @@ Notes:
       async execute(_id: string, params: Record<string, any>) {
         try {
           const result = await callToolWithRetry(tool.name, params);
+
+          // Auto-subscribe to mentions when a neighbourhood is joined or published
+          if (isNeighbourhoodTool) {
+            const perspId = extractPerspectiveUuid(tool.name, result);
+            if (perspId) {
+              // Fire and forget — don't block the tool response
+              autoSubscribeMentions(perspId);
+            }
+          }
+
           if (result?.content) return result;
           return { content: [{ type: "text", text: JSON.stringify(result) }] };
         } catch (err: any) {
@@ -1333,12 +1375,81 @@ Notes:
 
   // -- Waker subscription tools --
 
+  /**
+   * Subscribe to mentions for a perspective (neighbourhood).
+   * Reusable by both the explicit tool and the auto-subscription hooks.
+   * Returns a human-readable status string, or throws on failure.
+   */
+  async function subscribeToMentionsForPerspective(
+    perspectiveId: string,
+  ): Promise<string> {
+    // Skip if already subscribed
+    const existingId = `mention-${perspectiveId.substring(0, 8)}`;
+    if (wakerSubscriptions.has(existingId)) {
+      return `Already subscribed to mentions in perspective ${perspectiveId}.`;
+    }
+
+    const result = await callToolWithRetry("get_mention_waker_config", {
+      perspective_id: perspectiveId,
+    });
+    const data = extractMcpResultData(result);
+
+    if (data?.error) {
+      throw new Error(data.error);
+    }
+
+    const subscription: WakerSubscription = {
+      id: data.subscription?.id ?? existingId,
+      type: "mention",
+      perspective: perspectiveId,
+      channel: "",
+      query: data.query ?? data.subscription?.query,
+      neighbourhood: data.neighbourhood,
+    };
+
+    if (!subscription.query) {
+      throw new Error(
+        "MCP tool did not return a query. Is the perspective accessible?",
+      );
+    }
+
+    await createLiveSubscription(subscription);
+
+    return (
+      `Subscribed to mentions in perspective ${perspectiveId}. ` +
+      `Subscription ID: ${subscription.id}. ` +
+      `Watching for: ${(data.names ?? []).join(", ")} and DID ${data.did ?? "unknown"}.`
+    );
+  }
+
+  /**
+   * Auto-subscribe to mentions after a neighbourhood is joined or published.
+   * Best-effort: logs errors but never throws.
+   */
+  async function autoSubscribeMentions(perspectiveId: string): Promise<void> {
+    if (!wakerClient) {
+      logger.info(
+        `[ad4m-waker] Skipping auto-subscribe for ${perspectiveId} — waker not connected`,
+      );
+      return;
+    }
+    try {
+      const msg = await subscribeToMentionsForPerspective(perspectiveId);
+      logger.info(`[ad4m-waker] Auto-subscribed: ${msg}`);
+    } catch (err: any) {
+      logger.error(
+        `[ad4m-waker] Auto-subscribe to mentions failed for ${perspectiveId}: ${err.message}`,
+      );
+    }
+  }
+
   api.registerTool({
     name: "subscribe_to_mentions",
     description:
       "Subscribe to mentions of this agent in a neighbourhood. " +
       "Creates a live waker subscription that watches for messages mentioning " +
-      "your name or DID and wakes you when detected. Call this once per neighbourhood you join.",
+      "your name or DID and wakes you when detected. " +
+      "Note: this is called automatically when you join or publish a neighbourhood.",
     parameters: {
       type: "object",
       properties: {
@@ -1351,52 +1462,10 @@ Notes:
     },
     async execute(_id: string, params: { perspective_id: string }) {
       try {
-        // Call the MCP tool to generate the mention query
-        const result = await callToolWithRetry(
-          "get_mention_waker_config",
-          { perspective_id: params.perspective_id },
+        const msg = await subscribeToMentionsForPerspective(
+          params.perspective_id,
         );
-        const data = extractMcpResultData(result);
-
-        if (data?.error) {
-          return { content: [{ type: "text", text: `Error: ${data.error}` }] };
-        }
-
-        const subscription: WakerSubscription = {
-          id:
-            data.subscription?.id ??
-            `mention-${params.perspective_id.substring(0, 8)}`,
-          type: "mention",
-          perspective: params.perspective_id,
-          channel: "",
-          query: data.query ?? data.subscription?.query,
-          neighbourhood: data.neighbourhood,
-        };
-
-        if (!subscription.query) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "Error: MCP tool did not return a query. Is the perspective accessible?",
-              },
-            ],
-          };
-        }
-
-        await createLiveSubscription(subscription);
-
-        return {
-          content: [
-            {
-              type: "text",
-              text:
-                `Subscribed to mentions in perspective ${params.perspective_id}. ` +
-                `Subscription ID: ${subscription.id}. ` +
-                `Watching for: ${(data.names ?? []).join(", ")} and DID ${data.did ?? "unknown"}.`,
-            },
-          ],
-        };
+        return { content: [{ type: "text", text: msg }] };
       } catch (err: any) {
         return { content: [{ type: "text", text: `Error: ${err.message}` }] };
       }
