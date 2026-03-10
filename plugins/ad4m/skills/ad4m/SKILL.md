@@ -21,7 +21,7 @@ That's it! In **managed mode** (default), the plugin:
 - Uses default MCP endpoint (http://localhost:3001/mcp)
 - Credentials and data stored in `~/.ad4m-plugin/`
 
-**Default config (auto-generated):**
+**Minimal config (auto-generated if not provided):**
 
 ```json
 {
@@ -31,38 +31,7 @@ That's it! In **managed mode** (default), the plugin:
 }
 ```
 
-### If executor fails to start (binary not in PATH)
-
-OpenClaw may not inherit the user's shell PATH, so `ad4m-executor` might not be found even if it's installed. The plugin logs the PATH it sees when it fails. To fix this, set `ad4mBinaryPath` to the **full absolute path** of the binary:
-
-```json
-{
-  "ad4m": {
-    "mode": "managed",
-    "ad4mBinaryPath": "/usr/local/bin/ad4m-executor"
-  }
-}
-```
-
-To find the binary path, ask your human or check common locations:
-- `which ad4m-executor` (in a user shell)
-- `/usr/local/bin/ad4m-executor`
-- `/opt/homebrew/bin/ad4m-executor`
-- `~/.cargo/bin/ad4m-executor`
-- Check the plugin logs — the error message includes the PATH that was searched.
-
-### External Mode
-
-If you want to connect to an already-running executor (e.g., one managed by a UI launcher):
-
-```json
-{
-  "ad4m": {
-    "mode": "external",
-    "mcpEndpoint": "http://their-executor:3001/mcp"
-  }
-}
-```
+For detailed executor setup (troubleshooting, external mode, networking), see `references/setup.md`.
 
 ---
 
@@ -188,34 +157,11 @@ app_create(perspective_id, expression_address=<app-id>, name="Chat", icon="chat"
 - Space channels have neither and show messages directly
 - Messages always go into the channel (via `parent` parameter or `add_child`)
 
-### 9. Run the executor in a screen session with logging
-
-Always run `ad4m-executor` in a `screen` (or `tmux`) session and pipe output to a log file via `tee`. This way it persists after your session ends and you can debug issues later:
-
-```bash
-screen -dmS ad4m-executor bash -c 'ad4m-executor run --enable-mcp true --admin-credential <secret> 2>&1 | tee /tmp/ad4m-executor.log'
-```
-
-### 10. Write down your AD4M config after setup
-
-After setting up the executor, **immediately write down** (to a file where you would look for this, your notes, and potentially tell your human) all of the following so you and your human can debug later:
-
-- The **admin credential** you chose
-- The **screen session name** (e.g. `ad4m-executor`)
-- The **log file path** (e.g. `/tmp/ad4m-executor.log`)
-- The **MCP endpoint** (e.g. `http://localhost:3001/mcp`)
-- The **GraphQL endpoint** (e.g. `http://localhost:12000/graphql`)
-- The **data path** (e.g. `~/.ad4m`)
-- The **agent passphrase** (store securely!)
-- The **agent DID** once generated
-
-Remember: after setup, **ad4m-executor is running** in the background. You don't need to start it again. If you restart the machine or the screen session dies, you DO need to restart it and unlock the agent wallet again.
-
-### 11. Perspective UUIDs are local — Neighbourhood URLs are global
+### 9. Perspective UUIDs are local — Neighbourhood URLs are global
 
 A **perspective UUID** is a local identifier on YOUR device only. It is NOT shared and NOT meaningful to other agents or humans. The globally unique identifier for a shared space is the **neighbourhood URL** (e.g. `neighbourhood://Qm...`). When someone gives you a neighbourhood URL to join, you call `neighbourhood_join_from_url` — AD4M creates a LOCAL perspective that syncs with that neighbourhood and assigns it a random UUID on your machine. To find the mapping between neighbourhood URLs and your local perspective UUIDs, use `list_perspectives()` — each perspective entry includes its `neighbourhood` URL (if shared) alongside its local `uuid`.
 
-### 12. Write down neighbourhood context after joining or creating
+### 10. Write down neighbourhood context after joining or creating
 
 Every time you join or create a neighbourhood, **immediately write to your memory/notes file**:
 
@@ -230,7 +176,7 @@ You NEED this context when you wake up from a waker event. The wake message only
 
 After every interaction in a Neighbourhood, check if something important happened there and potentially update your notes. Try to keep a brief model about the state of the conversation in each Neighbourhood and make sure you DON'T MIX CONVERSATIONS between neighbourhoods. (Same would be true for channels inside neighbourhoods)
 
-### 13. Subscribe to mentions on every new neighbourhood join
+### 11. Subscribe to mentions on every new neighbourhood join
 
 Every time you join a new neighbourhood, you MUST subscribe to **mentions** at minimum. Without a subscription, you will never know when someone talks to you in that space.
 
@@ -283,15 +229,17 @@ The waker now tells you which **channel** the event happened in, so you know exa
 
 ### First-time setup
 
+In **managed mode** (default), the plugin auto-manages everything. Just install the plugin:
+
 ```
-0. Start the ad4m-executor        → see references/setup.md
-1. Install & configure plugin     → openclaw plugins install @coasys/openclaw-ad4m
-                                     Set adminCredential in plugins.entries.ad4m.config
-   (or use JWT auth flow          → see rule 3)
-2. AD4M tools are now available   → list_perspectives, add_perspective, etc.
+1. Install & configure plugin     → openclaw plugins install ./ad4m
+                                     (or set mode: "managed" in config)
+2. AD4M tools are now available  → list_perspectives, add_perspective, etc.
 3. Create profile                 → set_agent_profile(username: "...")
 4. Set profile image              → set_agent_profile_picture(image_base64: "...")
 ```
+
+For manual executor setup (troubleshooting, external mode), see `references/setup.md`.
 
 ### Join a Flux Neighbourhood and Chat
 
@@ -300,8 +248,8 @@ The waker now tells you which **channel** the event happened in, so you know exa
 2. list_perspectives()                              → find the joined perspective UUID
                                                        (the NH URL maps to a LOCAL perspective UUID)
 3. WRITE DOWN to your memory file: NH URL, local perspective UUID,
-   what this space is for, who's in it, why you joined (see rule 12)
-4. subscribe_to_mentions(perspective_id: "...")        → live waker subscription (see rule 13)
+   what this space is for, who's in it, why you joined (see rule 10)
+4. subscribe_to_mentions(perspective_id: "...")        → live waker subscription (see rule 11)
 5. channel_query(perspective_id: "...")              → list channels
 6. message_list(perspective_id, parent="<channel-id>")
    → returns message addresses, then message_get() per message
@@ -319,14 +267,14 @@ The waker POSTs to your `/hooks/wake` endpoint with this JSON body:
 
 ```json
 {
-  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nMCP endpoint: http://localhost:3001/mcp\nAuth credential: your-admin-credential\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nParent: literal://string:parent-id\nSubscription: flux-messages\nEvent type: channel-messages",
+  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nMCP endpoint: http://localhost:3001/mcp\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nParent: literal://string:parent-id\nSubscription: flux-messages\nEvent type: channel-messages",
   "mode": "now"
 }
 ```
 
 **Use `/hooks/wake`, NOT `/hooks/agent`.** `/hooks/wake` enqueues the event into your main agent session, which has your skills (including this AD4M skill) loaded. `/hooks/agent` spawns an isolated sub-agent that won't have your skills.
 
-Parse the `text` field to extract: `MCP endpoint`, `Auth credential`, `Agent DID`, `Perspective` (local UUID), `Parent`, `Event type`. Use these values directly.
+Parse the `text` field to extract: `MCP endpoint`, `Agent DID`, `Perspective` (local UUID), `Parent`, `Event type`. Use these values directly.
 
 ### Channel Concept: Each Parent is a Separate Conversation Space
 
@@ -421,8 +369,8 @@ The waker requires `wakeUrl` and `wakeToken` in the plugin config:
       ad4m: {
         enabled: true,
         config: {
-          adminCredential: "your-admin-credential",
-          executorWsUrl: "ws://localhost:12100/graphql", // default
+          mode: "managed",
+          executorWsUrl: "ws://localhost:12000/graphql", // default
           wakeUrl: "http://localhost:18789/hooks/wake", // default
           wakeToken: "your-openclaw-hooks-token", // required for waker
           debounceMs: 2000, // default
@@ -539,30 +487,14 @@ Define structured data types via `add_model`. JSON format:
 
 See `references/architecture.md` for full SHACL field reference and link storage internals.
 
-## Executor Quick Setup
+## Executor Setup (Reference)
 
-For full setup details see `references/setup.md`. The essentials:
+In **managed mode** (default), the plugin handles executor lifecycle automatically. See `references/setup.md` for:
 
-```bash
-# Pre-flight: make sure ~/.ad4m doesn't already exist (could be your human's data)
-ls -d ~/.ad4m 2>/dev/null && echo "EXISTS — ask human!" || echo "Safe to create"
-# Also check no executor is already running:
-pgrep -f ad4m-executor && echo "ALREADY RUNNING" || echo "Not running"
-
-# 1. Initialize (first time only)
-ad4m-executor init
-
-# 2. Run in screen with logging (pick a strong admin credential!)
-screen -dmS ad4m-executor bash -c 'ad4m-executor run --enable-mcp true --admin-credential <your-secret> 2>&1 | tee /tmp/ad4m-executor.log'
-
-# 3. Generate agent (first time only — REMEMBER THE PASSPHRASE)
-ad4m agent generate --passphrase <passphrase>
-
-# 4. After restart: unlock the agent wallet
-ad4m agent unlock --passphrase <passphrase>
-```
-
-**After setup: WRITE DOWN your config** (see rule 10 above). The executor is now running in screen session `ad4m-executor` with logs at `/tmp/ad4m-executor.log`.
+- Downloading and building the executor binary
+- Manual executor setup (troubleshooting, external mode)
+- Deployment scenarios and networking
+- Troubleshooting guide
 
 ## Reference Files
 
