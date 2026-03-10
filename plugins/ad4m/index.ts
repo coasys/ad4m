@@ -666,12 +666,6 @@ export default async function ad4mPlugin(api: any) {
         mode: "external",
         mcpEndpoint: "http://their-executor:3001/mcp",
       };
-      const externalConfig = {
-        mode: "external",
-        mcpEndpoint: "http://their-executor:3001/mcp",
-        wakerEnabled: true,
-        wakeUrl: "http://localhost:18789/hooks/wake",
-      };
       return {
         content: [
           {
@@ -683,8 +677,8 @@ ${JSON.stringify({ ad4m: managedConfig }, null, 2)}
 ${JSON.stringify({ ad4m: externalConfig }, null, 2)}
 
 Notes:
-- Managed: uses default localhost:3001, auto-generates credentials
-- External: provide executor URL, uses executor's auth (or JWT flow)
+- Managed: auto-starts executor, auto-generates credentials
+- External: provide executor URL, uses executor's auth
 - Credentials stored in ~/.ad4m-plugin/ for reuse`,
           },
         ],
