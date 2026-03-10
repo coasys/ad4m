@@ -132,6 +132,55 @@ class Recipe extends Ad4mModel {
   **`through` on computed properties**: Even when using a custom `getter`, `through` is still required — it serves as the SHACL predicate identifier in the generated shape, making the property discoverable by other consumers (MCP, CLI, other apps). No link is written at this predicate; the value is entirely derived from the getter expression.
 </Callout>
 
+#### All property options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `through` | `string` | *(required)* | Predicate URI for the link |
+| `required` | `boolean` | `false` | If true, a placeholder link is created on save even if the value is empty |
+| `readOnly` | `boolean` | `false` | Prevents updates after creation |
+| `resolveLanguage` | `string` | `"literal"` | Language used to resolve the stored value. Use `"literal"` for simple values, or a Language address for richer content |
+| `initial` | `any` | — | Default value written on creation. When `required: true` with no `initial`, the framework uses a sentinel value (`"literal://string:uninitialized"`) |
+| `local` | `boolean` | `false` | Store locally only — not synced to the network. Useful for user preferences or draft state |
+| `getter` | `string` | — | Raw SurrealQL expression for computed values. `Base` is replaced with the instance's node ID at query time. Mutually exclusive with regular storage |
+| `transform` | `(value: any) => any` | — | Post-retrieval transformation function, called after the value is hydrated |
+
+You can also use the `@Optional` decorator as an alias for `@Property` with `required: false` (the default), if you want to be explicit:
+
+```typescript
+@Optional({ through: "recipe://description" })
+description?: string;
+```
+
+#### The `getter` option in detail
+
+The `getter` option accepts a raw SurrealQL expression. The framework wraps it as:
+```sql
+SELECT ({getter}) AS value FROM node WHERE uri = {instanceId}
+```
+
+Use `Base` as a placeholder for the current instance's node — it gets replaced at query time:
+
+```typescript
+@ReadOnly({
+  through: "recipe://rating",
+  getter: `math::mean(Base->link[WHERE predicate = 'recipe://user_rating'].out.uri)`
+})
+averageRating: number = 0;
+```
+
+#### The `transform` option
+
+Apply a transformation after a value is retrieved from the graph:
+
+```typescript
+@Property({
+  through: "recipe://tags_raw",
+  transform: (value) => typeof value === 'string' ? value.split(',') : value
+})
+tags: string[] = [];
+```
+
 ### Relations
 
 Relations represent associations between models. AD4M provides four relation decorators that make the relationship semantics explicit:
@@ -192,7 +241,12 @@ Each relation decorator supports two calling conventions:
 | `@HasOne` | One-to-one | Property setter | Parent owns |
 | `@BelongsToOne` | Many-to-one | Read-only | Child references |
 | `@BelongsToMany` | Many-to-many | Read-only | Child references |
+<Callout type="info" emoji="ℹ️">
+  **Default `through`**: When you omit `through` on a relation decorator, it defaults to `'ad4m://has_child'`.
+  This is the standard AD4M parent-child predicate, so it works well for hierarchical data — but make sure it's intentional.
+</Callout>
 
+Relation decorators also accept a `local` option (`local: true`) to store the relation links locally without syncing to the network.
 #### Using relation methods
 
 `@HasMany` generates typed helper methods on the model instance:
@@ -433,6 +487,32 @@ console.log(recipe3.id); // "recipe://my-cake"
   The legacy `.baseExpression` getter still works but is deprecated. Use `.id` instead.
 </Callout>
 
+### Built-in Instance Properties
+
+Every model instance automatically gets these properties, populated from link metadata:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `.id` | `string` | Unique URI identifier |
+| `.author` | `string` | DID of the agent who created the earliest link (e.g. `"did:key:z6Mk..."`) |
+| `.createdAt` | `string \| number` | Timestamp of the earliest link (epoch ms or ISO string) |
+| `.updatedAt` | `string \| number` | Timestamp of the most recent link |
+| `.timestamp` | *(deprecated)* | Alias for `.createdAt` — use `.createdAt` instead |
+
+These are available after any fetch operation (`get()`, `findAll()`, `findOne()`, etc.) and can be used in queries:
+
+```typescript
+// Order by creation date
+const recent = await Recipe.query(perspective)
+  .order({ createdAt: "DESC" })
+  .limit(10)
+  .get();
+
+console.log(recent[0].author);    // "did:key:z6Mk..."
+console.log(recent[0].createdAt); // 1709049600000
+console.log(recent[0].updatedAt); // 1709136000000
+```
+
 ## Querying
 
 ### Basic Queries
@@ -525,6 +605,36 @@ await recipe.get({ include: { comments: true } });
 // Shorthand:
 await recipe.get({ comments: true });
 ```
+
+#### Filtering and sorting eager-loaded relations
+
+Instead of `true`, pass a sub-query object to filter, sort, or paginate the eager-loaded relation:
+
+```typescript
+// Only load the 5 most recent comments
+const recipes = await Recipe.query(perspective)
+  .include({
+    comments: {
+      where: { status: "approved" },
+      order: { createdAt: "DESC" },
+      limit: 5
+    }
+  })
+  .get();
+
+// Combine with nested includes
+const recipes = await Recipe.query(perspective)
+  .include({
+    comments: {
+      order: { createdAt: "DESC" },
+      limit: 10,
+      include: { author: true }  // Also hydrate each comment's author
+    }
+  })
+  .get();
+```
+
+The sub-query accepts: `where`, `order`, `limit`, `offset`, `include`, and `properties`.
 
 ### Sparse Fieldsets with `properties`
 
@@ -647,6 +757,21 @@ For lower-level batch control, see the [Batch Operations Guide](/developer-guide
 | `transaction` | `transaction(perspective, fn)` | Atomic batch operation |
 | `query` | `query(perspective)` | Returns a `ModelQueryBuilder` |
 | `getModelMetadata` | `getModelMetadata()` | Introspect property & relation metadata |
+| `generateSDNA` | `generateSDNA()` | Returns the generated Prolog SDNA rules (injected by `@Model`) |
+| `generateSHACL` | `generateSHACL()` | Returns the generated SHACL shape graph (injected by `@Model`) |
+
+### Introspection
+
+Use `getModelMetadata()` to inspect a model's structure at runtime — useful for tooling, debugging, or dynamic UIs:
+
+```typescript
+const meta = Recipe.getModelMetadata();
+console.log(meta.name);        // "Recipe"
+console.log(meta.properties);  // [{ name: "name", predicate: "recipe://name", ... }, ...]
+console.log(meta.relations);   // [{ name: "comments", predicate: "recipe://comment", ... }, ...]
+```
+
+`generateSDNA()` and `generateSHACL()` return the raw Prolog rules and SHACL shape respectively — primarily useful for debugging schema registration issues.
 
 ## Relation Filtering
 
