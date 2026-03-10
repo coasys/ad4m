@@ -170,6 +170,22 @@ jobs:
           command: cd ./tests/js && pnpm run test-mcp
           no_output_timeout: 30m
 
+  integration-tests-model:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - setup_integration_test_environment
+      - run:
+          name: Kill any orphaned executors from previous runs
+          command: |
+            for port in 15700 15701 15702; do
+              lsof -ti:$port | xargs -r kill -9 2>/dev/null || true
+            done
+      - run:
+          name: Run Ad4mModel unit + integration tests
+          command: cd ./tests/js && pnpm run test-model
+          no_output_timeout: 30m
+
   integration-tests-cli:
     machine: true
     resource_class: coasys/marvin
@@ -207,5 +223,8 @@ workflows:
           requires:
             - build-and-test
       - integration-tests-mcp:
+          requires:
+            - build-and-test
+      - integration-tests-model:
           requires:
             - build-and-test

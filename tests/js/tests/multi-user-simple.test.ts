@@ -1,5 +1,5 @@
 import path from "path";
-import { Ad4mClient, Ad4mModel, ExpressionProof, Link, LinkExpression, LinkInput, ModelOptions, Perspective, PerspectiveUnsignedInput, Property } from "@coasys/ad4m";
+import { Ad4mClient, Ad4mModel, ExpressionProof, Link, LinkExpression, LinkInput, Model, Perspective, PerspectiveUnsignedInput, Property } from "@coasys/ad4m";
 import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
@@ -520,16 +520,15 @@ describe("Multi-User Simple integration tests", () => {
         
         before(async () => {
             // Import necessary decorators and classes
-            const { ModelOptions, Property, Optional } = await import("@coasys/ad4m");
+            const { Model, Property } = await import("@coasys/ad4m");
 
             // Define a proper subject class with decorators
-            @ModelOptions({
+            @Model({
                 name: "TestSubject"
             })
             class TestSubjectClass {
                 @Property({
                     through: "test://name",
-                    writable: true,
                     initial: "test://initial",
                     resolveLanguage: "literal"
                 })
@@ -798,6 +797,9 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         it("should publish managed users to the agent language", async () => {
+            // Ensure multi-user is enabled
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+
             // Create two users
             const user1Result = await adminAd4mClient!.agent.createUser("agentlang1@example.com", "password1");
             const user2Result = await adminAd4mClient!.agent.createUser("agentlang2@example.com", "password2");
@@ -1161,13 +1163,12 @@ describe("Multi-User Simple integration tests", () => {
             // User 1 creates a perspective and shares it as a neighbourhood
             const perspective1 = await client1.perspective.add("Prolog Pool Test");
 
-            @ModelOptions({
+            @Model({
                 name: "User1Model"
             })
             class User1Model extends Ad4mModel {
                 @Property({
                     through: "test://user1-property",
-                    writable: true,
                     initial: "test://user1-initial",
                     resolveLanguage: "literal"
                 })
@@ -1206,13 +1207,12 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("User 2 joined, adding their own SDNA...");
 
-            @ModelOptions({
+            @Model({
                 name: "User2Model"
             })
             class User2Model extends Ad4mModel {
                 @Property({
                     through: "test://user2-property",
-                    writable: true,
                     initial: "test://user2-initial",
                     resolveLanguage: "literal"
                 })
