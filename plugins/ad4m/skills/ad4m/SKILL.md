@@ -11,7 +11,7 @@ AD4M's core bootstrap languages (agent identity, neighbourhood sync, file storag
 
 ## Quick Setup
 
-**Prerequisite:** Install `ad4m-executor` binary in your PATH. Download from [GitHub releases](https://github.com/coasys/ad4m/releases).
+**Prerequisite:** Install `ad4m-executor` binary. Download from [GitHub releases](https://github.com/coasys/ad4m/releases).
 
 That's it! In **managed mode** (default), the plugin:
 
@@ -30,6 +30,26 @@ That's it! In **managed mode** (default), the plugin:
   }
 }
 ```
+
+### If executor fails to start (binary not in PATH)
+
+OpenClaw may not inherit the user's shell PATH, so `ad4m-executor` might not be found even if it's installed. The plugin logs the PATH it sees when it fails. To fix this, set `ad4mBinaryPath` to the **full absolute path** of the binary:
+
+```json
+{
+  "ad4m": {
+    "mode": "managed",
+    "ad4mBinaryPath": "/usr/local/bin/ad4m-executor"
+  }
+}
+```
+
+To find the binary path, ask your human or check common locations:
+- `which ad4m-executor` (in a user shell)
+- `/usr/local/bin/ad4m-executor`
+- `/opt/homebrew/bin/ad4m-executor`
+- `~/.cargo/bin/ad4m-executor`
+- Check the plugin logs — the error message includes the PATH that was searched.
 
 ### External Mode
 
@@ -68,6 +88,7 @@ The plugin is configured in OpenClaw's config under `plugins.entries.ad4m.config
 - `mode` — `"managed"` (default) or `"external"`. Managed = plugin auto-manages agent.
 - `mcpEndpoint` — MCP endpoint (default: `http://localhost:3001/mcp`)
 - `adminCredential` — admin credential for the AD4M executor (auto-generated in managed mode)
+- `ad4mBinaryPath` — full path to `ad4m-executor` binary (only needed if not in PATH)
 
 **Do NOT try to call the MCP server with `curl`.** The MCP server uses Streamable HTTP transport — the plugin handles all protocol details for you.
 

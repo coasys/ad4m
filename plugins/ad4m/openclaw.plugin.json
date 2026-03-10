@@ -21,6 +21,10 @@
         "type": "string",
         "description": "Admin credential for the AD4M executor (auto-generated in managed mode)"
       },
+      "ad4mBinaryPath": {
+        "type": "string",
+        "description": "Full path to the ad4m-executor binary (e.g. /usr/local/bin/ad4m-executor). Only needed if ad4m-executor is not in PATH."
+      },
       "toolRefreshIntervalMs": {
         "type": "number",
         "default": 30000,
@@ -62,6 +66,10 @@
     "adminCredential": {
       "label": "Admin Credential",
       "sensitive": true
+    },
+    "ad4mBinaryPath": {
+      "label": "Executor Binary Path",
+      "placeholder": "/usr/local/bin/ad4m-executor"
     },
     "toolRefreshIntervalMs": {
       "label": "Tool Refresh Interval (ms)",

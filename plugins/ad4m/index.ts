@@ -40,6 +40,7 @@ export interface PluginConfig {
   mcpEndpoint?: string;
   adminCredential?: string;
   agentPassphrase?: string;
+  ad4mBinaryPath?: string;
   toolRefreshIntervalMs?: number;
   wakerEnabled?: boolean;
   executorWsUrl?: string;
@@ -170,6 +171,7 @@ export async function ensureExecutorRunning(
   logger: any,
   endpoint: string = "http://localhost:3001/mcp",
   wsEndpoint: string = "ws://localhost:12100/graphql",
+  binaryPath?: string,
 ): Promise<boolean> {
   logger.info(`[ad4m] Checking if executor is running at ${endpoint}...`);
 
@@ -179,11 +181,11 @@ export async function ensureExecutorRunning(
     return true;
   }
 
+  const executorPath = binaryPath || "ad4m-executor";
   logger.info(`[ad4m] Executor not running, attempting to start...`);
+  logger.info(`[ad4m] Using binary: ${executorPath}`);
   logger.info(`[ad4m] PATH: ${process.env.PATH ?? "(unset)"}`);
 
-  // Try to find ad4m-executor in PATH
-  const executorPath = "ad4m-executor";
 
   try {
     // Track whether spawn itself failed (ENOENT, permission error, etc.)
@@ -244,7 +246,7 @@ export async function ensureExecutorRunning(
           `[ad4m] Executor process failed to start: ${spawnError ?? "unknown error"}`,
         );
         logger.error(
-          `[ad4m] Make sure ad4m-executor is installed and in PATH`,
+          `[ad4m] Make sure ad4m-executor is installed. Set ad4mBinaryPath in plugin config to the full path (e.g. /usr/local/bin/ad4m-executor) if it's not in PATH.`,
         );
         return false;
       }
@@ -261,7 +263,7 @@ export async function ensureExecutorRunning(
   } catch (err: any) {
     logger.error(`[ad4m] Error starting executor: ${err.message}`);
     logger.error(
-      `[ad4m] Make sure ad4m-executor is installed and in PATH: ${process.env.PATH ?? "(unset)"}`,
+      `[ad4m] Make sure ad4m-executor is installed. Set ad4mBinaryPath in plugin config to the full path. PATH: ${process.env.PATH ?? "(unset)"}`,
     );
     return false;
   }
@@ -644,10 +646,11 @@ export default async function ad4mPlugin(api: any) {
       logger,
       endpoint,
       executorWsUrl,
+      providedConfig.ad4mBinaryPath,
     );
     if (!executorStarted) {
       logger.error(
-        `[ad4m] Failed to start executor in managed mode. Please ensure ad4m-executor is installed.`,
+        `[ad4m] Failed to start executor in managed mode. Set ad4mBinaryPath in plugin config if ad4m-executor is not in PATH.`,
       );
     }
   }
@@ -698,7 +701,9 @@ ${JSON.stringify({ ad4m: externalConfig }, null, 2)}
 Notes:
 - Managed: auto-starts executor, auto-generates credentials
 - External: provide executor URL, uses executor's auth
-- Credentials stored in ~/.ad4m-plugin/ for reuse`,
+- Credentials stored in ~/.ad4m-plugin/ for reuse
+- If executor is not in PATH, set ad4mBinaryPath to the full path (e.g. /usr/local/bin/ad4m-executor)
+- Find the binary: which ad4m-executor || find / -name ad4m-executor -type f 2>/dev/null`,
           },
         ],
       };

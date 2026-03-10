@@ -323,10 +323,15 @@ describe("ensureExecutorRunning", () => {
       ),
     ).toBe(true);
 
-    // Should have logged "failed to start" (not timed out after 30s)
+    // Should have logged "failed to start" and mention ad4mBinaryPath
     expect(
       logger.error.mock.calls.some((c: any[]) =>
         c[0].includes("failed to start") || c[0].includes("Failed to start"),
+      ),
+    ).toBe(true);
+    expect(
+      logger.error.mock.calls.some((c: any[]) =>
+        c[0].includes("ad4mBinaryPath"),
       ),
     ).toBe(true);
   }, 10000);
@@ -401,6 +406,66 @@ describe("ensureExecutorRunning", () => {
     // The initial "attempting to start" message should include PATH
     const infoMsgs = logger.info.mock.calls.map((c: any[]) => c[0]);
     expect(infoMsgs.some((m: string) => m.includes("PATH:"))).toBe(true);
+  }, 10000);
+
+  it("uses custom binaryPath when provided", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const fakeProc = createFakeChildProcess();
+    mockSpawn.mockReturnValue(fakeProc as any);
+
+    const logger = makeMockLogger();
+    const resultPromise = ensureExecutorRunning(
+      "cred",
+      logger,
+      "http://localhost:3001/mcp",
+      "ws://localhost:12100/graphql",
+      "/opt/custom/bin/ad4m-executor",
+    );
+
+    setTimeout(() => {
+      fakeProc.emit("error", new Error("spawn ENOENT"));
+    }, 100);
+
+    await resultPromise;
+
+    // spawn should have been called with the custom path
+    expect(mockSpawn).toHaveBeenCalledWith(
+      "/opt/custom/bin/ad4m-executor",
+      expect.any(Array),
+      expect.any(Object),
+    );
+
+    // Should log which binary it's using
+    const infoMsgs = logger.info.mock.calls.map((c: any[]) => c[0]);
+    expect(
+      infoMsgs.some((m: string) =>
+        m.includes("/opt/custom/bin/ad4m-executor"),
+      ),
+    ).toBe(true);
+  }, 10000);
+
+  it("defaults to 'ad4m-executor' when binaryPath is not set", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const fakeProc = createFakeChildProcess();
+    mockSpawn.mockReturnValue(fakeProc as any);
+
+    const logger = makeMockLogger();
+    const resultPromise = ensureExecutorRunning("cred", logger);
+
+    setTimeout(() => {
+      fakeProc.emit("error", new Error("spawn ENOENT"));
+    }, 100);
+
+    await resultPromise;
+
+    // spawn should have been called with default name
+    expect(mockSpawn).toHaveBeenCalledWith(
+      "ad4m-executor",
+      expect.any(Array),
+      expect.any(Object),
+    );
   }, 10000);
 });
 
