@@ -195,11 +195,14 @@ import {
 class Comment extends Ad4mModel {
   @Property({ through: "comment://body" })
   body: string = "";
+
+  @BelongsToOne(() => Chef, { through: "comment://chef" })
+  chef: string = "";
 }
 
-@Model({ name: "Author" })
-class Author extends Ad4mModel {
-  @Property({ through: "author://name" })
+@Model({ name: "Chef" })
+class Chef extends Ad4mModel {
+  @Property({ through: "chef://name" })
   name: string = "";
 }
 
@@ -228,9 +231,9 @@ class Recipe extends Ad4mModel {
   @HasOne({ through: "recipe://featured_image", target: () => Image })
   featuredImage: string = "";
 
-  // Many-to-one: this recipe belongs to one author (read-only reference)
-  @BelongsToOne(() => Author, { through: "recipe://author" })
-  author: string = "";
+  // Many-to-one: this recipe belongs to one chef (read-only reference)
+  @BelongsToOne(() => Chef, { through: "recipe://chef" })
+  chef: string = "";
 
   // Many-to-many: this recipe belongs to many categories (read-only)
   @BelongsToMany(() => Category, { through: "recipe://category" })
@@ -603,7 +606,7 @@ console.log(recipes[0].comments[0].body); // "Delicious!"
 const recipes = await Recipe.query(perspective)
   .include({ 
     comments: { 
-      include: { author: true }  // Load comment authors too
+      include: { chef: true }  // Load comment chefs too
     } 
   })
   .get();
@@ -643,7 +646,7 @@ const recipes = await Recipe.query(perspective)
     comments: {
       order: { createdAt: "DESC" },
       limit: 10,
-      include: { author: true }  // Also hydrate each comment's author
+      include: { chef: true }  // Also hydrate each comment's chef
     }
   })
   .get();
