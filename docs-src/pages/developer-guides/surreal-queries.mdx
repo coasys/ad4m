@@ -315,7 +315,7 @@ AD4M provides a custom SurrealDB function to parse literal values. Literals in A
 // Extract parsed values from literals
 const query = `
   SELECT 
-    out.uri AS baseExpression,
+    out.uri AS id,
     fn::parse_literal(out->link[WHERE predicate = 'flux://title'][0].out.uri) AS title,
     fn::parse_literal(out->link[WHERE predicate = 'flux://body'][0].out.uri) AS body,
     fn::parse_literal(out->link[WHERE predicate = 'flux://count'][0].out.uri) AS count
@@ -324,7 +324,7 @@ const query = `
     AND predicate = 'ad4m://has_child'
 `;
 const results = await perspective.querySurrealDB(query);
-// Results have parsed values: { baseExpression, title: "Hello", body: "World", count: 42 }
+// Results have parsed values: { id, title: "Hello", body: "World", count: 42 }
 ```
 
 ### Real-World Example: Querying Messages with Metadata
@@ -335,7 +335,7 @@ Here's a complete example showing how to query messages with their metadata:
 // Get messages with type, body, and author information
 const messagesQuery = `
   SELECT
-    out.uri AS baseExpression,
+    out.uri AS id,
     author,
     timestamp,
     out->link[WHERE predicate = 'flux://entry_type'][0].out.uri AS type,
@@ -352,7 +352,7 @@ const messagesQuery = `
 `;
 
 const messages = await perspective.querySurrealDB(messagesQuery);
-// Each message includes: baseExpression, author, timestamp, type, messageBody, postTitle
+// Each message includes: id, author, timestamp, type, messageBody, postTitle
 ```
 
 ### Counting Nested Items
@@ -459,7 +459,7 @@ This pattern is equivalent to asking: "From this node, follow links with a speci
 ### findAll() - Default Uses SurrealDB
 
 ```typescript
-@ModelOptions({ name: "Recipe" })
+@Model({ name: "Recipe" })
 class Recipe extends Ad4mModel {
   @Property({ through: "recipe://name", resolveLanguage: "literal" })
   name: string = "";

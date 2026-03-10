@@ -1,35 +1,46 @@
 import { Tab, Tabs } from "nextra-theme-docs";
+import { Callout } from "nextra/components";
 
 # Model Classes in AD4M
 
-Model classes in AD4M provide a way to define, store, and query structured data in your application. Let's start with a simple example that we'll build upon:
+Model classes in AD4M provide a way to define, store, and query structured data in your application. They follow familiar ORM conventions (ActiveRecord-style) and generate SHACL schemas automatically.
 
 ## Quick Start
 
 There are two ways to create model classes in AD4M:
 
-### Option 1: Using Decorators (Traditional)
+### Option 1: Using Decorators (Recommended)
 
 ```typescript
-import { Ad4mModel, ModelOptions, Property } from '@coasys/ad4m';
+import { Ad4mModel, Model, Property, HasMany } from '@coasys/ad4m';
 
-@ModelOptions({ name: "Recipe" })
+@Model({ name: "Recipe" })
 class Recipe extends Ad4mModel {
-  @Property({
-    through: "recipe://name",
-    resolveLanguage: "literal"
-  })
+  @Property({ through: "recipe://name" })
   name: string = "";
+
+  @HasMany({ through: "recipe://ingredient" })
+  ingredients: string[] = [];
 }
+
+// Register the model with a perspective (once at app startup)
+await Recipe.register(perspective);
 
 // Using the model
 const recipe = new Recipe(perspective);
 recipe.name = "Chocolate Cake";
+recipe.ingredients = ["flour", "sugar", "cocoa"];
 await recipe.save();
 
 // Reading it back
 const recipes = await Recipe.findAll(perspective);
 console.log(recipes[0].name); // "Chocolate Cake"
+
+// Or use the static create shorthand
+const cake = await Recipe.create(perspective, {
+  name: "Chocolate Cake",
+  ingredients: ["flour", "sugar", "cocoa"]
+});
 ```
 
 ### Option 2: From JSON Schema (Dynamic)
@@ -70,298 +81,529 @@ recipe.difficulty = 3;
 await recipe.save();
 ```
 
-Before using any model class, register it with your perspective:
+Register your model before use:
 
 ```typescript
-await perspective.ensureSDNASubjectClass(Recipe);
+await Recipe.register(perspective);
 ```
 
 ## Basic Concepts
 
 ### Properties
 
-Properties are the basic building blocks of your models. They can be required or optional:
+Properties are the basic building blocks of your models. They are **optional by default** — no link is created in the graph until you explicitly set a value.
 
 ```typescript
-@ModelOptions({ name: "Recipe" })
+@Model({ name: "Recipe" })
 class Recipe extends Ad4mModel {
-  // Required property
-  @Property({
-    through: "recipe://name",
-    resolveLanguage: "literal"
-  })
+  // Optional property (default) — only stored when explicitly set
+  @Property({ through: "recipe://name" })
   name: string = "";
 
-  // Optional property
-  @Optional({
-    through: "recipe://description",
-    resolveLanguage: "literal"
-  })
+  // Optional property — same behavior
+  @Property({ through: "recipe://description" })
   description?: string;
+
+  // Required property — a placeholder link is created on save
+  @Property({ through: "recipe://category", required: true })
+  category: string = "";
+
+  // Read-only computed property — `through` acts as the SHACL predicate
+  // identifier; the actual value comes from the custom `getter` expression.
+  @ReadOnly({
+    through: "recipe://rating",
+    getter: `math::mean(->link[WHERE predicate = 'recipe://user_rating'].out.uri)`
+  })
+  averageRating: number = 0;
 }
 ```
 
-### Collections
+<Callout type="info" emoji="ℹ️">
+  `@Property` smart defaults: `required: false`, `readOnly: false`, `resolveLanguage: "literal"`.
+  You only need to specify `through` in the common case.
+</Callout>
 
-Collections represent one-to-many relationships:
+<Callout type="info" emoji="ℹ️">
+  **`through` on computed properties**: Even when using a custom `getter`, `through` is still required — it serves as the SHACL predicate identifier in the generated shape, making the property discoverable by other consumers (MCP, CLI, other apps). No link is written at this predicate; the value is entirely derived from the getter expression.
+</Callout>
+
+### Relations
+
+Relations represent associations between models. AD4M provides four relation decorators that make the relationship semantics explicit:
 
 ```typescript
-@ModelOptions({ name: "Recipe" })
-class Recipe extends Ad4mModel {
-  @Property({
-    through: "recipe://name",
-    resolveLanguage: "literal"
-  })
-  name: string = "";
+import { Model, Property, HasMany, HasOne, BelongsToOne, BelongsToMany } from '@coasys/ad4m';
 
-  @Collection({ through: "recipe://ingredient" })
-  ingredients: string[] = [];
+@Model({ name: "Comment" })
+class Comment extends Ad4mModel {
+  @Property({ through: "comment://body" })
+  body: string = "";
 }
 
-// Using collections
-const recipe = new Recipe(perspective);
-recipe.name = "Chocolate Cake";
-recipe.ingredients = ["flour", "sugar", "cocoa"];
-await recipe.save();
+@Model({ name: "Author" })
+class Author extends Ad4mModel {
+  @Property({ through: "author://name" })
+  name: string = "";
+}
+
+@Model({ name: "Recipe" })
+class Recipe extends Ad4mModel {
+  @Property({ through: "recipe://name" })
+  name: string = "";
+
+  // One-to-many: this recipe owns many comments
+  @HasMany(() => Comment, { through: "recipe://comment" })
+  comments: string[] = [];
+
+  // One-to-one: this recipe has one featured image
+  @HasOne({ through: "recipe://featured_image", target: () => Image })
+  featuredImage: string = "";
+
+  // Many-to-one: this recipe belongs to one author (read-only reference)
+  @BelongsToOne(() => Author, { through: "recipe://author" })
+  author: string = "";
+
+  // Many-to-many: this recipe belongs to many categories (read-only)
+  @BelongsToMany(() => Category, { through: "recipe://category" })
+  categories: string[] = [];
+}
 ```
+
+Each relation decorator supports two calling conventions:
+
+```typescript
+// Target-first shorthand (recommended)
+@HasMany(() => Comment, { through: "recipe://comment" })
+
+// Options-object style
+@HasMany({ through: "recipe://comment", target: () => Comment })
+```
+
+#### Relation types at a glance
+
+| Decorator | Cardinality | Generated methods | Ownership |
+|-----------|------------|-------------------|-----------|
+| `@HasMany` | One-to-many | `add*`, `remove*`, `set*` | Parent owns |
+| `@HasOne` | One-to-one | Property setter | Parent owns |
+| `@BelongsToOne` | Many-to-one | Read-only | Child references |
+| `@BelongsToMany` | Many-to-many | Read-only | Child references |
+
+#### Using relation methods
+
+`@HasMany` generates typed helper methods on the model instance:
+
+```typescript
+const recipe = await Recipe.findOne(perspective, { where: { name: "Chocolate Cake" } });
+
+// Add a comment — accepts a model instance or a string ID
+const comment = await Comment.create(perspective, { body: "Delicious!" });
+await recipe.addComments(comment);       // pass instance
+await recipe.addComments(comment.id);    // or pass ID
+
+// Remove
+await recipe.removeComments(comment);
+
+// Replace all
+await recipe.setComments([comment1.id, comment2.id]);
+
+// With batch support
+const batchId = await perspective.createBatch();
+await recipe.addComments(comment, batchId);
+await perspective.commitBatch(batchId);
+```
+
+### Flags
+
+Flags are immutable type markers. They are automatically `readOnly` and `required`, and cannot be changed after creation:
+
+```typescript
+@Flag({ through: "ad4m://type", value: "recipe://main-course" })
+type: string = "";
+```
+
+Attempting to update a flag after creation throws an error.
 
 ## Working with Models
 
-### Creating & Saving
+### Creating
 
 ```typescript
-// Create new instance
+// Option 1: Instantiate and save
 const recipe = new Recipe(perspective);
 recipe.name = "Chocolate Cake";
 await recipe.save();
 
-// Create with specific ID
+// Option 2: Static create (one-step)
+const recipe = await Recipe.create(perspective, { name: "Chocolate Cake" });
+
+// Create with a specific ID
 const recipe = new Recipe(perspective, "recipe://chocolate-cake");
 await recipe.save();
+
+// Create with a parent relationship
+const recipe = await Recipe.create(perspective, { name: "Cake" }, {
+  parent: { model: Cookbook, id: cookbook.id }
+});
 ```
 
-### Reading & Updating
+### Reading
 
 ```typescript
 // Get by ID
 const recipe = new Recipe(perspective, existingId);
 await recipe.get();
 
-// Update
-recipe.name = "Dark Chocolate Cake";
-await recipe.update();
+// Get with eager-loaded relations
+await recipe.get({ include: { comments: true } });
+
+// Get with sparse fieldset (only hydrate specific properties)
+await recipe.get({ properties: ["name", "category"] });
 ```
 
-### Basic Querying
+### Updating
+
+`save()` handles both creation and updates automatically. For existing instances (fetched via `get()` or a query), it only writes changed fields thanks to built-in dirty tracking:
 
 ```typescript
-// Get all recipes (uses SurrealDB by default - 10-100x faster)
-const allRecipes = await Recipe.findAll(perspective);
-
-// Get with simple conditions
-const recipes = await Recipe.findAll(perspective, {
+const recipe = await Recipe.findOne(perspective, {
   where: { name: "Chocolate Cake" }
 });
+
+recipe.name = "Dark Chocolate Cake";
+await recipe.save();  // Only the name field is updated
+
+// Static update shorthand
+await Recipe.update(perspective, recipe.id, { name: "White Chocolate Cake" });
 ```
 
-## Query Performance with SurrealDB
-
-**Important**: `Ad4mModel` now uses **SurrealDB by default** for all query operations, providing **10-100x faster performance** compared to the legacy Prolog engine. This means:
-
-- `findAll()` automatically uses SurrealDB
-- `findAllAndCount()` automatically uses SurrealDB  
-- Query builder methods automatically use SurrealDB
-- Live query subscriptions automatically use SurrealDB
+### Deleting
 
 ```typescript
-// Uses SurrealDB by default (fast!)
-const highRated = await Recipe.findAll(perspective, {
-  where: { rating: { gt: 4 } },
-  order: { rating: "DESC" },
-  limit: 10
+// Instance method
+await recipe.delete();
+
+// Static method
+await Recipe.delete(perspective, recipeId);
+```
+
+The instance `delete()` also cleans up incoming links (e.g. a parent's `hasMany` reference to this instance).
+
+### Dirty Tracking
+
+After fetching an instance, AD4M takes a snapshot of all field values. You can inspect what changed:
+
+```typescript
+const recipe = await Recipe.findOne(perspective);
+recipe.name = "Updated Name";
+
+recipe.isDirty();       // true
+recipe.changedFields(); // ["name"]
+
+await recipe.save();    // Only "name" is written
+```
+
+### Instance Identity
+
+Every model instance has a unique `id` (a URI string):
+
+```typescript
+const recipe = await Recipe.create(perspective, { name: "Cake" });
+console.log(recipe.id); // "literal://..."
+
+// Auto-generated when not specified
+const recipe2 = new Recipe(perspective);
+console.log(recipe2.id); // random literal URI
+
+// Custom ID
+const recipe3 = new Recipe(perspective, "recipe://my-cake");
+console.log(recipe3.id); // "recipe://my-cake"
+```
+
+<Callout type="info" emoji="ℹ️">
+  The legacy `.baseExpression` getter still works but is deprecated. Use `.id` instead.
+</Callout>
+
+## Querying
+
+### Basic Queries
+
+```typescript
+// Get all (uses SurrealDB by default — 10-100x faster than Prolog)
+const allRecipes = await Recipe.findAll(perspective);
+
+// With conditions
+const cakes = await Recipe.findAll(perspective, { where: { category: "Dessert" } });
+
+// Find one
+const recipe = await Recipe.findOne(perspective, { where: { name: "Chocolate Cake" } });
+
+// Count
+const { results, totalCount } = await Recipe.findAllAndCount(perspective, {
+  where: { category: "Dessert" }
 });
 
-// You can explicitly use Prolog if needed (for backward compatibility)
-const recipesProlog = await Recipe.findAll(perspective, {
-  where: { rating: { gt: 4 } }
-}, false); // useSurrealDB = false
+// Pagination
+const page = await Recipe.paginate(perspective, 10, 1, { where: { category: "Dessert" } });
 ```
 
-For advanced graph traversal queries and direct SurrealQL access, see the [SurrealDB Queries Guide](/developer-guides/surreal-queries).
+### Query Builder
 
-## Understanding the Underlying System
-
-Now that you've seen the basics, let's understand how it works under the hood.
-
-### Graph-Based Storage
-
-Each model instance is stored as a subgraph in an AD4M perspective. For example, our recipe is stored as:
-
-```
-recipe://chocolate-cake-123 -[recipe://name]-> literal://string:"Chocolate Cake"
-recipe://chocolate-cake-123 -[recipe://ingredient]-> ingredient://flour
-recipe://chocolate-cake-123 -[recipe://ingredient]-> ingredient://sugar
-```
-
-Every node in this graph is a URL pointing to an Expression in some language.
-
-### Base Expressions
-
-Each model instance has a unique identifier called a "base expression" that serves as the root node of its subgraph. You can specify it or let AD4M generate one:
+The fluent query builder provides a chainable interface:
 
 ```typescript
-// Auto-generated base expression
-const recipe = new Recipe(perspective);
-
-// Custom base expression
-const recipe = new Recipe(perspective, "recipe://chocolate-cake-2024-03");
-```
-
-### Literals for Simple Values
-
-AD4M provides Literals for storing simple values without needing a full language:
-
-```typescript
-// These are equivalent:
-recipe.name = "Chocolate Cake";
-// Stored as: literal://string:Chocolate Cake
-
-recipe.cookingTime = 45;
-// Stored as: literal://number:45
-```
-
-## Advanced Features
-
-### Property Types
-
-AD4M provides several specialized property decorators:
-
-#### @ReadOnly
-For computed or immutable properties:
-
-```typescript
-@ReadOnly({
-  through: "recipe://rating",
-  getter: `
-    findall(Rating, triple(Base, "recipe://user_rating", Rating), Ratings),
-    sum_list(Ratings, Sum),
-    length(Ratings, Count),
-    Value is Sum / Count
-  `
-})
-averageRating: number = 0;
-```
-
-#### @Flag
-For immutable type markers:
-
-```typescript
-@Flag({
-  through: "ad4m://type",
-  value: "recipe://main-course"
-})
-type: string = "";
-```
-
-### Advanced Collections
-
-Collections can be filtered and typed:
-
-```typescript
-// Collection of other model instances
-@Collection({
-  through: "recipe://comment",
-  where: { isInstance: Comment }
-})
-comments: Comment[] = [];
-
-// Collection with custom filter
-@Collection({
-  through: "recipe://review",
-  where: { condition: `triple(Target, "review://rating", Rating), Rating > 4` }
-})
-topReviews: string[] = [];
-```
-
-### Advanced Querying
-
-The query builder provides a fluent interface for complex queries and uses **SurrealDB by default** for optimal performance:
-
-```typescript
-// Uses SurrealDB by default (10-100x faster)
 const recipes = await Recipe.query(perspective)
-  .where({ 
-    category: "MainCourse",
-    rating: { gt: 4 }
-  })
+  .where({ category: "MainCourse", rating: { gt: 4 } })
   .order({ createdAt: "DESC" })
   .limit(5)
   .get();
 
-// Explicitly control query engine
-const recipesSurreal = await Recipe.query(perspective)
+// Get first match
+const topRecipe = await Recipe.query(perspective)
   .where({ rating: { gt: 4 } })
-  .useSurrealDB(true)  // Default is true
+  .order({ rating: "DESC" })
+  .first();  // Returns Recipe | null
+```
+
+### Where Operators
+
+```typescript
+const recipes = await Recipe.findAll(perspective, {
+  where: {
+    name: "Exact Match",             // Equality
+    rating: { gt: 4 },               // Greater than
+    difficulty: { lte: 3 },          // Less than or equal
+    servings: { between: [2, 6] },   // Range
+    category: ["Dessert", "Snack"],  // IN (array membership)
+    status: { not: "archived" },     // Not equal
+    tags: { contains: "vegan" },     // Contains
+  }
+});
+```
+
+### Eager Loading with `include`
+
+By default, relation fields contain raw URI strings. Use `include` to hydrate them into full model instances:
+
+```typescript
+// Eager-load comments on query results
+const recipes = await Recipe.query(perspective)
+  .where({ category: "Dessert" })
+  .include({ comments: true })
   .get();
 
-// Use Prolog for backward compatibility
-const recipesProlog = await Recipe.query(perspective)
-  .where({ rating: { gt: 4 } })
-  .useSurrealDB(false)  // Switch to Prolog
+// recipes[0].comments is now Comment[] instead of string[]
+console.log(recipes[0].comments[0].body); // "Delicious!"
+
+// Nested includes
+const recipes = await Recipe.query(perspective)
+  .include({ 
+    comments: { 
+      include: { author: true }  // Load comment authors too
+    } 
+  })
+  .get();
+
+// Also works on findAll / findOne
+const recipe = await Recipe.findOne(perspective, {
+  where: { name: "Cake" },
+  include: { comments: true }
+});
+
+// And on instance get()
+const recipe = new Recipe(perspective, existingId);
+await recipe.get({ include: { comments: true } });
+// Shorthand:
+await recipe.get({ comments: true });
+```
+
+### Sparse Fieldsets with `properties`
+
+Only hydrate specific properties to avoid unnecessary work (especially useful for properties with non-literal `resolveLanguage` that trigger network calls):
+
+```typescript
+const recipes = await Recipe.query(perspective)
+  .properties(["name", "category"])
+  .get();
+// Only name and category are hydrated; other fields stay at defaults
+```
+
+### Parent-Scoped Queries
+
+Query instances that are linked from a specific parent:
+
+```typescript
+// From a model instance
+const comments = await Comment.query(perspective)
+  .parent(recipe)
+  .get();
+
+// From an ID + model class (predicate auto-resolved from metadata)
+const comments = await Comment.query(perspective)
+  .parent(recipeId, Recipe)
+  .get();
+
+// Raw predicate escape hatch
+const comments = await Comment.query(perspective)
+  .parent(recipeId, "recipe://comment")
   .get();
 ```
 
-### Real-time Updates
+### SurrealDB vs Prolog
 
-Subscribe to changes in your data. Subscriptions also use **SurrealDB by default** for better performance:
+`Ad4mModel` uses **SurrealDB by default** for all query operations, providing **10-100x faster performance** compared to the legacy Prolog engine.
 
 ```typescript
-// Create a query builder (uses SurrealDB by default)
+// Uses SurrealDB by default (fast!)
+const recipes = await Recipe.findAll(perspective, { where: { rating: { gt: 4 } } });
+
+// Explicitly use Prolog if needed (for backward compatibility)
+const recipesProlog = await Recipe.findAll(perspective, {
+  where: { rating: { gt: 4 } }
+}, false); // useSurrealDB = false
+
+// Or on the query builder
+const recipesProlog = await Recipe.query(perspective)
+  .where({ rating: { gt: 4 } })
+  .useSurrealDB(false)
+  .get();
+```
+
+For advanced graph traversal queries and direct SurrealQL access, see the [SurrealDB Queries Guide](/developer-guides/surreal-queries).
+
+### Real-time Subscriptions
+
+Subscribe to changes in your data:
+
+```typescript
 const builder = Recipe.query(perspective)
   .where({ status: "cooking" });
 
-// Subscribe to updates
+// Subscribe — callback fires immediately with initial results,
+// then again whenever matching data changes
 const initialRecipes = await builder.subscribe(recipes => {
   console.log("Currently cooking:", recipes);
 });
 
-// Subscribe with Prolog (for backward compatibility)
-const builderProlog = Recipe.query(perspective)
-  .where({ status: "cooking" })
-  .useSurrealDB(false);  // Use Prolog
+// Count subscription
+const initialCount = await builder.countSubscribe(count => {
+  console.log("Number cooking:", count);
+});
 
-await builderProlog.subscribe(recipes => {
-  console.log("Currently cooking (Prolog):", recipes);
+// Paginated subscription
+const initialPage = await builder.paginateSubscribe(10, 1, page => {
+  console.log("Page 1:", page.results);
 });
 
 // Important: Clean up when done
 builder.dispose();
 ```
 
-The query builder's subscription system:
-1. Returns initial results immediately
-2. Calls your callback whenever the results change
-3. Maintains an active connection to receive updates
-4. Automatically cleans up resources when disposed
+Always call `dispose()` when you're done with a subscription to prevent memory leaks.
 
-Always call `dispose()` when you're done with the subscription to:
-- Stop keepalive signals
-- Unsubscribe from updates
-- Notify the backend to clean up resources
-- Prevent memory leaks
+## Transactions
 
-You can also subscribe to just the count of matching items:
+Group multiple operations into an atomic batch:
 
 ```typescript
-const builder = Recipe.query(perspective)
-  .where({ category: "Dessert" });
+await Ad4mModel.transaction(perspective, async (tx) => {
+  const recipe = await Recipe.create(perspective, { name: "Cake" }, {
+    batchId: tx.batchId
+  });
 
-const initialCount = await builder.countSubscribe(count => {
-  console.log("Number of desserts:", count);
+  const comment = new Comment(perspective);
+  comment.body = "Looks great!";
+  await comment.save(tx.batchId);
+
+  await recipe.addComments(comment, tx.batchId);
 });
+// All operations commit together, or none do if an error is thrown
+```
 
-// Remember to clean up
-builder.dispose();
+For lower-level batch control, see the [Batch Operations Guide](/developer-guides/batch-operations).
+
+## Static Convenience Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `create` | `create(perspective, data?, options?)` | Create and save in one step. `options` supports `parent` and `batchId` |
+| `update` | `update(perspective, id, data)` | Fetch by ID, merge data, save |
+| `delete` | `delete(perspective, id)` | Delete by ID with incoming link cleanup |
+| `remove` | `remove(perspective, id)` | *Deprecated* — alias for `delete` |
+| `findAll` | `findAll(perspective, query?, useSurrealDB?)` | Query all matching instances |
+| `findOne` | `findOne(perspective, query?, useSurrealDB?)` | First matching instance or `null` |
+| `findAllAndCount` | `findAllAndCount(perspective, query?, useSurrealDB?)` | Results + total count |
+| `paginate` | `paginate(perspective, pageSize, page, query?, useSurrealDB?)` | Paginated results |
+| `register` | `register(perspective)` | Install the SHACL schema in the perspective |
+| `transaction` | `transaction(perspective, fn)` | Atomic batch operation |
+| `query` | `query(perspective)` | Returns a `ModelQueryBuilder` |
+| `getModelMetadata` | `getModelMetadata()` | Introspect property & relation metadata |
+
+## Relation Filtering
+
+When a relation has a `target` model, AD4M can auto-generate a conformance filter that only returns linked instances matching the target model's shape (checking flags and required properties):
+
+```typescript
+@Model({ name: "MainCourse" })
+class MainCourse extends Ad4mModel {
+  @Flag({ through: "ad4m://type", value: "recipe://main-course" })
+  type: string = "";
+
+  @Property({ through: "recipe://name", required: true })
+  name: string = "";
+}
+
+@Model({ name: "Cookbook" })
+class Cookbook extends Ad4mModel {
+  // Auto-filters: only returns linked items that match the MainCourse shape
+  @HasMany(() => MainCourse, { through: "cookbook://recipe" })
+  mainCourses: string[] = [];
+}
+```
+
+### `where` on Relations
+
+Add value-based filtering using the same `where` syntax as queries:
+
+```typescript
+@Model({ name: "TaskBoard" })
+class TaskBoard extends Ad4mModel {
+  // Only return tasks where status is "active"
+  @HasMany(() => Task, { through: "board://task", where: { status: "active" } })
+  activeTasks: string[] = [];
+}
+```
+
+### Filtering options
+
+| Option | Effect |
+|--------|--------|
+| `target: () => Model` | Auto-generates conformance filter from model shape |
+| `where: { ... }` | Value-based filtering using query DSL |
+| `filter: false` | Opt out of auto-filtering even when `target` is set |
+| `getter: "..."` | Raw SurrealQL getter (escape hatch, mutually exclusive with `target`/`through`) |
+
+## Model Inheritance
+
+Models can extend other models. The child's SHACL shape references the parent via `sh:node`, ensuring inherited constraints are validated:
+
+```typescript
+@Model({ name: "BaseRecipe" })
+class BaseRecipe extends Ad4mModel {
+  @Property({ through: "recipe://name" })
+  name: string = "";
+}
+
+@Model({ name: "DetailedRecipe" })
+class DetailedRecipe extends BaseRecipe {
+  @Property({ through: "recipe://instructions" })
+  instructions: string = "";
+}
+
+// DetailedRecipe inherits the "name" property from BaseRecipe
+const recipe = await DetailedRecipe.create(perspective, {
+  name: "Cake",
+  instructions: "Mix and bake"
+});
 ```
 
 ## Dynamic Models from JSON Schema
@@ -439,8 +681,8 @@ interface JSONSchemaToModelOptions {
   local?: boolean;            // Whether properties are stored locally
 
   // Property-specific overrides
-  // Accepts any PropertyOptions fields: through, initial, required, writable,
-  // resolveLanguage, getter, setter, local, transform
+  // Accepts any PropertyOptions fields: through, initial, required,
+  // readOnly, resolveLanguage, getter, local, transform
   propertyOptions?: Record<string, Partial<PropertyOptions>>;
 }
 ```
@@ -632,9 +874,9 @@ const saved = await Article.findAll(perspective);
 console.log(saved[0].metadata.author); // "Alice"
 ```
 
-#### Array/Collection Mapping
+#### Array/Relation Mapping
 
-Arrays in JSON Schema automatically become AD4M collections:
+Arrays in JSON Schema automatically become AD4M relations:
 
 ```typescript
 const schema = {
@@ -660,7 +902,7 @@ post.tags = ["ad4m", "tutorial"];
 post.categories = ["technology"];
 await post.save();
 
-// Collections work with all standard AD4M collection methods
+// Relations work with all standard AD4M relation methods
 post.addTags("blockchain");
 post.removeCategories("technology");
 ```
@@ -699,7 +941,44 @@ post.title = "Type-safe access";
 - **Complex objects**: Nested objects are stored as JSON literals, limiting semantic querying capabilities
 - **Performance**: For better semantic querying, consider flattening complex objects into separate properties
 
-## Under the Hood
+## Understanding the Underlying System
+
+### Graph-Based Storage
+
+Each model instance is stored as a subgraph in an AD4M perspective. For example, our recipe is stored as:
+
+```
+recipe://chocolate-cake-123 -[recipe://name]-> literal://string:"Chocolate Cake"
+recipe://chocolate-cake-123 -[recipe://ingredient]-> ingredient://flour
+recipe://chocolate-cake-123 -[recipe://ingredient]-> ingredient://sugar
+```
+
+Every node in this graph is a URL pointing to an Expression in some language.
+
+### Instance Identity
+
+Each model instance has a unique `id` that serves as the root node of its subgraph. You can specify it or let AD4M generate one:
+
+```typescript
+// Auto-generated ID
+const recipe = new Recipe(perspective);
+
+// Custom ID
+const recipe = new Recipe(perspective, "recipe://chocolate-cake-2024-03");
+```
+
+### Literals for Simple Values
+
+AD4M provides Literals for storing simple values without needing a full language:
+
+```typescript
+// These are equivalent:
+recipe.name = "Chocolate Cake";
+// Stored as: literal://string:Chocolate Cake
+
+recipe.cookingTime = 45;
+// Stored as: literal://number:45
+```
 
 ### Social DNA and SHACL
 
@@ -708,18 +987,15 @@ When you define a model class, AD4M generates a **SHACL** (Shapes Constraint Lan
 <Tabs items={['TypeScript Class', 'Generated SHACL']}>
   <Tab>
     ```typescript
-    @ModelOptions({ name: "Recipe" })
+    @Model({ name: "Recipe" })
     class Recipe extends Ad4mModel {
       @Property({
         through: "recipe://name",
-        resolveLanguage: "literal",
         required: true
       })
       name: string = "";
 
-      @Collection({
-        through: "recipe://ingredient"
-      })
+      @HasMany({ through: "recipe://ingredient" })
       ingredients: string[] = [];
     }
     ```
@@ -742,7 +1018,7 @@ When you define a model class, AD4M generates a **SHACL** (Shapes Constraint Lan
       sh:property [
         sh:path <recipe://ingredient> ;
         sh:datatype xsd:string ;
-        # No maxCount = collection (multiple values)
+        # No maxCount = relation (multiple values)
       ] .
     ```
   </Tab>
@@ -755,16 +1031,18 @@ The SHACL shape is stored as links in the perspective graph, making it discovera
 | SHACL Concept | AD4M Equivalent |
 |--------------|-----------------|
 | `sh:NodeShape` | Subject Class definition |
-| `sh:PropertyShape` | Property or Collection definition |
+| `sh:PropertyShape` | Property or Relation definition |
 | `sh:maxCount 1` | Scalar property (single value, generates `set_` tool) |
-| No `sh:maxCount` or `> 1` | Collection (generates `add_`/`remove_` tools) |
+| No `sh:maxCount` or `> 1` | Relation (generates `add_`/`remove_` tools) |
 | `sh:minCount 1` | Required property (must be set on creation) |
 | `sh:datatype` | Value type constraint |
-| `sh:class` | Reference to another Subject Class |
+| `sh:class` | Reference to another Subject Class (target model shape) |
+| `sh:node` | Parent shape reference (model inheritance) |
 | `ad4m://initial` | Default value on instance creation |
 | `ad4m://resolveLanguage` | Expression language for value resolution |
-| `ad4m://writable` | Property supports updates |
-| `ad4m://readonly` | Read-only computed property |
+| `ad4m://readOnly` | Read-only computed property |
+| `ad4m://getter` | SurrealQL getter for conformance filtering |
+| `ad4m://conformanceConditions` | Structured filter conditions for relation targets |
 
 AD4M extends standard SHACL with `ad4m://` predicates for features specific to the AD4M runtime (initial values, language resolution, write permissions).
 
@@ -785,13 +1063,10 @@ AD4M extends standard SHACL with `ad4m://` predicates for features specific to t
    servings: any;               // Bad
    ```
 
-3. **Collection Filtering**: Use `where` conditions to filter collections:
+3. **Relation Filtering**: Use typed `target` to auto-filter relations:
    ```typescript
-   @Collection({
-     through: "recipe://review",
-     where: { isInstance: Review }  // Only include Review instances
-   })
-   reviews: Review[] = [];
+   @HasMany(() => Review, { through: "recipe://review" })
+   reviews: string[] = [];
    ```
 
 4. **Query Optimization**: Use specific queries instead of filtering in memory, and leverage SurrealDB's performance:
@@ -834,11 +1109,8 @@ AD4M extends standard SHACL with `ad4m://` predicates for features specific to t
 
 7. **Use Literals Appropriately**: 
    ```typescript
-   // Good - Using literals for simple values
-   @Property({
-     through: "recipe://name",
-     resolveLanguage: "literal"
-   })
+   // Good - Using literals for simple values (default resolveLanguage)
+   @Property({ through: "recipe://name" })
    name: string = "";
    
    // Good - Using specific language for rich content
@@ -849,13 +1121,13 @@ AD4M extends standard SHACL with `ad4m://` predicates for features specific to t
    instructions: string = "";
    ```
 
-8. **Meaningful Base Expressions**:
+8. **Meaningful IDs**:
    ```typescript
-   // Good - Descriptive base expression
+   // Good - Descriptive ID
    const recipe = new Recipe(perspective, "recipe://chocolate-cake-2024-03");
    
-   // Bad - Random or meaningless base expression
-   const recipe = new Recipe(perspective, "x://123");
+   // Fine - Auto-generated ID (most common)
+   const recipe = new Recipe(perspective);
    ```
 
 ## Error Handling
@@ -873,17 +1145,17 @@ try {
 }
 ```
 
-## Integration with AD4M Perspectives
+## Registration
 
-Before using a model class, register it with the perspective:
+Before using a model class, register it with the perspective (typically once at app startup):
 
 ```typescript
 // Register the model class
-await perspective.ensureSDNASubjectClass(Recipe);
+await Recipe.register(perspective);
 
 // Now you can use it
 const recipe = new Recipe(perspective);
 await recipe.save();
 ```
 
-This ensures the perspective knows how to handle instances of your model class.
+This installs the SHACL schema into the perspective so that all consumers (JS, Rust, MCP, CLI) can discover and work with your model's shape.

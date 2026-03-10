@@ -18,6 +18,24 @@ Batch operations in AD4M allow you to group multiple perspective mutations into 
 
 ## Using Batch Operations
 
+### High-Level: Ad4mModel.transaction()
+
+The simplest way to use batch operations with models is the `transaction()` static method, which handles batch creation and commit automatically:
+
+```typescript
+await Ad4mModel.transaction(perspective, async (tx) => {
+  const recipe = await Recipe.create(perspective, { name: "Cake" }, { batchId: tx.batchId });
+
+  const comment = new Comment(perspective);
+  comment.body = "Looks great!";
+  await comment.save(tx.batchId);
+
+  // Relation methods also accept batchId
+  await recipe.addComments(comment, tx.batchId);
+});
+// All operations commit together, or none do if an error is thrown
+```
+
 ### Basic Usage with PerspectiveProxy
 
 ```typescript
@@ -59,9 +77,9 @@ try {
   await recipe.save(batchId);
 
   // Update another model in the same batch
-  const existingRecipe = await Recipe.findAll(perspective)[0];
+  const existingRecipe = (await Recipe.findAll(perspective))[0];
   existingRecipe.title = "Updated Title";
-  await existingRecipe.update(batchId);
+  await existingRecipe.save(batchId);
 
   // Delete a model in the batch
   await anotherRecipe.delete(batchId);
@@ -98,7 +116,7 @@ const batchId = await perspective.createBatch();
 // Bulk status update
 for (const task of tasks) {
   task.status = 'completed';
-  await task.update(batchId);
+  await task.save(batchId);
 }
 
 await perspective.commitBatch(batchId);
@@ -191,7 +209,7 @@ await post.save(batchId);
 const comments = initialComments.map(comment => {
   const c = new Comment(perspective);
   c.content = comment;
-  c.postId = post.baseExpression;
+  c.postId = post.id;
   return c;
 });
 
@@ -217,12 +235,12 @@ async function updateRecipeWithIngredients(recipe, ingredients) {
     
     // If all valid, proceed with updates
     recipe.ingredients = ingredients;
-    await recipe.update(batchId);
+    await recipe.save(batchId);
     
     // Create ingredient references
     for (const ingredient of ingredients) {
       const ref = new IngredientReference(perspective);
-      ref.recipeId = recipe.baseExpression;
+      ref.recipeId = recipe.id;
       ref.ingredientId = ingredient.id;
       await ref.save(batchId);
     }

@@ -260,49 +260,23 @@ For app developers, writing queries directly is optional-AD4M's `Ad4mModel` clas
 This TypeScript base class lets you define model classes with properties and relationships, automatically using **SurrealDB** under the hood for
 fast query performance (10-100x faster than Prolog). Here's how you define a model:
 ```typescript
-import { Ad4mModel, ModelOptions, Property, Collection, Flag, Optional, ReadOnly } from "@coasys/ad4m";
+import { Ad4mModel, Model, Property, HasMany, Flag, ReadOnly } from "@coasys/ad4m";
 
-@ModelOptions({
-    name: "Todo"
-})
+@Model({ name: "Todo" })
 class Todo extends Ad4mModel {
-    @Property({
-        through: "todo://state",
-        initial: "todo://ready"
-    })
+    @Property({ through: "todo://state", initial: "todo://ready" })
     state: string = "";
 
-    @Optional({
-        through: "todo://has_title",
-        writable: true,
-        resolveLanguage: "literal"
-    })
+    @Property({ through: "todo://has_title" })
     title: string = "";
 
     @ReadOnly({
-        getter: 'triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true'
+        getter: 'count(->link[WHERE predicate = "flux://has_reaction" AND out.uri = "flux://thumbsup"]) > 0'
     })
     isLiked: boolean = false;
 
-    @Collection({ through: "todo://comment" })
+    @HasMany({ through: "todo://comment" })
     comments: string[] = [];
-
-    @Collection({
-        through: "flux://entry_type",
-        where: { prologCondition: 'triple(Target, "flux://has_reaction", "flux://thumbsup")' }
-    })
-    likedMessages: string[] = [];
-
-    // Static query methods
-    static async all(perspective: PerspectiveProxy): Promise<Todo[]> {
-        return await Todo.findAll(perspective);
-    }
-
-    static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> {
-        return await Todo.findAll(perspective, {
-            where: { state: "todo://done" }
-        });
-    }
 }
 ```
 
@@ -325,12 +299,14 @@ todo.state = "todo://ready";
 await todo.save();
 
 // Query todos
-const allTodos = await Todo.all(perspective);
-const doneTodos = await Todo.allDone(perspective);
+const allTodos = await Todo.findAll(perspective);
+const doneTodos = await Todo.query(perspective)
+  .where({ state: "todo://done" })
+  .get();
 
 // Update a todo
 todo.state = "todo://done";
-await todo.update();
+await todo.save();
 
 // Delete a todo
 await todo.delete();

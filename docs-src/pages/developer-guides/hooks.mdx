@@ -147,37 +147,40 @@ function PerspectivesList({ client }) {
 }
 ```
 
-## useModel
+## useLiveQuery
 
-Provides a convenient way to query and subscribe to AD4M models with pagination support.
+Provides reactive, live-updating access to AD4M model data with support for collections, single instances, pagination, and parent-scoped queries. Replaces the previous `useModel` hook.
+
+### Collection Mode (default)
 
 ```typescript
-import { useModel } from '@coasys/ad4m-react-hooks';
+import { useLiveQuery } from '@coasys/ad4m-react-hooks';
 import { Todo } from './models/Todo';
 
 function TodoList({ perspective }) {
-  const { entries, loading, error, totalCount, loadMore } = useModel<Todo>({
+  const { data, loading, error, totalCount, loadMore } = useLiveQuery(
+    Todo,
     perspective,
-    model: Todo,
-    query: { /* optional query parameters */ },
-    pageSize: 10, // Optional - enables pagination
-    preserveReferences: true // Optional - improves rendering performance
-  });
+    {
+      query: { where: { status: "active" } },
+      pageSize: 10,
+    }
+  );
 
   if (error) return <div>Error: {error}</div>;
-  if (loading && entries.length === 0) return <div>Loading...</div>;
+  if (loading && data.length === 0) return <div>Loading...</div>;
 
   return (
     <div>
       <h2>Todos ({totalCount})</h2>
-      {entries.map(todo => (
-        <div key={todo.baseExpression}>
+      {data.map(todo => (
+        <div key={todo.id}>
           <h3>{todo.title}</h3>
           <p>{todo.description}</p>
         </div>
       ))}
 
-      {entries.length < totalCount && (
+      {data.length < totalCount && (
         <button onClick={loadMore} disabled={loading}>
           {loading ? 'Loading...' : 'Load More'}
         </button>
@@ -186,6 +189,86 @@ function TodoList({ perspective }) {
   );
 }
 ```
+
+### Single-Instance Mode
+
+When you provide `id` in options, the hook returns a single item instead of an array:
+
+```typescript
+function TodoDetail({ perspective, todoId }) {
+  const { data: todo, loading, error } = useLiveQuery(
+    Todo,
+    perspective,
+    { id: todoId }
+  );
+
+  if (loading) return <div>Loading...</div>;
+  if (error) return <div>Error: {error}</div>;
+  if (!todo) return <div>Not found</div>;
+
+  return <h2>{todo.title}</h2>;
+}
+```
+
+### Parent-Scoped Queries
+
+Filter results to children of a specific parent:
+
+```typescript
+function RecipeComments({ perspective, recipe }) {
+  const { data: comments } = useLiveQuery(
+    Comment,
+    perspective,
+    {
+      parent: { model: Recipe, id: recipe.id }
+    }
+  );
+
+  return (
+    <ul>
+      {comments.map(c => <li key={c.id}>{c.body}</li>)}
+    </ul>
+  );
+}
+```
+
+### Return Types
+
+**Collection mode** (`LiveCollectionResult<T>`):
+- `data: T[]` — Array of model instances
+- `loading: boolean` — Whether a query is in progress
+- `error: string` — Error message if any
+- `totalCount: number` — Total matching items (for pagination)
+- `loadMore: () => void` — Load next page
+
+**Single-instance mode** (`LiveInstanceResult<T>`):
+- `data: T | null` — The model instance or null
+- `loading: boolean`
+- `error: string`
+
+### Vue Usage
+
+The Vue hook has the same API but returns Vue `Ref`-wrapped values and accepts `ComputedRef<PerspectiveProxy>` for the perspective parameter:
+
+```typescript
+import { useLiveQuery } from '@coasys/ad4m-vue-hooks';
+
+const { data, loading, error, totalCount, loadMore } = useLiveQuery(
+  Todo,
+  perspective,  // Can be a ComputedRef
+  { pageSize: 10 }
+);
+
+// data.value is T[] (collection) or T | null (single-instance)
+```
+
+The Vue hook automatically re-subscribes when the perspective ref changes, and cleans up subscriptions on unmount.
+
+### Important Notes
+
+- **Registration**: Call `Model.register(perspective)` once at app startup — the hook does **not** register models automatically.
+- **Cleanup**: Subscriptions are automatically disposed on component unmount.
+- **String model support**: You can pass a model class name string instead of a class for dynamic/generic use cases.
 
 ## Best Practices
 
@@ -221,14 +304,7 @@ function TodoList({ perspective }) {
 
 5. **Use TypeScript for better type safety**
    ```typescript
-   interface TodoSubject {
-     id: string;
-     title: string;
-     description: string;
-   }
-
-   const { entries } = useSubjects<TodoSubject>({
-     perspective,
-     subject: 'Todo'
-   });
+   // useLiveQuery is fully typed — generics are inferred from the model class
+   const { data } = useLiveQuery(Todo, perspective);
+   // data is Todo[] with full autocomplete
    ```
