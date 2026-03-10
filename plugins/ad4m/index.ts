@@ -22,20 +22,20 @@ import { spawn, ChildProcess } from "child_process";
 // Types
 // ---------------------------------------------------------------------------
 
-interface McpResponse {
+export interface McpResponse {
   jsonrpc: string;
   id: number;
   result?: any;
   error?: { code: number; message: string; data?: any };
 }
 
-interface McpTool {
+export interface McpTool {
   name: string;
   description?: string;
   inputSchema?: Record<string, any>;
 }
 
-interface PluginConfig {
+export interface PluginConfig {
   mode?: "managed" | "external";
   mcpEndpoint?: string;
   adminCredential?: string;
@@ -52,7 +52,7 @@ interface PluginConfig {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function generateRandomPassphrase(length: number = 32): string {
+export function generateRandomPassphrase(length: number = 32): string {
   const chars =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   let result = "";
@@ -62,13 +62,13 @@ function generateRandomPassphrase(length: number = 32): string {
   return result;
 }
 
-function getPluginDataPath(): string {
+export function getPluginDataPath(): string {
   // Use HOME/.ad4m-plugin as storage location
   const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
   return path.join(home, ".ad4m-plugin");
 }
 
-function ensurePluginDataDir(): string {
+export function ensurePluginDataDir(): string {
   const dataPath = getPluginDataPath();
   try {
     if (!fs.existsSync(dataPath)) {
@@ -80,7 +80,7 @@ function ensurePluginDataDir(): string {
   return dataPath;
 }
 
-function getStoredPassphrase(): string | null {
+export function getStoredPassphrase(): string | null {
   try {
     const dataPath = ensurePluginDataDir();
     const passphraseFile = path.join(dataPath, "agent.passphrase");
@@ -93,7 +93,7 @@ function getStoredPassphrase(): string | null {
   return null;
 }
 
-function storePassphrase(passphrase: string): void {
+export function storePassphrase(passphrase: string): void {
   try {
     const dataPath = ensurePluginDataDir();
     const passphraseFile = path.join(dataPath, "agent.passphrase");
@@ -103,7 +103,7 @@ function storePassphrase(passphrase: string): void {
   }
 }
 
-function getStoredAdminCredential(): string | null {
+export function getStoredAdminCredential(): string | null {
   try {
     const dataPath = ensurePluginDataDir();
     const credFile = path.join(dataPath, "admin.credential");
@@ -116,7 +116,7 @@ function getStoredAdminCredential(): string | null {
   return null;
 }
 
-function storeAdminCredential(credential: string): void {
+export function storeAdminCredential(credential: string): void {
   try {
     const dataPath = ensurePluginDataDir();
     const credFile = path.join(dataPath, "admin.credential");
@@ -132,7 +132,7 @@ function storeAdminCredential(credential: string): void {
 
 let executorProcess: ReturnType<typeof spawn> | null = null;
 
-function isExecutorRunning(
+export function isExecutorRunning(
   endpoint: string,
   timeoutMs: number = 3000,
 ): Promise<boolean> {
@@ -165,7 +165,7 @@ function isExecutorRunning(
   });
 }
 
-async function ensureExecutorRunning(
+export async function ensureExecutorRunning(
   adminCredential: string,
   logger: any,
   endpoint: string = "http://localhost:3001/mcp",
@@ -241,15 +241,15 @@ async function ensureExecutorRunning(
   }
 }
 
-function stopExecutor(): void {
+export function stopExecutor(logger?: any): void {
   if (executorProcess) {
     executorProcess.kill("SIGTERM");
     executorProcess = null;
-    logger.info(`[ad4m] Executor stopped`);
+    if (logger) logger.info(`[ad4m] Executor stopped`);
   }
 }
 
-interface WakerSubscription {
+export interface WakerSubscription {
   id: string;
   type: "mention" | "channel-messages";
   perspective: string;
@@ -267,7 +267,7 @@ let requestIdCounter = 0;
 /**
  * Parse an SSE text/event-stream body into the first JSON-RPC message.
  */
-async function parseSSEStream(response: Response): Promise<McpResponse> {
+export async function parseSSEStream(response: Response): Promise<McpResponse> {
   const reader = response.body?.getReader();
   if (!reader) throw new Error("No response body");
 
@@ -327,7 +327,7 @@ async function parseSSEStream(response: Response): Promise<McpResponse> {
 /**
  * Send a JSON-RPC request to the AD4M MCP server.
  */
-async function mcpRequest(
+export async function mcpRequest(
   endpoint: string,
   method: string,
   params: any = {},
@@ -362,7 +362,7 @@ async function mcpRequest(
 /**
  * Send a JSON-RPC notification (no id, no response expected).
  */
-async function mcpNotify(
+export async function mcpNotify(
   endpoint: string,
   method: string,
   params: any = {},
@@ -386,7 +386,7 @@ async function mcpNotify(
 /**
  * Initialize an MCP session: initialize + notifications/initialized handshake.
  */
-async function mcpInitialize(
+export async function mcpInitialize(
   endpoint: string,
   authToken?: string,
 ): Promise<{ sessionId: string; serverInfo: any }> {
@@ -444,7 +444,7 @@ async function mcpInitialize(
 /**
  * Fetch tool list from the MCP server.
  */
-async function mcpListTools(
+export async function mcpListTools(
   endpoint: string,
   sessionId: string,
   authToken?: string,
@@ -462,7 +462,7 @@ async function mcpListTools(
 /**
  * Call an MCP tool and return the result.
  */
-async function mcpCallTool(
+export async function mcpCallTool(
   endpoint: string,
   toolName: string,
   args: Record<string, any>,
@@ -492,7 +492,7 @@ async function mcpCallTool(
  * Extract text from an MCP tool result. Handles both { content: [{ text }] }
  * and raw string results, parsing JSON if possible.
  */
-function extractMcpResultData(result: any): any {
+export function extractMcpResultData(result: any): any {
   let text = result;
   if (result?.content?.[0]?.text) {
     text = result.content[0].text;
@@ -511,7 +511,7 @@ function extractMcpResultData(result: any): any {
 // Waker helpers
 // ---------------------------------------------------------------------------
 
-function buildWakeMessage(
+export function buildWakeMessage(
   config: PluginConfig,
   sub: WakerSubscription,
   agentDid: string,
@@ -539,7 +539,7 @@ function buildWakeMessage(
     .join("\n");
 }
 
-async function postWake(
+export async function postWake(
   config: PluginConfig,
   sub: WakerSubscription,
   agentDid: string,
@@ -563,14 +563,8 @@ async function postWake(
     if (!resp.ok) {
       logger.error(`[ad4m-waker] wake POST failed: ${resp.status}`);
     } else {
-      logger.info(
-        `[ad4m] Using adminCredential: *** (length: ${adminCredential.length})`,
-      );
+      logger.info(`[ad4m-waker] wake POST sent successfully`);
     }
-
-    const authToken = adminCredential;
-
-    // -- Setup helper tool --
   } catch (e: any) {
     logger.error(`[ad4m-waker] wake POST error: ${e.message}`);
   }
@@ -583,6 +577,7 @@ async function postWake(
 export default async function ad4mPlugin(api: any) {
   const providedConfig: PluginConfig = (api.pluginConfig as PluginConfig) ?? {};
   const mode = providedConfig.mode || "managed";
+  const logger = api.logger;
 
   // Determine endpoint - default to localhost for managed, use provided for external
   const endpoint = providedConfig.mcpEndpoint ?? "http://localhost:3001/mcp";
@@ -638,7 +633,6 @@ export default async function ad4mPlugin(api: any) {
     mcpEndpoint: endpoint,
     adminCredential,
   };
-  const logger = api.logger;
 
   // Check for required config
   if (!adminCredential) {
@@ -1207,6 +1201,7 @@ Notes:
         );
 
         // Start periodic polling for dynamic SHACL tools
+        const refreshInterval = config.toolRefreshIntervalMs ?? 30000;
         refreshTimer = setInterval(() => {
           refreshTools();
         }, refreshInterval);
@@ -1223,7 +1218,7 @@ Notes:
         clearInterval(refreshTimer);
         refreshTimer = null;
       }
-      stopExecutor();
+      stopExecutor(logger);
       logger.info("[ad4m] AD4M MCP service stopped");
     },
   });
