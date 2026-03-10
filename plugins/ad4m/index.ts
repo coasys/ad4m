@@ -580,7 +580,7 @@ async function postWake(
 // Plugin Export
 // ---------------------------------------------------------------------------
 
-export default function ad4mPlugin(api: any) {
+export default async function ad4mPlugin(api: any) {
   const providedConfig: PluginConfig = (api.pluginConfig as PluginConfig) ?? {};
   const mode = providedConfig.mode || "managed";
 
