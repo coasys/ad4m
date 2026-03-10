@@ -9,6 +9,7 @@
  * - filter:false and explicit getter options are respected
  */
 import { Ad4mModel } from "./Ad4mModel";
+import type { Where } from "./Ad4mModel";
 import {
   Model,
   Property,
@@ -22,6 +23,7 @@ import {
   SHACLPropertyShape,
   ConformanceCondition,
 } from "../shacl/SHACLShape";
+import { compileWhereClause } from "./surreal-utils";
 
 // ============================================================================
 // Test models
@@ -536,5 +538,267 @@ describe("sh:class target shape reference", () => {
     const json = shape.toJSON();
     const reconstructed = SHACLShape.fromJSON(json);
     expect(reconstructed.properties[0].class).toBe("test://TargetShape");
+  });
+});
+
+// ============================================================================
+// where clause tests
+// ============================================================================
+
+describe("where clause validation", () => {
+  it("should throw if both where and getter are provided", () => {
+    expect(() => {
+      @Model({ name: "InvalidWhereGetter" })
+      class _Invalid extends Ad4mModel {
+        @HasMany({
+          where: { status: "active" },
+          getter: "(<-link.in.uri)",
+        })
+        items: string[] = [];
+      }
+    }).toThrow(/where.*getter.*mutually exclusive/i);
+  });
+
+  it("should throw if both where and filter:false are provided", () => {
+    expect(() => {
+      @Model({ name: "InvalidWhereFilterFalse" })
+      class _Invalid extends Ad4mModel {
+        @HasMany(() => FlaggedTarget, {
+          through: "test://pred",
+          where: { status: "active" },
+          filter: false,
+        })
+        items: string[] = [];
+      }
+    }).toThrow(/where.*filter.*contradictory/i);
+  });
+});
+
+describe("where clause compilation", () => {
+  it("should compile where clause to SurrealQL getter", () => {
+    @Model({ name: "WhereTarget" })
+    class WhereTarget extends Ad4mModel {
+      @Property({ through: "test://status", required: true })
+      status: string = "";
+    }
+
+    @Model({ name: "WhereParent" })
+    class WhereParent extends Ad4mModel {
+      @HasMany(() => WhereTarget, {
+        through: "test://has_item",
+        where: { status: "active" },
+      })
+      items: string[] = [];
+    }
+
+    const { shape } = (WhereParent as any).generateSHACL();
+    const itemsProp = shape.properties.find(
+      (p: SHACLPropertyShape) => p.name === "items"
+    );
+    expect(itemsProp).toBeDefined();
+    expect(itemsProp!.getter).toBeDefined();
+    expect(itemsProp!.getter).toContain("test://has_item");
+    expect(itemsProp!.getter).toContain("test://status");
+    expect(itemsProp!.getter).toContain("active");
+  });
+
+  it("should use where clause instead of auto-derived conformance when both target and where are set", () => {
+    @Model({ name: "WhereOverrideParent" })
+    class WhereOverrideParent extends Ad4mModel {
+      @HasMany(() => FlaggedTarget, {
+        through: "test://has_flagged",
+        where: { name: "specific" },
+      })
+      flaggedItems: string[] = [];
+    }
+
+    const { shape } = (WhereOverrideParent as any).generateSHACL();
+    const prop = shape.properties.find(
+      (p: SHACLPropertyShape) => p.name === "flaggedItems"
+    );
+    expect(prop).toBeDefined();
+    expect(prop!.getter).toBeDefined();
+    // Should contain the where condition (name = specific)
+    expect(prop!.getter).toContain("test://name");
+    expect(prop!.getter).toContain("specific");
+    // Should NOT contain the auto-derived flag condition
+    // (where overrides auto-conformance)
+    expect(prop!.getter).not.toContain("test://flagged_type");
+  });
+
+  it("should compile where clause with not operator", () => {
+    @Model({ name: "WhereNotTarget" })
+    class WhereNotTarget extends Ad4mModel {
+      @Property({ through: "test://status" })
+      status: string = "";
+    }
+
+    @Model({ name: "WhereNotParent" })
+    class WhereNotParent extends Ad4mModel {
+      @HasMany(() => WhereNotTarget, {
+        through: "test://has_item",
+        where: { status: { not: "archived" } },
+      })
+      items: string[] = [];
+    }
+
+    const { shape } = (WhereNotParent as any).generateSHACL();
+    const prop = shape.properties.find(
+      (p: SHACLPropertyShape) => p.name === "items"
+    );
+    expect(prop).toBeDefined();
+    expect(prop!.getter).toBeDefined();
+    // Should contain a negation condition
+    expect(prop!.getter).toContain("test://status");
+    expect(prop!.getter).toContain("archived");
+  });
+
+  it("should compile where clause with array values (IN)", () => {
+    @Model({ name: "WhereArrayTarget" })
+    class WhereArrayTarget extends Ad4mModel {
+      @Property({ through: "test://category" })
+      category: string = "";
+    }
+
+    @Model({ name: "WhereArrayParent" })
+    class WhereArrayParent extends Ad4mModel {
+      @HasMany(() => WhereArrayTarget, {
+        through: "test://has_item",
+        where: { category: ["food", "drink"] },
+      })
+      items: string[] = [];
+    }
+
+    const { shape } = (WhereArrayParent as any).generateSHACL();
+    const prop = shape.properties.find(
+      (p: SHACLPropertyShape) => p.name === "items"
+    );
+    expect(prop).toBeDefined();
+    expect(prop!.getter).toBeDefined();
+    expect(prop!.getter).toContain("test://category");
+    expect(prop!.getter).toContain("food");
+    expect(prop!.getter).toContain("drink");
+  });
+
+  it("should compile where clause without target using raw predicate URIs", () => {
+    @Model({ name: "WhereNoTargetParent" })
+    class WhereNoTargetParent extends Ad4mModel {
+      @HasMany({
+        through: "test://has_item",
+        where: { "test://status": "active" },
+      })
+      items: string[] = [];
+    }
+
+    const { shape } = (WhereNoTargetParent as any).generateSHACL();
+    const prop = shape.properties.find(
+      (p: SHACLPropertyShape) => p.name === "items"
+    );
+    expect(prop).toBeDefined();
+    expect(prop!.getter).toBeDefined();
+    expect(prop!.getter).toContain("test://status");
+    expect(prop!.getter).toContain("active");
+  });
+
+  it("should set both where-compiled getter and sh:class when target is present", () => {
+    @Model({ name: "WherePlusClassParent" })
+    class WherePlusClassParent extends Ad4mModel {
+      @HasMany(() => FlaggedTarget, {
+        through: "test://has_flagged",
+        where: { name: "specific" },
+      })
+      flaggedItems: string[] = [];
+    }
+
+    const { shape } = (WherePlusClassParent as any).generateSHACL();
+    const prop = shape.properties.find(
+      (p: SHACLPropertyShape) => p.name === "flaggedItems"
+    );
+    expect(prop).toBeDefined();
+    // where-compiled getter
+    expect(prop!.getter).toBeDefined();
+    expect(prop!.getter).toContain("specific");
+    // sh:class still set (target is present)
+    expect(prop!.class).toBeDefined();
+    expect(prop!.class).toContain("FlaggedTarget");
+  });
+
+  it("should round-trip where-compiled getter through toLinks/fromLinks", () => {
+    @Model({ name: "WhereRoundTripTarget" })
+    class WhereRoundTripTarget extends Ad4mModel {
+      @Property({ through: "test://status", required: true })
+      status: string = "";
+    }
+
+    @Model({ name: "WhereRoundTripParent" })
+    class WhereRoundTripParent extends Ad4mModel {
+      @HasMany(() => WhereRoundTripTarget, {
+        through: "test://has_item",
+        where: { status: "active" },
+      })
+      items: string[] = [];
+    }
+
+    const { shape } = (WhereRoundTripParent as any).generateSHACL();
+    const links = shape.toLinks();
+    const reconstructed = SHACLShape.fromLinks(
+      links.map((l: any) => ({ source: l.source, predicate: l.predicate, target: l.target })),
+      shape.nodeShapeUri
+    );
+
+    const prop = reconstructed.properties.find(
+      (p: SHACLPropertyShape) => p.name === "items"
+    );
+    expect(prop).toBeDefined();
+    expect(prop!.getter).toBeDefined();
+    expect(prop!.getter).toContain("test://status");
+    expect(prop!.getter).toContain("active");
+  });
+});
+
+// ============================================================================
+// compileWhereClause() unit tests
+// ============================================================================
+
+describe("compileWhereClause()", () => {
+  it("should compile simple equality to SurrealQL condition", () => {
+    const conditions = compileWhereClause(
+      { status: "active" },
+      { properties: { status: { name: "status", predicate: "test://status", required: false, readOnly: false } }, relations: {}, className: "Test" }
+    );
+    expect(conditions).toHaveLength(1);
+    expect(conditions[0]).toContain("test://status");
+    expect(conditions[0]).toContain("active");
+  });
+
+  it("should compile not operator", () => {
+    const conditions = compileWhereClause(
+      { status: { not: "archived" } },
+      { properties: { status: { name: "status", predicate: "test://status", required: false, readOnly: false } }, relations: {}, className: "Test" }
+    );
+    expect(conditions).toHaveLength(1);
+    expect(conditions[0]).toContain("= 0");  // negation
+    expect(conditions[0]).toContain("archived");
+  });
+
+  it("should compile array values to IN clause", () => {
+    const conditions = compileWhereClause(
+      { category: ["food", "drink"] },
+      { properties: { category: { name: "category", predicate: "test://category", required: false, readOnly: false } }, relations: {}, className: "Test" }
+    );
+    expect(conditions).toHaveLength(1);
+    expect(conditions[0]).toContain("food");
+    expect(conditions[0]).toContain("drink");
+    expect(conditions[0]).toContain("IN");
+  });
+
+  it("should fall back to raw predicate URIs when metadata is null", () => {
+    const conditions = compileWhereClause(
+      { "test://raw_pred": "value" },
+      null as any
+    );
+    expect(conditions).toHaveLength(1);
+    expect(conditions[0]).toContain("test://raw_pred");
+    expect(conditions[0]).toContain("value");
   });
 });

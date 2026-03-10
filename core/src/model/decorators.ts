@@ -1,6 +1,8 @@
 import { capitalize, propertyNameToSetterName, singularToPlural, stringifyObjectLiteral } from "./util";
 import { SHACLShape, SHACLPropertyShape, ConformanceCondition } from "../shacl/SHACLShape";
 import { escapeSurrealString } from "../utils";
+import type { Where } from "./Ad4mModel";
+import { compileWhereClause } from "./surreal-utils";
 
 // ============================================================================
 // WeakMap-based metadata registry
@@ -39,6 +41,12 @@ export interface RelationMetadataEntry {
      * while keeping hydration capability via `include`.
      */
     filter?: boolean;
+    /**
+     * Filter constraints on linked target nodes using the query DSL.
+     * Property names reference the target model's properties.
+     * Overrides auto-derived conformance when set.
+     */
+    where?: Where;
 }
 
 /** Registry of property metadata keyed by constructor → { propName → metadata } */
@@ -879,11 +887,32 @@ export function Model(opts: ModelConfig) {
                 }];
 
                 // === Build Getter (conformance filter) ===
-                // If the relation has an explicit getter string, use it directly.
-                // Otherwise, if a target model is declared and filter !== false,
-                // auto-generate a conformance getter from the target's metadata.
+                // Priority chain:
+                // 1. Explicit getter string → use verbatim
+                // 2. `where` clause → compile DSL to SurrealQL getter
+                // 3. target + filter !== false → auto-derive from shape
                 if (relMeta.getter) {
                     relShape.getter = relMeta.getter;
+                } else if (relMeta.where) {
+                    // Compile Where DSL → SurrealQL getter
+                    try {
+                        const TargetClass = relMeta.target?.();
+                        const targetMetadata = TargetClass
+                            ? (TargetClass as any).getModelMetadata?.() ?? null
+                            : null;
+
+                        const conditions = compileWhereClause(
+                            relMeta.where,
+                            targetMetadata,
+                        );
+
+                        if (conditions.length > 0) {
+                            const escapedPredicate = escapeSurrealString(relMeta.predicate);
+                            relShape.getter = `(->link[WHERE predicate = '${escapedPredicate}'].out[WHERE ${conditions.join(' AND ')}].uri)`;
+                        }
+                    } catch (e) {
+                        // Target metadata may not be available yet
+                    }
                 } else if (relMeta.target && relMeta.filter !== false) {
                     try {
                         const TargetClass = relMeta.target();
@@ -1105,6 +1134,27 @@ export interface RelationOptions {
      * Set to `false` to opt out of filtering while keeping hydration capability.
      */
     filter?: boolean;
+    /**
+     * Filter constraints on the linked target nodes, using the same query DSL
+     * as `Model.query().where(...)`. Property names reference the **target**
+     * model's properties (resolved via target metadata).
+     *
+     * When `target` is set and `where` is omitted, conformance conditions are
+     * auto-derived from the target shape (flags + required properties).
+     * Providing `where` overrides this auto-derivation.
+     *
+     * Mutually exclusive with `getter` and `filter: false`.
+     *
+     * @example
+     * ```typescript
+     * @HasMany(() => Message, {
+     *   through: "flux://entry_type",
+     *   where: { status: "active", priority: { gte: 3 } }
+     * })
+     * activeMessages: Message[] = []
+     * ```
+     */
+    where?: Where;
 }
 
 /**
@@ -1139,7 +1189,7 @@ function resolveRelationArgs(
         ? { ...(second || {}), target: first }
         : first;
 
-    // getter is mutually exclusive with through and target
+    // getter is mutually exclusive with through, target, and where
     if (opts.getter) {
         if (opts.through) {
             throw new Error(
@@ -1155,12 +1205,28 @@ function resolveRelationArgs(
                 'providing both is contradictory.'
             );
         }
+        if (opts.where) {
+            throw new Error(
+                'Relation decorator: `where` and `getter` are mutually exclusive. ' +
+                'Use `where` for DSL-based filtering, or `getter` for raw SurrealQL.'
+            );
+        }
         return opts;
     }
 
     // Default predicate when not provided
     if (!opts.through) {
         opts.through = 'ad4m://has_child';
+    }
+
+    // where validation
+    if (opts.where) {
+        if (opts.filter === false) {
+            throw new Error(
+                'Relation decorator: `where` and `filter: false` are contradictory. ' +
+                '`where` adds filtering constraints; `filter: false` disables filtering.'
+            );
+        }
     }
 
     return opts;
@@ -1214,6 +1280,7 @@ export function HasMany(
             local: opts.local,
             ...(opts.getter && { getter: opts.getter }),
             ...(opts.filter !== undefined && { filter: opts.filter }),
+            ...(opts.where && { where: opts.where }),
         };
 
         const relKey = key as string;
@@ -1276,6 +1343,7 @@ export function HasOne(
             maxCount: 1,
             local: opts.local,
             ...(opts.filter !== undefined && { filter: opts.filter }),
+            ...(opts.where && { where: opts.where }),
         };
 
         const relKey = key as string;
@@ -1345,6 +1413,7 @@ export function BelongsToOne(
             maxCount: 1,
             local: opts.local,
             ...(opts.filter !== undefined && { filter: opts.filter }),
+            ...(opts.where && { where: opts.where }),
         };
 
         if (opts.through) {
@@ -1402,6 +1471,7 @@ export function BelongsToMany(
             local: opts.local,
             ...(opts.getter && { getter: opts.getter }),
             ...(opts.filter !== undefined && { filter: opts.filter }),
+            ...(opts.where && { where: opts.where }),
         };
 
         // @BelongsToMany is the inverse/read-only side — do NOT generate add*/remove*/set*

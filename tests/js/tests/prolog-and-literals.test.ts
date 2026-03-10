@@ -597,7 +597,6 @@ describe("Prolog + Literals", () => {
                         entries: string[] = [];
 
                         @HasMany({
-                            through: "recipe://entries",
                             getter: `(->link[WHERE predicate = 'recipe://entries'].out[WHERE count(->link[WHERE predicate = 'recipe://has_ingredient' AND out.uri = 'recipe://test']) > 0].uri)`
                         })
                         ingredients: string[] = [];
@@ -2646,7 +2645,6 @@ describe("Prolog + Literals", () => {
                     parentPost: string | undefined;
 
                     @HasMany({
-                        through: "blog://tags",
                         getter: "(->link[WHERE predicate = 'blog://tagged_with'].out.uri)"
                     })
                     tags: string[] = [];

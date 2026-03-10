@@ -4,6 +4,7 @@
  * Covers:
  *   - @Property(getter:) — custom SurrealQL expression for computed properties
  *   - @HasMany(getter:)  — custom SurrealQL expression for computed relations
+ *   - @HasMany(where:)   — DSL-compiled getter for relation filtering
  *   - None / empty-value filtering from getter results
  *
  * Run standalone:
@@ -14,6 +15,7 @@ import { expect } from "chai";
 import {
   Ad4mClient,
   Ad4mModel,
+  Flag,
   HasMany,
   Link,
   Literal,
@@ -44,7 +46,6 @@ describe("Ad4mModel — Custom Getters", function () {
     parentPost: string | undefined;
 
     @HasMany({
-      through: "blog://tags",
       getter:
         "(->link[WHERE predicate = 'blog://tagged_with'].out.uri)",
     })
@@ -145,5 +146,99 @@ describe("Ad4mModel — Custom Getters", function () {
 
     // Property should be undefined, not 'None' or empty string
     expect(retrievedPost.parentPost).to.be.undefined;
+  });
+});
+
+// ── where-clause compiled getter ────────────────────────────────────────────
+
+describe("Ad4mModel — Where-Clause Relation Filtering", function () {
+  this.timeout(120_000);
+
+  let ownStop: (() => Promise<void>) | null = null;
+  let ad4m: Ad4mClient;
+  let perspective: PerspectiveProxy;
+
+  // Target model — has a status flag so we can filter by it
+  @Model({ name: "Task" })
+  class Task extends Ad4mModel {
+    @Flag({ through: "task://type", value: "task://task" })
+    type = "task://task";
+
+    @Property({ through: "task://title", required: true })
+    title: string = "";
+
+    @Property({ through: "task://status", required: true })
+    status: string = "";
+  }
+
+  // Parent model — uses `where` to only include active tasks
+  @Model({ name: "TaskBoard" })
+  class TaskBoard extends Ad4mModel {
+    @Property({ through: "board://name" })
+    name: string = "";
+
+    @HasMany(() => Task, {
+      through: "board://has_task",
+      where: { status: "active" },
+    })
+    activeTasks: string[] = [];
+
+    // Unfiltered relation for comparison
+    @HasMany(() => Task, { through: "board://has_task" })
+    allTasks: string[] = [];
+  }
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("model-where-getter");
+      ad4m = agent.client;
+      ownStop = agent.stop;
+    }
+  });
+
+  after(async () => {
+    if (ownStop) await ownStop();
+  });
+
+  beforeEach(async () => {
+    if (perspective) {
+      await ad4m.perspective.remove(perspective.uuid);
+    }
+    perspective = await ad4m.perspective.add("where-getter-test");
+    await perspective.ensureSDNASubjectClass(Task);
+    await perspective.ensureSDNASubjectClass(TaskBoard);
+  });
+
+  it("where-compiled getter should only return matching children", async () => {
+    // Create a board
+    const board = await TaskBoard.create(perspective, { name: "Sprint 1" });
+
+    // Create three tasks with different statuses
+    const active1 = await Task.create(perspective, { title: "Active 1", status: "active" });
+    const active2 = await Task.create(perspective, { title: "Active 2", status: "active" });
+    const done = await Task.create(perspective, { title: "Done Task", status: "done" });
+
+    // Link all three tasks to the board
+    for (const task of [active1, active2, done]) {
+      await perspective.add(
+        new Link({ source: board.id, predicate: "board://has_task", target: task.id }),
+      );
+    }
+
+    // Retrieve the board and check filtered vs unfiltered relations
+    const retrieved = new TaskBoard(perspective, board.id);
+    await retrieved.get();
+
+    // activeTasks (where: status = "active") should only have 2
+    expect(retrieved.activeTasks).to.have.lengthOf(2);
+    expect(retrieved.activeTasks).to.include(active1.id);
+    expect(retrieved.activeTasks).to.include(active2.id);
+    expect(retrieved.activeTasks).to.not.include(done.id);
+
+    // allTasks (no where filter) should have all 3
+    expect(retrieved.allTasks).to.have.lengthOf(3);
   });
 });

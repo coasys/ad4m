@@ -5,6 +5,7 @@ import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomId, PropertyOptions, Model, getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, PropertyMetadataEntry, RelationMetadataEntry, buildConformanceFilter } from "./decorators";
 import { singularToPlural, pluralToSingular, propertyNameToSetterName, relationToAdderName, relationToRemoverName, relationToSetterName } from "./util";
 import { escapeSurrealString } from "../utils";
+import { formatSurrealValue as _formatSurrealValue, compileWhereClause } from "./surreal-utils";
 
 // JSON Schema type definitions
 interface JSONSchemaProperty {
@@ -46,7 +47,7 @@ interface JSONSchemaToModelOptions {
 }
 
 type ValueTuple = [name: string, value: any, resolve?: boolean];
-type WhereOps = {
+export type WhereOps = {
   not: string | number | boolean | string[] | number[];
   between: [number, number];
   lt: number; // less than
@@ -55,8 +56,8 @@ type WhereOps = {
   gte: number; // greater than or equal to
   contains: string | number; // substring/element check
 };
-type WhereCondition = string | number | boolean | string[] | number[] | { [K in keyof WhereOps]?: WhereOps[K] };
-type Where = { [propertyName: string]: WhereCondition };
+export type WhereCondition = string | number | boolean | string[] | number[] | { [K in keyof WhereOps]?: WhereOps[K] };
+export type Where = { [propertyName: string]: WhereCondition };
 type Order = { [propertyName: string]: "ASC" | "DESC" };
 
 /**
@@ -182,6 +183,8 @@ export interface RelationMetadata {
    * Defaults to `true` — set to `false` to opt out of DB-level type filtering.
    */
   filter?: boolean;
+  /** Where clause for relation filtering (query DSL) */
+  where?: Where;
 }
 
 
@@ -669,6 +672,7 @@ export class Ad4mModel {
         direction: (options.kind === 'belongsToMany' || options.kind === 'belongsToOne') ? 'reverse' : 'forward',
         ...(options.target !== undefined && { target: options.target }),
         ...(options.filter !== undefined && { filter: options.filter }),
+        ...(options.where !== undefined && { where: options.where }),
       };
     }
     
@@ -1487,12 +1491,28 @@ export class Ad4mModel {
 
       // Determine the getter to execute:
       // 1. Explicit `getter` always wins
-      // 2. If `target` is set and `filter !== false`, auto-generate from target metadata
+      // 2. `where` clause → compile DSL to SurrealQL getter
+      // 3. If `target` is set and `filter !== false`, auto-generate from target metadata
       //    BUT skip auto-generation for reverse relations (belongsToMany / belongsToOne)
       //    because buildConformanceGetter traverses outgoing links (->link) which is
       //    wrong for reverse relations. Their values are already populated by the
       //    reverse link lookup in instancesFromSurrealResult / getData.
       let getter = meta.getter;
+      if (!getter && meta.where && meta.direction !== 'reverse') {
+        try {
+          const TargetClass = meta.target?.();
+          const targetMetadata = TargetClass
+            ? (TargetClass as any).getModelMetadata?.() ?? null
+            : null;
+          const conditions = compileWhereClause(meta.where, targetMetadata);
+          if (conditions.length > 0) {
+            const escapedPred = escapeSurrealString(meta.predicate);
+            getter = `(->link[WHERE predicate = '${escapedPred}'].out[WHERE ${conditions.join(' AND ')}].uri)`;
+          }
+        } catch (e) {
+          // Target metadata may not be available yet
+        }
+      }
       if (!getter && meta.target && meta.filter !== false && meta.direction !== 'reverse') {
         try {
           const TargetClass = meta.target();
@@ -2338,23 +2358,7 @@ FETCH links
    * @private
    */
   private static formatSurrealValue(value: any): string {
-    if (typeof value === 'string') {
-      // Escape backslashes first, then single quotes and other special characters
-      const escaped = value
-        .replace(/\\/g, '\\\\')  // Backslash -> \\
-        .replace(/'/g, "\\'")     // Single quote -> \'
-        .replace(/"/g, '\\"')     // Double quote -> \"
-        .replace(/\n/g, '\\n')    // Newline -> \n
-        .replace(/\r/g, '\\r')    // Carriage return -> \r
-        .replace(/\t/g, '\\t');   // Tab -> \t
-      return `'${escaped}'`;
-    } else if (typeof value === 'number' || typeof value === 'boolean') {
-      return String(value);
-    } else if (Array.isArray(value)) {
-      return `[${value.map(v => this.formatSurrealValue(v)).join(', ')}]`;
-    } else {
-      return String(value);
-    }
+    return _formatSurrealValue(value);
   }
 
   public static async instancesFromPrologResult<T extends Ad4mModel>(
