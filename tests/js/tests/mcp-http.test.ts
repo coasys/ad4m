@@ -553,6 +553,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             // Dynamic tools for Channel (CRUD + per-property + collections)
             expect(toolNames).to.include('channel_create');
             expect(toolNames).to.include('channel_query');
+            expect(toolNames).to.include('channel_list');
             expect(toolNames).to.include('channel_get');
             expect(toolNames).to.include('channel_delete');
             expect(toolNames).to.include('channel_set_name');
@@ -563,6 +564,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             // Dynamic tools for Message (CRUD + per-property)
             expect(toolNames).to.include('message_create');
             expect(toolNames).to.include('message_query');
+            expect(toolNames).to.include('message_list');
             expect(toolNames).to.include('message_get');
             expect(toolNames).to.include('message_delete');
             expect(toolNames).to.include('message_set_body');
@@ -584,7 +586,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(schema.properties).to.have.property('expression_address');
             expect(schema.properties).to.have.property('name');
             expect(schema.required).to.include('perspective_id');
-            expect(schema.required).to.include('expression_address');
+            expect(schema.required).to.not.include('expression_address'); // now optional
         });
 
         it("should query channels via typed channel_query tool", async function() {
