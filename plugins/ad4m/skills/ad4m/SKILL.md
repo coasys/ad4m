@@ -9,11 +9,55 @@ AD4M lets your AI agent join **neighbourhoods** (shared P2P spaces, semantic kno
 
 AD4M's core bootstrap languages (agent identity, neighbourhood sync, file storage) are built on **Holochain** — a framework for distributed, agent-centric applications. Neighbourhoods sync P2P via Holochain DNAs, giving AD4M its trust and consistency layer without any central server.
 
+## Quick Setup
+
+**Prerequisite:** Install `ad4m-executor` binary in your PATH. Download from [GitHub releases](https://github.com/coasys/ad4m/releases).
+
+That's it! In **managed mode** (default), the plugin:
+
+- Auto-starts the `ad4m-executor` process if not running
+- Auto-generates admin credential
+- Auto-creates/unlocks agent identity
+- Uses default MCP endpoint (http://localhost:3001/mcp)
+- Credentials and data stored in `~/.ad4m-plugin/`
+
+**Default config (auto-generated):**
+
+```json
+{
+  "ad4m": {
+    "mode": "managed"
+  }
+}
+```
+
+### External Mode
+
+If you want to connect to an already-running executor (e.g., one managed by a UI launcher):
+
+```json
+{
+  "ad4m": {
+    "mode": "external",
+    "mcpEndpoint": "http://their-executor:3001/mcp"
+  }
+}
+```
+
+---
+
 ## IMPORTANT rules for how to use AD4M correctly
 
-### 1. Use --admin-credential if you setup a new ad4m-executor for you
+### 1. The plugin auto-manages your AD4M agent
 
-There are multiple ways to use/connect to an ad4m-executor. If in doubt: get the ad4m-executor binary and set it up just for you — you are the owner/admin of that ad4m instance. You start it with `--admin-credential <random passphrase>`. The credential authenticates all MCP tool calls from your session automatically. If you're connecting to someone else's executor (no admin credential), use the JWT flow from rule 3 instead.
+In **managed mode** (default), the plugin:
+
+- Generates admin credential automatically
+- Creates your agent identity on first run
+- Unlocks the agent on subsequent runs
+- Stores credentials in `~/.ad4m-plugin/`
+
+You don't need to manually set up credentials unless connecting to an external agent.
 
 ### 2. AD4M tools are native agent tools — just call them
 
@@ -21,8 +65,9 @@ The AD4M OpenClaw plugin bridges AD4M's MCP server into your tool list automatic
 
 The plugin is configured in OpenClaw's config under `plugins.entries.ad4m.config`:
 
+- `mode` — `"managed"` (default) or `"external"`. Managed = plugin auto-manages agent.
 - `mcpEndpoint` — MCP endpoint (default: `http://localhost:3001/mcp`)
-- `adminCredential` — admin credential for the AD4M executor
+- `adminCredential` — admin credential for the AD4M executor (auto-generated in managed mode)
 
 **Do NOT try to call the MCP server with `curl`.** The MCP server uses Streamable HTTP transport — the plugin handles all protocol details for you.
 

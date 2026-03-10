@@ -11,6 +11,14 @@
  */
 
 // ---------------------------------------------------------------------------
+// Imports
+// ---------------------------------------------------------------------------
+
+import path from "path";
+import fs from "fs";
+import { spawn, ChildProcess } from "child_process";
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -28,14 +36,217 @@ interface McpTool {
 }
 
 interface PluginConfig {
+  mode?: "managed" | "external";
   mcpEndpoint?: string;
   adminCredential?: string;
+  agentPassphrase?: string;
   toolRefreshIntervalMs?: number;
   wakerEnabled?: boolean;
   executorWsUrl?: string;
   wakeUrl?: string;
   wakeToken?: string;
   debounceMs?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function generateRandomPassphrase(length: number = 32): string {
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let result = "";
+  for (let i = 0; i < length; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
+function getPluginDataPath(): string {
+  // Use HOME/.ad4m-plugin as storage location
+  const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
+  return path.join(home, ".ad4m-plugin");
+}
+
+function ensurePluginDataDir(): string {
+  const dataPath = getPluginDataPath();
+  try {
+    if (!fs.existsSync(dataPath)) {
+      fs.mkdirSync(dataPath, { recursive: true });
+    }
+  } catch (e) {
+    // Ignore - might not have fs access
+  }
+  return dataPath;
+}
+
+function getStoredPassphrase(): string | null {
+  try {
+    const dataPath = ensurePluginDataDir();
+    const passphraseFile = path.join(dataPath, "agent.passphrase");
+    if (fs.existsSync(passphraseFile)) {
+      return fs.readFileSync(passphraseFile, "utf-8").trim();
+    }
+  } catch (e) {
+    // Ignore - might not have fs access
+  }
+  return null;
+}
+
+function storePassphrase(passphrase: string): void {
+  try {
+    const dataPath = ensurePluginDataDir();
+    const passphraseFile = path.join(dataPath, "agent.passphrase");
+    fs.writeFileSync(passphraseFile, passphrase, { mode: 0o600 });
+  } catch (e) {
+    // Ignore - might not have fs access
+  }
+}
+
+function getStoredAdminCredential(): string | null {
+  try {
+    const dataPath = ensurePluginDataDir();
+    const credFile = path.join(dataPath, "admin.credential");
+    if (fs.existsSync(credFile)) {
+      return fs.readFileSync(credFile, "utf-8").trim();
+    }
+  } catch (e) {
+    // Ignore
+  }
+  return null;
+}
+
+function storeAdminCredential(credential: string): void {
+  try {
+    const dataPath = ensurePluginDataDir();
+    const credFile = path.join(dataPath, "admin.credential");
+    fs.writeFileSync(credFile, credential, { mode: 0o600 });
+  } catch (e) {
+    // Ignore
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Executor Process Management (Managed Mode)
+// ---------------------------------------------------------------------------
+
+let executorProcess: ReturnType<typeof spawn> | null = null;
+
+function isExecutorRunning(
+  endpoint: string,
+  timeoutMs: number = 3000,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+      resolve(false);
+    }, timeoutMs);
+
+    fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 0,
+        method: "tools/list",
+        params: {},
+      }),
+      signal: controller.signal,
+    })
+      .then(() => {
+        clearTimeout(timeout);
+        resolve(true);
+      })
+      .catch(() => {
+        clearTimeout(timeout);
+        resolve(false);
+      });
+  });
+}
+
+async function ensureExecutorRunning(
+  adminCredential: string,
+  logger: any,
+  endpoint: string = "http://localhost:3001/mcp",
+  wsEndpoint: string = "ws://localhost:12100/graphql",
+): Promise<boolean> {
+  logger.info(`[ad4m] Checking if executor is running at ${endpoint}...`);
+
+  // Check if already running
+  if (await isExecutorRunning(endpoint, 3000)) {
+    logger.info(`[ad4m] Executor is already running`);
+    return true;
+  }
+
+  logger.info(`[ad4m] Executor not running, attempting to start...`);
+
+  // Try to find ad4m-executor in PATH
+  const executorPath = "ad4m-executor";
+
+  try {
+    // Start the executor as a child process
+    executorProcess = spawn(
+      executorPath,
+      [
+        "run",
+        "--enable-mcp",
+        "true",
+        "--admin-credential",
+        adminCredential,
+        "--port",
+        "3001",
+      ],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: false,
+      },
+    );
+
+    executorProcess.stdout?.on("data", (data: Buffer) => {
+      logger.info(`[ad4m-executor] ${data.toString().trim()}`);
+    });
+
+    executorProcess.stderr?.on("data", (data: Buffer) => {
+      logger.info(`[ad4m-executor] ${data.toString().trim()}`);
+    });
+
+    executorProcess.on("error", (err: Error) => {
+      logger.error(`[ad4m] Failed to start executor: ${err.message}`);
+      executorProcess = null;
+    });
+
+    executorProcess.on("exit", (code: number) => {
+      logger.info(`[ad4m] Executor exited with code ${code}`);
+      executorProcess = null;
+    });
+
+    // Wait for executor to be ready
+    logger.info(`[ad4m] Waiting for executor to start...`);
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      if (await isExecutorRunning(endpoint, 2000)) {
+        logger.info(`[ad4m] Executor started successfully`);
+        return true;
+      }
+      logger.info(`[ad4m] Waiting... (${i + 1}/30)`);
+    }
+
+    logger.error(`[ad4m] Executor failed to start within 30 seconds`);
+    return false;
+  } catch (err: any) {
+    logger.error(`[ad4m] Error starting executor: ${err.message}`);
+    logger.error(`[ad4m] Make sure ad4m-executor is installed and in PATH`);
+    return false;
+  }
+}
+
+function stopExecutor(): void {
+  if (executorProcess) {
+    executorProcess.kill("SIGTERM");
+    executorProcess = null;
+    logger.info(`[ad4m] Executor stopped`);
+  }
 }
 
 interface WakerSubscription {
@@ -352,8 +563,14 @@ async function postWake(
     if (!resp.ok) {
       logger.error(`[ad4m-waker] wake POST failed: ${resp.status}`);
     } else {
-      logger.info(`[ad4m-waker] wake sent for ${sub.id} (type=${sub.type})`);
+      logger.info(
+        `[ad4m] Using adminCredential: *** (length: ${adminCredential.length})`,
+      );
     }
+
+    const authToken = adminCredential;
+
+    // -- Setup helper tool --
   } catch (e: any) {
     logger.error(`[ad4m-waker] wake POST error: ${e.message}`);
   }
@@ -364,16 +581,73 @@ async function postWake(
 // ---------------------------------------------------------------------------
 
 export default function ad4mPlugin(api: any) {
-  const config: PluginConfig = (api.pluginConfig as PluginConfig) ?? {};
-  const endpoint = config.mcpEndpoint ?? "http://localhost:3001/mcp";
-  const authToken = config.adminCredential;
-  const refreshInterval = config.toolRefreshIntervalMs ?? 30000;
+  const providedConfig: PluginConfig = (api.pluginConfig as PluginConfig) ?? {};
+  const mode = providedConfig.mode || "managed";
+
+  // Determine endpoint - default to localhost for managed, use provided for external
+  const endpoint = providedConfig.mcpEndpoint ?? "http://localhost:3001/mcp";
+
+  // Determine auth token based on mode
+  let adminCredential: string | undefined;
+  let authToken: string;
+
+  if (mode === "external") {
+    // External mode: use provided credential as-is (may be empty - uses JWT flow)
+    adminCredential = providedConfig.adminCredential;
+    authToken = adminCredential || "";
+  } else {
+    // Managed mode: auto-generate and manage credentials AND start executor
+    const storedPassphrase = getStoredPassphrase();
+    const storedAdminCred = getStoredAdminCredential();
+
+    // Determine effective adminCredential: provided > stored > generate new
+    adminCredential = providedConfig.adminCredential;
+    if (!adminCredential && storedAdminCred) {
+      adminCredential = storedAdminCred;
+    }
+    if (!adminCredential) {
+      adminCredential = generateRandomPassphrase(24);
+      storeAdminCredential(adminCredential);
+    }
+
+    // Store the adminCredential we end up using
+    if (!providedConfig.adminCredential && adminCredential) {
+      storeAdminCredential(adminCredential);
+    }
+    authToken = adminCredential;
+
+    // Ensure executor is running (spawn if not)
+    const executorWsUrl =
+      providedConfig.executorWsUrl ?? "ws://localhost:12100/graphql";
+    const executorStarted = await ensureExecutorRunning(
+      adminCredential,
+      logger,
+      endpoint,
+      executorWsUrl,
+    );
+    if (!executorStarted) {
+      logger.error(
+        `[ad4m] Failed to start executor in managed mode. Please ensure ad4m-executor is installed.`,
+      );
+    }
+  }
+
+  const config: PluginConfig = {
+    ...providedConfig,
+    mode,
+    mcpEndpoint: endpoint,
+    adminCredential,
+  };
   const logger = api.logger;
 
   // Check for required config
-  if (!config.adminCredential) {
+  if (!adminCredential) {
     logger.warn(
       `[ad4m] Warning: adminCredential not configured. MCP tools will not be available. Please configure adminCredential in plugin settings.`,
+    );
+  } else {
+    logger.info(
+      `[ad4m] Using adminCredential: *** (length: ${adminCredential.length})`,
     );
   }
 
@@ -385,18 +659,33 @@ export default function ad4mPlugin(api: any) {
       "Get a sample OpenClaw plugin config for AD4M. Use this to see the required configuration format.",
     parameters: { type: "object", properties: {} },
     async execute() {
-      const sampleConfig = {
-        mcpEndpoint: "http://localhost:3001/mcp",
-        adminCredential: "YOUR_SECRET_PASSWORD",
+      const managedConfig = {
+        mode: "managed",
+      };
+      const externalConfig = {
+        mode: "external",
+        mcpEndpoint: "http://their-executor:3001/mcp",
+      };
+      const externalConfig = {
+        mode: "external",
+        mcpEndpoint: "http://their-executor:3001/mcp",
         wakerEnabled: true,
         wakeUrl: "http://localhost:18789/hooks/wake",
-        executorWsUrl: "ws://localhost:12100/graphql",
       };
       return {
         content: [
           {
             type: "text",
-            text: `Add this to your OpenClaw plugins.entries:\n\n${JSON.stringify({ ad4m: sampleConfig }, null, 2)}`,
+            text: `# Managed mode (default):
+${JSON.stringify({ ad4m: managedConfig }, null, 2)}
+
+# External mode (connect to existing executor):
+${JSON.stringify({ ad4m: externalConfig }, null, 2)}
+
+Notes:
+- Managed: uses default localhost:3001, auto-generates credentials
+- External: provide executor URL, uses executor's auth (or JWT flow)
+- Credentials stored in ~/.ad4m-plugin/ for reuse`,
           },
         ],
       };
@@ -940,6 +1229,7 @@ export default function ad4mPlugin(api: any) {
         clearInterval(refreshTimer);
         refreshTimer = null;
       }
+      stopExecutor();
       logger.info("[ad4m] AD4M MCP service stopped");
     },
   });
@@ -1002,6 +1292,59 @@ export default function ad4mPlugin(api: any) {
         });
 
         wakerClient = new Ad4mClient(apolloClient);
+
+        // Check agent status and manage if needed
+        let agentStatus;
+        try {
+          agentStatus = await wakerClient.agent.status();
+          logger.info(
+            `[ad4m-waker] Agent status: initialized=${agentStatus.isInitialized}, unlocked=${agentStatus.isUnlocked}`,
+          );
+        } catch (e: any) {
+          logger.error(`[ad4m-waker] Failed to get agent status: ${e.message}`);
+          throw e;
+        }
+
+        // Agent management: generate or unlock as needed
+        if (!agentStatus.isInitialized) {
+          // First run - generate new agent
+          const passphrase = generateRandomPassphrase(32);
+          logger.info(
+            `[ad4m-waker] Agent not initialized, generating new agent...`,
+          );
+          try {
+            await wakerClient.agent.generate(passphrase);
+            storePassphrase(passphrase);
+            logger.info(
+              `[ad4m-waker] Agent generated successfully. DID: ${agentStatus.did}`,
+            );
+          } catch (e: any) {
+            logger.error(`[ad4m-waker] Failed to generate agent: ${e.message}`);
+          }
+        } else if (agentStatus.isLocked) {
+          // Previously initialized but locked - try to unlock
+          const passphrase = getStoredPassphrase();
+          if (passphrase) {
+            logger.info(
+              `[ad4m-waker] Agent is locked, attempting to unlock...`,
+            );
+            try {
+              await wakerClient.agent.unlock(passphrase);
+              logger.info(`[ad4m-waker] Agent unlocked successfully.`);
+            } catch (e: any) {
+              logger.error(`[ad4m-waker] Failed to unlock agent: ${e.message}`);
+              logger.warn(
+                `[ad4m-waker] You may need to provide the correct passphrase or reconfigure.`,
+              );
+            }
+          } else {
+            logger.warn(
+              `[ad4m-waker] Agent is locked but no passphrase stored. Please provide agentPassphrase in config or reinstall.`,
+            );
+          }
+        } else {
+          logger.info(`[ad4m-waker] Agent is ready.`);
+        }
 
         // Verify connection + get agent DID
         const status = await wakerClient.agent.status();

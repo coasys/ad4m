@@ -7,14 +7,19 @@
   "configSchema": {
     "type": "object",
     "properties": {
+      "mode": {
+        "type": "string",
+        "enum": ["managed", "external"],
+        "default": "managed",
+        "description": "Plugin mode: 'managed' = auto-manages agent identity, 'external' = connect to existing executor"
+      },
       "mcpEndpoint": {
         "type": "string",
-        "default": "http://localhost:3001/mcp",
-        "description": "AD4M executor MCP endpoint URL"
+        "description": "AD4M executor MCP endpoint URL (required in external mode, defaults to localhost in managed)"
       },
       "adminCredential": {
         "type": "string",
-        "description": "Admin credential for the AD4M executor (used as Bearer token)"
+        "description": "Admin credential for the AD4M executor (auto-generated in managed mode)"
       },
       "toolRefreshIntervalMs": {
         "type": "number",
