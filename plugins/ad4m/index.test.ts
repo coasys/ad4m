@@ -13,6 +13,21 @@ vi.mock("child_process", async (importOriginal) => {
   return { ...actual, spawn: mockSpawn };
 });
 
+/** Build a fake Ad4mClient with controllable agent methods. */
+function makeMockAd4mClient(agentMethods: {
+  status: ReturnType<typeof vi.fn>;
+  generate?: ReturnType<typeof vi.fn>;
+  unlock?: ReturnType<typeof vi.fn>;
+}) {
+  return {
+    agent: {
+      status: agentMethods.status,
+      generate: agentMethods.generate ?? vi.fn(),
+      unlock: agentMethods.unlock ?? vi.fn(),
+    },
+  };
+}
+
 import {
   generateRandomPassphrase,
   getPluginDataPath,
@@ -26,6 +41,7 @@ import {
   findExecutorBinary,
   isExecutorRunning,
   ensureExecutorRunning,
+  ensureAgentReady,
   stopExecutor,
   parseSSEStream,
   mcpRequest,
@@ -564,6 +580,272 @@ describe("stopExecutor", () => {
   it("accepts an optional logger parameter", () => {
     const logger = makeMockLogger();
     expect(() => stopExecutor(logger)).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ensureAgentReady
+// ---------------------------------------------------------------------------
+
+describe("ensureAgentReady", () => {
+  it("returns DID when agent is already initialized and unlocked", async () => {
+    const mockStatus = vi.fn().mockResolvedValue({
+      isInitialized: true,
+      isUnlocked: true,
+      did: "did:key:z6MkAlreadyReady",
+    });
+    const mockGenerate = vi.fn();
+    const mockUnlock = vi.fn();
+    const client = makeMockAd4mClient({
+      status: mockStatus,
+      generate: mockGenerate,
+      unlock: mockUnlock,
+    });
+
+    const logger = makeMockLogger();
+    const result = await ensureAgentReady(
+      "ws://localhost:12100/graphql",
+      "test-cred",
+      logger,
+      undefined,
+      client,
+    );
+
+    expect(result).toBe("did:key:z6MkAlreadyReady");
+    expect(mockGenerate).not.toHaveBeenCalled();
+    expect(mockUnlock).not.toHaveBeenCalled();
+
+    const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
+    expect(msgs.some((m: string) => m.includes("Agent is ready"))).toBe(true);
+  });
+
+  it("generates new agent on first run and returns DID", async () => {
+    let callCount = 0;
+    const mockStatus = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return { isInitialized: false, isUnlocked: false, did: "" };
+      }
+      return {
+        isInitialized: true,
+        isUnlocked: true,
+        did: "did:key:z6MkNewAgent",
+      };
+    });
+    const mockGenerate = vi.fn().mockResolvedValue(undefined);
+    const client = makeMockAd4mClient({
+      status: mockStatus,
+      generate: mockGenerate,
+    });
+
+    const logger = makeMockLogger();
+    const result = await ensureAgentReady(
+      "ws://localhost:12100/graphql",
+      "test-cred",
+      logger,
+      undefined,
+      client,
+    );
+
+    expect(result).toBe("did:key:z6MkNewAgent");
+    expect(mockGenerate).toHaveBeenCalledOnce();
+
+    const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
+    expect(
+      msgs.some((m: string) => m.includes("generating new agent")),
+    ).toBe(true);
+    expect(
+      msgs.some((m: string) => m.includes("generated successfully")),
+    ).toBe(true);
+
+    // Passphrase should have been stored
+    const stored = getStoredPassphrase();
+    expect(stored).toBeTruthy();
+  });
+
+  it("unlocks agent with stored passphrase and returns DID", async () => {
+    storePassphrase("test-stored-passphrase");
+
+    let callCount = 0;
+    const mockStatus = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return { isInitialized: true, isUnlocked: false, did: "did:key:z6MkLocked" };
+      }
+      return {
+        isInitialized: true,
+        isUnlocked: true,
+        did: "did:key:z6MkLocked",
+      };
+    });
+    const mockUnlock = vi.fn().mockResolvedValue(undefined);
+    const client = makeMockAd4mClient({
+      status: mockStatus,
+      unlock: mockUnlock,
+    });
+
+    const logger = makeMockLogger();
+    const result = await ensureAgentReady(
+      "ws://localhost:12100/graphql",
+      "test-cred",
+      logger,
+      undefined,
+      client,
+    );
+
+    expect(result).toBe("did:key:z6MkLocked");
+    expect(mockUnlock).toHaveBeenCalledWith("test-stored-passphrase");
+
+    const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
+    expect(
+      msgs.some((m: string) => m.includes("unlocked successfully")),
+    ).toBe(true);
+  });
+
+  it("uses agentPassphrase from config over stored passphrase for unlock", async () => {
+    storePassphrase("stored-passphrase");
+
+    let callCount = 0;
+    const mockStatus = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return { isInitialized: true, isUnlocked: false, did: "did:key:z6MkLocked" };
+      }
+      return { isInitialized: true, isUnlocked: true, did: "did:key:z6MkLocked" };
+    });
+    const mockUnlock = vi.fn().mockResolvedValue(undefined);
+    const client = makeMockAd4mClient({
+      status: mockStatus,
+      unlock: mockUnlock,
+    });
+
+    const logger = makeMockLogger();
+    const result = await ensureAgentReady(
+      "ws://localhost:12100/graphql",
+      "test-cred",
+      logger,
+      "config-passphrase",
+      client,
+    );
+
+    expect(result).toBe("did:key:z6MkLocked");
+    expect(mockUnlock).toHaveBeenCalledWith("config-passphrase");
+  });
+
+  it("returns null when agent is locked and no passphrase available", async () => {
+    try {
+      const dataPath = getPluginDataPath();
+      const file = path.join(dataPath, "agent.passphrase");
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    } catch {
+      // ignore
+    }
+
+    const mockStatus = vi.fn().mockResolvedValue({
+      isInitialized: true,
+      isUnlocked: false,
+      did: "did:key:z6MkLocked",
+    });
+    const mockUnlock = vi.fn();
+    const client = makeMockAd4mClient({
+      status: mockStatus,
+      unlock: mockUnlock,
+    });
+
+    const logger = makeMockLogger();
+    const result = await ensureAgentReady(
+      "ws://localhost:12100/graphql",
+      "test-cred",
+      logger,
+      undefined,
+      client,
+    );
+
+    expect(result).toBeNull();
+    expect(mockUnlock).not.toHaveBeenCalled();
+
+    const errorMsgs = logger.error.mock.calls.map((c: any[]) => c[0]);
+    expect(
+      errorMsgs.some((m: string) => m.includes("no passphrase available")),
+    ).toBe(true);
+  });
+
+  it("returns null when generate fails", async () => {
+    const mockStatus = vi.fn().mockResolvedValue({
+      isInitialized: false,
+      isUnlocked: false,
+      did: "",
+    });
+    const mockGenerate = vi.fn().mockRejectedValue(new Error("generate failed"));
+    const client = makeMockAd4mClient({
+      status: mockStatus,
+      generate: mockGenerate,
+    });
+
+    const logger = makeMockLogger();
+    const result = await ensureAgentReady(
+      "ws://localhost:12100/graphql",
+      "test-cred",
+      logger,
+      undefined,
+      client,
+    );
+
+    expect(result).toBeNull();
+    const errorMsgs = logger.error.mock.calls.map((c: any[]) => c[0]);
+    expect(
+      errorMsgs.some((m: string) => m.includes("Failed to generate agent")),
+    ).toBe(true);
+  });
+
+  it("returns null when unlock fails", async () => {
+    storePassphrase("test-passphrase");
+
+    const mockStatus = vi.fn().mockResolvedValue({
+      isInitialized: true,
+      isUnlocked: false,
+      did: "did:key:z6MkLocked",
+    });
+    const mockUnlock = vi.fn().mockRejectedValue(new Error("wrong passphrase"));
+    const client = makeMockAd4mClient({
+      status: mockStatus,
+      unlock: mockUnlock,
+    });
+
+    const logger = makeMockLogger();
+    const result = await ensureAgentReady(
+      "ws://localhost:12100/graphql",
+      "test-cred",
+      logger,
+      undefined,
+      client,
+    );
+
+    expect(result).toBeNull();
+    const errorMsgs = logger.error.mock.calls.map((c: any[]) => c[0]);
+    expect(
+      errorMsgs.some((m: string) => m.includes("Failed to unlock agent")),
+    ).toBe(true);
+  });
+
+  it("returns null when agent.status() throws", async () => {
+    const mockStatus = vi.fn().mockRejectedValue(new Error("connection refused"));
+    const client = makeMockAd4mClient({ status: mockStatus });
+
+    const logger = makeMockLogger();
+    const result = await ensureAgentReady(
+      "ws://localhost:12100/graphql",
+      "test-cred",
+      logger,
+      undefined,
+      client,
+    );
+
+    expect(result).toBeNull();
+    const errorMsgs = logger.error.mock.calls.map((c: any[]) => c[0]);
+    expect(
+      errorMsgs.some((m: string) => m.includes("Failed to get agent status")),
+    ).toBe(true);
   });
 });
 
@@ -1243,11 +1525,18 @@ describe("ad4mPlugin", () => {
     const knownCred = "known-test-cred-" + Date.now();
     storeAdminCredential(knownCred);
 
-    // In managed mode, isExecutorRunning will be called via ensureExecutorRunning
-    // Mock fetch to simulate executor already running
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      fakeJsonResponse({ jsonrpc: "2.0", id: 0, result: {} }),
-    );
+    // In managed mode, isExecutorRunning will be called via ensureExecutorRunning.
+    // Mock fetch to fail (executor not running), and mock spawn to fail immediately.
+    // This way ensureExecutorRunning returns false and ensureAgentReady is never called,
+    // avoiding real WS connections.
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const fakeProc = createFakeChildProcess();
+    mockSpawn.mockReturnValue(fakeProc as any);
+    // Trigger immediate spawn failure
+    setTimeout(() => {
+      fakeProc.emit("error", new Error("spawn ad4m-executor ENOENT"));
+    }, 50);
 
     const mockApi = {
       pluginConfig: {
@@ -1275,7 +1564,7 @@ describe("ad4mPlugin", () => {
     } catch {
       // ignore
     }
-  });
+  }, 10000);
 
   it("refreshTools recovers from 422 by re-initializing session", async () => {
     const registeredTools: Array<{ name: string; execute: Function }> = [];

@@ -21,6 +21,10 @@
         "type": "string",
         "description": "Admin credential for the AD4M executor (auto-generated in managed mode)"
       },
+      "agentPassphrase": {
+        "type": "string",
+        "description": "Passphrase for the AD4M agent identity (auto-generated on first run, stored for reuse)"
+      },
       "ad4mBinaryPath": {
         "type": "string",
         "description": "Full path to the ad4m-executor binary (e.g. /usr/local/bin/ad4m-executor). Only needed if ad4m-executor is not in PATH."
@@ -65,6 +69,10 @@
     },
     "adminCredential": {
       "label": "Admin Credential",
+      "sensitive": true
+    },
+    "agentPassphrase": {
+      "label": "Agent Passphrase",
       "sensitive": true
     },
     "ad4mBinaryPath": {

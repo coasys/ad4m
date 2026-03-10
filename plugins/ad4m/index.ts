@@ -359,6 +359,144 @@ export interface WakerSubscription {
 }
 
 // ---------------------------------------------------------------------------
+// Agent management (generate / unlock)
+// ---------------------------------------------------------------------------
+
+/**
+ * Ensure the AD4M agent is initialized and unlocked.
+ *
+ * Creates a temporary GraphQL WS connection to the executor, checks agent
+ * status, and generates (first run) or unlocks (subsequent runs) as needed.
+ *
+ * Returns the agent DID on success, or null if agent management failed.
+ */
+export async function ensureAgentReady(
+  executorWsUrl: string,
+  adminCredential: string,
+  logger: any,
+  agentPassphrase?: string,
+  /** @internal — pass a pre-built Ad4mClient for testing */
+  _testClient?: any,
+): Promise<string | null> {
+  let wsClient: any = null;
+  try {
+    let client: any;
+
+    if (_testClient) {
+      client = _testClient;
+    } else {
+      const { Ad4mClient } = require("@coasys/ad4m");
+      const { ApolloClient, InMemoryCache } = require("@apollo/client/core");
+      const { GraphQLWsLink } = require("@apollo/client/link/subscriptions");
+      const { createClient } = require("graphql-ws");
+      const WebSocket = require("ws");
+
+      logger.info(`[ad4m] Connecting to executor at ${executorWsUrl} for agent management...`);
+
+      wsClient = createClient({
+        url: executorWsUrl,
+        webSocketImpl: WebSocket,
+        connectionParams: adminCredential
+          ? { headers: { authorization: adminCredential } }
+          : {},
+        retryAttempts: 3,
+        retryWait: async (retries: number) => {
+          const delay = Math.min(1000 * Math.pow(2, retries), 5000);
+          await new Promise((r: any) => setTimeout(r, delay));
+        },
+      });
+
+      const wsLink = new GraphQLWsLink(wsClient);
+      const apolloClient = new ApolloClient({
+        link: wsLink,
+        cache: new InMemoryCache(),
+        defaultOptions: {
+          watchQuery: { fetchPolicy: "no-cache" },
+          query: { fetchPolicy: "no-cache" },
+          mutate: { fetchPolicy: "no-cache" },
+        },
+      });
+
+      client = new Ad4mClient(apolloClient);
+    }
+
+    // Check agent status
+    let agentStatus;
+    try {
+      agentStatus = await client.agent.status();
+      logger.info(
+        `[ad4m] Agent status: initialized=${agentStatus.isInitialized}, unlocked=${agentStatus.isUnlocked}`,
+      );
+    } catch (e: any) {
+      logger.error(`[ad4m] Failed to get agent status: ${e.message}`);
+      return null;
+    }
+
+    if (!agentStatus.isInitialized) {
+      // First run — generate new agent
+      const passphrase = agentPassphrase || generateRandomPassphrase(32);
+      logger.info(`[ad4m] Agent not initialized, generating new agent...`);
+      try {
+        await client.agent.generate(passphrase);
+        storePassphrase(passphrase);
+        // Re-fetch status to get the DID
+        const newStatus = await client.agent.status();
+        logger.info(
+          `[ad4m] Agent generated successfully. DID: ${newStatus.did}`,
+        );
+        return newStatus.did;
+      } catch (e: any) {
+        logger.error(`[ad4m] Failed to generate agent: ${e.message}`);
+        return null;
+      }
+    } else if (agentStatus.isUnlocked === false) {
+      // Previously initialized but locked — try to unlock
+      const passphrase =
+        agentPassphrase || getStoredPassphrase();
+      if (passphrase) {
+        logger.info(`[ad4m] Agent is locked, attempting to unlock...`);
+        try {
+          await client.agent.unlock(passphrase);
+          const newStatus = await client.agent.status();
+          logger.info(`[ad4m] Agent unlocked successfully. DID: ${newStatus.did}`);
+          return newStatus.did;
+        } catch (e: any) {
+          logger.error(`[ad4m] Failed to unlock agent: ${e.message}`);
+          logger.warn(
+            `[ad4m] You may need to provide the correct agentPassphrase in config or reconfigure.`,
+          );
+          return null;
+        }
+      } else {
+        logger.error(
+          `[ad4m] Agent is locked but no passphrase available. Set agentPassphrase in plugin config.`,
+        );
+        return null;
+      }
+    } else {
+      // Already initialized and unlocked
+      logger.info(`[ad4m] Agent is ready. DID: ${agentStatus.did}`);
+      return agentStatus.did;
+    }
+  } catch (err: any) {
+    logger.error(`[ad4m] Agent management failed: ${err.message}`);
+    logger.error(
+      `[ad4m] Make sure @coasys/ad4m and dependencies are installed (npm install in the plugin directory).`,
+    );
+    return null;
+  } finally {
+    // Clean up temporary WS connection
+    if (wsClient) {
+      try {
+        wsClient.dispose();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // MCP HTTP Client (Streamable HTTP with SSE support)
 // ---------------------------------------------------------------------------
 
@@ -684,6 +822,7 @@ export default async function ad4mPlugin(api: any) {
   // Determine auth token based on mode
   let adminCredential: string | undefined;
   let authToken: string;
+  let pluginAgentDid: string = "";
 
   if (mode === "external") {
     // External mode: use provided credential as-is (may be empty - uses JWT flow)
@@ -745,6 +884,21 @@ export default async function ad4mPlugin(api: any) {
       logger.error(
         `[ad4m] Failed to start executor in managed mode. Set ad4mBinaryPath in plugin config if ad4m-executor is not in PATH.`,
       );
+    } else {
+      // Executor is running — ensure agent is generated/unlocked
+      const agentDid = await ensureAgentReady(
+        executorWsUrl,
+        adminCredential,
+        logger,
+        providedConfig.agentPassphrase,
+      );
+      if (agentDid) {
+        pluginAgentDid = agentDid;
+      } else {
+        logger.error(
+          `[ad4m] Agent management failed. MCP tools and waker will not work correctly.`,
+        );
+      }
     }
   }
 
@@ -826,7 +980,6 @@ Notes:
 
   // -- Waker state --
   let wakerClient: any = null;
-  let wakerAgentDid = "";
   const wakerProxies = new Map<string, any>(); // id -> QuerySubscriptionProxy
   const wakerDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const wakerSubscriptions = new Map<string, WakerSubscription>();
@@ -1042,7 +1195,7 @@ Notes:
       wakerDebounceTimers.set(
         sub.id,
         setTimeout(() => {
-          postWake(config, sub, wakerAgentDid, logger, parentChannel);
+          postWake(config, sub, pluginAgentDid, logger, parentChannel);
           wakerDebounceTimers.delete(sub.id);
         }, debounceMs),
       );
@@ -1467,62 +1620,17 @@ Notes:
 
         wakerClient = new Ad4mClient(apolloClient);
 
-        // Check agent status and manage if needed
-        let agentStatus;
-        try {
-          agentStatus = await wakerClient.agent.status();
-          logger.info(
-            `[ad4m-waker] Agent status: initialized=${agentStatus.isInitialized}, unlocked=${agentStatus.isUnlocked}`,
-          );
-        } catch (e: any) {
-          logger.error(`[ad4m-waker] Failed to get agent status: ${e.message}`);
-          throw e;
-        }
-
-        // Agent management: generate or unlock as needed
-        if (!agentStatus.isInitialized) {
-          // First run - generate new agent
-          const passphrase = generateRandomPassphrase(32);
-          logger.info(
-            `[ad4m-waker] Agent not initialized, generating new agent...`,
-          );
-          try {
-            await wakerClient.agent.generate(passphrase);
-            storePassphrase(passphrase);
-            logger.info(
-              `[ad4m-waker] Agent generated successfully. DID: ${agentStatus.did}`,
-            );
-          } catch (e: any) {
-            logger.error(`[ad4m-waker] Failed to generate agent: ${e.message}`);
-          }
-        } else if (agentStatus.isLocked) {
-          // Previously initialized but locked - try to unlock
-          const passphrase = getStoredPassphrase();
-          if (passphrase) {
-            logger.info(
-              `[ad4m-waker] Agent is locked, attempting to unlock...`,
-            );
-            try {
-              await wakerClient.agent.unlock(passphrase);
-              logger.info(`[ad4m-waker] Agent unlocked successfully.`);
-            } catch (e: any) {
-              logger.error(`[ad4m-waker] Failed to unlock agent: ${e.message}`);
-              logger.warn(
-                `[ad4m-waker] You may need to provide the correct passphrase or reconfigure.`,
-              );
-            }
-          } else {
-            logger.warn(
-              `[ad4m-waker] Agent is locked but no passphrase stored. Please provide agentPassphrase in config or reinstall.`,
-            );
-          }
-        } else {
-          logger.info(`[ad4m-waker] Agent is ready.`);
-        }
-
-        // Verify connection + get agent DID
+        // Verify connection and get agent DID (agent should already be
+        // initialized/unlocked by ensureAgentReady during plugin init)
         const status = await wakerClient.agent.status();
-        wakerAgentDid = status.did;
+        if (!status.isInitialized || status.isUnlocked === false) {
+          logger.error(
+            `[ad4m-waker] Agent is not ready (initialized=${status.isInitialized}, unlocked=${status.isUnlocked}). Agent management should have run during plugin init.`,
+          );
+          wakerClient = null;
+          return;
+        }
+        pluginAgentDid = status.did;
         logger.info(
           `[ad4m-waker] Connected — agent: ${status.did.substring(0, 40)}...`,
         );
@@ -1539,7 +1647,6 @@ Notes:
         disposeLiveSubscription(id);
       }
       wakerClient = null;
-      wakerAgentDid = "";
       logger.info("[ad4m-waker] Waker service stopped");
     },
   });
