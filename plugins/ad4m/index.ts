@@ -16,7 +16,7 @@
 
 import path from "path";
 import fs from "fs";
-import { spawn, ChildProcess } from "child_process";
+import { spawn, execFileSync, ChildProcess } from "child_process";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -204,6 +204,7 @@ export function findExecutorBinary(): string | null {
 // ---------------------------------------------------------------------------
 
 let executorProcess: ReturnType<typeof spawn> | null = null;
+let executorLogStream: fs.WriteStream | null = null;
 
 export function isExecutorRunning(
   endpoint: string,
@@ -258,6 +259,43 @@ export async function ensureExecutorRunning(
   logger.info(`[ad4m] Using binary: ${executorPath}`);
   logger.info(`[ad4m] PATH: ${process.env.PATH ?? "(unset)"}`);
 
+  // Check if executor needs initialization (first run)
+  const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
+  const ad4mDir = path.join(home, ".ad4m");
+  const seedFile = path.join(ad4mDir, "mainnet_seed.seed");
+
+  if (!fs.existsSync(seedFile)) {
+    logger.info(
+      `[ad4m] Seed file not found at ${seedFile} — running init...`,
+    );
+    try {
+      execFileSync(executorPath, ["init"], {
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 30000,
+      });
+      logger.info(`[ad4m] Executor initialized successfully`);
+    } catch (initErr: any) {
+      logger.error(`[ad4m] Executor init failed: ${initErr.message}`);
+      if (initErr.stderr) {
+        logger.error(
+          `[ad4m] init stderr: ${initErr.stderr.toString().trim()}`,
+        );
+      }
+      return false;
+    }
+  }
+
+  // Open log file for tee-ing stdout/stderr
+  const logFilePath = path.join(ad4mDir, "ad4m.log");
+  try {
+    if (!fs.existsSync(ad4mDir)) {
+      fs.mkdirSync(ad4mDir, { recursive: true });
+    }
+    executorLogStream = fs.createWriteStream(logFilePath, { flags: "a" });
+    logger.info(`[ad4m] Logging executor output to ${logFilePath}`);
+  } catch (logErr: any) {
+    logger.warn(`[ad4m] Could not open log file ${logFilePath}: ${logErr.message}`);
+  }
 
   try {
     // Track whether spawn itself failed (ENOENT, permission error, etc.)
@@ -283,11 +321,15 @@ export async function ensureExecutorRunning(
     );
 
     executorProcess.stdout?.on("data", (data: Buffer) => {
-      logger.info(`[ad4m-executor] ${data.toString().trim()}`);
+      const line = data.toString().trim();
+      logger.info(`[ad4m-executor] ${line}`);
+      if (executorLogStream) executorLogStream.write(`${new Date().toISOString()} [stdout] ${line}\n`);
     });
 
     executorProcess.stderr?.on("data", (data: Buffer) => {
-      logger.info(`[ad4m-executor] ${data.toString().trim()}`);
+      const line = data.toString().trim();
+      logger.info(`[ad4m-executor] ${line}`);
+      if (executorLogStream) executorLogStream.write(`${new Date().toISOString()} [stderr] ${line}\n`);
     });
 
     executorProcess.on("error", (err: Error) => {
@@ -295,6 +337,7 @@ export async function ensureExecutorRunning(
       spawnError = err.message;
       logger.error(`[ad4m] Failed to start executor: ${err.message}`);
       logger.error(`[ad4m] PATH: ${process.env.PATH ?? "(unset)"}`);
+      if (executorLogStream) { executorLogStream.end(); executorLogStream = null; }
       executorProcess = null;
     });
 
@@ -304,6 +347,7 @@ export async function ensureExecutorRunning(
         spawnFailed = true;
         spawnError = `Executor exited with code ${code}`;
       }
+      if (executorLogStream) { executorLogStream.end(); executorLogStream = null; }
       executorProcess = null;
     });
 
@@ -346,6 +390,10 @@ export function stopExecutor(logger?: any): void {
     executorProcess.kill("SIGTERM");
     executorProcess = null;
     if (logger) logger.info(`[ad4m] Executor stopped`);
+  }
+  if (executorLogStream) {
+    executorLogStream.end();
+    executorLogStream = null;
   }
 }
 

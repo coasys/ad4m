@@ -5,12 +5,12 @@ import os from "os";
 import { EventEmitter } from "events";
 
 // Mock child_process before any imports that use it
-const { mockSpawn } = vi.hoisted(() => {
-  return { mockSpawn: vi.fn() };
+const { mockSpawn, mockExecFileSync } = vi.hoisted(() => {
+  return { mockSpawn: vi.fn(), mockExecFileSync: vi.fn() };
 });
 vi.mock("child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("child_process")>();
-  return { ...actual, spawn: mockSpawn };
+  return { ...actual, spawn: mockSpawn, execFileSync: mockExecFileSync };
 });
 
 /** Build a fake Ad4mClient with controllable agent methods. */
@@ -564,6 +564,178 @@ describe("ensureExecutorRunning", () => {
       expect.any(Array),
       expect.any(Object),
     );
+  }, 10000);
+
+  it("runs ad4m-executor init when seed file is missing", async () => {
+    const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
+    const seedFile = path.join(home, ".ad4m", "mainnet_seed.seed");
+    const backupFile = seedFile + ".test-backup";
+    let hadSeedFile = false;
+
+    // Temporarily move seed file out of the way
+    if (fs.existsSync(seedFile)) {
+      hadSeedFile = true;
+      fs.renameSync(seedFile, backupFile);
+    }
+
+    try {
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(
+        new Error("ECONNREFUSED"),
+      );
+      // Make init succeed (execFileSync mock does nothing = success)
+      mockExecFileSync.mockReturnValue(Buffer.from(""));
+
+      const fakeProc = createFakeChildProcess();
+      mockSpawn.mockReturnValue(fakeProc as any);
+
+      const logger = makeMockLogger();
+      const resultPromise = ensureExecutorRunning("cred", logger);
+
+      setTimeout(() => {
+        fakeProc.emit("error", new Error("spawn ENOENT"));
+      }, 100);
+
+      await resultPromise;
+
+      // Should have called execFileSync with init
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        "ad4m-executor",
+        ["init"],
+        expect.any(Object),
+      );
+
+      // Should have logged about running init
+      const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
+      expect(
+        msgs.some((m: string) => m.includes("running init")),
+      ).toBe(true);
+    } finally {
+      // Restore seed file
+      if (hadSeedFile && fs.existsSync(backupFile)) {
+        fs.renameSync(backupFile, seedFile);
+      }
+      mockExecFileSync.mockReset();
+    }
+  }, 10000);
+
+  it("returns false when ad4m-executor init fails", async () => {
+    const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
+    const seedFile = path.join(home, ".ad4m", "mainnet_seed.seed");
+    const backupFile = seedFile + ".test-backup";
+    let hadSeedFile = false;
+
+    if (fs.existsSync(seedFile)) {
+      hadSeedFile = true;
+      fs.renameSync(seedFile, backupFile);
+    }
+
+    try {
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(
+        new Error("ECONNREFUSED"),
+      );
+      // Make init fail
+      mockExecFileSync.mockImplementation(() => {
+        const err: any = new Error("init crashed");
+        err.stderr = Buffer.from("segfault");
+        throw err;
+      });
+
+      const logger = makeMockLogger();
+      const result = await ensureExecutorRunning("cred", logger);
+
+      expect(result).toBe(false);
+
+      const errorMsgs = logger.error.mock.calls.map((c: any[]) => c[0]);
+      expect(
+        errorMsgs.some((m: string) => m.includes("init failed")),
+      ).toBe(true);
+
+      // spawn should NOT have been called (init failed before spawn)
+      expect(mockSpawn).not.toHaveBeenCalled();
+    } finally {
+      if (hadSeedFile && fs.existsSync(backupFile)) {
+        fs.renameSync(backupFile, seedFile);
+      }
+      mockExecFileSync.mockReset();
+    }
+  }, 10000);
+
+  it("skips init when seed file exists", async () => {
+    // The seed file should exist on this machine (or we create it)
+    const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
+    const ad4mDir = path.join(home, ".ad4m");
+    const seedFile = path.join(ad4mDir, "mainnet_seed.seed");
+    let createdSeedFile = false;
+
+    if (!fs.existsSync(seedFile)) {
+      if (!fs.existsSync(ad4mDir)) fs.mkdirSync(ad4mDir, { recursive: true });
+      fs.writeFileSync(seedFile, "test-seed-content");
+      createdSeedFile = true;
+    }
+
+    try {
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(
+        new Error("ECONNREFUSED"),
+      );
+
+      const fakeProc = createFakeChildProcess();
+      mockSpawn.mockReturnValue(fakeProc as any);
+
+      const logger = makeMockLogger();
+      const resultPromise = ensureExecutorRunning("cred", logger);
+
+      setTimeout(() => {
+        fakeProc.emit("error", new Error("spawn ENOENT"));
+      }, 100);
+
+      await resultPromise;
+
+      // execFileSync should NOT have been called (seed exists, no init needed)
+      expect(mockExecFileSync).not.toHaveBeenCalled();
+
+      // Should NOT have logged about running init
+      const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
+      expect(
+        msgs.some((m: string) => m.includes("running init")),
+      ).toBe(false);
+    } finally {
+      if (createdSeedFile && fs.existsSync(seedFile)) {
+        fs.unlinkSync(seedFile);
+      }
+      mockExecFileSync.mockReset();
+    }
+  }, 10000);
+
+  it("logs executor output to ~/.ad4m/ad4m.log", async () => {
+    const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
+    const logFile = path.join(home, ".ad4m", "ad4m.log");
+
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("ECONNREFUSED"),
+    );
+
+    const fakeProc = createFakeChildProcess();
+    mockSpawn.mockReturnValue(fakeProc as any);
+
+    const logger = makeMockLogger();
+    const resultPromise = ensureExecutorRunning("cred", logger);
+
+    // Emit some output then fail
+    setTimeout(() => {
+      fakeProc.stdout.emit("data", Buffer.from("test log line\n"));
+      fakeProc.stderr.emit("data", Buffer.from("test error line\n"));
+    }, 50);
+    setTimeout(() => {
+      fakeProc.emit("error", new Error("spawn ENOENT"));
+    }, 200);
+
+    await resultPromise;
+
+    // Logger should mention the log file
+    const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
+    expect(
+      msgs.some((m: string) => m.includes("ad4m.log")),
+    ).toBe(true);
   }, 10000);
 });
 
