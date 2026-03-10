@@ -44,11 +44,11 @@ out->link[WHERE predicate = 'flux://entry_type'][0].out.uri
 **Key Functions**:
 - `fn::parse_literal(uri)` - Extract values from AD4M literal URIs (handles `literal://string:`, `literal://number:`, `literal://json:`, etc.)
 
-**Indexed Fields** (fast):
-- `in.uri` - Source node of link
-- `out.uri` - Target node of link
-- `predicate` - Link predicate
-- `source`, `target` - String representations (also indexed)
+**Fields & Indexes**:
+- `predicate` — Indexed independently and in composites
+- `source`, `target` — Indexed independently and in composites with `predicate`
+- `(in, predicate)`, `(out, predicate)` — Composite indexes (pair `in.uri`/`out.uri` with `predicate` for best performance)
+- `in.uri`, `out.uri` — Graph edge references, resolved via the node table's unique URI index (not independently indexed on the link table)
 
 ## Direct SurrealDB Queries
 
@@ -104,13 +104,19 @@ const uniqueSources = await perspective.querySurrealDB(
 // uniqueSources.length gives you the count of unique sources
 ```
 
-## Graph Traversal Queries
+## Graph Traversal
 
-SurrealDB uses efficient graph traversal with indexed node lookups. The key is to use **direct field comparisons** rather than subqueries for optimal performance.
+SurrealDB stores links as graph edges with indexed source and target node references, enabling efficient multi-hop traversal. See the [Quick Reference](#quick-reference-graph-traversal-syntax) above for the full syntax.
 
-### ⚠️ Performance Warning: Avoid Subqueries
+**Key fields**:
+- `in.uri` — Source node (where the edge comes FROM). Composite-indexed with `predicate`
+- `out.uri` — Target node (where the edge goes TO). Composite-indexed with `predicate`
+- `predicate` — Link predicate (independently indexed)
+- `source` / `target` — String representations (independently indexed, plus composite with `predicate`)
 
-**Important**: Subqueries (using `IN (SELECT ...)`) can be very slow, especially with large datasets. Instead, use the graph traversal operator (`->`) which is optimized and uses indexed lookups.
+### ⚠️ Avoid Subqueries
+
+Subqueries (`IN (SELECT ...)`) can be very slow. Use the `->` traversal operator instead:
 
 ```typescript
 // ❌ SLOW - Uses subquery
@@ -124,68 +130,62 @@ const good = await perspective.querySurrealDB(
 );
 ```
 
-### Graph Traversal Operators
-
-SurrealDB stores links as graph edges with indexed source (`in.uri`) and target (`out.uri`) node references:
-
-- `in.uri` - The source node of the link (where the edge comes FROM)
-- `out.uri` - The target node of the link (where the edge goes TO)  
-- `source` / `target` - String fields (also available for simple filtering)
-
-### Forward Traversal (Outgoing Links)
+### Basic Traversal
 
 ```typescript
-// Find all users that Alice follows
+// Forward: Find all users that Alice follows
 const aliceFollows = await perspective.querySurrealDB(
   "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'follows'"
 );
 
-// Find all posts by Alice
-const alicePosts = await perspective.querySurrealDB(
-  "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'author'"
-);
-```
-
-### Reverse Traversal (Incoming Links)
-
-```typescript
-// Find all users who follow Alice (followers)
+// Reverse: Find all users who follow Alice
 const aliceFollowers = await perspective.querySurrealDB(
   "SELECT source FROM link WHERE out.uri = 'user://alice' AND predicate = 'follows'"
 );
 
-// Find all posts that mention Alice
-const mentionsAlice = await perspective.querySurrealDB(
-  "SELECT source FROM link WHERE out.uri = 'user://alice' AND predicate = 'mentions'"
-);
-```
-
-### Bidirectional Queries
-
-```typescript
-// Find all users connected to Alice (either following or followed by)
+// Bidirectional: All connections involving Alice
 const aliceConnections = await perspective.querySurrealDB(
   "SELECT source, target FROM link WHERE (in.uri = 'user://alice' OR out.uri = 'user://alice') AND predicate = 'follows'"
 );
 ```
 
-### Multi-Hop Traversal with Graph Operators
+### Filtering
+
+```typescript
+// By timestamp range
+const recentLinks = await perspective.querySurrealDB(
+  "SELECT * FROM link WHERE in.uri = 'user://alice' AND timestamp > '2024-01-01T00:00:00Z' AND timestamp < '2024-12-31T23:59:59Z'"
+);
+
+// By author
+const bobsLinks = await perspective.querySurrealDB(
+  "SELECT * FROM link WHERE author = 'did:key:bob' AND predicate = 'posted'"
+);
+
+// Filter on multi-hop properties (find children of a specific type)
+const subgroups = await perspective.querySurrealDB(`
+  SELECT out.uri AS subgroup
+  FROM link
+  WHERE in.uri = 'conversation://456'
+    AND predicate = 'ad4m://has_child'
+    AND out->link[WHERE predicate = 'flux://entry_type'][0].out.uri = 'flux://conversation_subgroup'
+`);
+```
+
+### Multi-Hop Traversal
 
 Use the `->` operator to traverse multiple hops in a single efficient query:
 
 ```typescript
-// Find friends of friends (2-hop traversal)
-// Traverse: Alice -> Friends -> Their Friends
-// Note: Use GROUP BY instead of DISTINCT for unique results
+// 2-hop: Friends of friends
 const friendsOfFriends = await perspective.querySurrealDB(`
   SELECT out->link[WHERE predicate = 'follows'].out.uri AS friend_of_friend
   FROM link
   WHERE in.uri = 'user://alice' AND predicate = 'follows'
 `);
-// Deduplicate in JavaScript if needed: [...new Set(friendsOfFriends.map(f => f.friend_of_friend))]
+// Deduplicate in JS: [...new Set(friendsOfFriends.map(f => f.friend_of_friend))]
 
-// Get user profiles 2 hops away
-// Traverse: User -> Follows -> Profile
+// 2-hop: User profiles via follows
 const profiles = await perspective.querySurrealDB(`
   SELECT 
     out.uri AS user,
@@ -193,11 +193,20 @@ const profiles = await perspective.querySurrealDB(`
   FROM link
   WHERE in.uri = 'user://alice' AND predicate = 'follows'
 `);
+
+// 2-hop: Child items with their types
+const childTypes = await perspective.querySurrealDB(`
+  SELECT 
+    out.uri AS child,
+    out->link[WHERE predicate = 'flux://entry_type'][0].out.uri AS type
+  FROM link
+  WHERE in.uri = 'parent://123' AND predicate = 'ad4m://has_child'
+`);
 ```
 
-### Chaining Multiple Traversals
+### Chaining Traversals
 
-You can chain `->` operators for deeper traversals:
+Chain `->` operators for deeper patterns:
 
 ```typescript
 // 3-hop: Conversation -> Subgroup -> Items -> Get item types
@@ -210,15 +219,8 @@ const itemTypes = await perspective.querySurrealDB(`
     AND predicate = 'ad4m://has_child'
     AND out->link[WHERE predicate = 'flux://entry_type'][0].out.uri = 'flux://conversation_subgroup'
 `);
-```
 
-### Complex Graph Patterns
-
-Use graph traversal for complex multi-hop patterns:
-
-```typescript
-// Find all comments on Alice's posts (2-hop)
-// Traverse: Alice -> Posts (authored) -> Comments (has_comment)
+// 2-hop: Comments on Alice's posts
 const commentsOnAlicePosts = await perspective.querySurrealDB(`
   SELECT 
     out.uri AS post,
@@ -227,8 +229,7 @@ const commentsOnAlicePosts = await perspective.querySurrealDB(`
   WHERE in.uri = 'user://alice' AND predicate = 'authored'
 `);
 
-// Get all reactions to posts by people Alice follows (3-hop)
-// Traverse: Alice -> Follows -> Posts -> Reactions
+// 3-hop: Reactions to posts by people Alice follows
 const reactions = await perspective.querySurrealDB(`
   SELECT 
     out.uri AS followed_user,
@@ -239,80 +240,18 @@ const reactions = await perspective.querySurrealDB(`
 `);
 ```
 
-### Filtering by Properties
+### Parsing Literal Values
+
+AD4M stores values as literal URIs. Use `fn::parse_literal()` to extract them:
+
+| Literal URI | Parsed Value |
+|-------------|-------------|
+| `literal://string:Hello` | `"Hello"` |
+| `literal://number:42` | `42` |
+| `literal://boolean:true` | `true` |
+| `literal://json:{"data":"value"}` | extracts `.data` field |
 
 ```typescript
-// Find all links from Alice with a specific timestamp range
-const recentLinks = await perspective.querySurrealDB(
-  "SELECT * FROM link WHERE in.uri = 'user://alice' AND timestamp > '2024-01-01T00:00:00Z' AND timestamp < '2024-12-31T23:59:59Z'"
-);
-
-// Find links by author
-const bobsLinks = await perspective.querySurrealDB(
-  "SELECT * FROM link WHERE author = 'did:key:bob' AND predicate = 'posted'"
-);
-```
-
-## Advanced Graph Traversal Patterns
-
-For complex graph queries, SurrealDB provides powerful traversal operators that let you navigate multi-hop relationships in a single query.
-
-### The Graph Traversal Operator (`->`)
-
-The `->` operator allows you to traverse edges in your graph. Combined with filtering and array indexing, you can express complex patterns efficiently:
-
-**Syntax**: `node->link[WHERE condition][index].field`
-
-- `node->link` - Follow link edges from the node
-- `[WHERE condition]` - Filter the traversed links (optional)
-- `[index]` - Select a specific result (e.g., `[0]` for first, `[-1]` for last)
-- `.field` - Access a field from the result (e.g., `.out.uri` for target URI)
-
-### Multi-Hop Traversal Examples
-
-```typescript
-// Get the type of child items (2-hop traversal)
-// Traverse: Parent -> Child (via 'ad4m://has_child') -> Type (via 'flux://entry_type')
-const query = `
-  SELECT 
-    out.uri AS child,
-    out->link[WHERE predicate = 'flux://entry_type'][0].out.uri AS type
-  FROM link
-  WHERE in.uri = 'parent://123' 
-    AND predicate = 'ad4m://has_child'
-`;
-const results = await perspective.querySurrealDB(query);
-// Results include child URI and its type
-```
-
-### Filtering on Multi-Hop Properties
-
-You can filter based on properties several hops away:
-
-```typescript
-// Find all children that are of type 'conversation_subgroup'
-const subgroups = `
-  SELECT out.uri AS subgroup
-  FROM link
-  WHERE in.uri = 'conversation://456'
-    AND predicate = 'ad4m://has_child'
-    AND out->link[WHERE predicate = 'flux://entry_type'][0].out.uri = 'flux://conversation_subgroup'
-`;
-const results = await perspective.querySurrealDB(subgroups);
-```
-
-### The `fn::parse_literal()` Function
-
-AD4M provides a custom SurrealDB function to parse literal values. Literals in AD4M are stored as URIs like:
-- `literal://string:Hello` → `"Hello"`
-- `literal://number:42` → `42`
-- `literal://boolean:true` → `true`
-- `literal://json:{"data":"value"}` → `"value"` (extracts `.data` field)
-
-**Usage**:
-
-```typescript
-// Extract parsed values from literals
 const query = `
   SELECT 
     out.uri AS id,
@@ -320,19 +259,17 @@ const query = `
     fn::parse_literal(out->link[WHERE predicate = 'flux://body'][0].out.uri) AS body,
     fn::parse_literal(out->link[WHERE predicate = 'flux://count'][0].out.uri) AS count
   FROM link
-  WHERE in.uri = 'parent://789'
-    AND predicate = 'ad4m://has_child'
+  WHERE in.uri = 'parent://789' AND predicate = 'ad4m://has_child'
 `;
 const results = await perspective.querySurrealDB(query);
-// Results have parsed values: { id, title: "Hello", body: "World", count: 42 }
+// { id, title: "Hello", body: "World", count: 42 }
 ```
 
-### Real-World Example: Querying Messages with Metadata
+### Real-World Examples
 
-Here's a complete example showing how to query messages with their metadata:
+#### Messages with Metadata
 
 ```typescript
-// Get messages with type, body, and author information
 const messagesQuery = `
   SELECT
     out.uri AS id,
@@ -350,61 +287,15 @@ const messagesQuery = `
     )
   ORDER BY timestamp ASC
 `;
-
 const messages = await perspective.querySurrealDB(messagesQuery);
-// Each message includes: id, author, timestamp, type, messageBody, postTitle
 ```
 
-### Counting Nested Items
-
-Count items that match complex multi-hop conditions:
+#### Mixed Item Types with Metadata
 
 ```typescript
-// Count conversation subgroups
-const countQuery = `
-  SELECT count() AS count
-  FROM link
-  WHERE in.uri = 'conversation://abc'
-    AND predicate = 'ad4m://has_child'
-    AND out->link[WHERE predicate = 'flux://entry_type'][0].out.uri = 'flux://conversation_subgroup'
-`;
-
-const result = await perspective.querySurrealDB(countQuery);
-console.log(`Found ${result[0].count} subgroups`);
-```
-
-### Finding Unique Values Across Hops
-
-Get unique authors from items nested within subgroups:
-
-```typescript
-// Get unique participants from nested items
-// Traverse: Conversation -> Subgroups -> Items -> Extract unique authors
-const participantsQuery = `
-  SELECT VALUE author
-  FROM link
-  WHERE in.uri = 'conversation://xyz'
-    AND predicate = 'ad4m://has_child'
-    AND out->link[WHERE predicate = 'flux://entry_type'][0].out.uri = 'flux://conversation_subgroup'
-    AND out->link[WHERE predicate = 'ad4m://has_child'].author IS NOT NONE
-  GROUP BY author
-`;
-
-const participants = await perspective.querySurrealDB(participantsQuery);
-// Returns array of unique author DIDs
-```
-
-### Complex Multi-Condition Queries
-
-Combine multiple traversals and conditions:
-
-```typescript
-// Find all tasks, posts, and messages with their specific metadata
 const itemsQuery = `
   SELECT
-    out.uri AS item,
-    author,
-    timestamp,
+    out.uri AS item, author, timestamp,
     out->link[WHERE predicate = 'flux://entry_type'][0].out.uri AS type,
     fn::parse_literal(out->link[WHERE predicate = 'flux://body'][0].out.uri) AS messageBody,
     fn::parse_literal(out->link[WHERE predicate = 'flux://title'][0].out.uri) AS postTitle,
@@ -420,37 +311,41 @@ const itemsQuery = `
   ORDER BY timestamp DESC
   LIMIT 50
 `;
-
-const items = await perspective.querySurrealDB(itemsQuery);
-// Returns mixed items with appropriate metadata populated based on type
 ```
 
-### Performance Tips for Complex Queries
-
-1. **Index-Friendly Patterns**: Start with indexed fields (`in.uri`, `out.uri`, `predicate`)
-2. **Filter Within Traversals**: Use `->link[WHERE predicate = 'x']` to filter as you traverse
-3. **Array Indexing**: Use `[0]` to get first result efficiently, `[-1]` for last
-4. **Traversal Depth**: 2-4 hops perform well in a single query
-5. **Use IS NOT NONE**: Check for existence of traversed values to avoid errors
-6. **Combine Conditions**: Use AND/OR in WHERE clauses on final filtered results
-
-### Pattern Breakdown
-
-Understanding the query structure:
+#### Counting and Unique Values
 
 ```typescript
-// Pattern: node->link[filter][index].field
-out->link[WHERE predicate = 'flux://entry_type'][0].out.uri
+// Count conversation subgroups
+const countQuery = `
+  SELECT count() AS count
+  FROM link
+  WHERE in.uri = 'conversation://abc'
+    AND predicate = 'ad4m://has_child'
+    AND out->link[WHERE predicate = 'flux://entry_type'][0].out.uri = 'flux://conversation_subgroup'
+`;
+const result = await perspective.querySurrealDB(countQuery);
 
-// Breakdown:
-// 1. out                    - Start from the target node
-// 2. ->link                 - Follow link edges
-// 3. [WHERE predicate = ...]- Filter to specific predicate
-// 4. [0]                    - Take first matching link
-// 5. .out.uri               - Get the target URI of that link
+// Get unique participants from nested items
+const participantsQuery = `
+  SELECT VALUE author
+  FROM link
+  WHERE in.uri = 'conversation://xyz'
+    AND predicate = 'ad4m://has_child'
+    AND out->link[WHERE predicate = 'flux://entry_type'][0].out.uri = 'flux://conversation_subgroup'
+    AND out->link[WHERE predicate = 'ad4m://has_child'].author IS NOT NONE
+  GROUP BY author
+`;
 ```
 
-This pattern is equivalent to asking: "From this node, follow links with a specific predicate and tell me where they point."
+### Performance Tips
+
+1. **Start with indexed fields**: `predicate`, `source`, `target` are independently indexed; `in`/`out` are composite-indexed with `predicate`
+2. **Filter within traversals**: `->link[WHERE predicate = 'x']` filters as you traverse
+3. **Array indexing**: `[0]` for first, `[-1]` for last result
+4. **Traversal depth**: 2–4 hops perform well in a single query
+5. **Use IS NOT NONE**: Check existence of traversed values to avoid errors
+6. **Combine conditions**: AND/OR in WHERE clauses on final filtered results
 
 ## Using SurrealDB with Ad4mModel
 
@@ -738,7 +633,7 @@ const recipes = await Recipe.findAll(perspective, {
    
 8. **Profile Performance**: Use browser DevTools to measure query performance
    
-9. **Index Awareness**: The system automatically indexes `in.uri`, `out.uri`, `predicate`, `source`, and `target`
+9. **Index Awareness**: `predicate`, `source`, and `target` are independently indexed. `(in, predicate)` and `(out, predicate)` have composite indexes — always pair `in.uri`/`out.uri` with `predicate` for best performance
 
 10. **Traversal Depth**: You can safely traverse 2-4 hops in a single query with good performance
 

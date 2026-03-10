@@ -87,6 +87,11 @@ Register your model before use:
 await Recipe.register(perspective);
 ```
 
+<Callout type="warning" emoji="⚠️">
+  Always register your model classes with the perspective before use (typically once at app startup).
+  This installs the SHACL schema so that all consumers (JS, Rust, MCP, CLI) can discover and work with your model's shape.
+</Callout>
+
 ## Basic Concepts
 
 ### Properties
@@ -222,6 +227,111 @@ type: string = "";
 ```
 
 Attempting to update a flag after creation throws an error.
+
+## How It Works Under the Hood
+
+### Graph-Based Storage
+
+Each model instance is stored as a subgraph in an AD4M perspective. For example, our recipe is stored as:
+
+```
+recipe://chocolate-cake-123 -[recipe://name]-> literal://string:"Chocolate Cake"
+recipe://chocolate-cake-123 -[recipe://ingredient]-> ingredient://flour
+recipe://chocolate-cake-123 -[recipe://ingredient]-> ingredient://sugar
+```
+
+Every node in this graph is a URL pointing to an Expression in some language.
+
+### Instance Identity
+
+Each model instance has a unique `id` that serves as the root node of its subgraph. You can specify it or let AD4M generate one:
+
+```typescript
+// Auto-generated ID
+const recipe = new Recipe(perspective);
+
+// Custom ID
+const recipe = new Recipe(perspective, "recipe://chocolate-cake-2024-03");
+```
+
+### Literals for Simple Values
+
+AD4M provides Literals for storing simple values without needing a full language:
+
+```typescript
+// These are equivalent:
+recipe.name = "Chocolate Cake";
+// Stored as: literal://string:Chocolate Cake
+
+recipe.cookingTime = 45;
+// Stored as: literal://number:45
+```
+
+### Social DNA and SHACL
+
+When you define a model class, AD4M generates a **SHACL** (Shapes Constraint Language) representation — a W3C standard for describing and validating RDF graph shapes:
+
+<Tabs items={['TypeScript Class', 'Generated SHACL']}>
+  <Tab>
+    ```typescript
+    @Model({ name: "Recipe" })
+    class Recipe extends Ad4mModel {
+      @Property({
+        through: "recipe://name",
+        required: true
+      })
+      name: string = "";
+
+      @HasMany({ through: "recipe://ingredient" })
+      ingredients: string[] = [];
+    }
+    ```
+  </Tab>
+  <Tab>
+    ```turtle
+    @prefix sh: <http://www.w3.org/ns/shacl#> .
+    @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+    @prefix ad4m: <ad4m://> .
+
+    <recipe://Recipe> a sh:NodeShape ;
+      sh:targetClass <recipe://Recipe> ;
+      sh:property [
+        sh:path <recipe://name> ;
+        sh:datatype xsd:string ;
+        sh:maxCount 1 ;      # Scalar property
+        sh:minCount 1 ;      # Required
+        ad4m:resolveLanguage "literal" ;
+      ] ;
+      sh:property [
+        sh:path <recipe://ingredient> ;
+        sh:datatype xsd:string ;
+        # No maxCount = relation (multiple values)
+      ] .
+    ```
+  </Tab>
+</Tabs>
+
+The SHACL shape is stored as links in the perspective graph, making it discoverable and queryable by any agent or tool that joins the perspective.
+
+### How SHACL Maps to AD4M
+
+| SHACL Concept | AD4M Equivalent |
+|--------------|-----------------|
+| `sh:NodeShape` | Subject Class definition |
+| `sh:PropertyShape` | Property or Relation definition |
+| `sh:maxCount 1` | Scalar property (single value, generates `set_` tool) |
+| No `sh:maxCount` or `> 1` | Relation (generates `add_`/`remove_` tools) |
+| `sh:minCount 1` | Required property (must be set on creation) |
+| `sh:datatype` | Value type constraint |
+| `sh:class` | Reference to another Subject Class (target model shape) |
+| `sh:node` | Parent shape reference (model inheritance) |
+| `ad4m://initial` | Default value on instance creation |
+| `ad4m://resolveLanguage` | Expression language for value resolution |
+| `ad4m://readOnly` | Read-only computed property |
+| `ad4m://getter` | SurrealQL getter for conformance filtering |
+| `ad4m://conformanceConditions` | Structured filter conditions for relation targets |
+
+AD4M extends standard SHACL with `ad4m://` predicates for features specific to the AD4M runtime (initial values, language resolution, write permissions).
 
 ## Working with Models
 
@@ -608,12 +718,7 @@ const recipe = await DetailedRecipe.create(perspective, {
 
 ## Dynamic Models from JSON Schema
 
-The `fromJSONSchema()` method allows you to dynamically create AD4M model classes from JSON Schema definitions. This is perfect for:
-
-- **Integrating with external systems** that use JSON Schema
-- **Runtime model generation** based on user-defined schemas
-- **Partner app integration** (like Holons) that define types using JSON Schema
-- **Rapid prototyping** without writing decorator-based classes
+The `fromJSONSchema()` method dynamically creates AD4M model classes from JSON Schema definitions. This is perfect for integrating with external systems, runtime model generation, partner app integration (like Holons), and rapid prototyping.
 
 ### Basic Usage
 
@@ -658,152 +763,60 @@ await post.save();
 
 ### Configuration Options
 
-The second parameter to `fromJSONSchema()` is optional and accepts these options:
+The second parameter to `fromJSONSchema()` is optional:
 
 ```typescript
 interface JSONSchemaToModelOptions {
   // Model configuration
-  name?: string;              // Class name override (optional: falls back to x-ad4m.className → schema.title → schema.$id)
-  namespace?: string;         // Base namespace for predicates (optional: falls back to x-ad4m.namespace → schema.title → schema.$id)
+  name?: string;              // Class name override (falls back to x-ad4m.className → schema.title → schema.$id)
+  namespace?: string;         // Base namespace for predicates (falls back to x-ad4m.namespace → schema.title → schema.$id)
 
-  // Predicate generation helpers
-  // 1) Direct mapping: propertyName -> predicate URI
-  propertyMapping?: Record<string, string>;
+  // Predicate generation helpers (in order of precedence)
+  propertyMapping?: Record<string, string>;    // Direct propertyName → predicate URI mapping
+  predicateTemplate?: string;                   // Template: ${scheme}, ${namespace}/${ns}, ${title}, ${property}
+  predicateGenerator?: (title: string, property: string) => string;  // Custom callback
 
-  // 2) Template: supports ${scheme}, ${namespace} (or ${ns}), ${title}, ${property}
-  predicateTemplate?: string;
-
-  // 3) Generator callback: receives schema title and property name
-  predicateGenerator?: (title: string, property: string) => string;
-
-  // Global property settings (applied to all properties unless overridden)
+  // Global property settings
   resolveLanguage?: string;   // Default language for all properties
   local?: boolean;            // Whether properties are stored locally
 
-  // Property-specific overrides
-  // Accepts any PropertyOptions fields: through, initial, required,
-  // readOnly, resolveLanguage, getter, local, transform
+  // Property-specific overrides (accepts any PropertyOptions fields)
   propertyOptions?: Record<string, Partial<PropertyOptions>>;
 }
 ```
 
-### Class Name Resolution (Cascading Priority)
+### Resolution Cascades
 
-The class name is determined using this priority order:
+The class name, namespace, and per-property predicate are each resolved with a cascading priority:
 
-1. **Explicit `options.name`** (highest priority)
-2. **`x-ad4m.className` metadata in schema**
-3. **Schema `title`**
-4. **Schema `$id`** (extracted from URI)
-5. **Error** if none found (lowest priority)
+| Setting | Priority 1 (highest) | Priority 2 | Priority 3 | Priority 4 |
+|---------|----------------------|------------|------------|------------|
+| **Class name** | `options.name` | `x-ad4m.className` | `schema.title` | `schema.$id` |
+| **Namespace** | `options.namespace` | `x-ad4m.namespace` | `schema.title` | `schema.$id` |
+| **Predicate** | `propertyMapping[name]` | `x-ad4m.through` | `predicateTemplate` | `predicateGenerator` → default `${namespace}/${property}` |
 
-```typescript
-// Priority 1: Explicit name override
-const Model1 = Ad4mModel.fromJSONSchema(schema, {
-  name: "CustomModelName"
-});
-
-// Priority 2: x-ad4m.className metadata
-const schemaWithClassName = {
-  "title": "Person",
-  "x-ad4m": {
-    "className": "PersonModel"
-  },
-  "properties": { /* ... */ }
-};
-const PersonClass = Ad4mModel.fromJSONSchema(schemaWithClassName);
-
-// Priority 3: Inferred from title
-const schemaWithTitle = {
-  "title": "BlogPost",  // becomes "BlogPost" class name
-  "properties": { /* ... */ }
-};
-const BlogPostClass = Ad4mModel.fromJSONSchema(schemaWithTitle);
-
-// Priority 4: Inferred from $id
-const schemaWithId = {
-  "$id": "https://example.com/schemas/product.schema.json",  // becomes "Product"
-  "properties": { /* ... */ }
-};
-const ProductClass = Ad4mModel.fromJSONSchema(schemaWithId);
-```
-
-### Namespace Resolution (Cascading Priority)
-
-The namespace is determined using this priority order:
-
-1. **Explicit `options.namespace`** (highest priority)
-2. **`x-ad4m.namespace` metadata in schema**
-3. **Schema `title`** (converted to namespace)
-4. **Schema `$id`** (extracted from URI)
-5. **Error** if none found (lowest priority)
+For example, to control predicate URIs directly:
 
 ```typescript
-// Priority 1: Explicit namespace
-const Model1 = Ad4mModel.fromJSONSchema(schema, {
-  namespace: "custom://"
-});
-
-// Priority 2: x-ad4m.namespace metadata
-const schemaWithMetadata = {
-  "title": "Person",
-  "x-ad4m": {
-    "namespace": "person://"
-  },
-  "properties": { /* ... */ }
-};
-
-// Priority 3: Inferred from title
-const schemaWithTitle = {
-  "title": "BlogPost", // becomes "blogpost://"
-  "properties": { /* ... */ }
-};
-```
-
-### Property Predicate Resolution
-
-Each property's predicate URI is determined by (highest to lowest precedence):
-
-1. **`options.propertyMapping[name]`** (explicit mapping)
-2. **`x-ad4m.through` in property schema**
-3. **`predicateTemplate`** (supports `${scheme}`, `${namespace}`/`${ns}`, `${title}`, `${property}`)
-4. **`predicateGenerator(title, property)`**
-5. **Default**: `${namespace}/${propertyName}` (normalized)
-
-```typescript
-const schema = {
-  "title": "Product",
-  "properties": {
-    "name": { "type": "string" },
-    "price": { 
-      "type": "number",
-      "x-ad4m": {
-        "through": "product://cost"  // Custom predicate
-      }
-    }
-  }
-};
-
 const Product = Ad4mModel.fromJSONSchema(schema, {
   name: "Product",
   namespace: "product://",
-  // Option A: direct mapping
+  // Direct mapping: property name → predicate URI
   propertyMapping: {
-    name: "product://title"
-  }
-  // Option B: or per-property options
-  // propertyOptions: { name: { through: "product://title" } }
+    name: "product://title",
+    price: "product://cost"
+  },
+  // Or use a template (lower priority than propertyMapping)
+  // predicateTemplate: "${namespace}/${property}"
 });
 ```
 
-### Advanced Schema Features
-
-#### Using x-ad4m Extensions
+### x-ad4m Schema Extensions
 
 Add AD4M-specific metadata directly to your JSON Schema:
 
 ```typescript
-const advancedSchema = {
+const schema = {
   "title": "User",
   "x-ad4m": {
     "namespace": "user://",
@@ -812,106 +825,42 @@ const advancedSchema = {
   "properties": {
     "email": { 
       "type": "string",
-      "x-ad4m": {
-        "through": "user://email_address",
-        "local": true
-      }
-    },
-    "profile": {
-      "type": "object",
-      "x-ad4m": {
-        "resolveLanguage": "literal"  // Store as JSON
-      }
+      "x-ad4m": { "through": "user://email_address", "local": true }
     },
     "tags": {
       "type": "array",
       "items": { "type": "string" },
-      "x-ad4m": {
-        "through": "user://interests"
-      }
+      "x-ad4m": { "through": "user://interests" }
     }
   },
   "required": ["email"]
 };
-
-const User = Ad4mModel.fromJSONSchema(advancedSchema, { name: "User" });
 ```
 
-#### Complex Object Handling
+### Schema Type Mapping
 
-Object properties are automatically stored as JSON literals:
+| JSON Schema type | AD4M treatment |
+|------------------|----------------|
+| `string`, `number`, `boolean` | Scalar `@Property` |
+| `object` | Stored as JSON literal (limited semantic querying) |
+| `array` | Relation (`@HasMany`-style), with `add*`/`remove*` methods |
 
-```typescript
-const schema = {
-  "title": "Article",
-  "properties": {
-    "metadata": {
-      "type": "object",
-      "properties": {
-        "author": { "type": "string" },
-        "publishedAt": { "type": "string" },
-        "views": { "type": "number" }
-      }
-    }
-  },
-  "required": ["metadata"]
-};
-
-const Article = Ad4mModel.fromJSONSchema(schema, {
-  namespace: "article://"
-});
-
-const article = new Article(perspective);
-article.metadata = {
-  author: "Alice",
-  publishedAt: "2025-09-23",
-  views: 42
-};
-await article.save();
-
-// Complex objects are preserved
-const saved = await Article.findAll(perspective);
-console.log(saved[0].metadata.author); // "Alice"
-```
-
-#### Array/Relation Mapping
-
-Arrays in JSON Schema automatically become AD4M relations:
+Arrays automatically get relation helper methods:
 
 ```typescript
-const schema = {
-  "title": "BlogPost",
-  "properties": {
-    "tags": {
-      "type": "array",
-      "items": { "type": "string" }
-    },
-    "categories": {
-      "type": "array", 
-      "items": { "type": "string" }
-    }
-  }
-};
-
-const BlogPost = Ad4mModel.fromJSONSchema(schema, {
-  namespace: "blog://"
-});
-
 const post = new BlogPost(perspective);
 post.tags = ["ad4m", "tutorial"];
-post.categories = ["technology"];
 await post.save();
 
-// Relations work with all standard AD4M relation methods
+// Relation methods generated from the property name
 post.addTags("blockchain");
-post.removeCategories("technology");
+post.removeTags("tutorial");
 ```
 
-### Type Safety Considerations
+### Type Safety
 
-Since properties are added dynamically, TypeScript won't know about them at compile time. You can:
+Since properties are added dynamically, TypeScript won't know about them at compile time. Use type assertions:
 
-1. **Use type assertions** for better IDE support:
 ```typescript
 const BlogPost = Ad4mModel.fromJSONSchema(schema) as typeof Ad4mModel & {
   new(perspective: PerspectiveProxy): Ad4mModel & {
@@ -922,129 +871,12 @@ const BlogPost = Ad4mModel.fromJSONSchema(schema) as typeof Ad4mModel & {
 };
 ```
 
-2. **Create TypeScript interfaces** for your schemas:
-```typescript
-interface BlogPostData {
-  title: string;
-  tags: string[];
-  metadata: { author: string; publishedAt: string };
-}
+### Limitations
 
-const post = new BlogPost(perspective) as Ad4mModel & BlogPostData;
-post.title = "Type-safe access";
-```
-
-### Limitations and Best Practices
-
-- **No `author` property**: JSON schemas cannot define a top-level `author` property (conflicts with built-in AD4M property)
+- **No `author` property**: Conflicts with the built-in AD4M `author` field
 - **Required properties**: At least one property must be required or have an initial value
-- **Complex objects**: Nested objects are stored as JSON literals, limiting semantic querying capabilities
-- **Performance**: For better semantic querying, consider flattening complex objects into separate properties
-
-## Understanding the Underlying System
-
-### Graph-Based Storage
-
-Each model instance is stored as a subgraph in an AD4M perspective. For example, our recipe is stored as:
-
-```
-recipe://chocolate-cake-123 -[recipe://name]-> literal://string:"Chocolate Cake"
-recipe://chocolate-cake-123 -[recipe://ingredient]-> ingredient://flour
-recipe://chocolate-cake-123 -[recipe://ingredient]-> ingredient://sugar
-```
-
-Every node in this graph is a URL pointing to an Expression in some language.
-
-### Instance Identity
-
-Each model instance has a unique `id` that serves as the root node of its subgraph. You can specify it or let AD4M generate one:
-
-```typescript
-// Auto-generated ID
-const recipe = new Recipe(perspective);
-
-// Custom ID
-const recipe = new Recipe(perspective, "recipe://chocolate-cake-2024-03");
-```
-
-### Literals for Simple Values
-
-AD4M provides Literals for storing simple values without needing a full language:
-
-```typescript
-// These are equivalent:
-recipe.name = "Chocolate Cake";
-// Stored as: literal://string:Chocolate Cake
-
-recipe.cookingTime = 45;
-// Stored as: literal://number:45
-```
-
-### Social DNA and SHACL
-
-When you define a model class, AD4M generates a **SHACL** (Shapes Constraint Language) representation — a W3C standard for describing and validating RDF graph shapes:
-
-<Tabs items={['TypeScript Class', 'Generated SHACL']}>
-  <Tab>
-    ```typescript
-    @Model({ name: "Recipe" })
-    class Recipe extends Ad4mModel {
-      @Property({
-        through: "recipe://name",
-        required: true
-      })
-      name: string = "";
-
-      @HasMany({ through: "recipe://ingredient" })
-      ingredients: string[] = [];
-    }
-    ```
-  </Tab>
-  <Tab>
-    ```turtle
-    @prefix sh: <http://www.w3.org/ns/shacl#> .
-    @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
-    @prefix ad4m: <ad4m://> .
-
-    <recipe://Recipe> a sh:NodeShape ;
-      sh:targetClass <recipe://Recipe> ;
-      sh:property [
-        sh:path <recipe://name> ;
-        sh:datatype xsd:string ;
-        sh:maxCount 1 ;      # Scalar property
-        sh:minCount 1 ;      # Required
-        ad4m:resolveLanguage "literal" ;
-      ] ;
-      sh:property [
-        sh:path <recipe://ingredient> ;
-        sh:datatype xsd:string ;
-        # No maxCount = relation (multiple values)
-      ] .
-    ```
-  </Tab>
-</Tabs>
-
-The SHACL shape is stored as links in the perspective graph, making it discoverable and queryable by any agent or tool that joins the perspective.
-
-### How SHACL Maps to AD4M
-
-| SHACL Concept | AD4M Equivalent |
-|--------------|-----------------|
-| `sh:NodeShape` | Subject Class definition |
-| `sh:PropertyShape` | Property or Relation definition |
-| `sh:maxCount 1` | Scalar property (single value, generates `set_` tool) |
-| No `sh:maxCount` or `> 1` | Relation (generates `add_`/`remove_` tools) |
-| `sh:minCount 1` | Required property (must be set on creation) |
-| `sh:datatype` | Value type constraint |
-| `sh:class` | Reference to another Subject Class (target model shape) |
-| `sh:node` | Parent shape reference (model inheritance) |
-| `ad4m://initial` | Default value on instance creation |
-| `ad4m://resolveLanguage` | Expression language for value resolution |
-| `ad4m://readOnly` | Read-only computed property |
-| `ad4m://getter` | SurrealQL getter for conformance filtering |
-| `ad4m://conformanceConditions` | Structured filter conditions for relation targets |
-
-AD4M extends standard SHACL with `ad4m://` predicates for features specific to the AD4M runtime (initial values, language resolution, write permissions).
+- **Complex objects**: Nested objects are stored as JSON literals, limiting semantic querying
+- **Performance**: For better querying, consider flattening complex objects into separate properties
 
 ## Best Practices
 
@@ -1144,18 +976,3 @@ try {
   // Handle error appropriately
 }
 ```
-
-## Registration
-
-Before using a model class, register it with the perspective (typically once at app startup):
-
-```typescript
-// Register the model class
-await Recipe.register(perspective);
-
-// Now you can use it
-const recipe = new Recipe(perspective);
-await recipe.save();
-```
-
-This installs the SHACL schema into the perspective so that all consumers (JS, Rust, MCP, CLI) can discover and work with your model's shape.
