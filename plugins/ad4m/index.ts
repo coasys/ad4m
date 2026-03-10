@@ -127,6 +127,78 @@ export function storeAdminCredential(credential: string): void {
   }
 }
 
+export function getStoredBinaryPath(): string | null {
+  try {
+    const dataPath = ensurePluginDataDir();
+    const file = path.join(dataPath, "executor.path");
+    if (fs.existsSync(file)) {
+      const stored = fs.readFileSync(file, "utf-8").trim();
+      // Only return if the binary still exists at the stored path
+      if (stored && fs.existsSync(stored)) {
+        return stored;
+      }
+    }
+  } catch {
+    // Ignore
+  }
+  return null;
+}
+
+export function storeBinaryPath(binaryPath: string): void {
+  try {
+    const dataPath = ensurePluginDataDir();
+    fs.writeFileSync(path.join(dataPath, "executor.path"), binaryPath, {
+      mode: 0o600,
+    });
+  } catch {
+    // Ignore
+  }
+}
+
+/**
+ * Search for ad4m-executor binary in PATH and common locations.
+ * Returns the absolute path if found, null otherwise.
+ */
+export function findExecutorBinary(): string | null {
+  const name = "ad4m-executor";
+
+  // 1. Check PATH entries
+  const envPath = process.env.PATH ?? "";
+  for (const dir of envPath.split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, name);
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // not found or not executable
+    }
+  }
+
+  // 2. Check common locations not always in PATH
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  const commonPaths = [
+    "/usr/local/bin",
+    "/usr/bin",
+    "/opt/homebrew/bin",
+    path.join(home, ".cargo", "bin"),
+    path.join(home, ".local", "bin"),
+    path.join(home, "bin"),
+  ];
+
+  for (const dir of commonPaths) {
+    const candidate = path.join(dir, name);
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // not found
+    }
+  }
+
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Executor Process Management (Managed Mode)
 // ---------------------------------------------------------------------------
@@ -638,6 +710,27 @@ export default async function ad4mPlugin(api: any) {
     }
     authToken = adminCredential;
 
+    // Resolve executor binary path: config > stored > discover > default
+    let binaryPath = providedConfig.ad4mBinaryPath;
+    if (!binaryPath) {
+      binaryPath = getStoredBinaryPath() ?? undefined;
+    }
+    if (!binaryPath) {
+      logger.info(`[ad4m] Searching for ad4m-executor binary...`);
+      const discovered = findExecutorBinary();
+      if (discovered) {
+        logger.info(`[ad4m] Found ad4m-executor at: ${discovered}`);
+        storeBinaryPath(discovered);
+        binaryPath = discovered;
+      } else {
+        logger.warn(
+          `[ad4m] ad4m-executor not found in PATH or common locations. Will try bare name.`,
+        );
+      }
+    } else {
+      logger.info(`[ad4m] Using executor binary: ${binaryPath}`);
+    }
+
     // Ensure executor is running (spawn if not)
     const executorWsUrl =
       providedConfig.executorWsUrl ?? "ws://localhost:12100/graphql";
@@ -646,7 +739,7 @@ export default async function ad4mPlugin(api: any) {
       logger,
       endpoint,
       executorWsUrl,
-      providedConfig.ad4mBinaryPath,
+      binaryPath,
     );
     if (!executorStarted) {
       logger.error(

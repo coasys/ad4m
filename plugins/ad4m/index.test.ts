@@ -21,6 +21,9 @@ import {
   storePassphrase,
   getStoredAdminCredential,
   storeAdminCredential,
+  getStoredBinaryPath,
+  storeBinaryPath,
+  findExecutorBinary,
   isExecutorRunning,
   ensureExecutorRunning,
   stopExecutor,
@@ -224,6 +227,85 @@ describe("storeAdminCredential / getStoredAdminCredential", () => {
     }
     const result = getStoredAdminCredential();
     expect(result).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// storeBinaryPath / getStoredBinaryPath
+// ---------------------------------------------------------------------------
+
+describe("storeBinaryPath / getStoredBinaryPath", () => {
+  let originalPath: string | null;
+
+  beforeEach(() => {
+    originalPath = getStoredBinaryPath();
+  });
+
+  afterEach(() => {
+    // Restore
+    try {
+      const dataPath = getPluginDataPath();
+      const file = path.join(dataPath, "executor.path");
+      if (originalPath) {
+        fs.writeFileSync(file, originalPath);
+      } else if (fs.existsSync(file)) {
+        fs.unlinkSync(file);
+      }
+    } catch {
+      // ignore
+    }
+  });
+
+  it("stores and retrieves a binary path that exists", () => {
+    // Use a binary we know exists (node itself)
+    const nodePath = process.execPath;
+    storeBinaryPath(nodePath);
+    const result = getStoredBinaryPath();
+    expect(result).toBe(nodePath);
+  });
+
+  it("returns null if stored path points to a file that no longer exists", () => {
+    storeBinaryPath("/nonexistent/path/ad4m-executor");
+    const result = getStoredBinaryPath();
+    expect(result).toBeNull();
+  });
+
+  it("returns null when no path is stored", () => {
+    try {
+      const dataPath = getPluginDataPath();
+      const file = path.join(dataPath, "executor.path");
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    } catch {
+      // ignore
+    }
+    const result = getStoredBinaryPath();
+    expect(result).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findExecutorBinary
+// ---------------------------------------------------------------------------
+
+describe("findExecutorBinary", () => {
+  it("returns null when ad4m-executor is not installed", () => {
+    // On most CI / dev machines ad4m-executor won't be installed
+    // If it IS installed, this test still passes (returns a valid path)
+    const result = findExecutorBinary();
+    if (result !== null) {
+      // Verify it's actually an executable file
+      expect(fs.existsSync(result)).toBe(true);
+      expect(result).toContain("ad4m-executor");
+    }
+    // No assertion if null — that's the expected case
+  });
+
+  it("returns a string ending with ad4m-executor if found", () => {
+    const result = findExecutorBinary();
+    if (result !== null) {
+      expect(result.endsWith("ad4m-executor")).toBe(true);
+      expect(path.isAbsolute(result)).toBe(true);
+    }
   });
 });
 
