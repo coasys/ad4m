@@ -2,7 +2,7 @@ import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { LinkQuery } from "../perspectives/LinkQuery";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { makeRandomId, PropertyOptions, Model, getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
+import { makeRandomId, PropertyOptions, Model, getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, PropertyMetadataEntry, RelationMetadataEntry, buildConformanceFilter } from "./decorators";
 import { singularToPlural, pluralToSingular, propertyNameToSetterName, relationToAdderName, relationToRemoverName, relationToSetterName } from "./util";
 import { escapeSurrealString } from "../utils";
 
@@ -1417,6 +1417,9 @@ export class Ad4mModel {
    * predicate and then filters the target nodes to only those that conform to
    * the target model's shape (required properties / flags).
    *
+   * Delegates to the shared `buildConformanceFilter()` utility in decorators.ts
+   * so the same logic is used at shape-definition time and at query time.
+   *
    * @param relationPredicate - The relation's predicate URI (e.g. "flux://entry_type")
    * @param targetClass       - The target model class (result of calling the `target()` thunk)
    * @returns A SurrealQL expression string, or `undefined` if no conformance
@@ -1427,43 +1430,13 @@ export class Ad4mModel {
     relationPredicate: string,
     targetClass: any
   ): string | undefined {
-    try {
-      const targetMetadata = targetClass.getModelMetadata() as ModelMetadata;
-      const conditions: string[] = [];
-
-      // 1. Flags — check predicate + value
-      for (const [propName, propMeta] of Object.entries(targetMetadata.properties)) {
-        if (propMeta.flag && propMeta.initial) {
-          conditions.push(
-            `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
-          );
-        }
-      }
-
-      // 2. Required (non-flag) properties — check predicate exists
-      for (const [propName, propMeta] of Object.entries(targetMetadata.properties)) {
-        if (propMeta.required && !propMeta.flag && !propMeta.getter) {
-          conditions.push(
-            `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`
-          );
-        }
-      }
-
-      if (conditions.length === 0) {
-        console.warn(`[Ad4mModel] buildConformanceGetter: no conditions found for target "${targetMetadata.className}". Properties:`, 
-          Object.entries(targetMetadata.properties).map(([k, v]) => ({ name: k, flag: v.flag, initial: v.initial, required: v.required }))
-        );
-        return undefined;
-      }
-
-      const escapedPredicate = escapeSurrealString(relationPredicate);
-      const getter = `(->link[WHERE predicate = '${escapedPredicate}'].out[WHERE ${conditions.join(' AND ')}].uri)`;
-      return getter;
-    } catch (e) {
-      // Target class may not have @Model metadata (e.g. plain class stub)
-      console.warn(`[Ad4mModel] buildConformanceGetter: exception for predicate "${relationPredicate}":`, e);
+    const filter = buildConformanceFilter(relationPredicate, targetClass);
+    if (!filter) {
+      const targetName = targetClass?.prototype?.className || targetClass?.name || 'unknown';
+      console.warn(`[Ad4mModel] buildConformanceGetter: no conditions found for target "${targetName}".`);
       return undefined;
     }
+    return filter.getter;
   }
 
   /**

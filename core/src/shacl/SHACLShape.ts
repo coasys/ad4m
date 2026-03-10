@@ -96,6 +96,19 @@ export interface AD4MAction {
 }
 
 /**
+ * A single structured conformance condition for relation filtering.
+ * DB-agnostic representation that can be translated to any query language.
+ */
+export interface ConformanceCondition {
+  /** Type of check: 'flag' (predicate + value) or 'required' (predicate exists) */
+  type: 'flag' | 'required';
+  /** The predicate URI to check on the target node */
+  predicate: string;
+  /** For 'flag' conditions: the expected value */
+  value?: string;
+}
+
+/**
  * SHACL Property Shape
  * Represents constraints on a single property path
  */
@@ -147,6 +160,15 @@ export interface SHACLPropertyShape {
 
   /** AD4M-specific: Remover action for collection properties */
   remover?: AD4MAction[];
+
+  /** AD4M-specific: Pre-computed SurrealQL getter expression for reading this relation/property.
+   *  For relations with a target model, this encodes conformance filtering
+   *  so that Rust/MCP can execute the exact same query as the JS runtime. */
+  getter?: string;
+
+  /** AD4M-specific: Structured conformance conditions (DB-agnostic).
+   *  Each condition describes a check on the target node (flag match or required property). */
+  conformanceConditions?: ConformanceCondition[];
 }
 
 /**
@@ -494,6 +516,22 @@ export class SHACLShape {
           target: `literal://string:${JSON.stringify(prop.remover)}`
         });
       }
+
+      if (prop.getter) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://getter",
+          target: `literal://string:${prop.getter}`
+        });
+      }
+
+      if (prop.conformanceConditions && prop.conformanceConditions.length > 0) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://conformanceConditions",
+          target: `literal://string:${JSON.stringify(prop.conformanceConditions)}`
+        });
+      }
     }
 
     return links;
@@ -698,6 +736,25 @@ export class SHACLShape {
         }
       }
 
+      const getterLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://getter"
+      );
+      if (getterLink) {
+        prop.getter = getterLink.target.replace('literal://string:', '');
+      }
+
+      const conditionsLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://conformanceConditions"
+      );
+      if (conditionsLink) {
+        try {
+          const jsonStr = conditionsLink.target.replace('literal://string:', '');
+          prop.conformanceConditions = JSON.parse(jsonStr);
+        } catch (e) {
+          // Ignore parse errors
+        }
+      }
+
       shape.addProperty(prop);
     }
     
@@ -732,6 +789,8 @@ export class SHACLShape {
         setter: p.setter,
         adder: p.adder,
         remover: p.remover,
+        getter: p.getter,
+        conformance_conditions: p.conformanceConditions,
       })),
       constructor_actions: this.constructor_actions,
       destructor_actions: this.destructor_actions,
@@ -764,6 +823,8 @@ export class SHACLShape {
         setter: p.setter,
         adder: p.adder,
         remover: p.remover,
+        getter: p.getter,
+        conformanceConditions: p.conformance_conditions,
       });
     }
     

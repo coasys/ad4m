@@ -26,6 +26,20 @@ pub struct SHACLShape {
     pub destructor_actions: Vec<AD4MAction>,
 }
 
+/// A single structured conformance condition for relation filtering.
+/// DB-agnostic representation that can be translated to any query language.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ConformanceCondition {
+    /// Type of check: "flag" (predicate + value) or "required" (predicate exists)
+    #[serde(rename = "type")]
+    pub condition_type: String,
+    /// The predicate URI to check on the target node
+    pub predicate: String,
+    /// For "flag" conditions: the expected value
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
 /// SHACL Property Shape structure
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PropertyShape {
@@ -48,6 +62,13 @@ pub struct PropertyShape {
     /// Remover action for collection properties
     #[serde(default)]
     pub remover: Vec<AD4MAction>,
+    /// Pre-computed SurrealQL getter expression for reading this relation/property.
+    /// For relations with a target model, this encodes conformance filtering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub getter: Option<String>,
+    /// Structured conformance conditions (DB-agnostic).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conformance_conditions: Vec<ConformanceCondition>,
 }
 
 // ============================================================================

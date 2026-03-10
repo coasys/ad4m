@@ -1,5 +1,6 @@
 import { capitalize, propertyNameToSetterName, singularToPlural, stringifyObjectLiteral } from "./util";
-import { SHACLShape, SHACLPropertyShape } from "../shacl/SHACLShape";
+import { SHACLShape, SHACLPropertyShape, ConformanceCondition } from "../shacl/SHACLShape";
+import { escapeSurrealString } from "../utils";
 
 // ============================================================================
 // WeakMap-based metadata registry
@@ -120,6 +121,69 @@ export interface Ad4mModelLike {
     className?: string;
     generateSDNA?: () => any;
     generateSHACL?: () => any;
+}
+
+/**
+ * Build a conformance filter for a relation whose target model is known.
+ *
+ * Inspects the target class's property metadata to derive:
+ * - `conformanceConditions`: Structured, DB-agnostic conditions (flag & required checks)
+ * - `getter`: Pre-computed SurrealQL expression that traverses outgoing links and filters
+ *   target nodes to only those conforming to the target shape.
+ *
+ * @param relationPredicate - The relation's predicate URI (e.g. "flux://entry_type")
+ * @param targetClass       - The target model class (resolved from the target() thunk)
+ * @returns `{ getter, conformanceConditions }` or `undefined` if no conditions could be derived
+ */
+export function buildConformanceFilter(
+    relationPredicate: string,
+    targetClass: Ad4mModelLike
+): { getter: string; conformanceConditions: ConformanceCondition[] } | undefined {
+    try {
+        const targetProps = getPropertiesMetadata(targetClass);
+        const conditions: ConformanceCondition[] = [];
+        const surrealConditions: string[] = [];
+
+        // 1. Flags — check predicate + value
+        for (const [_propName, propMeta] of Object.entries(targetProps)) {
+            if (propMeta.flag && propMeta.initial && propMeta.through) {
+                conditions.push({
+                    type: 'flag',
+                    predicate: propMeta.through,
+                    value: propMeta.initial,
+                });
+                surrealConditions.push(
+                    `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.through)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
+                );
+            }
+        }
+
+        // 2. Required (non-flag) properties — check predicate exists
+        //    Skip properties with custom getters (they don't follow the standard link pattern)
+        for (const [_propName, propMeta] of Object.entries(targetProps)) {
+            if (propMeta.required && !propMeta.flag && !propMeta.getter && propMeta.through) {
+                conditions.push({
+                    type: 'required',
+                    predicate: propMeta.through,
+                });
+                surrealConditions.push(
+                    `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.through)}']) > 0`
+                );
+            }
+        }
+
+        if (conditions.length === 0) {
+            return undefined;
+        }
+
+        const escapedPredicate = escapeSurrealString(relationPredicate);
+        const getter = `(->link[WHERE predicate = '${escapedPredicate}'].out[WHERE ${surrealConditions.join(' AND ')}].uri)`;
+
+        return { getter, conformanceConditions: conditions };
+    } catch (e) {
+        // Target class may not have property metadata
+        return undefined;
+    }
 }
 
 /**
@@ -813,6 +877,26 @@ export function Model(opts: ModelConfig) {
                     target: "value",
                     ...(relMeta.local && { local: true })
                 }];
+
+                // === Build Getter (conformance filter) ===
+                // If the relation has an explicit getter string, use it directly.
+                // Otherwise, if a target model is declared and filter !== false,
+                // auto-generate a conformance getter from the target's metadata.
+                if (relMeta.getter) {
+                    relShape.getter = relMeta.getter;
+                } else if (relMeta.target && relMeta.filter !== false) {
+                    try {
+                        const TargetClass = relMeta.target();
+                        const filter = buildConformanceFilter(relMeta.predicate, TargetClass);
+                        if (filter) {
+                            relShape.getter = filter.getter;
+                            relShape.conformanceConditions = filter.conformanceConditions;
+                        }
+                    } catch (e) {
+                        // Target class may not be available yet — getter will be
+                        // absent and runtime will fall back to unfiltered get_links
+                    }
+                }
 
                 shape.addProperty(relShape);
             }
