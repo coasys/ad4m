@@ -63,7 +63,7 @@ Creates:
 ```bash
 ad4m-executor run \
   --app-data-path /path/to/.ad4m \
-  --gql-port 12100 \
+  --gql-port 12000 \
   --admin-credential <your-secret> \
   --enable-mcp true
 ```
@@ -80,9 +80,11 @@ ad4m-executor run \
 | `--hc-app-port` | 1337 | Holochain app interface port |
 
 **For AI agents**: Always run in a screen session with logging:
+
 ```bash
-screen -dmS ad4m-executor bash -c 'ad4m-executor run --app-data-path ~/.ad4m --gql-port 12100 --admin-credential mysecret --enable-mcp true 2>&1 | tee /tmp/ad4m-executor.log'
+screen -dmS ad4m-executor bash -c 'ad4m-executor run --app-data-path ~/.ad4m --gql-port 12000 --admin-credential mysecret --enable-mcp true 2>&1 | tee /tmp/ad4m-executor.log'
 ```
+
 After startup, **write down** the admin credential, screen session name (`ad4m-executor`), log path (`/tmp/ad4m-executor.log`), MCP endpoint, and data path so you and your human can debug later. The executor is now running in the background — don't start another one.
 
 ### Step 3: Generate Agent
@@ -90,13 +92,15 @@ After startup, **write down** the admin credential, screen session name (`ad4m-e
 First run only. Creates cryptographic keys and DID identity.
 
 **Via CLI:**
+
 ```bash
-ad4m --executor-url http://localhost:12100/graphql agent generate --passphrase <passphrase>
+ad4m --executor-url http://localhost:12000/graphql agent generate --passphrase <passphrase>
 ```
 
 **Via GraphQL:**
+
 ```bash
-curl -s http://localhost:12100/graphql \
+curl -s http://localhost:12000/graphql \
   -H "Content-Type: application/json" \
   -H "Authorization: <admin-credential>" \
   -d '{"query":"mutation { agentGenerate(passphrase: \"<passphrase>\") { did } }"}'
@@ -109,7 +113,7 @@ This triggers Holochain conductor startup and language installation. Takes 30-60
 After restarting the executor, unlock the agent:
 
 ```bash
-curl -s http://localhost:12100/graphql \
+curl -s http://localhost:12000/graphql \
   -H "Content-Type: application/json" \
   -H "Authorization: <admin-credential>" \
   -d '{"query":"mutation { agentUnlock(passphrase: \"<passphrase>\", holochain: true) { isInitialized isUnlocked did } }"}'
@@ -121,7 +125,7 @@ The `holochain: true` parameter starts the Holochain conductor during unlock.
 
 ```bash
 # Check agent status
-curl -s http://localhost:12100/graphql \
+curl -s http://localhost:12000/graphql \
   -H "Content-Type: application/json" \
   -H "Authorization: <admin-credential>" \
   -d '{"query":"{ agentStatus { isInitialized isUnlocked did } }"}'
@@ -136,10 +140,10 @@ curl -s http://localhost:12100/graphql \
 Agent and executor on the same machine. No TLS needed.
 
 ```bash
-ad4m-executor run --app-data-path ~/.ad4m --gql-port 12100 \
+ad4m-executor run --app-data-path ~/.ad4m --gql-port 12000 \
   --admin-credential mysecret --enable-mcp true
 # MCP at http://localhost:3001/mcp
-# GraphQL at http://localhost:12100/graphql
+# GraphQL at http://localhost:12000/graphql
 ```
 
 ### Scenario 2: Agent connects to remote executor
@@ -147,24 +151,27 @@ ad4m-executor run --app-data-path ~/.ad4m --gql-port 12100 \
 Agent on machine A, executor on machine B (LAN or internet). MCP works over plain HTTP for agent-to-agent connections. **Flux UI (browser) requires TLS for non-localhost connections.**
 
 **Option A: SSH tunnel (no TLS needed, simplest for agents)**
+
 ```bash
 # On agent machine — forward both GraphQL and MCP ports
-ssh -L 12100:localhost:12100 -L 3001:localhost:3001 user@executor-host
-# Now agent connects to localhost:12100 / localhost:3001 as if local
+ssh -L 12000:localhost:12000 -L 3001:localhost:3001 user@executor-host
+# Now agent connects to localhost:12000 / localhost:3001 as if local
 ```
 
 **Option B: Caddy reverse proxy (auto TLS, needed for Flux UI)**
+
 ```bash
 # On executor machine — install Caddy, then:
-caddy reverse-proxy --from ad4m.yourdomain.com --to localhost:12100
+caddy reverse-proxy --from ad4m.yourdomain.com --to localhost:12000
 # Flux connects to https://ad4m.yourdomain.com
 # Requires: domain name pointing to executor IP, ports 80/443 open
 ```
 
 **Option C: Cloudflare Tunnel (no port forwarding, free TLS)**
+
 ```bash
 # On executor machine
-cloudflared tunnel --url http://localhost:12100
+cloudflared tunnel --url http://localhost:12000
 # Gives you a public https://xxx.trycloudflare.com URL
 # Works for both Flux and agents
 ```
@@ -174,37 +181,40 @@ cloudflared tunnel --url http://localhost:12100
 Requires `--enable-multi-user true`. Each user authenticates separately.
 
 **⚠️ Flux (browser) REQUIRES TLS for non-localhost.** Browsers block mixed content and WebSocket connections to insecure origins. You MUST use one of:
+
 - Caddy/nginx reverse proxy with TLS cert
 - Cloudflare Tunnel
 - SSH tunnel (makes it appear as localhost on the client)
 - Self-signed cert via `mkcert` (install CA on all client devices)
 
 ```bash
-ad4m-executor run --app-data-path ~/.ad4m --gql-port 12100 \
+ad4m-executor run --app-data-path ~/.ad4m --gql-port 12000 \
   --admin-credential mysecret --enable-mcp true \
   --enable-multi-user true
 ```
 
 **Agent auth flow (MCP):**
+
 1. `request_capability` → get `request_id` + `code`
 2. Admin approves (or auto-approve with admin credential)
 3. `generate_jwt` with `request_id` + `code` → get JWT token
 4. All subsequent requests include the JWT
 
 **Human auth flow (Flux):**
+
 1. Open Flux UI → enter executor URL (must be HTTPS)
 2. Email verification or admin approval
 3. Flux stores JWT in browser
 
 ### Quick Decision Guide
 
-| Who connects? | Where? | TLS needed? | Recommended setup |
-|---------------|--------|-------------|-------------------|
-| Just your agent | Same machine | No | Scenario 1 (local) |
-| Just your agent | Remote | No | SSH tunnel |
-| Agent + Flux UI | Same machine | No | Scenario 1 |
-| Agent + Flux UI | Remote/LAN | **Yes (for Flux)** | Caddy + domain, or Cloudflare Tunnel |
-| Multiple users | Remote | **Yes** | Caddy + domain + multi-user flag |
+| Who connects?   | Where?       | TLS needed?        | Recommended setup                    |
+| --------------- | ------------ | ------------------ | ------------------------------------ |
+| Just your agent | Same machine | No                 | Scenario 1 (local)                   |
+| Just your agent | Remote       | No                 | SSH tunnel                           |
+| Agent + Flux UI | Same machine | No                 | Scenario 1                           |
+| Agent + Flux UI | Remote/LAN   | **Yes (for Flux)** | Caddy + domain, or Cloudflare Tunnel |
+| Multiple users  | Remote       | **Yes**            | Caddy + domain + multi-user flag     |
 
 ## Directory Structure
 

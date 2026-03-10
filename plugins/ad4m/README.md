@@ -37,7 +37,7 @@ Configure the plugin in your OpenClaw config:
           adminCredential: "your-admin-credential",    // required
           mcpEndpoint: "http://localhost:3001/mcp",     // default
           toolRefreshIntervalMs: 30000,                 // default
-          executorWsUrl: "ws://localhost:12100/graphql", // default (for waker)
+          executorWsUrl: "ws://localhost:12000/graphql", // default (for waker)
           wakeUrl: "http://localhost:18789/hooks/wake",  // default (for waker)
           wakeToken: "your-openclaw-hooks-token",        // required for waker
           debounceMs: 2000                               // default (for waker)
@@ -53,7 +53,7 @@ Configure the plugin in your OpenClaw config:
 | `adminCredential` | Yes | — | Admin credential for the ad4m-executor |
 | `mcpEndpoint` | No | `http://localhost:3001/mcp` | AD4M executor MCP endpoint URL |
 | `toolRefreshIntervalMs` | No | `30000` | How often to poll for new dynamic SHACL tools (ms) |
-| `executorWsUrl` | No | `ws://localhost:12100/graphql` | AD4M executor GraphQL WebSocket URL (for waker) |
+| `executorWsUrl` | No | `ws://localhost:12000/graphql` | AD4M executor GraphQL WebSocket URL (for waker) |
 | `wakeUrl` | No | `http://localhost:18789/hooks/wake` | OpenClaw wake endpoint URL |
 | `wakeToken` | For waker | — | Bearer token for the wake endpoint |
 | `debounceMs` | No | `2000` | Debounce interval for wake events (ms) |

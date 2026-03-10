@@ -14,7 +14,7 @@ The AD4M waker watches perspectives for data changes via GraphQL WebSocket subsc
 | Field           | Default                             | Description                                                         |
 | --------------- | ----------------------------------- | ------------------------------------------------------------------- |
 | `wakerEnabled`  | `true`                              | Enable/disable the waker service                                    |
-| `executorWsUrl` | `ws://localhost:12100/graphql`      | AD4M executor GraphQL WebSocket URL                                 |
+| `executorWsUrl` | `ws://localhost:12000/graphql`      | AD4M executor GraphQL WebSocket URL                                 |
 | `wakeUrl`       | `http://localhost:18789/hooks/wake` | OpenClaw wake endpoint URL                                          |
 | `wakeToken`     | —                                   | Bearer token for the wake endpoint (required for waker to function) |
 | `debounceMs`    | `2000`                              | Debounce interval to prevent rapid-fire wakes (ms)                  |

@@ -243,7 +243,7 @@ export async function ensureExecutorRunning(
   adminCredential: string,
   logger: any,
   endpoint: string = "http://localhost:3001/mcp",
-  wsEndpoint: string = "ws://localhost:12100/graphql",
+  wsEndpoint: string = "ws://localhost:12000/graphql",
   binaryPath?: string,
 ): Promise<boolean> {
   logger.info(`[ad4m] Checking if executor is running at ${endpoint}...`);
@@ -426,57 +426,84 @@ export async function ensureAgentReady(
   /** @internal — pass a pre-built Ad4mClient for testing */
   _testClient?: any,
 ): Promise<string | null> {
-  let wsClient: any = null;
-  try {
-    let client: any;
+  const MAX_CONNECT_ATTEMPTS = 10;
+  const CONNECT_RETRY_DELAY_MS = 2000;
 
+  let wsClient: any = null;
+  let client: any = null;
+
+  // Helper: create a fresh WS-backed Ad4mClient
+  function createWsClient() {
+    const { Ad4mClient } = require("@coasys/ad4m");
+    const { ApolloClient, InMemoryCache } = require("@apollo/client/core");
+    const { GraphQLWsLink } = require("@apollo/client/link/subscriptions");
+    const { createClient } = require("graphql-ws");
+    const WebSocket = require("ws");
+
+    // Dispose previous client if any
+    if (wsClient) {
+      try { wsClient.dispose(); } catch {}
+    }
+
+    wsClient = createClient({
+      url: executorWsUrl,
+      webSocketImpl: WebSocket,
+      connectionParams: adminCredential
+        ? { headers: { authorization: adminCredential } }
+        : {},
+      retryAttempts: 0, // We handle retries ourselves in the outer loop
+    });
+
+    const wsLink = new GraphQLWsLink(wsClient);
+    const apolloClient = new ApolloClient({
+      link: wsLink,
+      cache: new InMemoryCache(),
+      defaultOptions: {
+        watchQuery: { fetchPolicy: "no-cache" },
+        query: { fetchPolicy: "no-cache" },
+        mutate: { fetchPolicy: "no-cache" },
+      },
+    });
+
+    client = new Ad4mClient(apolloClient);
+  }
+
+  try {
     if (_testClient) {
       client = _testClient;
     } else {
-      const { Ad4mClient } = require("@coasys/ad4m");
-      const { ApolloClient, InMemoryCache } = require("@apollo/client/core");
-      const { GraphQLWsLink } = require("@apollo/client/link/subscriptions");
-      const { createClient } = require("graphql-ws");
-      const WebSocket = require("ws");
-
       logger.info(`[ad4m] Connecting to executor at ${executorWsUrl} for agent management...`);
-
-      wsClient = createClient({
-        url: executorWsUrl,
-        webSocketImpl: WebSocket,
-        connectionParams: adminCredential
-          ? { headers: { authorization: adminCredential } }
-          : {},
-        retryAttempts: 3,
-        retryWait: async (retries: number) => {
-          const delay = Math.min(1000 * Math.pow(2, retries), 5000);
-          await new Promise((r: any) => setTimeout(r, delay));
-        },
-      });
-
-      const wsLink = new GraphQLWsLink(wsClient);
-      const apolloClient = new ApolloClient({
-        link: wsLink,
-        cache: new InMemoryCache(),
-        defaultOptions: {
-          watchQuery: { fetchPolicy: "no-cache" },
-          query: { fetchPolicy: "no-cache" },
-          mutate: { fetchPolicy: "no-cache" },
-        },
-      });
-
-      client = new Ad4mClient(apolloClient);
     }
 
-    // Check agent status
-    let agentStatus;
-    try {
-      agentStatus = await client.agent.status();
-      logger.info(
-        `[ad4m] Agent status: initialized=${agentStatus.isInitialized}, unlocked=${agentStatus.isUnlocked}`,
-      );
-    } catch (e: any) {
-      logger.error(`[ad4m] Failed to get agent status: ${e.message}`);
+    // Retry loop: the GraphQL WS server may not be ready immediately after
+    // the MCP endpoint comes up. We retry the initial status check.
+    // When _testClient is provided (tests), skip retries — no real WS to wait for.
+    const maxAttempts = _testClient ? 1 : MAX_CONNECT_ATTEMPTS;
+    let agentStatus: any = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        if (!_testClient) {
+          createWsClient();
+        }
+        agentStatus = await client.agent.status();
+        logger.info(
+          `[ad4m] Agent status: initialized=${agentStatus.isInitialized}, unlocked=${agentStatus.isUnlocked}`,
+        );
+        break; // Connected successfully
+      } catch (e: any) {
+        if (attempt < maxAttempts) {
+          logger.info(
+            `[ad4m] WS not ready yet (${e.message}), retrying in ${CONNECT_RETRY_DELAY_MS}ms... (${attempt}/${maxAttempts})`,
+          );
+          await new Promise((r: any) => setTimeout(r, CONNECT_RETRY_DELAY_MS));
+        } else {
+          logger.error(`[ad4m] Failed to connect to executor after ${maxAttempts} attempt(s): ${e.message}`);
+          return null;
+        }
+      }
+    }
+
+    if (!agentStatus) {
       return null;
     }
 
@@ -867,6 +894,10 @@ export default async function ad4mPlugin(api: any) {
   // Determine endpoint - default to localhost for managed, use provided for external
   const endpoint = providedConfig.mcpEndpoint ?? "http://localhost:3001/mcp";
 
+  // Resolve executorWsUrl once — used by both ensureAgentReady and waker service
+  const executorWsUrl =
+    providedConfig.executorWsUrl ?? "ws://localhost:12000/graphql";
+
   // Determine auth token based on mode
   let adminCredential: string | undefined;
   let authToken: string;
@@ -919,8 +950,6 @@ export default async function ad4mPlugin(api: any) {
     }
 
     // Ensure executor is running (spawn if not)
-    const executorWsUrl =
-      providedConfig.executorWsUrl ?? "ws://localhost:12100/graphql";
     const executorStarted = await ensureExecutorRunning(
       adminCredential,
       logger,
@@ -955,6 +984,7 @@ export default async function ad4mPlugin(api: any) {
     mode,
     mcpEndpoint: endpoint,
     adminCredential,
+    executorWsUrl,
   };
 
   // Check for required config
@@ -1628,7 +1658,7 @@ Notes:
       }
 
       const executorWsUrl =
-        config.executorWsUrl ?? "ws://localhost:12100/graphql";
+        config.executorWsUrl ?? "ws://localhost:12000/graphql";
       const token = config.adminCredential;
 
       try {

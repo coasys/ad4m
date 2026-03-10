@@ -517,7 +517,7 @@ describe("ensureExecutorRunning", () => {
       "cred",
       logger,
       "http://localhost:3001/mcp",
-      "ws://localhost:12100/graphql",
+      "ws://localhost:12000/graphql",
       "/opt/custom/bin/ad4m-executor",
     );
 
@@ -776,7 +776,7 @@ describe("ensureAgentReady", () => {
 
     const logger = makeMockLogger();
     const result = await ensureAgentReady(
-      "ws://localhost:12100/graphql",
+      "ws://localhost:12000/graphql",
       "test-cred",
       logger,
       undefined,
@@ -812,7 +812,7 @@ describe("ensureAgentReady", () => {
 
     const logger = makeMockLogger();
     const result = await ensureAgentReady(
-      "ws://localhost:12100/graphql",
+      "ws://localhost:12000/graphql",
       "test-cred",
       logger,
       undefined,
@@ -858,7 +858,7 @@ describe("ensureAgentReady", () => {
 
     const logger = makeMockLogger();
     const result = await ensureAgentReady(
-      "ws://localhost:12100/graphql",
+      "ws://localhost:12000/graphql",
       "test-cred",
       logger,
       undefined,
@@ -893,7 +893,7 @@ describe("ensureAgentReady", () => {
 
     const logger = makeMockLogger();
     const result = await ensureAgentReady(
-      "ws://localhost:12100/graphql",
+      "ws://localhost:12000/graphql",
       "test-cred",
       logger,
       "config-passphrase",
@@ -926,7 +926,7 @@ describe("ensureAgentReady", () => {
 
     const logger = makeMockLogger();
     const result = await ensureAgentReady(
-      "ws://localhost:12100/graphql",
+      "ws://localhost:12000/graphql",
       "test-cred",
       logger,
       undefined,
@@ -956,7 +956,7 @@ describe("ensureAgentReady", () => {
 
     const logger = makeMockLogger();
     const result = await ensureAgentReady(
-      "ws://localhost:12100/graphql",
+      "ws://localhost:12000/graphql",
       "test-cred",
       logger,
       undefined,
@@ -986,7 +986,7 @@ describe("ensureAgentReady", () => {
 
     const logger = makeMockLogger();
     const result = await ensureAgentReady(
-      "ws://localhost:12100/graphql",
+      "ws://localhost:12000/graphql",
       "test-cred",
       logger,
       undefined,
@@ -1006,7 +1006,7 @@ describe("ensureAgentReady", () => {
 
     const logger = makeMockLogger();
     const result = await ensureAgentReady(
-      "ws://localhost:12100/graphql",
+      "ws://localhost:12000/graphql",
       "test-cred",
       logger,
       undefined,
@@ -1016,7 +1016,7 @@ describe("ensureAgentReady", () => {
     expect(result).toBeNull();
     const errorMsgs = logger.error.mock.calls.map((c: any[]) => c[0]);
     expect(
-      errorMsgs.some((m: string) => m.includes("Failed to get agent status")),
+      errorMsgs.some((m: string) => m.includes("Failed to connect to executor")),
     ).toBe(true);
   });
 });
