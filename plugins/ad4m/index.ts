@@ -377,6 +377,32 @@ export default function ad4mPlugin(api: any) {
     );
   }
 
+  // -- Setup helper tool --
+
+  api.registerTool({
+    name: "ad4m_get_sample_config",
+    description:
+      "Get a sample OpenClaw plugin config for AD4M. Use this to see the required configuration format.",
+    parameters: { type: "object", properties: {} },
+    async execute() {
+      const sampleConfig = {
+        mcpEndpoint: "http://localhost:3001/mcp",
+        adminCredential: "YOUR_SECRET_PASSWORD",
+        wakerEnabled: true,
+        wakeUrl: "http://localhost:18789/hooks/wake",
+        executorWsUrl: "ws://localhost:12100/graphql",
+      };
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Add this to your OpenClaw plugins.entries:\n\n${JSON.stringify({ ad4m: sampleConfig }, null, 2)}`,
+          },
+        ],
+      };
+    },
+  });
+
   // Debug: log config values
   logger.info(
     `[ad4m] Config received: ${JSON.stringify({
