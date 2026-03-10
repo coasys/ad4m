@@ -29,7 +29,7 @@ interface McpTool {
 
 interface PluginConfig {
   mcpEndpoint?: string;
-  adminCredential: string;
+  adminCredential?: string;
   toolRefreshIntervalMs?: number;
   wakerEnabled?: boolean;
   executorWsUrl?: string;
@@ -369,6 +369,13 @@ export default function ad4mPlugin(api: any) {
   const authToken = config.adminCredential;
   const refreshInterval = config.toolRefreshIntervalMs ?? 30000;
   const logger = api.logger;
+
+  // Check for required config
+  if (!config.adminCredential) {
+    logger.warn(
+      `[ad4m] Warning: adminCredential not configured. MCP tools will not be available. Please configure adminCredential in plugin settings.`,
+    );
+  }
 
   // Debug: log config values
   logger.info(
