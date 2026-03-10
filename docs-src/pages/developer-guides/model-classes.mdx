@@ -186,7 +186,10 @@ tags: string[] = [];
 Relations represent associations between models. AD4M provides four relation decorators that make the relationship semantics explicit:
 
 ```typescript
-import { Model, Property, HasMany, HasOne, BelongsToOne, BelongsToMany } from '@coasys/ad4m';
+import {
+  Ad4mModel, Model, Property,
+  HasMany, HasOne, BelongsToOne, BelongsToMany
+} from '@coasys/ad4m';
 
 @Model({ name: "Comment" })
 class Comment extends Ad4mModel {
@@ -197,6 +200,18 @@ class Comment extends Ad4mModel {
 @Model({ name: "Author" })
 class Author extends Ad4mModel {
   @Property({ through: "author://name" })
+  name: string = "";
+}
+
+@Model({ name: "Image" })
+class Image extends Ad4mModel {
+  @Property({ through: "image://url" })
+  url: string = "";
+}
+
+@Model({ name: "Category" })
+class Category extends Ad4mModel {
+  @Property({ through: "category://name" })
   name: string = "";
 }
 

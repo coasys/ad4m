@@ -266,7 +266,7 @@ The Vue hook automatically re-subscribes when the perspective ref changes, and c
 
 ### Important Notes
 
-- **Registration**: Call `Model.register(perspective)` once at app startup — the hook does **not** register models automatically.
+- **Registration**: Call `<ModelClass>.register(perspective)` once at app startup (e.g., `await Recipe.register(perspective)`) — the hook does **not** register models automatically. Use the concrete generated class, not the `@Model` decorator.
 - **Cleanup**: Subscriptions are automatically disposed on component unmount.
 - **String model support**: You can pass a model class name string instead of a class for dynamic/generic use cases.
 

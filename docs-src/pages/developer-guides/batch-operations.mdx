@@ -18,7 +18,7 @@ Batch operations in AD4M allow you to group multiple perspective mutations into 
 
 ## Using Transactions
 
-The recommended way to use batch operations is `Ad4mModel.transaction()`, which handles batch creation, commit, and error rollback automatically:
+The recommended way to use batch operations is `Ad4mModel.transaction()`, which creates a batch, runs your callback, and commits only on success:
 
 ```typescript
 await Ad4mModel.transaction(perspective, async (tx) => {
@@ -34,7 +34,7 @@ await Ad4mModel.transaction(perspective, async (tx) => {
 // All operations commit together, or none do if an error is thrown
 ```
 
-If any operation inside the callback throws, nothing is persisted — you don't need explicit try/catch for rollback.
+If any operation inside the callback throws, the batch is never committed and no changes are persisted.
 
 ### Complex Data Models
 
@@ -178,7 +178,7 @@ Under the hood, `Ad4mModel.transaction()` calls `createBatch()` and `commitBatch
 
 ## Best Practices
 
-1. **Prefer `transaction()`**: Use `Ad4mModel.transaction()` over manual `createBatch()`/`commitBatch()` — it handles commit and rollback automatically.
+1. **Prefer `transaction()`**: Use `Ad4mModel.transaction()` over manual `createBatch()`/`commitBatch()` — if the callback throws, the batch is not committed and no changes are persisted.
 
 2. **Batch Size**: Keep batches focused on related operations. Avoid extremely large batches that could impact memory usage — split very large operations into multiple smaller batches.
 

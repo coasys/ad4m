@@ -328,14 +328,14 @@ const result = await perspective.querySurrealDB(countQuery);
 
 // Get unique participants from nested items
 const participantsQuery = `
-  SELECT VALUE author
+  SELECT VALUE out->link[WHERE predicate = 'ad4m://has_child'].author
   FROM link
   WHERE in.uri = 'conversation://xyz'
     AND predicate = 'ad4m://has_child'
     AND out->link[WHERE predicate = 'flux://entry_type'][0].out.uri = 'flux://conversation_subgroup'
     AND out->link[WHERE predicate = 'ad4m://has_child'].author IS NOT NONE
-  GROUP BY author
 `;
+// Returns nested author arrays (one per subgroup) — flatten and deduplicate client-side
 ```
 
 ### Performance Tips
