@@ -155,11 +155,8 @@ describe("Prolog + Literals", () => {
                 @HasMany({ through: "flux://entry_type" })
                 entries: string[] = []
 
-                @HasMany({
-                    through: "flux://entry_type",
-                    target: () => Message
-                })
-                messages: string[] = []
+                @HasMany(() => Message, { through: "flux://entry_type" })
+                messages: Message[] = []
             }
 
             before(async () => {
@@ -361,6 +358,33 @@ describe("Prolog + Literals", () => {
                     const second = await Message.all(perspective!)
                     expect(second.length).to.be.equal(1)
                 })
+
+                it("can constrain collection entries through 'where' clause", async () => {
+                    let root = Literal.from("Collection where test").toUrl()
+                    let messageEntry = Literal.from("test message").toUrl()
+                    
+                    // Create todo with entries already set
+                    let todo = new Todo(perspective!, root)
+                    todo.entries = [messageEntry]
+                    await todo.save()
+
+                    let entries = await todo.entries
+                    expect(entries.length).to.equal(1)
+
+                    let messageEntries = await todo.messages
+                    expect(messageEntries.length).to.equal(0)
+
+                    let message = new Message(perspective!, messageEntry)
+                    await message.save()
+
+                    // Allow SurrealDB to index the new type flag
+                    await sleep(500)
+                    
+                    // Refresh todo data to apply collection filtering
+                    await todo.get()
+                    messageEntries = await todo.messages
+                    expect(messageEntries.length).to.equal(1)
+                })
             })
 
             describe("Active record implementation", () => {
@@ -552,7 +576,9 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("can constrain relation entries through SurrealQL getter", async () => {
-                    // Define a Recipe model with a getter-based filtered relation
+                    // Define a Recipe model with a getter-based filtered relation.
+                    // Both `entries` and `ingredients` share the same predicate ("recipe://entries"),
+                    // but `ingredients` uses an explicit getter to filter by an arbitrary link condition.
                     @Model({ name: "RecipeWithSurrealFilter" })
                     class RecipeWithSurrealFilter extends Ad4mModel {
                         @Flag({
@@ -571,7 +597,7 @@ describe("Prolog + Literals", () => {
                         entries: string[] = [];
 
                         @HasMany({
-                            through: "recipe://filtered_ingredients",
+                            through: "recipe://entries",
                             getter: `(->link[WHERE predicate = 'recipe://entries'].out[WHERE count(->link[WHERE predicate = 'recipe://has_ingredient' AND out.uri = 'recipe://test']) > 0].uri)`
                         })
                         ingredients: string[] = [];
@@ -2709,7 +2735,8 @@ describe("Prolog + Literals", () => {
 
             describe("type-filtered relation tests (replaces isInstance)", () => {
                 // The old @Collection({ where: { isInstance: Comment } }) pattern is replaced
-                // by @HasMany with a SurrealQL getter that filters targets by their type flag.
+                // by @HasMany(() => Comment, { through: ... }) which auto-generates a
+                // conformance filter from the target model's metadata (flags, required props).
                 // This achieves the same result: only linked items that are valid Comment
                 // instances (have the ad4m://type -> ad4m://comment flag) are returned.
 
@@ -2736,10 +2763,7 @@ describe("Prolog + Literals", () => {
                     })
                     title: string = "";
 
-                    @HasMany({
-                        through: "article://typed_comments",
-                        getter: `(->link[WHERE predicate = 'article://has_comment'].out[WHERE count(->link[WHERE predicate = 'ad4m://type' AND out.uri = 'ad4m://comment']) > 0].uri)`
-                    })
+                    @HasMany(() => Comment, { through: "article://has_comment" })
                     comments: string[] = [];
                 }
 
@@ -2751,10 +2775,7 @@ describe("Prolog + Literals", () => {
                     })
                     title: string = "";
 
-                    @HasMany({
-                        through: "article://typed_comments_str",
-                        getter: `(->link[WHERE predicate = 'article://has_comment'].out[WHERE count(->link[WHERE predicate = 'ad4m://type' AND out.uri = 'ad4m://comment']) > 0].uri)`
-                    })
+                    @HasMany(() => Comment, { through: "article://has_comment" })
                     comments: string[] = [];
                 }
 

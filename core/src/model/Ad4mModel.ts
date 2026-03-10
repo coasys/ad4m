@@ -175,6 +175,13 @@ export interface RelationMetadata {
   local?: boolean;
   /** Link direction: 'forward' for HasMany/HasOne, 'reverse' for BelongsToMany/BelongsToOne */
   direction?: 'forward' | 'reverse';
+  /** Target model class thunk for hydration and type filtering */
+  target?: () => any;
+  /**
+   * Whether to auto-generate a conformance filter when `target` is set.
+   * Defaults to `true` — set to `false` to opt out of DB-level type filtering.
+   */
+  filter?: boolean;
 }
 
 
@@ -660,6 +667,8 @@ export class Ad4mModel {
         ...(options.local !== undefined && { local: options.local }),
         ...(options.getter !== undefined && { getter: options.getter }),
         direction: (options.kind === 'belongsToMany' || options.kind === 'belongsToOne') ? 'reverse' : 'forward',
+        ...(options.target !== undefined && { target: options.target }),
+        ...(options.filter !== undefined && { filter: options.filter }),
       };
     }
     
@@ -971,9 +980,28 @@ export class Ad4mModel {
     }
 
     const predToRelation = new Map<string, [string, RelationMetadata]>();
+
+    // Two-pass approach: first add all non-getter, non-target-filtered relations,
+    // then try to add target+filter relations only if their predicate isn't
+    // already claimed.  This prevents predicate collisions (e.g. entries +
+    // messages sharing the same predicate) while still populating unique-
+    // predicate relations normally via link hydration.
+    const deferredTargetRelations: [string, RelationMetadata][] = [];
     for (const [relName, relMeta] of Object.entries(metadata.relations)) {
-      if (relMeta.getter) continue;
+      if (relMeta.getter) continue;  // Handled via explicit custom getter evaluation
+      if (relMeta.target && relMeta.filter !== false) {
+        deferredTargetRelations.push([relName, relMeta]);
+        continue;
+      }
       predToRelation.set(relMeta.predicate, [relName, relMeta]);
+    }
+    // Second pass: add deferred target+filter relations only if their predicate
+    // is not already claimed by a base relation.  When a collision exists, the
+    // conformance getter will handle the filtered view instead.
+    for (const [relName, relMeta] of deferredTargetRelations) {
+      if (!predToRelation.has(relMeta.predicate)) {
+        predToRelation.set(relMeta.predicate, [relName, relMeta]);
+      }
     }
 
     // Per-property accumulator: track all matching targets so we can pick the last (latest-wins)
@@ -1333,7 +1361,10 @@ export class Ad4mModel {
       }
 
       // Evaluate SurrealQL getters
-      await ctor.evaluateCustomGettersForInstance(this, this._perspective, metadata);
+      const getterOpts = opts?.properties || opts?.include
+        ? { requestedProperties: opts?.properties, include: opts?.include }
+        : undefined;
+      await ctor.evaluateCustomGettersForInstance(this, this._perspective, metadata, getterOpts);
 
       // Eager-load relations if requested
       if (opts?.include) {
@@ -1379,18 +1410,85 @@ export class Ad4mModel {
   }
 
   /**
+   * Builds a SurrealQL conformance getter for a relation whose `target` model
+   * is known but no explicit `getter` string was supplied.
+   *
+   * The generated getter traverses outgoing links matching the relation's
+   * predicate and then filters the target nodes to only those that conform to
+   * the target model's shape (required properties / flags).
+   *
+   * @param relationPredicate - The relation's predicate URI (e.g. "flux://entry_type")
+   * @param targetClass       - The target model class (result of calling the `target()` thunk)
+   * @returns A SurrealQL expression string, or `undefined` if no conformance
+   *          conditions could be derived from the target model.
+   * @private
+   */
+  private static buildConformanceGetter(
+    relationPredicate: string,
+    targetClass: any
+  ): string | undefined {
+    try {
+      const targetMetadata = targetClass.getModelMetadata() as ModelMetadata;
+      const conditions: string[] = [];
+
+      // 1. Flags — check predicate + value
+      for (const [propName, propMeta] of Object.entries(targetMetadata.properties)) {
+        if (propMeta.flag && propMeta.initial) {
+          conditions.push(
+            `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
+          );
+        }
+      }
+
+      // 2. Required (non-flag) properties — check predicate exists
+      for (const [propName, propMeta] of Object.entries(targetMetadata.properties)) {
+        if (propMeta.required && !propMeta.flag && !propMeta.getter) {
+          conditions.push(
+            `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`
+          );
+        }
+      }
+
+      if (conditions.length === 0) {
+        console.warn(`[Ad4mModel] buildConformanceGetter: no conditions found for target "${targetMetadata.className}". Properties:`, 
+          Object.entries(targetMetadata.properties).map(([k, v]) => ({ name: k, flag: v.flag, initial: v.initial, required: v.required }))
+        );
+        return undefined;
+      }
+
+      const escapedPredicate = escapeSurrealString(relationPredicate);
+      const getter = `(->link[WHERE predicate = '${escapedPredicate}'].out[WHERE ${conditions.join(' AND ')}].uri)`;
+      return getter;
+    } catch (e) {
+      // Target class may not have @Model metadata (e.g. plain class stub)
+      console.warn(`[Ad4mModel] buildConformanceGetter: exception for predicate "${relationPredicate}":`, e);
+      return undefined;
+    }
+  }
+
+  /**
    * Evaluates custom SurrealQL getters for properties and relations on a specific instance.
+   *
+   * For relations that declare a `target` but no explicit `getter`, a conformance
+   * getter is auto-generated from the target model's metadata (unless `filter: false`).
    * @private
    */
   private static async evaluateCustomGettersForInstance(
     instance: any,
     perspective: PerspectiveProxy,
-    metadata: any
+    metadata: any,
+    options?: { requestedProperties?: string[]; include?: Record<string, any> }
   ) {
     const safeBaseExpression = this.formatSurrealValue(instance.id);
 
+    // Build projection filter — when requestedProperties is active, only
+    // evaluate getters for fields that are requested (or included).
+    const projectionActive = options?.requestedProperties && options.requestedProperties.length > 0;
+    const projectionSet = projectionActive ? new Set(options!.requestedProperties) : null;
+
     // Evaluate property getters
     for (const [propName, propMeta] of Object.entries(metadata.properties)) {
+      if (projectionSet && !projectionSet.has(propName)) continue;
       if ((propMeta as any).getter) {
         try {
           // Replace 'Base' placeholder with actual base expression
@@ -1408,16 +1506,40 @@ export class Ad4mModel {
       }
     }
 
-    // Evaluate relation getters
+    // Evaluate relation getters (explicit or auto-generated from target)
     for (const [relName, relMeta] of Object.entries(metadata.relations)) {
-      if ((relMeta as any).getter) {
+      // Skip relations excluded by property projection (unless in include map)
+      if (projectionSet && !projectionSet.has(relName) && !(options?.include && relName in options.include)) continue;
+      const meta = relMeta as RelationMetadata;
+
+      // Determine the getter to execute:
+      // 1. Explicit `getter` always wins
+      // 2. If `target` is set and `filter !== false`, auto-generate from target metadata
+      //    BUT skip auto-generation for reverse relations (belongsToMany / belongsToOne)
+      //    because buildConformanceGetter traverses outgoing links (->link) which is
+      //    wrong for reverse relations. Their values are already populated by the
+      //    reverse link lookup in instancesFromSurrealResult / getData.
+      let getter = meta.getter;
+      if (!getter && meta.target && meta.filter !== false && meta.direction !== 'reverse') {
+        try {
+          const TargetClass = meta.target();
+          getter = this.buildConformanceGetter(meta.predicate, TargetClass);
+          if (!getter) {
+            console.warn(`[Ad4mModel] buildConformanceGetter returned undefined for relation "${relName}" (predicate: "${meta.predicate}")`);
+          }
+        } catch (e) {
+          console.warn(`[Ad4mModel] auto-generation failed for relation "${relName}":`, e);
+        }
+      }
+
+      if (getter) {
         try {
           // Replace 'Base' placeholder with actual base expression
-          const query = (relMeta as any).getter.replace(/Base/g, safeBaseExpression);
+          const query = getter.replace(/Base/g, safeBaseExpression);
+          const fullQuery = `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`;
           // Query from node table to have graph traversal context
-          const result = await perspective.querySurrealDB(
-            `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`
-          );
+          const result = await perspective.querySurrealDB(fullQuery);
+
           if (result && result.length > 0 && result[0].value !== undefined && result[0].value !== null) {
             // Filter out 'None' from relation results
             const value = result[0].value;
@@ -2417,8 +2539,11 @@ FETCH links
     }
 
     // Evaluate custom getters for all instances (single pass)
+    const getterOpts = requestedProperties.length > 0 || query.include
+      ? { requestedProperties, include: query.include }
+      : undefined;
     for (const instance of instances) {
-      await this.evaluateCustomGettersForInstance(instance, perspective, metadata);
+      await this.evaluateCustomGettersForInstance(instance, perspective, metadata, getterOpts);
     }
     
     // Filter by where conditions that couldn't be filtered in SQL
@@ -3103,6 +3228,24 @@ FETCH links
       if (!schemaFields.has(key)) continue;
       // Skip unchanged fields when a snapshot is available
       if (dirty && !dirty.has(key)) continue;
+
+      // Skip read-only computed relations — explicit getters never write links.
+      // For target+filter relations, skip only when another relation on this
+      // model claims the same predicate (i.e., this is a filtered *view* of a
+      // base relation and writing would collide).
+      const relMeta = metadata.relations[key];
+      if (relMeta) {
+        if (relMeta.getter) continue;
+        if (relMeta.target && relMeta.filter !== false) {
+          // Check for predicate collision with a sibling relation
+          const hasCollision = Object.entries(metadata.relations).some(
+            ([otherName, otherMeta]) =>
+              otherName !== key &&
+              (otherMeta as RelationMetadata).predicate === relMeta.predicate
+          );
+          if (hasCollision) continue;
+        }
+      }
 
       if (value !== undefined && value !== null) {
         if (value?.action) {

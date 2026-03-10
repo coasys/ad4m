@@ -32,6 +32,12 @@ export interface RelationMetadataEntry {
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      */
     getter?: string;
+    /**
+     * Whether to auto-generate a conformance filter when `target` is set.
+     * Defaults to `true` — set to `false` to opt out of DB-level type filtering
+     * while keeping hydration capability via `include`.
+     */
+    filter?: boolean;
 }
 
 /** Registry of property metadata keyed by constructor → { propName → metadata } */
@@ -985,6 +991,13 @@ export interface RelationOptions {
     getter?: string;
     /** Whether the link is stored locally (not shared on the network) */
     local?: boolean;
+    /**
+     * Whether to auto-generate a DB-level conformance filter when `target` is set.
+     * Defaults to `true` when `target` is present — the query will only return linked
+     * nodes whose shape matches the target model (required properties, flags, etc.).
+     * Set to `false` to opt out of filtering while keeping hydration capability.
+     */
+    filter?: boolean;
 }
 
 /**
@@ -1075,6 +1088,7 @@ export function HasMany(
             kind: 'hasMany',
             local: opts.local,
             ...(opts.getter && { getter: opts.getter }),
+            ...(opts.filter !== undefined && { filter: opts.filter }),
         };
 
         // Add prototype methods for add/remove/set
@@ -1133,6 +1147,7 @@ export function HasOne(
             kind: 'hasOne',
             maxCount: 1,
             local: opts.local,
+            ...(opts.filter !== undefined && { filter: opts.filter }),
         };
 
         // Register as a writable property
@@ -1197,6 +1212,7 @@ export function BelongsToOne(
             kind: 'belongsToOne',
             maxCount: 1,
             local: opts.local,
+            ...(opts.filter !== undefined && { filter: opts.filter }),
         };
 
         // Read-only property (the owning side manages the link)
@@ -1249,6 +1265,7 @@ export function BelongsToMany(
             kind: 'belongsToMany',
             local: opts.local,
             ...(opts.getter && { getter: opts.getter }),
+            ...(opts.filter !== undefined && { filter: opts.filter }),
         };
 
         // @BelongsToMany is the inverse/read-only side — do NOT generate add*/remove*/set*
