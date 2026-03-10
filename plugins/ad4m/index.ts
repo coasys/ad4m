@@ -180,11 +180,16 @@ export async function ensureExecutorRunning(
   }
 
   logger.info(`[ad4m] Executor not running, attempting to start...`);
+  logger.info(`[ad4m] PATH: ${process.env.PATH ?? "(unset)"}`);
 
   // Try to find ad4m-executor in PATH
   const executorPath = "ad4m-executor";
 
   try {
+    // Track whether spawn itself failed (ENOENT, permission error, etc.)
+    let spawnFailed = false;
+    let spawnError: string | null = null;
+
     // Start the executor as a child process
     executorProcess = spawn(
       executorPath,
@@ -212,19 +217,38 @@ export async function ensureExecutorRunning(
     });
 
     executorProcess.on("error", (err: Error) => {
+      spawnFailed = true;
+      spawnError = err.message;
       logger.error(`[ad4m] Failed to start executor: ${err.message}`);
+      logger.error(`[ad4m] PATH: ${process.env.PATH ?? "(unset)"}`);
       executorProcess = null;
     });
 
-    executorProcess.on("exit", (code: number) => {
+    executorProcess.on("exit", (code: number | null) => {
       logger.info(`[ad4m] Executor exited with code ${code}`);
+      if (code !== null && code !== 0) {
+        spawnFailed = true;
+        spawnError = `Executor exited with code ${code}`;
+      }
       executorProcess = null;
     });
 
-    // Wait for executor to be ready
+    // Wait for executor to be ready (check spawn failure each iteration)
     logger.info(`[ad4m] Waiting for executor to start...`);
     for (let i = 0; i < 30; i++) {
       await new Promise((r) => setTimeout(r, 1000));
+
+      // If spawn failed (ENOENT, permission, non-zero exit), stop waiting
+      if (spawnFailed) {
+        logger.error(
+          `[ad4m] Executor process failed to start: ${spawnError ?? "unknown error"}`,
+        );
+        logger.error(
+          `[ad4m] Make sure ad4m-executor is installed and in PATH`,
+        );
+        return false;
+      }
+
       if (await isExecutorRunning(endpoint, 2000)) {
         logger.info(`[ad4m] Executor started successfully`);
         return true;
@@ -236,7 +260,9 @@ export async function ensureExecutorRunning(
     return false;
   } catch (err: any) {
     logger.error(`[ad4m] Error starting executor: ${err.message}`);
-    logger.error(`[ad4m] Make sure ad4m-executor is installed and in PATH`);
+    logger.error(
+      `[ad4m] Make sure ad4m-executor is installed and in PATH: ${process.env.PATH ?? "(unset)"}`,
+    );
     return false;
   }
 }

@@ -2,6 +2,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import path from "path";
 import fs from "fs";
 import os from "os";
+import { EventEmitter } from "events";
+
+// Mock child_process before any imports that use it
+const { mockSpawn } = vi.hoisted(() => {
+  return { mockSpawn: vi.fn() };
+});
+vi.mock("child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("child_process")>();
+  return { ...actual, spawn: mockSpawn };
+});
 
 import {
   generateRandomPassphrase,
@@ -12,6 +22,7 @@ import {
   getStoredAdminCredential,
   storeAdminCredential,
   isExecutorRunning,
+  ensureExecutorRunning,
   stopExecutor,
   parseSSEStream,
   mcpRequest,
@@ -238,6 +249,159 @@ describe("isExecutorRunning", () => {
     const result = await isExecutorRunning("http://localhost:3001/mcp", 500);
     expect(result).toBe(false);
   });
+});
+
+// ---------------------------------------------------------------------------
+// ensureExecutorRunning
+// ---------------------------------------------------------------------------
+
+/** Create a fake ChildProcess (EventEmitter with stdout/stderr). */
+function createFakeChildProcess() {
+  const proc = new EventEmitter() as EventEmitter & {
+    stdout: EventEmitter;
+    stderr: EventEmitter;
+    kill: ReturnType<typeof vi.fn>;
+    pid: number;
+  };
+  proc.stdout = new EventEmitter();
+  proc.stderr = new EventEmitter();
+  proc.kill = vi.fn();
+  proc.pid = 12345;
+  return proc;
+}
+
+describe("ensureExecutorRunning", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("returns true immediately when executor is already running", async () => {
+    // Mock fetch to succeed (executor already running)
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      fakeJsonResponse({ jsonrpc: "2.0", id: 0, result: {} }),
+    );
+
+    const logger = makeMockLogger();
+    const result = await ensureExecutorRunning("cred", logger);
+
+    expect(result).toBe(true);
+    const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
+    expect(msgs.some((m: string) => m.includes("already running"))).toBe(true);
+  });
+
+  it("returns false and logs PATH when spawn emits error (ENOENT)", async () => {
+    // First call: isExecutorRunning check → not running
+    // Subsequent calls: still not running
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const fakeProc = createFakeChildProcess();
+    mockSpawn.mockReturnValue(fakeProc as any);
+
+    const logger = makeMockLogger();
+    const resultPromise = ensureExecutorRunning("cred", logger);
+
+    // Simulate spawn ENOENT error after a short delay (before first poll completes)
+    setTimeout(() => {
+      fakeProc.emit("error", new Error("spawn ad4m-executor ENOENT"));
+    }, 100);
+
+    const result = await resultPromise;
+
+    expect(result).toBe(false);
+
+    // Should have logged PATH
+    const allMessages = [
+      ...logger.info.mock.calls.map((c: any[]) => c[0]),
+      ...logger.error.mock.calls.map((c: any[]) => c[0]),
+    ];
+    expect(allMessages.some((m: string) => m.includes("PATH:"))).toBe(true);
+
+    // Should have logged the ENOENT error
+    expect(
+      logger.error.mock.calls.some((c: any[]) =>
+        c[0].includes("ENOENT"),
+      ),
+    ).toBe(true);
+
+    // Should have logged "failed to start" (not timed out after 30s)
+    expect(
+      logger.error.mock.calls.some((c: any[]) =>
+        c[0].includes("failed to start") || c[0].includes("Failed to start"),
+      ),
+    ).toBe(true);
+  }, 10000);
+
+  it("returns false when process exits with non-zero code", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const fakeProc = createFakeChildProcess();
+    mockSpawn.mockReturnValue(fakeProc as any);
+
+    const logger = makeMockLogger();
+    const resultPromise = ensureExecutorRunning("cred", logger);
+
+    // Simulate non-zero exit after a short delay
+    setTimeout(() => {
+      fakeProc.emit("exit", 1);
+    }, 100);
+
+    const result = await resultPromise;
+
+    expect(result).toBe(false);
+
+    // Should have logged the exit code
+    const allErrors = logger.error.mock.calls.map((c: any[]) => c[0]);
+    expect(
+      allErrors.some(
+        (m: string) => m.includes("exited with code") || m.includes("failed to start"),
+      ),
+    ).toBe(true);
+  }, 10000);
+
+  it("returns true when executor becomes available during polling", async () => {
+    let fetchCallCount = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      fetchCallCount++;
+      // First 2 calls fail (initial check + first poll), third succeeds
+      if (fetchCallCount <= 2) {
+        throw new Error("ECONNREFUSED");
+      }
+      return fakeJsonResponse({ jsonrpc: "2.0", id: 0, result: {} });
+    });
+
+    const fakeProc = createFakeChildProcess();
+    mockSpawn.mockReturnValue(fakeProc as any);
+
+    const logger = makeMockLogger();
+    const result = await ensureExecutorRunning("cred", logger);
+
+    expect(result).toBe(true);
+    const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
+    expect(msgs.some((m: string) => m.includes("started successfully"))).toBe(
+      true,
+    );
+  }, 15000);
+
+  it("logs PATH on startup attempt", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const fakeProc = createFakeChildProcess();
+    mockSpawn.mockReturnValue(fakeProc as any);
+
+    const logger = makeMockLogger();
+    const resultPromise = ensureExecutorRunning("cred", logger);
+
+    // Trigger immediate failure to avoid waiting
+    setTimeout(() => {
+      fakeProc.emit("error", new Error("spawn ad4m-executor ENOENT"));
+    }, 100);
+
+    await resultPromise;
+
+    // The initial "attempting to start" message should include PATH
+    const infoMsgs = logger.info.mock.calls.map((c: any[]) => c[0]);
+    expect(infoMsgs.some((m: string) => m.includes("PATH:"))).toBe(true);
+  }, 10000);
 });
 
 // ---------------------------------------------------------------------------
