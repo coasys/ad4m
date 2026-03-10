@@ -390,7 +390,7 @@ The SHACL shape is stored as links in the perspective graph, making it discovera
 | `sh:PropertyShape` | Property or Relation definition |
 | `sh:maxCount 1` | Scalar property (single value, generates `set_` tool) |
 | No `sh:maxCount` or `> 1` | Relation (generates `add_`/`remove_` tools) |
-| `sh:minCount 1` | Required property (must be set on creation) |
+| `sh:minCount 1` | Required property (must exist on creation — when `required: true` is used without an explicit `initial`, the `@Property` decorator auto-supplies a `"literal://string:uninitialized"` placeholder) |
 | `sh:datatype` | Value type constraint |
 | `sh:class` | Reference to another Subject Class (target model shape) |
 | `sh:node` | Parent shape reference (model inheritance) |

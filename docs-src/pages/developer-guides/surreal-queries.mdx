@@ -183,7 +183,8 @@ const friendsOfFriends = await perspective.querySurrealDB(`
   FROM link
   WHERE in.uri = 'user://alice' AND predicate = 'follows'
 `);
-// Deduplicate in JS: [...new Set(friendsOfFriends.map(f => f.friend_of_friend))]
+// Deduplicate in JS (friend_of_friend is an array per row — flatten first):
+// [...new Set(friendsOfFriends.flatMap(f => f.friend_of_friend))]
 
 // 2-hop: User profiles via follows
 const profiles = await perspective.querySurrealDB(`
