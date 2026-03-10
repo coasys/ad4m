@@ -64,8 +64,6 @@ class ParentWithRelations extends Ad4mModel {
   unfilteredItems: string[] = [];
 
   @HasMany({
-    through: "test://has_custom",
-    target: () => FlaggedTarget,
     getter: "(<-link[WHERE predicate = 'test://custom'].in.uri)",
   })
   customItems: string[] = [];
@@ -271,15 +269,11 @@ describe("generateSHACL() relation getter population", () => {
   it("should use explicit getter when provided (ignoring auto-generation)", () => {
     const { shape } = (ParentWithRelations as any).generateSHACL();
 
+    // Getter-only relations have no predicate and are excluded from SHACL shapes
     const customProp = shape.properties.find(
       (p: SHACLPropertyShape) => p.name === "customItems"
     );
-    expect(customProp).toBeDefined();
-    expect(customProp!.getter).toBe(
-      "(<-link[WHERE predicate = 'test://custom'].in.uri)"
-    );
-    // Explicit getter → no auto-generated conditions
-    expect(customProp!.conformanceConditions).toBeUndefined();
+    expect(customProp).toBeUndefined();
   });
 
   it("should survive full round-trip: generateSHACL → toLinks → fromLinks", () => {
@@ -304,14 +298,11 @@ describe("generateSHACL() relation getter population", () => {
     expect(flaggedProp!.conformanceConditions).toBeDefined();
     expect(flaggedProp!.conformanceConditions!.length).toBeGreaterThan(0);
 
-    // The custom getter should also survive
+    // The custom getter-only relation should NOT be in the SHACL shape
     const customProp = reconstructed.properties.find(
       (p: SHACLPropertyShape) => p.name === "customItems"
     );
-    expect(customProp).toBeDefined();
-    expect(customProp!.getter).toBe(
-      "(<-link[WHERE predicate = 'test://custom'].in.uri)"
-    );
+    expect(customProp).toBeUndefined();
   });
 });
 
@@ -344,10 +335,11 @@ describe("Ad4mModel.getModelMetadata() relation filtering fields", () => {
   it("should expose explicit getter on relations with custom getter", () => {
     const metadata = ParentWithRelations.getModelMetadata();
 
-    // Explicit getter provided via decorator
+    // Explicit getter provided via decorator (getter-only, no predicate)
     expect(metadata.relations.customItems.getter).toBe(
       "(<-link[WHERE predicate = 'test://custom'].in.uri)"
     );
+    expect(metadata.relations.customItems.predicate).toBe("");
 
     // Auto-generated getter is NOT in decorator metadata (it's in the SHACL shape)
     expect(metadata.relations.flaggedItems.getter).toBeUndefined();
@@ -382,5 +374,167 @@ describe("Ad4mModel.getModelMetadata() relation filtering fields", () => {
     expect(metadata.relations.minimalItems.direction).toBe("forward");
     expect(metadata.relations.unfilteredItems.direction).toBe("forward");
     expect(metadata.relations.customItems.direction).toBe("forward");
+  });
+});
+
+// ============================================================================
+// Validation tests
+// ============================================================================
+
+describe("Relation decorator validation", () => {
+  it("should throw if both getter and target are provided", () => {
+    expect(() => {
+      @Model({ name: "InvalidGetterTarget" })
+      class _Invalid extends Ad4mModel {
+        @HasMany({
+          getter: "(<-link.in.uri)",
+          target: () => FlaggedTarget,
+        })
+        items: string[] = [];
+      }
+    }).toThrow(/getter.*target.*mutually exclusive/i);
+  });
+
+  it("should throw if both getter and through are provided", () => {
+    expect(() => {
+      @Model({ name: "InvalidGetterThrough" })
+      class _Invalid extends Ad4mModel {
+        @HasMany({
+          getter: "(<-link.in.uri)",
+          through: "test://pred",
+        })
+        items: string[] = [];
+      }
+    }).toThrow(/getter.*through.*mutually exclusive/i);
+  });
+
+  it("should allow getter-only relations (read-only)", () => {
+    expect(() => {
+      @Model({ name: "ValidGetterOnly" })
+      class _Valid extends Ad4mModel {
+        @HasMany({
+          getter: "(<-link.in.uri)",
+        })
+        items: string[] = [];
+      }
+    }).not.toThrow();
+  });
+});
+
+// ============================================================================
+// Default through tests
+// ============================================================================
+
+describe("Default through predicate", () => {
+  it("should default through to ad4m://has_child when omitted", () => {
+    @Model({ name: "DefaultThrough" })
+    class DefaultThrough extends Ad4mModel {
+      @HasMany(() => FlaggedTarget)
+      items: string[] = [];
+    }
+
+    const { shape } = (DefaultThrough as any).generateSHACL();
+    const itemsProp = shape.properties.find(
+      (p: SHACLPropertyShape) => p.name === "items"
+    );
+    expect(itemsProp).toBeDefined();
+    expect(itemsProp!.path).toBe("ad4m://has_child");
+  });
+
+  it("should use explicit through when provided", () => {
+    @Model({ name: "ExplicitThrough" })
+    class ExplicitThrough extends Ad4mModel {
+      @HasMany(() => FlaggedTarget, { through: "test://custom_pred" })
+      items: string[] = [];
+    }
+
+    const { shape } = (ExplicitThrough as any).generateSHACL();
+    const itemsProp = shape.properties.find(
+      (p: SHACLPropertyShape) => p.name === "items"
+    );
+    expect(itemsProp).toBeDefined();
+    expect(itemsProp!.path).toBe("test://custom_pred");
+  });
+});
+
+// ============================================================================
+// sh:class tests
+// ============================================================================
+
+describe("sh:class target shape reference", () => {
+  it("should set sh:class on relation shapes when target is provided", () => {
+    const { shape } = (ParentWithRelations as any).generateSHACL();
+
+    const flaggedProp = shape.properties.find(
+      (p: SHACLPropertyShape) => p.name === "flaggedItems"
+    );
+    expect(flaggedProp).toBeDefined();
+    expect(flaggedProp!.class).toBeDefined();
+    expect(flaggedProp!.class).toContain("FlaggedTarget");
+    expect(flaggedProp!.class).toContain("Shape");
+  });
+
+  it("should set sh:class even when filter is false", () => {
+    const { shape } = (ParentWithRelations as any).generateSHACL();
+
+    const unfilteredProp = shape.properties.find(
+      (p: SHACLPropertyShape) => p.name === "unfilteredItems"
+    );
+    expect(unfilteredProp).toBeDefined();
+    // filter:false suppresses getter but NOT sh:class
+    expect(unfilteredProp!.getter).toBeUndefined();
+    expect(unfilteredProp!.class).toBeDefined();
+    expect(unfilteredProp!.class).toContain("FlaggedTarget");
+  });
+
+  it("should NOT set sh:class when no target is provided", () => {
+    @Model({ name: "NoTargetParent" })
+    class NoTargetParent extends Ad4mModel {
+      @HasMany({ through: "test://pred" })
+      items: string[] = [];
+    }
+
+    const { shape } = (NoTargetParent as any).generateSHACL();
+    const itemsProp = shape.properties.find(
+      (p: SHACLPropertyShape) => p.name === "items"
+    );
+    expect(itemsProp).toBeDefined();
+    expect(itemsProp!.class).toBeUndefined();
+  });
+
+  it("should round-trip sh:class through toLinks/fromLinks", () => {
+    const shape = new SHACLShape("test://Parent");
+    const prop: SHACLPropertyShape = {
+      name: "items",
+      path: "test://has_items",
+      nodeKind: "IRI",
+      class: "test://TargetShape",
+    };
+    shape.addProperty(prop);
+
+    const links = shape.toLinks();
+    const classLink = links.find(l => l.predicate === "sh://class");
+    expect(classLink).toBeDefined();
+    expect(classLink!.target).toBe("test://TargetShape");
+
+    const reconstructed = SHACLShape.fromLinks(
+      links.map((l: any) => ({ source: l.source, predicate: l.predicate, target: l.target })),
+      shape.nodeShapeUri
+    );
+    expect(reconstructed.properties[0].class).toBe("test://TargetShape");
+  });
+
+  it("should round-trip sh:class through toJSON/fromJSON", () => {
+    const shape = new SHACLShape("test://Parent");
+    const prop: SHACLPropertyShape = {
+      name: "items",
+      path: "test://has_items",
+      class: "test://TargetShape",
+    };
+    shape.addProperty(prop);
+
+    const json = shape.toJSON();
+    const reconstructed = SHACLShape.fromJSON(json);
+    expect(reconstructed.properties[0].class).toBe("test://TargetShape");
   });
 });

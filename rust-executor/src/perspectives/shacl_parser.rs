@@ -69,6 +69,10 @@ pub struct PropertyShape {
     /// Structured conformance conditions (DB-agnostic).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conformance_conditions: Vec<ConformanceCondition>,
+    /// Target SHACL node shape URI (sh:class). When present, linked nodes
+    /// must conform to this shape, enabling typed construction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
 }
 
 // ============================================================================

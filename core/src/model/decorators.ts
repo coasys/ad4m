@@ -898,6 +898,21 @@ export function Model(opts: ModelConfig) {
                     }
                 }
 
+                // === sh:class — target shape reference ===
+                // Always set when a target model is declared, regardless of filter.
+                // This enables typed construction on the Rust/MCP side.
+                if (relMeta.target) {
+                    try {
+                        const TargetClass = relMeta.target();
+                        const targetSHACL = (TargetClass as any).generateSHACL?.();
+                        if (targetSHACL?.shape?.nodeShapeUri) {
+                            relShape.class = targetSHACL.shape.nodeShapeUri;
+                        }
+                    } catch (e) {
+                        // Target class may not be available yet
+                    }
+                }
+
                 shape.addProperty(relShape);
             }
 
@@ -1063,14 +1078,22 @@ export function ReadOnly(opts: PropertyOptions) {
  * Options for relation decorators (@HasMany, @HasOne, @BelongsToOne, @BelongsToMany).
  */
 export interface RelationOptions {
-    /** The predicate URI used to link the two models */
-    through: string;
-    /** The target model class (use a thunk to avoid circular-dependency issues). Optional for untyped string relations. */
+    /**
+     * The predicate URI used to link the two models.
+     * Defaults to `'ad4m://has_child'` when omitted.
+     * Cannot be combined with `getter`.
+     */
+    through?: string;
+    /** The target model class (use a thunk to avoid circular-dependency issues). Optional for untyped string relations.
+     *  Cannot be combined with `getter`. */
     target?: () => Ad4mModelLike;
     /**
      * Custom SurrealQL getter to resolve the relation values. Use this for custom graph traversals.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      * Example: "(<-link[WHERE predicate = 'flux://has_reply'].out.uri)"
+     *
+     * Mutually exclusive with `through` and `target`. When `getter` is provided the
+     * relation is read-only (no adder/remover actions are generated).
      */
     getter?: string;
     /** Whether the link is stored locally (not shared on the network) */
@@ -1113,13 +1136,31 @@ function resolveRelationArgs(
     second?: Omit<RelationOptions, 'target'>,
 ): RelationOptions {
     const opts = typeof first === 'function'
-        ? { ...second!, target: first }
+        ? { ...(second || {}), target: first }
         : first;
 
+    // getter is mutually exclusive with through and target
+    if (opts.getter) {
+        if (opts.through) {
+            throw new Error(
+                'Relation decorator: `getter` and `through` are mutually exclusive. ' +
+                'Use `getter` alone for custom read-only relations, or `through` ' +
+                '(with optional `target`) for standard link-based relations.'
+            );
+        }
+        if (opts.target) {
+            throw new Error(
+                'Relation decorator: `getter` and `target` are mutually exclusive. ' +
+                '`target` auto-generates a conformance getter from the model shape; ' +
+                'providing both is contradictory.'
+            );
+        }
+        return opts;
+    }
+
+    // Default predicate when not provided
     if (!opts.through) {
-        throw new Error(
-            `Relation decorator requires a { through: '...' } option specifying the predicate URI.`
-        );
+        opts.through = 'ad4m://has_child';
     }
 
     return opts;
@@ -1155,7 +1196,7 @@ function resolveRelationArgs(
  * ```
  */
 export function HasMany(opts: RelationOptions): PropertyDecorator;
-export function HasMany(target: () => Ad4mModelLike, opts: Omit<RelationOptions, 'target'>): PropertyDecorator;
+export function HasMany(target: () => Ad4mModelLike, opts?: Omit<RelationOptions, 'target'>): PropertyDecorator;
 export function HasMany(
     first: (() => Ad4mModelLike) | RelationOptions,
     second?: Omit<RelationOptions, 'target'>,
@@ -1175,17 +1216,20 @@ export function HasMany(
             ...(opts.filter !== undefined && { filter: opts.filter }),
         };
 
-        // Add prototype methods for add/remove/set
         const relKey = key as string;
-        (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
-            return (this as any).addRelationValue(relKey, arg, batchId);
-        };
-        (target as any)[`remove${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
-            return (this as any).removeRelationValue(relKey, arg, batchId);
-        };
-        (target as any)[`set${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
-            return (this as any).setRelationValues(relKey, arg, batchId);
-        };
+        // Only add mutation methods when a predicate is available
+        // (getter-only relations are read-only)
+        if (opts.through) {
+            (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+                return (this as any).addRelationValue(relKey, arg, batchId);
+            };
+            (target as any)[`remove${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+                return (this as any).removeRelationValue(relKey, arg, batchId);
+            };
+            (target as any)[`set${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+                return (this as any).setRelationValues(relKey, arg, batchId);
+            };
+        }
         Object.defineProperty(target, relKey, { configurable: true, writable: true });
     };
 }
@@ -1215,7 +1259,7 @@ export function HasMany(
  * ```
  */
 export function HasOne(opts: RelationOptions): PropertyDecorator;
-export function HasOne(target: () => Ad4mModelLike, opts: Omit<RelationOptions, 'target'>): PropertyDecorator;
+export function HasOne(target: () => Ad4mModelLike, opts?: Omit<RelationOptions, 'target'>): PropertyDecorator;
 export function HasOne(
     first: (() => Ad4mModelLike) | RelationOptions,
     second?: Omit<RelationOptions, 'target'>,
@@ -1234,24 +1278,28 @@ export function HasOne(
             ...(opts.filter !== undefined && { filter: opts.filter }),
         };
 
-        // Register as a writable property
-        applyPropertyMetadata({
-            through: opts.through,
-            readOnly: false,
-            local: opts.local,
-        })(target, key);
-
-        // Add prototype methods for add/remove/set (mirroring @HasMany)
         const relKey = key as string;
-        (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any) {
-            return (this as any).addRelationValue(relKey, arg);
-        };
-        (target as any)[`remove${capitalize(relKey)}`] = async function(this: any, arg: any) {
-            return (this as any).removeRelationValue(relKey, arg);
-        };
-        (target as any)[`set${capitalize(relKey)}`] = async function(this: any, arg: any) {
-            return (this as any).setRelationValues(relKey, arg);
-        };
+        if (opts.through) {
+            // Register as a writable property
+            applyPropertyMetadata({
+                through: opts.through,
+                readOnly: false,
+                local: opts.local,
+            })(target, key);
+
+            // Add prototype methods for add/remove/set (mirroring @HasMany)
+            (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any) {
+                return (this as any).addRelationValue(relKey, arg);
+            };
+            (target as any)[`remove${capitalize(relKey)}`] = async function(this: any, arg: any) {
+                return (this as any).removeRelationValue(relKey, arg);
+            };
+            (target as any)[`set${capitalize(relKey)}`] = async function(this: any, arg: any) {
+                return (this as any).setRelationValues(relKey, arg);
+            };
+        } else {
+            Object.defineProperty(target, relKey, { configurable: true, writable: true });
+        }
     };
 }
 
@@ -1280,7 +1328,7 @@ export function HasOne(
  * ```
  */
 export function BelongsToOne(opts: RelationOptions): PropertyDecorator;
-export function BelongsToOne(target: () => Ad4mModelLike, opts: Omit<RelationOptions, 'target'>): PropertyDecorator;
+export function BelongsToOne(target: () => Ad4mModelLike, opts?: Omit<RelationOptions, 'target'>): PropertyDecorator;
 export function BelongsToOne(
     first: (() => Ad4mModelLike) | RelationOptions,
     second?: Omit<RelationOptions, 'target'>,
@@ -1299,12 +1347,16 @@ export function BelongsToOne(
             ...(opts.filter !== undefined && { filter: opts.filter }),
         };
 
-        // Read-only property (the owning side manages the link)
-        applyPropertyMetadata({
-            through: opts.through,
-            readOnly: true,
-            local: opts.local,
-        })(target, key);
+        if (opts.through) {
+            // Read-only property (the owning side manages the link)
+            applyPropertyMetadata({
+                through: opts.through,
+                readOnly: true,
+                local: opts.local,
+            })(target, key);
+        } else {
+            Object.defineProperty(target, key, { configurable: true, writable: true });
+        }
     };
 }
 
@@ -1333,7 +1385,7 @@ export function BelongsToOne(
  * ```
  */
 export function BelongsToMany(opts: RelationOptions): PropertyDecorator;
-export function BelongsToMany(target: () => Ad4mModelLike, opts: Omit<RelationOptions, 'target'>): PropertyDecorator;
+export function BelongsToMany(target: () => Ad4mModelLike, opts?: Omit<RelationOptions, 'target'>): PropertyDecorator;
 export function BelongsToMany(
     first: (() => Ad4mModelLike) | RelationOptions,
     second?: Omit<RelationOptions, 'target'>,

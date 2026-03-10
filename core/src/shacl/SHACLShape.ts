@@ -169,6 +169,11 @@ export interface SHACLPropertyShape {
   /** AD4M-specific: Structured conformance conditions (DB-agnostic).
    *  Each condition describes a check on the target node (flag match or required property). */
   conformanceConditions?: ConformanceCondition[];
+
+  /** sh:class — the target SHACL node shape URI that linked nodes must conform to.
+   *  Set automatically when a relation has a `target` model. Enables typed construction
+   *  on the Rust/MCP side by referencing the full target shape. */
+  class?: string;
 }
 
 /**
@@ -532,6 +537,14 @@ export class SHACLShape {
           target: `literal://string:${JSON.stringify(prop.conformanceConditions)}`
         });
       }
+
+      if (prop.class) {
+        links.push({
+          source: propShapeId,
+          predicate: "sh://class",
+          target: prop.class
+        });
+      }
     }
 
     return links;
@@ -755,6 +768,13 @@ export class SHACLShape {
         }
       }
 
+      const classLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "sh://class"
+      );
+      if (classLink) {
+        prop.class = classLink.target;
+      }
+
       shape.addProperty(prop);
     }
     
@@ -791,6 +811,7 @@ export class SHACLShape {
         remover: p.remover,
         getter: p.getter,
         conformance_conditions: p.conformanceConditions,
+        class: p.class,
       })),
       constructor_actions: this.constructor_actions,
       destructor_actions: this.destructor_actions,
@@ -825,6 +846,7 @@ export class SHACLShape {
         remover: p.remover,
         getter: p.getter,
         conformanceConditions: p.conformance_conditions,
+        class: p.class,
       });
     }
     

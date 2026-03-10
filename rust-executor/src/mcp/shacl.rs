@@ -45,6 +45,9 @@ pub struct ShaclProperty {
     /// Pre-computed SurrealQL getter expression for reading this property/relation.
     /// For relations with a target model, this encodes conformance filtering.
     pub getter: Option<String>,
+    /// Target SHACL node shape URI (sh:class). When present, linked nodes
+    /// must conform to this shape, enabling typed construction.
+    pub class: Option<String>,
 }
 
 impl ShaclClass {
@@ -327,6 +330,19 @@ pub async fn load_class_properties_with_uri(
             _ => None,
         };
 
+        // Get target shape class (sh://class)
+        let class_uri = match perspective
+            .get_links(&LinkQuery {
+                source: Some(prop_uri.clone()),
+                predicate: Some("sh://class".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) if !links.is_empty() => Some(links[0].data.target.clone()),
+            _ => None,
+        };
+
         properties.push(ShaclProperty {
             name: prop_name,
             is_collection,
@@ -336,6 +352,7 @@ pub async fn load_class_properties_with_uri(
             max_count,
             node_kind,
             getter,
+            class: class_uri,
         });
     }
 
