@@ -3,6 +3,10 @@
 //! Provides ICE candidates derived from Holochain/Iroh transport peer URLs,
 //! replacing the need for external STUN/TURN servers.
 
+pub mod demux;
+pub mod stun_responder;
+
+
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -109,4 +113,21 @@ mod tests {
         let candidates = candidates_from_urls(&urls);
         assert!(candidates.is_empty());
     }
+}
+
+/// Handle to a running STUN responder, holding the channel sender
+/// for the demuxer to tee STUN packets into.
+pub struct StunHandle {
+    /// Send STUN packets here from the demuxer.
+    pub stun_tx: tokio::sync::mpsc::Sender<stun_responder::StunPacket>,
+    /// Receive STUN responses to send back over the network.
+    pub response_rx: tokio::sync::mpsc::Receiver<stun_responder::StunResponse>,
+}
+
+/// Start a STUN responder task and return handles for the demuxer.
+pub fn start_stun_responder(channel_size: usize) -> StunHandle {
+    let (stun_tx, stun_rx) = tokio::sync::mpsc::channel(channel_size);
+    let (response_tx, response_rx) = tokio::sync::mpsc::channel(channel_size);
+    tokio::spawn(stun_responder::run_stun_responder(stun_rx, response_tx));
+    StunHandle { stun_tx, response_rx }
 }
