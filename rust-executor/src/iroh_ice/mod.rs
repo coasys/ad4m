@@ -5,6 +5,7 @@
 
 pub mod demux;
 pub mod stun_responder;
+pub mod address_publisher;
 
 
 use std::collections::hash_map::DefaultHasher;

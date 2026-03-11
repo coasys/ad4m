@@ -385,7 +385,11 @@ impl HolochainService {
                                 }
 
                                 HolochainServiceRequest::LocalSocketAddrs(response_tx) => {
-                                    // TODO: return real socket addrs once holochain_p2p exposes local_socket_addrs
+                                    // TODO(iroh-ice): ConductorHandle does not yet expose holochain_p2p().local_socket_addrs().
+                                    // Once coasys/holochain branch feat/iroh-ice-v2 surfaces HcP2p::local_socket_addrs()
+                                    // through ConductorHandle, replace this with:
+                                    //   conductor.holochain_p2p().local_socket_addrs().await.unwrap_or_default()
+                                    // See: coasys/holochain#feat/iroh-ice-v2 Phase 1b
                                     let _ = response_tx.send(HolochainServiceResponse::LocalSocketAddrs(Ok(Vec::new())));
                                 }
                             };
