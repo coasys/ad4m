@@ -65,25 +65,40 @@ export function generateRandomPassphrase(length: number = 32): string {
 }
 
 /**
- * Persist plugin config fields back to the OpenClaw config.
- * Uses api.patchConfig if available.
+ * Persist plugin config fields to the OpenClaw config file.
+ * Uses api.runtime.config to load the full config, patch our plugin entry,
+ * and write it back.
  */
 export async function updatePluginConfig(
   api: any,
   patch: Partial<PluginConfig>,
   logger?: any,
 ): Promise<void> {
-  if (typeof api.patchConfig !== "function") {
-    logger?.warn?.(
-      `[ad4m] patchConfig not available on api — cannot persist config: ${JSON.stringify(patch)}`,
-    );
-    return;
-  }
   try {
-    await api.patchConfig({ ad4m: patch });
-    logger?.info?.(`[ad4m] Config updated: ${Object.keys(patch).join(", ")}`);
+    const cfg = api.runtime.config.loadConfig();
+    const pluginId = api.id;
+    const entries = cfg.plugins?.entries ?? {};
+    const existing = entries[pluginId] ?? {};
+    const existingConfig = (existing.config ?? {}) as Record<string, unknown>;
+
+    const next = {
+      ...cfg,
+      plugins: {
+        ...cfg.plugins,
+        entries: {
+          ...entries,
+          [pluginId]: {
+            ...existing,
+            config: { ...existingConfig, ...patch },
+          },
+        },
+      },
+    };
+
+    await api.runtime.config.writeConfigFile(next);
+    logger?.info?.(`[ad4m] Config persisted: ${Object.keys(patch).join(", ")}`);
   } catch (e: any) {
-    logger?.error?.(`[ad4m] Failed to update config: ${e.message}`);
+    logger?.error?.(`[ad4m] Failed to persist config: ${e.message}`);
   }
 }
 
@@ -367,7 +382,7 @@ export async function ensureAgentReady(
   agentPassphrase?: string,
   /** @internal — pass a pre-built Ad4mClient for testing */
   _testClient?: any,
-  /** OpenClaw plugin API for persisting config changes */
+  /** OpenClaw plugin API — for persisting generated passphrase */
   _api?: any,
 ): Promise<string | null> {
   const MAX_CONNECT_ATTEMPTS = 10;
@@ -830,9 +845,10 @@ export async function postWake(
 // ---------------------------------------------------------------------------
 
 export default async function ad4mPlugin(api: any) {
+  const logger = api.logger;
+
   const providedConfig: PluginConfig = (api.pluginConfig as PluginConfig) ?? {};
   const mode = providedConfig.mode || "managed";
-  const logger = api.logger;
 
   // Determine endpoint - default to localhost for managed, use provided for external
   const endpoint = providedConfig.mcpEndpoint ?? "http://localhost:3001/mcp";
@@ -1006,13 +1022,13 @@ export default async function ad4mPlugin(api: any) {
   let resolvedWakeToken = providedConfig.wakeToken;
   if (!resolvedWakeToken) {
     try {
-      const globalConfig = api.getConfig?.();
-      resolvedWakeToken = globalConfig?.hooks?.token;
+      const globalConfig = api.config;
+      resolvedWakeToken = (globalConfig as any)?.hooks?.token;
       if (resolvedWakeToken) {
         logger.info("[ad4m] Resolved wakeToken from OpenClaw hooks config");
       }
     } catch {
-      // api.getConfig may not be available in all versions
+      // api.config may not expose hooks token
     }
   }
 

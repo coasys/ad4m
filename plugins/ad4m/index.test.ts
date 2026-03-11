@@ -123,24 +123,71 @@ describe("generateRandomPassphrase", () => {
 });
 
 // ---------------------------------------------------------------------------
-// updatePluginConfig
+// updatePluginConfig (via api.runtime.config)
 // ---------------------------------------------------------------------------
 
+function makeMockRuntimeApi(existingPluginConfig: Record<string, unknown> = {}) {
+  const storedConfig: any = {
+    plugins: {
+      entries: {
+        "ad4m-openclaw-plugin": {
+          enabled: true,
+          config: { ...existingPluginConfig },
+        },
+      },
+    },
+  };
+  return {
+    id: "ad4m-openclaw-plugin",
+    runtime: {
+      config: {
+        loadConfig: () => structuredClone(storedConfig),
+        writeConfigFile: vi.fn(async (cfg: any) => {
+          Object.assign(storedConfig, cfg);
+        }),
+      },
+    },
+    logger: makeMockLogger(),
+  };
+}
+
 describe("updatePluginConfig", () => {
-  it("calls api.patchConfig with the patch", async () => {
-    const mockApi = { patchConfig: vi.fn() };
-    await updatePluginConfig(mockApi, { token: "jwt-123" });
-    expect(mockApi.patchConfig).toHaveBeenCalledWith({ ad4m: { token: "jwt-123" } });
+  it("writes config via api.runtime.config.writeConfigFile", async () => {
+    const mockApi = makeMockRuntimeApi();
+    await updatePluginConfig(mockApi, { mode: "managed", agentPassphrase: "test-pass" });
+
+    expect(mockApi.runtime.config.writeConfigFile).toHaveBeenCalledOnce();
+    const written = mockApi.runtime.config.writeConfigFile.mock.calls[0][0];
+    const pluginCfg = written.plugins.entries["ad4m-openclaw-plugin"].config;
+    expect(pluginCfg.mode).toBe("managed");
+    expect(pluginCfg.agentPassphrase).toBe("test-pass");
   });
 
-  it("silently ignores when patchConfig is not available", async () => {
-    const mockApi = {};
-    await expect(updatePluginConfig(mockApi, { token: "jwt-123" })).resolves.toBeUndefined();
+  it("merges patches into existing plugin config", async () => {
+    const mockApi = makeMockRuntimeApi({ mode: "managed" });
+    await updatePluginConfig(mockApi, { ad4mBinaryPath: "/usr/bin/ad4m-executor" });
+
+    const written = mockApi.runtime.config.writeConfigFile.mock.calls[0][0];
+    const pluginCfg = written.plugins.entries["ad4m-openclaw-plugin"].config;
+    expect(pluginCfg.mode).toBe("managed");
+    expect(pluginCfg.ad4mBinaryPath).toBe("/usr/bin/ad4m-executor");
   });
 
-  it("silently ignores when patchConfig throws", async () => {
-    const mockApi = { patchConfig: vi.fn().mockRejectedValue(new Error("fail")) };
-    await expect(updatePluginConfig(mockApi, { token: "jwt-123" })).resolves.toBeUndefined();
+  it("handles missing plugin entry gracefully", async () => {
+    const mockApi = {
+      id: "ad4m-openclaw-plugin",
+      runtime: {
+        config: {
+          loadConfig: () => ({ plugins: {} }),
+          writeConfigFile: vi.fn(),
+        },
+      },
+    };
+    await updatePluginConfig(mockApi, { mode: "managed" });
+
+    const written = mockApi.runtime.config.writeConfigFile.mock.calls[0][0];
+    const pluginCfg = written.plugins.entries["ad4m-openclaw-plugin"].config;
+    expect(pluginCfg.mode).toBe("managed");
   });
 });
 
@@ -643,7 +690,7 @@ describe("ensureAgentReady", () => {
     });
 
     const logger = makeMockLogger();
-    const mockApi = { patchConfig: vi.fn() };
+    const mockApi = makeMockRuntimeApi();
     const result = await ensureAgentReady(
       "ws://localhost:12000/graphql",
       "test-cred",
@@ -664,10 +711,12 @@ describe("ensureAgentReady", () => {
       msgs.some((m: string) => m.includes("generated successfully")),
     ).toBe(true);
 
-    // Passphrase should have been persisted via updatePluginConfig
-    expect(mockApi.patchConfig).toHaveBeenCalledWith(
-      expect.objectContaining({ ad4m: expect.objectContaining({ agentPassphrase: expect.any(String) }) }),
-    );
+    // Passphrase should have been persisted via writeConfigFile
+    expect(mockApi.runtime.config.writeConfigFile).toHaveBeenCalled();
+    const written = mockApi.runtime.config.writeConfigFile.mock.calls[0][0];
+    const pluginCfg = written.plugins.entries["ad4m-openclaw-plugin"].config;
+    expect(pluginCfg.agentPassphrase).toBeDefined();
+    expect(typeof pluginCfg.agentPassphrase).toBe("string");
   });
 
   it("unlocks agent with passphrase from config and returns DID", async () => {
@@ -1526,12 +1575,26 @@ describe("ad4mPlugin", () => {
     }, 50);
 
     const mockApi = {
+      id: "ad4m-openclaw-plugin",
       pluginConfig: {
         mode: "managed",
       },
       logger: makeMockLogger(),
       registerTool: vi.fn(),
       registerService: vi.fn(),
+      config: {},
+      runtime: {
+        config: {
+          loadConfig: () => ({
+            plugins: {
+              entries: {
+                "ad4m-openclaw-plugin": { config: { mode: "managed" } },
+              },
+            },
+          }),
+          writeConfigFile: vi.fn(),
+        },
+      },
     };
 
     await ad4mPlugin(mockApi);
@@ -1872,22 +1935,31 @@ describe("ad4mPlugin", () => {
       fakeProc.emit("error", new Error("spawn ad4m-executor ENOENT"));
     }, 50);
 
+    const writeConfigFile = vi.fn();
     const mockApi: any = {
+      id: "ad4m-openclaw-plugin",
       pluginConfig: {},
       logger: makeMockLogger(),
       registerTool: vi.fn(),
       registerService: vi.fn(),
-      patchConfig: vi.fn(),
+      config: {},
+      runtime: {
+        config: {
+          loadConfig: () => ({ plugins: { entries: {} } }),
+          writeConfigFile,
+        },
+      },
     };
 
     await ad4mPlugin(mockApi);
 
-    // Should have called patchConfig with managed config
-    expect(mockApi.patchConfig).toHaveBeenCalled();
-    const patchCall = mockApi.patchConfig.mock.calls[0][0];
-    expect(patchCall.ad4m.mode).toBe("managed");
-    expect(patchCall.ad4m.agentPassphrase).toBeDefined();
-    expect(patchCall.ad4m.agentPassphrase.length).toBeGreaterThan(0);
+    // Should have written config via api.runtime.config.writeConfigFile
+    expect(writeConfigFile).toHaveBeenCalled();
+    const written = writeConfigFile.mock.calls[0][0];
+    const pluginCfg = written.plugins.entries["ad4m-openclaw-plugin"].config;
+    expect(pluginCfg.mode).toBe("managed");
+    expect(pluginCfg.agentPassphrase).toBeDefined();
+    expect(pluginCfg.agentPassphrase.length).toBeGreaterThan(0);
   }, 10000);
 
 });
