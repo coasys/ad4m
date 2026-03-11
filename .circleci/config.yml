@@ -215,11 +215,11 @@ jobs:
       - run:
           name: Install dependencies
           working_directory: plugins/ad4m
-          command: pnpm install
+          command: npm install
       - run:
           name: Run tests
           working_directory: plugins/ad4m
-          command: pnpm test
+          command: npm test
 
 workflows:
   version: 2
