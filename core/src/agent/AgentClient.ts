@@ -10,6 +10,7 @@ import {
   EntanglementProofInput,
   UserCreationResult,
 } from "./Agent";
+import { HostingUserInfo, PaymentRequestResult } from "../runtime/RuntimeResolver";
 import { AgentStatus } from "./AgentStatus";
 import { LinkMutations } from "../links/Links";
 import { PerspectiveClient } from "../perspectives/PerspectiveClient";
@@ -587,5 +588,49 @@ export class AgentClient {
       })
     );
     return runtimeVerifyEmailCode;
+  }
+
+  // Hosting methods
+
+  async hostingUserInfo(): Promise<HostingUserInfo> {
+    const { runtimeHostingUserInfo } = unwrapApolloResult(
+      await this.#apolloClient.query({
+        query: gql`query runtimeHostingUserInfo {
+          runtimeHostingUserInfo {
+            email
+            remainingCredits
+            hotWalletAddress
+          }
+        }`,
+      })
+    );
+    return runtimeHostingUserInfo;
+  }
+
+  async setHotWalletAddress(address: string): Promise<boolean> {
+    const { runtimeSetHotWalletAddress } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation runtimeSetHotWalletAddress($address: String!) {
+          runtimeSetHotWalletAddress(address: $address)
+        }`,
+        variables: { address },
+      })
+    );
+    return runtimeSetHotWalletAddress;
+  }
+
+  async requestPayment(amountHOT: number): Promise<PaymentRequestResult> {
+    const { runtimeRequestPayment } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation runtimeRequestPayment($amountHOT: Float!) {
+          runtimeRequestPayment(amountHOT: $amountHOT) {
+            success
+            message
+          }
+        }`,
+        variables: { amountHOT },
+      })
+    );
+    return runtimeRequestPayment;
   }
 }

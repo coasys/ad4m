@@ -697,6 +697,21 @@ pub struct VerificationRequestResult {
     pub is_existing_user: bool,
 }
 
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct HostingUserInfo {
+    pub email: String,
+    pub remaining_credits: f64,
+    pub hot_wallet_address: Option<String>,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PaymentRequestResult {
+    pub success: bool,
+    pub message: String,
+}
+
 #[derive(Default, Debug, Deserialize, Serialize)]
 pub struct NeighbourhoodSignalFilter {
     pub perspective: PerspectiveHandle,

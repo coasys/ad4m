@@ -2978,4 +2978,28 @@ impl Mutation {
 
         Ok(true)
     }
+
+    async fn runtime_set_hot_wallet_address(
+        &self,
+        _context: &RequestContext,
+        _address: String,
+    ) -> FieldResult<bool> {
+        // TODO: implement actual hot wallet address storage
+        Err(FieldError::new(
+            "Set hot wallet address not yet implemented",
+            Value::null(),
+        ))
+    }
+
+    async fn runtime_request_payment(
+        &self,
+        _context: &RequestContext,
+        _amount_hot: f64,
+    ) -> FieldResult<PaymentRequestResult> {
+        // TODO: implement actual payment request via Unit
+        Err(FieldError::new(
+            "Request payment not yet implemented",
+            Value::null(),
+        ))
+    }
 }
