@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import path from "path";
 import fs from "fs";
-import os from "os";
 import { EventEmitter } from "events";
 
 // Mock child_process before any imports that use it
@@ -30,14 +29,7 @@ function makeMockAd4mClient(agentMethods: {
 
 import {
   generateRandomPassphrase,
-  getPluginDataPath,
-  ensurePluginDataDir,
-  getStoredPassphrase,
-  storePassphrase,
-  getStoredAdminCredential,
-  storeAdminCredential,
-  getStoredBinaryPath,
-  storeBinaryPath,
+  updatePluginConfig,
   findExecutorBinary,
   isExecutorRunning,
   ensureExecutorRunning,
@@ -130,172 +122,24 @@ describe("generateRandomPassphrase", () => {
 });
 
 // ---------------------------------------------------------------------------
-// getPluginDataPath
+// updatePluginConfig
 // ---------------------------------------------------------------------------
 
-describe("getPluginDataPath", () => {
-  it("returns a path under HOME/.ad4m-plugin", () => {
-    const result = getPluginDataPath();
-    const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
-    expect(result).toBe(path.join(home, ".ad4m-plugin"));
-  });
-});
-
-// ---------------------------------------------------------------------------
-// ensurePluginDataDir
-// ---------------------------------------------------------------------------
-
-describe("ensurePluginDataDir", () => {
-  it("returns the data path and the directory exists", () => {
-    const dataPath = ensurePluginDataDir();
-    expect(dataPath).toBe(getPluginDataPath());
-    expect(fs.existsSync(dataPath)).toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// storePassphrase / getStoredPassphrase
-// ---------------------------------------------------------------------------
-
-describe("storePassphrase / getStoredPassphrase", () => {
-  const testPassphrase = "test-passphrase-" + Date.now();
-  let originalPassphrase: string | null;
-
-  beforeEach(() => {
-    originalPassphrase = getStoredPassphrase();
+describe("updatePluginConfig", () => {
+  it("calls api.patchConfig with the patch", async () => {
+    const mockApi = { patchConfig: vi.fn() };
+    await updatePluginConfig(mockApi, { token: "jwt-123" });
+    expect(mockApi.patchConfig).toHaveBeenCalledWith({ ad4m: { token: "jwt-123" } });
   });
 
-  afterEach(() => {
-    // Restore original passphrase if any
-    if (originalPassphrase) {
-      storePassphrase(originalPassphrase);
-    } else {
-      // Remove test file
-      try {
-        const dataPath = getPluginDataPath();
-        const file = path.join(dataPath, "agent.passphrase");
-        if (fs.existsSync(file)) fs.unlinkSync(file);
-      } catch {
-        // ignore
-      }
-    }
+  it("silently ignores when patchConfig is not available", async () => {
+    const mockApi = {};
+    await expect(updatePluginConfig(mockApi, { token: "jwt-123" })).resolves.toBeUndefined();
   });
 
-  it("stores and retrieves a passphrase", () => {
-    storePassphrase(testPassphrase);
-    const result = getStoredPassphrase();
-    expect(result).toBe(testPassphrase);
-  });
-
-  it("returns null when no passphrase stored", () => {
-    // Remove passphrase file
-    try {
-      const dataPath = getPluginDataPath();
-      const file = path.join(dataPath, "agent.passphrase");
-      if (fs.existsSync(file)) fs.unlinkSync(file);
-    } catch {
-      // ignore
-    }
-    const result = getStoredPassphrase();
-    expect(result).toBeNull();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// storeAdminCredential / getStoredAdminCredential
-// ---------------------------------------------------------------------------
-
-describe("storeAdminCredential / getStoredAdminCredential", () => {
-  const testCred = "test-credential-" + Date.now();
-  let originalCred: string | null;
-
-  beforeEach(() => {
-    originalCred = getStoredAdminCredential();
-  });
-
-  afterEach(() => {
-    if (originalCred) {
-      storeAdminCredential(originalCred);
-    } else {
-      try {
-        const dataPath = getPluginDataPath();
-        const file = path.join(dataPath, "admin.credential");
-        if (fs.existsSync(file)) fs.unlinkSync(file);
-      } catch {
-        // ignore
-      }
-    }
-  });
-
-  it("stores and retrieves an admin credential", () => {
-    storeAdminCredential(testCred);
-    const result = getStoredAdminCredential();
-    expect(result).toBe(testCred);
-  });
-
-  it("returns null when no credential stored", () => {
-    try {
-      const dataPath = getPluginDataPath();
-      const file = path.join(dataPath, "admin.credential");
-      if (fs.existsSync(file)) fs.unlinkSync(file);
-    } catch {
-      // ignore
-    }
-    const result = getStoredAdminCredential();
-    expect(result).toBeNull();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// storeBinaryPath / getStoredBinaryPath
-// ---------------------------------------------------------------------------
-
-describe("storeBinaryPath / getStoredBinaryPath", () => {
-  let originalPath: string | null;
-
-  beforeEach(() => {
-    originalPath = getStoredBinaryPath();
-  });
-
-  afterEach(() => {
-    // Restore
-    try {
-      const dataPath = getPluginDataPath();
-      const file = path.join(dataPath, "executor.path");
-      if (originalPath) {
-        fs.writeFileSync(file, originalPath);
-      } else if (fs.existsSync(file)) {
-        fs.unlinkSync(file);
-      }
-    } catch {
-      // ignore
-    }
-  });
-
-  it("stores and retrieves a binary path that exists", () => {
-    // Use a binary we know exists (node itself)
-    const nodePath = process.execPath;
-    storeBinaryPath(nodePath);
-    const result = getStoredBinaryPath();
-    expect(result).toBe(nodePath);
-  });
-
-  it("returns null if stored path points to a file that no longer exists", () => {
-    storeBinaryPath("/nonexistent/path/ad4m-executor");
-    const result = getStoredBinaryPath();
-    expect(result).toBeNull();
-  });
-
-  it("returns null when no path is stored", () => {
-    try {
-      const dataPath = getPluginDataPath();
-      const file = path.join(dataPath, "executor.path");
-      if (fs.existsSync(file)) fs.unlinkSync(file);
-    } catch {
-      // ignore
-    }
-    const result = getStoredBinaryPath();
-    expect(result).toBeNull();
+  it("silently ignores when patchConfig throws", async () => {
+    const mockApi = { patchConfig: vi.fn().mockRejectedValue(new Error("fail")) };
+    await expect(updatePluginConfig(mockApi, { token: "jwt-123" })).resolves.toBeUndefined();
   });
 });
 
@@ -811,12 +655,14 @@ describe("ensureAgentReady", () => {
     });
 
     const logger = makeMockLogger();
+    const mockApi = { patchConfig: vi.fn() };
     const result = await ensureAgentReady(
       "ws://localhost:12000/graphql",
       "test-cred",
       logger,
       undefined,
       client,
+      mockApi,
     );
 
     expect(result).toBe("did:key:z6MkNewAgent");
@@ -830,14 +676,13 @@ describe("ensureAgentReady", () => {
       msgs.some((m: string) => m.includes("generated successfully")),
     ).toBe(true);
 
-    // Passphrase should have been stored
-    const stored = getStoredPassphrase();
-    expect(stored).toBeTruthy();
+    // Passphrase should have been persisted via updatePluginConfig
+    expect(mockApi.patchConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ ad4m: expect.objectContaining({ agentPassphrase: expect.any(String) }) }),
+    );
   });
 
-  it("unlocks agent with stored passphrase and returns DID", async () => {
-    storePassphrase("test-stored-passphrase");
-
+  it("unlocks agent with passphrase from config and returns DID", async () => {
     let callCount = 0;
     const mockStatus = vi.fn().mockImplementation(async () => {
       callCount++;
@@ -861,7 +706,7 @@ describe("ensureAgentReady", () => {
       "ws://localhost:12000/graphql",
       "test-cred",
       logger,
-      undefined,
+      "test-stored-passphrase",
       client,
     );
 
@@ -874,9 +719,7 @@ describe("ensureAgentReady", () => {
     ).toBe(true);
   });
 
-  it("uses agentPassphrase from config over stored passphrase for unlock", async () => {
-    storePassphrase("stored-passphrase");
-
+  it("uses agentPassphrase from config for unlock", async () => {
     let callCount = 0;
     const mockStatus = vi.fn().mockImplementation(async () => {
       callCount++;
@@ -905,14 +748,6 @@ describe("ensureAgentReady", () => {
   });
 
   it("returns null when agent is locked and no passphrase available", async () => {
-    try {
-      const dataPath = getPluginDataPath();
-      const file = path.join(dataPath, "agent.passphrase");
-      if (fs.existsSync(file)) fs.unlinkSync(file);
-    } catch {
-      // ignore
-    }
-
     const mockStatus = vi.fn().mockResolvedValue({
       isInitialized: true,
       isUnlocked: false,
@@ -971,8 +806,6 @@ describe("ensureAgentReady", () => {
   });
 
   it("returns null when unlock fails", async () => {
-    storePassphrase("test-passphrase");
-
     const mockStatus = vi.fn().mockResolvedValue({
       isInitialized: true,
       isUnlocked: false,
@@ -989,7 +822,7 @@ describe("ensureAgentReady", () => {
       "ws://localhost:12000/graphql",
       "test-cred",
       logger,
-      undefined,
+      "test-passphrase",
       client,
     );
 
@@ -1325,7 +1158,7 @@ describe("extractMcpResultData", () => {
 describe("buildWakeMessage", () => {
   const config: PluginConfig = {
     mcpEndpoint: "http://localhost:3001/mcp",
-    adminCredential: "test-cred",
+    token: "test-cred",
   };
 
   const mentionSub: WakerSubscription = {
@@ -1396,7 +1229,7 @@ describe("postWake", () => {
 
     const config: PluginConfig = {
       mcpEndpoint: "http://localhost:3001/mcp",
-      adminCredential: "cred",
+      token: "cred",
       wakeUrl: "http://localhost:18789/hooks/wake",
       wakeToken: "wake-token-123",
     };
@@ -1431,7 +1264,7 @@ describe("postWake", () => {
     const config: PluginConfig = {
       wakeUrl: "http://localhost:18789/hooks/wake",
       wakeToken: "t",
-      adminCredential: "c",
+      token: "c",
     };
 
     const sub: WakerSubscription = {
@@ -1458,7 +1291,7 @@ describe("postWake", () => {
     const config: PluginConfig = {
       wakeUrl: "http://localhost:18789/hooks/wake",
       wakeToken: "t",
-      adminCredential: "c",
+      token: "c",
     };
 
     const sub: WakerSubscription = {
@@ -1498,7 +1331,7 @@ describe("ad4mPlugin", () => {
       pluginConfig: {
         mode: "external",
         mcpEndpoint: "http://localhost:3001/mcp",
-        adminCredential: "test-cred",
+        token: "test-cred",
       },
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
@@ -1532,7 +1365,7 @@ describe("ad4mPlugin", () => {
       pluginConfig: {
         mode: "external",
         mcpEndpoint: "http://localhost:3001/mcp",
-        adminCredential: "test-cred",
+        token: "test-cred",
       },
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
@@ -1560,7 +1393,7 @@ describe("ad4mPlugin", () => {
       pluginConfig: {
         mode: "external",
         mcpEndpoint: "http://localhost:3001/mcp",
-        adminCredential: "test-cred",
+        token: "test-cred",
       },
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
@@ -1587,7 +1420,7 @@ describe("ad4mPlugin", () => {
       pluginConfig: {
         mode: "external",
         mcpEndpoint: "http://localhost:3001/mcp",
-        adminCredential: "test-cred",
+        token: "test-cred",
       },
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
@@ -1664,7 +1497,7 @@ describe("ad4mPlugin", () => {
       pluginConfig: {
         mode: "external",
         mcpEndpoint: "http://localhost:3001/mcp",
-        adminCredential: "test-cred",
+        token: "test-cred",
       },
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
@@ -1692,15 +1525,9 @@ describe("ad4mPlugin", () => {
     mcpService!.stop();
   });
 
-  it("managed mode uses stored or generated credentials", async () => {
-    // Store a known credential
-    const knownCred = "known-test-cred-" + Date.now();
-    storeAdminCredential(knownCred);
-
-    // In managed mode, isExecutorRunning will be called via ensureExecutorRunning.
+  it("managed mode generates ephemeral credential", async () => {
+    // In managed mode, the plugin generates an ephemeral admin credential.
     // Mock fetch to fail (executor not running), and mock spawn to fail immediately.
-    // This way ensureExecutorRunning returns false and ensureAgentReady is never called,
-    // avoiding real WS connections.
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
 
     const fakeProc = createFakeChildProcess();
@@ -1721,21 +1548,14 @@ describe("ad4mPlugin", () => {
 
     await ad4mPlugin(mockApi);
 
-    // Logger should show the credential was found (it logs the length)
+    // Logger should show the auth token was generated (it logs the length)
     const infoMessages = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
     const credMessage = infoMessages.find((m: string) =>
-      m.includes("Using adminCredential"),
+      m.includes("Auth token ready"),
     );
     expect(credMessage).toBeDefined();
-    expect(credMessage).toContain(`length: ${knownCred.length}`);
-
-    // Clean up
-    try {
-      const dataPath = getPluginDataPath();
-      fs.unlinkSync(path.join(dataPath, "admin.credential"));
-    } catch {
-      // ignore
-    }
+    // Ephemeral credential is 24 chars
+    expect(credMessage).toContain("length: 24");
   }, 10000);
 
   it("refreshTools recovers from 422 by re-initializing session", async () => {
@@ -1803,7 +1623,7 @@ describe("ad4mPlugin", () => {
       pluginConfig: {
         mode: "external",
         mcpEndpoint: "http://localhost:3001/mcp",
-        adminCredential: "test-cred",
+        token: "test-cred",
       },
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
@@ -1908,7 +1728,7 @@ describe("ad4mPlugin", () => {
       pluginConfig: {
         mode: "external",
         mcpEndpoint: "http://localhost:3001/mcp",
-        adminCredential: "test-cred",
+        token: "test-cred",
       },
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
@@ -2003,7 +1823,7 @@ describe("ad4mPlugin", () => {
       pluginConfig: {
         mode: "external",
         mcpEndpoint: "http://localhost:3001/mcp",
-        adminCredential: "test-cred",
+        token: "test-cred",
       },
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
@@ -2032,14 +1852,14 @@ describe("ad4mPlugin", () => {
     mcpService!.stop();
   });
 
-  it("warns when adminCredential is not configured in external mode", async () => {
+  it("warns when no auth token is available in external mode", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No executor"));
 
     const mockApi = {
       pluginConfig: {
         mode: "external",
         mcpEndpoint: "http://localhost:3001/mcp",
-        // no adminCredential
+        // no token
       },
       logger: makeMockLogger(),
       registerTool: vi.fn(),
@@ -2050,7 +1870,7 @@ describe("ad4mPlugin", () => {
 
     const warnMessages = mockApi.logger.warn.mock.calls.map((c: any[]) => c[0]);
     const warningFound = warnMessages.some((m: string) =>
-      m.includes("adminCredential not configured"),
+      m.includes("No auth token"),
     );
     expect(warningFound).toBe(true);
   });

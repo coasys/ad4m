@@ -16,7 +16,7 @@ The AD4M waker watches perspectives for data changes via GraphQL WebSocket subsc
 | `wakerEnabled`  | `true`                              | Enable/disable the waker service                                    |
 | `executorWsUrl` | `ws://localhost:12000/graphql`      | AD4M executor GraphQL WebSocket URL                                 |
 | `wakeUrl`       | `http://localhost:18789/hooks/wake` | OpenClaw wake endpoint URL                                          |
-| `wakeToken`     | —                                   | Bearer token for the wake endpoint (required for waker to function) |
+| `wakeToken`     | auto from `hooks.token`              | Override for the hooks token. Auto-read from OpenClaw global config if omitted. |
 | `debounceMs`    | `2000`                              | Debounce interval to prevent rapid-fire wakes (ms)                  |
 
 ## Subscription Tools
@@ -58,7 +58,9 @@ The `text` field contains key-value pairs, one per line:
 
 ## OpenClaw Hooks Config
 
-Add to your OpenClaw config:
+The plugin automatically reads the hooks token from OpenClaw's global config (`hooks.token`). On first install, the plugin's `configureInteractive` will generate a secure token if one isn't set. No manual configuration is needed.
+
+If you want to set one manually:
 
 ```json
 {

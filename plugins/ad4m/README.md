@@ -34,13 +34,8 @@ Configure the plugin in your OpenClaw config:
       "ad4m": {
         enabled: true,
         config: {
-          adminCredential: "your-admin-credential",    // required
-          mcpEndpoint: "http://localhost:3001/mcp",     // default
-          toolRefreshIntervalMs: 30000,                 // default
-          executorWsUrl: "ws://localhost:12000/graphql", // default (for waker)
-          wakeUrl: "http://localhost:18789/hooks/wake",  // default (for waker)
-          wakeToken: "your-openclaw-hooks-token",        // required for waker
-          debounceMs: 2000                               // default (for waker)
+          // Managed mode (default): no config needed — credentials and hooks
+          // token are auto-generated. Just install and go.
         }
       }
     }
@@ -48,14 +43,17 @@ Configure the plugin in your OpenClaw config:
 }
 ```
 
+All fields are optional. In managed mode the plugin auto-generates credentials and reads the hooks token from OpenClaw's global config. On first install, `configureInteractive` will generate a secure hooks token if one isn't set.
+
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `adminCredential` | Yes | — | Admin credential for the ad4m-executor |
+| `mode` | No | `managed` | `managed` = auto-manages executor + agent, `external` = connect to existing |
+| `adminCredential` | No | auto-generated | Admin credential for the ad4m-executor |
 | `mcpEndpoint` | No | `http://localhost:3001/mcp` | AD4M executor MCP endpoint URL |
 | `toolRefreshIntervalMs` | No | `30000` | How often to poll for new dynamic SHACL tools (ms) |
 | `executorWsUrl` | No | `ws://localhost:12000/graphql` | AD4M executor GraphQL WebSocket URL (for waker) |
 | `wakeUrl` | No | `http://localhost:18789/hooks/wake` | OpenClaw wake endpoint URL |
-| `wakeToken` | For waker | — | Bearer token for the wake endpoint |
+| `wakeToken` | No | auto from `hooks.token` | Override for the hooks token (read from OpenClaw global config if omitted) |
 | `debounceMs` | No | `2000` | Debounce interval for wake events (ms) |
 
 ## Prerequisites

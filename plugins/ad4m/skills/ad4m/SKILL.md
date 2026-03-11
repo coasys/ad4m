@@ -380,32 +380,7 @@ unsubscribe_from_children(perspective_id: "...", expression_address: "<channel-i
 
 ### Plugin config for waker
 
-The waker requires `wakeUrl` and `wakeToken` in the plugin config:
-
-```json5
-{
-  plugins: {
-    entries: {
-      ad4m: {
-        enabled: true,
-        config: {
-          mode: "managed",
-          executorWsUrl: "ws://localhost:12000/graphql", // default
-          wakeUrl: "http://localhost:18789/hooks/wake", // default
-          wakeToken: "your-openclaw-hooks-token", // required for waker
-          debounceMs: 2000, // default
-        },
-      },
-    },
-  },
-}
-```
-
-**OpenClaw hooks config** (in openclaw.json):
-
-```json
-{ "hooks": { "enabled": true, "path": "/hooks", "token": "your-hooks-token" } }
-```
+The waker works automatically — it reads the hooks token from OpenClaw's global config (`hooks.token`). On first install, the plugin generates a secure token if one isn't set. No manual `wakeToken` configuration is needed.
 
 See `references/waker.md` for config field reference.
 

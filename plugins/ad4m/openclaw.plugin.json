@@ -11,38 +11,38 @@
         "type": "string",
         "enum": ["managed", "external"],
         "default": "managed",
-        "description": "Plugin mode: 'managed' = auto-manages agent identity, 'external' = connect to existing executor"
+        "description": "Plugin mode: 'managed' = auto-manages executor + agent, 'external' = connect to existing executor"
       },
       "mcpEndpoint": {
         "type": "string",
-        "description": "AD4M executor MCP endpoint URL (required in external mode, defaults to localhost in managed)"
+        "description": "AD4M executor MCP endpoint URL"
       },
-      "adminCredential": {
+      "token": {
         "type": "string",
-        "description": "Admin credential for the AD4M executor (auto-generated in managed mode)"
+        "description": "Auth token — JWT obtained during external mode setup. In managed mode this is generated automatically and not persisted."
       },
       "agentPassphrase": {
         "type": "string",
-        "description": "Passphrase for the AD4M agent identity (auto-generated on first run, stored for reuse)"
+        "description": "Passphrase for the AD4M agent identity (auto-generated on first run)"
       },
       "ad4mBinaryPath": {
         "type": "string",
-        "description": "Full path to the ad4m-executor binary (e.g. /usr/local/bin/ad4m-executor). Only needed if ad4m-executor is not in PATH."
+        "description": "Full path to the ad4m-executor binary. Only needed if ad4m-executor is not in PATH."
       },
       "toolRefreshIntervalMs": {
         "type": "number",
         "default": 30000,
         "description": "How often to poll for new dynamic SHACL tools (ms)"
       },
+      "executorWsUrl": {
+        "type": "string",
+        "default": "ws://localhost:12000/graphql",
+        "description": "AD4M executor GraphQL WebSocket URL"
+      },
       "wakerEnabled": {
         "type": "boolean",
         "default": true,
         "description": "Enable the embedded AD4M waker service"
-      },
-      "executorWsUrl": {
-        "type": "string",
-        "default": "ws://localhost:12100/graphql",
-        "description": "AD4M executor GraphQL WebSocket URL for waker subscriptions"
       },
       "wakeUrl": {
         "type": "string",
@@ -51,7 +51,7 @@
       },
       "wakeToken": {
         "type": "string",
-        "description": "Bearer token for the OpenClaw wake endpoint"
+        "description": "Override for the OpenClaw hooks token. If omitted, read from hooks.token in OpenClaw global config."
       },
       "debounceMs": {
         "type": "number",
@@ -67,8 +67,8 @@
       "label": "MCP Endpoint",
       "placeholder": "http://localhost:3001/mcp"
     },
-    "adminCredential": {
-      "label": "Admin Credential",
+    "token": {
+      "label": "Auth Token",
       "sensitive": true
     },
     "agentPassphrase": {
@@ -79,13 +79,9 @@
       "label": "Executor Binary Path",
       "placeholder": "/usr/local/bin/ad4m-executor"
     },
-    "toolRefreshIntervalMs": {
-      "label": "Tool Refresh Interval (ms)",
-      "placeholder": "30000"
-    },
     "executorWsUrl": {
       "label": "Executor WebSocket URL",
-      "placeholder": "ws://localhost:12100/graphql"
+      "placeholder": "ws://localhost:12000/graphql"
     },
     "wakeUrl": {
       "label": "Wake Endpoint URL",
@@ -94,10 +90,6 @@
     "wakeToken": {
       "label": "Wake Token",
       "sensitive": true
-    },
-    "debounceMs": {
-      "label": "Debounce (ms)",
-      "placeholder": "2000"
     }
   }
 }

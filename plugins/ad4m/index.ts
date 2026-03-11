@@ -16,6 +16,7 @@
 
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 import { spawn, execFileSync, ChildProcess } from "child_process";
 
 // ---------------------------------------------------------------------------
@@ -38,7 +39,8 @@ export interface McpTool {
 export interface PluginConfig {
   mode?: "managed" | "external";
   mcpEndpoint?: string;
-  adminCredential?: string;
+  /** Auth token — JWT in external mode, admin credential in managed mode (internal). */
+  token?: string;
   agentPassphrase?: string;
   ad4mBinaryPath?: string;
   toolRefreshIntervalMs?: number;
@@ -63,95 +65,18 @@ export function generateRandomPassphrase(length: number = 32): string {
   return result;
 }
 
-export function getPluginDataPath(): string {
-  // Use HOME/.ad4m-plugin as storage location
-  const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
-  return path.join(home, ".ad4m-plugin");
-}
-
-export function ensurePluginDataDir(): string {
-  const dataPath = getPluginDataPath();
+/**
+ * Persist plugin config fields back to the OpenClaw config.
+ * Uses api.patchConfig if available. Best-effort — silently ignores errors.
+ */
+export async function updatePluginConfig(
+  api: any,
+  patch: Partial<PluginConfig>,
+): Promise<void> {
   try {
-    if (!fs.existsSync(dataPath)) {
-      fs.mkdirSync(dataPath, { recursive: true });
-    }
-  } catch (e) {
-    // Ignore - might not have fs access
-  }
-  return dataPath;
-}
-
-export function getStoredPassphrase(): string | null {
-  try {
-    const dataPath = ensurePluginDataDir();
-    const passphraseFile = path.join(dataPath, "agent.passphrase");
-    if (fs.existsSync(passphraseFile)) {
-      return fs.readFileSync(passphraseFile, "utf-8").trim();
-    }
-  } catch (e) {
-    // Ignore - might not have fs access
-  }
-  return null;
-}
-
-export function storePassphrase(passphrase: string): void {
-  try {
-    const dataPath = ensurePluginDataDir();
-    const passphraseFile = path.join(dataPath, "agent.passphrase");
-    fs.writeFileSync(passphraseFile, passphrase, { mode: 0o600 });
-  } catch (e) {
-    // Ignore - might not have fs access
-  }
-}
-
-export function getStoredAdminCredential(): string | null {
-  try {
-    const dataPath = ensurePluginDataDir();
-    const credFile = path.join(dataPath, "admin.credential");
-    if (fs.existsSync(credFile)) {
-      return fs.readFileSync(credFile, "utf-8").trim();
-    }
-  } catch (e) {
-    // Ignore
-  }
-  return null;
-}
-
-export function storeAdminCredential(credential: string): void {
-  try {
-    const dataPath = ensurePluginDataDir();
-    const credFile = path.join(dataPath, "admin.credential");
-    fs.writeFileSync(credFile, credential, { mode: 0o600 });
-  } catch (e) {
-    // Ignore
-  }
-}
-
-export function getStoredBinaryPath(): string | null {
-  try {
-    const dataPath = ensurePluginDataDir();
-    const file = path.join(dataPath, "executor.path");
-    if (fs.existsSync(file)) {
-      const stored = fs.readFileSync(file, "utf-8").trim();
-      // Only return if the binary still exists at the stored path
-      if (stored && fs.existsSync(stored)) {
-        return stored;
-      }
-    }
+    await api.patchConfig?.({ ad4m: patch });
   } catch {
-    // Ignore
-  }
-  return null;
-}
-
-export function storeBinaryPath(binaryPath: string): void {
-  try {
-    const dataPath = ensurePluginDataDir();
-    fs.writeFileSync(path.join(dataPath, "executor.path"), binaryPath, {
-      mode: 0o600,
-    });
-  } catch {
-    // Ignore
+    // patchConfig may not be available in all versions
   }
 }
 
@@ -425,6 +350,8 @@ export async function ensureAgentReady(
   agentPassphrase?: string,
   /** @internal — pass a pre-built Ad4mClient for testing */
   _testClient?: any,
+  /** OpenClaw plugin API for persisting config changes */
+  _api?: any,
 ): Promise<string | null> {
   const MAX_CONNECT_ATTEMPTS = 10;
   const CONNECT_RETRY_DELAY_MS = 2000;
@@ -513,7 +440,7 @@ export async function ensureAgentReady(
       logger.info(`[ad4m] Agent not initialized, generating new agent...`);
       try {
         await client.agent.generate(passphrase);
-        storePassphrase(passphrase);
+        if (_api) updatePluginConfig(_api, { agentPassphrase: passphrase });
         // Re-fetch status to get the DID
         const newStatus = await client.agent.status();
         logger.info(
@@ -526,8 +453,7 @@ export async function ensureAgentReady(
       }
     } else if (agentStatus.isUnlocked === false) {
       // Previously initialized but locked — try to unlock
-      const passphrase =
-        agentPassphrase || getStoredPassphrase();
+      const passphrase = agentPassphrase;
       if (passphrase) {
         logger.info(`[ad4m] Agent is locked, attempting to unlock...`);
         try {
@@ -899,46 +825,58 @@ export default async function ad4mPlugin(api: any) {
     providedConfig.executorWsUrl ?? "ws://localhost:12000/graphql";
 
   // Determine auth token based on mode
-  let adminCredential: string | undefined;
-  let authToken: string;
+  let authToken: string = "";
   let pluginAgentDid: string = "";
 
   if (mode === "external") {
-    // External mode: use provided credential as-is (may be empty - uses JWT flow)
-    adminCredential = providedConfig.adminCredential;
-    authToken = adminCredential || "";
+    // External mode: use token from config (JWT from setup), or request new JWT
+    authToken = providedConfig.token || "";
+    if (!authToken) {
+      // Try to obtain JWT via MCP capability request (auto-permits)
+      logger.info("[ad4m] No token found, attempting JWT auth via MCP...");
+      try {
+        const initResp = await mcpInitialize(endpoint);
+        const capResult = await mcpCallTool(
+          endpoint,
+          "request_capability",
+          {
+            app_name: "OpenClaw AD4M Plugin",
+            app_desc: "OpenClaw agent plugin for AD4M neighbourhoods",
+          },
+          initResp.sessionId,
+        );
+        const capData = extractMcpResultData(capResult);
+        if (capData?.request_id && capData?.code) {
+          const jwtResult = await mcpCallTool(
+            endpoint,
+            "generate_jwt",
+            { request_id: capData.request_id, code: capData.code },
+            initResp.sessionId,
+          );
+          const jwtData = extractMcpResultData(jwtResult);
+          if (jwtData?.token) {
+            authToken = jwtData.token;
+            updatePluginConfig(api, { token: jwtData.token });
+            logger.info("[ad4m] JWT obtained and stored in config");
+          }
+        }
+      } catch (e: any) {
+        logger.warn(`[ad4m] Auto JWT auth failed: ${e.message}. Tools may not work until authenticated.`);
+      }
+    }
   } else {
-    // Managed mode: auto-generate and manage credentials AND start executor
-    const storedPassphrase = getStoredPassphrase();
-    const storedAdminCred = getStoredAdminCredential();
-
-    // Determine effective adminCredential: provided > stored > generate new
-    adminCredential = providedConfig.adminCredential;
-    if (!adminCredential && storedAdminCred) {
-      adminCredential = storedAdminCred;
-    }
-    if (!adminCredential) {
-      adminCredential = generateRandomPassphrase(24);
-      storeAdminCredential(adminCredential);
-    }
-
-    // Store the adminCredential we end up using
-    if (!providedConfig.adminCredential && adminCredential) {
-      storeAdminCredential(adminCredential);
-    }
+    // Managed mode: generate ephemeral admin credential (not persisted)
+    const adminCredential = generateRandomPassphrase(24);
     authToken = adminCredential;
 
-    // Resolve executor binary path: config > stored > discover > default
+    // Resolve executor binary path: config > discover > default
     let binaryPath = providedConfig.ad4mBinaryPath;
-    if (!binaryPath) {
-      binaryPath = getStoredBinaryPath() ?? undefined;
-    }
     if (!binaryPath) {
       logger.info(`[ad4m] Searching for ad4m-executor binary...`);
       const discovered = findExecutorBinary();
       if (discovered) {
         logger.info(`[ad4m] Found ad4m-executor at: ${discovered}`);
-        storeBinaryPath(discovered);
+        updatePluginConfig(api, { ad4mBinaryPath: discovered });
         binaryPath = discovered;
       } else {
         logger.warn(
@@ -968,6 +906,8 @@ export default async function ad4mPlugin(api: any) {
         adminCredential,
         logger,
         providedConfig.agentPassphrase,
+        undefined, // _testClient
+        api,       // for persisting generated passphrase
       );
       if (agentDid) {
         pluginAgentDid = agentDid;
@@ -979,23 +919,35 @@ export default async function ad4mPlugin(api: any) {
     }
   }
 
+  // Resolve wakeToken: plugin config override > OpenClaw global hooks config
+  let resolvedWakeToken = providedConfig.wakeToken;
+  if (!resolvedWakeToken) {
+    try {
+      const globalConfig = api.getConfig?.();
+      resolvedWakeToken = globalConfig?.hooks?.token;
+      if (resolvedWakeToken) {
+        logger.info("[ad4m] Resolved wakeToken from OpenClaw hooks config");
+      }
+    } catch {
+      // api.getConfig may not be available in all versions
+    }
+  }
+
   const config: PluginConfig = {
     ...providedConfig,
     mode,
     mcpEndpoint: endpoint,
-    adminCredential,
+    token: authToken || undefined,
     executorWsUrl,
+    wakeUrl: providedConfig.wakeUrl ?? "http://localhost:18789/hooks/wake",
+    wakeToken: resolvedWakeToken,
+    debounceMs: providedConfig.debounceMs ?? 2000,
   };
 
-  // Check for required config
-  if (!adminCredential) {
-    logger.warn(
-      `[ad4m] Warning: adminCredential not configured. MCP tools will not be available. Please configure adminCredential in plugin settings.`,
-    );
+  if (authToken) {
+    logger.info(`[ad4m] Auth token ready (length: ${authToken.length})`);
   } else {
-    logger.info(
-      `[ad4m] Using adminCredential: *** (length: ${adminCredential.length})`,
-    );
+    logger.warn(`[ad4m] No auth token. Tools may not work until authenticated.`);
   }
 
   // -- Setup helper tool --
@@ -1039,8 +991,8 @@ Notes:
   logger.info(
     `[ad4m] Config received: ${JSON.stringify({
       mcpEndpoint: config.mcpEndpoint,
-      adminCredential: config.adminCredential
-        ? "*** (length: " + config.adminCredential.length + ")"
+      token: config.token
+        ? "*** (length: " + config.token.length + ")"
         : "UNDEFINED",
       wakeUrl: config.wakeUrl,
       wakeToken: config.wakeToken
@@ -1666,6 +1618,152 @@ Notes:
   });
 
   // =========================================================================
+  // Interactive Setup
+  // =========================================================================
+
+  api.configureInteractive = async (ctx: any) => {
+    // --- Mode selection ---
+    const modeAnswer = await ctx.prompt?.({
+      type: "list",
+      name: "mode",
+      message: "How should the AD4M plugin connect to an executor?",
+      choices: [
+        {
+          name: "Managed (recommended) — starts ad4m-executor automatically and initializes an agent. Requires ad4m-executor in PATH.",
+          value: "managed",
+        },
+        {
+          name: "External — connect to an already-running AD4M executor or AD4M Launcher.",
+          value: "external",
+        },
+      ],
+      default: "managed",
+    });
+
+    const selectedMode = modeAnswer?.mode ?? "managed";
+    const configPatch: Record<string, any> = { mode: selectedMode };
+
+    if (selectedMode === "external") {
+      // Ask for both endpoint URLs
+      const mcpAnswer = await ctx.prompt?.({
+        type: "input",
+        name: "mcpEndpoint",
+        message: "MCP endpoint URL:",
+        default: "http://localhost:3001/mcp",
+      });
+      if (mcpAnswer?.mcpEndpoint) {
+        configPatch.mcpEndpoint = mcpAnswer.mcpEndpoint;
+      }
+
+      const wsAnswer = await ctx.prompt?.({
+        type: "input",
+        name: "executorWsUrl",
+        message: "GraphQL WebSocket URL:",
+        default: "ws://localhost:12000/graphql",
+      });
+      if (wsAnswer?.executorWsUrl) {
+        configPatch.executorWsUrl = wsAnswer.executorWsUrl;
+      }
+
+      // Attempt JWT auth via MCP capability request
+      const mcpUrl = configPatch.mcpEndpoint ?? "http://localhost:3001/mcp";
+      ctx.info?.("Requesting authentication from the executor...");
+
+      try {
+        const initResp = await mcpInitialize(mcpUrl);
+        const capResult = await mcpCallTool(
+          mcpUrl,
+          "request_capability",
+          {
+            app_name: "OpenClaw AD4M Plugin",
+            app_desc: "OpenClaw agent plugin for AD4M neighbourhoods",
+          },
+          initResp.sessionId,
+        );
+        const capData = extractMcpResultData(capResult);
+
+        if (capData?.request_id && capData?.code) {
+          // MCP auto-permitted — complete JWT flow silently
+          const jwtResult = await mcpCallTool(
+            mcpUrl,
+            "generate_jwt",
+            { request_id: capData.request_id, code: capData.code },
+            initResp.sessionId,
+          );
+          const jwtData = extractMcpResultData(jwtResult);
+          if (jwtData?.token) {
+            configPatch.token = jwtData.token;
+            ctx.info?.("Authenticated successfully via JWT.");
+          }
+        } else if (capData?.request_id) {
+          // Executor did not auto-permit (e.g. Launcher requires manual approval).
+          // The user sees a 6-digit code in the Launcher UI.
+          ctx.info?.(
+            "A capability request was sent to the executor. Check the AD4M Launcher or executor logs for a 6-digit verification code.",
+          );
+
+          const codeAnswer = await ctx.prompt?.({
+            type: "input",
+            name: "code",
+            message: "Enter the 6-digit verification code:",
+            validate: (val: string) =>
+              /^\d{6}$/.test(val) || "Must be a 6-digit number",
+          });
+
+          if (codeAnswer?.code) {
+            const jwtResult = await mcpCallTool(
+              mcpUrl,
+              "generate_jwt",
+              { request_id: capData.request_id, code: codeAnswer.code },
+              initResp.sessionId,
+            );
+            const jwtData = extractMcpResultData(jwtResult);
+            if (jwtData?.token) {
+              configPatch.token = jwtData.token;
+              ctx.info?.("Authenticated successfully via JWT.");
+            } else {
+              ctx.info?.(
+                "Authentication failed. You can retry by reconfiguring the plugin.",
+              );
+            }
+          }
+        }
+      } catch (e: any) {
+        ctx.info?.(
+          `Could not reach executor at ${mcpUrl}: ${e.message}. Make sure the executor is running and try again.`,
+        );
+      }
+    }
+
+    // --- Ensure hooks token exists (silent, no prompting) ---
+    try {
+      const currentConfig = ctx.getConfig?.();
+      const hooksToken = currentConfig?.hooks?.token;
+      if (!hooksToken || hooksToken.length < 32) {
+        const generated = crypto.randomBytes(32).toString("hex");
+        await ctx.patchConfig?.({
+          hooks: { enabled: true, token: generated },
+        });
+      }
+    } catch {
+      // getConfig/patchConfig may not be available — token will be resolved at runtime
+    }
+
+    // --- Apply plugin config ---
+    await ctx.patchConfig?.({ ad4m: configPatch });
+
+    if (selectedMode === "managed") {
+      ctx.info?.(
+        "Managed mode selected. The plugin will start ad4m-executor, generate credentials, and initialize an agent automatically.",
+      );
+    } else {
+      ctx.info?.(
+        "External mode selected. The plugin will connect to the provided executor.",
+      );
+    }
+  };
+
+  // =========================================================================
   // Background Services
   // =========================================================================
 
@@ -1719,16 +1817,16 @@ Notes:
         return;
       }
 
-      if (!config.wakeUrl || !config.wakeToken) {
+      if (!config.wakeToken) {
         logger.info(
-          "[ad4m-waker] Waker not configured (wakeUrl and wakeToken required). Skipping.",
+          "[ad4m-waker] wakeToken not configured. Set wakeToken in plugin config to enable the waker. Skipping.",
         );
         return;
       }
 
       const executorWsUrl =
         config.executorWsUrl ?? "ws://localhost:12000/graphql";
-      const token = config.adminCredential;
+      const token = authToken;
 
       try {
         // Dynamic imports to avoid load-time issues with @holochain/client transitive deps
