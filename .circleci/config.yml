@@ -226,7 +226,7 @@ workflows:
   build-and-test:
     jobs:
       - build-and-test
-      - plugin-ad4m-tests:
+      - plugin-ad4m-tests
       - integration-tests-js:
           requires:
             - build-and-test
