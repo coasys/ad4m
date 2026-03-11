@@ -48,6 +48,7 @@ import {
   type WakerSubscription,
   type McpTool,
   type McpResponse,
+  type ExecutorStartResult,
 } from "./index";
 
 import ad4mPlugin from "./index";
@@ -217,7 +218,7 @@ describe("ensureExecutorRunning", () => {
     vi.restoreAllMocks();
   });
 
-  it("returns true immediately when executor is already running", async () => {
+  it("returns 'already_running' when executor is already running", async () => {
     // Mock fetch to succeed (executor already running)
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       fakeJsonResponse({ jsonrpc: "2.0", id: 0, result: {} }),
@@ -226,7 +227,7 @@ describe("ensureExecutorRunning", () => {
     const logger = makeMockLogger();
     const result = await ensureExecutorRunning("cred", logger);
 
-    expect(result).toBe(true);
+    expect(result).toBe("already_running");
     const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
     expect(msgs.some((m: string) => m.includes("already running"))).toBe(true);
   });
@@ -305,7 +306,7 @@ describe("ensureExecutorRunning", () => {
     ).toBe(true);
   }, 10000);
 
-  it("returns true when executor becomes available during polling", async () => {
+  it("returns 'spawned' when executor becomes available during polling", async () => {
     let fetchCallCount = 0;
     vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
       fetchCallCount++;
@@ -322,7 +323,7 @@ describe("ensureExecutorRunning", () => {
     const logger = makeMockLogger();
     const result = await ensureExecutorRunning("cred", logger);
 
-    expect(result).toBe(true);
+    expect(result).toBe("spawned");
     const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
     expect(msgs.some((m: string) => m.includes("started successfully"))).toBe(
       true,
