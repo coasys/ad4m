@@ -1862,4 +1862,118 @@ describe("ad4mPlugin", () => {
     );
     expect(warningFound).toBe(true);
   });
+
+  it("skips heavy initialization on first run (no mode in config)", async () => {
+    const registeredTools: Array<{ name: string; [k: string]: any }> = [];
+    const registeredServices: Array<{ id: string; [k: string]: any }> = [];
+
+    const mockApi = {
+      pluginConfig: {},
+      logger: makeMockLogger(),
+      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
+      registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+    };
+
+    await ad4mPlugin(mockApi);
+
+    // Should log that it's waiting for interactive setup
+    const infoMessages = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
+    expect(
+      infoMessages.some((m: string) => m.includes("waiting for interactive setup")),
+    ).toBe(true);
+
+    // Should NOT have tried to start executor (no spawn calls)
+    expect(mockSpawn).not.toHaveBeenCalled();
+
+    // Should still register tools, services, and configureInteractive
+    const toolNames = registeredTools.map((t) => t.name);
+    expect(toolNames).toContain("ad4m_get_sample_config");
+    expect(toolNames).toContain("refresh_ad4m_tools");
+
+    const serviceIds = registeredServices.map((s) => s.id);
+    expect(serviceIds).toContain("ad4m-mcp");
+    expect(serviceIds).toContain("ad4m-waker");
+
+    // configureInteractive should be assigned
+    expect(typeof mockApi.configureInteractive).toBe("function");
+  });
+
+  it("configureInteractive discovers binary and generates passphrase in managed mode", async () => {
+    const mockApi: any = {
+      pluginConfig: {},
+      logger: makeMockLogger(),
+      registerTool: vi.fn(),
+      registerService: vi.fn(),
+    };
+
+    await ad4mPlugin(mockApi);
+
+    // Simulate OpenClaw calling configureInteractive
+    const configPatch: Record<string, any> = {};
+    const mockCtx = {
+      prompt: vi.fn().mockResolvedValue({ mode: "managed" }),
+      patchConfig: vi.fn(async (patch: any) => {
+        Object.assign(configPatch, patch);
+      }),
+      getConfig: vi.fn().mockReturnValue({}),
+      info: vi.fn(),
+    };
+
+    await mockApi.configureInteractive(mockCtx);
+
+    // Should have called patchConfig with ad4m config
+    expect(mockCtx.patchConfig).toHaveBeenCalled();
+    const ad4mConfig = configPatch.ad4m;
+    expect(ad4mConfig).toBeDefined();
+    expect(ad4mConfig.mode).toBe("managed");
+
+    // Should have generated a passphrase
+    expect(ad4mConfig.agentPassphrase).toBeDefined();
+    expect(ad4mConfig.agentPassphrase.length).toBeGreaterThan(0);
+
+    // Should have attempted to discover binary
+    const infoMessages = mockCtx.info.mock.calls.map((c: any[]) => c[0]);
+    expect(
+      infoMessages.some((m: string) => m.includes("ad4m-executor")),
+    ).toBe(true);
+  });
+
+  it("configureInteractive sets up external mode with endpoints", async () => {
+    const mockApi: any = {
+      pluginConfig: {},
+      logger: makeMockLogger(),
+      registerTool: vi.fn(),
+      registerService: vi.fn(),
+    };
+
+    // Mock fetch to fail (no executor running during setup)
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No executor"));
+
+    await ad4mPlugin(mockApi);
+
+    const configPatch: Record<string, any> = {};
+    let promptCallCount = 0;
+    const mockCtx = {
+      prompt: vi.fn().mockImplementation(async (q: any) => {
+        promptCallCount++;
+        if (q.name === "mode") return { mode: "external" };
+        if (q.name === "mcpEndpoint") return { mcpEndpoint: "http://custom:3001/mcp" };
+        if (q.name === "executorWsUrl") return { executorWsUrl: "ws://custom:12000/graphql" };
+        return {};
+      }),
+      patchConfig: vi.fn(async (patch: any) => {
+        Object.assign(configPatch, patch);
+      }),
+      getConfig: vi.fn().mockReturnValue({}),
+      info: vi.fn(),
+    };
+
+    await mockApi.configureInteractive(mockCtx);
+
+    const ad4mConfig = configPatch.ad4m;
+    expect(ad4mConfig).toBeDefined();
+    expect(ad4mConfig.mode).toBe("external");
+    expect(ad4mConfig.mcpEndpoint).toBe("http://custom:3001/mcp");
+    expect(ad4mConfig.executorWsUrl).toBe("ws://custom:12000/graphql");
+  });
 });

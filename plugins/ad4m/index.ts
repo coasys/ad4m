@@ -67,16 +67,24 @@ export function generateRandomPassphrase(length: number = 32): string {
 
 /**
  * Persist plugin config fields back to the OpenClaw config.
- * Uses api.patchConfig if available. Best-effort — silently ignores errors.
+ * Uses api.patchConfig if available.
  */
 export async function updatePluginConfig(
   api: any,
   patch: Partial<PluginConfig>,
+  logger?: any,
 ): Promise<void> {
+  if (typeof api.patchConfig !== "function") {
+    logger?.warn?.(
+      `[ad4m] patchConfig not available on api — cannot persist config: ${JSON.stringify(patch)}`,
+    );
+    return;
+  }
   try {
-    await api.patchConfig?.({ ad4m: patch });
-  } catch {
-    // patchConfig may not be available in all versions
+    await api.patchConfig({ ad4m: patch });
+    logger?.info?.(`[ad4m] Config updated: ${Object.keys(patch).join(", ")}`);
+  } catch (e: any) {
+    logger?.error?.(`[ad4m] Failed to update config: ${e.message}`);
   }
 }
 
@@ -450,7 +458,7 @@ export async function ensureAgentReady(
       logger.info(`[ad4m] Agent not initialized, generating new agent...`);
       try {
         await client.agent.generate(passphrase);
-        if (_api) updatePluginConfig(_api, { agentPassphrase: passphrase });
+        if (_api) await updatePluginConfig(_api, { agentPassphrase: passphrase }, logger);
         // Re-fetch status to get the DID
         const newStatus = await client.agent.status();
         logger.info(
@@ -827,6 +835,11 @@ export default async function ad4mPlugin(api: any) {
   const mode = providedConfig.mode || "managed";
   const logger = api.logger;
 
+  // Detect first run: mode not explicitly set in config means configureInteractive
+  // hasn't run yet. Skip heavy initialization — just register configureInteractive
+  // and tools/services so OpenClaw can call configureInteractive first.
+  const isConfigured = !!providedConfig.mode;
+
   // Determine endpoint - default to localhost for managed, use provided for external
   const endpoint = providedConfig.mcpEndpoint ?? "http://localhost:3001/mcp";
 
@@ -838,7 +851,11 @@ export default async function ad4mPlugin(api: any) {
   let authToken: string = "";
   let pluginAgentDid: string = "";
 
-  if (mode === "external") {
+  if (!isConfigured) {
+    // First run — skip heavy initialization.
+    // configureInteractive will be called by OpenClaw to set up config.
+    logger.info("[ad4m] No config found — waiting for interactive setup...");
+  } else if (mode === "external") {
     // External mode: use token from config (JWT from setup), or request new JWT
     authToken = providedConfig.token || "";
     if (!authToken) {
@@ -866,7 +883,7 @@ export default async function ad4mPlugin(api: any) {
           const jwtData = extractMcpResultData(jwtResult);
           if (jwtData?.token) {
             authToken = jwtData.token;
-            updatePluginConfig(api, { token: jwtData.token });
+            await updatePluginConfig(api, { token: jwtData.token }, logger);
             logger.info("[ad4m] JWT obtained and stored in config");
           }
         }
@@ -879,14 +896,14 @@ export default async function ad4mPlugin(api: any) {
     const adminCredential = generateRandomPassphrase(24);
     authToken = adminCredential;
 
-    // Resolve executor binary path: config > discover > default
+    // Resolve executor binary path from config (set by configureInteractive)
     let binaryPath = providedConfig.ad4mBinaryPath;
     if (!binaryPath) {
+      // Fallback: re-discover if binary moved since install
       logger.info(`[ad4m] Searching for ad4m-executor binary...`);
       const discovered = findExecutorBinary();
       if (discovered) {
         logger.info(`[ad4m] Found ad4m-executor at: ${discovered}`);
-        updatePluginConfig(api, { ad4mBinaryPath: discovered });
         binaryPath = discovered;
       } else {
         logger.warn(
@@ -1704,7 +1721,24 @@ Notes:
     const selectedMode = modeAnswer?.mode ?? "managed";
     const configPatch: Record<string, any> = { mode: selectedMode };
 
-    if (selectedMode === "external") {
+    if (selectedMode === "managed") {
+      // --- Managed mode: discover binary and pre-generate passphrase ---
+      ctx.info?.("Searching for ad4m-executor binary...");
+      const discovered = findExecutorBinary();
+      if (discovered) {
+        configPatch.ad4mBinaryPath = discovered;
+        ctx.info?.(`Found ad4m-executor at: ${discovered}`);
+      } else {
+        ctx.info?.(
+          "ad4m-executor not found in PATH or common locations. " +
+          "Set ad4mBinaryPath in plugin config to the full path (e.g. /usr/local/bin/ad4m-executor).",
+        );
+      }
+
+      // Pre-generate agent passphrase so it's persisted in config
+      const passphrase = generateRandomPassphrase(32);
+      configPatch.agentPassphrase = passphrase;
+    } else if (selectedMode === "external") {
       // Ask for both endpoint URLs
       const mcpAnswer = await ctx.prompt?.({
         type: "input",
