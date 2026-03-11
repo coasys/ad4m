@@ -42,14 +42,13 @@ export class TestCluster {
      * Returns the node handle with process and client references.
      */
     async addNode(config: NodeConfig): Promise<ClusterNode> {
-        const { process: executorProcess } = await startExecutor(
+        const executorProcess = await startExecutor(
             config.dataPath,
             config.seedPath || "",
             config.gqlPort,
             config.hcAdminPort,
             config.hcAppPort,
-            false, // useLocalProxy
-            false, // useBootstrap
+            false, // languageLanguageOnly
             config.adminCredential || "",
         );
 
@@ -76,7 +75,7 @@ export class TestCluster {
 
         while (Date.now() - start < timeoutMs) {
             try {
-                const client = new Ad4mClient(apolloClient(`http://localhost:${port}/graphql`, adminCredential));
+                const client = new Ad4mClient(apolloClient(port, adminCredential));
                 // Try a simple query to verify connectivity
                 await client.runtime.info();
                 return client;

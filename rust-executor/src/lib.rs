@@ -194,7 +194,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     // Set up graceful shutdown channel.
     // The sender is stored globally so runtime_quit and signal handlers can trigger shutdown.
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let _ = crate::globals::SHUTDOWN_TX.set(shutdown_tx);
+    {
+        let mut guard = crate::globals::SHUTDOWN_TX.lock().unwrap();
+        *guard = Some(shutdown_tx);
+    }
 
     // Spawn a task that listens for OS signals (SIGTERM/SIGINT) and triggers shutdown.
     // This replaces the old ctrlc handler in the CLI binaries with an in-executor handler
@@ -213,7 +216,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             }
 
             // Trigger shutdown via the global channel
-            if let Some(tx) = crate::globals::SHUTDOWN_TX.take() {
+            if let Some(tx) = crate::globals::SHUTDOWN_TX.lock().unwrap().take() {
                 let _ = tx.send(());
             }
         });
@@ -225,7 +228,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             info!("Shutdown signal received, cleaning up...");
 
             // 1. Shut down Holochain conductor gracefully
-            if let Some(holochain_service) = holochain_service::maybe_get_holochain_service().await {
+            if let Some(holochain_service) = holochain_service::maybe_get_holochain_service().await
+            {
                 info!("Shutting down Holochain conductor...");
                 match holochain_service.shutdown().await {
                     Ok(()) => info!("Holochain conductor shut down cleanly"),

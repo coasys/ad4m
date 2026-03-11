@@ -200,7 +200,9 @@ async fn main() -> Result<()> {
         if let Some(ref pf) = pid_file {
             // SAFETY: set_var is safe here because we're in single-threaded init before spawning.
             #[allow(deprecated)]
-            unsafe { std::env::set_var("AD4M_PID_FILE", pf); }
+            unsafe {
+                std::env::set_var("AD4M_PID_FILE", pf);
+            }
         }
         let tls = if tls_cert_file.is_some() && tls_key_file.is_some() {
             Some(TlsConfig {

@@ -2494,7 +2494,7 @@ impl Mutation {
         // Trigger graceful shutdown via the global shutdown channel.
         // The main loop will shut down Holochain conductor, flush state, and exit cleanly.
         // Falls back to process::exit(0) if the channel was already consumed or not set.
-        if let Some(tx) = crate::globals::SHUTDOWN_TX.take() {
+        if let Some(tx) = crate::globals::SHUTDOWN_TX.lock().unwrap().take() {
             log::info!("runtime_quit: sending graceful shutdown signal");
             let _ = tx.send(());
             Ok(true)
