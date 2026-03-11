@@ -288,15 +288,56 @@ export async function wipePerspective(
 
 /**
  * Kill any process listening on the given ports.
- * Use this in after() hooks as a safety net — even if executorProcess.kill()
- * works correctly, this ensures nothing lingers on the ports.
+ * Uses SIGTERM → wait → SIGKILL escalation for graceful shutdown.
+ * Use this in after() hooks as a safety net.
  */
 export function killByPorts(ports: number[]): void {
     for (const port of ports) {
         try {
+            // First try SIGTERM for graceful shutdown
+            execSync(`lsof -ti:${port} | xargs -r kill -TERM`, { stdio: 'ignore' });
+        } catch (e) {
+            // Port not in use — fine
+        }
+    }
+    // Give processes a moment to shut down gracefully
+    try { execSync('sleep 2', { stdio: 'ignore' }); } catch (e) { /* ignore */ }
+    for (const port of ports) {
+        try {
+            // SIGKILL anything still lingering
             execSync(`lsof -ti:${port} | xargs -r kill -9`, { stdio: 'ignore' });
         } catch (e) {
             // Port not in use — fine
         }
     }
+}
+
+/**
+ * Gracefully shut down a ChildProcess using SIGTERM → wait → SIGKILL escalation.
+ * Replaces the common pattern of `while (!process.killed) { process.kill(); await sleep(500); }`
+ * which sends repeated SIGTERM signals unnecessarily.
+ *
+ * @param proc - The ChildProcess to shut down
+ * @param label - Label for logging
+ * @param timeoutMs - How long to wait for graceful shutdown before SIGKILL (default: 10s)
+ */
+export async function gracefulShutdown(proc: ChildProcess | null | undefined, label: string = "process", timeoutMs: number = 10000): Promise<void> {
+    if (!proc || proc.killed) return;
+
+    console.log(`Sending SIGTERM to ${label} (PID ${proc.pid})...`);
+    proc.kill('SIGTERM');
+
+    // Wait for process to exit gracefully
+    const start = Date.now();
+    while (!proc.killed && Date.now() - start < timeoutMs) {
+        await sleep(500);
+    }
+
+    if (!proc.killed) {
+        console.log(`${label} did not exit after ${timeoutMs}ms, sending SIGKILL...`);
+        proc.kill('SIGKILL');
+        await sleep(1000);
+    }
+
+    console.log(`${label} shut down (killed=${proc.killed})`);
 }

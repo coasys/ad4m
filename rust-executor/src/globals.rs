@@ -1,9 +1,15 @@
 use lazy_static::lazy_static;
+use std::sync::OnceLock;
+use tokio::sync::oneshot;
 
 lazy_static! {
     /// The current version of AD4M
     pub static ref AD4M_VERSION: String = String::from("0.12.0-rc2");
 }
+
+/// Global shutdown signal sender. Used by `runtime_quit` GQL mutation and signal handlers
+/// to trigger a graceful shutdown of the executor.
+pub static SHUTDOWN_TX: OnceLock<oneshot::Sender<()>> = OnceLock::new();
 
 /// Struct representing oldest supported version and indicator if state should be cleared if update is required
 pub struct OldestVersion {

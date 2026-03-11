@@ -2491,7 +2491,17 @@ impl Mutation {
 
     async fn runtime_quit(&self, context: &RequestContext) -> FieldResult<bool> {
         check_capability(&context.capabilities, &RUNTIME_QUIT_CAPABILITY)?;
-        std::process::exit(0);
+        // Trigger graceful shutdown via the global shutdown channel.
+        // The main loop will shut down Holochain conductor, flush state, and exit cleanly.
+        // Falls back to process::exit(0) if the channel was already consumed or not set.
+        if let Some(tx) = crate::globals::SHUTDOWN_TX.take() {
+            log::info!("runtime_quit: sending graceful shutdown signal");
+            let _ = tx.send(());
+            Ok(true)
+        } else {
+            log::warn!("runtime_quit: shutdown channel unavailable, falling back to process::exit");
+            std::process::exit(0);
+        }
     }
 
     async fn runtime_remove_friends(

@@ -163,6 +163,9 @@ enum Domain {
         enable_mcp: Option<bool>,
         #[arg(long, action)]
         mcp_port: Option<u16>,
+        /// Write the executor PID to this file on startup (removed on clean shutdown).
+        #[arg(long)]
+        pid_file: Option<String>,
     },
     RunLocalHcServices {},
     Eve {
@@ -243,8 +246,14 @@ async fn main() -> Result<()> {
         enable_multi_user,
         enable_mcp,
         mcp_port,
+        pid_file,
     } = args.domain
     {
+        // Set PID file path as env var so the executor can write/clean it up
+        if let Some(ref pf) = pid_file {
+            #[allow(deprecated)]
+            unsafe { std::env::set_var("AD4M_PID_FILE", pf); }
+        }
         let _ = tokio::spawn(async move {
             rust_executor::run(Ad4mConfig {
                 app_data_path,
@@ -269,6 +278,8 @@ async fn main() -> Result<()> {
                 auto_permit_cap_requests: None,
                 tls: None,
                 log_holochain_metrics: None,
+                hc_relay_url: None,
+                smtp_config: None,
             }).await
         }).await;
         

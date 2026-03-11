@@ -34,6 +34,7 @@ pub mod types;
 use std::thread::JoinHandle;
 
 use log::{error, info, warn};
+use tokio::sync::oneshot;
 
 use crate::{
     agent::AgentService, ai_service::AIService, dapp_server::serve_dapp, db::Ad4mDb,
@@ -190,10 +191,74 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         }
     }
 
+    // Set up graceful shutdown channel.
+    // The sender is stored globally so runtime_quit and signal handlers can trigger shutdown.
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let _ = crate::globals::SHUTDOWN_TX.set(shutdown_tx);
+
+    // Spawn a task that listens for OS signals (SIGTERM/SIGINT) and triggers shutdown.
+    // This replaces the old ctrlc handler in the CLI binaries with an in-executor handler
+    // that allows graceful cleanup of Holochain conductor and databases.
+    #[cfg(unix)]
+    {
+        tokio::spawn(async {
+            use tokio::signal;
+            let ctrl_c = signal::ctrl_c();
+            let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler");
+
+            tokio::select! {
+                _ = ctrl_c => info!("Received SIGINT, initiating graceful shutdown..."),
+                _ = sigterm.recv() => info!("Received SIGTERM, initiating graceful shutdown..."),
+            }
+
+            // Trigger shutdown via the global channel
+            if let Some(tx) = crate::globals::SHUTDOWN_TX.take() {
+                let _ = tx.send(());
+            }
+        });
+    }
+
+    // Spawn the shutdown handler that waits for the signal and cleans up
+    tokio::spawn(async move {
+        if shutdown_rx.await.is_ok() {
+            info!("Shutdown signal received, cleaning up...");
+
+            // 1. Shut down Holochain conductor gracefully
+            if let Some(holochain_service) = holochain_service::maybe_get_holochain_service().await {
+                info!("Shutting down Holochain conductor...");
+                match holochain_service.shutdown().await {
+                    Ok(()) => info!("Holochain conductor shut down cleanly"),
+                    Err(e) => warn!("Error shutting down Holochain conductor: {}", e),
+                }
+            }
+
+            // 2. Write PID file removal if it exists
+            if let Ok(pid_file) = std::env::var("AD4M_PID_FILE") {
+                let _ = std::fs::remove_file(&pid_file);
+                info!("Removed PID file: {}", pid_file);
+            }
+
+            info!("Graceful shutdown complete, exiting.");
+            std::process::exit(0);
+        }
+    });
+
     // Initialize logging for CLI (stdout)
     // Respects RUST_LOG environment variable if set
     crate::logging::init_cli_logging(None);
     config.prepare();
+
+    // Write PID file if requested via environment variable or config.
+    // Test harnesses can set AD4M_PID_FILE to get a reliable PID for targeted cleanup.
+    if let Ok(pid_file) = std::env::var("AD4M_PID_FILE") {
+        let pid = std::process::id();
+        if let Err(e) = std::fs::write(&pid_file, pid.to_string()) {
+            warn!("Failed to write PID file {}: {}", pid_file, e);
+        } else {
+            info!("Wrote PID {} to {}", pid, pid_file);
+        }
+    }
 
     // Store config globally so services (e.g. agent mutation resolvers) can access it
     crate::config::set_global_config(config.clone());

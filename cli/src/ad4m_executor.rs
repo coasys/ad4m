@@ -136,6 +136,10 @@ enum Domain {
         enable_mcp: Option<bool>,
         #[arg(long, action)]
         mcp_port: Option<u16>,
+        /// Write the executor PID to this file on startup (removed on clean shutdown).
+        /// Useful for test harnesses that need targeted process cleanup.
+        #[arg(long)]
+        pid_file: Option<String>,
     },
     RunLocalHcServices {},
 }
@@ -189,8 +193,15 @@ async fn main() -> Result<()> {
         enable_multi_user,
         enable_mcp,
         mcp_port,
+        pid_file,
     } = args.domain
     {
+        // Set PID file path as env var so the executor can write/clean it up
+        if let Some(ref pf) = pid_file {
+            // SAFETY: set_var is safe here because we're in single-threaded init before spawning.
+            #[allow(deprecated)]
+            unsafe { std::env::set_var("AD4M_PID_FILE", pf); }
+        }
         let tls = if tls_cert_file.is_some() && tls_key_file.is_some() {
             Some(TlsConfig {
                 cert_file_path: tls_cert_file.unwrap(),

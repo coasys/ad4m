@@ -860,6 +860,29 @@ impl Query {
         Ok(None)
     }
 
+    /// Returns the readiness status of executor subsystems.
+    /// Test harnesses should poll this query instead of using `sleep()`.
+    /// No capability check — readiness is safe to expose publicly.
+    async fn runtime_readiness(&self, _context: &RequestContext) -> FieldResult<ReadinessStatus> {
+        // TODO: holochain_ready only checks if the service handle exists, not actual conductor readiness.
+        // A proper fix would require an API to query conductor state, which doesn't exist yet.
+        let holochain_ready = crate::holochain_service::maybe_get_holochain_service().await.is_some();
+
+        // TODO: languages_loaded currently maps to wallet unlock state, not language-controller state.
+        // The language loading happens during unlock, but there's no separate API to check if all
+        // languages have finished loading. This is a reasonable approximation for now.
+        let (agent_initialized, languages_loaded) = AgentService::with_global_instance(|agent_service| {
+            Ok((agent_service.is_initialized(), agent_service.is_unlocked()))
+        }).unwrap_or((false, false));
+
+        Ok(ReadinessStatus {
+            gql_ready: true, // If this query returns, GQL is ready
+            holochain_ready,
+            agent_initialized,
+            languages_loaded,
+        })
+    }
+
     async fn runtime_known_link_language_templates(
         &self,
         context: &RequestContext,

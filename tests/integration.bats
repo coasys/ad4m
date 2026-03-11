@@ -7,6 +7,8 @@ setup_file() {
     echo "done." >&3
     echo "Starting agent 1..." >&3
     ./target/release/ad4m run --app-data-path ${current_dir}/tests/ad4m1 --gql-port 4000 &
+    AD4M_PID=$!
+    export AD4M_PID
     sleep 5
     echo "done." >&3
 
@@ -31,7 +33,19 @@ setup_file() {
 }
 
 teardown_file() {
-    killall ad4m
+    # Graceful shutdown: SIGTERM first, then escalate to SIGKILL if needed.
+    # Never use `killall ad4m` — it kills ALL ad4m processes on the machine,
+    # including other CI jobs and dev instances.
+    if [ -n "$AD4M_PID" ]; then
+        kill -TERM "$AD4M_PID" 2>/dev/null || true
+        for i in $(seq 1 10); do
+            kill -0 "$AD4M_PID" 2>/dev/null || break
+            sleep 1
+        done
+        kill -9 "$AD4M_PID" 2>/dev/null || true
+    fi
+    # Port-based fallback in case PID tracking missed something
+    lsof -ti:4000 | xargs -r kill -9 2>/dev/null || true
 }
 
 setup() {
