@@ -30,6 +30,7 @@ use rustls::crypto::aws_lc_rs;
 #[cfg(test)]
 mod test_utils;
 pub mod types;
+pub mod iroh_ice;
 
 use std::thread::JoinHandle;
 

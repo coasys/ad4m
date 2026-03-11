@@ -383,6 +383,11 @@ impl HolochainService {
                                         },
                                     }
                                 }
+
+                                HolochainServiceRequest::LocalSocketAddrs(response_tx) => {
+                                    // TODO: return real socket addrs once holochain_p2p exposes local_socket_addrs
+                                    let _ = response_tx.send(HolochainServiceResponse::LocalSocketAddrs(Ok(Vec::new())));
+                                }
                             };
                         };
                         error!("Holochain service receiver closed");

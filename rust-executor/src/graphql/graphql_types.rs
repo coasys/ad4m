@@ -1285,3 +1285,11 @@ impl GetFilter for PerspectiveQuerySubscriptionFilter {
         Some(self.subscription_id.clone())
     }
 }
+
+#[derive(GraphQLObject, Default, Serialize, Deserialize, Debug, Clone)]
+pub struct IceCandidateInfo {
+    pub candidate: String,
+    pub candidate_type: String,
+    pub address: String,
+    pub port: i32,
+}

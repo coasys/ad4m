@@ -39,6 +39,7 @@ pub enum HolochainServiceRequest {
     UnPackDna(String, oneshot::Sender<HolochainServiceResponse>),
     PackHapp(String, oneshot::Sender<HolochainServiceResponse>),
     UnPackHapp(String, oneshot::Sender<HolochainServiceResponse>),
+    LocalSocketAddrs(oneshot::Sender<HolochainServiceResponse>),
 }
 
 #[derive(Debug)]
@@ -59,6 +60,7 @@ pub enum HolochainServiceResponse {
     UnPackDna(Result<String, AnyError>),
     PackHapp(Result<String, AnyError>),
     UnPackHapp(Result<String, AnyError>),
+    LocalSocketAddrs(Result<Vec<String>, AnyError>),
 }
 
 impl HolochainServiceInterface {
@@ -233,6 +235,16 @@ impl HolochainServiceInterface {
         match response_rx.await? {
             HolochainServiceResponse::UnPackHapp(result) => result,
             _ => unreachable!(),
+        }
+    }
+
+    pub async fn local_socket_addrs(&self) -> Result<Vec<String>, AnyError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.sender
+            .send(HolochainServiceRequest::LocalSocketAddrs(response_tx))?;
+        match response_rx.await? {
+            HolochainServiceResponse::LocalSocketAddrs(result) => result,
+            _ => Err(anyhow::anyhow!("unexpected response")),
         }
     }
 }

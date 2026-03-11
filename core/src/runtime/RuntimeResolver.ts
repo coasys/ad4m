@@ -562,3 +562,18 @@ export default class RuntimeResolver {
     }
 }
 
+
+@ObjectType()
+export class IceCandidateInfo {
+    @Field()
+    candidate: string
+
+    @Field()
+    candidateType: string
+
+    @Field()
+    address: string
+
+    @Field(type => Int)
+    port: number
+}

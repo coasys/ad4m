@@ -527,4 +527,20 @@ export class RuntimeClient {
             error: (e) => console.error(e)
         })
     }
+
+    async iceCandidates(): Promise<any[]> {
+        const { data } = await this.apolloClient.query({
+            query: gql\`query runtimeIceCandidates {
+                runtimeIceCandidates {
+                    candidate
+                    candidateType
+                    address
+                    port
+                }
+            }\`,
+            fetchPolicy: "no-cache"
+        })
+        return data.runtimeIceCandidates
+    }
+
 }

@@ -791,6 +791,28 @@ impl Query {
         Ok(metrics)
     }
 
+
+    async fn runtime_ice_candidates(&self, context: &RequestContext) -> FieldResult<Vec<IceCandidateInfo>> {
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY,
+        )?;
+
+        let interface = get_holochain_service().await;
+        let addrs = interface.local_socket_addrs().await.unwrap_or_default();
+        let candidates = crate::iroh_ice::candidates_from_urls(&addrs);
+
+        Ok(candidates
+            .into_iter()
+            .map(|c| IceCandidateInfo {
+                candidate: c.candidate,
+                candidate_type: c.candidate_type,
+                address: c.address,
+                port: c.port as i32,
+            })
+            .collect())
+    }
+
     async fn runtime_info(&self, _context: &RequestContext) -> FieldResult<RuntimeInfo> {
         AgentService::with_global_instance(|agent_service| {
             agent_service
