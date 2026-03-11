@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "next dev",
     "start": "next start",
-    "build": "pnpm run typedoc && next build",
+    "build": "pnpm run typedoc && next build && rm -rf ../docs && mv out ../docs",
     "typedoc": "typedoc --options typedoc.json ../core/src"
   },
   "dependencies": {
