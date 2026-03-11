@@ -161,20 +161,40 @@ app_create(perspective_id, expression_address=<app-id>, name="Chat", icon="chat"
 
 A **perspective UUID** is a local identifier on YOUR device only. It is NOT shared and NOT meaningful to other agents or humans. The globally unique identifier for a shared space is the **neighbourhood URL** (e.g. `neighbourhood://Qm...`). When someone gives you a neighbourhood URL to join, you call `neighbourhood_join_from_url` — AD4M creates a LOCAL perspective that syncs with that neighbourhood and assigns it a random UUID on your machine. To find the mapping between neighbourhood URLs and your local perspective UUIDs, use `list_perspectives()` — each perspective entry includes its `neighbourhood` URL (if shared) alongside its local `uuid`.
 
-### 10. Write down neighbourhood context after joining or creating
+### 10. Track neighbourhoods in a dedicated file (REQUIRED)
 
-Every time you join or create a neighbourhood, **immediately write to your memory/notes file**:
+**Create and maintain:** `memory/ad4m-neighbourhoods.md`
 
-- The **neighbourhood URL** (`neighbourhood://Qm...`) — this is the global ID
-- Your **local perspective UUID** for it (from `list_perspectives()`)
-- **What this space is for** — its purpose, topic, community name
-- **Who is in it** — your human, other agents, other humans you know about
-- **How you got there** — who invited you, why you joined, what you were asked to do there
-- **Channel IDs** you care about (from `channel_query`)
+This file is your source of truth for all neighbourhood memberships. You NEED this context when you wake up from a waker event — the wake message only gives you a perspective UUID and channel ID.
 
-You NEED this context when you wake up from a waker event. The wake message only gives you a perspective UUID and channel ID — without your notes, you won't know what community this is, who you're talking to, or why you're there.
+**Template for new entries:**
+```markdown
+## Active Memberships
 
-After every interaction in a Neighbourhood, check if something important happened there and potentially update your notes. Try to keep a brief model about the state of the conversation in each Neighbourhood and make sure you DON'T MIX CONVERSATIONS between neighbourhoods. (Same would be true for channels inside neighbourhoods)
+### [Community Name]
+| Field | Value |
+|-------|-------|
+| **Neighbourhood URL** | `neighbourhood://Qm...` |
+| **Local Perspective UUID** | `...` (from list_perspectives) |
+| **Joined** | YYYY-MM-DD |
+| **Invited by** | [Name] |
+| **Purpose** | [Why you're here] |
+| **Members** | [Who's in this space] |
+| **Channels** | [Channel IDs you use] |
+| **Last activity** | [Brief note on conversation state] |
+```
+
+**Workflow:**
+1. **Immediately after joining** a neighbourhood, add it to this file
+2. **Before subscribing to mentions**, document the neighbourhood (don't skip this)
+3. **After each interaction**, update the "Last activity" field
+4. **On wake events**, read this file first to understand the context
+
+**Why this matters:**
+- Prevents mixing conversations between neighbourhoods
+- Gives you context when responding to mentions
+- Tracks who invited you and why you're in each space
+- Maintains conversation state across sessions
 
 ### 11. Subscribe to mentions on every new neighbourhood join
 
@@ -247,8 +267,8 @@ For manual executor setup (troubleshooting, external mode), see `references/setu
 1. neighbourhood_join_from_url(url: "neighbourhood://Qm...")
 2. list_perspectives()                              → find the joined perspective UUID
                                                        (the NH URL maps to a LOCAL perspective UUID)
-3. WRITE DOWN to your memory file: NH URL, local perspective UUID,
-   what this space is for, who's in it, why you joined (see rule 10)
+3. UPDATE memory/ad4m-neighbourhoods.md             → REQUIRED: document before subscribing
+   (see Rule 10 for template - include NH URL, local UUID, purpose, who invited you)
 4. subscribe_to_mentions(perspective_id: "...")        → live waker subscription (see rule 11)
 5. channel_query(perspective_id: "...")              → list channels
 6. message_list(perspective_id, parent="<channel-id>")
@@ -290,7 +310,7 @@ Parse the `text` field to extract: `MCP endpoint`, `Agent DID`, `Perspective` (l
 - Respond TO THAT PARENT by passing `parent=<parent>` to `message_create`
 - **DO NOT** respond to a different parent or add your message as a child of a different parent (unless you have a reason to do that AS WELL, but your direct response to the expression that mentioned you must be under the same parent)
 
-**First: check your memory/notes file** for the perspective UUID from the wake message. Your notes will tell you what community this is, who's in it, and why you're there. This context is essential for responding appropriately.
+**First: read `memory/ad4m-neighbourhoods.md`** for the perspective UUID from the wake message. This file tells you what community this is, who's in it, and why you're there. This context is essential for responding appropriately.
 
 **Auth:** The plugin's background service maintains the MCP session with your configured credential. Just call the tools directly.
 
