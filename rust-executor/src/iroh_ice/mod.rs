@@ -56,12 +56,13 @@ impl IrohIce {
 
     /// Get ICE candidates for the local endpoint.
     ///
-    /// Classifies addresses as:
-    /// - `host` — private/LAN addresses (RFC 1918, link-local, loopback)
-    /// - `srflx` — public/server-reflexive addresses (everything else)
+    /// All addresses are classified as `host` since Iroh does not distinguish
+    /// between directly-bound and STUN-discovered addresses.
+    /// Unspecified/wildcard addresses (0.0.0.0, ::) are filtered out.
     pub fn local_candidates(&self) -> Vec<IceCandidate> {
         self.local_addrs
             .iter()
+            .filter(|addr| !addr.ip().is_unspecified())
             .enumerate()
             .map(|(i, addr)| {
                 let typ = classify_addr(addr);
@@ -92,13 +93,14 @@ impl IrohIce {
     }
 }
 
-/// Classify a socket address as host (private) or server-reflexive (public).
-fn classify_addr(addr: &SocketAddr) -> IceCandidateType {
-    if is_private(addr) {
-        IceCandidateType::Host
-    } else {
-        IceCandidateType::ServerReflexive
-    }
+/// Classify a socket address.
+///
+/// Since Iroh's EndpointAddr does not distinguish between directly-bound and
+/// STUN-discovered addresses (all come from `local_socket_addrs()`), every
+/// address is reported as `host`.  Only a real STUN response should produce
+/// `srflx`, which we do not have here.
+fn classify_addr(_addr: &SocketAddr) -> IceCandidateType {
+    IceCandidateType::Host
 }
 
 /// Check if a socket address is private/LAN.
@@ -106,10 +108,13 @@ fn is_private(addr: &SocketAddr) -> bool {
     match addr {
         SocketAddr::V4(v4) => {
             let ip = v4.ip();
+            let octets = ip.octets();
             ip.is_private()
                 || ip.is_loopback()
                 || ip.is_link_local()
                 || ip.is_unspecified()
+                // CGNAT/shared address space (100.64.0.0/10) per RFC 6598
+                || (octets[0] == 100 && (octets[1] & 0xC0) == 64)
         }
         SocketAddr::V6(v6) => {
             let ip = v6.ip();
@@ -179,8 +184,8 @@ mod tests {
             ("172.16.0.1:8080", IceCandidateType::Host),
             ("127.0.0.1:3000", IceCandidateType::Host),
             ("169.254.1.1:4000", IceCandidateType::Host),
-            ("8.8.8.8:443", IceCandidateType::ServerReflexive),
-            ("203.0.113.5:12345", IceCandidateType::ServerReflexive),
+            ("8.8.8.8:443", IceCandidateType::Host),
+            ("203.0.113.5:12345", IceCandidateType::Host),
         ];
         for (addr_str, expected) in cases {
             let addr: SocketAddr = addr_str.parse().unwrap();
@@ -201,7 +206,7 @@ mod tests {
         assert_eq!(classify_addr(&ula), IceCandidateType::Host);
 
         let public: SocketAddr = "[2001:db8::1]:1234".parse().unwrap();
-        assert_eq!(classify_addr(&public), IceCandidateType::ServerReflexive);
+        assert_eq!(classify_addr(&public), IceCandidateType::Host);
     }
 
     #[test]
@@ -255,9 +260,9 @@ mod tests {
 
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].typ, IceCandidateType::Host);
-        assert_eq!(candidates[1].typ, IceCandidateType::ServerReflexive);
+        assert_eq!(candidates[1].typ, IceCandidateType::Host);
         assert!(candidates[0].candidate.contains("typ host"));
-        assert!(candidates[1].candidate.contains("typ srflx"));
+        assert!(candidates[1].candidate.contains("typ host"));
     }
 
     #[test]

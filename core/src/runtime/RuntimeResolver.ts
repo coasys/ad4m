@@ -43,6 +43,19 @@ export class RuntimeInfo {
     isUnlocked: Boolean;
 }
 
+
+@ObjectType()
+export class IceCandidateInfo {
+    @Field()
+    candidate: string;
+    @Field()
+    candidateType: string;
+    @Field()
+    address: string;
+    @Field(() => Int)
+    port: number;
+}
+
 @ObjectType()
 export class ExceptionInfo {
     @Field()
@@ -239,6 +252,11 @@ export default class RuntimeResolver {
     @Mutation(returns => Boolean)
     runtimeOpenLink(@Arg('url') url: string): Boolean {
         return true
+    }
+
+    @Query(returns => [IceCandidateInfo])
+    runtimeIceCandidates(): IceCandidateInfo[] {
+        return []
     }
 
     @Query(returns => RuntimeInfo)

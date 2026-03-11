@@ -6,6 +6,7 @@ use crate::languages::LanguageController;
 use crate::types::{AITask, DecoratedExpressionProof, ModelType};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
 use crate::{
+    iroh_ice::IrohIce,
     db::Ad4mDb,
     globals::AD4M_VERSION,
     holochain_service::get_holochain_service,
@@ -789,6 +790,39 @@ impl Query {
         let metrics = interface.get_network_metrics().await?;
 
         Ok(metrics)
+    }
+
+    /// Get ICE candidates derived from the Iroh transport layer.
+    /// These can be used as WebRTC ICE candidates, replacing external STUN servers.
+    async fn runtime_ice_candidates(&self, context: &RequestContext) -> FieldResult<Vec<IceCandidateInfo>> {
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY,
+        )?;
+
+        let service = get_holochain_service().await;
+        let addrs = service
+            .conductor
+            .holochain_p2p()
+            .local_socket_addrs()
+            .await
+            .map_err(|e| FieldError::new(format!("Failed to get socket addresses: {}", e), Value::null()))?;
+
+        let ice = IrohIce::new(addrs);
+        let candidates = ice.local_candidates();
+
+        Ok(candidates
+            .into_iter()
+            .map(|c| IceCandidateInfo {
+                candidate: c.candidate,
+                candidate_type: match c.typ {
+                    crate::iroh_ice::IceCandidateType::Host => "host".to_string(),
+                    crate::iroh_ice::IceCandidateType::ServerReflexive => "srflx".to_string(),
+                },
+                address: c.addr.ip().to_string(),
+                port: c.addr.port() as i32,
+            })
+            .collect())
     }
 
     async fn runtime_info(&self, _context: &RequestContext) -> FieldResult<RuntimeInfo> {

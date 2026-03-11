@@ -625,6 +625,21 @@ pub struct ResourceInput {
     pub pointers: Vec<String>,
 }
 
+
+/// ICE candidate information derived from the Iroh transport layer.
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct IceCandidateInfo {
+    /// ICE candidate string in SDP format (RFC 8445).
+    pub candidate: String,
+    /// Candidate type: "host" or "srflx".
+    pub candidate_type: String,
+    /// The IP address.
+    pub address: String,
+    /// The port number.
+    pub port: i32,
+}
+
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeInfo {

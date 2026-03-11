@@ -1,7 +1,7 @@
 import { ApolloClient, gql } from "@apollo/client/core"
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import unwrapApolloResult from "../unwrapApolloResult"
-import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult, UserStatistics } from "./RuntimeResolver"
+import { RuntimeInfo, IceCandidateInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult, UserStatistics } from "./RuntimeResolver"
 
 const PERSPECTIVE_EXPRESSION_FIELDS = `
 author
@@ -76,6 +76,21 @@ export class RuntimeClient {
             }`,
         }));
         return runtimeInfo
+    }
+
+    async iceCandidates(): Promise<IceCandidateInfo[]> {
+        const { runtimeIceCandidates } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeIceCandidates {
+                runtimeIceCandidates {
+                    candidate
+                    candidateType
+                    address
+                    port
+                }
+            }`,
+            fetchPolicy: 'no-cache',
+        }))
+        return runtimeIceCandidates
     }
 
     async quit(): Promise<Boolean> {
