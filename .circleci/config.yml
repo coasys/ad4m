@@ -118,37 +118,6 @@ jobs:
     steps:
       - setup_integration_test_environment
       - run:
-          name: Kill any orphaned executors from previous runs
-          command: |
-            # Self-hosted runners reuse workdirs; previous job may have left
-            # an executor alive. Use SIGTERM first for graceful shutdown,
-            # then escalate to SIGKILL after a timeout.
-            for port in 15700 15701 15702; do
-              PIDS=$(lsof -ti:$port 2>/dev/null || true)
-              if [ -n "$PIDS" ]; then
-                echo "$PIDS" | xargs -r kill -TERM 2>/dev/null || true
-                sleep 3
-                echo "$PIDS" | xargs -r kill -9 2>/dev/null || true
-              fi
-            done
-      - run:
-          name: Verify clean port state
-          command: |
-            CONFLICTS=""
-            for port in 15000 15100 15200 15300 15400 15600 15700 15800 15900 15920 16000 16010 16600; do
-              if lsof -ti:$port >/dev/null 2>&1; then
-                CONFLICTS="$CONFLICTS $port"
-              fi
-            done
-            if [ -n "$CONFLICTS" ]; then
-              echo "⚠️  Ports still in use:$CONFLICTS"
-              echo "Attempting cleanup..."
-              for port in $CONFLICTS; do
-                lsof -ti:$port | xargs -r kill -9 2>/dev/null || true
-              done
-              sleep 2
-            fi
-      - run:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test-main
           no_output_timeout: 30m
@@ -191,21 +160,6 @@ jobs:
     steps:
       - setup_integration_test_environment
       - run:
-          name: Kill any orphaned executors from previous runs
-          command: |
-            # MCP tests use ports 16000-16002 (mcp-http) and 16010-16012 (mcp-auth)
-            # plus port 3001 (MCP HTTP server). Graceful SIGTERM first, then SIGKILL.
-            for port in 16000 16001 16002 16010 16011 16012 3001; do
-              PIDS=$(lsof -ti:$port 2>/dev/null || true)
-              if [ -n "$PIDS" ]; then
-                echo "$PIDS" | xargs -r kill -TERM 2>/dev/null || true
-              fi
-            done
-            sleep 3
-            for port in 16000 16001 16002 16010 16011 16012 3001; do
-              lsof -ti:$port | xargs -r kill -9 2>/dev/null || true
-            done
-      - run:
           name: Run MCP integration tests
           command: cd ./tests/js && pnpm install && pnpm run test-mcp
           no_output_timeout: 30m
@@ -215,17 +169,6 @@ jobs:
     resource_class: coasys/marvin
     steps:
       - setup_integration_test_environment
-      - run:
-          name: Kill any orphaned executors from previous runs
-          command: |
-            for port in 15700 15701 15702; do
-              PIDS=$(lsof -ti:$port 2>/dev/null || true)
-              if [ -n "$PIDS" ]; then
-                echo "$PIDS" | xargs -r kill -TERM 2>/dev/null || true
-                sleep 3
-                echo "$PIDS" | xargs -r kill -9 2>/dev/null || true
-              fi
-            done
       - run:
           name: Run Ad4mModel unit + integration tests
           command: cd ./tests/js && pnpm run test-model
@@ -269,12 +212,7 @@ jobs:
 
 workflows:
   version: 2
-  # CI DISABLED — pending review of test infrastructure improvements.
-  # This branch contains graceful shutdown, readiness probes, and test isolation changes
-  # that need review before enabling CI. See PR description for details.
-  # To re-enable: remove the `when: never` condition below.
   build-and-test:
-    when: never
     jobs:
       - build-and-test
       - plugin-ad4m-tests
