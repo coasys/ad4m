@@ -55,7 +55,6 @@ commands:
           name: Build bootstrap languages
           command: pnpm run build-languages
 
-
 jobs:
   build-and-test:
     machine: true
@@ -208,11 +207,26 @@ jobs:
           name: Run integration test script
           command: ./tests/bats/bin/bats tests/integration.bats
 
+  plugin-ad4m-tests:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          working_directory: plugins/ad4m
+          command: pnpm install
+      - run:
+          name: Run tests
+          working_directory: plugins/ad4m
+          command: pnpm test
+
 workflows:
   version: 2
   build-and-test:
     jobs:
       - build-and-test
+      - plugin-ad4m-tests:
       - integration-tests-js:
           requires:
             - build-and-test
