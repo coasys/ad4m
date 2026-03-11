@@ -192,14 +192,16 @@ export async function ensureExecutorRunning(
   logger.info(`[ad4m] Using binary: ${executorPath}`);
   logger.info(`[ad4m] PATH: ${process.env.PATH ?? "(unset)"}`);
 
-  // Check if executor needs initialization (first run)
+  // Check if executor needs initialization (first run).
+  // ONLY run init when the data directory doesn't exist at all.
+  // Running init on an existing directory can wipe agent keys via
+  // its version-mismatch cleanup logic.
   const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
   const ad4mDir = path.join(home, ".ad4m");
-  const seedFile = path.join(ad4mDir, "mainnet_seed.seed");
 
-  if (!fs.existsSync(seedFile)) {
+  if (!fs.existsSync(ad4mDir)) {
     logger.info(
-      `[ad4m] Seed file not found at ${seedFile} — running init...`,
+      `[ad4m] Data directory ${ad4mDir} not found — running init for first-time setup...`,
     );
     try {
       execFileSync(executorPath, ["init"], {
@@ -907,46 +909,62 @@ export default async function ad4mPlugin(api: any) {
       logger.error(
         `[ad4m] Failed to start executor in managed mode. Set ad4mBinaryPath in plugin config if ad4m-executor is not in PATH.`,
       );
-    } else {
-      // If we spawned the executor ourselves, the ephemeral credential is valid.
-      // If it was already running (e.g. from Launcher or previous install),
-      // our ephemeral credential won't match — obtain a JWT instead.
-      if (executorStartResult === "already_running") {
-        logger.info("[ad4m] Executor was already running — obtaining JWT for auth...");
-        try {
-          const initResp = await mcpInitialize(endpoint);
-          const capResult = await mcpCallTool(
+    } else if (executorStartResult === "already_running") {
+      // Executor was already running (e.g. from Launcher or previous install).
+      // Our ephemeral credential won't match — obtain a JWT instead.
+      // Agent should already be initialized; we only unlock, never generate.
+      logger.info("[ad4m] Executor was already running — obtaining JWT for auth...");
+      try {
+        const initResp = await mcpInitialize(endpoint);
+        const capResult = await mcpCallTool(
+          endpoint,
+          "request_capability",
+          {
+            app_name: "OpenClaw AD4M Plugin",
+            app_desc: "OpenClaw agent plugin for AD4M neighbourhoods",
+          },
+          initResp.sessionId,
+        );
+        const capData = extractMcpResultData(capResult);
+        if (capData?.request_id && capData?.code) {
+          const jwtResult = await mcpCallTool(
             endpoint,
-            "request_capability",
-            {
-              app_name: "OpenClaw AD4M Plugin",
-              app_desc: "OpenClaw agent plugin for AD4M neighbourhoods",
-            },
+            "generate_jwt",
+            { request_id: capData.request_id, code: capData.code },
             initResp.sessionId,
           );
-          const capData = extractMcpResultData(capResult);
-          if (capData?.request_id && capData?.code) {
-            const jwtResult = await mcpCallTool(
-              endpoint,
-              "generate_jwt",
-              { request_id: capData.request_id, code: capData.code },
-              initResp.sessionId,
-            );
-            const jwtData = extractMcpResultData(jwtResult);
-            if (jwtData?.token) {
-              authToken = jwtData.token;
-              logger.info("[ad4m] JWT obtained for pre-existing executor");
-            }
+          const jwtData = extractMcpResultData(jwtResult);
+          if (jwtData?.token) {
+            authToken = jwtData.token;
+            logger.info("[ad4m] JWT obtained for pre-existing executor");
           }
-        } catch (e: any) {
-          logger.warn(`[ad4m] JWT auth failed for pre-existing executor: ${e.message}`);
         }
+      } catch (e: any) {
+        logger.warn(`[ad4m] JWT auth failed for pre-existing executor: ${e.message}`);
+        // Can't authenticate with a pre-existing executor — MCP tools
+        // will attempt without auth; agent management is skipped.
+        authToken = "";
       }
 
-      // Executor is running — ensure agent is generated/unlocked
+      if (authToken) {
+        const agentDid = await ensureAgentReady(
+          executorWsUrl,
+          authToken,
+          logger,
+          providedConfig.agentPassphrase,
+        );
+        if (agentDid) {
+          pluginAgentDid = agentDid;
+        } else {
+          logger.warn("[ad4m] Could not verify agent on pre-existing executor.");
+        }
+      }
+    } else {
+      // We spawned the executor with our admin credential — use it directly.
+      // ensureAgentReady may generate the agent on first run.
       const agentDid = await ensureAgentReady(
         executorWsUrl,
-        authToken,
+        adminCredential,
         logger,
         providedConfig.agentPassphrase,
         undefined, // _testClient

@@ -411,17 +411,16 @@ describe("ensureExecutorRunning", () => {
     );
   }, 10000);
 
-  it("runs ad4m-executor init when seed file is missing", async () => {
+  it("runs ad4m-executor init when data directory does not exist", async () => {
     const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
-    const seedFile = path.join(home, ".ad4m", "mainnet_seed.seed");
-    const backupFile = seedFile + ".test-backup";
-    let hadSeedFile = false;
+    const ad4mDir = path.join(home, ".ad4m");
 
-    // Temporarily move seed file out of the way
-    if (fs.existsSync(seedFile)) {
-      hadSeedFile = true;
-      fs.renameSync(seedFile, backupFile);
-    }
+    // Mock fs.existsSync to report the data directory as missing
+    const realExistsSync = fs.existsSync;
+    vi.spyOn(fs, "existsSync").mockImplementation((p: fs.PathLike) => {
+      if (p === ad4mDir) return false;
+      return realExistsSync(p);
+    });
 
     try {
       vi.spyOn(globalThis, "fetch").mockRejectedValue(
@@ -449,30 +448,26 @@ describe("ensureExecutorRunning", () => {
         expect.any(Object),
       );
 
-      // Should have logged about running init
+      // Should have logged about first-time setup
       const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
       expect(
-        msgs.some((m: string) => m.includes("running init")),
+        msgs.some((m: string) => m.includes("first-time setup")),
       ).toBe(true);
     } finally {
-      // Restore seed file
-      if (hadSeedFile && fs.existsSync(backupFile)) {
-        fs.renameSync(backupFile, seedFile);
-      }
       mockExecFileSync.mockReset();
     }
   }, 10000);
 
   it("returns false when ad4m-executor init fails", async () => {
     const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
-    const seedFile = path.join(home, ".ad4m", "mainnet_seed.seed");
-    const backupFile = seedFile + ".test-backup";
-    let hadSeedFile = false;
+    const ad4mDir = path.join(home, ".ad4m");
 
-    if (fs.existsSync(seedFile)) {
-      hadSeedFile = true;
-      fs.renameSync(seedFile, backupFile);
-    }
+    // Mock fs.existsSync to report the data directory as missing
+    const realExistsSync = fs.existsSync;
+    vi.spyOn(fs, "existsSync").mockImplementation((p: fs.PathLike) => {
+      if (p === ad4mDir) return false;
+      return realExistsSync(p);
+    });
 
     try {
       vi.spyOn(globalThis, "fetch").mockRejectedValue(
@@ -498,25 +493,20 @@ describe("ensureExecutorRunning", () => {
       // spawn should NOT have been called (init failed before spawn)
       expect(mockSpawn).not.toHaveBeenCalled();
     } finally {
-      if (hadSeedFile && fs.existsSync(backupFile)) {
-        fs.renameSync(backupFile, seedFile);
-      }
       mockExecFileSync.mockReset();
     }
   }, 10000);
 
-  it("skips init when seed file exists", async () => {
-    // The seed file should exist on this machine (or we create it)
+  it("skips init when data directory exists", async () => {
     const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
     const ad4mDir = path.join(home, ".ad4m");
-    const seedFile = path.join(ad4mDir, "mainnet_seed.seed");
-    let createdSeedFile = false;
 
-    if (!fs.existsSync(seedFile)) {
-      if (!fs.existsSync(ad4mDir)) fs.mkdirSync(ad4mDir, { recursive: true });
-      fs.writeFileSync(seedFile, "test-seed-content");
-      createdSeedFile = true;
-    }
+    // Mock fs.existsSync to report the data directory as present
+    const realExistsSync = fs.existsSync;
+    vi.spyOn(fs, "existsSync").mockImplementation((p: fs.PathLike) => {
+      if (p === ad4mDir) return true;
+      return realExistsSync(p);
+    });
 
     try {
       vi.spyOn(globalThis, "fetch").mockRejectedValue(
@@ -535,18 +525,15 @@ describe("ensureExecutorRunning", () => {
 
       await resultPromise;
 
-      // execFileSync should NOT have been called (seed exists, no init needed)
+      // execFileSync should NOT have been called (directory exists, no init needed)
       expect(mockExecFileSync).not.toHaveBeenCalled();
 
-      // Should NOT have logged about running init
+      // Should NOT have logged about first-time setup
       const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
       expect(
-        msgs.some((m: string) => m.includes("running init")),
+        msgs.some((m: string) => m.includes("first-time setup")),
       ).toBe(false);
     } finally {
-      if (createdSeedFile && fs.existsSync(seedFile)) {
-        fs.unlinkSync(seedFile);
-      }
       mockExecFileSync.mockReset();
     }
   }, 10000);
