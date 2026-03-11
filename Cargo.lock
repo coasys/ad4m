@@ -130,6 +130,7 @@ dependencies = [
  "os_info",
  "percent-encoding",
  "portpicker",
+ "quinn",
  "rand 0.8.5",
  "rayon",
  "regex",
@@ -16063,6 +16064,7 @@ checksum = "f1906b49b0c3bc04b5fe5d86a77925ae6524a19b816ae38ce1e426255f1d8a31"
 dependencies = [
  "aws-lc-rs",
  "bytes",
+ "fastbloom",
  "getrandom 0.3.4",
  "lru-slab",
  "rand 0.9.2",
@@ -16070,6 +16072,7 @@ dependencies = [
  "rustc-hash 2.1.1",
  "rustls 0.23.36",
  "rustls-pki-types",
+ "rustls-platform-verifier",
  "slab",
  "thiserror 2.0.18",
  "tinyvec",
