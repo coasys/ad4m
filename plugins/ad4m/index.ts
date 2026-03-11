@@ -861,6 +861,12 @@ export default async function ad4mPlugin(api: any) {
   let authToken: string = "";
   let pluginAgentDid: string = "";
 
+  updatePluginConfig(api, { 
+    mode: "managed", 
+    agentPassphrase: "PLEASE_FILL_IN_FOR_PRE_EXISTING_AD4M_KEYS",
+    ad4mBinaryPath: findExecutorBinary() ?? "PLEASE_POINT_TO_AD4M_EXECUTOR_BINARY"
+  }, logger);
+
   if (mode === "external") {
     // External mode: use token from config (JWT from setup), or request new JWT
     authToken = providedConfig.token || "";
