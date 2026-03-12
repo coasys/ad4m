@@ -451,7 +451,7 @@ impl HolochainService {
             if local_config.use_bootstrap {
                 network_config.bootstrap_url = Url2::parse(local_config.bootstrap_url.as_str());
             } else {
-                network_config.bootstrap_url = Url2::parse("http://boostrap.ad4m.dev:4433");
+                network_config.bootstrap_url = Url2::parse("http://bootstrap.ad4m.dev:4433");
             }
 
             if local_config.use_proxy {
