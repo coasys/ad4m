@@ -17,11 +17,6 @@ core/lib/*
 executor/lib/*
 coverage
 .DS_store
-docs-src/api.md
-docs-src/typedoc
-docs-src/_book
-docs-src/.next
-docs-src/pages/jsdoc
 host/dist
 host/build
 
@@ -66,7 +61,12 @@ rust-executor/CUSTOM_DENO_SNAPSHOT.bin
 rust-executor/test_data
 
 .npmrc
-docs-src/
+docs-src/out
+docs-src/api.md
+docs-src/typedoc
+docs-src/_book
+docs-src/.next
+docs-src/pages/jsdoc
 .worktrees/
 CUSTOM_DENO_SNAPSHOT.bin
 waker-bridge/package-lock.json

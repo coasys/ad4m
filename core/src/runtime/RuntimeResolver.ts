@@ -223,6 +223,38 @@ export class VerificationRequestResult {
     isExistingUser: boolean;
 }
 
+@ObjectType()
+export class HostingUserInfo {
+    @Field()
+    email: string;
+
+    @Field()
+    remainingCredits: string;
+
+    @Field({ nullable: true })
+    hotWalletAddress?: string;
+
+    constructor(email: string, remainingCredits: string, hotWalletAddress?: string) {
+        this.email = email;
+        this.remainingCredits = remainingCredits;
+        this.hotWalletAddress = hotWalletAddress;
+    }
+}
+
+@ObjectType()
+export class PaymentRequestResult {
+    @Field()
+    success: boolean;
+
+    @Field()
+    message: string;
+
+    constructor(success: boolean, message: string) {
+        this.success = success;
+        this.message = message;
+    }
+}
+
 /**
  * Resolver classes are used here to define the GraphQL schema 
  * (through the type-graphql annotations)
@@ -559,6 +591,27 @@ export default class RuntimeResolver {
     ): boolean {
         // For testing: simulate setting expiry (no-op in mock)
         return true
+    }
+
+    // Hosting mutations & queries
+
+    @Query(returns => HostingUserInfo)
+    runtimeHostingUserInfo(): HostingUserInfo {
+        return new HostingUserInfo("test@example.com", "100000000", null)
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeSetHotWalletAddress(
+        @Arg("address") address: string
+    ): boolean {
+        return true
+    }
+
+    @Mutation(returns => PaymentRequestResult)
+    runtimeRequestPayment(
+        @Arg("amountHOT") amountHOT: string
+    ): PaymentRequestResult {
+        return new PaymentRequestResult(true, "Mock payment of " + amountHOT + " base units credited")
     }
 }
 
