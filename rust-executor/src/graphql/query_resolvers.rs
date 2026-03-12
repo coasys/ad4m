@@ -875,9 +875,8 @@ impl Query {
         // languages have finished loading. This is a reasonable approximation for now.
         let (agent_initialized, languages_loaded) =
             AgentService::with_global_instance(|agent_service| {
-                Ok((agent_service.is_initialized(), agent_service.is_unlocked()))
-            })
-            .unwrap_or((false, false));
+                (agent_service.is_initialized(), agent_service.is_unlocked())
+            });
 
         Ok(ReadinessStatus {
             gql_ready: true, // If this query returns, GQL is ready
