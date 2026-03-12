@@ -196,11 +196,13 @@ const Login = () => {
       modelType: "EMBEDDING",
     });
     // add main whisper model (quantized large v3 turbo)
-    client!.ai.addModel({
-      name: "Whisper",
-      local: { fileName: whisperModel },
-      modelType: "TRANSCRIPTION",
-    });
+    client!.ai
+      .addModel({
+        name: "Whisper",
+        local: { fileName: whisperModel },
+        modelType: "TRANSCRIPTION",
+      })
+      .then((modelId) => client!.ai.setDefaultModel("TRANSCRIPTION", modelId));
 
     client!.ai.addModel({
       name: "Whisper tiny quantized",
