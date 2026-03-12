@@ -14,13 +14,12 @@
 // Imports
 // ---------------------------------------------------------------------------
 
+import { McpResponse, McpTool, PluginConfig, WakerSubscription } from "./types";
 import {
-  McpResponse,
-  McpTool,
-  PluginConfig,
-  WakerSubscription,
-} from "./types";
-import { generateRandomPassphrase, loadWakerState, saveWakerState } from "./config";
+  generateRandomPassphrase,
+  loadWakerState,
+  saveWakerState,
+} from "./config";
 import {
   ensureExecutorRunning,
   ExecutorStartResult,
@@ -48,7 +47,11 @@ export type {
   PluginConfig,
   WakerSubscription,
 } from "./types";
-export { generateRandomPassphrase, loadWakerState, saveWakerState } from "./config";
+export {
+  generateRandomPassphrase,
+  loadWakerState,
+  saveWakerState,
+} from "./config";
 export {
   findExecutorBinary,
   isExecutorRunning,
@@ -70,15 +73,11 @@ export {
 export { buildWakeMessage, postWake } from "./wakerHelpers";
 export { runSetup } from "./setup";
 
-
-
 // ---------------------------------------------------------------------------
 // MCP HTTP Client (Streamable HTTP with SSE support)
 // ---------------------------------------------------------------------------
 
 let requestIdCounter = 0;
-
-
 
 // ---------------------------------------------------------------------------
 // Plugin Export
@@ -258,9 +257,10 @@ export default function ad4mPlugin(api: any) {
     if (registeredTools.has(tool.name)) return;
 
     const isNeighbourhoodTool = NEIGHBOURHOOD_TOOLS.has(tool.name);
+    const prefixedName = `ad4m_${tool.name}`;
 
     api.registerTool({
-      name: tool.name,
+      name: prefixedName,
       description: tool.description ?? `AD4M MCP tool: ${tool.name}`,
       parameters: toParameters(tool),
       async execute(_id: string, params: Record<string, any>) {
@@ -531,7 +531,7 @@ Notes:
   // -- Manual refresh tool --
 
   api.registerTool({
-    name: "refresh_ad4m_tools",
+    name: "ad4m_refresh_ad4m_tools",
     description:
       "Re-fetch the AD4M MCP tool list and register any new tools. " +
       "Call this after add_model, adding SHACL subject classes, or joining a neighbourhood " +
@@ -618,7 +618,7 @@ Notes:
   }
 
   api.registerTool({
-    name: "subscribe_to_mentions",
+    name: "ad4m_subscribe_to_mentions",
     description:
       "Subscribe to mentions of this agent in a neighbourhood. " +
       "Creates a live waker subscription that watches for messages mentioning " +
@@ -647,7 +647,7 @@ Notes:
   });
 
   api.registerTool({
-    name: "unsubscribe_from_mentions",
+    name: "ad4m_unsubscribe_from_mentions",
     description: "Remove the mention subscription for a neighbourhood.",
     parameters: {
       type: "object",
@@ -686,7 +686,7 @@ Notes:
   });
 
   api.registerTool({
-    name: "subscribe_to_children",
+    name: "ad4m_subscribe_to_children",
     description:
       "Subscribe to new children (e.g., messages) under a specific parent (e.g., a channel). " +
       "Creates a live waker subscription that watches for new child links and wakes you when detected. " +
@@ -711,14 +711,11 @@ Notes:
     ) {
       try {
         // Call the MCP tool to generate the waker query
-        const result = await callToolWithRetry(
-          "generate_waker_query",
-          {
-            perspective_id: params.perspective_id,
-            class_name: "Message",
-            parent_address: params.expression_address,
-          },
-        );
+        const result = await callToolWithRetry("generate_waker_query", {
+          perspective_id: params.perspective_id,
+          class_name: "Message",
+          parent_address: params.expression_address,
+        });
         const data = extractMcpResultData(result);
 
         if (data?.error) {
@@ -765,7 +762,7 @@ Notes:
   });
 
   api.registerTool({
-    name: "unsubscribe_from_children",
+    name: "ad4m_unsubscribe_from_children",
     description:
       "Remove the child subscription for a specific parent in a perspective.",
     parameters: {
@@ -812,7 +809,7 @@ Notes:
   });
 
   api.registerTool({
-    name: "list_waker_subscriptions",
+    name: "ad4m_list_waker_subscriptions",
     description: "List all active waker subscriptions.",
     parameters: { type: "object", properties: {}, required: [] },
     async execute() {
@@ -917,7 +914,9 @@ Notes:
         } else if (executorStartResult === "already_running") {
           // Executor was already running (e.g. from Launcher or previous install).
           // Our ephemeral credential won't match — obtain a JWT instead.
-          logger.info("[ad4m] Executor was already running — obtaining JWT for auth...");
+          logger.info(
+            "[ad4m] Executor was already running — obtaining JWT for auth...",
+          );
           const jwt = await obtainJwtFromExecutor();
           if (jwt) {
             authToken = jwt;
@@ -937,7 +936,9 @@ Notes:
             if (agentResult) {
               pluginAgentDid = agentResult.did;
             } else {
-              logger.warn("[ad4m] Could not verify agent on pre-existing executor.");
+              logger.warn(
+                "[ad4m] Could not verify agent on pre-existing executor.",
+              );
             }
           }
         } else {
@@ -963,7 +964,9 @@ Notes:
       if (authToken) {
         logger.info(`[ad4m] Auth token ready (length: ${authToken.length})`);
       } else {
-        logger.warn(`[ad4m] No auth token. Tools may not work until authenticated.`);
+        logger.warn(
+          `[ad4m] No auth token. Tools may not work until authenticated.`,
+        );
       }
 
       // Update config with resolved token
@@ -1033,8 +1036,7 @@ Notes:
         return;
       }
 
-      const wsUrl =
-        config.executorWsUrl ?? "ws://localhost:12000/graphql";
+      const wsUrl = config.executorWsUrl ?? "ws://localhost:12000/graphql";
 
       try {
         // Dynamic imports to avoid load-time issues with @holochain/client transitive deps
@@ -1049,7 +1051,9 @@ Notes:
         const wsClient = createClient({
           url: wsUrl,
           webSocketImpl: WebSocket,
-          connectionParams: authToken ? { headers: { authorization: authToken } } : {},
+          connectionParams: authToken
+            ? { headers: { authorization: authToken } }
+            : {},
           retryAttempts: Infinity,
           retryWait: async (retries: number) => {
             const delay = Math.min(1000 * Math.pow(2, retries), 30000);
@@ -1132,7 +1136,9 @@ Notes:
     (ctx: any) => {
       ctx.program
         .command("ad4m-setup")
-        .description("Set up the AD4M plugin (discover executor, generate agent, print config)")
+        .description(
+          "Set up the AD4M plugin (discover executor, generate agent, print config)",
+        )
         .option("--endpoint <url>", "MCP endpoint URL", endpoint)
         .option("--ws <url>", "Executor GraphQL WebSocket URL", executorWsUrl)
         .action(async (opts: any) => {

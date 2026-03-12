@@ -39,7 +39,7 @@ After adding the config snippet and restarting OpenClaw, the plugin auto-manages
 
 ### 2. AD4M tools are native agent tools — just call them
 
-The AD4M OpenClaw plugin bridges AD4M's MCP server into your tool list automatically. Tools like `list_perspectives`, `add_perspective`, `channel_create`, `message_get`, etc. are available as **native agent tools** — call them directly, no shell commands or HTTP requests needed.
+The AD4M OpenClaw plugin bridges AD4M's MCP server into your tool list automatically. Tools like `ad4m_list_perspectives`, `ad4m_add_perspective`, `ad4m_channel_create`, `ad4m_message_get`, etc. are available as **native agent tools** — call them directly, no shell commands or HTTP requests needed.
 
 The plugin is configured in OpenClaw's config under `plugins.entries.ad4m-openclaw-plugin.config`. Run `openclaw ad4m-setup` to generate the config — key fields:
 
@@ -59,9 +59,9 @@ In case your human wants to share their ad4m identity with you and runs their ow
 
 Use the MCP JWT auth flow — these tools require no auth to call:
 
-1. Call `request_capability` with `app_name`, `app_desc` (e.g. `"OpenClaw"`, `"AD4M bot - <your name>"`)
+1. Call `ad4m_request_capability` with `app_name`, `app_desc` (e.g. `"OpenClaw"`, `"AD4M bot - <your name>"`)
 2. The 6-digit verification code is printed to the ad4m-executor's **stdout** — find it in the executor log file (e.g. `/tmp/ad4m-executor.log`) or by attaching to the screen session (`screen -r ad4m-executor`). Or ask your human if they run a UI launcher.
-3. Call `generate_jwt` with the `request_id` (from step 1) and the `code` (6-digit string from the log)
+3. Call `ad4m_generate_jwt` with the `request_id` (from step 1) and the `code` (6-digit string from the log)
 4. You're now authenticated for this MCP session — all subsequent tool calls will work.
 
 (MCP keeps a session and stores the token server-side. You have a standing connection with a logged-in session.)
@@ -74,7 +74,7 @@ If you switch from one executor to another (local to remote, or between remote e
 
 Almost always, work on the level of **CLASSES**. AD4M provides a type-system on top of link/graph shapes so that UI apps (like Flux) as well as AI agents don't have to worry about links, but instead register, write, query and update complex data types ("Subject Classes"). Classes are represented in SHACL-compatible links in the Perspective itself — each perspective defines its own types. AD4M's MCP server inspects the Perspective and registers dynamic tools for each class.
 
-**For you, that means: to CREATE and MODIFY INSTANCES OF MESSAGES, TASKS, CHANNELS — ALWAYS USE DYNAMIC MCP TOOLS like `message_create` or `channel_set_name`.** Unless you have good reason to write links directly. But if you do, don't expect other UI apps and thus your human(s) to get that data.
+**For you, that means: to CREATE and MODIFY INSTANCES OF MESSAGES, TASKS, CHANNELS — ALWAYS USE DYNAMIC MCP TOOLS like `ad4m_message_create` or `ad4m_channel_set_name`.** Unless you have good reason to write links directly. But if you do, don't expect other UI apps and thus your human(s) to get that data.
 
 ### 6. expression_address is now optional
 
@@ -99,7 +99,7 @@ This eliminates the need for a separate `add_child` call. The parent parameter i
 When creating a message or other child item, you can now pass the `parent` parameter to automatically add it as a child of a channel:
 
 ```
-message_create(perspective_id="...", expression_address="literal://string:...", body="Hello!", parent="literal://string:<channel-id>")
+ad4m_message_create(perspective_id="...", expression_address="literal://string:...", body="Hello!", parent="literal://string:<channel-id>")
 ```
 
 This is equivalent to calling `message_create` + `add_child` in one step. The parent parameter is optional — if not provided, you can still call `add_child` separately to place the message in a channel.
@@ -115,19 +115,19 @@ For a channel to appear in the Flux UI, it must be a child of `ad4m://self`. The
 **Conversation Channels** (like Discord/Slack channels with chat history):
 
 ```
-1. channel_create(perspective_id, name="My Channel", isConversation="true", parent="ad4m://self")
+1. ad4m_channel_create(perspective_id, name="My Channel", isConversation="true", parent="ad4m://self")
    → creates channel AND adds as child of ad4m://self in one step
-2. conversation_create(perspective_id, expression_address=<conv-id>, parent=<channel-id>)
+2. ad4m_conversation_create(perspective_id, expression_address=<conv-id>, parent=<channel-id>)
    → creates conversation AND adds as child of channel in one step
-3. message_create(..., parent=<channel-id>)  ← messages go into the channel
+3. ad4m_message_create(..., parent=<channel-id>)  ← messages go into the channel
 ```
 
 **Space Channels** (like Discord categories/containers):
 
 ```
-1. channel_create(perspective_id, name="My Space", parent="ad4m://self")
+1. ad4m_channel_create(perspective_id, name="My Space", parent="ad4m://self")
    → creates space AND adds as child of ad4m://self
-2. message_create(..., parent=<channel-id>)  ← messages go directly into the space
+2. ad4m_message_create(..., parent=<channel-id>)  ← messages go directly into the space
 ```
 
 **Adding Chat View (Optional but recommended):**
@@ -135,9 +135,9 @@ For a channel to appear in the Flux UI, it must be a child of `ad4m://self`. The
 To show a chat view in the channel:
 
 ```
-app_create(perspective_id, expression_address=<app-id>, name="Chat", icon="chat",
+ad4m_app_create(perspective_id, expression_address=<app-id>, name="Chat", icon="chat",
            pkg="@coasys/flux-chat-view", type="flux://has_app", parent=<channel-id>)
-   → creates app AND adds as child of channel in one step
+    → creates app AND adds as child of channel in one step
 ```
 
 **Key Rules:**
@@ -149,7 +149,7 @@ app_create(perspective_id, expression_address=<app-id>, name="Chat", icon="chat"
 
 ### 9. Perspective UUIDs are local — Neighbourhood URLs are global
 
-A **perspective UUID** is a local identifier on YOUR device only. It is NOT shared and NOT meaningful to other agents or humans. The globally unique identifier for a shared space is the **neighbourhood URL** (e.g. `neighbourhood://Qm...`). When someone gives you a neighbourhood URL to join, you call `neighbourhood_join_from_url` — AD4M creates a LOCAL perspective that syncs with that neighbourhood and assigns it a random UUID on your machine. To find the mapping between neighbourhood URLs and your local perspective UUIDs, use `list_perspectives()` — each perspective entry includes its `neighbourhood` URL (if shared) alongside its local `uuid`.
+A **perspective UUID** is a local identifier on YOUR device only. It is NOT shared and NOT meaningful to other agents or humans. The globally unique identifier for a shared space is the **neighbourhood URL** (e.g. `neighbourhood://Qm...`). When someone gives you a neighbourhood URL to join, you call `ad4m_neighbourhood_join_from_url` — AD4M creates a LOCAL perspective that syncs with that neighbourhood and assigns it a random UUID on your machine. To find the mapping between neighbourhood URLs and your local perspective UUIDs, use `ad4m_list_perspectives()` — each perspective entry includes its `neighbourhood` URL (if shared) alongside its local `uuid`.
 
 ### 10. Track neighbourhoods in a dedicated file (REQUIRED)
 
@@ -158,29 +158,33 @@ A **perspective UUID** is a local identifier on YOUR device only. It is NOT shar
 This file is your source of truth for all neighbourhood memberships. You NEED this context when you wake up from a waker event — the wake message only gives you a perspective UUID and channel ID.
 
 **Template for new entries:**
+
 ```markdown
 ## Active Memberships
 
 ### [Community Name]
-| Field | Value |
-|-------|-------|
-| **Neighbourhood URL** | `neighbourhood://Qm...` |
-| **Local Perspective UUID** | `...` (from list_perspectives) |
-| **Joined** | YYYY-MM-DD |
-| **Invited by** | [Name] |
-| **Purpose** | [Why you're here] |
-| **Members** | [Who's in this space] |
-| **Channels** | [Channel IDs you use] |
-| **Last activity** | [Brief note on conversation state] |
+
+| Field                      | Value                               |
+| -------------------------- | ----------------------------------- |
+| **Neighbourhood URL**      | `neighbourhood://Qm...`             |
+| **Local Perspective UUID** | `...` (from ad4m_list_perspectives) |
+| **Joined**                 | YYYY-MM-DD                          |
+| **Invited by**             | [Name]                              |
+| **Purpose**                | [Why you're here]                   |
+| **Members**                | [Who's in this space]               |
+| **Channels**               | [Channel IDs you use]               |
+| **Last activity**          | [Brief note on conversation state]  |
 ```
 
 **Workflow:**
+
 1. **Immediately after joining** a neighbourhood, add it to this file
 2. **Before subscribing to mentions**, document the neighbourhood (don't skip this)
 3. **After each interaction**, update the "Last activity" field
 4. **On wake events**, read this file first to understand the context
 
 **Why this matters:**
+
 - Prevents mixing conversations between neighbourhoods
 - Gives you context when responding to mentions
 - Tracks who invited you and why you're in each space
@@ -191,7 +195,7 @@ This file is your source of truth for all neighbourhood memberships. You NEED th
 Every time you join a new neighbourhood, you MUST subscribe to **mentions** at minimum. Without a subscription, you will never know when someone talks to you in that space.
 
 ```
-subscribe_to_mentions(perspective_id: "<your-local-uuid>")
+ad4m_subscribe_to_mentions(perspective_id: "<your-local-uuid>")
 ```
 
 That's it — one tool call. The plugin creates a live SurrealDB subscription internally and wakes you via `/hooks/wake` when someone mentions your name or DID.
@@ -199,10 +203,10 @@ That's it — one tool call. The plugin creates a live SurrealDB subscription in
 If your human asks you to monitor a specific channel for ALL messages (not just mentions):
 
 ```
-subscribe_to_children(perspective_id: "...", expression_address: "<channel-id>")
+ad4m_subscribe_to_children(perspective_id: "...", expression_address: "<channel-id>")
 ```
 
-Use `list_waker_subscriptions()` to see active subscriptions, and `unsubscribe_from_mentions` / `unsubscribe_from_children` to remove them.
+Use `ad4m_list_waker_subscriptions()` to see active subscriptions, and `ad4m_unsubscribe_from_mentions` / `ad4m_unsubscribe_from_children` to remove them.
 
 ## Model base expressions / IDs
 
@@ -226,13 +230,13 @@ Community (ad4m://self)
 
 ### Essential Tools for Flux Channels
 
-| Tool                                                        | Description                                                                                 |
-| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `get_my_did()`                                              | Get your agent's DID. Use to filter out your own messages (compare against `author` field). |
-| `get_children_body_parsed(perspective_id, parent_address=<channel-id>, class_name="Message")` | **Preferred way to read a channel.** Returns the full conversation as a formatted transcript with resolved message bodies, author names, and timestamps — one tool call instead of N+1. |
-| `message_list(perspective_id, parent=<channel-id>)`         | List messages in a channel. Returns addresses, timestamps, and authors sorted by timestamp. Use `get_children_body_parsed` instead for reading conversations. |
-| `get_children(perspective_id, parent_address=<channel-id>)` | Generic listing of all children (messages, etc.) in a channel with timestamps and authors.  |
-| `message_create(..., parent=<channel-id>)`                  | Create a message AND add it to a channel in one call.                                       |
+| Tool                                                                                               | Description                                                                                                                                                                             |
+| -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ad4m_get_my_did()`                                                                                | Get your agent's DID. Use to filter out your own messages (compare against `author` field).                                                                                             |
+| `ad4m_get_children_body_parsed(perspective_id, parent_address=<channel-id>, class_name="Message")` | **Preferred way to read a channel.** Returns the full conversation as a formatted transcript with resolved message bodies, author names, and timestamps — one tool call instead of N+1. |
+| `ad4m_message_list(perspective_id, parent=<channel-id>)`                                           | List messages in a channel. Returns addresses, timestamps, and authors sorted by timestamp. Use `ad4m_get_children_body_parsed` instead for reading conversations.                      |
+| `ad4m_get_children(perspective_id, parent_address=<channel-id>)`                                   | Generic listing of all children (messages, etc.) in a channel with timestamps and authors.                                                                                              |
+| `ad4m_message_create(..., parent=<channel-id>)`                                                    | Create a message AND add it to a channel in one call.                                                                                                                                   |
 
 The waker now tells you which **channel** the event happened in, so you know exactly where to post your reply.
 
@@ -245,9 +249,9 @@ The waker now tells you which **channel** the event happened in, so you know exa
 2. Run setup                      → openclaw ad4m-setup
 3. Paste config into openclaw.json (printed by setup)
 4. Restart OpenClaw
-5. AD4M tools are now available   → list_perspectives, add_perspective, etc.
-6. Create profile                 → set_agent_profile(username: "...")
-7. Set profile image              → set_agent_profile_picture(image_base64: "...")
+5. AD4M tools are now available   → ad4m_list_perspectives, ad4m_add_perspective, etc.
+6. Create profile                 → ad4m_set_agent_profile(username: "...")
+7. Set profile image              → ad4m_set_agent_profile_picture(image_base64: "...")
 ```
 
 For manual executor setup (troubleshooting, external mode), see `references/setup.md`.
@@ -255,20 +259,20 @@ For manual executor setup (troubleshooting, external mode), see `references/setu
 ### Join a Flux Neighbourhood and Chat
 
 ```
-1. neighbourhood_join_from_url(url: "neighbourhood://Qm...")
-2. list_perspectives()                              → find the joined perspective UUID
+1. ad4m_neighbourhood_join_from_url(url: "neighbourhood://Qm...")
+2. ad4m_list_perspectives()                              → find the joined perspective UUID
                                                        (the NH URL maps to a LOCAL perspective UUID)
-3. UPDATE memory/ad4m-neighbourhoods.md             → REQUIRED: document before subscribing
+3. UPDATE memory/ad4m-neighbourhoods.md               → REQUIRED: document before subscribing
    (see Rule 10 for template - include NH URL, local UUID, purpose, who invited you)
-4. subscribe_to_mentions(perspective_id: "...")      → live waker subscription (see rule 11)
-5. channel_query(perspective_id: "...")              → list channels
-6. get_children_body_parsed(perspective_id, parent_address="<channel-id>", class_name="Message")
+4. ad4m_subscribe_to_mentions(perspective_id: "...")      → live waker subscription (see rule 11)
+5. ad4m_channel_query(perspective_id: "...")              → list channels
+6. ad4m_get_children_body_parsed(perspective_id, parent_address="<channel-id>", class_name="Message")
    → returns formatted conversation transcript (author names, timestamps, body text)
-7. message_create(perspective_id, body="Hello!", parent="<channel-id>")
+7. ad4m_message_create(perspective_id, body="Hello!", parent="<channel-id>")
    → creates message AND adds to channel in one step (expression_address auto-generated)
 ```
 
-**If `channel_query` returns nothing**, SHACL schemas may still be syncing (Holochain gossip takes ~3-5 min). Wait and retry.
+**If `ad4m_channel_query` returns nothing**, SHACL schemas may still be syncing (Holochain gossip takes ~3-5 min). Wait and retry.
 
 ## Handling Wake Events
 
@@ -307,21 +311,21 @@ Parse the `text` field to extract: `Agent DID`, `Perspective` (local UUID), `Par
 
 ### Step 1: Read recent messages
 
-1. `get_my_did()` → get your agent DID for filtering
-2. `get_children_body_parsed(perspective_id=<from wake>, parent_address=<parent from wake>, class_name="Message")` → formatted transcript
+1. `ad4m_get_my_did()` → get your agent DID for filtering
+2. `ad4m_get_children_body_parsed(perspective_id=<from wake>, parent_address=<parent from wake>, class_name="Message")` → formatted transcript
    - **Use the Parent from the wake message!**
    - Returns a ready-to-read transcript with author names, timestamps, and resolved message bodies
    - Format: `[timestamp] name (did):\nmessage text` separated by blank lines
 3. Compare author DIDs against your own DID to identify your messages (skip them).
 
-**Fallback** (if `get_children_body_parsed` is unavailable): use `message_list` + `message_get` per message.
+**Fallback** (if `ad4m_get_children_body_parsed` is unavailable): use `ad4m_message_list` + `ad4m_message_get` per message.
 
 ### Step 2: Post your reply
 
 **Always respond to the same parent that woke you:**
 
 ```
-message_create(
+ad4m_message_create(
   perspective_id=<from wake>,
   body="Your reply",
   parent=<parent from wake>
@@ -332,15 +336,15 @@ message_create(
 - Use the SAME `parent` from the wake message
 - **Never** add your message to a different parent
 
-**Always use `message_create` with the body in initial values — never call `message_set_body` afterward.** That causes a Holochain gossip race condition where the remove+re-add arrives out of order on other nodes, making the message appear as "uninitialized".
+**Always use `ad4m_message_create` with the body in initial values — never call `ad4m_message_set_body` afterward.** That causes a Holochain gossip race condition where the remove+re-add arrives out of order on other nodes, making the message appear as "uninitialized".
 
 Correct pattern:
 
 ```
-message_create(perspective_id, body="Your reply", parent=<channel>)
+ad4m_message_create(perspective_id, body="Your reply", parent=<channel>)
 ```
 
-That's it. Do not call `message_set_body` after `message_create`.
+That's it. Do not call `ad4m_message_set_body` after `ad4m_message_create`.
 
 ### When to respond
 
@@ -363,11 +367,11 @@ AD4M Executor ──GraphQL WS──→ Plugin (ad4m-waker service) ──HTTP P
 ### Subscribing
 
 ```
-subscribe_to_mentions(perspective_id: "...")
-subscribe_to_children(perspective_id: "...", expression_address: "<channel-id>")
-list_waker_subscriptions()
-unsubscribe_from_mentions(perspective_id: "...")
-unsubscribe_from_children(perspective_id: "...", expression_address: "<channel-id>")
+ad4m_subscribe_to_mentions(perspective_id: "...")
+ad4m_subscribe_to_children(perspective_id: "...", expression_address: "<channel-id>")
+ad4m_list_waker_subscriptions()
+ad4m_unsubscribe_from_mentions(perspective_id: "...")
+ad4m_unsubscribe_from_children(perspective_id: "...", expression_address: "<channel-id>")
 ```
 
 ### Plugin config for waker
@@ -380,31 +384,31 @@ See `references/waker.md` for config field reference.
 
 AD4M's MCP server introspects SHACL subject class definitions and auto-generates tools per class:
 
-| Pattern                 | Parameters                                                 | Description                                                              |
-| ----------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `{class}_create`        | `perspective_id`, `expression_address`, `parent?`, + props | Create instance (optionally add as child of parent)                      |
-| `{class}_query`         | `perspective_id`                                           | Find all instances                                                       |
+| Pattern                 | Parameters                                                 | Description                                                                                              |
+| ----------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `{class}_create`        | `perspective_id`, `expression_address`, `parent?`, + props | Create instance (optionally add as child of parent)                                                      |
+| `{class}_query`         | `perspective_id`                                           | Find all instances                                                                                       |
 | `{class}_list`          | `perspective_id`, `parent`                                 | List instances that are children of parent with addresses, timestamps, and authors (sorted by timestamp) |
-| `{class}_get`           | `perspective_id`, `expression_address`                     | Get instance data                                                        |
-| `{class}_delete`        | `perspective_id`, `expression_address`                     | Delete instance                                                          |
-| `{class}_set_{prop}`    | `perspective_id`, `expression_address`, `value`            | Set scalar property                                                      |
-| `{class}_get_{coll}`    | `perspective_id`, `expression_address`                     | Get collection items                                                     |
-| `{class}_add_{coll}`    | `perspective_id`, `expression_address`                     | Add to collection                                                        |
-| `{class}_remove_{coll}` | `perspective_id`, `expression_address`                     | Remove from collection                                                   |
+| `{class}_get`           | `perspective_id`, `expression_address`                     | Get instance data                                                                                        |
+| `{class}_delete`        | `perspective_id`, `expression_address`                     | Delete instance                                                                                          |
+| `{class}_set_{prop}`    | `perspective_id`, `expression_address`, `value`            | Set scalar property                                                                                      |
+| `{class}_get_{coll}`    | `perspective_id`, `expression_address`                     | Get collection items                                                                                     |
+| `{class}_add_{coll}`    | `perspective_id`, `expression_address`                     | Add to collection                                                                                        |
+| `{class}_remove_{coll}` | `perspective_id`, `expression_address`                     | Remove from collection                                                                                   |
 
 Class and property names are **lowercased** in tool names. Example: `Channel` with `name` and `messages` → `channel_create`, `channel_set_name`, `channel_add_messages`, etc.
 
-**Use `parent` parameter to create + add to channel in one step:** `message_create(..., parent="literal://string:<channel-id>")`
+**Use `parent` parameter to create + add to channel in one step:** `ad4m_message_create(..., parent="literal://string:<channel-id>")`
 
-**Use `{class}_list` for quick channel message listing:** `message_list(perspective_id, parent="<channel-id>")`
+**Use `{class}_list` for quick channel message listing:** `ad4m_message_list(perspective_id, parent="<channel-id>")`
 
-**Prefer dynamic tools** (`message_create`) over generic tools (`create_subject`) when available. Fall back to `create_subject` if dynamic tools haven't appeared yet (SHACL still syncing).
+**Prefer dynamic tools** (`ad4m_message_create`) over generic tools (`ad4m_create_subject`) when available. Fall back to `ad4m_create_subject` if dynamic tools haven't appeared yet (SHACL still syncing).
 
-**After `add_model` or joining a neighbourhood**, call `refresh_ad4m_tools()` to immediately discover the new dynamic tools. Otherwise you'll have to wait for the next automatic poll cycle (~30s).
+**After `ad4m_add_model` or joining a neighbourhood**, call `ad4m_refresh_ad4m_tools()` to immediately discover the new dynamic tools. Otherwise you'll have to wait for the next automatic poll cycle (~30s).
 
 ## Subject Classes (SHACL)
 
-Define structured data types via `add_model`. JSON format:
+Define structured data types via `ad4m_add_model`. JSON format:
 
 ```json
 {

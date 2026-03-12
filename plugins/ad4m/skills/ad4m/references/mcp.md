@@ -30,9 +30,9 @@ Start the executor with `--admin-credential <secret>`. All MCP tool calls from t
 
 Use the MCP auth tools (no auth required to call these):
 
-1. `request_capability(app_name: "AI Agent", app_desc: "AD4M bot")` → returns `request_id`
+1. `ad4m_request_capability(app_name: "AI Agent", app_desc: "AD4M bot")` → returns `request_id`
 2. Find the 6-digit verification code in the executor's **stdout** (log file or screen session)
-3. `generate_jwt(request_id: "<from step 1>", code: "<6-digit code>")` → returns JWT
+3. `ad4m_generate_jwt(request_id: "<from step 1>", code: "<6-digit code>")` → returns JWT
 4. All subsequent tool calls in this session are authenticated
 
 Without any admin credential configured, empty token has full access.
@@ -43,88 +43,88 @@ These are always available regardless of SDNA:
 
 **Perspective & Link Tools:**
 
-| Tool                | Description                                   |
-| ------------------- | --------------------------------------------- |
-| `list_perspectives` | List all perspectives                         |
-| `add_perspective`   | Create a new perspective                      |
-| `add_link`          | Add a link to a perspective                   |
-| `query_links`       | Query links in a perspective                  |
-| `get_models`        | List available subject classes (SHACL shapes) |
-| `add_model`         | Add SHACL SDNA to a perspective               |
-| `infer`             | Run Prolog queries for complex reasoning      |
+| Tool                     | Description                                   |
+| ------------------------ | --------------------------------------------- |
+| `ad4m_list_perspectives` | List all perspectives                         |
+| `ad4m_add_perspective`   | Create a new perspective                      |
+| `ad4m_add_link`          | Add a link to a perspective                   |
+| `ad4m_query_links`       | Query links in a perspective                  |
+| `ad4m_get_models`        | List available subject classes (SHACL shapes) |
+| `ad4m_add_model`         | Add SHACL SDna to a perspective               |
+| `ad4m_infer`             | Run Prolog queries for complex reasoning      |
 
 **Subject CRUD Tools:**
 
-| Tool                     | Description                            |
-| ------------------------ | -------------------------------------- |
-| `query_subjects`         | Find instances of a subject class      |
-| `get_subject_data`       | Get full data for a subject instance   |
-| `create_subject`         | Create a new subject instance          |
-| `set_subject_property`   | Set a property on a subject            |
-| `delete_subject`         | Delete a subject instance              |
-| `get_subject_collection` | Get items in a collection property     |
-| `add_to_collection`      | Add item to a collection               |
-| `remove_from_collection` | Remove item from a collection          |
-| `execute_commands`       | Execute commands on a subject instance |
+| Tool                          | Description                            |
+| ----------------------------- | -------------------------------------- |
+| `ad4m_query_subjects`         | Find instances of a subject class      |
+| `ad4m_get_subject_data`       | Get full data for a subject instance   |
+| `ad4m_create_subject`         | Create a new subject instance          |
+| `ad4m_set_subject_property`   | Set a property on a subject            |
+| `ad4m_delete_subject`         | Delete a subject instance              |
+| `ad4m_get_subject_collection` | Get items in a collection property     |
+| `ad4m_add_to_collection`      | Add item to a collection               |
+| `ad4m_remove_from_collection` | Remove item from a collection          |
+| `ad4m_execute_commands`       | Execute commands on a subject instance |
 
 **Child/Tree Tools:**
 
-| Tool                        | Description                                |
-| --------------------------- | ------------------------------------------ |
-| `add_child`                 | Add a child to a subject                   |
-| `get_children`              | Get children of a subject (addresses, timestamps, authors) |
-| `get_children_body_parsed`  | Get children with resolved body text, author names, and timestamps as a formatted transcript. **Preferred for reading conversations.** |
-| `get_subject_children`      | Get children with optional class filtering |
+| Tool                            | Description                                                                                                                            |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `ad4m_add_child`                | Add a child to a subject                                                                                                               |
+| `ad4m_get_children`             | Get children of a subject (addresses, timestamps, authors)                                                                             |
+| `ad4m_get_children_body_parsed` | Get children with resolved body text, author names, and timestamps as a formatted transcript. **Preferred for reading conversations.** |
+| `ad4m_get_subject_children`     | Get children with optional class filtering                                                                                             |
 
 **Profile Tools:**
 
-| Tool                        | Description                                              |
-| --------------------------- | -------------------------------------------------------- |
-| `get_my_did`                | Get the current agent's DID (for filtering own messages) |
-| `get_agent_profile`         | Get agent's DID and profile                              |
-| `set_agent_profile`         | Update agent profile fields                              |
-| `set_agent_profile_picture` | Set agent's profile picture                              |
+| Tool                             | Description                                              |
+| -------------------------------- | -------------------------------------------------------- |
+| `ad4m_get_my_did`                | Get the current agent's DID (for filtering own messages) |
+| `ad4m_get_agent_profile`         | Get agent's DID and profile                              |
+| `ad4m_set_agent_profile`         | Update agent profile fields                              |
+| `ad4m_set_agent_profile_picture` | Set agent's profile picture                              |
 
 **Neighbourhood & Language Tools:**
 
-| Tool                                     | Description                                                            |
-| ---------------------------------------- | ---------------------------------------------------------------------- |
-| `language_meta`                          | Get metadata about a language by address                               |
-| `list_link_language_templates`           | List available P2P sync templates for neighbourhoods                   |
-| `neighbourhood_publish_from_perspective` | Publish a perspective as a shared neighbourhood (auto-clones template) |
-| `neighbourhood_join_from_url`            | Join an existing neighbourhood by URL                                  |
+| Tool                                          | Description                                                            |
+| --------------------------------------------- | ---------------------------------------------------------------------- |
+| `ad4m_language_meta`                          | Get metadata about a language by address                               |
+| `ad4m_list_link_language_templates`           | List available P2P sync templates for neighbourhoods                   |
+| `ad4m_neighbourhood_publish_from_perspective` | Publish a perspective as a shared neighbourhood (auto-clones template) |
+| `ad4m_neighbourhood_join_from_url`            | Join an existing neighbourhood by URL                                  |
 
 **Waker/Subscription Tools:**
 
-| Tool                       | Description                               |
-| -------------------------- | ----------------------------------------- |
-| `generate_waker_query`     | Generate SurrealQL for waker subscription |
-| `get_mention_waker_config` | Get waker config for tracking mentions    |
+| Tool                            | Description                               |
+| ------------------------------- | ----------------------------------------- |
+| `ad4m_generate_waker_query`     | Generate SurrealQL for waker subscription |
+| `ad4m_get_mention_waker_config` | Get waker config for tracking mentions    |
 
 **Auth Tools (no auth required):**
 
-| Tool                 | Description                            |
-| -------------------- | -------------------------------------- |
-| `request_capability` | Step 1 of local auth flow              |
-| `generate_jwt`       | Step 2 of local auth flow              |
-| `login_email`        | Login with email/password (multi-user) |
-| `signup`             | Create new account (multi-user)        |
-| `verify_email_code`  | Verify email code (multi-user)         |
-| `auth_status`        | Check current authentication status    |
+| Tool                      | Description                            |
+| ------------------------- | -------------------------------------- |
+| `ad4m_request_capability` | Step 1 of local auth flow              |
+| `ad4m_generate_jwt`       | Step 2 of local auth flow              |
+| `ad4m_login_email`        | Login with email/password (multi-user) |
+| `ad4m_signup`             | Create new account (multi-user)        |
+| `ad4m_verify_email_code`  | Verify email code (multi-user)         |
+| `ad4m_auth_status`        | Check current authentication status    |
 
 ## Language & Neighbourhood Tools
 
 ### Inspecting Languages
 
-Use `language_meta` to get information about any language address — name, description, author, template params, source code link.
+Use `ad4m_language_meta` to get information about any language address — name, description, author, template params, source code link.
 
 ### Publishing Neighbourhoods
 
 To share a perspective as a P2P neighbourhood:
 
 ```
-1. list_link_language_templates  → get available sync engines
-2. neighbourhood_publish_from_perspective(
+1. ad4m_list_link_language_templates  → get available sync engines
+2. ad4m_neighbourhood_publish_from_perspective(
      perspective_uuid,
      link_language_template: templates[0].address,
      name: "My Neighbourhood"
@@ -136,7 +136,7 @@ The tool handles link language cloning automatically. Each neighbourhood gets a 
 ### Joining Neighbourhoods
 
 ```
-neighbourhood_join_from_url(url: "neighbourhood://Qm...")
+ad4m_neighbourhood_join_from_url(url: "neighbourhood://Qm...")
   → creates local perspective synced with the neighbourhood
 ```
 
@@ -146,18 +146,18 @@ When a perspective has SHACL SDNA, tools are generated per class:
 
 For a class `Channel` with scalar `name`, scalar `description`, and collection `messages`:
 
-| Tool                      | Description                                                                                                            |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `channel_create`          | Create a Channel instance (required props as params; `expression_address` optional; `parent` optional to add as child) |
-| `channel_query`           | Query all Channel instances in the perspective                                                                         |
-| `channel_list`            | List Channel instances that are children of a parent with addresses, timestamps, and authors (sorted by timestamp)     |
-| `channel_get`             | Get a Channel by expression address                                                                                    |
-| `channel_delete`          | Delete a Channel instance                                                                                              |
-| `channel_set_name`        | Set the name property                                                                                                  |
-| `channel_set_description` | Set the description property                                                                                           |
-| `channel_get_messages`    | Get all messages in the collection                                                                                     |
-| `channel_add_messages`    | Add a message to the collection                                                                                        |
-| `channel_remove_messages` | Remove a message from the collection                                                                                   |
+| Tool                           | Description                                                                                                            |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| `ad4m_channel_create`          | Create a Channel instance (required props as params; `expression_address` optional; `parent` optional to add as child) |
+| `ad4m_channel_query`           | Query all Channel instances in the perspective                                                                         |
+| `ad4m_channel_list`            | List Channel instances that are children of a parent with addresses, timestamps, and authors (sorted by timestamp)     |
+| `ad4m_channel_get`             | Get a Channel by expression address                                                                                    |
+| `ad4m_channel_delete`          | Delete a Channel instance                                                                                              |
+| `ad4m_channel_set_name`        | Set the name property                                                                                                  |
+| `ad4m_channel_set_description` | Set the description property                                                                                           |
+| `ad4m_channel_get_messages`    | Get all messages in the collection                                                                                     |
+| `ad4m_channel_add_messages`    | Add a message to the collection                                                                                        |
+| `ad4m_channel_remove_messages` | Remove a message from the collection                                                                                   |
 
 ### Naming Convention
 
@@ -186,14 +186,14 @@ Generated tool patterns per class:
 ## Workflow Example
 
 ```
-1. get_my_did                  → get your DID for filtering own messages
-2. get_agent_profile           → verify identity
-3. add_perspective             → create workspace
-4. add_model                   → add SHACL schema
-5. get_models                  → verify schema loaded
-6. channel_create              → create a Channel (expression_address optional)
-7. message_create              → create a Message (expression_address auto-generated, provide body + parent=<channel>)
-8. message_list(perspective_id, parent=<channel>) → list all messages in channel
+1. ad4m_get_my_did                  → get your DID for filtering own messages
+2. ad4m_get_agent_profile           → verify identity
+3. ad4m_add_perspective             → create workspace
+4. ad4m_add_model                   → add SHACL schema
+5. ad4m_get_models                  → verify schema loaded
+6. ad4m_channel_create              → create a Channel (expression_address optional)
+7. ad4m_message_create              → create a Message (expression_address auto-generated, provide body + parent=<channel>)
+8. ad4m_message_list(perspective_id, parent=<channel>) → list all messages in channel
 ```
 
 ## Error Handling

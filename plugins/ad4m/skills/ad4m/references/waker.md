@@ -11,25 +11,25 @@ The AD4M waker watches perspectives for data changes via GraphQL WebSocket subsc
 
 ## Plugin Config Fields
 
-| Field           | Default                             | Description                                                         |
-| --------------- | ----------------------------------- | ------------------------------------------------------------------- |
-| `wakerEnabled`  | `true`                              | Enable/disable the waker service                                    |
-| `executorWsUrl` | `ws://localhost:12000/graphql`      | AD4M executor GraphQL WebSocket URL                                 |
-| `wakeUrl`       | `http://localhost:18789/hooks/wake` | OpenClaw wake endpoint URL                                          |
-| `wakeToken`     | auto from `hooks.token`              | Override for the hooks token. Auto-read from OpenClaw global config if omitted. |
-| `debounceMs`    | `2000`                              | Debounce interval to prevent rapid-fire wakes (ms)                  |
+| Field           | Default                             | Description                                                                     |
+| --------------- | ----------------------------------- | ------------------------------------------------------------------------------- |
+| `wakerEnabled`  | `true`                              | Enable/disable the waker service                                                |
+| `executorWsUrl` | `ws://localhost:12000/graphql`      | AD4M executor GraphQL WebSocket URL                                             |
+| `wakeUrl`       | `http://localhost:18789/hooks/wake` | OpenClaw wake endpoint URL                                                      |
+| `wakeToken`     | auto from `hooks.token`             | Override for the hooks token. Auto-read from OpenClaw global config if omitted. |
+| `debounceMs`    | `2000`                              | Debounce interval to prevent rapid-fire wakes (ms)                              |
 
 ## Subscription Tools
 
-| Tool                                                            | Description                                                         |
-| --------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `subscribe_to_mentions(perspective_id)`                         | Watch for messages mentioning your name or DID                      |
-| `subscribe_to_children(perspective_id, expression_address)`     | Watch for new children under a parent (e.g., messages in a channel) |
-| `unsubscribe_from_mentions(perspective_id)`                     | Stop watching mentions in a neighbourhood                           |
-| `unsubscribe_from_children(perspective_id, expression_address)` | Stop watching a channel                                             |
-| `list_waker_subscriptions()`                                    | List all active subscriptions                                       |
+| Tool                                                                 | Description                                                         |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `ad4m_subscribe_to_mentions(perspective_id)`                         | Watch for messages mentioning your name or DID                      |
+| `ad4m_subscribe_to_children(perspective_id, expression_address)`     | Watch for new children under a parent (e.g., messages in a channel) |
+| `ad4m_unsubscribe_from_mentions(perspective_id)`                     | Stop watching mentions in a neighbourhood                           |
+| `ad4m_unsubscribe_from_children(perspective_id, expression_address)` | Stop watching a channel                                             |
+| `ad4m_list_waker_subscriptions()`                                    | List all active subscriptions                                       |
 
-The subscribe tools call the MCP tools `get_mention_waker_config` / `generate_waker_query` internally to build the SurrealQL queries — you don't need to construct queries manually.
+The subscribe tools call the MCP tools `ad4m_get_mention_waker_config` / `ad4m_generate_waker_query` internally to build the SurrealQL queries — you don't need to construct queries manually.
 
 ## Wake Message Format
 
