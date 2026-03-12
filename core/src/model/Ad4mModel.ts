@@ -2,11 +2,18 @@ import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { LinkQuery } from "../perspectives/LinkQuery";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { makeRandomId, PropertyOptions, Model, getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, PropertyMetadataEntry, RelationMetadataEntry, buildConformanceFilter } from "./decorators";
-import { singularToPlural, pluralToSingular, capitalize, propertyNameToSetterName, relationToAdderName, relationToRemoverName, relationToSetterName } from "./util";
-import { escapeSurrealString } from "../utils";
-import { formatSurrealValue as _formatSurrealValue, compileWhereClause } from "./surreal-utils";
+import { makeRandomId, getPropertiesMetadata, getRelationsMetadata } from "./decorators";
+import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
+import { formatSurrealValue as _formatSurrealValue } from "./surreal-utils";
 import { resolveParentPredicate, buildParentQuery, buildAuthorAndTimestampQuery, buildPropertiesQuery, buildWhereQuery, buildCountQuery, buildOrderQuery, buildOffsetQuery, buildLimitQuery } from "./query-prolog";
+import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
+import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
+import { buildSurrealQLQuery } from "./query-surreal";
+import {
+  normalizeValue, matchesCondition, hydrateFromLinks,
+  assignValuesToInstance as _assignValuesToInstance,
+  evaluateCustomGettersForInstance,
+} from "./hydration";
 import type {
   WhereCondition, Where, Order, ParentScope, IncludeMap, Query,
   RelationSubQuery, GetOptions, AllInstancesResult, ResultsWithTotalCount,
@@ -15,83 +22,8 @@ import type {
 
 // Re-export all shared types so existing consumers of './Ad4mModel' are unaffected
 export * from "./types";
-
-// JSON Schema type definitions
-interface JSONSchemaProperty {
-  type: string | string[];
-  items?: JSONSchemaProperty;
-  properties?: { [key: string]: JSONSchemaProperty };
-  required?: string[];
-  "x-ad4m"?: {
-    through?: string;
-    resolveLanguage?: string;
-    local?: boolean;
-    writable?: boolean;
-    initial?: string;
-  };
-}
-
-interface JSONSchema {
-  $schema?: string;
-  title?: string;
-  $id?: string;
-  type?: string;
-  properties?: { [key: string]: JSONSchemaProperty };
-  required?: string[];
-  "x-ad4m"?: {
-    namespace?: string;
-    className?: string;
-  };
-}
-
-interface JSONSchemaToModelOptions {
-  name: string;
-  namespace?: string;
-  predicateTemplate?: string;
-  predicateGenerator?: (title: string, property: string) => string;
-  propertyMapping?: Record<string, string>;
-  resolveLanguage?: string;
-  local?: boolean;
-  propertyOptions?: Record<string, Partial<PropertyOptions>>;
-}
-
-function normalizeNamespaceString(namespace: string): string {
-  if (!namespace) return '';
-  if (namespace.includes('://')) {
-    const [scheme, rest] = namespace.split('://');
-    const path = (rest || '').replace(/\/+$/,'');
-    return `${scheme}://${path}`;
-  } else {
-    return namespace.replace(/\/+$/,'');
-  }
-}
-
-function normalizeSchemaType(type?: string | string[]): string | undefined {
-  if (!type) return undefined;
-  if (typeof type === "string") return type;
-  if (Array.isArray(type) && type.length > 0) {
-    const nonNull = type.find((t) => t !== "null");
-    return nonNull || type[0];
-  }
-  return undefined;
-}
-
-function isSchemaType(schema: JSONSchemaProperty, expectedType: string): boolean {
-  return normalizeSchemaType(schema.type) === expectedType;
-}
-
-function isArrayType(schema: JSONSchemaProperty): boolean {
-  return isSchemaType(schema, "array");
-}
-
-function isObjectType(schema: JSONSchemaProperty): boolean {
-  return isSchemaType(schema, "object");
-}
-
-function isNumericType(schema: JSONSchemaProperty): boolean {
-  const normalized = normalizeSchemaType(schema.type);
-  return normalized === "number" || normalized === "integer";
-}
+// Re-export JSON Schema types for consumers who imported from this module
+export type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
 /**
  * Base class for defining data models in AD4M.
@@ -360,11 +292,11 @@ export class Ad4mModel {
       if (schema.properties) {
         for (const [propertyName, propertySchema] of Object.entries(schema.properties)) {
           const isArray = isArrayType(propertySchema as JSONSchemaProperty);
-          const predicate = this.determinePredicate(
+          const predicate = determinePredicate(
             schema, 
             propertyName, 
             propertySchema as JSONSchemaProperty, 
-            this.determineNamespace(schema, options),
+            determineNamespace(schema, options),
             options
           );
           
@@ -531,338 +463,17 @@ export class Ad4mModel {
     }];
   }
 
-  // ──────────────────────────────────────────────────────────
-  //  Unified hydration helpers
-  // ──────────────────────────────────────────────────────────
-
   /**
-   * Resolves a raw link target value into a hydrated property value.
-   *
-   * Handles, in order:
-   * 1. Non-literal expression resolution (`perspective.getExpression`)
-   * 2. Literal URI parsing (`Literal.fromUrl(…).get()`)
-   * 3. Primitive type coercion (string → number / boolean)
-   * 4. Transform function application
-   *
-   * @param target        - The raw target string from the link
-   * @param propMeta      - Property metadata from the decorator registry
-   * @param perspective   - The perspective for expression resolution
-   * @param expectedType  - Optional JS typeof hint for coercion (e.g. 'number')
-   * @returns The resolved value
-   * @private
+   * Assigns decoded Prolog property values to an instance.
+   * Delegates to the standalone function in hydration.ts.
    */
-  private static async hydratePropertyValue(
-    target: string,
-    propMeta: PropertyMetadata,
-    perspective: PerspectiveProxy,
-    expectedType?: string,
-  ): Promise<any> {
-    let value: any = target;
-
-    if (target !== undefined && target !== null && target !== '') {
-      // Non-literal expression resolution
-      if (
-        propMeta.resolveLanguage != null &&
-        propMeta.resolveLanguage !== 'literal' &&
-        typeof target === 'string' &&
-        !target.startsWith('literal://')
-      ) {
-        try {
-          const expression = await perspective.getExpression(target);
-          if (expression) {
-            try { value = JSON.parse(expression.data); } catch { value = expression.data; }
-          }
-        } catch (e) {
-          console.warn(`hydratePropertyValue: failed to resolve expression for "${propMeta.name}":`, e);
-        }
-      }
-      // Literal URI parsing
-      else if (
-        propMeta.resolveLanguage === 'literal' &&
-        typeof target === 'string' &&
-        target.startsWith('literal://')
-      ) {
-        try {
-          const parsed = Literal.fromUrl(target).get();
-          value = parsed.data !== undefined ? parsed.data : parsed;
-        } catch {
-          // Keep raw value
-        }
-      }
-      // Primitive type coercion
-      else if (typeof target === 'string' && expectedType) {
-        if (expectedType === 'number') value = Number(target);
-        else if (expectedType === 'boolean') value = target === 'true' || target === '1';
-      }
-    }
-
-    // Transform function
-    if (propMeta.transform && typeof propMeta.transform === 'function') {
-      value = propMeta.transform(value);
-    }
-
-    return value;
-  }
-
-  /**
-   * Link shape accepted by `hydrateFromLinks`.
-   * Both `getData()` and `instancesFromSurrealResult()` produce this shape.
-   */
-  private static readonly _linkShape: undefined;  // type-only marker
-
-  /**
-   * Hydrates an instance from an array of raw links.
-   *
-   * Processes properties (latest-wins semantics), relations
-   * (chronological accumulation), and timestamps/author in a single
-   * pass over the links array.
-   *
-   * @param instance     - The blank model instance to populate
-   * @param links        - Array of link objects (predicate, target, author?, timestamp?)
-   * @param metadata     - Model metadata from `getModelMetadata()`
-   * @param perspective  - The perspective for expression resolution
-   * @param requestedProperties - Optional sparse fieldset; when provided, only these
-   *                              property names are hydrated (relations are unaffected).
-   *                              Omit or pass `undefined` to hydrate all properties.
-   * @private
-   */
-  private static async hydrateFromLinks(
-    instance: any,
-    links: Array<{ predicate: string; target: string; author?: string; timestamp?: string | number }>,
-    metadata: ModelMetadata,
-    perspective: PerspectiveProxy,
-    requestedProperties?: string[],
-  ): Promise<void> {
-    if (!links || links.length === 0) return;
-
-    let minTimestamp: string | number | null = null;
-    let maxTimestamp: string | number | null = null;
-    let originalAuthor: string | null = null;
-    let latestAuthor: string | null = null;
-
-    // Build predicate→propName and predicate→relName lookup maps for O(1) matching
-    // When requestedProperties is provided, only include those properties in the map
-    const propFilter = requestedProperties && requestedProperties.length > 0
-      ? new Set(requestedProperties)
-      : null;
-
-    const predToProperty = new Map<string, [string, PropertyMetadata]>();
-    for (const [propName, propMeta] of Object.entries(metadata.properties)) {
-      if (propMeta.getter) continue;  // Handled via custom getter evaluation
-      if (propFilter && !propFilter.has(propName)) continue;  // Skip unrequested properties
-      predToProperty.set(propMeta.predicate, [propName, propMeta]);
-    }
-
-    const predToRelation = new Map<string, [string, RelationMetadata]>();
-
-    // Two-pass approach: first add all non-getter, non-target-filtered relations,
-    // then try to add target+filter relations only if their predicate isn't
-    // already claimed.  This prevents predicate collisions (e.g. entries +
-    // messages sharing the same predicate) while still populating unique-
-    // predicate relations normally via link hydration.
-    const deferredTargetRelations: [string, RelationMetadata][] = [];
-    for (const [relName, relMeta] of Object.entries(metadata.relations)) {
-      if (relMeta.getter) continue;  // Handled via explicit custom getter evaluation
-      if (relMeta.target && relMeta.filter !== false) {
-        deferredTargetRelations.push([relName, relMeta]);
-        continue;
-      }
-      predToRelation.set(relMeta.predicate, [relName, relMeta]);
-    }
-    // Second pass: add deferred target+filter relations only if their predicate
-    // is not already claimed by a base relation.  When a collision exists, the
-    // conformance getter will handle the filtered view instead.
-    for (const [relName, relMeta] of deferredTargetRelations) {
-      if (!predToRelation.has(relMeta.predicate)) {
-        predToRelation.set(relMeta.predicate, [relName, relMeta]);
-      }
-    }
-
-    // Per-property accumulator: track all matching targets so we can pick the last (latest-wins)
-    const propertyLatest = new Map<string, { target: string; timestamp?: string | number }>();
-
-    // Per-relation accumulator: ordered targets with metadata for sorting
-    const relationAccum = new Map<string, Array<{ target: string; timestamp: string | number; index: number }>>();
-
-    // Single pass over all links
-    for (let i = 0; i < links.length; i++) {
-      const link = links[i];
-      const { predicate, target, author, timestamp } = link;
-      if (target === 'None' || target === undefined || target === null) continue;
-
-      // Track timestamps/authors
-      if (timestamp != null) {
-        if (minTimestamp == null || timestamp < minTimestamp) {
-          minTimestamp = timestamp;
-          originalAuthor = author ?? null;
-        }
-        if (maxTimestamp == null || timestamp > maxTimestamp) {
-          maxTimestamp = timestamp;
-          latestAuthor = author ?? null;
-        }
-      }
-
-      // Property match — accumulate for latest-wins
-      const propEntry = predToProperty.get(predicate);
-      if (propEntry) {
-        const existing = propertyLatest.get(propEntry[0]);
-        // Latest-wins: always overwrite (links are ordered ASC so last = latest)
-        propertyLatest.set(propEntry[0], { target, timestamp });
-        continue;
-      }
-
-      // Relation match — accumulate all
-      const relEntry = predToRelation.get(predicate);
-      if (relEntry) {
-        const [relName] = relEntry;
-        let arr = relationAccum.get(relName);
-        if (!arr) {
-          arr = [];
-          relationAccum.set(relName, arr);
-        }
-        arr.push({ target, timestamp: timestamp ?? '', index: i });
-      }
-    }
-
-    // Resolve properties
-    for (const [propName, { target }] of propertyLatest) {
-      const [, propMeta] = predToProperty.get(
-        metadata.properties[propName].predicate
-      )!;
-      const expectedType = typeof instance[propName];
-      instance[propName] = await this.hydratePropertyValue(
-        target,
-        propMeta,
-        perspective,
-        expectedType !== 'undefined' ? expectedType : undefined,
-      );
-    }
-
-    // Resolve relations: sort by timestamp (stable via index tiebreaker), filter empties
-    for (const [relName, items] of relationAccum) {
-      items.sort((a, b) => {
-        const cmp = String(a.timestamp).localeCompare(String(b.timestamp));
-        return cmp !== 0 ? cmp : a.index - b.index;
-      });
-      instance[relName] = items
-        .map(i => i.target)
-        .filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None');
-    }
-
-    // Assign author / timestamps
-    if (originalAuthor) instance.author = originalAuthor;
-    if (minTimestamp != null) {
-      instance.createdAt = typeof minTimestamp === 'string' && minTimestamp.includes('T')
-        ? new Date(minTimestamp).getTime()
-        : typeof minTimestamp === 'string'
-          ? (isNaN(parseInt(minTimestamp, 10)) ? minTimestamp : parseInt(minTimestamp, 10))
-          : minTimestamp;
-    }
-    if (maxTimestamp != null) {
-      instance.updatedAt = typeof maxTimestamp === 'string' && maxTimestamp.includes('T')
-        ? new Date(maxTimestamp).getTime()
-        : typeof maxTimestamp === 'string'
-          ? (isNaN(parseInt(maxTimestamp, 10)) ? maxTimestamp : parseInt(maxTimestamp, 10))
-          : maxTimestamp;
-    }
-  }
-
   public static async assignValuesToInstance(perspective: PerspectiveProxy, instance: Ad4mModel, values: ValueTuple[]) {
-    // Map properties to object
-    const propsObject = Object.fromEntries(
-      await Promise.all(
-        values.map(async ([name, value, resolve]) => {
-          let finalValue = value;
-
-          // Handle UTF-8 byte sequences from Prolog URL decoding
-          if (!resolve && typeof value === 'string') {
-            // Only attempt reconstruction if the string looks like a byte string (all code points <= 0xFF)
-            // and contains at least one high byte (>= 0x80). This avoids mangling valid Unicode.
-            const codePoints = Array.from(value, ch => ch.codePointAt(0)!);
-            const looksByteString = codePoints.every(cp => cp <= 0xFF);
-            const hasHighByte = codePoints.some(cp => cp >= 0x80);
-            if (looksByteString && hasHighByte) {
-              try {
-                const bytes = Uint8Array.from(codePoints);
-                const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-                if (decoded !== value) finalValue = decoded;
-              } catch (error) {
-                // If UTF-8 conversion fails, keep the original value
-                console.warn(`UTF-8 byte reconstruction failed for property "${name}"`, { value, error });
-              }
-            }
-          }
-
-          // Resolve the value if necessary
-          if (resolve) {
-            let resolvedExpression = await perspective.getExpression(value);
-            if (resolvedExpression) {
-              try {
-                // Attempt to parse the data as JSON
-                finalValue = JSON.parse(resolvedExpression.data);
-              } catch (error) {
-                // If parsing fails, keep the original data
-                finalValue = resolvedExpression.data;
-              }
-            }
-          }
-          // Apply transform function if it exists
-          const propsMeta = getPropertiesMetadata(instance.constructor);
-          const transform = propsMeta[name]?.transform;
-          if (transform && typeof transform === "function") {
-            finalValue = transform(finalValue);
-          }
-          return [name, finalValue];
-        })
-      )
-    );
-    // Filter out properties that are read-only (getters without setters)
-    const writableProps = Object.fromEntries(
-      Object.entries(propsObject).filter(([key]) => {
-        const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(instance), key);
-        if (!descriptor) {
-          // No descriptor means it's a regular property on the instance, allow it
-          return true;
-        }
-        // Check if it's an accessor descriptor (has get/set) vs data descriptor (has value/writable)
-        const isAccessor = descriptor.get !== undefined || descriptor.set !== undefined;
-        if (isAccessor) {
-          // Accessor descriptor: only allow if it has a setter
-          return descriptor.set !== undefined;
-        } else {
-          // Data descriptor: only allow if writable is not explicitly false
-          return descriptor.writable !== false;
-        }
-      })
-    );
-    // Assign properties to instance
-    Object.assign(instance, writableProps);
+    return _assignValuesToInstance(perspective, instance, values);
   }
 
   // ──────────────────────────────────────────────────────────
   //  Snapshot / dirty tracking
   // ──────────────────────────────────────────────────────────
-
-  /**
-   * Captures a shallow snapshot of the instance's current property and
-   * relation values.  Called automatically after hydration (`get()`,
-   * query results).  The snapshot is used by `isDirty()`,
-   * `changedFields()`, and by `update()` to skip unchanged fields.
-   * @private
-   */
-  /**
-   * Normalize a value for snapshot storage.
-   * Arrays of model instances are reduced to their `.id` strings so that
-   * dirty-tracking compares stable identifiers instead of object references.
-   */
-  private static normalizeValue(value: any): any {
-    if (Array.isArray(value)) {
-      return value.map((v: any) =>
-        v && typeof v === 'object' && typeof v.id === 'string' ? v.id : v,
-      );
-    }
-    return value;
-  }
 
   /**
    * @param includedRelations  Controls which relation fields are recorded
@@ -883,7 +494,7 @@ export class Ad4mModel {
     // Always snapshot properties
     for (const propName of Object.keys(metadata.properties)) {
       const val = (this as any)[propName];
-      snap[propName] = Ad4mModel.normalizeValue(
+      snap[propName] = normalizeValue(
         Array.isArray(val) ? [...val] : val,
       );
     }
@@ -896,7 +507,7 @@ export class Ad4mModel {
       // Full snapshot — e.g. after getData() / create()
       for (const relName of Object.keys(metadata.relations)) {
         const val = (this as any)[relName];
-        snap[relName] = Ad4mModel.normalizeValue(
+        snap[relName] = normalizeValue(
           Array.isArray(val) ? [...val] : val,
         );
       }
@@ -905,7 +516,7 @@ export class Ad4mModel {
       for (const relName of Object.keys(includedRelations)) {
         if (relName in metadata.relations) {
           const val = (this as any)[relName];
-          snap[relName] = Ad4mModel.normalizeValue(
+          snap[relName] = normalizeValue(
             Array.isArray(val) ? [...val] : val,
           );
         }
@@ -974,7 +585,7 @@ export class Ad4mModel {
       // setRelationValues call during innerUpdate.
       if (!(field in this._snapshot)) continue;
 
-      const current = Ad4mModel.normalizeValue((this as any)[field]);
+      const current = normalizeValue((this as any)[field]);
       const original = this._snapshot[field];
 
       if (Array.isArray(current) || Array.isArray(original)) {
@@ -1012,7 +623,7 @@ export class Ad4mModel {
       if (links && links.length > 0) {
         // Core hydration: properties (latest-wins), relations, timestamps/author
         const requestedProperties = opts?.properties && opts.properties.length > 0 ? opts.properties : undefined;
-        await ctor.hydrateFromLinks(this, links, metadata, this._perspective, requestedProperties);
+        await hydrateFromLinks(this, links, metadata, this._perspective, requestedProperties);
       }
 
       // Populate reverse relation fields (belongsToOne / belongsToMany) as string IDs.
@@ -1038,7 +649,7 @@ export class Ad4mModel {
       const getterOpts = opts?.properties || opts?.include
         ? { requestedProperties: opts?.properties, include: opts?.include }
         : undefined;
-      await ctor.evaluateCustomGettersForInstance(this, this._perspective, metadata, getterOpts);
+      await evaluateCustomGettersForInstance(this, this._perspective, metadata, getterOpts);
 
       // Eager-load relations if requested
       if (opts?.include) {
@@ -1081,140 +692,6 @@ export class Ad4mModel {
     `;
 
     return fullQuery;
-  }
-
-  /**
-   * Builds a SurrealQL conformance getter for a relation whose `target` model
-   * is known but no explicit `getter` string was supplied.
-   *
-   * The generated getter traverses outgoing links matching the relation's
-   * predicate and then filters the target nodes to only those that conform to
-   * the target model's shape (required properties / flags).
-   *
-   * Delegates to the shared `buildConformanceFilter()` utility in decorators.ts
-   * so the same logic is used at shape-definition time and at query time.
-   *
-   * @param relationPredicate - The relation's predicate URI (e.g. "flux://entry_type")
-   * @param targetClass       - The target model class (result of calling the `target()` thunk)
-   * @returns A SurrealQL expression string, or `undefined` if no conformance
-   *          conditions could be derived from the target model.
-   * @private
-   */
-  private static buildConformanceGetter(
-    relationPredicate: string,
-    targetClass: any
-  ): string | undefined {
-    const filter = buildConformanceFilter(relationPredicate, targetClass);
-    if (!filter) {
-      const targetName = targetClass?.prototype?.className || targetClass?.name || 'unknown';
-      console.warn(`[Ad4mModel] buildConformanceGetter: no conditions found for target "${targetName}".`);
-      return undefined;
-    }
-    return filter.getter;
-  }
-
-  /**
-   * Evaluates custom SurrealQL getters for properties and relations on a specific instance.
-   *
-   * For relations that declare a `target` but no explicit `getter`, a conformance
-   * getter is auto-generated from the target model's metadata (unless `filter: false`).
-   * @private
-   */
-  private static async evaluateCustomGettersForInstance(
-    instance: any,
-    perspective: PerspectiveProxy,
-    metadata: any,
-    options?: { requestedProperties?: string[]; include?: Record<string, any> }
-  ) {
-    const safeBaseExpression = this.formatSurrealValue(instance.id);
-
-    // Build projection filter — when requestedProperties is active, only
-    // evaluate getters for fields that are requested (or included).
-    const projectionActive = options?.requestedProperties && options.requestedProperties.length > 0;
-    const projectionSet = projectionActive ? new Set(options!.requestedProperties) : null;
-
-    // Evaluate property getters
-    for (const [propName, propMeta] of Object.entries(metadata.properties)) {
-      if (projectionSet && !projectionSet.has(propName)) continue;
-      if ((propMeta as any).getter) {
-        try {
-          // Replace 'Base' placeholder with actual base expression
-          const query = (propMeta as any).getter.replace(/Base/g, safeBaseExpression);
-          // Query from node table to have graph traversal context
-          const result = await perspective.querySurrealDB(
-            `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`
-          );
-          if (result && result.length > 0 && result[0].value !== undefined && result[0].value !== null && result[0].value !== 'None' && result[0].value !== '') {
-            instance[propName] = result[0].value;
-          }
-        } catch (error) {
-          console.warn(`Failed to evaluate getter for ${propName}:`, error);
-        }
-      }
-    }
-
-    // Evaluate relation getters (explicit or auto-generated from target)
-    for (const [relName, relMeta] of Object.entries(metadata.relations)) {
-      // Skip relations excluded by property projection (unless in include map)
-      if (projectionSet && !projectionSet.has(relName) && !(options?.include && relName in options.include)) continue;
-      const meta = relMeta as RelationMetadata;
-
-      // Determine the getter to execute:
-      // 1. Explicit `getter` always wins
-      // 2. `where` clause → compile DSL to SurrealQL getter
-      // 3. If `target` is set and `filter !== false`, auto-generate from target metadata
-      //    BUT skip auto-generation for reverse relations (belongsToMany / belongsToOne)
-      //    because buildConformanceGetter traverses outgoing links (->link) which is
-      //    wrong for reverse relations. Their values are already populated by the
-      //    reverse link lookup in instancesFromSurrealResult / getData.
-      let getter = meta.getter;
-      if (!getter && meta.where && meta.direction !== 'reverse') {
-        try {
-          const TargetClass = meta.target?.();
-          const targetMetadata = TargetClass
-            ? (TargetClass as any).getModelMetadata?.() ?? null
-            : null;
-          const conditions = compileWhereClause(meta.where, targetMetadata);
-          if (conditions.length > 0) {
-            const escapedPred = escapeSurrealString(meta.predicate);
-            getter = `(->link[WHERE predicate = '${escapedPred}'].out[WHERE ${conditions.join(' AND ')}].uri)`;
-          }
-        } catch (e) {
-          // Target metadata may not be available yet
-        }
-      }
-      if (!getter && meta.target && meta.filter !== false && meta.direction !== 'reverse') {
-        try {
-          const TargetClass = meta.target();
-          getter = this.buildConformanceGetter(meta.predicate, TargetClass);
-          if (!getter) {
-            console.warn(`[Ad4mModel] buildConformanceGetter returned undefined for relation "${relName}" (predicate: "${meta.predicate}")`);
-          }
-        } catch (e) {
-          console.warn(`[Ad4mModel] auto-generation failed for relation "${relName}":`, e);
-        }
-      }
-
-      if (getter) {
-        try {
-          // Replace 'Base' placeholder with actual base expression
-          const query = getter.replace(/Base/g, safeBaseExpression);
-          const fullQuery = `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`;
-          // Query from node table to have graph traversal context
-          const result = await perspective.querySurrealDB(fullQuery);
-
-          if (result && result.length > 0 && result[0].value !== undefined && result[0].value !== null) {
-            // Filter out 'None' from relation results
-            const value = result[0].value;
-            instance[relName] = Array.isArray(value) 
-              ? value.filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None')
-              : value;
-          }
-        } catch (error) {
-          console.warn(`Failed to evaluate getter for ${relName}:`, error);
-        }
-      }
-    }
   }
 
   /**
@@ -1501,530 +978,12 @@ export class Ad4mModel {
    */
   public static async queryToSurrealQL(perspective: PerspectiveProxy, query: Query): Promise<string> {
     const metadata = this.getModelMetadata();
-    const { where, order, offset, limit } = query;
-
-    // Build list of graph traversal filters for required predicates
-    const graphTraversalFilters: string[] = [];
-
-    // Add parent filter if specified (filter to nodes linked from a parent via a specific predicate)
-    if (query.parent) {
-      const parentPredicate = resolveParentPredicate(query.parent, this);
-      graphTraversalFilters.push(
-        `count(<-link[WHERE in.uri = ${this.formatSurrealValue(query.parent.id)} AND predicate = '${escapeSurrealString(parentPredicate)}']) > 0`
-      );
-    }
-
-    // Add filters for required properties
-    for (const [propName, propMeta] of Object.entries(metadata.properties)) {
-      if (propMeta.required) {
-        // Skip properties with a getter — they are computed dynamically
-        // and may not have a stored link with their predicate, so requiring their
-        // presence would wrongly exclude valid model instances.
-        if (propMeta.getter) continue;
-
-        // For flag properties, also filter by the target value
-        if (propMeta.flag && propMeta.initial) {
-          graphTraversalFilters.push(
-            `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
-          );
-        } else {
-          graphTraversalFilters.push(
-            `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`
-          );
-        }
-      }
-    }
-
-    // If no required properties produced filters, try properties with initial
-    // values (e.g. @Flag or @Property with an explicit initial).
-    if (graphTraversalFilters.length === 0) {
-      for (const [propName, propMeta] of Object.entries(metadata.properties)) {
-        if (propMeta.initial) {
-          if (propMeta.flag) {
-            graphTraversalFilters.push(
-              `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
-            );
-          } else {
-            graphTraversalFilters.push(
-              `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`
-            );
-          }
-          break;
-        }
-      }
-    }
-
-    // Still no filters → open-world structural matching.
-    // Require the node to have at least one link whose predicate is declared
-    // by this model (property OR relation).  This prevents the query from
-    // matching every node in the perspective.
-    if (graphTraversalFilters.length === 0) {
-      const structuralPredicates: string[] = [];
-      for (const [, propMeta] of Object.entries(metadata.properties)) {
-        if (propMeta.predicate) {
-          structuralPredicates.push(`predicate = '${escapeSurrealString(propMeta.predicate)}'`);
-        }
-      }
-      if (metadata.relations) {
-        for (const [, relMeta] of Object.entries(metadata.relations)) {
-          if (relMeta.predicate) {
-            structuralPredicates.push(`predicate = '${escapeSurrealString(relMeta.predicate)}'`);
-          }
-        }
-      }
-      if (structuralPredicates.length > 0) {
-        graphTraversalFilters.push(
-          `count(->link[WHERE (${structuralPredicates.join(' OR ')})]) > 0`
-        );
-      }
-    }
-
-    // Build user WHERE clause filters using graph traversal
-    const userWhereClause = this.buildGraphTraversalWhereClause(metadata, where);
-
-    // Build complete WHERE clause using graph traversal filters
-    const whereConditions: string[] = [];
-
-    // Add all graph traversal filters for required properties
-    whereConditions.push(...graphTraversalFilters);
-
-    // Add user where conditions if any
-    if (userWhereClause) {
-      whereConditions.push(userWhereClause);
-    }
-
-    // Always ensure node has at least one link (each perspective has its own isolated DB)
-    whereConditions.push(`count(->link) > 0`);
-
-    // Build the query FROM node using direct graph traversal in WHERE
-    // This avoids slow subqueries and uses graph indexes for fast traversal
-    // FETCH links expands the link record IDs into full record objects
-    // (without FETCH, ->link returns only IDs like "link:abc123")
-    const fullQuery = `
-SELECT
-    id AS source,
-    uri AS source_uri,
-    ->link AS links
-FROM node
-WHERE ${whereConditions.join(' AND ')}
-FETCH links
-    `.trim();
-
-    return fullQuery;
+    const allRelMeta = getRelationsMetadata(this as any);
+    return buildSurrealQLQuery(metadata, allRelMeta, query, this);
   }
-
-  /**
-   * Builds the WHERE clause for SurrealQL queries using graph traversal syntax.
-   *
-   * @description
-   * Translates where conditions into graph traversal filters: `->link[WHERE ...]`
-   * This is more efficient than nested SELECTs because SurrealDB can optimize graph traversals.
-   *
-   * Handles several condition types:
-   * - Simple equality: `{ name: "Pasta" }` → `->link[WHERE predicate = 'X' AND out.uri = 'Pasta']`
-   * - Arrays (IN clause): `{ name: ["Pasta", "Pizza"] }` → `->link[WHERE predicate = 'X' AND out.uri IN [...]]`
-   * - NOT operators: Use `NOT` prefix
-   * - Comparison operators (gt, gte, lt, lte, etc.): Handled in post-query JavaScript filtering
-   * - Special fields: base uses `uri` directly, author/timestamp handled post-query
-   *
-   * @param metadata - Model metadata containing property predicates
-   * @param where - Where conditions from the query
-   * @returns Graph traversal WHERE clause filters, or empty string if no conditions
-   *
-   * @private
-   */
-  private static buildGraphTraversalWhereClause(metadata: ModelMetadata, where?: Where): string {
-    if (!where) return '';
-
-    const conditions: string[] = [];
-
-    for (const [propertyName, condition] of Object.entries(where)) {
-      // Check if this is a special field (id, author, timestamp)
-      // Note: author and timestamp filtering is done in JavaScript after query
-      const isSpecial = ['id', 'author', 'timestamp'].includes(propertyName);
-
-      if (isSpecial) {
-        // Skip author and timestamp - they'll be filtered in JavaScript
-        // Only handle 'id' (which maps to 'uri') here
-        if (propertyName === 'author' || propertyName === 'timestamp') {
-          continue; // Skip - will be filtered post-query
-        }
-
-        const columnName = 'uri'; // id maps to uri in node table
-
-        // Handle base/uri field directly
-        if (Array.isArray(condition)) {
-          // Array values (IN clause)
-          const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
-          conditions.push(`${columnName} IN [${formattedValues}]`);
-        } else if (typeof condition === 'object' && condition !== null) {
-          // Operator object
-          const ops = condition as any;
-          if (ops.not !== undefined) {
-            if (Array.isArray(ops.not)) {
-              const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
-              conditions.push(`${columnName} NOT IN [${formattedValues}]`);
-            } else {
-              conditions.push(`${columnName} != ${this.formatSurrealValue(ops.not)}`);
-            }
-          }
-          if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
-            conditions.push(`${columnName} >= ${this.formatSurrealValue(ops.between[0])} AND ${columnName} <= ${this.formatSurrealValue(ops.between[1])}`);
-          }
-          if (ops.gt !== undefined) {
-            conditions.push(`${columnName} > ${this.formatSurrealValue(ops.gt)}`);
-          }
-          if (ops.gte !== undefined) {
-            conditions.push(`${columnName} >= ${this.formatSurrealValue(ops.gte)}`);
-          }
-          if (ops.lt !== undefined) {
-            conditions.push(`${columnName} < ${this.formatSurrealValue(ops.lt)}`);
-          }
-          if (ops.lte !== undefined) {
-            conditions.push(`${columnName} <= ${this.formatSurrealValue(ops.lte)}`);
-          }
-          if (ops.contains !== undefined) {
-            conditions.push(`${columnName} CONTAINS ${this.formatSurrealValue(ops.contains)}`);
-          }
-        } else {
-          // Simple equality
-          conditions.push(`${columnName} = ${this.formatSurrealValue(condition)}`);
-        }
-      } else {
-        // Handle regular properties via graph traversal.
-        // IMPORTANT: Check relation metadata first — @BelongsToOne / @BelongsToMany
-        // also write into propertyRegistry, but the link direction is inverted.
-        // If we matched the property path they would get a forward ->link filter
-        // which is wrong for belongs-to relations.
-        const allRelations = getRelationsMetadata(this);
-        const relMeta = allRelations[propertyName];
-        const isBelongs = relMeta?.kind === 'belongsToOne' || relMeta?.kind === 'belongsToMany';
-
-        if (relMeta) {
-          const predicate = escapeSurrealString(relMeta.predicate);
-
-          if (Array.isArray(condition)) {
-            const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
-            if (isBelongs) {
-              conditions.push(`count(<-link[WHERE predicate = '${predicate}' AND in.uri IN [${formattedValues}]]) > 0`);
-            } else {
-              conditions.push(`count(->link[WHERE predicate = '${predicate}' AND out.uri IN [${formattedValues}]]) > 0`);
-            }
-          } else if (typeof condition === 'object' && condition !== null) {
-            const ops = condition as any;
-            if (ops.not !== undefined) {
-              if (Array.isArray(ops.not)) {
-                const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
-                if (isBelongs) {
-                  conditions.push(`count(<-link[WHERE predicate = '${predicate}' AND in.uri IN [${formattedValues}]]) = 0`);
-                } else {
-                  conditions.push(`count(->link[WHERE predicate = '${predicate}' AND out.uri IN [${formattedValues}]]) = 0`);
-                }
-              } else {
-                if (isBelongs) {
-                  conditions.push(`count(<-link[WHERE predicate = '${predicate}' AND in.uri = ${this.formatSurrealValue(ops.not)}]) = 0`);
-                } else {
-                  conditions.push(`count(->link[WHERE predicate = '${predicate}' AND out.uri = ${this.formatSurrealValue(ops.not)}]) = 0`);
-                }
-              }
-            }
-          } else {
-            // Simple equality
-            if (isBelongs) {
-              conditions.push(`count(<-link[WHERE predicate = '${predicate}' AND in.uri = ${this.formatSurrealValue(condition)}]) > 0`);
-            } else {
-              conditions.push(`count(->link[WHERE predicate = '${predicate}' AND out.uri = ${this.formatSurrealValue(condition)}]) > 0`);
-            }
-          }
-          continue;
-        }
-
-        const propMeta = metadata.properties[propertyName];
-        if (!propMeta) continue; // Skip if property not found in metadata
-
-        const predicate = escapeSurrealString(propMeta.predicate);
-        // Use fn::parse_literal() for properties with resolveLanguage
-        const targetField = propMeta.resolveLanguage === 'literal' ? 'fn::parse_literal(out.uri)' : 'out.uri';
-
-        if (Array.isArray(condition)) {
-          // Array values (IN clause)
-          const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
-          conditions.push(`count(->link[WHERE predicate = '${predicate}' AND ${targetField} IN [${formattedValues}]]) > 0`);
-        } else if (typeof condition === 'object' && condition !== null) {
-          // Operator object
-          const ops = condition as any;
-          if (ops.not !== undefined) {
-            if (Array.isArray(ops.not)) {
-              // For NOT IN with array: must NOT have a link with value in the array
-              const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
-              conditions.push(`count(->link[WHERE predicate = '${predicate}' AND ${targetField} IN [${formattedValues}]]) = 0`);
-            } else {
-              // For NOT with single value: must NOT have this value
-              conditions.push(`count(->link[WHERE predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(ops.not)}]) = 0`);
-            }
-          }
-          // Note: gt, gte, lt, lte, between, contains operators are filtered in JavaScript
-          // post-query because fn::parse_literal() comparisons in SurrealDB
-          // don't work reliably with numeric comparisons.
-          // These are handled in instancesFromSurrealResult along with author/timestamp filtering.
-          // However, we still need to ensure the property exists
-          const hasComparisonOps = ops.gt !== undefined || ops.gte !== undefined ||
-                                   ops.lt !== undefined || ops.lte !== undefined ||
-                                   ops.between !== undefined || ops.contains !== undefined;
-          if (hasComparisonOps) {
-            // Ensure we only get nodes that have this property
-            conditions.push(`count(->link[WHERE predicate = '${predicate}']) > 0`);
-          }
-        } else {
-          // Simple equality
-          conditions.push(`count(->link[WHERE predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(condition)}]) > 0`);
-        }
-      }
-    }
-
-    return conditions.join(' AND ');
-  }
-
-  /**
-   * Builds the WHERE clause for SurrealQL queries.
-   *
-   * @description
-   * Translates the where conditions from the Query object into SurrealQL WHERE clause fragments.
-   * For each property filter, generates a subquery that checks for links with the appropriate
-   * predicate and target value.
-   *
-   * Handles several condition types:
-   * - Simple equality: `{ name: "Pasta" }` → subquery checking for predicate and target match
-   * - Arrays (IN clause): `{ name: ["Pasta", "Pizza"] }` → target IN [...]
-   * - Operators: `{ rating: { gt: 4 } }` → target > '4'
-   *   - gt, gte, lt, lte: comparison operators
-   *   - not: negation (single value or array)
-   *   - between: range check
-   *   - contains: substring/element check (uses SurrealQL CONTAINS)
-   * - Special fields: base, author, timestamp are accessed directly, not via subqueries
-   *
-   * All conditions are joined with AND.
-   *
-   * @param metadata - Model metadata containing property predicates
-   * @param where - Where conditions from the query
-   * @returns WHERE clause string (without the "WHERE" keyword), or empty string if no conditions
-   *
-   * @private
-   */
-  private static buildSurrealWhereClause(metadata: ModelMetadata, where?: Where): string {
-    if (!where) return '';
-    
-    const conditions: string[] = [];
-    
-    for (const [propertyName, condition] of Object.entries(where)) {
-      // Check if this is a special field (id, author, timestamp)
-      // Note: author and timestamp filtering is done in JavaScript after GROUP BY
-      // because they need to be computed from the grouped links first
-      const isSpecial = ['id', 'author', 'timestamp'].includes(propertyName);
-      
-      if (isSpecial) {
-        // Skip author and timestamp - they'll be filtered in JavaScript
-        // Only handle 'id' (which maps to 'source') here
-        if (propertyName === 'author' || propertyName === 'timestamp') {
-          continue; // Skip - will be filtered post-query
-        }
-        
-        const columnName = 'source'; // id maps to source
-        
-        // Handle base/source field directly
-        if (Array.isArray(condition)) {
-          // Array values (IN clause)
-          const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
-          conditions.push(`${columnName} IN [${formattedValues}]`);
-        } else if (typeof condition === 'object' && condition !== null) {
-          // Operator object
-          const ops = condition as any;
-          if (ops.not !== undefined) {
-            if (Array.isArray(ops.not)) {
-              const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
-              conditions.push(`${columnName} NOT IN [${formattedValues}]`);
-            } else {
-              conditions.push(`${columnName} != ${this.formatSurrealValue(ops.not)}`);
-            }
-          }
-          if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
-            conditions.push(`${columnName} >= ${this.formatSurrealValue(ops.between[0])} AND ${columnName} <= ${this.formatSurrealValue(ops.between[1])}`);
-          }
-          if (ops.gt !== undefined) {
-            conditions.push(`${columnName} > ${this.formatSurrealValue(ops.gt)}`);
-          }
-          if (ops.gte !== undefined) {
-            conditions.push(`${columnName} >= ${this.formatSurrealValue(ops.gte)}`);
-          }
-          if (ops.lt !== undefined) {
-            conditions.push(`${columnName} < ${this.formatSurrealValue(ops.lt)}`);
-          }
-          if (ops.lte !== undefined) {
-            conditions.push(`${columnName} <= ${this.formatSurrealValue(ops.lte)}`);
-          }
-          if (ops.contains !== undefined) {
-            conditions.push(`${columnName} CONTAINS ${this.formatSurrealValue(ops.contains)}`);
-          }
-        } else {
-          // Simple equality
-          conditions.push(`${columnName} = ${this.formatSurrealValue(condition)}`);
-        }
-      } else {
-        // Handle regular properties via subqueries
-        const propMeta = metadata.properties[propertyName];
-        if (!propMeta) continue; // Skip if property not found in metadata
-        
-        const predicate = escapeSurrealString(propMeta.predicate);
-        // Use fn::parse_literal() for properties with resolveLanguage
-        const targetField = propMeta.resolveLanguage === 'literal' ? 'fn::parse_literal(target)' : 'target';
-        
-        if (Array.isArray(condition)) {
-          // Array values (IN clause)
-          const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
-          conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} IN [${formattedValues}])`);
-        } else if (typeof condition === 'object' && condition !== null) {
-          // Operator object
-          const ops = condition as any;
-          if (ops.not !== undefined) {
-            if (Array.isArray(ops.not)) {
-              // For NOT IN with array: exclude sources that HAVE a value in the array
-              const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
-              conditions.push(`source NOT IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} IN [${formattedValues}])`);
-            } else {
-              // For NOT with single value: exclude sources that HAVE this value
-              conditions.push(`source NOT IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(ops.not)})`);
-            }
-          }
-          // Note: gt, gte, lt, lte, between, contains operators are filtered in JavaScript
-          // post-query because fn::parse_literal() comparisons in SurrealDB subqueries
-          // don't work reliably with numeric comparisons.
-          // These are handled in instancesFromSurrealResult along with author/timestamp filtering.
-          // However, we still need to ensure the property exists by filtering on the predicate
-          const hasComparisonOps = ops.gt !== undefined || ops.gte !== undefined ||
-                                   ops.lt !== undefined || ops.lte !== undefined ||
-                                   ops.between !== undefined || ops.contains !== undefined;
-          if (hasComparisonOps) {
-            // Ensure we only get instances that have this property
-            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}')`);
-          }
-        } else {
-          // Simple equality
-          conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(condition)})`);
-        }
-      }
-    }
-    
-    return conditions.join(' AND ');
-  }
-
-  /**
-   * Builds the SELECT fields for SurrealQL queries.
-   * 
-   * @description
-   * Generates the field list for the SELECT clause, resolving properties and relations
-   * via subqueries. Each property is fetched with a subquery that finds the link with the
-   * appropriate predicate and returns its target. Relations are similar but don't use LIMIT 1.
-   * 
-   * Field types:
-   * - Properties: `(SELECT VALUE target FROM link WHERE source = $parent.base AND predicate = 'X' LIMIT 1) AS propName`
-   * - Relations: `(SELECT VALUE target FROM link WHERE source = $parent.base AND predicate = 'X') AS relName`
-   * - Author/Timestamp: Always included to provide metadata about each instance
-   * 
-   * If properties or relations arrays are provided, only those fields are included.
-   * Otherwise, all properties/relations from metadata are included.
-   * 
-   * @param metadata - Model metadata containing property and relation predicates
-   * @param properties - Optional array of property names to include (default: all)
-   * @param relations - Optional array of relation names to include (default: all)
-   * @returns Comma-separated SELECT field list
-   * 
-   * @private
-   */
-  private static buildSurrealSelectFields(metadata: ModelMetadata, properties?: string[], relations?: string[]): string {
-    const fields: string[] = [];
-    
-    // Determine properties to fetch
-    const propsToFetch = properties || Object.keys(metadata.properties);
-    for (const propName of propsToFetch) {
-      const propMeta = metadata.properties[propName];
-      if (!propMeta) continue; // Skip if not found
-      
-      // Reference source directly since we're selecting from link table
-      const escapedPredicate = escapeSurrealString(propMeta.predicate);
-      fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}' LIMIT 1) AS ${propName}`);
-    }
-    
-    // Determine relations to fetch
-    const relsToFetch = relations || Object.keys(metadata.relations);
-    for (const relName of relsToFetch) {
-      const relMeta = metadata.relations[relName];
-      if (!relMeta) continue; // Skip if not found
-      
-      // Reference source directly since we're selecting from link table
-      const escapedPredicate = escapeSurrealString(relMeta.predicate);
-      fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}') AS ${relName}`);
-    }
-    
-    // Always add author and timestamp fields
-    fields.push(`(SELECT VALUE author FROM link WHERE source = source ORDER BY timestamp ASC LIMIT 1) AS author`);
-    fields.push(`(SELECT VALUE timestamp FROM link WHERE source = source ORDER BY timestamp ASC LIMIT 1) AS createdAt`);
-    fields.push(`(SELECT VALUE timestamp FROM link WHERE source = source ORDER BY timestamp DESC LIMIT 1) AS updatedAt`);
-    
-    return fields.join(',\n  ');
-  }
-
-  /**
-   * Builds the SELECT fields for SurrealQL queries using aggregation functions.
-   * Compatible with GROUP BY source queries.
-   * 
-   * @private
-   */
-  private static buildSurrealSelectFieldsWithAggregation(metadata: ModelMetadata, properties?: string[], relations?: string[]): string {
-    const fields: string[] = [];
-    
-    // Determine properties to fetch
-    const propsToFetch = properties || Object.keys(metadata.properties);
-    for (const propName of propsToFetch) {
-      const propMeta = metadata.properties[propName];
-      if (!propMeta) continue; // Skip if not found
-      
-      // Use array::first to get the first target value for this predicate
-      const escapedPredicate = escapeSurrealString(propMeta.predicate);
-      fields.push(`array::first(target[WHERE predicate = '${escapedPredicate}']) AS ${propName}`);
-    }
-    
-    // Determine relations to fetch
-    const relsToFetch = relations || Object.keys(metadata.relations);
-    for (const relName of relsToFetch) {
-      const relMeta = metadata.relations[relName];
-      if (!relMeta) continue; // Skip if not found
-      
-      // Use array filtering to get all target values for this predicate
-      const escapedPredicate = escapeSurrealString(relMeta.predicate);
-      fields.push(`target[WHERE predicate = '${escapedPredicate}'] AS ${relName}`);
-    }
-    
-    // Always add author and timestamp fields
-    fields.push(`array::first(author) AS author`);
-    fields.push(`array::first(timestamp) AS createdAt`);
-    fields.push(`array::last(timestamp) AS updatedAt`);
-    
-    return fields.join(',\n  ');
-  }
-
 
   /**
    * Formats a value for use in SurrealQL queries.
-   * 
-   * @description
-   * Handles different value types:
-   * - Strings: Wrapped in single quotes with backslash-escaped special characters
-   * - Numbers/booleans: Converted to string
-   * - Arrays: Recursively formatted and wrapped in brackets
-   * 
-   * @param value - The value to format
-   * @returns Formatted value string ready for SurrealQL
-   * 
    * @private
    */
   private static formatSurrealValue(value: any): string {
@@ -2125,7 +1084,7 @@ FETCH links
         const instance = new this(perspective, base) as any;
 
         // Core hydration via unified helper (pass requestedProperties for sparse fieldset)
-        await this.hydrateFromLinks(instance, links, metadata, perspective, requestedProperties.length > 0 ? requestedProperties : undefined);
+        await hydrateFromLinks(instance, links, metadata, perspective, requestedProperties.length > 0 ? requestedProperties : undefined);
         
         // When specific properties are requested, delete unrequested properties
         // so they return undefined instead of their constructor defaults (e.g. 0, [])
@@ -2190,7 +1149,7 @@ FETCH links
       ? { requestedProperties, include: query.include }
       : undefined;
     for (const instance of instances) {
-      await this.evaluateCustomGettersForInstance(instance, perspective, metadata, getterOpts);
+      await evaluateCustomGettersForInstance(instance, perspective, metadata, getterOpts);
     }
     
     // Filter by where conditions that couldn't be filtered in SQL
@@ -2207,7 +1166,7 @@ FETCH links
 
           // For author and timestamp, always filter in JS
           if (propertyName === 'author' || propertyName === 'timestamp') {
-            if (!this.matchesCondition(instance[propertyName], condition)) {
+            if (!matchesCondition(instance[propertyName], condition)) {
               return false;
             }
             continue;
@@ -2222,7 +1181,7 @@ FETCH links
                                      ops.lt !== undefined || ops.lte !== undefined ||
                                      ops.between !== undefined || ops.contains !== undefined;
             if (hasComparisonOps) {
-              if (!this.matchesCondition(instance[propertyName], condition)) {
+              if (!matchesCondition(instance[propertyName], condition)) {
                 return false;
               }
             }
@@ -2301,71 +1260,6 @@ FETCH links
       results: paginatedInstances,
       totalCount
     };
-  }
-  
-  /**
-   * Checks if a value matches a condition (for post-query filtering).
-   * @private
-   */
-  private static matchesCondition(value: any, condition: WhereCondition): boolean {
-    // Handle array values (IN clause)
-    if (Array.isArray(condition)) {
-      return (condition as any[]).includes(value);
-    }
-    
-    // Handle operator object
-    if (typeof condition === 'object' && condition !== null) {
-      const ops = condition as any;
-      
-      // Special case: 'not' operator (exclusive with other operators)
-      if (ops.not !== undefined) {
-        if (Array.isArray(ops.not)) {
-          return !(ops.not as any[]).includes(value);
-        } else {
-          return value !== ops.not;
-        }
-      }
-      
-      // Special case: 'between' operator (inclusive range, exclusive with gt/gte/lt/lte)
-      if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
-        return value >= ops.between[0] && value <= ops.between[1];
-      }
-      
-      // For all other operators (gt, gte, lt, lte, contains), we need to check ALL of them
-      // and return true only if ALL conditions are satisfied
-      let allConditionsMet = true;
-      
-      if (ops.gt !== undefined) {
-        allConditionsMet = allConditionsMet && (value > ops.gt);
-      }
-      
-      if (ops.gte !== undefined) {
-        allConditionsMet = allConditionsMet && (value >= ops.gte);
-      }
-      
-      if (ops.lt !== undefined) {
-        allConditionsMet = allConditionsMet && (value < ops.lt);
-      }
-      
-      if (ops.lte !== undefined) {
-        allConditionsMet = allConditionsMet && (value <= ops.lte);
-      }
-      
-      if (ops.contains !== undefined) {
-        if (typeof value === 'string') {
-          allConditionsMet = allConditionsMet && value.includes(String(ops.contains));
-        } else if (Array.isArray(value)) {
-          allConditionsMet = allConditionsMet && value.includes(ops.contains);
-        } else {
-          allConditionsMet = false;
-        }
-      }
-      
-      return allConditionsMet;
-    }
-    
-    // Simple equality
-    return value === condition;
   }
 
   /**
@@ -3353,298 +2247,7 @@ FETCH links
     schema: JSONSchema,
     options: JSONSchemaToModelOptions
   ): typeof Ad4mModel {
-    // Disallow top-level "author" property since Ad4mModel provides it implicitly via link authorship
-    if (schema?.properties && Object.prototype.hasOwnProperty.call(schema.properties, "author")) {
-      throw new Error('JSON Schema must not define a top-level "author" property because Ad4mModel already exposes it. Please rename the property (e.g., "writer").');
-    }
-    // Determine namespace with cascading precedence
-    const namespace = this.determineNamespace(schema, options);
-    
-    // Create the dynamic class
-    const DynamicModelClass = class extends Ad4mModel {};
-    
-    // Set up class metadata
-    if (!options.name || options.name.trim() === '') {
-      throw new Error("options.name is required and cannot be empty");
-    }
-    (DynamicModelClass as any).className = options.name;
-    (DynamicModelClass.prototype as any).className = options.name;
-    
-    // Generate properties and relations metadata
-    const properties: any = {};
-    const relations: any = {};
-    
-    if (schema.properties) {
-      for (const [propertyName, propertySchema] of Object.entries(schema.properties)) {
-        const predicate = this.determinePredicate(schema, propertyName, propertySchema, namespace, options);
-        const isRequired = schema.required?.includes(propertyName) || false;
-        const propertyType = normalizeSchemaType(propertySchema.type);
-        const isArray = isArrayType(propertySchema);
-        
-        if (isArray) {
-          // Handle arrays as relations
-          // Store the singular form as the relation key since SDNA generation expects singular
-          relations[propertyName] = {
-            through: predicate,
-            local: this.getPropertyOption(propertyName, propertySchema, options, 'local')
-          };
-          
-          // Define the property on prototype
-          Object.defineProperty(DynamicModelClass.prototype, propertyName, {
-            configurable: true,
-            writable: true,
-            value: []
-          });
-          
-          // Add relation methods
-          const adderName = `add${capitalize(propertyName)}`;
-          const removerName = `remove${capitalize(propertyName)}`;
-          const setterName = `set${capitalize(propertyName)}`;
-          
-          (DynamicModelClass.prototype as any)[adderName] = function() {
-            // Placeholder function for SDNA generation
-          };
-          (DynamicModelClass.prototype as any)[removerName] = function() {
-            // Placeholder function for SDNA generation
-          };
-          (DynamicModelClass.prototype as any)[setterName] = function() {
-            // Placeholder function for SDNA generation
-          };
-          
-        } else {
-          // Handle regular properties
-          let resolveLanguage = this.getPropertyOption(propertyName, propertySchema, options, 'resolveLanguage');
-          // If no specific resolveLanguage for this property, use the global one
-          if (!resolveLanguage && options.resolveLanguage) {
-            resolveLanguage = options.resolveLanguage;
-          }
-          const local = this.getPropertyOption(propertyName, propertySchema, options, 'local');
-          // Determine readOnly: check PropertyOptions first, then x-ad4m.writable (inverted) for JSON Schema wire format
-          let readOnly = this.getPropertyOption(propertyName, propertySchema, options, 'readOnly');
-          if (readOnly === undefined) {
-            const xWritable = propertySchema["x-ad4m"]?.writable;
-            readOnly = xWritable !== undefined ? !xWritable : false;
-          }
-          const writable = !readOnly;
-          let initial = this.getPropertyOption(propertyName, propertySchema, options, 'initial');
-          
-          // Handle nested objects by serializing to JSON
-          if (isObjectType(propertySchema) && !resolveLanguage) {
-            resolveLanguage = 'literal';
-            console.warn(`Property "${propertyName}" is an object type. It will be stored as JSON. Consider flattening complex objects for better semantic querying.`);
-          }
-
-          // Ensure numeric properties use literal language for correct typing
-          if ((resolveLanguage === undefined || resolveLanguage === null) && isNumericType(propertySchema)) {
-            resolveLanguage = 'literal';
-          }
-
-          // Default resolveLanguage to 'literal' for all remaining property types,
-          // matching the @Property decorator behaviour. Without this, string values
-          // stored as literal:// URLs are returned unparsed.
-          if (resolveLanguage === undefined || resolveLanguage === null) {
-            resolveLanguage = 'literal';
-          }
-          
-          // If property is required, ensure it has an initial value
-          if (isRequired && !initial) {
-            if (isObjectType(propertySchema)) {
-              initial = 'literal://json:{}';
-            } else {
-              initial = "ad4m://undefined";
-            }
-          }
-          
-          properties[propertyName] = {
-            through: predicate,
-            required: isRequired,
-            writable: writable,
-            ...(resolveLanguage && { resolveLanguage }),
-            ...(local !== undefined && { local }),
-            ...(initial && { initial })
-          };
-          
-          // Define the property on prototype
-          Object.defineProperty(DynamicModelClass.prototype, propertyName, {
-            configurable: true,
-            writable: true,
-            value: this.getDefaultValueForType(propertyType)
-          });
-          
-          // Add setter function if writable
-          if (writable) {
-            const setterName = propertyNameToSetterName(propertyName);
-            (DynamicModelClass.prototype as any)[setterName] = function() {
-              // This is a placeholder function that the SDNA generation looks for
-              // The actual setter logic is handled by the Ad4mModel base class
-            };
-          }
-        }
-      }
-    }
-    
-    // No auto-flag generation — models with all-optional properties use
-    // open-world structural matching.  Consumers who need type discrimination
-    // should add an explicit @Flag to their model definition.
-    
-    // Attach metadata to WeakMap registries
-    for (const [propName, propMeta] of Object.entries(properties)) {
-      setPropertyRegistryEntry(DynamicModelClass, propName, propMeta as any);
-    }
-    for (const [relName, relMeta] of Object.entries(relations)) {
-      setRelationRegistryEntry(DynamicModelClass, relName, {
-        predicate: (relMeta as any).through || "",
-        kind: 'hasMany',
-        ...(( relMeta as any).getter !== undefined && { getter: (relMeta as any).getter }),
-        ...(( relMeta as any).local !== undefined && { local: (relMeta as any).local }),
-      });
-    }
-    
-    // Store the JSON schema and options on the prototype for potential fallback use by getModelMetadata()
-    (DynamicModelClass.prototype as any).__jsonSchema = schema;
-    (DynamicModelClass.prototype as any).__jsonSchemaOptions = options;
-    
-    // Apply the Model decorator to set up the generateSDNA method
-    const ModelDecorator = Model({ name: options.name });
-    ModelDecorator(DynamicModelClass);
-    
-    return DynamicModelClass as typeof Ad4mModel;
-  }
-  
-  /**
-   * Determines the namespace for predicates using cascading precedence
-   */
-  private static determineNamespace(schema: JSONSchema, options: JSONSchemaToModelOptions): string {
-    // 1. Explicit namespace in options (highest precedence)
-    if (options.namespace) {
-      return options.namespace;
-    }
-    
-    // 2. x-ad4m metadata in schema
-    if (schema["x-ad4m"]?.namespace) {
-      return schema["x-ad4m"].namespace;
-    }
-    
-    // 3. Infer from schema title
-    if (schema.title) {
-      return `${schema.title.toLowerCase()}://`;
-    }
-    
-    // 4. Try to extract from $id if it's a URL
-    if (schema.$id) {
-      try {
-        const url = new URL(schema.$id);
-        const pathParts = url.pathname.split('/').filter(p => p);
-        if (pathParts.length > 0) {
-          const lastPart = pathParts[pathParts.length - 1];
-          const baseName = lastPart.replace(/\.schema\.json$/, '').replace(/\.json$/, '');
-          return `${baseName.toLowerCase()}://`;
-        }
-      } catch {
-        // If $id is not a valid URL, continue to error
-      }
-    }
-    
-    // 5. Error if no namespace can be determined
-    throw new Error(
-      `Cannot infer namespace for JSON Schema. Please provide one of:
-      - options.namespace
-      - schema["x-ad4m"].namespace  
-      - schema.title
-      - valid schema.$id`
-    );
-  }
-  
-  /**
-   * Determines the predicate for a specific property using cascading precedence
-   */
-  private static determinePredicate(
-    schema: JSONSchema,
-    propertyName: string,
-    propertySchema: JSONSchemaProperty,
-    namespace: string,
-    options: JSONSchemaToModelOptions
-  ): string {
-    // 1. Explicit property mapping (highest precedence)
-    if (options.propertyMapping?.[propertyName]) {
-      return options.propertyMapping[propertyName];
-    }
-    
-    // 2. x-ad4m metadata in property schema
-    if (propertySchema["x-ad4m"]?.through) {
-      return propertySchema["x-ad4m"].through;
-    }
-    
-    // 3. Generate from namespace + property name
-    if (options.predicateTemplate) {
-      const normalizedNs = normalizeNamespaceString(namespace);
-      const [scheme, rest] = normalizedNs.includes('://') ? normalizedNs.split('://') : ['', normalizedNs];
-      const nsNoScheme = rest || '';
-      return options.predicateTemplate
-        .replace('${namespace}', nsNoScheme)
-        .replace('${scheme}', scheme)
-        .replace('${ns}', nsNoScheme)
-        .replace('${title}', schema.title || '')
-        .replace('${property}', propertyName);
-    }
-    
-    // 4. Custom predicate generator
-    if (options.predicateGenerator) {
-      return options.predicateGenerator(schema.title || '', propertyName);
-    }
-    
-    // 5. Default: namespace + property name
-    const normalizedNs = normalizeNamespaceString(namespace);
-    if (normalizedNs.includes('://')) {
-      // For namespaces like "product://", append property directly
-      return `${normalizedNs}${propertyName}`;
-    } else {
-      return `${normalizedNs}://${propertyName}`;
-    }
-  }
-  
-  /**
-   * Gets property-specific options using cascading precedence
-   */
-  private static getPropertyOption(
-    propertyName: string,
-    propertySchema: JSONSchemaProperty,
-    options: JSONSchemaToModelOptions,
-    optionName: keyof PropertyOptions,
-    defaultValue?: any
-  ): any {
-    // 1. Property-specific options
-    if (options.propertyOptions?.[propertyName]?.[optionName] !== undefined) {
-      return options.propertyOptions[propertyName][optionName];
-    }
-    
-    // 2. x-ad4m metadata in property
-    if (propertySchema["x-ad4m"]?.[optionName as keyof JSONSchemaProperty["x-ad4m"]] !== undefined) {
-      return propertySchema["x-ad4m"][optionName as keyof JSONSchemaProperty["x-ad4m"]];
-    }
-    
-    // 3. Global option
-    if (options[optionName as keyof JSONSchemaToModelOptions] !== undefined) {
-      return options[optionName as keyof JSONSchemaToModelOptions];
-    }
-    
-    // 4. Default value
-    return defaultValue;
-  }
-  
-  /**
-   * Gets default value for a JSON Schema type
-   */
-  private static getDefaultValueForType(type?: string): any {
-    switch (type) {
-      case 'string': return '';
-      case 'number': return 0;
-      case 'integer': return 0;
-      case 'boolean': return false;
-      case 'array': return [];
-      case 'object': return {};
-      default: return '';
-    }
+    return buildModelFromJSONSchema(this, schema, options);
   }
 }
 

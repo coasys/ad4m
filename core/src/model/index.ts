@@ -12,3 +12,6 @@ export * from "./decorators";
 export * from "./Subject";
 export * from "./query-prolog";
 export * from "./prolog-facts";
+export * from "./json-schema";
+export * from "./query-surreal";
+export * from "./hydration";
