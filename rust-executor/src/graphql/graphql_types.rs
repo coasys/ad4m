@@ -701,7 +701,7 @@ pub struct VerificationRequestResult {
 #[serde(rename_all = "camelCase")]
 pub struct HostingUserInfo {
     pub email: String,
-    pub remaining_credits: f64,
+    pub remaining_credits: String,
     pub hot_wallet_address: Option<String>,
 }
 

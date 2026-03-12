@@ -619,10 +619,10 @@ export class AgentClient {
     return runtimeSetHotWalletAddress;
   }
 
-  async requestPayment(amountHOT: number): Promise<PaymentRequestResult> {
+  async requestPayment(amountHOT: string): Promise<PaymentRequestResult> {
     const { runtimeRequestPayment } = unwrapApolloResult(
       await this.#apolloClient.mutate({
-        mutation: gql`mutation runtimeRequestPayment($amountHOT: Float!) {
+        mutation: gql`mutation runtimeRequestPayment($amountHOT: String!) {
           runtimeRequestPayment(amountHOT: $amountHOT) {
             success
             message

@@ -2994,7 +2994,7 @@ impl Mutation {
     async fn runtime_request_payment(
         &self,
         _context: &RequestContext,
-        _amount_hot: f64,
+        _amount_hot: String,
     ) -> FieldResult<PaymentRequestResult> {
         // TODO: implement actual payment request via Unit
         Err(FieldError::new(
