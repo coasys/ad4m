@@ -463,8 +463,7 @@ impl HolochainService {
             if let Some(relay_url) = local_config.relay_url {
                 network_config.relay_url = Url2::parse(relay_url.as_str());
             } else {
-                network_config.relay_url =
-                    Url2::parse("http://bootstrap.ad4m.dev:4433/relay");
+                network_config.relay_url = Url2::parse("http://bootstrap.ad4m.dev:4433/relay");
             }
 
             config.network = network_config;
