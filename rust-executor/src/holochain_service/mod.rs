@@ -464,7 +464,7 @@ impl HolochainService {
                 network_config.relay_url = Url2::parse(relay_url.as_str());
             } else {
                 network_config.relay_url =
-                    Url2::parse("https://bootstrap.ad4m.dev:4433/relay");
+                    Url2::parse("http://bootstrap.ad4m.dev:4433/relay");
             }
 
             config.network = network_config;
