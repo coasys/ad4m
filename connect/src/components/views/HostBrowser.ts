@@ -1,7 +1,8 @@
 import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { sharedStyles } from "../../styles/shared-styles";
-import { ArrowLeftIcon, GlobeIcon } from "../icons";
+import { ArrowLeftIcon } from "../icons";
+import { getInitials, getHue } from "../../utils";
 import type { RemoteHost } from "../../types";
 
 @customElement("host-browser")
@@ -10,19 +11,34 @@ export class HostBrowser extends LitElement {
   @property({ type: Boolean }) loading: boolean = false;
   @property({ type: String }) error: string | null = null;
   @property({ type: String }) lastHostId: string | null = null;
+  @property({ type: String }) defaultUrl: string = "";
 
   @state() private manualUrl = "";
+  private defaultApplied = false;
 
   static styles = [
     sharedStyles,
     css`
+      :host {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        flex: 1 1 auto;
+      }
+
+      .container {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: hidden;
+      }
+
       .host-list {
         display: flex;
         flex-direction: column;
         gap: 12px;
-        max-height: 320px;
+        max-height: min(500px, calc(100vh - 380px));
         overflow-y: auto;
-        padding-right: 4px;
+        padding: 2px;
       }
 
       .host-card {
@@ -54,6 +70,15 @@ export class HostBrowser extends LitElement {
         flex-shrink: 0;
         object-fit: cover;
         background: rgba(128, 178, 201, 0.2);
+      }
+
+      .host-avatar.fallback {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+        font-weight: 600;
+        color: #fff;
       }
 
       .host-info {
@@ -144,6 +169,7 @@ export class HostBrowser extends LitElement {
         display: flex;
         gap: 8px;
         width: 100%;
+        padding: 2px;
       }
 
       .manual-entry input {
@@ -164,6 +190,14 @@ export class HostBrowser extends LitElement {
       }
     `
   ];
+
+  willUpdate(changedProps: import("lit").PropertyValues) {
+    // Pre-fill manual URL from defaultUrl on first render only
+    if (changedProps.has('defaultUrl') && this.defaultUrl && !this.defaultApplied) {
+      this.manualUrl = this.defaultUrl;
+      this.defaultApplied = true;
+    }
+  }
 
   private back() {
     this.dispatchEvent(new CustomEvent("back", { bubbles: true, composed: true }));
@@ -189,6 +223,15 @@ export class HostBrowser extends LitElement {
     };
 
     this.selectHost(host);
+  }
+
+  private renderAvatar(host: RemoteHost) {
+    if (host.profilePicUrl) {
+      return html`<img class="host-avatar" src=${host.profilePicUrl} alt="" />`;
+    }
+    const hue = getHue(host.id || host.name);
+    const initials = getInitials(host.name);
+    return html`<div class="host-avatar fallback" style="background:hsl(${hue},60%,35%)">${initials}</div>`;
   }
 
   private retry() {
@@ -217,7 +260,7 @@ export class HostBrowser extends LitElement {
         </div>
 
         <div class="header">
-          <h1>Remote Hosts</h1>
+          <h1>Remote Node</h1>
           <h3>Choose a host or enter a URL</h3>
         </div>
 
@@ -235,10 +278,7 @@ export class HostBrowser extends LitElement {
                 class="host-card ${host.id === this.lastHostId ? 'pinned' : ''}"
                 @click=${() => this.selectHost(host)}
               >
-                ${host.profilePicUrl
-                  ? html`<img class="host-avatar" src=${host.profilePicUrl} alt="" />`
-                  : html`<div class="host-avatar"></div>`
-                }
+                ${this.renderAvatar(host)}
                 <div class="host-info">
                   <div style="display:flex;align-items:center;gap:8px;">
                     <p class="host-name">${host.name}</p>

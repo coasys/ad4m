@@ -166,13 +166,13 @@ export class ConnectionOptions extends LitElement {
             <div class="box">
               <div class="box-header">
                 ${GlobeIcon()}
-                <h3>Remote Hosts</h3>
+                <h3>Remote Node</h3>
               </div>
 
               <p>Browse hosted AD4M nodes or enter a URL</p>
 
               <button class="primary" @click=${this.browseHosts}>
-                Browse Remote Hosts
+                Connect to Remote Node
               </button>
             </div>
           ` : '' }

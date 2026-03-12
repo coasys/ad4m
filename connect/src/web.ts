@@ -69,12 +69,14 @@ const styles = css`
     border: 1px solid var(--ac-border-color-dark);
     border-radius: 12px;
     padding: 30px;
-    width: calc(100vw - 10px);
+    width: calc(100vw - 30px);
     max-width: 480px;
-    max-height: 90vh;
+    max-height: calc(100vh - 30px);
     overflow-y: auto;
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px); /* Safari */
+    display: flex;
+    flex-direction: column;
   }
 
   .modal-header {
@@ -94,6 +96,8 @@ const styles = css`
     display: flex;
     flex-direction: column;
     justify-content: center;
+    flex: 1 1 auto;
+    min-height: 0;
   }
 
   .settings-button {
@@ -430,6 +434,7 @@ export class Ad4mConnectElement extends LitElement {
           .loading=${this.hostsLoading}
           .error=${this.hostsError}
           .lastHostId=${this.core.connectedHost?.id ?? null}
+          .defaultUrl=${this.core.options.remoteUrl ?? ''}
           @select-host=${this.selectHost}
           @back=${() => { this.currentView = "connection-options" }}
           @retry=${this.retryFetchHosts}

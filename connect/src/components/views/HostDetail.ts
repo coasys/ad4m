@@ -1,7 +1,8 @@
-import { LitElement, html, css } from "lit";
+import { LitElement, html, css, TemplateResult } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { sharedStyles } from "../../styles/shared-styles";
 import { ArrowLeftIcon } from "../icons";
+import { getInitials, getHue } from "../../utils";
 import type { RemoteHost } from "../../types";
 
 @customElement("host-detail")
@@ -24,6 +25,15 @@ export class HostDetail extends LitElement {
         border-radius: 50%;
         object-fit: cover;
         background: rgba(128, 178, 201, 0.2);
+      }
+
+      .profile-pic.fallback {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 28px;
+        font-weight: 600;
+        color: #fff;
       }
 
       .profile-name {
@@ -112,6 +122,15 @@ export class HostDetail extends LitElement {
     this.dispatchEvent(new CustomEvent("proceed-to-auth", { detail: { host: this.host }, bubbles: true, composed: true }));
   }
 
+  private renderAvatar(): TemplateResult {
+    if (this.host.profilePicUrl) {
+      return html`<img class="profile-pic" src=${this.host.profilePicUrl} alt="" />`;
+    }
+    const hue = getHue(this.host.id || this.host.name);
+    const initials = getInitials(this.host.name);
+    return html`<div class="profile-pic fallback" style="background:hsl(${hue},60%,35%)">${initials}</div>`;
+  }
+
   private formatPrice(price: number): string {
     // Show enough decimal places to be meaningful
     if (price >= 0.01) return price.toFixed(2);
@@ -130,10 +149,7 @@ export class HostDetail extends LitElement {
         </div>
 
         <div class="profile">
-          ${this.host.profilePicUrl
-            ? html`<img class="profile-pic" src=${this.host.profilePicUrl} alt="" />`
-            : html`<div class="profile-pic"></div>`
-          }
+          ${this.renderAvatar()}
           <p class="profile-name">${this.host.name}</p>
           <p class="profile-location">${this.host.location}</p>
 
