@@ -16,3 +16,5 @@ export * from "./json-schema";
 export * from "./query-surreal";
 export * from "./hydration";
 export * from "./ModelQueryBuilder";
+export * from "./sdna";
+export * from "./shacl-gen";

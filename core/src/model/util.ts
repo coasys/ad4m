@@ -69,6 +69,19 @@ export function relationToSetterName(relation: string): string {
 }
 
 
+/**
+ * Generate a random identifier string of the given length (lowercase alpha).
+ */
+export function makeRandomId(length: number): string {
+    let result = '';
+    const characters = 'abcdefghijklmnopqrstuvwxyz';
+    const charactersLength = characters.length;
+    for (let i = 0; i < length; i++) {
+        result += characters.charAt(Math.floor(Math.random() * charactersLength));
+    }
+    return result;
+}
+
 export function stringifyObjectLiteral(obj) {
     if(Array.isArray(obj)) {
         //@ts-ignore
