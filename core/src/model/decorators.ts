@@ -1,9 +1,9 @@
-import { capitalize, propertyNameToSetterName } from "./util";
-import { ConformanceCondition } from "../shacl/SHACLShape";
-import { escapeSurrealString } from "../utils";
+import { capitalize } from "./util";
 import type { Where } from "./types";
 import { buildSDNA } from "./sdna";
 import { buildSHACL } from "./shacl-gen";
+import { escapeSurrealString } from "../utils";
+import type { ConformanceCondition } from "../shacl/SHACLShape";
 
 // ============================================================================
 // WeakMap-based metadata registry
@@ -194,47 +194,6 @@ export function buildConformanceFilter(
         return undefined;
     }
 }
-
-/**
- * Convert a model instance to a plain serializable object.
- * Reads the property metadata and extracts values from the instance.
- */
-export function instanceToSerializable(instance: any): Record<string, any> {
-    const ctor = instance.constructor;
-    const props = getPropertiesMetadata(ctor);
-    const result: Record<string, any> = {};
-    for (const [key, _meta] of Object.entries(props)) {
-        result[key] = instance[key];
-    }
-    return result;
-}
-
-/**
- * Generate a random identifier string of the given length (lowercase alpha).
- * @deprecated Import from `./util` directly. Re-exported here for backward compatibility.
- */
-export { makeRandomId } from "./util";
-
-export class PerspectiveAction {
-    action: string
-    source: string
-    predicate: string
-    target: string
-}
-
-export function addLink(source: string, predicate: string, target: string): PerspectiveAction {
-    return {
-        action: "addLink",
-        source,
-        predicate,
-        target,
-    };
-}
-
-export function hasLink(predicate: string): string {
-    return `triple(this, "${predicate}", _)`
-}
-
 
 export interface PropertyOptions {
     /**

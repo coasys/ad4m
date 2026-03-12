@@ -14,14 +14,11 @@
 
 import { escapeSurrealString } from "../utils";
 import { formatSurrealValue } from "./surreal-utils";
-import { resolveParentPredicate } from "./query-prolog";
+import { resolveParentPredicate } from "./query-common";
 import type { RelationMetadataEntry } from "./decorators";
 import type {
-  Where, Query, ModelMetadata, ParentScope,
+  Where, Query, ModelMetadata
 } from "./types";
-
-// Re-export formatSurrealValue so callers don't need surreal-utils directly
-export { formatSurrealValue };
 
 // ─── Graph Traversal WHERE Clause ────────────────────────────────────────────
 
@@ -165,167 +162,6 @@ export function buildGraphTraversalWhereClause(
   }
 
   return conditions.join(' AND ');
-}
-
-// ─── Legacy Subquery-based WHERE Clause ──────────────────────────────────────
-
-/**
- * Builds a WHERE clause using subqueries (legacy, kept for reference).
- *
- * @param metadata - Model metadata
- * @param where    - Where conditions
- * @returns WHERE clause fragment (without "WHERE" keyword)
- */
-export function buildSurrealWhereClause(metadata: ModelMetadata, where?: Where): string {
-  if (!where) return '';
-  
-  const conditions: string[] = [];
-  
-  for (const [propertyName, condition] of Object.entries(where)) {
-    const isSpecial = ['id', 'author', 'timestamp'].includes(propertyName);
-    
-    if (isSpecial) {
-      if (propertyName === 'author' || propertyName === 'timestamp') {
-        continue;
-      }
-      
-      const columnName = 'source';
-      
-      if (Array.isArray(condition)) {
-        const formattedValues = condition.map(v => formatSurrealValue(v)).join(', ');
-        conditions.push(`${columnName} IN [${formattedValues}]`);
-      } else if (typeof condition === 'object' && condition !== null) {
-        const ops = condition as any;
-        if (ops.not !== undefined) {
-          if (Array.isArray(ops.not)) {
-            const formattedValues = ops.not.map(v => formatSurrealValue(v)).join(', ');
-            conditions.push(`${columnName} NOT IN [${formattedValues}]`);
-          } else {
-            conditions.push(`${columnName} != ${formatSurrealValue(ops.not)}`);
-          }
-        }
-        if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
-          conditions.push(`${columnName} >= ${formatSurrealValue(ops.between[0])} AND ${columnName} <= ${formatSurrealValue(ops.between[1])}`);
-        }
-        if (ops.gt !== undefined) {
-          conditions.push(`${columnName} > ${formatSurrealValue(ops.gt)}`);
-        }
-        if (ops.gte !== undefined) {
-          conditions.push(`${columnName} >= ${formatSurrealValue(ops.gte)}`);
-        }
-        if (ops.lt !== undefined) {
-          conditions.push(`${columnName} < ${formatSurrealValue(ops.lt)}`);
-        }
-        if (ops.lte !== undefined) {
-          conditions.push(`${columnName} <= ${formatSurrealValue(ops.lte)}`);
-        }
-        if (ops.contains !== undefined) {
-          conditions.push(`${columnName} CONTAINS ${formatSurrealValue(ops.contains)}`);
-        }
-      } else {
-        conditions.push(`${columnName} = ${formatSurrealValue(condition)}`);
-      }
-    } else {
-      const propMeta = metadata.properties[propertyName];
-      if (!propMeta) continue;
-      
-      const predicate = escapeSurrealString(propMeta.predicate);
-      const targetField = propMeta.resolveLanguage === 'literal' ? 'fn::parse_literal(target)' : 'target';
-      
-      if (Array.isArray(condition)) {
-        const formattedValues = condition.map(v => formatSurrealValue(v)).join(', ');
-        conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} IN [${formattedValues}])`);
-      } else if (typeof condition === 'object' && condition !== null) {
-        const ops = condition as any;
-        if (ops.not !== undefined) {
-          if (Array.isArray(ops.not)) {
-            const formattedValues = ops.not.map(v => formatSurrealValue(v)).join(', ');
-            conditions.push(`source NOT IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} IN [${formattedValues}])`);
-          } else {
-            conditions.push(`source NOT IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} = ${formatSurrealValue(ops.not)})`);
-          }
-        }
-        const hasComparisonOps = ops.gt !== undefined || ops.gte !== undefined ||
-                                 ops.lt !== undefined || ops.lte !== undefined ||
-                                 ops.between !== undefined || ops.contains !== undefined;
-        if (hasComparisonOps) {
-          conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}')`);
-        }
-      } else {
-        conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} = ${formatSurrealValue(condition)})`);
-      }
-    }
-  }
-  
-  return conditions.join(' AND ');
-}
-
-// ─── SELECT Field Builders ───────────────────────────────────────────────────
-
-/**
- * Builds SELECT fields using subqueries.
- */
-export function buildSurrealSelectFields(
-  metadata: ModelMetadata,
-  properties?: string[],
-  relations?: string[],
-): string {
-  const fields: string[] = [];
-  
-  const propsToFetch = properties || Object.keys(metadata.properties);
-  for (const propName of propsToFetch) {
-    const propMeta = metadata.properties[propName];
-    if (!propMeta) continue;
-    const escapedPredicate = escapeSurrealString(propMeta.predicate);
-    fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}' LIMIT 1) AS ${propName}`);
-  }
-  
-  const relsToFetch = relations || Object.keys(metadata.relations);
-  for (const relName of relsToFetch) {
-    const relMeta = metadata.relations[relName];
-    if (!relMeta) continue;
-    const escapedPredicate = escapeSurrealString(relMeta.predicate);
-    fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}') AS ${relName}`);
-  }
-  
-  fields.push(`(SELECT VALUE author FROM link WHERE source = source ORDER BY timestamp ASC LIMIT 1) AS author`);
-  fields.push(`(SELECT VALUE timestamp FROM link WHERE source = source ORDER BY timestamp ASC LIMIT 1) AS createdAt`);
-  fields.push(`(SELECT VALUE timestamp FROM link WHERE source = source ORDER BY timestamp DESC LIMIT 1) AS updatedAt`);
-  
-  return fields.join(',\n  ');
-}
-
-/**
- * Builds SELECT fields using aggregation functions (for GROUP BY queries).
- */
-export function buildSurrealSelectFieldsWithAggregation(
-  metadata: ModelMetadata,
-  properties?: string[],
-  relations?: string[],
-): string {
-  const fields: string[] = [];
-  
-  const propsToFetch = properties || Object.keys(metadata.properties);
-  for (const propName of propsToFetch) {
-    const propMeta = metadata.properties[propName];
-    if (!propMeta) continue;
-    const escapedPredicate = escapeSurrealString(propMeta.predicate);
-    fields.push(`array::first(target[WHERE predicate = '${escapedPredicate}']) AS ${propName}`);
-  }
-  
-  const relsToFetch = relations || Object.keys(metadata.relations);
-  for (const relName of relsToFetch) {
-    const relMeta = metadata.relations[relName];
-    if (!relMeta) continue;
-    const escapedPredicate = escapeSurrealString(relMeta.predicate);
-    fields.push(`target[WHERE predicate = '${escapedPredicate}'] AS ${relName}`);
-  }
-  
-  fields.push(`array::first(author) AS author`);
-  fields.push(`array::first(timestamp) AS createdAt`);
-  fields.push(`array::last(timestamp) AS updatedAt`);
-  
-  return fields.join(',\n  ');
 }
 
 // ─── Main Query Builder ─────────────────────────────────────────────────────

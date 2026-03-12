@@ -8,13 +8,15 @@
  */
 
 import { Literal } from "../Literal";
+import { LinkQuery } from "../perspectives/LinkQuery";
 import type { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { getPropertiesMetadata, buildConformanceFilter } from "./decorators";
+import { getPropertiesMetadata, getRelationsMetadata, buildConformanceFilter } from "./decorators";
+import type { RelationMetadataEntry } from "./decorators";
 import { escapeSurrealString } from "../utils";
 import { formatSurrealValue, compileWhereClause } from "./surreal-utils";
 import type {
   PropertyMetadata, RelationMetadata, ModelMetadata,
-  ValueTuple, WhereCondition,
+  ValueTuple, WhereCondition, IncludeMap, RelationSubQuery,
 } from "./types";
 
 // ──────────────────────────────────────────────────────────
@@ -542,6 +544,253 @@ export async function evaluateCustomGettersForInstance(
       } catch (error) {
         console.warn(`Failed to evaluate getter for ${relName}:`, error);
       }
+    }
+  }
+}
+
+/**
+ * Hydrates relation fields on instances according to the provided IncludeMap.
+ *
+ * For each relation listed in `includeMap`, the raw expression-URI strings
+ * stored on the instance are replaced with fully-hydrated model instances
+ * (fetched via the relation's `target()` class).  Nested IncludeMaps are
+ * supported for multi-level eager loading.
+ *
+ * @param modelClass - The model class whose relation metadata to read
+ * @param instances - The instances whose relations should be hydrated
+ * @param perspective - The perspective to fetch related instances from
+ * @param includeMap - Describes which relations to hydrate
+ */
+export async function hydrateRelations<T>(
+  modelClass: any,
+  instances: T[],
+  perspective: PerspectiveProxy,
+  includeMap: IncludeMap | undefined,
+): Promise<void> {
+  if (!includeMap || Object.keys(includeMap).length === 0) return;
+
+  const relMeta = getRelationsMetadata(modelClass);
+
+  for (const [relName, includeValue] of Object.entries(includeMap)) {
+    const meta: RelationMetadataEntry | undefined = relMeta[relName];
+    if (!meta) {
+      console.warn(`include: relation "${relName}" not found in metadata, skipping`);
+      continue;
+    }
+
+    const TargetClass = meta.target() as any;
+
+    // Determine if a RelationSubQuery was supplied (object) vs a plain `true`
+    const subQuery: RelationSubQuery | undefined =
+      typeof includeValue === 'object' && includeValue !== null
+        ? (includeValue as RelationSubQuery)
+        : undefined;
+    const nestedInclude: IncludeMap | undefined = subQuery?.include;
+
+    // ── Reverse relations (belongsToOne / belongsToMany) ──────────────────
+    // The link goes target→instance, so we query backwards:
+    //   predicate = meta.predicate, target = inst.id  →  source is the related id
+    if (meta.kind === 'belongsToOne' || meta.kind === 'belongsToMany') {
+      // Per-instance reverse lookup (can't batch easily across instances)
+      for (const inst of instances) {
+        const reverseLinks = await perspective.get(
+          new LinkQuery({ predicate: meta.predicate, target: (inst as any).id })
+        );
+        // Defensive filter: perspective.get may return extra results; ensure
+        // we only use links that genuinely point to this instance.
+        const sourceIds = reverseLinks
+          .filter(l => l.data.target === (inst as any).id)
+          .map(l => l.data.source);
+
+        if (meta.kind === 'belongsToOne') {
+          if (sourceIds.length === 0) {
+            (inst as any)[relName] = null;
+            continue;
+          }
+          const sourceId = sourceIds[sourceIds.length - 1]; // latest-wins
+          try {
+            const related = new TargetClass(perspective, sourceId);
+            await related.get();
+            (inst as any)[relName] = related;
+          } catch {
+            (inst as any)[relName] = null;
+          }
+        } else {
+          // belongsToMany — return array of hydrated instances
+          let hydrated: any[] = [];
+
+          // If there's a where/order sub-query, delegate to findAll for filtering
+          if (subQuery && (subQuery.where || subQuery.order || subQuery.properties)) {
+            const whereWithIds: Record<string, any> = {
+              id: sourceIds,
+              ...(subQuery.where ?? {}),
+            };
+            hydrated = await TargetClass.findAll(perspective, {
+              where: whereWithIds as any,
+              ...(subQuery.order && { order: subQuery.order as any }),
+              ...(subQuery.properties && { properties: subQuery.properties }),
+            });
+          } else {
+            await Promise.all(sourceIds.map(async (sid: string) => {
+              try {
+                const related = new TargetClass(perspective, sid);
+                await related.get(
+                  subQuery?.properties ? { properties: subQuery.properties } : undefined
+                );
+                hydrated.push(related);
+              } catch { /* skip */ }
+            }));
+          }
+
+          // Apply order (client-side, if not already handled by findAll above)
+          if (subQuery?.order && !(subQuery.where || subQuery.properties)) {
+            const orderEntries = Object.entries(subQuery.order);
+            hydrated = hydrated.sort((a: any, b: any) => {
+              for (const [field, dir] of orderEntries) {
+                const av = String(a[field] ?? '');
+                const bv = String(b[field] ?? '');
+                const diff = av.localeCompare(bv);
+                if (diff !== 0) return dir === 'DESC' ? -diff : diff;
+              }
+              return 0;
+            });
+          }
+
+          // Apply offset and limit
+          if (subQuery?.offset != null || subQuery?.limit != null) {
+            const start = subQuery.offset ?? 0;
+            const end = subQuery.limit != null ? start + subQuery.limit : undefined;
+            hydrated = hydrated.slice(start, end);
+          }
+
+          (inst as any)[relName] = hydrated;
+
+          // Recurse for nested includes
+          if (nestedInclude && hydrated.length > 0) {
+            await hydrateRelations(TargetClass, hydrated, perspective, nestedInclude);
+          }
+        }
+      }
+      continue; // skip the forward-relation path below
+    }
+
+    // ── Forward relations (hasMany / hasOne) ──────────────────────────────
+    // Collect all unique URIs across all instances for batch-friendly lookup.
+    // IMPORTANT: We cache each instance's raw value NOW (before the async
+    // findAll) so that concurrent getData() calls on the same instance can't
+    // overwrite the relation field between the uriSet relation and the
+    // post-await assignment loop.  Without this cache, a concurrent call
+    // can replace the raw URI strings with hydrated model objects, causing
+    // the `typeof v === 'string'` check to fail and the array to end up empty.
+    const uriSet = new Set<string>();
+    const rawCache = new Map<T, any>();
+    for (const inst of instances) {
+      const raw = (inst as any)[relName];
+      rawCache.set(inst, Array.isArray(raw) ? [...raw] : raw);
+      if (raw == null) continue;
+      if (Array.isArray(raw)) {
+        for (const v of raw) {
+          if (typeof v === 'string') uriSet.add(v);
+          // Handle already-hydrated instances (from a concurrent call)
+          else if (v && typeof v === 'object' && typeof v.id === 'string') uriSet.add(v.id);
+        }
+      } else if (typeof raw === 'string') {
+        uriSet.add(raw);
+      } else if (raw && typeof raw === 'object' && typeof raw.id === 'string') {
+        uriSet.add(raw.id);
+      }
+    }
+
+    if (uriSet.size === 0) continue;
+
+    // Hydrate related instances using findAll to ensure conformance checking.
+    // findAll validates model membership via graph traversal (required predicates / flags),
+    // so non-conforming linked URIs are silently dropped — matching the documented behaviour.
+    const hydrated = new Map<string, any>();
+
+    const whereWithIds: Record<string, any> = {
+      id: Array.from(uriSet),
+      ...(subQuery?.where ?? {}),
+    };
+    const fetchQuery: any = {
+      where: whereWithIds,
+      ...(subQuery?.order && { order: subQuery.order }),
+      ...(subQuery?.properties && { properties: subQuery.properties }),
+    };
+    const results = await TargetClass.findAll(perspective, fetchQuery);
+    for (const result of results) {
+      hydrated.set(result.id, result);
+    }
+
+    // Replace raw URIs with hydrated instances on each parent instance.
+    // Use the cached raw values captured BEFORE the async findAll to avoid
+    // the race condition where a concurrent getData() already replaced the
+    // strings with hydrated objects.
+    for (const inst of instances) {
+      const raw = rawCache.get(inst);
+      if (raw == null) continue;
+      if (Array.isArray(raw)) {
+        // Map URIs → instances; handle both raw strings and already-hydrated objects
+        let resolved: any[] = raw
+          .map((v: any) => {
+            if (typeof v === 'string') {
+              return hydrated.has(v) ? hydrated.get(v)! : null;
+            }
+            // Already a hydrated model instance (from a concurrent call)
+            if (v && typeof v === 'object' && typeof v.id === 'string') {
+              return hydrated.has(v.id) ? hydrated.get(v.id)! : v;
+            }
+            return null;
+          })
+          .filter((v: any): v is any => v !== null);
+
+        // Per-instance sort (client-side, after filtering)
+        if (subQuery?.order) {
+          const orderEntries = Object.entries(subQuery.order);
+          resolved = resolved.sort((a: any, b: any) => {
+            for (const [field, dir] of orderEntries) {
+              const av = String(a[field] ?? '');
+              const bv = String(b[field] ?? '');
+              const diff = av.localeCompare(bv);
+              if (diff !== 0) return dir === 'DESC' ? -diff : diff;
+            }
+            return 0;
+          });
+        }
+
+        // Per-instance limit / offset
+        if (subQuery?.offset != null || subQuery?.limit != null) {
+          const start = subQuery.offset ?? 0;
+          const end =
+            subQuery.limit != null ? start + subQuery.limit : undefined;
+          resolved = resolved.slice(start, end);
+        }
+
+        // Enforce maxCount guard — single-valued relations keep only the last item
+        if (meta.maxCount === 1) {
+          if (resolved.length > 1) {
+            console.warn(
+              `include: relation "${relName}" has maxCount 1 but ${resolved.length} values found; keeping the last`,
+            );
+          }
+          (inst as any)[relName] = resolved.length > 0
+            ? resolved[resolved.length - 1]
+            : null;
+        } else {
+          (inst as any)[relName] = resolved;
+        }
+      } else if (typeof raw === 'string' && hydrated.has(raw)) {
+        (inst as any)[relName] = hydrated.get(raw);
+      } else if (raw && typeof raw === 'object' && typeof raw.id === 'string') {
+        // Already-hydrated object — look up refreshed version or keep as-is
+        (inst as any)[relName] = hydrated.has(raw.id) ? hydrated.get(raw.id) : raw;
+      }
+    }
+
+    // Recurse for nested includes
+    if (nestedInclude) {
+      const hydratedInstances = Array.from(hydrated.values());
+      await hydrateRelations(TargetClass, hydratedInstances, perspective, nestedInclude);
     }
   }
 }

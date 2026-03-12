@@ -9,7 +9,6 @@
  * - filter:false and explicit getter options are respected
  */
 import { Ad4mModel } from "./Ad4mModel";
-import type { Where } from "./Ad4mModel";
 import {
   Model,
   Property,

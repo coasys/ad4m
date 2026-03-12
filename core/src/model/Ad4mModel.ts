@@ -2,10 +2,12 @@ import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { LinkQuery } from "../perspectives/LinkQuery";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { makeRandomId, getPropertiesMetadata, getRelationsMetadata } from "./decorators";
+import { makeRandomId } from "./util";
+import { getPropertiesMetadata, getRelationsMetadata } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
-import { formatSurrealValue as _formatSurrealValue } from "./surreal-utils";
-import { resolveParentPredicate, buildParentQuery, buildAuthorAndTimestampQuery, buildPropertiesQuery, buildWhereQuery, buildCountQuery, buildOrderQuery, buildOffsetQuery, buildLimitQuery } from "./query-prolog";
+import { formatSurrealValue } from "./surreal-utils";
+import { resolveParentPredicate } from "./query-common";
+import { buildParentQuery, buildAuthorAndTimestampQuery, buildPropertiesQuery, buildWhereQuery, buildCountQuery, buildOrderQuery, buildOffsetQuery, buildLimitQuery } from "./query-prolog";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 import { buildSurrealQLQuery } from "./query-surreal";
@@ -14,17 +16,13 @@ import {
   normalizeValue, matchesCondition, hydrateFromLinks,
   assignValuesToInstance as _assignValuesToInstance,
   evaluateCustomGettersForInstance,
+  hydrateRelations,
 } from "./hydration";
 import type {
-  WhereCondition, Where, Order, ParentScope, IncludeMap, Query,
-  RelationSubQuery, GetOptions, AllInstancesResult, ResultsWithTotalCount,
+  ParentScope, IncludeMap, Query,
+  GetOptions, AllInstancesResult, ResultsWithTotalCount,
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata, ValueTuple,
 } from "./types";
-
-// Re-export all shared types so existing consumers of './Ad4mModel' are unaffected
-export * from "./types";
-// Re-export JSON Schema types for consumers who imported from this module
-export type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
 /**
  * Base class for defining data models in AD4M.
@@ -124,7 +122,6 @@ export type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from ".
  */
 export class Ad4mModel {
   private _baseExpression: string;
-  private _subjectClassName: string;
   private _perspective: PerspectiveProxy;
   private _snapshot: Record<string, any> | null = null;
   author: string;
@@ -375,7 +372,7 @@ export class Ad4mModel {
   }
 
   /**
-   * Get property metadata from decorator (Phase 1: Prolog-free refactor)
+   * Get property metadata from decorator.
    * @private
    */
   private getPropertyMetadata(key: string): PropertyMetadataEntry | undefined {
@@ -395,8 +392,7 @@ export class Ad4mModel {
   }
 
   /**
-   * Generate property setter action from metadata (Phase 1: Prolog-free refactor)
-   * Replaces Prolog query: property_setter(C, key, Setter)
+   * Generate property setter action from metadata.
    * @private
    */
   private generatePropertySetterAction(key: string, metadata: PropertyMetadataEntry): any[] {
@@ -435,8 +431,7 @@ export class Ad4mModel {
   }
 
   /**
-   * Generate relation action from metadata (Phase 1: Prolog-free refactor)
-   * Replaces Prolog queries: collection_adder, collection_remover, collection_setter
+   * Generate relation action from metadata.
    * @private
    */
   private generateRelationAction(key: string, actionType: 'adder' | 'remover' | 'setter'): any[] {
@@ -612,7 +607,7 @@ export class Ad4mModel {
       const metadata = ctor.getModelMetadata();
 
       // Query for all links from this specific node (base expression)
-      const safeBaseExpression = ctor.formatSurrealValue(this._baseExpression);
+      const safeBaseExpression = formatSurrealValue(this._baseExpression);
       const linksQuery = `
         SELECT id, predicate, out.uri AS target, author, timestamp
         FROM link
@@ -654,7 +649,7 @@ export class Ad4mModel {
 
       // Eager-load relations if requested
       if (opts?.include) {
-        await ctor.hydrateRelations([this], this._perspective, opts.include);
+        await hydrateRelations(ctor, [this], this._perspective, opts.include);
       }
     } catch (e) {
       console.error(`SurrealDB getData also failed for ${this._baseExpression}:`, e);
@@ -664,7 +659,6 @@ export class Ad4mModel {
     return this;
   }
 
-  // Todo: Only return AllInstances (InstancesWithOffset, SortedInstances, & UnsortedInstances not required)
   public static async queryToProlog(perspective: PerspectiveProxy, query: Query, modelClassName?: string | null) {
     const { properties, where, order, offset, limit, count } = query;
     const className = modelClassName || (await this.getClassName(perspective));
@@ -693,252 +687,6 @@ export class Ad4mModel {
     `;
 
     return fullQuery;
-  }
-
-  /**
-   * Hydrates relation fields on instances according to the provided IncludeMap.
-   *
-   * For each relation listed in `includeMap`, the raw expression-URI strings
-   * stored on the instance are replaced with fully-hydrated model instances
-   * (fetched via the relation's `target()` class).  Nested IncludeMaps are
-   * supported for multi-level eager loading.
-   *
-   * @param instances - The instances whose relations should be hydrated
-   * @param perspective - The perspective to fetch related instances from
-   * @param includeMap - Describes which relations to hydrate
-   * @private
-   */
-  private static async hydrateRelations<T extends Ad4mModel>(
-    instances: T[],
-    perspective: PerspectiveProxy,
-    includeMap: IncludeMap | undefined,
-  ): Promise<void> {
-    if (!includeMap || Object.keys(includeMap).length === 0) return;
-
-    const relMeta = getRelationsMetadata(this);
-
-    for (const [relName, includeValue] of Object.entries(includeMap)) {
-      const meta: RelationMetadataEntry | undefined = relMeta[relName];
-      if (!meta) {
-        console.warn(`include: relation "${relName}" not found in metadata, skipping`);
-        continue;
-      }
-
-      const TargetClass = meta.target() as unknown as typeof Ad4mModel;
-
-      // Determine if a RelationSubQuery was supplied (object) vs a plain `true`
-      const subQuery: RelationSubQuery | undefined =
-        typeof includeValue === 'object' && includeValue !== null
-          ? (includeValue as RelationSubQuery)
-          : undefined;
-      const nestedInclude: IncludeMap | undefined = subQuery?.include;
-
-      // ── Reverse relations (belongsToOne / belongsToMany) ──────────────────
-      // The link goes target→instance, so we query backwards:
-      //   predicate = meta.predicate, target = inst.id  →  source is the related id
-      if (meta.kind === 'belongsToOne' || meta.kind === 'belongsToMany') {
-        // Per-instance reverse lookup (can't batch easily across instances)
-        for (const inst of instances) {
-          const reverseLinks = await perspective.get(
-            new LinkQuery({ predicate: meta.predicate, target: inst.id })
-          );
-          // Defensive filter: perspective.get may return extra results; ensure
-          // we only use links that genuinely point to this instance.
-          const sourceIds = reverseLinks
-            .filter(l => l.data.target === inst.id)
-            .map(l => l.data.source);
-
-          if (meta.kind === 'belongsToOne') {
-            if (sourceIds.length === 0) {
-              (inst as any)[relName] = null;
-              continue;
-            }
-            const sourceId = sourceIds[sourceIds.length - 1]; // latest-wins
-            try {
-              const related = new TargetClass(perspective, sourceId);
-              await related.get();
-              (inst as any)[relName] = related;
-            } catch {
-              (inst as any)[relName] = null;
-            }
-          } else {
-            // belongsToMany — return array of hydrated instances
-            let hydrated: Ad4mModel[] = [];
-
-            // If there's a where/order sub-query, delegate to findAll for filtering
-            if (subQuery && (subQuery.where || subQuery.order || subQuery.properties)) {
-              const whereWithIds: Record<string, any> = {
-                id: sourceIds,
-                ...(subQuery.where ?? {}),
-              };
-              hydrated = await TargetClass.findAll(perspective, {
-                where: whereWithIds as any,
-                ...(subQuery.order && { order: subQuery.order as any }),
-                ...(subQuery.properties && { properties: subQuery.properties }),
-              });
-            } else {
-              await Promise.all(sourceIds.map(async (sid) => {
-                try {
-                  const related = new TargetClass(perspective, sid);
-                  await related.get(
-                    subQuery?.properties ? { properties: subQuery.properties } : undefined
-                  );
-                  hydrated.push(related);
-                } catch { /* skip */ }
-              }));
-            }
-
-            // Apply order (client-side, if not already handled by findAll above)
-            if (subQuery?.order && !(subQuery.where || subQuery.properties)) {
-              const orderEntries = Object.entries(subQuery.order);
-              hydrated = hydrated.sort((a, b) => {
-                for (const [field, dir] of orderEntries) {
-                  const av = String((a as any)[field] ?? '');
-                  const bv = String((b as any)[field] ?? '');
-                  const diff = av.localeCompare(bv);
-                  if (diff !== 0) return dir === 'DESC' ? -diff : diff;
-                }
-                return 0;
-              });
-            }
-
-            // Apply offset and limit
-            if (subQuery?.offset != null || subQuery?.limit != null) {
-              const start = subQuery.offset ?? 0;
-              const end = subQuery.limit != null ? start + subQuery.limit : undefined;
-              hydrated = hydrated.slice(start, end);
-            }
-
-            (inst as any)[relName] = hydrated;
-
-            // Recurse for nested includes
-            if (nestedInclude && hydrated.length > 0) {
-              await TargetClass.hydrateRelations(hydrated, perspective, nestedInclude);
-            }
-          }
-        }
-        continue; // skip the forward-relation path below
-      }
-
-      // ── Forward relations (hasMany / hasOne) ──────────────────────────────
-      // Collect all unique URIs across all instances for batch-friendly lookup.
-      // IMPORTANT: We cache each instance's raw value NOW (before the async
-      // findAll) so that concurrent getData() calls on the same instance can't
-      // overwrite the relation field between the uriSet relation and the
-      // post-await assignment loop.  Without this cache, a concurrent call
-      // can replace the raw URI strings with hydrated model objects, causing
-      // the `typeof v === 'string'` check to fail and the array to end up empty.
-      const uriSet = new Set<string>();
-      const rawCache = new Map<T, any>();
-      for (const inst of instances) {
-        const raw = (inst as any)[relName];
-        rawCache.set(inst, Array.isArray(raw) ? [...raw] : raw);
-        if (raw == null) continue;
-        if (Array.isArray(raw)) {
-          for (const v of raw) {
-            if (typeof v === 'string') uriSet.add(v);
-            // Handle already-hydrated instances (from a concurrent call)
-            else if (v && typeof v === 'object' && typeof v.id === 'string') uriSet.add(v.id);
-          }
-        } else if (typeof raw === 'string') {
-          uriSet.add(raw);
-        } else if (raw && typeof raw === 'object' && typeof raw.id === 'string') {
-          uriSet.add(raw.id);
-        }
-      }
-
-      if (uriSet.size === 0) continue;
-
-      // Hydrate related instances using findAll to ensure conformance checking.
-      // findAll validates model membership via graph traversal (required predicates / flags),
-      // so non-conforming linked URIs are silently dropped — matching the documented behaviour.
-      const hydrated = new Map<string, Ad4mModel>();
-
-      const whereWithIds: Record<string, any> = {
-        id: Array.from(uriSet),
-        ...(subQuery?.where ?? {}),
-      };
-      const fetchQuery: any = {
-        where: whereWithIds,
-        ...(subQuery?.order && { order: subQuery.order }),
-        ...(subQuery?.properties && { properties: subQuery.properties }),
-      };
-      const results = await TargetClass.findAll(perspective, fetchQuery);
-      for (const result of results) {
-        hydrated.set(result.id, result);
-      }
-
-      // Replace raw URIs with hydrated instances on each parent instance.
-      // Use the cached raw values captured BEFORE the async findAll to avoid
-      // the race condition where a concurrent getData() already replaced the
-      // strings with hydrated objects.
-      for (const inst of instances) {
-        const raw = rawCache.get(inst);
-        if (raw == null) continue;
-        if (Array.isArray(raw)) {
-          // Map URIs → instances; handle both raw strings and already-hydrated objects
-          let resolved: Ad4mModel[] = raw
-            .map((v: any) => {
-              if (typeof v === 'string') {
-                return hydrated.has(v) ? hydrated.get(v)! : null;
-              }
-              // Already a hydrated model instance (from a concurrent call)
-              if (v && typeof v === 'object' && typeof v.id === 'string') {
-                return hydrated.has(v.id) ? hydrated.get(v.id)! : v;
-              }
-              return null;
-            })
-            .filter((v): v is Ad4mModel => v !== null);
-
-          // Per-instance sort (client-side, after filtering)
-          if (subQuery?.order) {
-            const orderEntries = Object.entries(subQuery.order);
-            resolved = resolved.sort((a, b) => {
-              for (const [field, dir] of orderEntries) {
-                const av = String((a as any)[field] ?? '');
-                const bv = String((b as any)[field] ?? '');
-                const diff = av.localeCompare(bv);
-                if (diff !== 0) return dir === 'DESC' ? -diff : diff;
-              }
-              return 0;
-            });
-          }
-
-          // Per-instance limit / offset
-          if (subQuery?.offset != null || subQuery?.limit != null) {
-            const start = subQuery.offset ?? 0;
-            const end =
-              subQuery.limit != null ? start + subQuery.limit : undefined;
-            resolved = resolved.slice(start, end);
-          }
-
-          // Enforce maxCount guard — single-valued relations keep only the last item
-          if (meta.maxCount === 1) {
-            if (resolved.length > 1) {
-              console.warn(
-                `include: relation "${relName}" has maxCount 1 but ${resolved.length} values found; keeping the last`,
-              );
-            }
-            (inst as any)[relName] = resolved.length > 0
-              ? resolved[resolved.length - 1]
-              : null;
-          } else {
-            (inst as any)[relName] = resolved;
-          }
-        } else if (typeof raw === 'string' && hydrated.has(raw)) {
-          (inst as any)[relName] = hydrated.get(raw);
-        } else if (raw && typeof raw === 'object' && typeof raw.id === 'string') {
-          // Already-hydrated object — look up refreshed version or keep as-is
-          (inst as any)[relName] = hydrated.has(raw.id) ? hydrated.get(raw.id) : raw;
-        }
-      }
-
-      // Recurse for nested includes
-      if (nestedInclude) {
-        const hydratedInstances = Array.from(hydrated.values());
-        await TargetClass.hydrateRelations(hydratedInstances, perspective, nestedInclude);
-      }
-    }
   }
 
   /**
@@ -983,14 +731,6 @@ export class Ad4mModel {
     return buildSurrealQLQuery(metadata, allRelMeta, query, this);
   }
 
-  /**
-   * Formats a value for use in SurrealQL queries.
-   * @private
-   */
-  private static formatSurrealValue(value: any): string {
-    return _formatSurrealValue(value);
-  }
-
   public static async instancesFromPrologResult<T extends Ad4mModel>(
     this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy,
@@ -1026,7 +766,7 @@ export class Ad4mModel {
 
     // Eager-load relations if requested (BEFORE snapshot so dirty tracking is accurate)
     if (query.include && instances.length > 0) {
-      await this.hydrateRelations(instances, perspective, query.include);
+      await hydrateRelations(this, instances, perspective, query.include);
     }
 
     // Take snapshots for dirty tracking after ALL hydration is complete
@@ -1243,7 +983,7 @@ export class Ad4mModel {
 
     // Eager-load relations if requested (BEFORE snapshot so dirty tracking is accurate)
     if (query.include && paginatedInstances.length > 0) {
-      await this.hydrateRelations(paginatedInstances, perspective, query.include);
+      await hydrateRelations(this, paginatedInstances, perspective, query.include);
     }
 
     // Take snapshots for dirty tracking after ALL hydration is complete
@@ -1497,7 +1237,6 @@ export class Ad4mModel {
   }
 
   private async setProperty(key: string, value: any, batchId?: string) {
-    // Phase 1: Use metadata instead of Prolog queries
     const metadata = this.getPropertyMetadata(key);
     if (!metadata) {
       console.warn(`Property "${key}" has no metadata, skipping`);
@@ -1531,7 +1270,6 @@ export class Ad4mModel {
   }
 
   private async setRelationValues(key: string, value: any, batchId?: string) {
-    // Phase 1: Use metadata instead of Prolog queries
     const metadata = this.getRelationOptions(key);
     if (!metadata) {
       console.warn(`Relation "${key}" has no metadata, skipping`);
@@ -1556,7 +1294,6 @@ export class Ad4mModel {
   }
 
   private async addRelationValue(key: string, value: any, batchId?: string) {
-    // Phase 1: Use metadata instead of Prolog queries
     const metadata = this.getRelationOptions(key);
     if (!metadata) {
       console.warn(`Relation "${key}" has no metadata, skipping`);
@@ -1580,7 +1317,6 @@ export class Ad4mModel {
   }
 
   private async removeRelationValue(key: string, value: any, batchId?: string) {
-    // Phase 1: Use metadata instead of Prolog queries
     const metadata = this.getRelationOptions(key);
     if (!metadata) {
       console.warn(`Relation "${key}" has no metadata, skipping`);
@@ -1752,7 +1488,6 @@ export class Ad4mModel {
 
   private async innerUpdate(setProperties: boolean = true, batchId?: string) {
     const ctor = this.constructor as typeof Ad4mModel;
-    this._subjectClassName = await this._perspective.stringOrTemplateObjectToSubjectClassName(this.cleanCopy());
 
     // Determine which fields actually changed (skip unchanged when snapshot exists)
     const dirty = this._snapshot ? new Set(this.changedFields()) : null;
@@ -1864,8 +1599,6 @@ export class Ad4mModel {
       opts = { include: optsOrInclude as IncludeMap };
     }
 
-    this._subjectClassName = await this._perspective.stringOrTemplateObjectToSubjectClassName(this.cleanCopy());
-
     return await this.getData(opts);
   }
 
@@ -1944,11 +1677,6 @@ export class Ad4mModel {
   // ──────────────────────────────────────────────────────────
   //  Static convenience methods
   // ──────────────────────────────────────────────────────────
-
-  /**
-   * Options for `Ad4mModel.create()`.
-   */
-  static readonly CreateOptions: undefined; // type-only anchor for JSDoc
 
   /**
    * Creates and saves a new model instance in one step.
@@ -2251,9 +1979,4 @@ export class Ad4mModel {
     return buildModelFromJSONSchema(this, schema, options);
   }
 }
-
-// Re-export generatePrologFacts so existing consumers of './Ad4mModel' are unaffected
-export { generatePrologFacts } from "./prolog-facts";
-// Re-export ModelQueryBuilder so existing consumers of './Ad4mModel' are unaffected
-export { ModelQueryBuilder } from "./ModelQueryBuilder";
 
