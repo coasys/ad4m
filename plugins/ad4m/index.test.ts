@@ -1597,7 +1597,15 @@ describe("ad4mPlugin", () => {
       },
     };
 
-    await ad4mPlugin(mockApi);
+    ad4mPlugin(mockApi);
+
+    // ad4mPlugin is synchronous — auth happens in the mcp service start().
+    // Find the registered ad4m-mcp service and start it.
+    const mcpService = mockApi.registerService.mock.calls.find(
+      (c: any[]) => c[0]?.id === "ad4m-mcp",
+    )?.[0];
+    expect(mcpService).toBeDefined();
+    await mcpService.start();
 
     // Logger should show the auth token was generated (it logs the length)
     const infoMessages = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
@@ -1907,6 +1915,7 @@ describe("ad4mPlugin", () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No executor"));
 
     const mockApi = {
+      id: "ad4m-openclaw-plugin",
       pluginConfig: {
         mode: "external",
         mcpEndpoint: "http://localhost:3001/mcp",
@@ -1915,9 +1924,29 @@ describe("ad4mPlugin", () => {
       logger: makeMockLogger(),
       registerTool: vi.fn(),
       registerService: vi.fn(),
+      config: {},
+      runtime: {
+        config: {
+          loadConfig: () => ({
+            plugins: {
+              entries: {
+                "ad4m-openclaw-plugin": { config: { mode: "external" } },
+              },
+            },
+          }),
+          writeConfigFile: vi.fn(),
+        },
+      },
     };
 
-    await ad4mPlugin(mockApi);
+    ad4mPlugin(mockApi);
+
+    // Auth happens in the mcp service start()
+    const mcpService = mockApi.registerService.mock.calls.find(
+      (c: any[]) => c[0]?.id === "ad4m-mcp",
+    )?.[0];
+    expect(mcpService).toBeDefined();
+    await mcpService.start();
 
     const warnMessages = mockApi.logger.warn.mock.calls.map((c: any[]) => c[0]);
     const warningFound = warnMessages.some((m: string) =>

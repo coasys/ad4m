@@ -846,7 +846,7 @@ export async function postWake(
 // Plugin Export
 // ---------------------------------------------------------------------------
 
-export default async function ad4mPlugin(api: any) {
+export default function ad4mPlugin(api: any) {
   const logger = api.logger;
 
   const providedConfig: PluginConfig = (api.pluginConfig as PluginConfig) ?? {};
@@ -859,173 +859,17 @@ export default async function ad4mPlugin(api: any) {
   const executorWsUrl =
     providedConfig.executorWsUrl ?? "ws://localhost:12000/graphql";
 
-  // Determine auth token based on mode
-  let authToken: string = "";
+  // Mutable state set during service start() — shared across tools and services
+  let authToken: string = providedConfig.token || "";
   let pluginAgentDid: string = "";
 
-  updatePluginConfig(api, { 
+  // Persist config defaults (fire-and-forget — don't block registration)
+  updatePluginConfig(api, {
     ...providedConfig,
-    mode: providedConfig.mode ?? "managed", 
+    mode: providedConfig.mode ?? "managed",
     agentPassphrase: providedConfig.agentPassphrase ?? "PLEASE_FILL_IN_FOR_PRE_EXISTING_AD4M_KEYS",
-    ad4mBinaryPath: providedConfig.ad4mBinaryPath ?? findExecutorBinary() ?? "PLEASE_POINT_TO_AD4M_EXECUTOR_BINARY"
+    ad4mBinaryPath: providedConfig.ad4mBinaryPath ?? findExecutorBinary() ?? "PLEASE_POINT_TO_AD4M_EXECUTOR_BINARY",
   }, logger);
-
-  if (mode === "external") {
-    // External mode: use token from config (JWT from setup), or request new JWT
-    authToken = providedConfig.token || "";
-    if (!authToken) {
-      // Try to obtain JWT via MCP capability request (auto-permits)
-      logger.info("[ad4m] No token found, attempting JWT auth via MCP...");
-      try {
-        const initResp = await mcpInitialize(endpoint);
-        const capResult = await mcpCallTool(
-          endpoint,
-          "request_capability",
-          {
-            app_name: "OpenClaw AD4M Plugin",
-            app_desc: "OpenClaw agent plugin for AD4M neighbourhoods",
-          },
-          initResp.sessionId,
-        );
-        const capData = extractMcpResultData(capResult);
-        if (capData?.request_id && capData?.code) {
-          const jwtResult = await mcpCallTool(
-            endpoint,
-            "generate_jwt",
-            { request_id: capData.request_id, code: capData.code },
-            initResp.sessionId,
-          );
-          const jwtData = extractMcpResultData(jwtResult);
-          if (jwtData?.token) {
-            authToken = jwtData.token;
-            await updatePluginConfig(api, { token: jwtData.token }, logger);
-            logger.info("[ad4m] JWT obtained and stored in config");
-          }
-        }
-      } catch (e: any) {
-        logger.warn(`[ad4m] Auto JWT auth failed: ${e.message}. Tools may not work until authenticated.`);
-      }
-    }
-  } else {
-    // Managed mode: generate ephemeral admin credential (not persisted)
-    const adminCredential = generateRandomPassphrase(24);
-    authToken = adminCredential;
-
-    // Resolve executor binary path: config > discover > bare name
-    let binaryPath = providedConfig.ad4mBinaryPath;
-    if (!binaryPath) {
-      logger.info(`[ad4m] Searching for ad4m-executor binary...`);
-      const discovered = findExecutorBinary();
-      if (discovered) {
-        logger.info(`[ad4m] Found ad4m-executor at: ${discovered}`);
-        binaryPath = discovered;
-      } else {
-        logger.warn(
-          `[ad4m] ad4m-executor not found in PATH or common locations. Will try bare name.`,
-        );
-      }
-    } else {
-      logger.info(`[ad4m] Using executor binary: ${binaryPath}`);
-    }
-
-    // Generate passphrase if not already in config
-    const agentPassphrase = providedConfig.agentPassphrase || generateRandomPassphrase(32);
-
-    // Write managed config on first run (or whenever fields are missing)
-    if (!providedConfig.mode || !providedConfig.ad4mBinaryPath || !providedConfig.agentPassphrase) {
-      const configToWrite: Partial<PluginConfig> = {
-        mode: "managed",
-      };
-      if (binaryPath) configToWrite.ad4mBinaryPath = binaryPath;
-      if (!providedConfig.agentPassphrase) configToWrite.agentPassphrase = agentPassphrase;
-      await updatePluginConfig(api, configToWrite, logger);
-    }
-
-    // Use the resolved passphrase for agent management below
-    providedConfig.agentPassphrase = agentPassphrase;
-
-    // Ensure executor is running (spawn if not)
-    const executorStartResult = await ensureExecutorRunning(
-      adminCredential,
-      logger,
-      endpoint,
-      executorWsUrl,
-      binaryPath,
-    );
-    if (!executorStartResult) {
-      logger.error(
-        `[ad4m] Failed to start executor in managed mode. Set ad4mBinaryPath in plugin config if ad4m-executor is not in PATH.`,
-      );
-    } else if (executorStartResult === "already_running") {
-      // Executor was already running (e.g. from Launcher or previous install).
-      // Our ephemeral credential won't match — obtain a JWT instead.
-      // Agent should already be initialized; we only unlock, never generate.
-      logger.info("[ad4m] Executor was already running — obtaining JWT for auth...");
-      try {
-        const initResp = await mcpInitialize(endpoint);
-        const capResult = await mcpCallTool(
-          endpoint,
-          "request_capability",
-          {
-            app_name: "OpenClaw AD4M Plugin",
-            app_desc: "OpenClaw agent plugin for AD4M neighbourhoods",
-          },
-          initResp.sessionId,
-        );
-        const capData = extractMcpResultData(capResult);
-        if (capData?.request_id && capData?.code) {
-          const jwtResult = await mcpCallTool(
-            endpoint,
-            "generate_jwt",
-            { request_id: capData.request_id, code: capData.code },
-            initResp.sessionId,
-          );
-          const jwtData = extractMcpResultData(jwtResult);
-          if (jwtData?.token) {
-            authToken = jwtData.token;
-            logger.info("[ad4m] JWT obtained for pre-existing executor");
-          }
-        }
-      } catch (e: any) {
-        logger.warn(`[ad4m] JWT auth failed for pre-existing executor: ${e.message}`);
-        // Can't authenticate with a pre-existing executor — MCP tools
-        // will attempt without auth; agent management is skipped.
-        authToken = "";
-      }
-
-      if (authToken) {
-        const agentDid = await ensureAgentReady(
-          executorWsUrl,
-          authToken,
-          logger,
-          providedConfig.agentPassphrase,
-        );
-        if (agentDid) {
-          pluginAgentDid = agentDid;
-        } else {
-          logger.warn("[ad4m] Could not verify agent on pre-existing executor.");
-        }
-      }
-    } else {
-      // We spawned the executor with our admin credential — use it directly.
-      // ensureAgentReady may generate the agent on first run.
-      const agentDid = await ensureAgentReady(
-        executorWsUrl,
-        adminCredential,
-        logger,
-        providedConfig.agentPassphrase,
-        undefined, // _testClient
-        api,       // for persisting generated passphrase
-      );
-      if (agentDid) {
-        pluginAgentDid = agentDid;
-      } else {
-        logger.error(
-          `[ad4m] Agent management failed. MCP tools and waker will not work correctly.`,
-        );
-      }
-    }
-  }
 
   // Resolve wakeToken: plugin config override > OpenClaw global hooks config
   let resolvedWakeToken = providedConfig.wakeToken;
@@ -1052,52 +896,10 @@ export default async function ad4mPlugin(api: any) {
     debounceMs: providedConfig.debounceMs ?? 2000,
   };
 
-  if (authToken) {
-    logger.info(`[ad4m] Auth token ready (length: ${authToken.length})`);
-  } else {
-    logger.warn(`[ad4m] No auth token. Tools may not work until authenticated.`);
-  }
-
-  // -- Setup helper tool --
-
-  api.registerTool({
-    name: "ad4m_get_sample_config",
-    description:
-      "Get a sample OpenClaw plugin config for AD4M. Use this to see the required configuration format.",
-    parameters: { type: "object", properties: {} },
-    async execute() {
-      const managedConfig = {
-        mode: "managed",
-      };
-      const externalConfig = {
-        mode: "external",
-        mcpEndpoint: "http://their-executor:3001/mcp",
-      };
-      return {
-        content: [
-          {
-            type: "text",
-            text: `# Managed mode (default):
-${JSON.stringify({ ad4m: managedConfig }, null, 2)}
-
-# External mode (connect to existing executor):
-${JSON.stringify({ ad4m: externalConfig }, null, 2)}
-
-Notes:
-- Managed: auto-starts executor, auto-generates credentials
-- External: provide executor URL, uses executor's auth
-- Credentials stored in ~/.ad4m-plugin/ for reuse
-- If executor is not in PATH, set ad4mBinaryPath to the full path (e.g. /usr/local/bin/ad4m-executor)
-- Find the binary: which ad4m-executor || find / -name ad4m-executor -type f 2>/dev/null`,
-          },
-        ],
-      };
-    },
-  });
-
   // Debug: log config values
   logger.info(
-    `[ad4m] Config received: ${JSON.stringify({
+    `[ad4m] Config: ${JSON.stringify({
+      mode: config.mode,
       mcpEndpoint: config.mcpEndpoint,
       token: config.token
         ? "*** (length: " + config.token.length + ")"
@@ -1124,7 +926,7 @@ Notes:
 
   /**
    * (Re-)initialize the MCP session. Called on first connect and when the
-   * session becomes invalid (e.g. executor restart, session expiry → 422).
+   * session becomes invalid (e.g. executor restart, session expiry -> 422).
    */
   async function ensureSession(): Promise<string> {
     if (sessionId) return sessionId;
@@ -1275,7 +1077,7 @@ Notes:
         }
         return newCount;
       } catch (err: any) {
-        // Session error → re-initialize and retry once
+        // Session error -> re-initialize and retry once
         if (err.message && /MCP HTTP 4\d\d/.test(err.message)) {
           logger.info(
             `[ad4m] Session error during tool refresh, re-initializing...`,
@@ -1422,9 +1224,81 @@ Notes:
     if (persist) persistSubscriptions();
   }
 
+  /**
+   * Obtain a JWT token from a running executor via MCP capability request.
+   * Returns the JWT string or empty string on failure.
+   */
+  async function obtainJwtFromExecutor(): Promise<string> {
+    try {
+      const initResp = await mcpInitialize(endpoint);
+      const capResult = await mcpCallTool(
+        endpoint,
+        "request_capability",
+        {
+          app_name: "OpenClaw AD4M Plugin",
+          app_desc: "OpenClaw agent plugin for AD4M neighbourhoods",
+        },
+        initResp.sessionId,
+      );
+      const capData = extractMcpResultData(capResult);
+      if (capData?.request_id && capData?.code) {
+        const jwtResult = await mcpCallTool(
+          endpoint,
+          "generate_jwt",
+          { request_id: capData.request_id, code: capData.code },
+          initResp.sessionId,
+        );
+        const jwtData = extractMcpResultData(jwtResult);
+        if (jwtData?.token) {
+          return jwtData.token;
+        }
+      }
+    } catch (e: any) {
+      logger.warn(`[ad4m] JWT auth failed: ${e.message}`);
+    }
+    return "";
+  }
+
   // =========================================================================
   // Tools
   // =========================================================================
+
+  // -- Setup helper tool --
+
+  api.registerTool({
+    name: "ad4m_get_sample_config",
+    description:
+      "Get a sample OpenClaw plugin config for AD4M. Use this to see the required configuration format.",
+    parameters: { type: "object", properties: {} },
+    async execute() {
+      const managedConfig = {
+        mode: "managed",
+      };
+      const externalConfig = {
+        mode: "external",
+        mcpEndpoint: "http://their-executor:3001/mcp",
+      };
+      return {
+        content: [
+          {
+            type: "text",
+            text: `# Managed mode (default):
+${JSON.stringify({ ad4m: managedConfig }, null, 2)}
+
+# External mode (connect to existing executor):
+${JSON.stringify({ ad4m: externalConfig }, null, 2)}
+
+Notes:
+- Managed: auto-starts executor, auto-generates credentials
+- External: provide executor URL, uses executor's auth
+- Credentials stored in ~/.ad4m-plugin/ for reuse
+- If executor is not in PATH, set ad4mBinaryPath to the full path (e.g. /usr/local/bin/ad4m-executor)
+- Find the binary: which ad4m-executor || find / -name ad4m-executor -type f 2>/dev/null`,
+          },
+        ],
+      };
+    },
+  });
 
   // -- Manual refresh tool --
 
@@ -1741,12 +1615,134 @@ Notes:
   // Background Services
   // =========================================================================
 
-  // -- MCP bridge service --
+  // -- MCP bridge service (registered first — starts first) --
+  // Handles executor startup, agent management, auth token acquisition,
+  // MCP session init, and tool discovery.
 
   api.registerService({
     id: "ad4m-mcp",
     async start() {
-      logger.info(`[ad4m] Connecting to AD4M MCP at ${endpoint}`);
+      logger.info(`[ad4m] Starting MCP bridge service (mode=${mode})`);
+
+      // ── Mode-specific initialization ──
+
+      if (mode === "external") {
+        // External mode: use token from config, or obtain JWT
+        if (!authToken) {
+          logger.info("[ad4m] No token found, attempting JWT auth via MCP...");
+          const jwt = await obtainJwtFromExecutor();
+          if (jwt) {
+            authToken = jwt;
+            await updatePluginConfig(api, { token: jwt }, logger);
+            logger.info("[ad4m] JWT obtained and stored in config");
+          }
+        }
+      } else {
+        // Managed mode: generate ephemeral admin credential (not persisted)
+        const adminCredential = generateRandomPassphrase(24);
+        authToken = adminCredential;
+
+        // Resolve executor binary path: config > discover > bare name
+        let binaryPath = providedConfig.ad4mBinaryPath;
+        if (!binaryPath) {
+          logger.info(`[ad4m] Searching for ad4m-executor binary...`);
+          const discovered = findExecutorBinary();
+          if (discovered) {
+            logger.info(`[ad4m] Found ad4m-executor at: ${discovered}`);
+            binaryPath = discovered;
+          } else {
+            logger.warn(
+              `[ad4m] ad4m-executor not found in PATH or common locations. Will try bare name.`,
+            );
+          }
+        } else {
+          logger.info(`[ad4m] Using executor binary: ${binaryPath}`);
+        }
+
+        // Generate passphrase if not already in config
+        const agentPassphrase = providedConfig.agentPassphrase || generateRandomPassphrase(32);
+
+        // Write managed config on first run (or whenever fields are missing)
+        if (!providedConfig.mode || !providedConfig.ad4mBinaryPath || !providedConfig.agentPassphrase) {
+          const configToWrite: Partial<PluginConfig> = {
+            mode: "managed",
+          };
+          if (binaryPath) configToWrite.ad4mBinaryPath = binaryPath;
+          if (!providedConfig.agentPassphrase) configToWrite.agentPassphrase = agentPassphrase;
+          await updatePluginConfig(api, configToWrite, logger);
+        }
+
+        // Use the resolved passphrase for agent management below
+        providedConfig.agentPassphrase = agentPassphrase;
+
+        // Ensure executor is running (spawn if not)
+        const executorStartResult = await ensureExecutorRunning(
+          adminCredential,
+          logger,
+          endpoint,
+          executorWsUrl,
+          binaryPath,
+        );
+        if (!executorStartResult) {
+          logger.error(
+            `[ad4m] Failed to start executor in managed mode. Set ad4mBinaryPath in plugin config if ad4m-executor is not in PATH.`,
+          );
+        } else if (executorStartResult === "already_running") {
+          // Executor was already running (e.g. from Launcher or previous install).
+          // Our ephemeral credential won't match — obtain a JWT instead.
+          logger.info("[ad4m] Executor was already running — obtaining JWT for auth...");
+          const jwt = await obtainJwtFromExecutor();
+          if (jwt) {
+            authToken = jwt;
+            logger.info("[ad4m] JWT obtained for pre-existing executor");
+          } else {
+            logger.warn("[ad4m] JWT auth failed for pre-existing executor");
+            authToken = "";
+          }
+
+          if (authToken) {
+            const agentDid = await ensureAgentReady(
+              executorWsUrl,
+              authToken,
+              logger,
+              providedConfig.agentPassphrase,
+            );
+            if (agentDid) {
+              pluginAgentDid = agentDid;
+            } else {
+              logger.warn("[ad4m] Could not verify agent on pre-existing executor.");
+            }
+          }
+        } else {
+          // We spawned the executor with our admin credential — use it directly.
+          const agentDid = await ensureAgentReady(
+            executorWsUrl,
+            adminCredential,
+            logger,
+            providedConfig.agentPassphrase,
+            undefined, // _testClient
+            api,       // for persisting generated passphrase
+          );
+          if (agentDid) {
+            pluginAgentDid = agentDid;
+          } else {
+            logger.error(
+              `[ad4m] Agent management failed. MCP tools and waker will not work correctly.`,
+            );
+          }
+        }
+      }
+
+      // ── MCP session + tool discovery ──
+
+      if (authToken) {
+        logger.info(`[ad4m] Auth token ready (length: ${authToken.length})`);
+      } else {
+        logger.warn(`[ad4m] No auth token. Tools may not work until authenticated.`);
+      }
+
+      // Update config with resolved token
+      config.token = authToken || undefined;
 
       try {
         await ensureSession();
@@ -1780,7 +1776,9 @@ Notes:
     },
   });
 
-  // -- Waker service --
+  // -- Waker service (registered second — starts after ad4m-mcp) --
+  // By the time this starts, authToken and pluginAgentDid are set by
+  // the mcp service above (OpenClaw starts services sequentially).
 
   api.registerService({
     id: "ad4m-waker",
@@ -1798,9 +1796,15 @@ Notes:
         return;
       }
 
-      const executorWsUrl =
+      if (!authToken) {
+        logger.warn(
+          "[ad4m-waker] No auth token available — cannot connect to executor. Skipping.",
+        );
+        return;
+      }
+
+      const wsUrl =
         config.executorWsUrl ?? "ws://localhost:12000/graphql";
-      const token = authToken;
 
       try {
         // Dynamic imports to avoid load-time issues with @holochain/client transitive deps
@@ -1810,12 +1814,12 @@ Notes:
         const { createClient } = require("graphql-ws");
         const WebSocket = require("ws");
 
-        logger.info(`[ad4m-waker] Connecting to ${executorWsUrl}`);
+        logger.info(`[ad4m-waker] Connecting to ${wsUrl}`);
 
         const wsClient = createClient({
-          url: executorWsUrl,
+          url: wsUrl,
           webSocketImpl: WebSocket,
-          connectionParams: token ? { headers: { authorization: token } } : {},
+          connectionParams: authToken ? { headers: { authorization: authToken } } : {},
           retryAttempts: Infinity,
           retryWait: async (retries: number) => {
             const delay = Math.min(1000 * Math.pow(2, retries), 30000);
@@ -1840,11 +1844,11 @@ Notes:
         wakerClient = new Ad4mClient(apolloClient);
 
         // Verify connection and get agent DID (agent should already be
-        // initialized/unlocked by ensureAgentReady during plugin init)
+        // initialized/unlocked by ensureAgentReady during mcp service start)
         const status = await wakerClient.agent.status();
         if (!status.isInitialized || status.isUnlocked === false) {
           logger.error(
-            `[ad4m-waker] Agent is not ready (initialized=${status.isInitialized}, unlocked=${status.isUnlocked}). Agent management should have run during plugin init.`,
+            `[ad4m-waker] Agent is not ready (initialized=${status.isInitialized}, unlocked=${status.isUnlocked}). Agent management should have run during mcp service start.`,
           );
           wakerClient = null;
           return;
