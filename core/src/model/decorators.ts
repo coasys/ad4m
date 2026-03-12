@@ -1,7 +1,7 @@
 import { capitalize, propertyNameToSetterName, singularToPlural, stringifyObjectLiteral } from "./util";
 import { SHACLShape, SHACLPropertyShape, ConformanceCondition } from "../shacl/SHACLShape";
 import { escapeSurrealString } from "../utils";
-import type { Where } from "./Ad4mModel";
+import type { Where } from "./types";
 import { compileWhereClause } from "./surreal-utils";
 
 // ============================================================================
