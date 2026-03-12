@@ -863,6 +863,18 @@ export default function ad4mPlugin(api: any) {
   let authToken: string = providedConfig.token || "";
   let pluginAgentDid: string = "";
 
+  // Write initial defaults for missing fields (fire-and-forget).
+  // Only adds fields not already in config — never overwrites existing values.
+  const initDefaults: Partial<PluginConfig> = {};
+  if (!providedConfig.mode) initDefaults.mode = "managed";
+  if (!providedConfig.ad4mBinaryPath) {
+    const found = findExecutorBinary();
+    if (found) initDefaults.ad4mBinaryPath = found;
+  }
+  if (Object.keys(initDefaults).length > 0) {
+    updatePluginConfig(api, initDefaults, logger);
+  }
+
   // Resolve wakeToken: plugin config override > OpenClaw global hooks config
   let resolvedWakeToken = providedConfig.wakeToken;
   if (!resolvedWakeToken) {
