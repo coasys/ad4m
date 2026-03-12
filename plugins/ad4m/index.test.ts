@@ -188,7 +188,13 @@ describe("loadWakerState / saveWakerState", () => {
       { id: "a", type: "mention", perspective: "p1", channel: "", query: "q1" },
     ];
     const subs2: WakerSubscription[] = [
-      { id: "b", type: "channel-messages", perspective: "p2", channel: "c", query: "q2" },
+      {
+        id: "b",
+        type: "channel-messages",
+        perspective: "p2",
+        channel: "c",
+        query: "q2",
+      },
     ];
 
     saveWakerState(tmpDir, subs1);
@@ -336,15 +342,14 @@ describe("ensureExecutorRunning", () => {
 
     // Should have logged the ENOENT error
     expect(
-      logger.error.mock.calls.some((c: any[]) =>
-        c[0].includes("ENOENT"),
-      ),
+      logger.error.mock.calls.some((c: any[]) => c[0].includes("ENOENT")),
     ).toBe(true);
 
     // Should have logged "failed to start" and mention ad4mBinaryPath
     expect(
-      logger.error.mock.calls.some((c: any[]) =>
-        c[0].includes("failed to start") || c[0].includes("Failed to start"),
+      logger.error.mock.calls.some(
+        (c: any[]) =>
+          c[0].includes("failed to start") || c[0].includes("Failed to start"),
       ),
     ).toBe(true);
     expect(
@@ -376,7 +381,8 @@ describe("ensureExecutorRunning", () => {
     const allErrors = logger.error.mock.calls.map((c: any[]) => c[0]);
     expect(
       allErrors.some(
-        (m: string) => m.includes("exited with code") || m.includes("failed to start"),
+        (m: string) =>
+          m.includes("exited with code") || m.includes("failed to start"),
       ),
     ).toBe(true);
   }, 10000);
@@ -457,9 +463,7 @@ describe("ensureExecutorRunning", () => {
     // Should log which binary it's using
     const infoMsgs = logger.info.mock.calls.map((c: any[]) => c[0]);
     expect(
-      infoMsgs.some((m: string) =>
-        m.includes("/opt/custom/bin/ad4m-executor"),
-      ),
+      infoMsgs.some((m: string) => m.includes("/opt/custom/bin/ad4m-executor")),
     ).toBe(true);
   }, 10000);
 
@@ -525,9 +529,9 @@ describe("ensureExecutorRunning", () => {
 
       // Should have logged about first-time setup
       const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
-      expect(
-        msgs.some((m: string) => m.includes("first-time setup")),
-      ).toBe(true);
+      expect(msgs.some((m: string) => m.includes("first-time setup"))).toBe(
+        true,
+      );
     } finally {
       mockExecFileSync.mockReset();
     }
@@ -561,9 +565,9 @@ describe("ensureExecutorRunning", () => {
       expect(result).toBe(false);
 
       const errorMsgs = logger.error.mock.calls.map((c: any[]) => c[0]);
-      expect(
-        errorMsgs.some((m: string) => m.includes("init failed")),
-      ).toBe(true);
+      expect(errorMsgs.some((m: string) => m.includes("init failed"))).toBe(
+        true,
+      );
 
       // spawn should NOT have been called (init failed before spawn)
       expect(mockSpawn).not.toHaveBeenCalled();
@@ -605,9 +609,9 @@ describe("ensureExecutorRunning", () => {
 
       // Should NOT have logged about first-time setup
       const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
-      expect(
-        msgs.some((m: string) => m.includes("first-time setup")),
-      ).toBe(false);
+      expect(msgs.some((m: string) => m.includes("first-time setup"))).toBe(
+        false,
+      );
     } finally {
       mockExecFileSync.mockReset();
     }
@@ -617,9 +621,7 @@ describe("ensureExecutorRunning", () => {
     const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
     const logFile = path.join(home, ".ad4m", "ad4m.log");
 
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(
-      new Error("ECONNREFUSED"),
-    );
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
 
     const fakeProc = createFakeChildProcess();
     mockSpawn.mockReturnValue(fakeProc as any);
@@ -640,9 +642,7 @@ describe("ensureExecutorRunning", () => {
 
     // Logger should mention the log file
     const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
-    expect(
-      msgs.some((m: string) => m.includes("ad4m.log")),
-    ).toBe(true);
+    expect(msgs.some((m: string) => m.includes("ad4m.log"))).toBe(true);
   }, 10000);
 });
 
@@ -735,12 +735,12 @@ describe("ensureAgentReady", () => {
     expect(mockGenerate).toHaveBeenCalledOnce();
 
     const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
-    expect(
-      msgs.some((m: string) => m.includes("generating new agent")),
-    ).toBe(true);
-    expect(
-      msgs.some((m: string) => m.includes("generated successfully")),
-    ).toBe(true);
+    expect(msgs.some((m: string) => m.includes("generating new agent"))).toBe(
+      true,
+    );
+    expect(msgs.some((m: string) => m.includes("generated successfully"))).toBe(
+      true,
+    );
   });
 
   it("does not return passphrase when one was provided", async () => {
@@ -782,7 +782,11 @@ describe("ensureAgentReady", () => {
     const mockStatus = vi.fn().mockImplementation(async () => {
       callCount++;
       if (callCount === 1) {
-        return { isInitialized: true, isUnlocked: false, did: "did:key:z6MkLocked" };
+        return {
+          isInitialized: true,
+          isUnlocked: false,
+          did: "did:key:z6MkLocked",
+        };
       }
       return {
         isInitialized: true,
@@ -809,9 +813,9 @@ describe("ensureAgentReady", () => {
     expect(mockUnlock).toHaveBeenCalledWith("test-stored-passphrase");
 
     const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
-    expect(
-      msgs.some((m: string) => m.includes("unlocked successfully")),
-    ).toBe(true);
+    expect(msgs.some((m: string) => m.includes("unlocked successfully"))).toBe(
+      true,
+    );
   });
 
   it("uses agentPassphrase from config for unlock", async () => {
@@ -819,9 +823,17 @@ describe("ensureAgentReady", () => {
     const mockStatus = vi.fn().mockImplementation(async () => {
       callCount++;
       if (callCount === 1) {
-        return { isInitialized: true, isUnlocked: false, did: "did:key:z6MkLocked" };
+        return {
+          isInitialized: true,
+          isUnlocked: false,
+          did: "did:key:z6MkLocked",
+        };
       }
-      return { isInitialized: true, isUnlocked: true, did: "did:key:z6MkLocked" };
+      return {
+        isInitialized: true,
+        isUnlocked: true,
+        did: "did:key:z6MkLocked",
+      };
     });
     const mockUnlock = vi.fn().mockResolvedValue(undefined);
     const client = makeMockAd4mClient({
@@ -878,7 +890,9 @@ describe("ensureAgentReady", () => {
       isUnlocked: false,
       did: "",
     });
-    const mockGenerate = vi.fn().mockRejectedValue(new Error("generate failed"));
+    const mockGenerate = vi
+      .fn()
+      .mockRejectedValue(new Error("generate failed"));
     const client = makeMockAd4mClient({
       status: mockStatus,
       generate: mockGenerate,
@@ -929,7 +943,9 @@ describe("ensureAgentReady", () => {
   });
 
   it("returns null when agent.status() throws", async () => {
-    const mockStatus = vi.fn().mockRejectedValue(new Error("connection refused"));
+    const mockStatus = vi
+      .fn()
+      .mockRejectedValue(new Error("connection refused"));
     const client = makeMockAd4mClient({ status: mockStatus });
 
     const logger = makeMockLogger();
@@ -944,7 +960,9 @@ describe("ensureAgentReady", () => {
     expect(result).toBeNull();
     const errorMsgs = logger.error.mock.calls.map((c: any[]) => c[0]);
     expect(
-      errorMsgs.some((m: string) => m.includes("Failed to connect to executor")),
+      errorMsgs.some((m: string) =>
+        m.includes("Failed to connect to executor"),
+      ),
     ).toBe(true);
   });
 });
@@ -1437,12 +1455,12 @@ describe("ad4mPlugin", () => {
     // Check that base tools are registered
     const toolNames = registeredTools.map((t) => t.name);
     expect(toolNames).toContain("ad4m_get_sample_config");
-    expect(toolNames).toContain("refresh_ad4m_tools");
-    expect(toolNames).toContain("subscribe_to_mentions");
-    expect(toolNames).toContain("unsubscribe_from_mentions");
-    expect(toolNames).toContain("subscribe_to_children");
-    expect(toolNames).toContain("unsubscribe_from_children");
-    expect(toolNames).toContain("list_waker_subscriptions");
+    expect(toolNames).toContain("ad4m_refresh_ad4m_tools");
+    expect(toolNames).toContain("ad4m_subscribe_to_mentions");
+    expect(toolNames).toContain("ad4m_unsubscribe_from_mentions");
+    expect(toolNames).toContain("ad4m_subscribe_to_children");
+    expect(toolNames).toContain("ad4m_unsubscribe_from_children");
+    expect(toolNames).toContain("ad4m_list_waker_subscriptions");
 
     // Check services
     const serviceIds = registeredServices.map((s) => s.id);
@@ -1499,7 +1517,7 @@ describe("ad4mPlugin", () => {
     await ad4mPlugin(mockApi);
 
     const listTool = registeredTools.find(
-      (t) => t.name === "list_waker_subscriptions",
+      (t) => t.name === "ad4m_list_waker_subscriptions",
     );
     expect(listTool).toBeDefined();
 
@@ -1527,7 +1545,7 @@ describe("ad4mPlugin", () => {
     await ad4mPlugin(mockApi);
 
     const refreshTool = registeredTools.find(
-      (t) => t.name === "refresh_ad4m_tools",
+      (t) => t.name === "ad4m_refresh_ad4m_tools",
     );
     expect(refreshTool).toBeDefined();
 
@@ -1611,10 +1629,12 @@ describe("ad4mPlugin", () => {
 
     // Should now have the MCP tool registered (list_perspectives)
     const toolNames = registeredTools.map((t) => t.name);
-    expect(toolNames).toContain("list_perspectives");
+    expect(toolNames).toContain("ad4m_list_perspectives");
 
     // The registered tool should strip $schema
-    const lpTool = registeredTools.find((t) => t.name === "list_perspectives");
+    const lpTool = registeredTools.find(
+      (t) => t.name === "ad4m_list_perspectives",
+    );
     expect(lpTool).toBeDefined();
     // Check that $schema was stripped by calling the tool
     expect((lpTool as any).parameters.$schema).toBeUndefined();
@@ -1754,13 +1774,13 @@ describe("ad4mPlugin", () => {
 
     // The recovered tool should be registered
     const toolNames = registeredTools.map((t) => t.name);
-    expect(toolNames).toContain("recovered_tool");
+    expect(toolNames).toContain("ad4m_recovered_tool");
 
     // Logger should show re-initialization
     const infoMsgs = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
-    expect(
-      infoMsgs.some((m: string) => m.includes("re-initializing")),
-    ).toBe(true);
+    expect(infoMsgs.some((m: string) => m.includes("re-initializing"))).toBe(
+      true,
+    );
 
     mcpService!.stop();
   });
@@ -1853,7 +1873,7 @@ describe("ad4mPlugin", () => {
     await mcpService!.start(makeServiceCtx());
 
     // Find the dynamically registered MCP tool
-    const testTool = registeredTools.find((t) => t.name === "test_tool");
+    const testTool = registeredTools.find((t) => t.name === "ad4m_test_tool");
     expect(testTool).toBeDefined();
 
     // Reset counters to track just the tool call
@@ -1947,7 +1967,9 @@ describe("ad4mPlugin", () => {
     const mcpService = registeredServices.find((s) => s.id === "ad4m-mcp");
     await mcpService!.start(makeServiceCtx());
 
-    const failingTool = registeredTools.find((t) => t.name === "failing_tool");
+    const failingTool = registeredTools.find(
+      (t) => t.name === "ad4m_failing_tool",
+    );
     expect(failingTool).toBeDefined();
 
     initializeCallCount = 0;
@@ -2053,11 +2075,13 @@ describe("ad4mPlugin", () => {
       return realExistsSync(s);
     });
     // Make findExecutorBinary discover a binary
-    vi.spyOn(fs, "accessSync").mockImplementation((p: fs.PathLike, mode?: number) => {
-      const s = p.toString();
-      if (s.endsWith("/ad4m-executor")) return; // found + executable
-      return realAccessSync(s, mode);
-    });
+    vi.spyOn(fs, "accessSync").mockImplementation(
+      (p: fs.PathLike, mode?: number) => {
+        const s = p.toString();
+        if (s.endsWith("/ad4m-executor")) return; // found + executable
+        return realAccessSync(s, mode);
+      },
+    );
 
     const logger = makeMockLogger();
     const { runSetup } = await import("./setup");
@@ -2077,7 +2101,9 @@ describe("ad4mPlugin", () => {
 
     // Config snippet should contain placeholder
     expect(
-      infoMessages.some((m: string) => m.includes("<enter-your-existing-passphrase>")),
+      infoMessages.some((m: string) =>
+        m.includes("<enter-your-existing-passphrase>"),
+      ),
     ).toBe(true);
 
     // Should NOT have attempted to start executor
