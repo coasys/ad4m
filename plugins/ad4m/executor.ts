@@ -3,7 +3,6 @@ import fs from "fs";
 import { spawn, execFileSync } from "child_process";
 
 import type { PluginConfig } from "./types";
-import { generateRandomPassphrase, updatePluginConfig } from "./config";
 
 /**
  * Search for ad4m-executor binary in PATH and common locations.
@@ -277,18 +276,4 @@ export function stopExecutor(logger?: any): void {
   }
 }
 
-export function applyManagedModeDefaults(
-  providedConfig: PluginConfig,
-  binaryPath: string | undefined,
-): Partial<PluginConfig> {
-  const defaults: Partial<PluginConfig> = {};
-  if (!providedConfig.mode) defaults.mode = "managed";
-  if (!providedConfig.ad4mBinaryPath && binaryPath) {
-    defaults.ad4mBinaryPath = binaryPath;
-  }
-  if (!providedConfig.agentPassphrase) {
-    defaults.agentPassphrase = generateRandomPassphrase(32);
-  }
-  return defaults;
-}
 

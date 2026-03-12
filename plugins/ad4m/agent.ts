@@ -1,4 +1,9 @@
-import { generateRandomPassphrase, updatePluginConfig } from "./config";
+import { generateRandomPassphrase } from "./config";
+
+export interface AgentResult {
+  did: string;
+  passphrase?: string;
+}
 
 /**
  * Ensure the AD4M agent is initialized and unlocked.
@@ -6,7 +11,8 @@ import { generateRandomPassphrase, updatePluginConfig } from "./config";
  * Creates a temporary GraphQL WS connection to the executor, checks agent
  * status, and generates (first run) or unlocks (subsequent runs) as needed.
  *
- * Returns the agent DID on success, or null if agent management failed.
+ * Returns { did, passphrase? } on success (passphrase only set when a new
+ * agent was generated), or null if agent management failed.
  */
 export async function ensureAgentReady(
   executorWsUrl: string,
@@ -15,9 +21,7 @@ export async function ensureAgentReady(
   agentPassphrase?: string,
   /** @internal — pass a pre-built Ad4mClient for testing */
   _testClient?: any,
-  /** OpenClaw plugin API — for persisting generated passphrase */
-  _api?: any,
-): Promise<string | null> {
+): Promise<AgentResult | null> {
   const MAX_CONNECT_ATTEMPTS = 10;
   const CONNECT_RETRY_DELAY_MS = 2000;
 
@@ -115,13 +119,12 @@ export async function ensureAgentReady(
       logger.info(`[ad4m] Agent not initialized, generating new agent...`);
       try {
         await client.agent.generate(passphrase);
-        if (_api) await updatePluginConfig(_api, { agentPassphrase: passphrase }, logger);
         // Re-fetch status to get the DID
         const newStatus = await client.agent.status();
         logger.info(
           `[ad4m] Agent generated successfully. DID: ${newStatus.did}`,
         );
-        return newStatus.did;
+        return { did: newStatus.did, passphrase: agentPassphrase ? undefined : passphrase };
       } catch (e: any) {
         logger.error(`[ad4m] Failed to generate agent: ${e.message}`);
         return null;
@@ -137,7 +140,7 @@ export async function ensureAgentReady(
           logger.info(
             `[ad4m] Agent unlocked successfully. DID: ${newStatus.did}`,
           );
-          return newStatus.did;
+          return { did: newStatus.did };
         } catch (e: any) {
           logger.error(`[ad4m] Failed to unlock agent: ${e.message}`);
           logger.warn(
@@ -154,7 +157,7 @@ export async function ensureAgentReady(
     } else {
       // Already initialized and unlocked
       logger.info(`[ad4m] Agent is ready. DID: ${agentStatus.did}`);
-      return agentStatus.did;
+      return { did: agentStatus.did };
     }
   } catch (err: any) {
     logger.error(`[ad4m] Agent management failed: ${err.message}`);
@@ -173,4 +176,3 @@ export async function ensureAgentReady(
     }
   }
 }
-

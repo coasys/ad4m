@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import path from "path";
 import fs from "fs";
+import os from "os";
 import { EventEmitter } from "events";
 
 // Mock child_process before any imports that use it
@@ -29,7 +30,8 @@ function makeMockAd4mClient(agentMethods: {
 
 import {
   generateRandomPassphrase,
-  updatePluginConfig,
+  loadWakerState,
+  saveWakerState,
   findExecutorBinary,
   isExecutorRunning,
   ensureExecutorRunning,
@@ -49,6 +51,7 @@ import {
   type McpTool,
   type McpResponse,
   type ExecutorStartResult,
+  type AgentResult,
 } from "./index";
 
 import ad4mPlugin from "./index";
@@ -94,6 +97,20 @@ function makeMockLogger() {
   };
 }
 
+/** Create a temporary directory for stateDir tests. */
+function makeTempDir(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "ad4m-test-"));
+}
+
+/** Service context with stateDir. */
+function makeServiceCtx(stateDir?: string): any {
+  return {
+    stateDir: stateDir ?? makeTempDir(),
+    config: {},
+    logger: makeMockLogger(),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // generateRandomPassphrase
 // ---------------------------------------------------------------------------
@@ -123,71 +140,82 @@ describe("generateRandomPassphrase", () => {
 });
 
 // ---------------------------------------------------------------------------
-// updatePluginConfig (via api.runtime.config)
+// loadWakerState / saveWakerState
 // ---------------------------------------------------------------------------
 
-function makeMockRuntimeApi(existingPluginConfig: Record<string, unknown> = {}) {
-  const storedConfig: any = {
-    plugins: {
-      entries: {
-        "ad4m-openclaw-plugin": {
-          enabled: true,
-          config: { ...existingPluginConfig },
-        },
-      },
-    },
-  };
-  return {
-    id: "ad4m-openclaw-plugin",
-    runtime: {
-      config: {
-        loadConfig: () => structuredClone(storedConfig),
-        writeConfigFile: vi.fn(async (cfg: any) => {
-          Object.assign(storedConfig, cfg);
-        }),
-      },
-    },
-    logger: makeMockLogger(),
-  };
-}
+describe("loadWakerState / saveWakerState", () => {
+  let tmpDir: string;
 
-describe("updatePluginConfig", () => {
-  it("writes config via api.runtime.config.writeConfigFile", async () => {
-    const mockApi = makeMockRuntimeApi();
-    await updatePluginConfig(mockApi, { mode: "managed", agentPassphrase: "test-pass" });
-
-    expect(mockApi.runtime.config.writeConfigFile).toHaveBeenCalledOnce();
-    const written = mockApi.runtime.config.writeConfigFile.mock.calls[0][0];
-    const pluginCfg = written.plugins.entries["ad4m-openclaw-plugin"].config;
-    expect(pluginCfg.mode).toBe("managed");
-    expect(pluginCfg.agentPassphrase).toBe("test-pass");
+  beforeEach(() => {
+    tmpDir = makeTempDir();
   });
 
-  it("merges patches into existing plugin config", async () => {
-    const mockApi = makeMockRuntimeApi({ mode: "managed" });
-    await updatePluginConfig(mockApi, { ad4mBinaryPath: "/usr/bin/ad4m-executor" });
-
-    const written = mockApi.runtime.config.writeConfigFile.mock.calls[0][0];
-    const pluginCfg = written.plugins.entries["ad4m-openclaw-plugin"].config;
-    expect(pluginCfg.mode).toBe("managed");
-    expect(pluginCfg.ad4mBinaryPath).toBe("/usr/bin/ad4m-executor");
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("handles missing plugin entry gracefully", async () => {
-    const mockApi = {
-      id: "ad4m-openclaw-plugin",
-      runtime: {
-        config: {
-          loadConfig: () => ({ plugins: {} }),
-          writeConfigFile: vi.fn(),
-        },
-      },
-    };
-    await updatePluginConfig(mockApi, { mode: "managed" });
+  it("returns empty array when state file does not exist", () => {
+    const result = loadWakerState(tmpDir);
+    expect(result).toEqual([]);
+  });
 
-    const written = mockApi.runtime.config.writeConfigFile.mock.calls[0][0];
-    const pluginCfg = written.plugins.entries["ad4m-openclaw-plugin"].config;
-    expect(pluginCfg.mode).toBe("managed");
+  it("saves and loads subscriptions", () => {
+    const subs: WakerSubscription[] = [
+      {
+        id: "mention-abc",
+        type: "mention",
+        perspective: "uuid-1",
+        channel: "",
+        query: "SELECT ...",
+        neighbourhood: "neighbourhood://Qm1",
+      },
+      {
+        id: "children-def",
+        type: "channel-messages",
+        perspective: "uuid-2",
+        channel: "ch-1",
+        query: "SELECT ...",
+      },
+    ];
+
+    saveWakerState(tmpDir, subs);
+    const loaded = loadWakerState(tmpDir);
+    expect(loaded).toEqual(subs);
+  });
+
+  it("overwrites existing state on save", () => {
+    const subs1: WakerSubscription[] = [
+      { id: "a", type: "mention", perspective: "p1", channel: "", query: "q1" },
+    ];
+    const subs2: WakerSubscription[] = [
+      { id: "b", type: "channel-messages", perspective: "p2", channel: "c", query: "q2" },
+    ];
+
+    saveWakerState(tmpDir, subs1);
+    saveWakerState(tmpDir, subs2);
+    const loaded = loadWakerState(tmpDir);
+    expect(loaded).toEqual(subs2);
+  });
+
+  it("creates stateDir if it does not exist", () => {
+    const nestedDir = path.join(tmpDir, "nested", "dir");
+    saveWakerState(nestedDir, []);
+    expect(fs.existsSync(nestedDir)).toBe(true);
+  });
+
+  it("returns empty array for invalid JSON", () => {
+    fs.writeFileSync(path.join(tmpDir, "ad4m-waker-state.json"), "not json");
+    const result = loadWakerState(tmpDir);
+    expect(result).toEqual([]);
+  });
+
+  it("returns empty array for non-array JSON", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "ad4m-waker-state.json"),
+      JSON.stringify({ foo: "bar" }),
+    );
+    const result = loadWakerState(tmpDir);
+    expect(result).toEqual([]);
   });
 });
 
@@ -639,7 +667,7 @@ describe("stopExecutor", () => {
 // ---------------------------------------------------------------------------
 
 describe("ensureAgentReady", () => {
-  it("returns DID when agent is already initialized and unlocked", async () => {
+  it("returns { did } when agent is already initialized and unlocked", async () => {
     const mockStatus = vi.fn().mockResolvedValue({
       isInitialized: true,
       isUnlocked: true,
@@ -662,7 +690,7 @@ describe("ensureAgentReady", () => {
       client,
     );
 
-    expect(result).toBe("did:key:z6MkAlreadyReady");
+    expect(result).toEqual({ did: "did:key:z6MkAlreadyReady" });
     expect(mockGenerate).not.toHaveBeenCalled();
     expect(mockUnlock).not.toHaveBeenCalled();
 
@@ -670,7 +698,7 @@ describe("ensureAgentReady", () => {
     expect(msgs.some((m: string) => m.includes("Agent is ready"))).toBe(true);
   });
 
-  it("generates new agent on first run and returns DID", async () => {
+  it("generates new agent on first run and returns { did, passphrase }", async () => {
     let callCount = 0;
     const mockStatus = vi.fn().mockImplementation(async () => {
       callCount++;
@@ -690,17 +718,20 @@ describe("ensureAgentReady", () => {
     });
 
     const logger = makeMockLogger();
-    const mockApi = makeMockRuntimeApi();
     const result = await ensureAgentReady(
       "ws://localhost:12000/graphql",
       "test-cred",
       logger,
       undefined,
       client,
-      mockApi,
     );
 
-    expect(result).toBe("did:key:z6MkNewAgent");
+    expect(result).not.toBeNull();
+    expect(result!.did).toBe("did:key:z6MkNewAgent");
+    // Passphrase should be returned since none was provided
+    expect(result!.passphrase).toBeDefined();
+    expect(typeof result!.passphrase).toBe("string");
+    expect(result!.passphrase!.length).toBeGreaterThan(0);
     expect(mockGenerate).toHaveBeenCalledOnce();
 
     const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
@@ -710,16 +741,43 @@ describe("ensureAgentReady", () => {
     expect(
       msgs.some((m: string) => m.includes("generated successfully")),
     ).toBe(true);
-
-    // Passphrase should have been persisted via writeConfigFile
-    expect(mockApi.runtime.config.writeConfigFile).toHaveBeenCalled();
-    const written = mockApi.runtime.config.writeConfigFile.mock.calls[0][0];
-    const pluginCfg = written.plugins.entries["ad4m-openclaw-plugin"].config;
-    expect(pluginCfg.agentPassphrase).toBeDefined();
-    expect(typeof pluginCfg.agentPassphrase).toBe("string");
   });
 
-  it("unlocks agent with passphrase from config and returns DID", async () => {
+  it("does not return passphrase when one was provided", async () => {
+    let callCount = 0;
+    const mockStatus = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return { isInitialized: false, isUnlocked: false, did: "" };
+      }
+      return {
+        isInitialized: true,
+        isUnlocked: true,
+        did: "did:key:z6MkNewAgent",
+      };
+    });
+    const mockGenerate = vi.fn().mockResolvedValue(undefined);
+    const client = makeMockAd4mClient({
+      status: mockStatus,
+      generate: mockGenerate,
+    });
+
+    const logger = makeMockLogger();
+    const result = await ensureAgentReady(
+      "ws://localhost:12000/graphql",
+      "test-cred",
+      logger,
+      "user-provided-passphrase",
+      client,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.did).toBe("did:key:z6MkNewAgent");
+    // Passphrase was provided, so it should NOT be returned
+    expect(result!.passphrase).toBeUndefined();
+  });
+
+  it("unlocks agent with passphrase from config and returns { did }", async () => {
     let callCount = 0;
     const mockStatus = vi.fn().mockImplementation(async () => {
       callCount++;
@@ -747,7 +805,7 @@ describe("ensureAgentReady", () => {
       client,
     );
 
-    expect(result).toBe("did:key:z6MkLocked");
+    expect(result).toEqual({ did: "did:key:z6MkLocked" });
     expect(mockUnlock).toHaveBeenCalledWith("test-stored-passphrase");
 
     const msgs = logger.info.mock.calls.map((c: any[]) => c[0]);
@@ -780,7 +838,7 @@ describe("ensureAgentReady", () => {
       client,
     );
 
-    expect(result).toBe("did:key:z6MkLocked");
+    expect(result).toEqual({ did: "did:key:z6MkLocked" });
     expect(mockUnlock).toHaveBeenCalledWith("config-passphrase");
   });
 
@@ -1543,10 +1601,10 @@ describe("ad4mPlugin", () => {
 
     await ad4mPlugin(mockApi);
 
-    // Start the MCP service
+    // Start the MCP service with ctx
     const mcpService = registeredServices.find((s) => s.id === "ad4m-mcp");
     expect(mcpService).toBeDefined();
-    await mcpService!.start();
+    await mcpService!.start(makeServiceCtx());
 
     // Should now have the MCP tool registered (list_perspectives)
     const toolNames = registeredTools.map((t) => t.name);
@@ -1583,18 +1641,6 @@ describe("ad4mPlugin", () => {
       registerTool: vi.fn(),
       registerService: vi.fn(),
       config: {},
-      runtime: {
-        config: {
-          loadConfig: () => ({
-            plugins: {
-              entries: {
-                "ad4m-openclaw-plugin": { config: { mode: "managed" } },
-              },
-            },
-          }),
-          writeConfigFile: vi.fn(),
-        },
-      },
     };
 
     ad4mPlugin(mockApi);
@@ -1605,7 +1651,7 @@ describe("ad4mPlugin", () => {
       (c: any[]) => c[0]?.id === "ad4m-mcp",
     )?.[0];
     expect(mcpService).toBeDefined();
-    await mcpService.start();
+    await mcpService.start(makeServiceCtx());
 
     // Logger should show the auth token was generated (it logs the length)
     const infoMessages = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
@@ -1694,7 +1740,7 @@ describe("ad4mPlugin", () => {
     // Start the MCP service — ensureSession + refreshTools with 422 recovery
     const mcpService = registeredServices.find((s) => s.id === "ad4m-mcp");
     expect(mcpService).toBeDefined();
-    await mcpService!.start();
+    await mcpService!.start(makeServiceCtx());
 
     // Session should have been initialized twice (once initially, once after 422)
     expect(initializeCallCount).toBe(2);
@@ -1798,7 +1844,7 @@ describe("ad4mPlugin", () => {
 
     // Start the MCP service to register tools
     const mcpService = registeredServices.find((s) => s.id === "ad4m-mcp");
-    await mcpService!.start();
+    await mcpService!.start(makeServiceCtx());
 
     // Find the dynamically registered MCP tool
     const testTool = registeredTools.find((t) => t.name === "test_tool");
@@ -1892,7 +1938,7 @@ describe("ad4mPlugin", () => {
     await ad4mPlugin(mockApi);
 
     const mcpService = registeredServices.find((s) => s.id === "ad4m-mcp");
-    await mcpService!.start();
+    await mcpService!.start(makeServiceCtx());
 
     const failingTool = registeredTools.find((t) => t.name === "failing_tool");
     expect(failingTool).toBeDefined();
@@ -1925,18 +1971,6 @@ describe("ad4mPlugin", () => {
       registerTool: vi.fn(),
       registerService: vi.fn(),
       config: {},
-      runtime: {
-        config: {
-          loadConfig: () => ({
-            plugins: {
-              entries: {
-                "ad4m-openclaw-plugin": { config: { mode: "external" } },
-              },
-            },
-          }),
-          writeConfigFile: vi.fn(),
-        },
-      },
     };
 
     ad4mPlugin(mockApi);
@@ -1946,7 +1980,7 @@ describe("ad4mPlugin", () => {
       (c: any[]) => c[0]?.id === "ad4m-mcp",
     )?.[0];
     expect(mcpService).toBeDefined();
-    await mcpService.start();
+    await mcpService.start(makeServiceCtx());
 
     const warnMessages = mockApi.logger.warn.mock.calls.map((c: any[]) => c[0]);
     const warningFound = warnMessages.some((m: string) =>
@@ -1955,16 +1989,9 @@ describe("ad4mPlugin", () => {
     expect(warningFound).toBe(true);
   });
 
-  it("writes managed config on first run (no mode in config)", async () => {
+  it("runs setup flow when mode is not configured", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
 
-    const fakeProc = createFakeChildProcess();
-    mockSpawn.mockReturnValue(fakeProc as any);
-    setTimeout(() => {
-      fakeProc.emit("error", new Error("spawn ad4m-executor ENOENT"));
-    }, 50);
-
-    const writeConfigFile = vi.fn();
     const mockApi: any = {
       id: "ad4m-openclaw-plugin",
       pluginConfig: {},
@@ -1972,23 +1999,84 @@ describe("ad4mPlugin", () => {
       registerTool: vi.fn(),
       registerService: vi.fn(),
       config: {},
-      runtime: {
-        config: {
-          loadConfig: () => ({ plugins: { entries: {} } }),
-          writeConfigFile,
-        },
-      },
     };
 
-    await ad4mPlugin(mockApi);
+    ad4mPlugin(mockApi);
 
-    // Should have written config via api.runtime.config.writeConfigFile
-    expect(writeConfigFile).toHaveBeenCalled();
-    const written = writeConfigFile.mock.calls[0][0];
-    const pluginCfg = written.plugins.entries["ad4m-openclaw-plugin"].config;
-    expect(pluginCfg.mode).toBe("managed");
-    expect(pluginCfg.agentPassphrase).toBeDefined();
-    expect(pluginCfg.agentPassphrase.length).toBeGreaterThan(0);
+    // Find and start the ad4m-mcp service
+    const mcpService = mockApi.registerService.mock.calls.find(
+      (c: any[]) => c[0]?.id === "ad4m-mcp",
+    )?.[0];
+    expect(mcpService).toBeDefined();
+    await mcpService.start(makeServiceCtx());
+
+    // Should have logged about first-time setup
+    const infoMessages = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
+    expect(
+      infoMessages.some((m: string) =>
+        m.includes("No mode configured") || m.includes("first-time setup") || m.includes("ad4m-setup"),
+      ),
+    ).toBe(true);
+
+    // Should have logged a config snippet
+    expect(
+      infoMessages.some((m: string) => m.includes("openclaw.json")),
+    ).toBe(true);
   }, 10000);
 
+  it("asks for existing passphrase when ~/.ad4m already exists", async () => {
+    // Mock: no running executor, but binary found and ~/.ad4m exists
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const realExistsSync = fs.existsSync;
+    const realAccessSync = fs.accessSync;
+    vi.spyOn(fs, "existsSync").mockImplementation((p: fs.PathLike) => {
+      const s = p.toString();
+      if (s.endsWith("/.ad4m")) return true; // existing agent data
+      return realExistsSync(s);
+    });
+    // Make findExecutorBinary discover a binary
+    vi.spyOn(fs, "accessSync").mockImplementation((p: fs.PathLike, mode?: number) => {
+      const s = p.toString();
+      if (s.endsWith("/ad4m-executor")) return; // found + executable
+      return realAccessSync(s, mode);
+    });
+
+    const mockApi: any = {
+      id: "ad4m-openclaw-plugin",
+      pluginConfig: {},
+      logger: makeMockLogger(),
+      registerTool: vi.fn(),
+      registerService: vi.fn(),
+      config: {},
+    };
+
+    ad4mPlugin(mockApi);
+
+    const mcpService = mockApi.registerService.mock.calls.find(
+      (c: any[]) => c[0]?.id === "ad4m-mcp",
+    )?.[0];
+    expect(mcpService).toBeDefined();
+    await mcpService.start(makeServiceCtx());
+
+    const infoMessages = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
+
+    // Should mention existing agent data
+    expect(
+      infoMessages.some((m: string) => m.includes("existing AD4M agent data")),
+    ).toBe(true);
+
+    // Should ask for existing passphrase
+    expect(
+      infoMessages.some((m: string) => m.includes("existing agent passphrase")),
+    ).toBe(true);
+
+    // Config snippet should contain placeholder
+    expect(
+      infoMessages.some((m: string) => m.includes("<enter-your-existing-passphrase>")),
+    ).toBe(true);
+
+    // Should NOT have attempted to start executor
+    expect(mockSpawn).not.toHaveBeenCalled();
+  }, 10000);
 });

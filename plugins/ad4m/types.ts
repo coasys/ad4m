@@ -33,7 +33,5 @@ export interface PluginConfig {
   wakeUrl?: string;
   wakeToken?: string;
   debounceMs?: number;
-  /** Persisted waker subscriptions — restored automatically on restart. */
-  wakerSubscriptions?: WakerSubscription[];
 }
 

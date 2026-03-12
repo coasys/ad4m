@@ -20,7 +20,7 @@ import {
   PluginConfig,
   WakerSubscription,
 } from "./types";
-import { generateRandomPassphrase, updatePluginConfig } from "./config";
+import { generateRandomPassphrase, loadWakerState, saveWakerState } from "./config";
 import {
   ensureExecutorRunning,
   ExecutorStartResult,
@@ -36,6 +36,7 @@ import {
   mcpListTools,
 } from "./mcpClient";
 import { buildWakeMessage, postWake } from "./wakerHelpers";
+import { runSetup } from "./setup";
 
 // ---------------------------------------------------------------------------
 // Types & helpers (re-exported from domain modules)
@@ -47,7 +48,7 @@ export type {
   PluginConfig,
   WakerSubscription,
 } from "./types";
-export { generateRandomPassphrase, updatePluginConfig } from "./config";
+export { generateRandomPassphrase, loadWakerState, saveWakerState } from "./config";
 export {
   findExecutorBinary,
   isExecutorRunning,
@@ -56,6 +57,7 @@ export {
 } from "./executor";
 export type { ExecutorStartResult } from "./executor";
 export { ensureAgentReady } from "./agent";
+export type { AgentResult } from "./agent";
 export {
   parseSSEStream,
   mcpRequest,
@@ -66,6 +68,7 @@ export {
   extractMcpResultData,
 } from "./mcpClient";
 export { buildWakeMessage, postWake } from "./wakerHelpers";
+export { runSetup } from "./setup";
 
 
 
@@ -85,7 +88,7 @@ export default function ad4mPlugin(api: any) {
   const logger = api.logger;
 
   const providedConfig: PluginConfig = (api.pluginConfig as PluginConfig) ?? {};
-  const mode = providedConfig.mode || "managed";
+  const mode = providedConfig.mode;
 
   // Determine endpoint - default to localhost for managed, use provided for external
   const endpoint = providedConfig.mcpEndpoint ?? "http://localhost:3001/mcp";
@@ -98,23 +101,8 @@ export default function ad4mPlugin(api: any) {
   let authToken: string = providedConfig.token || "";
   let pluginAgentDid: string = "";
 
-  // Write initial defaults for missing fields (fire-and-forget).
-  // Only adds fields not already in config — never overwrites existing values.
-  const initDefaults: Partial<PluginConfig> = {};
-  if (!providedConfig.mode) initDefaults.mode = "managed";
-  if (!providedConfig.ad4mBinaryPath) {
-    const found = findExecutorBinary();
-    if (found) initDefaults.ad4mBinaryPath = found;
-  }
-  if (!providedConfig.agentPassphrase) {
-    const generated = generateRandomPassphrase(32);
-    initDefaults.agentPassphrase = generated;
-    // Keep the in-memory view in sync so later logic can rely on it
-    providedConfig.agentPassphrase = generated;
-  }
-  if (Object.keys(initDefaults).length > 0) {
-    updatePluginConfig(api, initDefaults, logger);
-  }
+  // State directory for waker subscription persistence (set by service ctx)
+  let stateDir: string = "";
 
   // Resolve wakeToken: plugin config override > OpenClaw global hooks config
   let resolvedWakeToken = providedConfig.wakeToken;
@@ -132,7 +120,7 @@ export default function ad4mPlugin(api: any) {
 
   const config: PluginConfig = {
     ...providedConfig,
-    mode,
+    mode: mode || "managed",
     mcpEndpoint: endpoint,
     token: authToken || undefined,
     executorWsUrl,
@@ -438,16 +426,17 @@ export default function ad4mPlugin(api: any) {
   }
 
   /**
-   * Persist the current subscription list to the OpenClaw config.
+   * Persist the current subscription list to stateDir.
    */
   function persistSubscriptions(): void {
+    if (!stateDir) return;
     const subs = Array.from(activeSubscriptions.values());
-    updatePluginConfig(api, { wakerSubscriptions: subs }, logger);
+    saveWakerState(stateDir, subs);
   }
 
   /**
    * Dispose a single live subscription.
-   * @param persist — if false, skip persisting to config (used during service stop
+   * @param persist — if false, skip persisting (used during service stop
    *   so saved subscriptions survive for restore on next start).
    */
   function disposeLiveSubscription(id: string, persist = true): void {
@@ -866,7 +855,19 @@ Notes:
 
   api.registerService({
     id: "ad4m-mcp",
-    async start() {
+    async start(ctx: any) {
+      // Capture stateDir from service context
+      if (ctx?.stateDir) {
+        stateDir = ctx.stateDir;
+      }
+
+      // If mode is not configured, run the first-time setup flow
+      if (!mode) {
+        logger.info("[ad4m] No mode configured — running first-time setup...");
+        await runSetup(api, logger, endpoint, executorWsUrl);
+        return; // Plugin not yet configured — user needs to add config and restart
+      }
+
       logger.info(`[ad4m] Starting MCP bridge service (mode=${mode})`);
 
       // ── Mode-specific initialization ──
@@ -878,8 +879,7 @@ Notes:
           const jwt = await obtainJwtFromExecutor();
           if (jwt) {
             authToken = jwt;
-            await updatePluginConfig(api, { token: jwt }, logger);
-            logger.info("[ad4m] JWT obtained and stored in config");
+            logger.info("[ad4m] JWT obtained");
           }
         }
       } else {
@@ -904,21 +904,8 @@ Notes:
           logger.info(`[ad4m] Using executor binary: ${binaryPath}`);
         }
 
-        // Generate passphrase if not already in config
-        const agentPassphrase = providedConfig.agentPassphrase || generateRandomPassphrase(32);
-
-        // Write defaults for any missing config fields.
-        // Only sets fields not already present — never overwrites existing values.
-        const defaults: Partial<PluginConfig> = {};
-        if (!providedConfig.mode) defaults.mode = "managed";
-        if (!providedConfig.ad4mBinaryPath && binaryPath) defaults.ad4mBinaryPath = binaryPath;
-        if (!providedConfig.agentPassphrase) defaults.agentPassphrase = agentPassphrase;
-        if (Object.keys(defaults).length > 0) {
-          await updatePluginConfig(api, defaults, logger);
-        }
-
-        // Use the resolved passphrase for agent management below
-        providedConfig.agentPassphrase = agentPassphrase;
+        // Use passphrase from config
+        const agentPassphrase = providedConfig.agentPassphrase;
 
         // Ensure executor is running (spawn if not)
         const executorStartResult = await ensureExecutorRunning(
@@ -946,30 +933,28 @@ Notes:
           }
 
           if (authToken) {
-            const agentDid = await ensureAgentReady(
+            const agentResult = await ensureAgentReady(
               executorWsUrl,
               authToken,
               logger,
-              providedConfig.agentPassphrase,
+              agentPassphrase,
             );
-            if (agentDid) {
-              pluginAgentDid = agentDid;
+            if (agentResult) {
+              pluginAgentDid = agentResult.did;
             } else {
               logger.warn("[ad4m] Could not verify agent on pre-existing executor.");
             }
           }
         } else {
           // We spawned the executor with our admin credential — use it directly.
-          const agentDid = await ensureAgentReady(
+          const agentResult = await ensureAgentReady(
             executorWsUrl,
             adminCredential,
             logger,
-            providedConfig.agentPassphrase,
-            undefined, // _testClient
-            api,       // for persisting generated passphrase
+            agentPassphrase,
           );
-          if (agentDid) {
-            pluginAgentDid = agentDid;
+          if (agentResult) {
+            pluginAgentDid = agentResult.did;
           } else {
             logger.error(
               `[ad4m] Agent management failed. MCP tools and waker will not work correctly.`,
@@ -1027,7 +1012,12 @@ Notes:
 
   api.registerService({
     id: "ad4m-waker",
-    async start() {
+    async start(ctx: any) {
+      // Capture stateDir from service context (in case mcp service didn't set it)
+      if (ctx?.stateDir && !stateDir) {
+        stateDir = ctx.stateDir;
+      }
+
       const wakerEnabled = config.wakerEnabled ?? true;
       if (!wakerEnabled) {
         logger.info("[ad4m-waker] Waker disabled via config");
@@ -1103,9 +1093,9 @@ Notes:
           `[ad4m-waker] Connected — agent: ${status.did.substring(0, 40)}...`,
         );
 
-        // Restore persisted subscriptions from config
-        const saved = config.wakerSubscriptions;
-        if (saved && saved.length > 0) {
+        // Restore persisted subscriptions from stateDir
+        const saved = stateDir ? loadWakerState(stateDir) : [];
+        if (saved.length > 0) {
           logger.info(
             `[ad4m-waker] Restoring ${saved.length} persisted subscription(s)...`,
           );
