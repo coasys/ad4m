@@ -15,3 +15,4 @@ export * from "./prolog-facts";
 export * from "./json-schema";
 export * from "./query-surreal";
 export * from "./hydration";
+export * from "./ModelQueryBuilder";
