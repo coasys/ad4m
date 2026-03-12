@@ -861,11 +861,12 @@ Notes:
         stateDir = ctx.stateDir;
       }
 
-      // If mode is not configured, run the first-time setup flow
+      // If mode is not configured, the user hasn't run setup yet
       if (!mode) {
-        logger.info("[ad4m] No mode configured — running first-time setup...");
-        await runSetup(api, logger, endpoint, executorWsUrl);
-        return; // Plugin not yet configured — user needs to add config and restart
+        logger.info(
+          "[ad4m] No mode configured. Run `openclaw ad4m-setup` to set up the plugin.",
+        );
+        return;
       }
 
       logger.info(`[ad4m] Starting MCP bridge service (mode=${mode})`);
@@ -1128,4 +1129,22 @@ Notes:
       logger.info("[ad4m-waker] Waker service stopped");
     },
   });
+
+  // -- CLI setup command --
+  // Registers `openclaw ad4m-setup` so users can run the interactive setup
+  // flow from their terminal (with a TTY) after installing the plugin.
+
+  api.registerCli(
+    (ctx: any) => {
+      ctx.program
+        .command("ad4m-setup")
+        .description("Set up the AD4M plugin (discover executor, generate agent, print config)")
+        .option("--endpoint <url>", "MCP endpoint URL", endpoint)
+        .option("--ws <url>", "Executor GraphQL WebSocket URL", executorWsUrl)
+        .action(async (opts: any) => {
+          await runSetup(ctx.config, ctx.logger, opts.endpoint, opts.ws);
+        });
+    },
+    { commands: ["ad4m-setup"] },
+  );
 }

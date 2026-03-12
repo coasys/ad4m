@@ -19,15 +19,18 @@ const SEPARATOR = "════════════════════�
 /**
  * First-run setup flow.
  *
- * Called from the ad4m-mcp service `start()` when `providedConfig.mode` is
- * not set (i.e., the user hasn't configured the plugin yet).
+ * Invoked via the `openclaw ad4m-setup` CLI command (registered through
+ * `registerCli`).  Gathers information (binary path, executor state, agent),
+ * performs initial setup where possible, and prints a config snippet for the
+ * user to copy-paste into their openclaw.json.
  *
- * Gathers information (binary path, executor state, agent), performs
- * initial setup where possible, and prints a config snippet for the user
- * to copy-paste into their openclaw.json.
+ * @param openclawConfig - The full OpenClaw config object (provides hooks.token)
+ * @param logger         - Plugin logger
+ * @param endpoint       - MCP endpoint URL
+ * @param executorWsUrl  - GraphQL WebSocket URL
  */
 export async function runSetup(
-  api: any,
+  openclawConfig: any,
   logger: any,
   endpoint: string = "http://localhost:3001/mcp",
   executorWsUrl: string = "ws://localhost:12000/graphql",
@@ -37,8 +40,7 @@ export async function runSetup(
   // ── Step 1: Read wakeToken ──
   let wakeToken: string | undefined;
   try {
-    const globalConfig = api.config;
-    wakeToken = (globalConfig as any)?.hooks?.token;
+    wakeToken = openclawConfig?.hooks?.token;
     if (wakeToken) {
       logger.info("[ad4m-setup] Found wakeToken from OpenClaw hooks config");
     } else {

@@ -1431,6 +1431,7 @@ describe("ad4mPlugin", () => {
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
       registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+      registerCli: vi.fn(),
     };
 
     await ad4mPlugin(mockApi);
@@ -1465,6 +1466,7 @@ describe("ad4mPlugin", () => {
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
       registerService: vi.fn(),
+      registerCli: vi.fn(),
     };
 
     await ad4mPlugin(mockApi);
@@ -1493,6 +1495,7 @@ describe("ad4mPlugin", () => {
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
       registerService: vi.fn(),
+      registerCli: vi.fn(),
     };
 
     await ad4mPlugin(mockApi);
@@ -1520,6 +1523,7 @@ describe("ad4mPlugin", () => {
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
       registerService: vi.fn(),
+      registerCli: vi.fn(),
     };
 
     await ad4mPlugin(mockApi);
@@ -1597,6 +1601,7 @@ describe("ad4mPlugin", () => {
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
       registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+      registerCli: vi.fn(),
     };
 
     await ad4mPlugin(mockApi);
@@ -1640,6 +1645,7 @@ describe("ad4mPlugin", () => {
       logger: makeMockLogger(),
       registerTool: vi.fn(),
       registerService: vi.fn(),
+      registerCli: vi.fn(),
       config: {},
     };
 
@@ -1733,6 +1739,7 @@ describe("ad4mPlugin", () => {
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
       registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+      registerCli: vi.fn(),
     };
 
     await ad4mPlugin(mockApi);
@@ -1838,6 +1845,7 @@ describe("ad4mPlugin", () => {
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
       registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+      registerCli: vi.fn(),
     };
 
     await ad4mPlugin(mockApi);
@@ -1933,6 +1941,7 @@ describe("ad4mPlugin", () => {
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
       registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+      registerCli: vi.fn(),
     };
 
     await ad4mPlugin(mockApi);
@@ -1970,6 +1979,7 @@ describe("ad4mPlugin", () => {
       logger: makeMockLogger(),
       registerTool: vi.fn(),
       registerService: vi.fn(),
+      registerCli: vi.fn(),
       config: {},
     };
 
@@ -1989,42 +1999,51 @@ describe("ad4mPlugin", () => {
     expect(warningFound).toBe(true);
   });
 
-  it("runs setup flow when mode is not configured", async () => {
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
-
+  it("logs setup hint when mode is not configured", async () => {
     const mockApi: any = {
       id: "ad4m-openclaw-plugin",
       pluginConfig: {},
       logger: makeMockLogger(),
       registerTool: vi.fn(),
       registerService: vi.fn(),
+      registerCli: vi.fn(),
       config: {},
     };
 
     ad4mPlugin(mockApi);
 
-    // Find and start the ad4m-mcp service
     const mcpService = mockApi.registerService.mock.calls.find(
       (c: any[]) => c[0]?.id === "ad4m-mcp",
     )?.[0];
     expect(mcpService).toBeDefined();
     await mcpService.start(makeServiceCtx());
 
-    // Should have logged about first-time setup
     const infoMessages = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
     expect(
-      infoMessages.some((m: string) =>
-        m.includes("No mode configured") || m.includes("first-time setup") || m.includes("ad4m-setup"),
-      ),
+      infoMessages.some((m: string) => m.includes("openclaw ad4m-setup")),
     ).toBe(true);
+  });
 
-    // Should have logged a config snippet
-    expect(
-      infoMessages.some((m: string) => m.includes("openclaw.json")),
-    ).toBe(true);
-  }, 10000);
+  it("registers ad4m-setup CLI command", () => {
+    const mockApi: any = {
+      id: "ad4m-openclaw-plugin",
+      pluginConfig: {},
+      logger: makeMockLogger(),
+      registerTool: vi.fn(),
+      registerService: vi.fn(),
+      registerCli: vi.fn(),
+      config: {},
+    };
 
-  it("asks for existing passphrase when ~/.ad4m already exists", async () => {
+    ad4mPlugin(mockApi);
+
+    expect(mockApi.registerCli).toHaveBeenCalledTimes(1);
+    const [registrar, opts] = mockApi.registerCli.mock.calls[0];
+    expect(typeof registrar).toBe("function");
+    expect(opts).toEqual({ commands: ["ad4m-setup"] });
+  });
+
+  it("runSetup asks for existing passphrase when ~/.ad4m already exists", async () => {
     // Mock: no running executor, but binary found and ~/.ad4m exists
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
 
@@ -2042,24 +2061,11 @@ describe("ad4mPlugin", () => {
       return realAccessSync(s, mode);
     });
 
-    const mockApi: any = {
-      id: "ad4m-openclaw-plugin",
-      pluginConfig: {},
-      logger: makeMockLogger(),
-      registerTool: vi.fn(),
-      registerService: vi.fn(),
-      config: {},
-    };
+    const logger = makeMockLogger();
+    const { runSetup } = await import("./setup");
+    await runSetup({}, logger);
 
-    ad4mPlugin(mockApi);
-
-    const mcpService = mockApi.registerService.mock.calls.find(
-      (c: any[]) => c[0]?.id === "ad4m-mcp",
-    )?.[0];
-    expect(mcpService).toBeDefined();
-    await mcpService.start(makeServiceCtx());
-
-    const infoMessages = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
+    const infoMessages = logger.info.mock.calls.map((c: any[]) => c[0]);
 
     // Should mention existing agent data
     expect(
