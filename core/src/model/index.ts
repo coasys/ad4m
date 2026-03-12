@@ -10,3 +10,5 @@ export * from "./types";
 export * from "./Ad4mModel";
 export * from "./decorators";
 export * from "./Subject";
+export * from "./query-prolog";
+export * from "./prolog-facts";
