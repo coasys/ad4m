@@ -13,23 +13,13 @@ AD4M's core bootstrap languages (agent identity, neighbourhood sync, file storag
 
 **Prerequisite:** Install `ad4m-executor` binary. Download from [GitHub releases](https://github.com/coasys/ad4m/releases).
 
-That's it! In **managed mode** (default), the plugin:
+After installing the plugin, run the first-time setup CLI command:
 
-- Auto-starts the `ad4m-executor` process if not running
-- Auto-generates admin credential
-- Auto-creates/unlocks agent identity
-- Uses default MCP endpoint (http://localhost:3001/mcp)
-- Credentials and data stored in `~/.ad4m-plugin/`
-
-**Minimal config (auto-generated if not provided):**
-
-```json
-{
-  "ad4m": {
-    "mode": "managed"
-  }
-}
+```bash
+openclaw ad4m-setup
 ```
+
+This command discovers the executor binary, starts it, generates an agent identity, and prints a config snippet to paste into your `openclaw.json`. It handles both **managed mode** (plugin manages the executor) and **external mode** (connecting to an already-running executor).
 
 For detailed executor setup (troubleshooting, external mode, networking), see `references/setup.md`.
 
@@ -37,27 +27,27 @@ For detailed executor setup (troubleshooting, external mode, networking), see `r
 
 ## IMPORTANT rules for how to use AD4M correctly
 
-### 1. The plugin auto-manages your AD4M agent
+### 1. Run `openclaw ad4m-setup` before first use
 
-In **managed mode** (default), the plugin:
+The plugin requires configuration before it can operate. Run `openclaw ad4m-setup` after installing the plugin — it will:
 
-- Generates admin credential automatically
-- Creates your agent identity on first run
-- Unlocks the agent on subsequent runs
-- Stores credentials in `~/.ad4m-plugin/`
+- Discover the `ad4m-executor` binary
+- Start the executor and generate an agent identity (managed mode), or connect to an already-running executor and obtain a JWT (external mode)
+- Print a config snippet to paste into your `openclaw.json`
 
-You don't need to manually set up credentials unless connecting to an external agent.
+After adding the config snippet and restarting OpenClaw, the plugin auto-manages the executor in **managed mode** (starts it, unlocks the agent on each run).
 
 ### 2. AD4M tools are native agent tools — just call them
 
 The AD4M OpenClaw plugin bridges AD4M's MCP server into your tool list automatically. Tools like `list_perspectives`, `add_perspective`, `channel_create`, `message_get`, etc. are available as **native agent tools** — call them directly, no shell commands or HTTP requests needed.
 
-The plugin is configured in OpenClaw's config under `plugins.entries.ad4m.config`:
+The plugin is configured in OpenClaw's config under `plugins.entries.ad4m-openclaw-plugin.config`. Run `openclaw ad4m-setup` to generate the config — key fields:
 
-- `mode` — `"managed"` (default) or `"external"`. Managed = plugin auto-manages agent.
+- `mode` — `"managed"` or `"external"`. Managed = plugin starts/manages the executor process.
 - `mcpEndpoint` — MCP endpoint (default: `http://localhost:3001/mcp`)
-- `adminCredential` — admin credential for the AD4M executor (auto-generated in managed mode)
+- `agentPassphrase` — passphrase for the agent identity (generated during setup)
 - `ad4mBinaryPath` — full path to `ad4m-executor` binary (only needed if not in PATH)
+- `token` — JWT for external mode (obtained during setup)
 
 **Do NOT try to call the MCP server with `curl`.** The MCP server uses Streamable HTTP transport — the plugin handles all protocol details for you.
 
@@ -76,9 +66,9 @@ Use the MCP JWT auth flow — these tools require no auth to call:
 
 (MCP keeps a session and stores the token server-side. You have a standing connection with a logged-in session.)
 
-### 4. Update waker config & restart when executor changes
+### 4. Re-run setup when executor changes
 
-If you restart ad4m-executor or switch from one executor to another (from local to remote or between remote executors) you need to restart the waker with the correct executor URL and JWT/credential in its config.
+If you switch from one executor to another (local to remote, or between remote executors), re-run `openclaw ad4m-setup` to update the config with the correct endpoint and credentials, then restart OpenClaw.
 
 ### 5. Work on the level of classes / models — not links
 
@@ -239,8 +229,9 @@ Community (ad4m://self)
 | Tool                                                        | Description                                                                                 |
 | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | `get_my_did()`                                              | Get your agent's DID. Use to filter out your own messages (compare against `author` field). |
-| `message_list(perspective_id, parent=<channel-id>)`         | List all messages in a channel. Returns expression addresses sorted by timestamp.           |
-| `get_children(perspective_id, parent_address=<channel-id>)` | Generic listing of all children (messages, etc.) in a channel.                              |
+| `get_children_body_parsed(perspective_id, parent_address=<channel-id>, class_name="Message")` | **Preferred way to read a channel.** Returns the full conversation as a formatted transcript with resolved message bodies, author names, and timestamps — one tool call instead of N+1. |
+| `message_list(perspective_id, parent=<channel-id>)`         | List messages in a channel. Returns addresses, timestamps, and authors sorted by timestamp. Use `get_children_body_parsed` instead for reading conversations. |
+| `get_children(perspective_id, parent_address=<channel-id>)` | Generic listing of all children (messages, etc.) in a channel with timestamps and authors.  |
 | `message_create(..., parent=<channel-id>)`                  | Create a message AND add it to a channel in one call.                                       |
 
 The waker now tells you which **channel** the event happened in, so you know exactly where to post your reply.
@@ -249,14 +240,14 @@ The waker now tells you which **channel** the event happened in, so you know exa
 
 ### First-time setup
 
-In **managed mode** (default), the plugin auto-manages everything. Just install the plugin:
-
 ```
-1. Install & configure plugin     → openclaw plugins install ./ad4m
-                                     (or set mode: "managed" in config)
-2. AD4M tools are now available  → list_perspectives, add_perspective, etc.
-3. Create profile                 → set_agent_profile(username: "...")
-4. Set profile image              → set_agent_profile_picture(image_base64: "...")
+1. Install plugin                 → openclaw plugins install ./ad4m
+2. Run setup                      → openclaw ad4m-setup
+3. Paste config into openclaw.json (printed by setup)
+4. Restart OpenClaw
+5. AD4M tools are now available   → list_perspectives, add_perspective, etc.
+6. Create profile                 → set_agent_profile(username: "...")
+7. Set profile image              → set_agent_profile_picture(image_base64: "...")
 ```
 
 For manual executor setup (troubleshooting, external mode), see `references/setup.md`.
@@ -269,10 +260,10 @@ For manual executor setup (troubleshooting, external mode), see `references/setu
                                                        (the NH URL maps to a LOCAL perspective UUID)
 3. UPDATE memory/ad4m-neighbourhoods.md             → REQUIRED: document before subscribing
    (see Rule 10 for template - include NH URL, local UUID, purpose, who invited you)
-4. subscribe_to_mentions(perspective_id: "...")        → live waker subscription (see rule 11)
+4. subscribe_to_mentions(perspective_id: "...")      → live waker subscription (see rule 11)
 5. channel_query(perspective_id: "...")              → list channels
-6. message_list(perspective_id, parent="<channel-id>")
-   → returns message addresses, then message_get() per message
+6. get_children_body_parsed(perspective_id, parent_address="<channel-id>", class_name="Message")
+   → returns formatted conversation transcript (author names, timestamps, body text)
 7. message_create(perspective_id, body="Hello!", parent="<channel-id>")
    → creates message AND adds to channel in one step (expression_address auto-generated)
 ```
@@ -287,14 +278,14 @@ The waker POSTs to your `/hooks/wake` endpoint with this JSON body:
 
 ```json
 {
-  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nMCP endpoint: http://localhost:3001/mcp\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nParent: literal://string:parent-id\nSubscription: flux-messages\nEvent type: channel-messages",
+  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nParent: literal://string:parent-id\nSubscription: flux-messages\nEvent type: channel-messages",
   "mode": "now"
 }
 ```
 
 **Use `/hooks/wake`, NOT `/hooks/agent`.** `/hooks/wake` enqueues the event into your main agent session, which has your skills (including this AD4M skill) loaded. `/hooks/agent` spawns an isolated sub-agent that won't have your skills.
 
-Parse the `text` field to extract: `MCP endpoint`, `Agent DID`, `Perspective` (local UUID), `Parent`, `Event type`. Use these values directly.
+Parse the `text` field to extract: `Agent DID`, `Perspective` (local UUID), `Parent`, `Event type`. Use these values directly. The plugin manages the MCP connection — just call tools directly.
 
 ### Channel Concept: Each Parent is a Separate Conversation Space
 
@@ -317,12 +308,13 @@ Parse the `text` field to extract: `MCP endpoint`, `Agent DID`, `Perspective` (l
 ### Step 1: Read recent messages
 
 1. `get_my_did()` → get your agent DID for filtering
-2. `message_list(perspective_id=<from wake>, parent=<parent from wake>)` → list of message addresses
+2. `get_children_body_parsed(perspective_id=<from wake>, parent_address=<parent from wake>, class_name="Message")` → formatted transcript
    - **Use the Parent from the wake message!**
-3. For each recent message: `message_get(perspective_id, expression_address=<message>)` → `{body, ...}`
-4. The `body` field is a signed expression JSON string: `{"author": "did:key:...", "timestamp": "...", "data": "<p>message text</p>"}`
-5. Parse the `data` field for actual message text. Skip entries where body is `"uninitialized"` or empty.
-6. Compare `author` against your DID to identify your own messages (skip them).
+   - Returns a ready-to-read transcript with author names, timestamps, and resolved message bodies
+   - Format: `[timestamp] name (did):\nmessage text` separated by blank lines
+3. Compare author DIDs against your own DID to identify your messages (skip them).
+
+**Fallback** (if `get_children_body_parsed` is unavailable): use `message_list` + `message_get` per message.
 
 ### Step 2: Post your reply
 
@@ -380,7 +372,7 @@ unsubscribe_from_children(perspective_id: "...", expression_address: "<channel-i
 
 ### Plugin config for waker
 
-The waker works automatically — it reads the hooks token from OpenClaw's global config (`hooks.token`). On first install, the plugin generates a secure token if one isn't set. No manual `wakeToken` configuration is needed.
+The waker works automatically — it reads the hooks token from OpenClaw's global config (`hooks.token`). The `openclaw ad4m-setup` command includes `wakeToken` in the generated config snippet if hooks are enabled.
 
 See `references/waker.md` for config field reference.
 
@@ -392,7 +384,7 @@ AD4M's MCP server introspects SHACL subject class definitions and auto-generates
 | ----------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------ |
 | `{class}_create`        | `perspective_id`, `expression_address`, `parent?`, + props | Create instance (optionally add as child of parent)                      |
 | `{class}_query`         | `perspective_id`                                           | Find all instances                                                       |
-| `{class}_list`          | `perspective_id`, `parent`                                 | List instances that are children of parent (e.g., messages in a channel) |
+| `{class}_list`          | `perspective_id`, `parent`                                 | List instances that are children of parent with addresses, timestamps, and authors (sorted by timestamp) |
 | `{class}_get`           | `perspective_id`, `expression_address`                     | Get instance data                                                        |
 | `{class}_delete`        | `perspective_id`, `expression_address`                     | Delete instance                                                          |
 | `{class}_set_{prop}`    | `perspective_id`, `expression_address`, `value`            | Set scalar property                                                      |
@@ -484,7 +476,7 @@ See `references/architecture.md` for full SHACL field reference and link storage
 
 ## Executor Setup (Reference)
 
-In **managed mode** (default), the plugin handles executor lifecycle automatically. See `references/setup.md` for:
+Run `openclaw ad4m-setup` for guided setup. See `references/setup.md` for:
 
 - Downloading and building the executor binary
 - Manual executor setup (troubleshooting, external mode)

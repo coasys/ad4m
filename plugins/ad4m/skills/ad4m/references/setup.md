@@ -237,12 +237,11 @@ After init + generate, `--app-data-path` contains:
 
 ### Credential Handling
 
-The waker includes the admin credential in wake messages. This is intentional — it allows the agent to authenticate immediately upon waking. However:
+The plugin manages MCP authentication internally — credentials are not sent in wake messages. Wake messages only contain event metadata (perspective UUID, parent, event type, agent DID).
 
+- The plugin's background service maintains an authenticated MCP session
 - Wake messages are sent over HTTP to your local OpenClaw hooks endpoint (`localhost` by default)
-- The credential is **only** sent to the configured `wakeUrl` — never to external services
 - If running the waker on a remote machine, ensure the wake endpoint uses HTTPS
-- Store the waker config file with appropriate permissions (`chmod 600 waker-config.json`)
 
 ### Executor Security
 

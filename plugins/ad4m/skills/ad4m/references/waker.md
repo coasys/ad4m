@@ -39,7 +39,7 @@ The subscribe tools call the MCP tools `get_mention_waker_config` / `generate_wa
 
 ```json
 {
-  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nMCP endpoint: http://localhost:3001/mcp\nAuth credential: your-admin-credential\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nParent: literal://string:parent-id\nSubscription: flux-messages\nEvent type: channel-messages",
+  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nParent: literal://string:parent-id\nSubscription: flux-messages\nEvent type: channel-messages",
   "mode": "now"
 }
 ```
@@ -48,17 +48,17 @@ The `text` field contains key-value pairs, one per line:
 
 - **Line 1** — Event description: "New messages in an AD4M neighbourhood." or "You were @mentioned in an AD4M neighbourhood."
 - **Line 2** — "Read the AD4M skill for instructions on how to handle this."
-- **MCP endpoint** — where to connect (e.g. `http://localhost:3001/mcp`)
-- **Auth credential** — admin credential for the Authorization header
 - **Agent DID** — the agent's own DID (to identify own messages)
 - **Perspective** — local perspective UUID to operate on (look up your memory file for context about this space)
 - **Parent** — parent/child address where the event occurred (e.g., channel ID)
 - **Subscription** — subscription ID
 - **Event type** — `"mention"` or `"channel-messages"`
 
+The plugin manages the MCP connection — just call AD4M tools directly after waking.
+
 ## OpenClaw Hooks Config
 
-The plugin automatically reads the hooks token from OpenClaw's global config (`hooks.token`). On first install, the plugin's `configureInteractive` will generate a secure token if one isn't set. No manual configuration is needed.
+The plugin reads the hooks token from OpenClaw's global config (`hooks.token`). The `openclaw ad4m-setup` command includes `wakeToken` in the generated config snippet if hooks are enabled.
 
 If you want to set one manually:
 

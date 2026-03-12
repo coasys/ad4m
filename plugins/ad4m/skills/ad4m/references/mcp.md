@@ -69,11 +69,12 @@ These are always available regardless of SDNA:
 
 **Child/Tree Tools:**
 
-| Tool                   | Description                                |
-| ---------------------- | ------------------------------------------ |
-| `add_child`            | Add a child to a subject                   |
-| `get_children`         | Get children of a subject                  |
-| `get_subject_children` | Get children with optional class filtering |
+| Tool                        | Description                                |
+| --------------------------- | ------------------------------------------ |
+| `add_child`                 | Add a child to a subject                   |
+| `get_children`              | Get children of a subject (addresses, timestamps, authors) |
+| `get_children_body_parsed`  | Get children with resolved body text, author names, and timestamps as a formatted transcript. **Preferred for reading conversations.** |
+| `get_subject_children`      | Get children with optional class filtering |
 
 **Profile Tools:**
 
@@ -149,7 +150,7 @@ For a class `Channel` with scalar `name`, scalar `description`, and collection `
 | ------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `channel_create`          | Create a Channel instance (required props as params; `expression_address` optional; `parent` optional to add as child) |
 | `channel_query`           | Query all Channel instances in the perspective                                                                         |
-| `channel_list`            | List Channel instances that are children of a parent (requires `parent`)                                               |
+| `channel_list`            | List Channel instances that are children of a parent with addresses, timestamps, and authors (sorted by timestamp)     |
 | `channel_get`             | Get a Channel by expression address                                                                                    |
 | `channel_delete`          | Delete a Channel instance                                                                                              |
 | `channel_set_name`        | Set the name property                                                                                                  |
@@ -166,7 +167,7 @@ Generated tool patterns per class:
 
 - `{class}_create` — create instance (`perspective_id`, optional `expression_address`, optional `parent`, + required properties)
 - `{class}_query` — query all instances (`perspective_id`)
-- `{class}_list` — list instances that are children of a parent (`perspective_id`, `parent`)
+- `{class}_list` — list instances that are children of a parent with addresses, timestamps, and authors (`perspective_id`, `parent`)
 - `{class}_get` — get instance data (`perspective_id`, `expression_address`)
 - `{class}_delete` — delete instance (`perspective_id`, `expression_address`)
 - `{class}_set_{property}` — set scalar property (`perspective_id`, `expression_address`, `value`)
