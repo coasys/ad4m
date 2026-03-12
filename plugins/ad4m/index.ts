@@ -864,12 +864,12 @@ export default function ad4mPlugin(api: any) {
   let pluginAgentDid: string = "";
 
   // Persist config defaults (fire-and-forget — don't block registration)
-  updatePluginConfig(api, {
-    ...providedConfig,
-    mode: providedConfig.mode ?? "managed",
-    agentPassphrase: providedConfig.agentPassphrase ?? "PLEASE_FILL_IN_FOR_PRE_EXISTING_AD4M_KEYS",
-    ad4mBinaryPath: providedConfig.ad4mBinaryPath ?? findExecutorBinary() ?? "PLEASE_POINT_TO_AD4M_EXECUTOR_BINARY",
-  }, logger);
+  // updatePluginConfig(api, {
+  //   ...providedConfig,
+  //   mode: providedConfig.mode ?? "managed",
+  //   agentPassphrase: providedConfig.agentPassphrase ?? "PLEASE_FILL_IN_FOR_PRE_EXISTING_AD4M_KEYS",
+  //   ad4mBinaryPath: providedConfig.ad4mBinaryPath ?? findExecutorBinary() ?? "PLEASE_POINT_TO_AD4M_EXECUTOR_BINARY",
+  // }, logger);
 
   // Resolve wakeToken: plugin config override > OpenClaw global hooks config
   let resolvedWakeToken = providedConfig.wakeToken;
