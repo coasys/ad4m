@@ -329,6 +329,8 @@ function printConfigSnippet(
   }
 
   logger.info(`[ad4m-setup]`);
+  logger.info(`[ad4m-setup] one line for copy&paste: ${JSON.stringify(config)}`);
+  logger.info(`[ad4m-setup]`);
   logger.info(
     `[ad4m-setup] After adding the config, restart OpenClaw to activate the plugin.`,
   );
