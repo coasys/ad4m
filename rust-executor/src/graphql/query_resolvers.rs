@@ -940,6 +940,18 @@ impl Query {
         Ok(user_stats)
     }
 
+    async fn runtime_hosting_user_info(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<HostingUserInfo> {
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        // TODO: implement actual hosting user info lookup
+        Err(FieldError::new(
+            "Hosting user info not yet implemented",
+            Value::null(),
+        ))
+    }
+
     async fn ai_get_models(&self, context: &RequestContext) -> FieldResult<Vec<Model>> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
         let models_result = Ad4mDb::with_global_instance(|db| db.get_models());
