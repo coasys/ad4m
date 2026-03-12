@@ -863,14 +863,6 @@ export default function ad4mPlugin(api: any) {
   let authToken: string = providedConfig.token || "";
   let pluginAgentDid: string = "";
 
-  // Persist config defaults (fire-and-forget — don't block registration)
-  // updatePluginConfig(api, {
-  //   ...providedConfig,
-  //   mode: providedConfig.mode ?? "managed",
-  //   agentPassphrase: providedConfig.agentPassphrase ?? "PLEASE_FILL_IN_FOR_PRE_EXISTING_AD4M_KEYS",
-  //   ad4mBinaryPath: providedConfig.ad4mBinaryPath ?? findExecutorBinary() ?? "PLEASE_POINT_TO_AD4M_EXECUTOR_BINARY",
-  // }, logger);
-
   // Resolve wakeToken: plugin config override > OpenClaw global hooks config
   let resolvedWakeToken = providedConfig.wakeToken;
   if (!resolvedWakeToken) {
@@ -1662,14 +1654,14 @@ Notes:
         // Generate passphrase if not already in config
         const agentPassphrase = providedConfig.agentPassphrase || generateRandomPassphrase(32);
 
-        // Write managed config on first run (or whenever fields are missing)
-        if (!providedConfig.mode || !providedConfig.ad4mBinaryPath || !providedConfig.agentPassphrase) {
-          const configToWrite: Partial<PluginConfig> = {
-            mode: "managed",
-          };
-          if (binaryPath) configToWrite.ad4mBinaryPath = binaryPath;
-          if (!providedConfig.agentPassphrase) configToWrite.agentPassphrase = agentPassphrase;
-          await updatePluginConfig(api, configToWrite, logger);
+        // Write defaults for any missing config fields.
+        // Only sets fields not already present — never overwrites existing values.
+        const defaults: Partial<PluginConfig> = {};
+        if (!providedConfig.mode) defaults.mode = "managed";
+        if (!providedConfig.ad4mBinaryPath && binaryPath) defaults.ad4mBinaryPath = binaryPath;
+        if (!providedConfig.agentPassphrase) defaults.agentPassphrase = agentPassphrase;
+        if (Object.keys(defaults).length > 0) {
+          await updatePluginConfig(api, defaults, logger);
         }
 
         // Use the resolved passphrase for agent management below
