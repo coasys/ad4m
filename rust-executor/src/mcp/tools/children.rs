@@ -48,9 +48,7 @@ async fn resolve_expression_value(target: &str) -> String {
     }
 
     // Not a literal — try full expression resolution via LanguageController
-    if let Ok((lang_address, expression_address)) =
-        LanguageController::parse_expr_url(target)
-    {
+    if let Ok((lang_address, expression_address)) = LanguageController::parse_expr_url(target) {
         let controller = LanguageController::global_instance();
         if let Ok(Some(expr_json)) = controller
             .get_expression(&lang_address, &expression_address)
@@ -96,7 +94,9 @@ async fn resolve_did_to_name(did: &str) -> String {
                     for link in &perspective.links {
                         if link.data.source == "flux://profile" {
                             let predicate = link.data.predicate.as_deref().unwrap_or("");
-                            if predicate == "sioc://has_username" || predicate == "sioc://has_given_name" {
+                            if predicate == "sioc://has_username"
+                                || predicate == "sioc://has_given_name"
+                            {
                                 let name = Ad4mMcpHandler::resolve_literal_value(&link.data.target);
                                 if !name.is_empty() {
                                     return name;
