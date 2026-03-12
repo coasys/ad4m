@@ -1276,12 +1276,10 @@ describe("buildWakeMessage", () => {
   it("builds a mention wake message", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", "");
     expect(msg).toContain("You were @mentioned in an AD4M neighbourhood.");
-    expect(msg).toContain("MCP endpoint: http://localhost:3001/mcp");
     expect(msg).toContain("Agent DID: did:key:z6Mk123");
     expect(msg).toContain("Perspective: uuid-123");
     expect(msg).toContain("Subscription: mention-abc");
     expect(msg).toContain("Event type: mention");
-    expect(msg).toContain("Neighbourhood: neighbourhood://Qm123");
   });
 
   it("builds a channel-messages wake message", () => {

@@ -303,6 +303,10 @@ impl Ad4mMcpHandler {
             // children.rs
             .with_route((Self::add_child_tool_attr(), Self::add_child))
             .with_route((Self::get_children_tool_attr(), Self::get_children))
+            .with_route((
+                Self::get_children_body_parsed_tool_attr(),
+                Self::get_children_body_parsed,
+            ))
             // subscriptions.rs
             .with_route((
                 Self::generate_waker_query_tool_attr(),

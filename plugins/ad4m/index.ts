@@ -378,26 +378,20 @@ export default function ad4mPlugin(api: any) {
         `[ad4m-waker] ${sub.id}: query result changed (${count} items)`,
       );
 
-      // Determine the parent from the result
+      // Determine the parent from the result.
+      // For mention subscriptions, the SurrealDB query already filters by
+      // predicate = 'ad4m://has_child', so every result record is a has_child
+      // link with flat fields (source, target, predicate, author, timestamp).
       let parentChannel = sub.channel;
-
-      // For mention subscriptions, the query returns has_child links pointing to messages with mentions
-      // The source of each has_child link is the parent (channel), target is the message
       if (
         !parentChannel &&
         sub.type === "mention" &&
         Array.isArray(result) &&
         result.length > 0
       ) {
-        // Each result is a has_child link where the target is a message with a mention
-        // The source is the parent (channel)
-        const parentLink = result.find(
-          (link: any) =>
-            link && link.predicate === "ad4m://has_child" && link.source,
-        );
-
-        if (parentLink) {
-          parentChannel = parentLink.source;
+        const first = result[0];
+        if (first && first.source) {
+          parentChannel = first.source;
           logger.info(
             `[ad4m-waker] ${sub.id}: found parent ${parentChannel} from has_child link`,
           );
