@@ -35,6 +35,15 @@ export interface McpTool {
   inputSchema?: Record<string, any>;
 }
 
+export interface WakerSubscription {
+  id: string;
+  type: "mention" | "channel-messages";
+  perspective: string;
+  channel: string;
+  query: string;
+  neighbourhood?: string;
+}
+
 export interface PluginConfig {
   mode?: "managed" | "external";
   mcpEndpoint?: string;
@@ -48,6 +57,8 @@ export interface PluginConfig {
   wakeUrl?: string;
   wakeToken?: string;
   debounceMs?: number;
+  /** Persisted waker subscriptions — restored automatically on restart. */
+  wakerSubscriptions?: WakerSubscription[];
 }
 
 // ---------------------------------------------------------------------------
@@ -352,15 +363,6 @@ export function stopExecutor(logger?: any): void {
     executorLogStream.end();
     executorLogStream = null;
   }
-}
-
-export interface WakerSubscription {
-  id: string;
-  type: "mention" | "channel-messages";
-  perspective: string;
-  channel: string;
-  query: string;
-  neighbourhood?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1118,7 +1120,7 @@ Notes:
   let wakerClient: any = null;
   const wakerProxies = new Map<string, any>(); // id -> QuerySubscriptionProxy
   const wakerDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  const wakerSubscriptions = new Map<string, WakerSubscription>();
+  const activeSubscriptions = new Map<string, WakerSubscription>();
 
   /**
    * (Re-)initialize the MCP session. Called on first connect and when the
@@ -1380,7 +1382,8 @@ Notes:
     });
 
     wakerProxies.set(sub.id, proxy);
-    wakerSubscriptions.set(sub.id, sub);
+    activeSubscriptions.set(sub.id, sub);
+    persistSubscriptions();
 
     logger.info(
       `[ad4m-waker] Subscription ${sub.id} active (type=${sub.type}, perspective=${sub.perspective})`,
@@ -1388,9 +1391,19 @@ Notes:
   }
 
   /**
-   * Dispose a single live subscription.
+   * Persist the current subscription list to the OpenClaw config.
    */
-  function disposeLiveSubscription(id: string): void {
+  function persistSubscriptions(): void {
+    const subs = Array.from(activeSubscriptions.values());
+    updatePluginConfig(api, { wakerSubscriptions: subs }, logger);
+  }
+
+  /**
+   * Dispose a single live subscription.
+   * @param persist — if false, skip persisting to config (used during service stop
+   *   so saved subscriptions survive for restore on next start).
+   */
+  function disposeLiveSubscription(id: string, persist = true): void {
     const proxy = wakerProxies.get(id);
     if (proxy) {
       try {
@@ -1405,7 +1418,8 @@ Notes:
       clearTimeout(timer);
       wakerDebounceTimers.delete(id);
     }
-    wakerSubscriptions.delete(id);
+    activeSubscriptions.delete(id);
+    if (persist) persistSubscriptions();
   }
 
   // =========================================================================
@@ -1443,7 +1457,7 @@ Notes:
   ): Promise<string> {
     // Skip if already subscribed
     const existingId = `mention-${perspectiveId.substring(0, 8)}`;
-    if (wakerSubscriptions.has(existingId)) {
+    if (activeSubscriptions.has(existingId)) {
       return `Already subscribed to mentions in perspective ${perspectiveId}.`;
     }
 
@@ -1546,7 +1560,7 @@ Notes:
     async execute(_id: string, params: { perspective_id: string }) {
       // Find subscription by perspective
       let found = false;
-      for (const [id, sub] of wakerSubscriptions) {
+      for (const [id, sub] of activeSubscriptions) {
         if (
           sub.perspective === params.perspective_id &&
           sub.type === "mention"
@@ -1671,7 +1685,7 @@ Notes:
       params: { perspective_id: string; expression_address: string },
     ) {
       let found = false;
-      for (const [id, sub] of wakerSubscriptions) {
+      for (const [id, sub] of activeSubscriptions) {
         if (
           sub.perspective === params.perspective_id &&
           sub.channel === params.expression_address &&
@@ -1700,7 +1714,7 @@ Notes:
     description: "List all active waker subscriptions.",
     parameters: { type: "object", properties: {}, required: [] },
     async execute() {
-      const subs = Array.from(wakerSubscriptions.values());
+      const subs = Array.from(activeSubscriptions.values());
       if (subs.length === 0) {
         return {
           content: [{ type: "text", text: "No active waker subscriptions." }],
@@ -1839,6 +1853,26 @@ Notes:
         logger.info(
           `[ad4m-waker] Connected — agent: ${status.did.substring(0, 40)}...`,
         );
+
+        // Restore persisted subscriptions from config
+        const saved = config.wakerSubscriptions;
+        if (saved && saved.length > 0) {
+          logger.info(
+            `[ad4m-waker] Restoring ${saved.length} persisted subscription(s)...`,
+          );
+          for (const sub of saved) {
+            try {
+              await createLiveSubscription(sub);
+              logger.info(
+                `[ad4m-waker] Restored: ${sub.id} (${sub.type}, perspective=${sub.perspective})`,
+              );
+            } catch (err: any) {
+              logger.error(
+                `[ad4m-waker] Failed to restore ${sub.id}: ${err.message}`,
+              );
+            }
+          }
+        }
       } catch (err: any) {
         logger.error(`[ad4m-waker] Failed to connect: ${err.message}`);
         logger.error(
@@ -1849,7 +1883,7 @@ Notes:
     },
     stop() {
       for (const [id] of wakerProxies) {
-        disposeLiveSubscription(id);
+        disposeLiveSubscription(id, false);
       }
       wakerClient = null;
       logger.info("[ad4m-waker] Waker service stopped");

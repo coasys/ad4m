@@ -57,6 +57,14 @@
         "type": "number",
         "default": 2000,
         "description": "Debounce interval for wake events (ms)"
+      },
+      "wakerSubscriptions": {
+        "type": "array",
+        "default": [],
+        "description": "Persisted waker subscriptions — restored automatically on restart",
+        "items": {
+          "type": "object"
+        }
       }
     },
     "required": [],
