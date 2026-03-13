@@ -685,8 +685,8 @@
           "dependencies": [
             "npm:@types/node@18.11.10",
             "npm:next@^13.0.6",
-            "npm:nextra-theme-docs@latest",
-            "npm:nextra@latest",
+            "npm:nextra-theme-docs@^2.13.4",
+            "npm:nextra@^2.13.4",
             "npm:react-dom@^18.2.0",
             "npm:react@^18.2.0",
             "npm:typedoc-plugin-markdown@^3.15.2",
