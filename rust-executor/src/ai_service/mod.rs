@@ -1533,7 +1533,7 @@ mod tests {
             .embed("bert".into(), "Test string".into())
             .await
             .expect("embed to return a result");
-        assert!(vector.len() > 300)
+        assert!(vector.embeddings.len() > 300)
     }
 
     #[ignore]
@@ -1557,8 +1557,8 @@ mod tests {
             .prompt(task.task_id, "Test string".into())
             .await
             .expect("prompt to return a result");
-        println!("Response: {}", response);
-        assert!(!response.is_empty())
+        println!("Response: {}", response.text);
+        assert!(!response.text.is_empty())
     }
 
     #[ignore]
@@ -1604,7 +1604,11 @@ mod tests {
             .collect::<Result<Vec<_>>>()
             .expect("all prompts to return results");
 
-        let response = responses.join("\n");
+        let response = responses
+            .iter()
+            .map(|r| r.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         println!("Responses: {}", response);
         assert!(!response.is_empty())
     }
@@ -1711,6 +1715,6 @@ mod tests {
             .prompt(task.task_id.clone(), "Test input".into())
             .await
             .expect("prompt to work after model update");
-        assert!(!response.is_empty());
+        assert!(!response.text.is_empty());
     }
 }
