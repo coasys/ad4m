@@ -2,7 +2,7 @@ import { LitElement, html, css, TemplateResult } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { sharedStyles } from "../../styles/shared-styles";
 import { ArrowLeftIcon } from "../icons";
-import { getInitials, getHue } from "../../utils";
+import { renderHostAvatar } from "../shared/avatar";
 import type { RemoteHost } from "../../types";
 
 @customElement("host-detail")
@@ -142,12 +142,7 @@ export class HostDetail extends LitElement {
   }
 
   private renderAvatar(): TemplateResult {
-    if (this.host.profilePicUrl) {
-      return html`<img class="profile-pic" src=${this.host.profilePicUrl} alt="" />`;
-    }
-    const hue = getHue(this.host.id || this.host.name);
-    const initials = getInitials(this.host.name);
-    return html`<div class="profile-pic fallback" style="background:hsl(${hue},60%,35%)">${initials}</div>`;
+    return renderHostAvatar(this.host, "profile-pic");
   }
 
   private formatPrice(price: number): string {

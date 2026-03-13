@@ -2,7 +2,7 @@ import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { sharedStyles } from "../../styles/shared-styles";
 import { ArrowLeftIcon } from "../icons";
-import { getInitials, getHue } from "../../utils";
+import { renderHostAvatar } from "../shared/avatar";
 import type { RemoteHost } from "../../types";
 
 @customElement("host-browser")
@@ -248,12 +248,7 @@ export class HostBrowser extends LitElement {
   }
 
   private renderAvatar(host: RemoteHost) {
-    if (host.profilePicUrl) {
-      return html`<img class="host-avatar" src=${host.profilePicUrl} alt="" />`;
-    }
-    const hue = getHue(host.id || host.name);
-    const initials = getInitials(host.name);
-    return html`<div class="host-avatar fallback" style="background:hsl(${hue},60%,35%)">${initials}</div>`;
+    return renderHostAvatar(host, "host-avatar");
   }
 
   private retry() {

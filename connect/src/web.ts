@@ -29,6 +29,7 @@ const styles = css`
   @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&display=swap');
 
   :host {
+    font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     --ac-primary-color: #91e3fd;
     --ac-primary-color-light: #acebff;
     --ac-success-color: #5dd27d;

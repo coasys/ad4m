@@ -9,7 +9,7 @@ import { Ad4mConnectOptions, ConnectionStates, AuthStates, ConfigStates, RemoteH
 import { fetchUserInfo, requestPayment } from './services/hostIndex';
 
 const DEFAULT_PORT = 12000;
-const DEFAULT_INDEX_URL = "https://hosting.ad4m.dev/api";
+const DEFAULT_INDEX_URL = "https://hosting.ad4m.dev";
 const CREDIT_POLL_INTERVAL_MS = 30000;
 
 export default class Ad4mConnect extends EventTarget {
