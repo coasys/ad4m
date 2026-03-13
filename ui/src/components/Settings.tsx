@@ -132,6 +132,84 @@ const Profile = (props: Props) => {
   const [smtpTestEmail, setSmtpTestEmail] = useState<string>("");
   const [showSmtpPassword, setShowSmtpPassword] = useState(false);
 
+  // Host Registration state
+  const [hostReg, setHostReg] = useState({
+    indexUrl: "https://hosting.ad4m.dev",
+    email: "",
+    password: "",
+    name: "",
+    description: "",
+    location: "",
+    rates: '[{"description": "Base rate", "priceInHOT": "0.001"}]',
+    aiModels: '["llama3"]',
+    computeSpecs: "",
+  });
+  const [hostRegStatus, setHostRegStatus] = useState<{
+    type: "success" | "error" | "info";
+    message: string;
+  } | null>(null);
+  const [hostRegistering, setHostRegistering] = useState(false);
+  const [profilePic, setProfilePic] = useState<File | null>(null);
+
+  const handleHostRegChange = (field: string, value: string) => {
+    setHostReg((prev) => ({ ...prev, [field]: value }));
+    setHostRegStatus(null);
+  };
+
+  const handleRegisterHost = async () => {
+    if (!hostReg.email || !hostReg.password || !hostReg.name) {
+      setHostRegStatus({ type: "error", message: "Email, password, and name are required." });
+      return;
+    }
+
+    setHostRegistering(true);
+    setHostRegStatus(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("email", hostReg.email);
+      formData.append("password", hostReg.password);
+      formData.append("name", hostReg.name);
+      formData.append("description", hostReg.description);
+      formData.append("location", hostReg.location);
+      // Auto-populate the host URL from the executor's WebSocket URL
+      const hostUrl = url?.replace("http://", "ws://").replace("https://", "wss://") || "";
+      formData.append("url", hostUrl);
+      formData.append("rates", hostReg.rates);
+      formData.append("aiModels", hostReg.aiModels);
+      formData.append("computeSpecs", hostReg.computeSpecs);
+      if (profilePic) {
+        formData.append("profilePic", profilePic);
+      }
+
+      const res = await fetch(`${hostReg.indexUrl}/hosts/register`, {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await res.json();
+
+      if (res.ok) {
+        setHostRegStatus({
+          type: "success",
+          message: data.message || "Host registered! Check your email for verification.",
+        });
+      } else {
+        setHostRegStatus({
+          type: "error",
+          message: data.error || `Registration failed (${res.status})`,
+        });
+      }
+    } catch (err: any) {
+      setHostRegStatus({
+        type: "error",
+        message: `Network error: ${err.message || "Could not reach index API"}`,
+      });
+    } finally {
+      setHostRegistering(false);
+    }
+  };
+
   // Load MCP config on component mount
   useEffect(() => {
     const loadMcpConfig = async () => {
@@ -949,6 +1027,220 @@ const Profile = (props: Props) => {
               )}
             </>
           )}
+
+          {/* Host Registration Section */}
+          <j-box px="500" my="500" pt="500" style={{ borderTop: "1px solid var(--j-color-ui-200)" }}>
+            <j-text size="600" weight="600" color="black">
+              Host Registration
+            </j-text>
+          </j-box>
+
+          <j-box px="500" my="300">
+            <j-text size="500" color="ui-500">
+              Register this executor with the AD4M hosting index so users can discover and connect to it.
+            </j-text>
+          </j-box>
+
+          {/* Index API URL */}
+          <j-box px="500" my="500">
+            <j-box mb="200">
+              <j-text size="500" weight="500">Index API URL</j-text>
+            </j-box>
+            <j-input
+              value={hostReg.indexUrl}
+              onInput={(e: any) => handleHostRegChange("indexUrl", e.target.value)}
+              placeholder="https://hosting.ad4m.dev"
+            />
+          </j-box>
+
+          {/* Email */}
+          <j-box px="500" my="500">
+            <j-box mb="200">
+              <j-text size="500" weight="500">Email *</j-text>
+            </j-box>
+            <j-input
+              value={hostReg.email}
+              onInput={(e: any) => handleHostRegChange("email", e.target.value)}
+              placeholder="admin@example.com"
+            />
+          </j-box>
+
+          {/* Password */}
+          <j-box px="500" my="500">
+            <j-box mb="200">
+              <j-text size="500" weight="500">Password *</j-text>
+            </j-box>
+            <j-input
+              type="password"
+              value={hostReg.password}
+              onInput={(e: any) => handleHostRegChange("password", e.target.value)}
+              placeholder="Choose a password for your host account"
+            />
+          </j-box>
+
+          {/* Host Name */}
+          <j-box px="500" my="500">
+            <j-box mb="200">
+              <j-text size="500" weight="500">Host Name *</j-text>
+            </j-box>
+            <j-input
+              value={hostReg.name}
+              onInput={(e: any) => handleHostRegChange("name", e.target.value)}
+              placeholder="My AD4M Host"
+            />
+          </j-box>
+
+          {/* Description */}
+          <j-box px="500" my="500">
+            <j-box mb="200">
+              <j-text size="500" weight="500">Description</j-text>
+            </j-box>
+            <j-input
+              value={hostReg.description}
+              onInput={(e: any) => handleHostRegChange("description", e.target.value)}
+              placeholder="A brief description of your host"
+            />
+          </j-box>
+
+          {/* Location */}
+          <j-box px="500" my="500">
+            <j-box mb="200">
+              <j-text size="500" weight="500">Location</j-text>
+            </j-box>
+            <j-input
+              value={hostReg.location}
+              onInput={(e: any) => handleHostRegChange("location", e.target.value)}
+              placeholder="e.g. US-East, EU-West"
+            />
+          </j-box>
+
+          {/* Host URL (auto-populated) */}
+          <j-box px="500" my="500">
+            <j-box mb="200">
+              <j-text size="500" weight="500">Host URL</j-text>
+            </j-box>
+            <j-box p="300" style={{
+              backgroundColor: "var(--j-color-ui-50)",
+              borderRadius: "6px",
+              border: "1px solid var(--j-color-ui-200)"
+            }}>
+              <j-text size="400" color="ui-600">
+                {url?.replace("http://", "ws://").replace("https://", "wss://") || "Not available — start the executor first"}
+              </j-text>
+            </j-box>
+            <j-box mt="100">
+              <j-text size="400" color="ui-400">
+                Auto-populated from your executor's WebSocket URL.
+              </j-text>
+            </j-box>
+          </j-box>
+
+          {/* Rates (JSON) */}
+          <j-box px="500" my="500">
+            <j-box mb="200">
+              <j-text size="500" weight="500">Rates (JSON)</j-text>
+            </j-box>
+            <j-input
+              value={hostReg.rates}
+              onInput={(e: any) => handleHostRegChange("rates", e.target.value)}
+              placeholder='[{"description": "Base rate", "priceInHOT": "0.001"}]'
+            />
+            <j-box mt="100">
+              <j-text size="400" color="ui-400">
+                JSON array of rate objects with description and priceInHOT fields.
+              </j-text>
+            </j-box>
+          </j-box>
+
+          {/* AI Models (JSON) */}
+          <j-box px="500" my="500">
+            <j-box mb="200">
+              <j-text size="500" weight="500">AI Models (JSON)</j-text>
+            </j-box>
+            <j-input
+              value={hostReg.aiModels}
+              onInput={(e: any) => handleHostRegChange("aiModels", e.target.value)}
+              placeholder='["llama3", "mistral"]'
+            />
+            <j-box mt="100">
+              <j-text size="400" color="ui-400">
+                JSON array of AI model names available on this host.
+              </j-text>
+            </j-box>
+          </j-box>
+
+          {/* Compute Specs */}
+          <j-box px="500" my="500">
+            <j-box mb="200">
+              <j-text size="500" weight="500">Compute Specs</j-text>
+            </j-box>
+            <j-input
+              value={hostReg.computeSpecs}
+              onInput={(e: any) => handleHostRegChange("computeSpecs", e.target.value)}
+              placeholder="e.g. 8 CPU, 32GB RAM, RTX 4090"
+            />
+          </j-box>
+
+          {/* Profile Picture */}
+          <j-box px="500" my="500">
+            <j-box mb="200">
+              <j-text size="500" weight="500">Profile Picture</j-text>
+            </j-box>
+            <input
+              type="file"
+              accept="image/*"
+              onChange={(e) => {
+                const f = e.target.files?.[0] || null;
+                if (f && f.size > 2 * 1024 * 1024) {
+                  setHostRegStatus({ type: "error", message: "Profile picture must be under 2MB." });
+                  return;
+                }
+                setProfilePic(f);
+                setHostRegStatus(null);
+              }}
+              style={{ fontSize: "14px" }}
+            />
+            <j-box mt="100">
+              <j-text size="400" color="ui-400">
+                Optional. Max 2MB.
+              </j-text>
+            </j-box>
+          </j-box>
+
+          {/* Status Message */}
+          {hostRegStatus && (
+            <j-box px="500" my="500">
+              <j-box p="400" style={{
+                backgroundColor: hostRegStatus.type === "success" ? "#e8f5e9" : hostRegStatus.type === "error" ? "#ffebee" : "#e7f3ff",
+                borderRadius: "8px",
+                border: `1px solid ${hostRegStatus.type === "success" ? "#4caf50" : hostRegStatus.type === "error" ? "#f44336" : "#2196f3"}`
+              }}>
+                <j-flex a="center" gap="300">
+                  <j-icon
+                    name={hostRegStatus.type === "success" ? "check-circle" : hostRegStatus.type === "error" ? "x-circle" : "info-circle"}
+                    color={hostRegStatus.type === "success" ? "success" : hostRegStatus.type === "error" ? "danger" : "primary"}
+                  ></j-icon>
+                  <j-text size="500">
+                    {hostRegStatus.message}
+                  </j-text>
+                </j-flex>
+              </j-box>
+            </j-box>
+          )}
+
+          {/* Register Button */}
+          <j-box px="500" my="500">
+            <j-button
+              variant="primary"
+              size="lg"
+              full=""
+              onClick={handleRegisterHost}
+              loading={hostRegistering}
+              disabled={hostRegistering}
+            >
+              {hostRegistering ? "Registering..." : "Register Host"}
+            </j-button>
+          </j-box>
         </>
       )}
 
