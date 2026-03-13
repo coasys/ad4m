@@ -1,6 +1,6 @@
 import type { RemoteHost, UserInfo } from '../types';
 
-const DEFAULT_INDEX_URL = "https://hosting.ad4m.dev/api";
+const DEFAULT_INDEX_URL = "https://hosting.ad4m.dev";
 
 // --- Mock data (used until real index API + executor GraphQL are wired) ---
 
@@ -136,7 +136,7 @@ const MOCK_HOSTS: RemoteHost[] = [
   },
 ];
 
-const USE_MOCK = true;
+const USE_MOCK = false;
 
 // --- Public API ---
 

@@ -49,6 +49,20 @@ export class HostDetail extends LitElement {
         margin: 0;
       }
 
+      .profile-description {
+        font-size: 14px;
+        color: rgba(255, 255, 255, 0.5);
+        margin: 0;
+        text-align: center;
+        line-height: 1.4;
+      }
+
+      .compute-specs {
+        font-size: 14px;
+        color: rgba(255, 255, 255, 0.8);
+        margin: 0;
+      }
+
       .models {
         display: flex;
         flex-wrap: wrap;
@@ -152,6 +166,7 @@ export class HostDetail extends LitElement {
           ${this.renderAvatar()}
           <p class="profile-name">${this.host.name}</p>
           <p class="profile-location">${this.host.location}</p>
+          ${this.host.description ? html`<p class="profile-description">${this.host.description}</p>` : ''}
 
           ${this.host.aiModels.length > 0 ? html`
             <div class="models">
@@ -172,6 +187,15 @@ export class HostDetail extends LitElement {
                   </tr>
                 `)}
               </table>
+            </div>
+          </div>
+        ` : ''}
+
+        ${this.host.computeSpecs ? html`
+          <div class="box">
+            <div class="rates-section">
+              <h3>Compute</h3>
+              <p class="compute-specs">${this.host.computeSpecs}</p>
             </div>
           </div>
         ` : ''}

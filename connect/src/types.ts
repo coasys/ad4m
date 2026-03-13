@@ -35,11 +35,13 @@ export type ConnectionStates = "connecting" | "connected" | "error" | "port-not-
 export type RemoteHost = {
   id: string;
   name: string;
+  description?: string;      // host description
   profilePicUrl: string;
   location: string;          // e.g. "Frankfurt, DE"
   url: string;               // WebSocket/GraphQL endpoint
   rates: PricingItem[];      // flexible pricing array
   aiModels: string[];        // e.g. ["gpt-4o", "claude-3.5-sonnet"]
+  computeSpecs?: string | null; // e.g. "8 vCPU, 32GB RAM"
 };
 
 /** Flexible pricing item — avoids locking the interface to a specific pricing model */
