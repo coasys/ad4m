@@ -191,6 +191,11 @@ export class HostBrowser extends LitElement {
         letter-spacing: 0.5px;
         font-weight: 600;
       }
+
+      button.back-button {
+        all: unset;
+        cursor: pointer;
+      }
     `
   ];
 
@@ -272,9 +277,9 @@ export class HostBrowser extends LitElement {
   render() {
     return html`
       <div class="container">
-        <div class="back-button" @click=${this.back}>
+        <button class="back-button" @click=${this.back} aria-label="Go back">
           ${ArrowLeftIcon()}
-        </div>
+        </button>
 
         <div class="header">
           <h1>Remote Node</h1>
