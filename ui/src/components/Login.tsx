@@ -8,6 +8,10 @@ import { open } from "@tauri-apps/plugin-shell";
 import "../index.css";
 import Logo from "./Logo";
 
+const WHISPER_TURBO_URL =
+  "https://huggingface.co/Demonthos/candle-quantized-whisper-large-v3-turbo";
+const WHISPER_TURBO_LABEL = "Whisper large v3 turbo quantized (454MB)";
+
 const Login = () => {
   const {
     state: { loading, hasLoginError },
@@ -165,12 +169,11 @@ const Login = () => {
   }
 
   async function saveModels() {
-    let whisperModel = "whisper_small";
+    let whisperModel = "whisper_large_v3_turbo_quantized";
     // add llm model
     if (aiMode !== "None") {
       const llm = { modelType: "LLM" } as ModelInput;
       if (aiMode === "Local") {
-        whisperModel = "whisper_distil_large_v3";
         llm.name = "Qwen2.5.1-Coder-7B-Instruct";
         llm.local = { fileName: "Qwen2.5.1-Coder-7B-Instruct" };
       } else {
@@ -192,12 +195,14 @@ const Login = () => {
       local: { fileName: "bert" },
       modelType: "EMBEDDING",
     });
-    // add medium whisper model
-    client!.ai.addModel({
-      name: "Whisper",
-      local: { fileName: whisperModel },
-      modelType: "TRANSCRIPTION",
-    });
+    // add main whisper model (quantized large v3 turbo)
+    client!.ai
+      .addModel({
+        name: "Whisper",
+        local: { fileName: whisperModel },
+        modelType: "TRANSCRIPTION",
+      })
+      .then((modelId) => client!.ai.setDefaultModel("TRANSCRIPTION", modelId));
 
     client!.ai.addModel({
       name: "Whisper tiny quantized",
@@ -643,12 +648,21 @@ const Login = () => {
                 <p>
                   <a
                     onClick={() =>
+                      open(WHISPER_TURBO_URL)
+                    }
+                    style={{ cursor: "pointer" }}
+                  >{WHISPER_TURBO_LABEL}</a>
+                </p>
+                and
+                <p>
+                  <a
+                    onClick={() =>
                       open(
-                        "https://huggingface.co/openai/whisper-large-v3-turbo"
+                        "https://huggingface.co/lmz/candle-whisper"
                       )
                     }
                     style={{ cursor: "pointer" }}
-                  >Whisper distill large v3 (1.42GB)</a>
+                  >Whisper tiny quantized (42MB)</a>
                 </p>
                 and
                 <p>
@@ -817,12 +831,21 @@ const Login = () => {
                   <p>
                     <a
                       onClick={() =>
+                        open(WHISPER_TURBO_URL)
+                      }
+                      style={{ cursor: "pointer" }}
+                    >{WHISPER_TURBO_LABEL}</a>
+                  </p>
+                  and
+                  <p>
+                    <a
+                      onClick={() =>
                         open(
-                          "https://huggingface.co/openai/whisper-small"
+                          "https://huggingface.co/lmz/candle-whisper"
                         )
                       }
                       style={{ cursor: "pointer" }}
-                    >Whisper small (244MB)</a>
+                    >Whisper tiny quantized (42MB)</a>
                   </p>
                   and
                   <p>
@@ -859,12 +882,21 @@ const Login = () => {
                   <p>
                     <a
                       onClick={() =>
+                        open(WHISPER_TURBO_URL)
+                      }
+                      style={{ cursor: "pointer" }}
+                    >{WHISPER_TURBO_LABEL}</a>
+                  </p>
+                  and
+                  <p>
+                    <a
+                      onClick={() =>
                         open(
-                          "https://huggingface.co/openai/whisper-small"
+                          "https://huggingface.co/lmz/candle-whisper"
                         )
                       }
                       style={{ cursor: "pointer" }}
-                    >Whisper small (244MB)</a>
+                    >Whisper tiny quantized (42MB)</a>
                   </p>
                   and
                   <p>

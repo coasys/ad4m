@@ -32,7 +32,7 @@ use log::error;
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
-static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
+static WHISPER_MODEL: WhisperSource = WhisperSource::QuantizedLargeV3Turbo;
 static TRANSCRIPTION_TIMEOUT_SECS: u64 = 30; // 30 seconds (was 2 minutes)
 static TRANSCRIPTION_CHECK_INTERVAL_SECS: u64 = 5; // 5 seconds (was 10)
 
@@ -1105,8 +1105,8 @@ impl AIService {
             }
         }
 
-        // Default to tiny if nothing found
-        Ok(WhisperSource::Tiny)
+        // Default to the configured WHISPER_MODEL constant when no model is persisted in the DB.
+        Ok(WHISPER_MODEL)
     }
 
     pub async fn open_transcription_stream(
