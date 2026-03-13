@@ -703,6 +703,7 @@ pub struct HostingUserInfo {
     pub email: String,
     pub remaining_credits: String,
     pub hot_wallet_address: Option<String>,
+    pub free_access: bool,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]

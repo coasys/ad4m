@@ -600,6 +600,7 @@ export class AgentClient {
             email
             remainingCredits
             hotWalletAddress
+            freeAccess
           }
         }`,
       })
@@ -632,5 +633,31 @@ export class AgentClient {
       })
     );
     return runtimeRequestPayment;
+  }
+
+  // Admin-only hosting methods (require launcher admin credential)
+
+  async setUserCredits(email: string, amount: number): Promise<boolean> {
+    const { runtimeSetUserCredits } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation runtimeSetUserCredits($email: String!, $amount: Float!) {
+          runtimeSetUserCredits(email: $email, amount: $amount)
+        }`,
+        variables: { email, amount },
+      })
+    );
+    return runtimeSetUserCredits;
+  }
+
+  async setUserFreeAccess(email: string, enabled: boolean): Promise<boolean> {
+    const { runtimeSetUserFreeAccess } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation runtimeSetUserFreeAccess($email: String!, $enabled: Boolean!) {
+          runtimeSetUserFreeAccess(email: $email, enabled: $enabled)
+        }`,
+        variables: { email, enabled },
+      })
+    );
+    return runtimeSetUserFreeAccess;
   }
 }

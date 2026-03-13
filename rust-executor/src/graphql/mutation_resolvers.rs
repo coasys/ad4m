@@ -2985,12 +2985,24 @@ impl Mutation {
         address: String,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        let _ = address;
-        // TODO: implement actual hot wallet address storage
-        Err(FieldError::new(
-            "Set hot wallet address not yet implemented",
-            Value::null(),
-        ))
+
+        let user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
+            FieldError::new(
+                "Setting hot wallet address requires multi-user authentication",
+                Value::null(),
+            )
+        })?;
+
+        Ad4mDb::with_global_instance(|db| {
+            db.set_user_hot_wallet(&user_email, &address).map_err(|e| {
+                FieldError::new(
+                    format!("Failed to set hot wallet address: {}", e),
+                    Value::null(),
+                )
+            })
+        })?;
+
+        Ok(true)
     }
 
     async fn runtime_request_payment(
@@ -2999,11 +3011,71 @@ impl Mutation {
         #[allow(non_snake_case)] amountHOT: String,
     ) -> FieldResult<PaymentRequestResult> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        let _ = amountHOT;
-        // TODO: implement actual payment request via Unit
-        Err(FieldError::new(
-            "Request payment not yet implemented",
-            Value::null(),
-        ))
+
+        let _user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
+            FieldError::new(
+                "Payment requests require multi-user authentication",
+                Value::null(),
+            )
+        })?;
+
+        // TODO: implement actual payment request via Unit in Phase 2
+        // For now, return success as a mock acknowledgement
+        Ok(PaymentRequestResult {
+            success: true,
+            message: format!(
+                "Mock: payment request for {} HOT acknowledged. Real Unit integration coming in Phase 2.",
+                amountHOT
+            ),
+        })
+    }
+
+    async fn runtime_set_user_credits(
+        &self,
+        context: &RequestContext,
+        email: String,
+        amount: f64,
+    ) -> FieldResult<bool> {
+        // Admin-only: only the launcher's admin credential can set user credits
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can set user credits",
+                Value::null(),
+            ));
+        }
+
+        Ad4mDb::with_global_instance(|db| {
+            db.set_user_credits(&email, amount).map_err(|e| {
+                FieldError::new(format!("Failed to set user credits: {}", e), Value::null())
+            })
+        })?;
+
+        Ok(true)
+    }
+
+    async fn runtime_set_user_free_access(
+        &self,
+        context: &RequestContext,
+        email: String,
+        enabled: bool,
+    ) -> FieldResult<bool> {
+        // Admin-only: only the launcher's admin credential can grant/revoke free access
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can set user free access",
+                Value::null(),
+            ));
+        }
+
+        Ad4mDb::with_global_instance(|db| {
+            db.set_user_free_access(&email, enabled).map_err(|e| {
+                FieldError::new(
+                    format!("Failed to set user free access: {}", e),
+                    Value::null(),
+                )
+            })
+        })?;
+
+        Ok(true)
     }
 }

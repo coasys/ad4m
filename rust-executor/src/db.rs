@@ -330,6 +330,17 @@ impl Ad4mDb {
         // This column tracks which user created the notification (NULL for main agent)
         let _ = conn.execute("ALTER TABLE notifications ADD COLUMN user_email TEXT", []);
 
+        // Add hosting columns to users table
+        let _ = conn.execute(
+            "ALTER TABLE users ADD COLUMN remaining_credits REAL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE users ADD COLUMN hot_wallet_address TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE users ADD COLUMN free_access BOOLEAN DEFAULT 0",
+            [],
+        );
+
         Ok(Self { conn })
     }
 
@@ -2736,6 +2747,75 @@ impl Ad4mDb {
     pub fn verify_user_password(&self, username: &str, password: &str) -> Ad4mDbResult<bool> {
         let user = self.get_user_internal(username)?;
         Self::verify_password(password, &user.password_hash)
+    }
+
+    // Hosting credit & access functions
+
+    pub fn get_user_credits(&self, email: &str) -> Ad4mDbResult<f64> {
+        let credits: f64 = self.conn.query_row(
+            "SELECT COALESCE(remaining_credits, 0) FROM users WHERE username = ?1",
+            [email],
+            |row| row.get(0),
+        )?;
+        Ok(credits)
+    }
+
+    pub fn set_user_credits(&self, email: &str, amount: f64) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "UPDATE users SET remaining_credits = ?1 WHERE username = ?2",
+            params![amount, email],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_user_credits(&self, email: &str, amount: f64) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "UPDATE users SET remaining_credits = COALESCE(remaining_credits, 0) + ?1 WHERE username = ?2",
+            params![amount, email],
+        )?;
+        Ok(())
+    }
+
+    pub fn deduct_user_credits(&self, email: &str, amount: f64) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "UPDATE users SET remaining_credits = MAX(0, COALESCE(remaining_credits, 0) - ?1) WHERE username = ?2",
+            params![amount, email],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_user_hot_wallet(&self, email: &str) -> Ad4mDbResult<Option<String>> {
+        let result: Option<String> = self.conn.query_row(
+            "SELECT hot_wallet_address FROM users WHERE username = ?1",
+            [email],
+            |row| row.get(0),
+        )?;
+        Ok(result)
+    }
+
+    pub fn set_user_hot_wallet(&self, email: &str, address: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "UPDATE users SET hot_wallet_address = ?1 WHERE username = ?2",
+            params![address, email],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_user_free_access(&self, email: &str) -> Ad4mDbResult<bool> {
+        let free_access: bool = self.conn.query_row(
+            "SELECT COALESCE(free_access, 0) FROM users WHERE username = ?1",
+            [email],
+            |row| row.get(0),
+        )?;
+        Ok(free_access)
+    }
+
+    pub fn set_user_free_access(&self, email: &str, enabled: bool) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "UPDATE users SET free_access = ?1 WHERE username = ?2",
+            params![enabled, email],
+        )?;
+        Ok(())
     }
 
     // Settings management functions
