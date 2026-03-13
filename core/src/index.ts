@@ -19,8 +19,7 @@ export * from "./perspectives/PerspectiveProxy";
 export * from "./perspectives/PerspectiveDiff";
 export * from "./perspectives/LinkQuery";
 export * from "./SmartLiteral";
-export * from "./model/decorators";
-export * from "./model/Subject";
+export * from "./model";
 export * from "./neighbourhood/Neighbourhood";
 export * from "./neighbourhood/NeighbourhoodProxy";
 export * from "./typeDefs";
@@ -30,6 +29,5 @@ export * from "./agent/AgentClient";
 export * from "./ai/AIClient"
 export * from "./ai/Tasks"
 export * from "./runtime/RuntimeResolver"
-export * from './model/Ad4mModel'
 export * from './shacl/SHACLShape'
 export { SHACLFlow, FlowState, FlowTransition, LinkPattern, FlowableCondition } from './shacl/SHACLFlow'

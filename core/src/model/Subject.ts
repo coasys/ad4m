@@ -1,5 +1,5 @@
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { relationSetterToName, relationToAdderName, relationToRemoverName, relationToSetterName, propertyNameToSetterName } from "./util";
+import { relationToAdderName, relationToRemoverName, relationToSetterName, propertyNameToSetterName } from "./util";
 
 /**
  * Represents a subject in the perspective.

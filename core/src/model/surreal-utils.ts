@@ -5,7 +5,7 @@
  * the compile-time SHACL generator (`decorators.ts`).
  */
 
-import type { WhereCondition, Where, ModelMetadata } from "./Ad4mModel";
+import type { WhereCondition, Where, ModelMetadata } from "./types";
 import { escapeSurrealString } from "../utils";
 
 /**

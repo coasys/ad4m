@@ -12,7 +12,7 @@ import { AIClient } from "../ai/AIClient";
 import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
 import { gql } from "@apollo/client/core";
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
-import { AllInstancesResult } from "../model/Ad4mModel";
+import { AllInstancesResult } from "../model/types";
 import { escapeSurrealString } from "../utils";
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
