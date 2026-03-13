@@ -1927,17 +1927,22 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
+        check_compute_credits(&context.auth_token)?;
 
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
-        Ok(perspective
+        let result = perspective
             .add_link(
                 link.into(),
                 link_status_from_input(status)?,
                 batch_id,
                 &agent_context,
             )
-            .await?)
+            .await?;
+
+        deduct_compute_credits(&context.auth_token, LINK_WRITE_RATE);
+
+        Ok(result)
     }
 
     async fn perspective_add_link_expression(
@@ -1952,11 +1957,17 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
+        check_compute_credits(&context.auth_token)?;
+
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let link = crate::types::LinkExpression::try_from(link)?;
-        Ok(perspective
+        let result = perspective
             .add_link_expression(link, link_status_from_input(status)?, batch_id)
-            .await?)
+            .await?;
+
+        deduct_compute_credits(&context.auth_token, LINK_WRITE_RATE);
+
+        Ok(result)
     }
 
     async fn perspective_add_links(
@@ -1971,16 +1982,23 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
+        check_compute_credits(&context.auth_token)?;
+
+        let link_count = links.len();
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
-        Ok(perspective
+        let result = perspective
             .add_links(
                 links.into_iter().map(|l| l.into()).collect(),
                 link_status_from_input(status)?,
                 batch_id,
                 &agent_context,
             )
-            .await?)
+            .await?;
+
+        deduct_compute_credits(&context.auth_token, link_count as f64 * LINK_WRITE_RATE);
+
+        Ok(result)
     }
 
     async fn perspective_link_mutations(
@@ -1994,11 +2012,22 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
+        check_compute_credits(&context.auth_token)?;
+
+        let additions_count = mutations.additions.len();
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
-        Ok(perspective
+        let result = perspective
             .link_mutations(mutations, link_status_from_input(status)?, &agent_context)
-            .await?)
+            .await?;
+
+        // Only charge for additions, not removals
+        deduct_compute_credits(
+            &context.auth_token,
+            additions_count as f64 * LINK_WRITE_RATE,
+        );
+
+        Ok(result)
     }
 
     async fn perspective_publish_snapshot(
