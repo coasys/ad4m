@@ -942,8 +942,9 @@ impl Query {
 
     async fn runtime_hosting_user_info(
         &self,
-        _context: &RequestContext,
+        context: &RequestContext,
     ) -> FieldResult<HostingUserInfo> {
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
         // TODO: implement actual hosting user info lookup
         Err(FieldError::new(
             "Hosting user info not yet implemented",

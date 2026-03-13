@@ -2981,9 +2981,11 @@ impl Mutation {
 
     async fn runtime_set_hot_wallet_address(
         &self,
-        _context: &RequestContext,
-        _address: String,
+        context: &RequestContext,
+        address: String,
     ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        let _ = address;
         // TODO: implement actual hot wallet address storage
         Err(FieldError::new(
             "Set hot wallet address not yet implemented",
@@ -2993,9 +2995,11 @@ impl Mutation {
 
     async fn runtime_request_payment(
         &self,
-        _context: &RequestContext,
-        _amount_hot: f64,
+        context: &RequestContext,
+        #[allow(non_snake_case)] amountHOT: String,
     ) -> FieldResult<PaymentRequestResult> {
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        let _ = amountHOT;
         // TODO: implement actual payment request via Unit
         Err(FieldError::new(
             "Request payment not yet implemented",
