@@ -131,6 +131,7 @@ jobs:
             # Capture port state for debugging
             lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
       - store_artifacts:
+          when: on_fail
           path: /tmp/test-artifacts
           destination: test-logs
 
