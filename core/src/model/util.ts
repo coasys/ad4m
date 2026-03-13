@@ -7,19 +7,6 @@ export function propertyNameToSetterName(property: string): string {
     return `set${capitalize(property)}`
 }
 
-// e.g. "setName" -> "name"
-export function setterNameToPropertyName(setter: string): string {
-    return setter.replace("set", "").replace(/^[A-Z]/, (m) => m.toLowerCase())
-}
-
-export function singularToPlural(singular: string): string {
-    if(singular.endsWith("y")) {
-        return singular.slice(0, -1) + "ies"
-    } else {
-        return singular + "s"
-    }
-}
-
 export function pluralToSingular(plural: string): string {
     if(plural.endsWith("ies")) {
         return plural.slice(0, -3) + "y"
@@ -35,32 +22,9 @@ export function relationToAdderName(relation: string): string {
     return `add${capitalize(pluralToSingular(relation))}`
 }
 
-// e.g. "addComments" -> "comments"
-export function relationAdderToName(adderName: string): string {
-    // Extract the relation name after "add" and lowercase first char
-    // The method name already has the plural relation name (e.g., "addComments")
-    let relationName = adderName.substring(3)
-    return relationName.charAt(0).toLowerCase() + relationName.slice(1)
-}
-
 // e.g. "comments" -> "removeComment"
 export function relationToRemoverName(relation: string): string {
     return `remove${capitalize(pluralToSingular(relation))}`
-}
-
-// e.g. "removeComments" -> "comments"  
-export function relationRemoverToName(removerName: string): string {
-    // Extract the relation name after "remove" and lowercase first char
-    // The method name already has the plural relation name (e.g., "removeComments")
-    let relationName = removerName.substring(6)
-    return relationName.charAt(0).toLowerCase() + relationName.slice(1)
-}
-
-export function relationSetterToName(setterName: string): string {
-    // Extract the relation name after "set" and lowercase first char
-    // The method name already has the plural relation name (e.g., "setComments")
-    let relationName = setterName.substring(3)
-    return relationName.charAt(0).toLowerCase() + relationName.slice(1)
 }
 
 // e.g. "comments" -> "setComments"
@@ -68,6 +32,19 @@ export function relationToSetterName(relation: string): string {
     return `set${capitalize(relation)}`
 }
 
+
+/**
+ * Generate a random identifier string of the given length (lowercase alpha).
+ */
+export function makeRandomId(length: number): string {
+    let result = '';
+    const characters = 'abcdefghijklmnopqrstuvwxyz';
+    const charactersLength = characters.length;
+    for (let i = 0; i < length; i++) {
+        result += characters.charAt(Math.floor(Math.random() * charactersLength));
+    }
+    return result;
+}
 
 export function stringifyObjectLiteral(obj) {
     if(Array.isArray(obj)) {
