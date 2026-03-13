@@ -2984,7 +2984,7 @@ impl Mutation {
         context: &RequestContext,
         address: String,
     ) -> FieldResult<bool> {
-        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_UPDATE_CAPABILITY)?;
 
         let user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
             FieldError::new(
@@ -3010,7 +3010,7 @@ impl Mutation {
         context: &RequestContext,
         #[allow(non_snake_case)] amountHOT: String,
     ) -> FieldResult<PaymentRequestResult> {
-        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_UPDATE_CAPABILITY)?;
 
         let _user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
             FieldError::new(

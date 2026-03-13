@@ -944,7 +944,7 @@ impl Query {
         &self,
         context: &RequestContext,
     ) -> FieldResult<HostingUserInfo> {
-        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
 
         let user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
             FieldError::new(
