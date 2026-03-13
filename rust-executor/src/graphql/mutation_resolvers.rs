@@ -2791,10 +2791,11 @@ impl Mutation {
         prompt: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
-        Ok(AIService::global_instance()
+        let result = AIService::global_instance()
             .await?
             .prompt(task_id, prompt)
-            .await?)
+            .await?;
+        Ok(result.text)
     }
 
     async fn ai_embed(
@@ -2804,11 +2805,11 @@ impl Mutation {
         text: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
-        let vector = AIService::global_instance()
+        let result = AIService::global_instance()
             .await?
             .embed(model_id, text)
             .await?;
-        let json_string = serde_json::to_string(&vector)
+        let json_string = serde_json::to_string(&result.embeddings)
             .map_err(|e| FieldError::from(format!("Failed to serialize vector: {}", e)))?;
 
         // Compress the JSON string using zlib compression
