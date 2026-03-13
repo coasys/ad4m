@@ -33,8 +33,12 @@ export async function postWake(
   parentChannel?: string,
 ): Promise<void> {
   const effectiveChannel = parentChannel || sub.channel;
+  logger.info(
+    `[ad4m-waker] postWake: sub=${sub.id}, type=${sub.type}, parentChannel=${parentChannel ?? "(none)"}, effectiveChannel=${effectiveChannel ?? "(none)"}`,
+  );
   const message = buildWakeMessage(config, sub, agentDid, effectiveChannel);
   const body = JSON.stringify({ text: message, mode: "now" });
+  logger.debug(`[ad4m-waker] wake body: ${message}`);
 
   try {
     const resp = await fetch(config.wakeUrl!, {

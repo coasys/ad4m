@@ -377,6 +377,9 @@ export default function ad4mPlugin(api: any) {
       logger.info(
         `[ad4m-waker] ${sub.id}: query result changed (${count} items)`,
       );
+      logger.debug(
+        `[ad4m-waker] ${sub.id}: raw result: ${JSON.stringify(result).substring(0, 500)}`,
+      );
 
       // Determine the parent from the result.
       // For mention subscriptions, the SurrealDB query already filters by
@@ -394,6 +397,10 @@ export default function ad4mPlugin(api: any) {
           parentChannel = first.source;
           logger.info(
             `[ad4m-waker] ${sub.id}: found parent ${parentChannel} from has_child link`,
+          );
+        } else {
+          logger.warn(
+            `[ad4m-waker] ${sub.id}: could not extract parent from first result: ${JSON.stringify(first).substring(0, 300)}`,
           );
         }
       }
