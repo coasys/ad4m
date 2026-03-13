@@ -4028,11 +4028,23 @@ impl PerspectiveInstance {
 
         let subscription_id = Uuid::new_v4().to_string();
 
+        log::info!(
+            "subscribe_and_query_surreal: new subscription {} for query: {}",
+            subscription_id,
+            query
+        );
+
         // Execute surreal query with user context for $agentDid and $perspectiveId substitution
         let initial_result_vec = self
             .surreal_query_notification(query.clone(), user_email.clone())
             .await?;
         let result_string = serde_json::to_string(&initial_result_vec)?;
+
+        log::info!(
+            "subscribe_and_query_surreal: {} initial result has {} items",
+            subscription_id,
+            initial_result_vec.len()
+        );
 
         let subscribed_query = SurrealSubscribedQuery {
             query,
@@ -4102,6 +4114,12 @@ impl PerspectiveInstance {
         // DON'T clone the potentially huge last_result string
         let queries = {
             let queries_guard = self.surreal_subscribed_queries.lock().await;
+            if !queries_guard.is_empty() {
+                log::debug!(
+                    "check_surreal_subscribed_queries: checking {} active subscription(s)",
+                    queries_guard.len()
+                );
+            }
             queries_guard
                 .iter()
                 .map(|(id, query)| {
@@ -4125,6 +4143,7 @@ impl PerspectiveInstance {
 
             // Spawn query check future
             let self_clone = self.clone();
+            let query_for_log = query_string.clone();
             let query_future = async move {
                 match self_clone
                     .surreal_query_notification(query_string, user_email)
@@ -4136,6 +4155,17 @@ impl PerspectiveInstance {
                             let mut queries = self_clone.surreal_subscribed_queries.lock().await;
                             if let Some(stored_query) = queries.get_mut(&id) {
                                 if result_string != stored_query.last_result {
+                                    log::info!(
+                                        "Surreal subscription {} result changed ({} items). Query: {}",
+                                        id,
+                                        result_vec.len(),
+                                        query_for_log
+                                    );
+                                    log::debug!(
+                                        "Surreal subscription {} new result (first 500 chars): {}",
+                                        id,
+                                        &result_string[..result_string.len().min(500)]
+                                    );
                                     // Release lock before sending update
                                     drop(queries);
                                     self_clone

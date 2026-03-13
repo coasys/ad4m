@@ -357,6 +357,13 @@ export default function ad4mPlugin(api: any) {
     const { QuerySubscriptionProxy } = require("@coasys/ad4m");
     const debounceMs = config.debounceMs ?? 2000;
 
+    logger.info(
+      `[ad4m-waker] ${sub.id}: creating subscription (perspective=${sub.perspective}, type=${sub.type})`,
+    );
+    logger.info(
+      `[ad4m-waker] ${sub.id}: SurrealQL query:\n${sub.query}`,
+    );
+
     const proxy = new QuerySubscriptionProxy(
       sub.perspective,
       sub.query,
@@ -365,6 +372,9 @@ export default function ad4mPlugin(api: any) {
     proxy.isSurrealDB = true;
     await proxy.subscribe();
     await proxy.initialized;
+    logger.info(
+      `[ad4m-waker] ${sub.id}: subscription initialized successfully`,
+    );
 
     let lastResultHash: string | null = null;
 
