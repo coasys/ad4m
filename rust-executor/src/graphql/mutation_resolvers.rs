@@ -3012,20 +3012,29 @@ impl Mutation {
     ) -> FieldResult<PaymentRequestResult> {
         check_capability(&context.capabilities, &RUNTIME_HOSTING_UPDATE_CAPABILITY)?;
 
-        let _user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
+        let user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
             FieldError::new(
                 "Payment requests require multi-user authentication",
                 Value::null(),
             )
         })?;
 
-        // TODO: implement actual payment request via Unit in Phase 2
-        // For now, return success as a mock acknowledgement
+        // TODO(Phase 2): Create a DB record / enqueue a retryable job here once
+        // Unit payment integration is implemented. Until then no external request
+        // is made and no state is persisted — callers must not treat this response
+        // as a completed or queued payment.
+        log::warn!(
+            "runtime_request_payment: no-op mock for user={} amount={} HOT — \
+             Unit integration not yet implemented, no payment was queued",
+            user_email, amountHOT
+        );
+
         Ok(PaymentRequestResult {
-            success: true,
+            success: false,
             message: format!(
-                "Mock: payment request for {} HOT acknowledged. Real Unit integration coming in Phase 2.",
-                amountHOT
+                "No action taken: payment request for {} HOT by {} was acknowledged but not queued. \
+                 Unit integration is not yet implemented (Phase 2).",
+                amountHOT, user_email
             ),
         })
     }

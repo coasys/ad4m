@@ -1231,6 +1231,7 @@ pub struct ImportResult {
     pub friends: ImportStats,
     pub trusted_agents: ImportStats,
     pub known_link_languages: ImportStats,
+    pub users: ImportStats,
 }
 
 impl Default for ImportStats {
@@ -1271,6 +1272,7 @@ impl ImportResult {
             friends: ImportStats::new(),
             trusted_agents: ImportStats::new(),
             known_link_languages: ImportStats::new(),
+            users: ImportStats::new(),
         }
     }
 }

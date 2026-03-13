@@ -2093,6 +2093,24 @@ impl Ad4mDb {
         //     serde_json::to_value(model_status)?,
         // );
 
+        // Export users
+        let users: Vec<serde_json::Value> = self
+            .conn
+            .prepare("SELECT username, did, password_hash, last_seen, remaining_credits, hot_wallet_address, free_access FROM users")?
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "username": row.get::<_, String>(0)?,
+                    "did": row.get::<_, String>(1)?,
+                    "password_hash": row.get::<_, String>(2)?,
+                    "last_seen": row.get::<_, Option<i64>>(3)?,
+                    "remaining_credits": row.get::<_, Option<f64>>(4)?,
+                    "hot_wallet_address": row.get::<_, Option<String>>(5)?,
+                    "free_access": row.get::<_, Option<bool>>(6)?
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        export_data.insert("users".to_string(), serde_json::to_value(users)?);
+
         // Export friends
         let mut stmt = self.conn.prepare("SELECT friend FROM friends")?;
         let friends: Vec<String> = stmt
@@ -2548,6 +2566,50 @@ impl Ad4mDb {
         //         )?;
         //     }
         // }
+
+        // Import users
+        if let Some(users) = data.get("users") {
+            match serde_json::from_value::<Vec<serde_json::Value>>(users.clone()) {
+                Ok(users) => {
+                    result.users.total = users.len() as i32;
+                    log::debug!("Importing {} users", users.len());
+                    for user in users {
+                        let username = user["username"].as_str().unwrap_or("<unknown>");
+                        match self.conn.execute(
+                            "INSERT OR REPLACE INTO users (username, did, password_hash, last_seen, remaining_credits, hot_wallet_address, free_access) 
+                                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![
+                                user["username"].as_str().unwrap_or(""),
+                                user["did"].as_str().unwrap_or(""),
+                                user["password_hash"].as_str().unwrap_or(""),
+                                user["last_seen"].as_i64(),
+                                user["remaining_credits"].as_f64(),
+                                user["hot_wallet_address"].as_str(),
+                                user["free_access"].as_bool()
+                            ],
+                        ) {
+                            Ok(_) => result.users.imported += 1,
+                            Err(e) => {
+                                result.users.failed += 1;
+                                result.users.errors.push(format!(
+                                    "Failed to import user {}: {}",
+                                    username, e
+                                ));
+                                log::warn!("Failed to import user {}: {}", username, e)
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    result.users.failed = 1;
+                    result
+                        .users
+                        .errors
+                        .push(format!("Failed to parse users: {}", e));
+                    log::warn!("Failed to parse users: {}", e)
+                }
+            }
+        }
 
         // Import friends
         if let Some(friends) = data.get("friends") {
