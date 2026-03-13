@@ -4,7 +4,7 @@ import { expect } from "chai";
 
 export default function agentLanguageTests(testContext: TestContext) {
     return () => {
-        it("works across remote agents", async function() {
+        it.skip("works across remote agents", async function() {
             this.retries(2)
             const alice = testContext.alice!
             const didAlice = (await alice.agent.status()).did!

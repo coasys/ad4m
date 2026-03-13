@@ -92,8 +92,9 @@ export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bo
                 }
             }
 
-            // Resolve when we have both ports
-            if (bootstrapPort && relayPort && !resolved) {
+            // Resolve when we have bootstrap port (relay is now internal to bootstrap server)
+            // The new kitsune2-bootstrap-srv (0.4.0+) doesn't output a separate relay port
+            if (bootstrapPort && !resolved) {
                 resolved = true;
                 cleanup();
                 resolve();
