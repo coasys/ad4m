@@ -628,6 +628,57 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(channelStr).to.include(newChannelAddr);
         });
 
+        it("should create a message with parent parameter and verify child link", async function() {
+            // Create a fresh channel to use as parent
+            var parentChannelAddr = "flux://channel-parent-test-" + Date.now();
+            var result = await callMcpTool(MCP_BASE_URL,'channel_create', {
+                perspective_id: perspectiveUuid,
+                expression_address: parentChannelAddr,
+                name: "parent-test-channel",
+            }, mcpSessionId);
+            var resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+            expect(resultStr).to.include('true');
+
+            // Create a message with the parent parameter
+            var msgResult = await callMcpTool(MCP_BASE_URL,'message_create', {
+                perspective_id: perspectiveUuid,
+                body: "Hello from parent test!",
+                parent: parentChannelAddr,
+            }, mcpSessionId);
+            console.log("message_create with parent result:", JSON.stringify(msgResult));
+            expect(msgResult.created).to.be.true;
+            expect(msgResult.added_to_parent).to.be.true;
+            var createdMsgAddr = msgResult.expression_address;
+
+            // Verify the child link was created correctly via get_children
+            var children = await callMcpTool(MCP_BASE_URL,'get_children', {
+                perspective_id: perspectiveUuid,
+                parent_address: parentChannelAddr,
+            }, mcpSessionId);
+            console.log("get_children after parent create:", JSON.stringify(children));
+            expect(children.count).to.be.greaterThan(0);
+            var childAddrs = children.children.map((c: any) => c.address);
+            expect(childAddrs).to.include(createdMsgAddr);
+        });
+
+        it("should create with parent when parent is a plain string (not URI)", async function() {
+            var plainParent = "plain-parent-" + Date.now();
+            var msgResult = await callMcpTool(MCP_BASE_URL,'message_create', {
+                perspective_id: perspectiveUuid,
+                body: "Hello from plain parent!",
+                parent: plainParent,
+            }, mcpSessionId);
+            expect(msgResult.created).to.be.true;
+            expect(msgResult.added_to_parent).to.be.true;
+
+            // Verify retrievable via get_children with the same plain parent
+            var children = await callMcpTool(MCP_BASE_URL,'get_children', {
+                perspective_id: perspectiveUuid,
+                parent_address: plainParent,
+            }, mcpSessionId);
+            expect(children.count).to.equal(1);
+        });
+
         it("should update channel via typed channel_update tool", async function() {
             var result = await callMcpTool(MCP_BASE_URL,'channel_update', {
                 perspective_id: perspectiveUuid,
