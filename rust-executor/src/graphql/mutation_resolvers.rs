@@ -3026,7 +3026,8 @@ impl Mutation {
         log::warn!(
             "runtime_request_payment: no-op mock for user={} amount={} HOT — \
              Unit integration not yet implemented, no payment was queued",
-            user_email, amountHOT
+            user_email,
+            amountHOT
         );
 
         Ok(PaymentRequestResult {
