@@ -218,6 +218,10 @@ Model/class instances below a parent are linked with `ad4m://has_child` predicat
 
 ### Flux Data Model
 
+#### Message HTML formatting
+
+Flux displays messages verbatim. If you want formatting, use HTML tags.
+
 #### Channels vs Conversations
 
 ```
