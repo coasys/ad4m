@@ -34,6 +34,46 @@ use base64::prelude::*;
 // Use the shared can_access_perspective function from query_resolvers
 use super::query_resolvers::can_access_perspective;
 
+// Pricing constants for compute billing (initial values, can tune later)
+const TOKEN_RATE: f64 = 0.000002; // per token (prompt + completion)
+const EMBEDDING_TOKEN_RATE: f64 = 0.0000001; // per input token
+const LINK_WRITE_RATE: f64 = 0.000000001; // per link write
+
+/// Check if user has sufficient credits for compute. Returns Ok(()) if:
+/// - No user email in token (single-user mode, no billing)
+/// - User has free_access enabled
+/// - User has remaining_credits > 0
+/// Returns Err if credits are depleted.
+fn check_compute_credits(auth_token: &str) -> FieldResult<()> {
+    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let free =
+            Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)).unwrap_or(false);
+        if !free {
+            let credits =
+                Ad4mDb::with_global_instance(|db| db.get_user_credits(email)).unwrap_or(0.0);
+            if credits <= 0.0 {
+                return Err(FieldError::new(
+                    "Insufficient compute credits",
+                    graphql_value!(null),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Deduct credits from user after a successful compute operation.
+/// Skips deduction for single-user mode (no email) or free_access users.
+fn deduct_compute_credits(auth_token: &str, amount: f64) {
+    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let free =
+            Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)).unwrap_or(false);
+        if !free {
+            let _ = Ad4mDb::with_global_instance(|db| db.deduct_user_credits(email, amount));
+        }
+    }
+}
+
 // Helper function to get perspective with access control
 async fn get_perspective_with_access_control(
     uuid: &str,
@@ -2791,10 +2831,16 @@ impl Mutation {
         prompt: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
+        check_compute_credits(&context.auth_token)?;
+
         let result = AIService::global_instance()
             .await?
             .prompt(task_id, prompt)
             .await?;
+
+        let total_tokens = result.prompt_tokens + result.completion_tokens;
+        deduct_compute_credits(&context.auth_token, total_tokens as f64 * TOKEN_RATE);
+
         Ok(result.text)
     }
 
@@ -2805,10 +2851,18 @@ impl Mutation {
         text: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
+        check_compute_credits(&context.auth_token)?;
+
         let result = AIService::global_instance()
             .await?
             .embed(model_id, text)
             .await?;
+
+        deduct_compute_credits(
+            &context.auth_token,
+            result.token_count as f64 * EMBEDDING_TOKEN_RATE,
+        );
+
         let json_string = serde_json::to_string(&result.embeddings)
             .map_err(|e| FieldError::from(format!("Failed to serialize vector: {}", e)))?;
 
