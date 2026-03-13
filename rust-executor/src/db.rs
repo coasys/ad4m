@@ -326,20 +326,24 @@ impl Ad4mDb {
             [],
         );
 
+        // Helper to run ALTER TABLE ADD COLUMN migrations, ignoring "duplicate column name"
+        // errors (column already exists from a previous migration) but propagating all others.
+        let alter_add_column = |sql: &str| -> Result<(), AnyError> {
+            match conn.execute(sql, []) {
+                Ok(_) => Ok(()),
+                Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+                Err(e) => Err(e.into()),
+            }
+        };
+
         // Add user_email column to notifications table for multi-user support
         // This column tracks which user created the notification (NULL for main agent)
-        let _ = conn.execute("ALTER TABLE notifications ADD COLUMN user_email TEXT", []);
+        alter_add_column("ALTER TABLE notifications ADD COLUMN user_email TEXT")?;
 
         // Add hosting columns to users table
-        let _ = conn.execute(
-            "ALTER TABLE users ADD COLUMN remaining_credits REAL DEFAULT 0",
-            [],
-        );
-        let _ = conn.execute("ALTER TABLE users ADD COLUMN hot_wallet_address TEXT", []);
-        let _ = conn.execute(
-            "ALTER TABLE users ADD COLUMN free_access BOOLEAN DEFAULT 0",
-            [],
-        );
+        alter_add_column("ALTER TABLE users ADD COLUMN remaining_credits REAL DEFAULT 0")?;
+        alter_add_column("ALTER TABLE users ADD COLUMN hot_wallet_address TEXT")?;
+        alter_add_column("ALTER TABLE users ADD COLUMN free_access BOOLEAN DEFAULT 0")?;
 
         Ok(Self { conn })
     }
@@ -2760,28 +2764,50 @@ impl Ad4mDb {
         Ok(credits)
     }
 
+    /// Validate that a credit amount is finite and non-negative.
+    fn validate_credit_amount(amount: f64) -> Ad4mDbResult<()> {
+        if amount.is_nan() || amount.is_infinite() {
+            return Err(anyhow!("Invalid credit amount: must be a finite number"));
+        }
+        if amount < 0.0 {
+            return Err(anyhow!("Invalid credit amount: must be non-negative"));
+        }
+        Ok(())
+    }
+
+    /// Require that an UPDATE affected at least one row, otherwise the user was not found.
+    fn require_user_row(rows: usize, email: &str) -> Ad4mDbResult<()> {
+        if rows == 0 {
+            return Err(anyhow!("User not found: {}", email));
+        }
+        Ok(())
+    }
+
     pub fn set_user_credits(&self, email: &str, amount: f64) -> Ad4mDbResult<()> {
-        self.conn.execute(
+        Self::validate_credit_amount(amount)?;
+        let rows = self.conn.execute(
             "UPDATE users SET remaining_credits = ?1 WHERE username = ?2",
             params![amount, email],
         )?;
-        Ok(())
+        Self::require_user_row(rows, email)
     }
 
     pub fn add_user_credits(&self, email: &str, amount: f64) -> Ad4mDbResult<()> {
-        self.conn.execute(
+        Self::validate_credit_amount(amount)?;
+        let rows = self.conn.execute(
             "UPDATE users SET remaining_credits = COALESCE(remaining_credits, 0) + ?1 WHERE username = ?2",
             params![amount, email],
         )?;
-        Ok(())
+        Self::require_user_row(rows, email)
     }
 
     pub fn deduct_user_credits(&self, email: &str, amount: f64) -> Ad4mDbResult<()> {
-        self.conn.execute(
+        Self::validate_credit_amount(amount)?;
+        let rows = self.conn.execute(
             "UPDATE users SET remaining_credits = MAX(0, COALESCE(remaining_credits, 0) - ?1) WHERE username = ?2",
             params![amount, email],
         )?;
-        Ok(())
+        Self::require_user_row(rows, email)
     }
 
     pub fn get_user_hot_wallet(&self, email: &str) -> Ad4mDbResult<Option<String>> {
@@ -2794,11 +2820,11 @@ impl Ad4mDb {
     }
 
     pub fn set_user_hot_wallet(&self, email: &str, address: &str) -> Ad4mDbResult<()> {
-        self.conn.execute(
+        let rows = self.conn.execute(
             "UPDATE users SET hot_wallet_address = ?1 WHERE username = ?2",
             params![address, email],
         )?;
-        Ok(())
+        Self::require_user_row(rows, email)
     }
 
     pub fn get_user_free_access(&self, email: &str) -> Ad4mDbResult<bool> {
@@ -2811,11 +2837,11 @@ impl Ad4mDb {
     }
 
     pub fn set_user_free_access(&self, email: &str, enabled: bool) -> Ad4mDbResult<()> {
-        self.conn.execute(
+        let rows = self.conn.execute(
             "UPDATE users SET free_access = ?1 WHERE username = ?2",
             params![enabled, email],
         )?;
-        Ok(())
+        Self::require_user_row(rows, email)
     }
 
     // Settings management functions

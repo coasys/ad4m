@@ -2984,7 +2984,7 @@ impl Mutation {
         context: &RequestContext,
         address: String,
     ) -> FieldResult<bool> {
-        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
 
         let user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
             FieldError::new(
@@ -3010,7 +3010,7 @@ impl Mutation {
         context: &RequestContext,
         #[allow(non_snake_case)] amountHOT: String,
     ) -> FieldResult<PaymentRequestResult> {
-        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
 
         let _user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
             FieldError::new(
@@ -3040,6 +3040,13 @@ impl Mutation {
         if !context.is_admin_credential {
             return Err(FieldError::new(
                 "Only the admin (launcher) can set user credits",
+                Value::null(),
+            ));
+        }
+
+        if amount < 0.0 || amount.is_nan() || amount.is_infinite() {
+            return Err(FieldError::new(
+                "Invalid credit amount: must be a finite, non-negative number",
                 Value::null(),
             ));
         }

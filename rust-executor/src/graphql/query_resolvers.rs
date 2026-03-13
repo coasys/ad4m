@@ -954,18 +954,20 @@ impl Query {
         })?;
 
         let free_access = Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user_email))
-            .unwrap_or(false);
+            .map_err(|e| FieldError::new(format!("Failed to get free access status: {}", e), Value::null()))?;
 
         let remaining_credits = if free_access {
             "unlimited".to_string()
         } else {
             let credits =
-                Ad4mDb::with_global_instance(|db| db.get_user_credits(&user_email)).unwrap_or(0.0);
+                Ad4mDb::with_global_instance(|db| db.get_user_credits(&user_email))
+                    .map_err(|e| FieldError::new(format!("Failed to get user credits: {}", e), Value::null()))?;
             credits.to_string()
         };
 
         let hot_wallet_address =
-            Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email)).unwrap_or(None);
+            Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
+                .map_err(|e| FieldError::new(format!("Failed to get hot wallet address: {}", e), Value::null()))?;
 
         Ok(HostingUserInfo {
             email: user_email,
