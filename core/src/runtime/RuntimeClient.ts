@@ -413,6 +413,8 @@ export class RuntimeClient {
                     did
                     lastSeen
                     perspectiveCount
+                    remainingCredits
+                    freeAccess
                 }
             }`
         }))

@@ -686,6 +686,8 @@ pub struct UserStatistics {
     pub did: String,
     pub last_seen: Option<DateTime>,
     pub perspective_count: i32,
+    pub remaining_credits: String,
+    pub free_access: bool,
 }
 
 #[derive(GraphQLObject, Debug, Deserialize, Serialize, Clone)]

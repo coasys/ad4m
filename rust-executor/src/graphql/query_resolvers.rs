@@ -925,7 +925,7 @@ impl Query {
             }
 
             user_stats.push(UserStatistics {
-                email: user.username,
+                email: user.username.clone(),
                 did: user.did,
                 last_seen: user.last_seen.map(|ts| {
                     DateTime::from(
@@ -934,6 +934,23 @@ impl Query {
                     )
                 }),
                 perspective_count,
+                remaining_credits: {
+                    let free =
+                        Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user.username))
+                            .unwrap_or(false);
+                    if free {
+                        "unlimited".to_string()
+                    } else {
+                        let credits =
+                            Ad4mDb::with_global_instance(|db| db.get_user_credits(&user.username))
+                                .unwrap_or(0.0);
+                        format!("{}", credits)
+                    }
+                },
+                free_access: Ad4mDb::with_global_instance(|db| {
+                    db.get_user_free_access(&user.username)
+                })
+                .unwrap_or(false),
             });
         }
 

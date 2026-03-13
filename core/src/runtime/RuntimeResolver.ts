@@ -206,6 +206,12 @@ export class UserStatistics {
 
     @Field(type => Int)
     perspectiveCount: number;
+
+    @Field()
+    remainingCredits: string;
+
+    @Field()
+    freeAccess: boolean;
 }
 
 @ObjectType()
@@ -510,7 +516,9 @@ export default class RuntimeResolver {
             email: "test@example.com",
             did: "did:key:test123",
             lastSeen: new Date().toISOString(),
-            perspectiveCount: 5
+            perspectiveCount: 5,
+            remainingCredits: "0",
+            freeAccess: false
         }]
     }
 
