@@ -14,6 +14,7 @@ export class HostBrowser extends LitElement {
   @property({ type: String }) defaultUrl: string = "";
 
   @state() private manualUrl = "";
+  @state() private manualUrlError: string | null = null;
   private defaultApplied = false;
 
   static styles = [
@@ -53,9 +54,11 @@ export class HostBrowser extends LitElement {
         transition: all 0.2s ease;
       }
 
-      .host-card:hover {
+      .host-card:hover,
+      .host-card:focus-visible {
         background: rgba(128, 178, 201, 0.20);
         box-shadow: 0 0 0 1px var(--ac-primary-color);
+        outline: none;
       }
 
       .host-card.pinned {
@@ -211,10 +214,24 @@ export class HostBrowser extends LitElement {
     const url = this.manualUrl.trim();
     if (!url) return;
 
-    // Create a minimal RemoteHost from the entered URL
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      this.manualUrlError = "Invalid URL format";
+      return;
+    }
+
+    if (parsedUrl.protocol !== 'ws:' && parsedUrl.protocol !== 'wss:') {
+      this.manualUrlError = "URL must use ws:// or wss:// protocol";
+      return;
+    }
+
+    this.manualUrlError = null;
+
     const host: RemoteHost = {
       id: `manual-${Date.now()}`,
-      name: new URL(url).hostname,
+      name: parsedUrl.hostname,
       profilePicUrl: "",
       location: "Custom URL",
       url,
@@ -276,7 +293,11 @@ export class HostBrowser extends LitElement {
             ${this.getSortedHosts().map(host => html`
               <div
                 class="host-card ${host.id === this.lastHostId ? 'pinned' : ''}"
+                tabindex="0"
+                role="button"
+                aria-label="Connect to ${host.name}"
                 @click=${() => this.selectHost(host)}
+                @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.selectHost(host); } }}
               >
                 ${this.renderAvatar(host)}
                 <div class="host-info">
@@ -304,7 +325,7 @@ export class HostBrowser extends LitElement {
             type="text"
             placeholder="wss://your-host.example/graphql"
             .value=${this.manualUrl}
-            @input=${(e: Event) => { this.manualUrl = (e.target as HTMLInputElement).value; }}
+            @input=${(e: Event) => { this.manualUrl = (e.target as HTMLInputElement).value; this.manualUrlError = null; }}
             @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter') this.connectManualUrl(); }}
             style="font-size: 14px;"
           />
@@ -316,6 +337,7 @@ export class HostBrowser extends LitElement {
             Connect
           </button>
         </div>
+        ${this.manualUrlError ? html`<p class="state danger" style="margin-top: 6px; font-size: 13px;">${this.manualUrlError}</p>` : ''}
       </div>
     `;
   }

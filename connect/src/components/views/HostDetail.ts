@@ -122,8 +122,13 @@ export class HostDetail extends LitElement {
         font-size: 13px;
       }
 
-      button {
+      button.connect-button {
         width: 100%;
+      }
+
+      button.back-button {
+        all: unset;
+        cursor: pointer;
       }
     `
   ];
@@ -146,6 +151,7 @@ export class HostDetail extends LitElement {
   }
 
   private formatPrice(price: number): string {
+    if (price === 0) return "0.00";
     // Show enough decimal places to be meaningful
     if (price >= 0.01) return price.toFixed(2);
     if (price >= 0.0001) return price.toFixed(4);
@@ -158,9 +164,9 @@ export class HostDetail extends LitElement {
 
     return html`
       <div class="container">
-        <div class="back-button" @click=${this.back}>
+        <button class="back-button" aria-label="Go back" @click=${this.back}>
           ${ArrowLeftIcon()}
-        </div>
+        </button>
 
         <div class="profile">
           ${this.renderAvatar()}
@@ -200,7 +206,7 @@ export class HostDetail extends LitElement {
           </div>
         ` : ''}
 
-        <button class="primary" @click=${this.proceedToAuth}>
+        <button class="primary connect-button" @click=${this.proceedToAuth}>
           Connect to ${this.host.name}
         </button>
       </div>

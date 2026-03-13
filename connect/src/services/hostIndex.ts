@@ -164,8 +164,8 @@ export async function fetchUserInfo(hostUrl: string, token: string): Promise<Use
     };
   }
 
-  // Convert wss:// GraphQL URL to https:// REST endpoint
-  const baseUrl = hostUrl.replace(/^wss?:\/\//, 'https://').replace(/\/graphql$/, '');
+  // Convert ws(s):// GraphQL URL to http(s):// REST endpoint
+  const baseUrl = hostUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://').replace(/\/graphql$/, '');
   const res = await fetch(`${baseUrl}/api/user-info`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -184,7 +184,7 @@ export async function requestPayment(
     return { success: true, message: "Payment request sent to Unit app" };
   }
 
-  const baseUrl = hostUrl.replace(/^wss?:\/\//, 'https://').replace(/\/graphql$/, '');
+  const baseUrl = hostUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://').replace(/\/graphql$/, '');
   const res = await fetch(`${baseUrl}/api/request-payment`, {
     method: 'POST',
     headers: {

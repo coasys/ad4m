@@ -70,9 +70,11 @@ export async function connectWebSocket(url, timeout = 10000) {
 
 /** Extract up to 2 initials from a name (first letter of first two words) */
 export function getInitials(name: string): string {
-  const words = name.trim().split(/\s+/);
+  const clean = name.trim();
+  if (!clean) return "";
+  const words = clean.split(/\s+/);
   if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
-  return name.slice(0, 2).toUpperCase();
+  return clean.slice(0, 2).toUpperCase();
 }
 
 /** Deterministic hue (0-359) from a string — same input always yields same color */

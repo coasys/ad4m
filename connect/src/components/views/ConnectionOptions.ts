@@ -109,7 +109,7 @@ export class ConnectionOptions extends LitElement {
         </div>
 
         <div class="options">
-          ${!this.isMobile ? html`
+          ${!this.isMobile || !this.showHosting ? html`
             <div class="box">
               <div class="box-header">
                 ${LocalIcon()}

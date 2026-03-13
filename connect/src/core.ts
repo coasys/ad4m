@@ -50,7 +50,20 @@ export default class Ad4mConnect extends EventTarget {
     // Restore last connected host for UI pinning
     const lastHost = getLocal("ad4m-last-host");
     if (lastHost) {
-      try { this.connectedHost = JSON.parse(lastHost); } catch { /* ignore corrupt data */ }
+      try {
+        const parsed = JSON.parse(lastHost);
+        if (parsed && parsed.id && parsed.url && parsed.name) {
+          this.connectedHost = {
+            id: parsed.id,
+            name: parsed.name,
+            profilePicUrl: parsed.profilePicUrl || "",
+            location: parsed.location || "",
+            url: parsed.url,
+            rates: parsed.rates || [],
+            aiModels: parsed.aiModels || [],
+          };
+        }
+      } catch { /* ignore corrupt data */ }
     }
 
     if (this.embedded) this.initializeEmbeddedMode();

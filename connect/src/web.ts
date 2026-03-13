@@ -173,7 +173,12 @@ export class Ad4mConnectElement extends LitElement {
 
     // Hosting events
     this.core.addEventListener('userinfochange', (e: any) => {
-      this.userInfo = e.detail as UserInfo;
+      const incoming = e.detail as UserInfo;
+      // Preserve locally-set wallet address until server confirms it via polling
+      if (this.userInfo?.hotWalletAddress && !incoming.hotWalletAddress) {
+        incoming.hotWalletAddress = this.userInfo.hotWalletAddress;
+      }
+      this.userInfo = incoming;
       this.lowCredit = this.userInfo.remainingCredits <= 10;
       this.requestUpdate();
     });
@@ -270,18 +275,24 @@ export class Ad4mConnectElement extends LitElement {
     const host = e.detail.host as RemoteHost;
     this.selectedHost = host;
 
-    // Set the core URL to this host's URL and persist it
-    this.core.url = host.url;
-    setLocal("ad4m-url", this.core.url);
+    const candidateUrl = host.url;
 
     try {
-      // Verify WS reachability
-      await connectWebSocket(host.url);
+      // Verify WS reachability before committing URL
+      await connectWebSocket(candidateUrl);
       console.log('[Ad4m Connect UI] Host connection successful:', host.name);
 
       // Verify it's an AD4M API
+      const prevUrl = this.core.url;
+      this.core.url = candidateUrl;
       const isValid = await this.core.isValidAd4mAPI();
-      if (!isValid) throw new Error("Server is reachable but doesn't appear to be an AD4M executor");
+      if (!isValid) {
+        this.core.url = prevUrl;
+        throw new Error("Server is reachable but doesn't appear to be an AD4M executor");
+      }
+
+      // Validation passed — persist
+      setLocal("ad4m-url", candidateUrl);
 
       // Navigate to remote authentication
       this.currentView = "remote-authentication";
