@@ -417,7 +417,11 @@ impl SurrealDBService {
                     const body = url.substring(10);
                     
                     if (body.startsWith('string:')) {
-                        return decodeURIComponent(body.substring(7));
+                        try {
+                            return decodeURIComponent(body.substring(7));
+                        } catch (e) {
+                            return body.substring(7);
+                        }
                     }
                     
                     if (body.startsWith('number:')) {
