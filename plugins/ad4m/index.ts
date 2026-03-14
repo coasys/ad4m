@@ -35,6 +35,7 @@ import {
   mcpListTools,
 } from "./mcpClient";
 import { buildWakeMessage, postWake } from "./wakerHelpers";
+import { WakerSubscriptionManager } from "./wakerSubscriptionManager";
 import { runSetup } from "./setup";
 
 // ---------------------------------------------------------------------------
@@ -71,6 +72,8 @@ export {
   extractMcpResultData,
 } from "./mcpClient";
 export { buildWakeMessage, postWake } from "./wakerHelpers";
+export { WakerSubscriptionManager } from "./wakerSubscriptionManager";
+export type { WakerSubscriptionManagerOptions, WakerLogger } from "./wakerSubscriptionManager";
 export { runSetup } from "./setup";
 
 // ---------------------------------------------------------------------------
@@ -152,9 +155,7 @@ export default function ad4mPlugin(api: any) {
 
   // -- Waker state --
   let wakerClient: any = null;
-  const wakerProxies = new Map<string, any>(); // id -> QuerySubscriptionProxy
-  const wakerDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  const activeSubscriptions = new Map<string, WakerSubscription>();
+  let subscriptionManager: WakerSubscriptionManager | null = null;
 
   /**
    * (Re-)initialize the MCP session. Called on first connect and when the
@@ -345,104 +346,12 @@ export default function ad4mPlugin(api: any) {
    * Requires the waker service to be running (wakerClient set).
    */
   async function createLiveSubscription(sub: WakerSubscription): Promise<void> {
-    if (!wakerClient) {
+    if (!subscriptionManager) {
       throw new Error(
         "Waker service not connected. Ensure ad4m-executor is running and wakerEnabled is true.",
       );
     }
-
-    // Dispose existing subscription with same id if any
-    disposeLiveSubscription(sub.id);
-
-    const { QuerySubscriptionProxy } = require("@coasys/ad4m");
-    const debounceMs = config.debounceMs ?? 2000;
-
-    logger.info(
-      `[ad4m-waker] ${sub.id}: creating subscription (perspective=${sub.perspective}, type=${sub.type})`,
-    );
-    logger.info(
-      `[ad4m-waker] ${sub.id}: SurrealQL query:\n${sub.query}`,
-    );
-
-    const proxy = new QuerySubscriptionProxy(
-      sub.perspective,
-      sub.query,
-      wakerClient.perspective,
-    );
-    proxy.isSurrealDB = true;
-    await proxy.subscribe();
-    await proxy.initialized;
-    logger.info(
-      `[ad4m-waker] ${sub.id}: subscription initialized successfully`,
-    );
-
-    let lastResultHash: string | null = null;
-
-    proxy.onResult(async (result: any) => {
-      const serialized = JSON.stringify(result);
-      if (lastResultHash === serialized) return;
-      lastResultHash = serialized;
-
-      const count = Array.isArray(result) ? result.length : "?";
-      logger.info(
-        `[ad4m-waker] ${sub.id}: query result changed (${count} items)`,
-      );
-      logger.debug(
-        `[ad4m-waker] ${sub.id}: raw result: ${JSON.stringify(result).substring(0, 500)}`,
-      );
-
-      // Determine the parent from the result.
-      // For mention subscriptions, the SurrealDB query already filters by
-      // predicate = 'ad4m://has_child', so every result record is a has_child
-      // link with flat fields (source, target, predicate, author, timestamp).
-      let parentChannel = sub.channel;
-      if (
-        !parentChannel &&
-        sub.type === "mention" &&
-        Array.isArray(result) &&
-        result.length > 0
-      ) {
-        const first = result[0];
-        if (first && first.source) {
-          parentChannel = first.source;
-          logger.info(
-            `[ad4m-waker] ${sub.id}: found parent ${parentChannel} from has_child link`,
-          );
-        } else {
-          logger.warn(
-            `[ad4m-waker] ${sub.id}: could not extract parent from first result: ${JSON.stringify(first).substring(0, 300)}`,
-          );
-        }
-      }
-
-      const existing = wakerDebounceTimers.get(sub.id);
-      if (existing) clearTimeout(existing);
-
-      wakerDebounceTimers.set(
-        sub.id,
-        setTimeout(() => {
-          postWake(config, sub, pluginAgentDid, logger, parentChannel);
-          wakerDebounceTimers.delete(sub.id);
-        }, debounceMs),
-      );
-    });
-
-    wakerProxies.set(sub.id, proxy);
-    activeSubscriptions.set(sub.id, sub);
-    persistSubscriptions();
-
-    logger.info(
-      `[ad4m-waker] Subscription ${sub.id} active (type=${sub.type}, perspective=${sub.perspective})`,
-    );
-  }
-
-  /**
-   * Persist the current subscription list to stateDir.
-   */
-  function persistSubscriptions(): void {
-    if (!stateDir) return;
-    const subs = Array.from(activeSubscriptions.values());
-    saveWakerState(stateDir, subs);
+    await subscriptionManager.subscribe(sub);
   }
 
   /**
@@ -451,22 +360,9 @@ export default function ad4mPlugin(api: any) {
    *   so saved subscriptions survive for restore on next start).
    */
   function disposeLiveSubscription(id: string, persist = true): void {
-    const proxy = wakerProxies.get(id);
-    if (proxy) {
-      try {
-        proxy.dispose();
-      } catch {
-        /* ignore */
-      }
-      wakerProxies.delete(id);
+    if (subscriptionManager) {
+      subscriptionManager.dispose(id, persist);
     }
-    const timer = wakerDebounceTimers.get(id);
-    if (timer) {
-      clearTimeout(timer);
-      wakerDebounceTimers.delete(id);
-    }
-    activeSubscriptions.delete(id);
-    if (persist) persistSubscriptions();
   }
 
   /**
@@ -576,7 +472,7 @@ Notes:
   ): Promise<string> {
     // Skip if already subscribed
     const existingId = `mention-${perspectiveId.substring(0, 8)}`;
-    if (activeSubscriptions.has(existingId)) {
+    if (subscriptionManager?.has(existingId)) {
       return `Already subscribed to mentions in perspective ${perspectiveId}.`;
     }
 
@@ -679,12 +575,12 @@ Notes:
     async execute(_id: string, params: { perspective_id: string }) {
       // Find subscription by perspective
       let found = false;
-      for (const [id, sub] of activeSubscriptions) {
+      for (const sub of (subscriptionManager?.getActive() ?? [])) {
         if (
           sub.perspective === params.perspective_id &&
           sub.type === "mention"
         ) {
-          disposeLiveSubscription(id);
+          disposeLiveSubscription(sub.id);
           found = true;
           break;
         }
@@ -801,13 +697,13 @@ Notes:
       params: { perspective_id: string; expression_address: string },
     ) {
       let found = false;
-      for (const [id, sub] of activeSubscriptions) {
+      for (const sub of (subscriptionManager?.getActive() ?? [])) {
         if (
           sub.perspective === params.perspective_id &&
           sub.channel === params.expression_address &&
           sub.type === "channel-messages"
         ) {
-          disposeLiveSubscription(id);
+          disposeLiveSubscription(sub.id);
           found = true;
           break;
         }
@@ -830,7 +726,7 @@ Notes:
     description: "List all active waker subscriptions.",
     parameters: { type: "object", properties: {}, required: [] },
     async execute() {
-      const subs = Array.from(activeSubscriptions.values());
+      const subs = subscriptionManager?.getActive() ?? [];
       if (subs.length === 0) {
         return {
           content: [{ type: "text", text: "No active waker subscriptions." }],
@@ -1057,7 +953,7 @@ Notes:
 
       try {
         // Dynamic imports to avoid load-time issues with @holochain/client transitive deps
-        const { Ad4mClient } = require("@coasys/ad4m");
+        const { Ad4mClient, QuerySubscriptionProxy } = require("@coasys/ad4m");
         const { ApolloClient, InMemoryCache } = require("@apollo/client/core");
         const { GraphQLWsLink } = require("@apollo/client/link/subscriptions");
         const { createClient } = require("graphql-ws");
@@ -1093,6 +989,20 @@ Notes:
         });
 
         wakerClient = new Ad4mClient(apolloClient);
+
+        // Create subscription manager wired to the Ad4mClient and wake callback
+        subscriptionManager = new WakerSubscriptionManager({
+          perspectiveClient: wakerClient.perspective,
+          logger,
+          QuerySubscriptionProxy,
+          debounceMs: config.debounceMs,
+          onWake: (sub, _result, parentChannel) => {
+            postWake(config, sub, pluginAgentDid, logger, parentChannel);
+          },
+          onPersist: (subs) => {
+            if (stateDir) saveWakerState(stateDir, subs);
+          },
+        });
 
         // Verify connection and get agent DID (agent should already be
         // initialized/unlocked by ensureAgentReady during mcp service start)
@@ -1137,8 +1047,9 @@ Notes:
       }
     },
     stop() {
-      for (const [id] of wakerProxies) {
-        disposeLiveSubscription(id, false);
+      if (subscriptionManager) {
+        subscriptionManager.disposeAll();
+        subscriptionManager = null;
       }
       wakerClient = null;
       logger.info("[ad4m-waker] Waker service stopped");
