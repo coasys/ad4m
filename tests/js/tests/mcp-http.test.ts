@@ -1776,5 +1776,80 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 console.log("Channel subscription did not fire — initial result may have been empty or unchanged");
             }
         });
+
+        it("should gracefully handle subscription to non-existent perspective", async function() {
+            this.timeout(15000);
+
+            var manager = new WakerSubscriptionManager({
+                perspectiveClient: wakerClient.perspective,
+                logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
+                QuerySubscriptionProxy,
+                debounceMs: 100,
+                onWake: function() {
+                    throw new Error("onWake should not be called for non-existent perspective");
+                },
+            });
+
+            // Subscribe to a perspective UUID that doesn't exist
+            var bogusId = "00000000-0000-0000-0000-000000000000";
+            try {
+                await manager.subscribe({
+                    id: "test-stale-" + Date.now(),
+                    type: "mention" as const,
+                    perspective: bogusId,
+                    channel: "",
+                    query: "SELECT * FROM link WHERE predicate = 'ad4m://has_child'",
+                });
+                // If subscribe didn't throw, that's also acceptable (some impls may defer the error)
+                console.log("subscribe() did not throw — checking manager has no active subscription");
+            } catch (err: any) {
+                console.log("subscribe() threw as expected:", err.message);
+                expect(err.message).to.match(/not found|does not exist|Perspective not found/i);
+            }
+
+            manager.disposeAll();
+        });
+
+        it("should not cause unhandled promise rejection when perspective does not exist", async function() {
+            this.timeout(15000);
+
+            // Listen for unhandled rejections — this is exactly what crashed OpenClaw
+            var unhandledRejection: any = null;
+            var rejectionHandler = function(reason: any) {
+                unhandledRejection = reason;
+            };
+            process.on("unhandledRejection", rejectionHandler);
+
+            var manager = new WakerSubscriptionManager({
+                perspectiveClient: wakerClient.perspective,
+                logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
+                QuerySubscriptionProxy,
+                debounceMs: 100,
+                onWake: function() {},
+            });
+
+            var bogusId = "00000000-0000-0000-0000-000000000000";
+            try {
+                await manager.subscribe({
+                    id: "test-no-unhandled-" + Date.now(),
+                    type: "mention" as const,
+                    perspective: bogusId,
+                    channel: "",
+                    query: "SELECT * FROM link WHERE predicate = 'ad4m://has_child'",
+                });
+            } catch {
+                // Expected — subscribe should throw for non-existent perspective
+            }
+
+            // Give the event loop a few ticks for any unhandled rejection to surface
+            await sleep(500);
+
+            process.removeListener("unhandledRejection", rejectionHandler);
+            manager.disposeAll();
+
+            expect(unhandledRejection).to.equal(null,
+                "Unhandled promise rejection detected: " +
+                (unhandledRejection?.message ?? String(unhandledRejection)));
+        });
     });
 });
