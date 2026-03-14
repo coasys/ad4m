@@ -69,9 +69,15 @@ impl Ad4mMcpHandler {
 
         let query = if let Some(ref parent) = p.parent_address {
             // Scope to children of a specific parent
+            // Use the same encoding logic as add_child/message_create: leave URIs as-is
+            let parent_encoded = if parent.contains("://") {
+                parent.clone()
+            } else {
+                Self::encode_literal(parent)
+            };
             format!(
                 "SELECT * FROM link WHERE source = '{}' AND predicate = 'ad4m://has_child'",
-                Self::encode_literal(parent)
+                parent_encoded
             )
         } else if let Some(ref predicate) = p.predicate {
             // Explicit predicate filter
@@ -219,7 +225,7 @@ impl Ad4mMcpHandler {
         let all_terms: Vec<String> = names
             .iter()
             .map(|n| n.to_lowercase())
-            .chain(std::iter::once(did.clone())) // DIDs already lowercase
+            .chain(std::iter::once(did.to_lowercase()))
             .collect();
 
         let mention_conditions: Vec<String> = all_terms
@@ -234,11 +240,13 @@ impl Ad4mMcpHandler {
 
         let mention_predicate = format!("({})", mention_conditions.join(" OR "));
 
-        // Use graph traversal to find has_child links where the target (message) contains a mention.
-        // The query traverses from has_child links to message body links using the -> operator.
-        // This returns has_child links only for messages that have mentions.
+        // Two-hop query: find has_child links where any property of the child contains a mention.
+        // has_child -> child_id -[any predicate]-> target_with_mention
+        // The 2nd hop is predicate-agnostic so it works regardless of ontology (flux://has_body, etc.)
+        // Note: must use array::len() > 0 instead of .source IS NOT NONE because SurrealDB
+        // returns [] (empty array) for non-matching graph traversals, and [] IS NOT NONE == true.
         let query = format!(
-            "SELECT * FROM link WHERE predicate = 'ad4m://has_child' AND out->link[WHERE {}].source IS NOT NONE",
+            "SELECT * FROM link WHERE predicate = 'ad4m://has_child' AND array::len(out->link[WHERE {}]) > 0",
             mention_predicate
         );
 
