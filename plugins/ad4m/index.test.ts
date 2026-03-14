@@ -55,6 +55,7 @@ import {
 } from "./index";
 
 import ad4mPlugin from "./index";
+import { WakerSubscriptionManager } from "../../core/src/perspectives/WakerSubscriptionManager";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2123,4 +2124,145 @@ describe("ad4mPlugin", () => {
     // Should NOT have attempted to start executor
     expect(mockSpawn).not.toHaveBeenCalled();
   }, 10000);
+});
+
+// ============================================================================
+// WakerSubscriptionManager unit tests
+// ============================================================================
+
+describe("WakerSubscriptionManager", () => {
+  /** Create a mock QuerySubscriptionProxy that lets tests control onResult delivery. */
+  function makeMockProxy() {
+    let resultCallback: ((result: any) => void) | null = null;
+    const proxy = {
+      isSurrealDB: false,
+      initialized: Promise.resolve(),
+      subscribe: vi.fn(() => Promise.resolve()),
+      dispose: vi.fn(),
+      onResult: vi.fn((cb: (result: any) => void) => {
+        resultCallback = cb;
+      }),
+    };
+    return {
+      ProxyClass: vi.fn(() => proxy),
+      proxy,
+      /** Simulate SurrealDB delivering a result */
+      deliver: (result: any) => {
+        if (!resultCallback) throw new Error("onResult not registered yet");
+        resultCallback(result);
+      },
+    };
+  }
+
+  const noopLogger = {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  };
+
+  it("should ignore non-array results (e.g. false) and not persist them as resultHashes", async () => {
+    const mock = makeMockProxy();
+    const persisted: { hashes: Record<string, string> } = { hashes: {} };
+    let wakeCount = 0;
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: {},
+      logger: { ...noopLogger },
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      onWake: () => { wakeCount++; },
+      onPersist: (_subs, hashes) => { persisted.hashes = hashes; },
+    });
+
+    await manager.subscribe({
+      id: "test-false",
+      type: "mention",
+      perspective: "fake-uuid",
+      channel: "",
+      query: "SELECT * FROM link",
+    });
+
+    // Deliver `false` — should be ignored
+    mock.deliver(false);
+    await new Promise(r => setTimeout(r, 50));
+    expect(wakeCount).toBe(0);
+    expect(persisted.hashes["test-false"]).toBeUndefined();
+
+    // Deliver a real result — should fire
+    mock.deliver([{ source: "channel-1", target: "msg-1", predicate: "ad4m://has_child" }]);
+    await new Promise(r => setTimeout(r, 50));
+    expect(wakeCount).toBe(1);
+    expect(persisted.hashes["test-false"]).toBeDefined();
+    expect(persisted.hashes["test-false"]).not.toBe("false");
+
+    manager.disposeAll();
+  });
+
+  it("should not wake for real result after false if false were persisted as hash (regression)", async () => {
+    // This replicates the bug: if `false` had been persisted as the hash,
+    // the next real result should still trigger a wake (not be skipped).
+    const mock = makeMockProxy();
+    let wakeCount = 0;
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: {},
+      logger: { ...noopLogger },
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      onWake: () => { wakeCount++; },
+      // Simulate a corrupted persisted state where hash is "false"
+      previousResultHashes: { "test-regression": "false" },
+    });
+
+    await manager.subscribe({
+      id: "test-regression",
+      type: "mention",
+      perspective: "fake-uuid",
+      channel: "",
+      query: "SELECT * FROM link",
+    });
+
+    // Deliver a real result — must still fire even though previous hash was "false"
+    mock.deliver([{ source: "channel-1", target: "msg-1" }]);
+    await new Promise(r => setTimeout(r, 50));
+    expect(wakeCount).toBe(1);
+
+    manager.disposeAll();
+  });
+
+  it("should ignore null and undefined results", async () => {
+    const mock = makeMockProxy();
+    let wakeCount = 0;
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: {},
+      logger: { ...noopLogger },
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      onWake: () => { wakeCount++; },
+    });
+
+    await manager.subscribe({
+      id: "test-nullish",
+      type: "channel-messages",
+      perspective: "fake-uuid",
+      channel: "ch1",
+      query: "SELECT * FROM link",
+    });
+
+    mock.deliver(null);
+    mock.deliver(undefined);
+    mock.deliver(0);
+    mock.deliver("");
+    await new Promise(r => setTimeout(r, 50));
+    expect(wakeCount).toBe(0);
+
+    // Real result should still work after all the junk
+    mock.deliver([{ target: "msg-1" }]);
+    await new Promise(r => setTimeout(r, 50));
+    expect(wakeCount).toBe(1);
+
+    manager.disposeAll();
+  });
 });

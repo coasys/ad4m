@@ -116,17 +116,30 @@ export class WakerSubscriptionManager {
     }
 
     proxy.onResult(async (result: any) => {
+      this.logger.info(
+        `[waker] ${sub.id}: onResult fired — type=${typeof result}, isArray=${Array.isArray(result)}, value=${String(JSON.stringify(result)).substring(0, 500)}`,
+      );
+
+      // SurrealDB can deliver non-array values (e.g. false) on disconnect/reconnect — ignore them
+      if (!Array.isArray(result)) {
+        this.logger.warn(
+          `[waker] ${sub.id}: ignoring non-array result: ${JSON.stringify(result)}`,
+        );
+        return;
+      }
       const serialized = JSON.stringify(result);
-      if (lastResultHash === serialized) return;
+      if (lastResultHash === serialized) {
+        this.logger.info(
+          `[waker] ${sub.id}: result unchanged (${result.length} items), skipping`,
+        );
+        return;
+      }
       lastResultHash = serialized;
       this.resultHashes.set(sub.id, serialized);
 
-      const count = Array.isArray(result) ? result.length : "?";
+      const count = result.length;
       this.logger.info(
         `[waker] ${sub.id}: query result changed (${count} items)`,
-      );
-      this.logger.debug(
-        `[waker] ${sub.id}: raw result: ${JSON.stringify(result).substring(0, 500)}`,
       );
 
       // Extract parent channel from has_child link results
