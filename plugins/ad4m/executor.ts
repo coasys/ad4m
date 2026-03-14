@@ -102,6 +102,7 @@ export async function ensureExecutorRunning(
   endpoint: string = "http://localhost:3001/mcp",
   wsEndpoint: string = "ws://localhost:12000/graphql",
   binaryPath?: string,
+  rustLog?: string,
 ): Promise<ExecutorStartResult> {
   logger.info(`[ad4m] Checking if executor is running at ${endpoint}...`);
 
@@ -163,6 +164,10 @@ export async function ensureExecutorRunning(
     let spawnFailed = false;
     let spawnError: string | null = null;
 
+    if (rustLog) {
+      logger.info(`[ad4m] Setting RUST_LOG=${rustLog}`);
+    }
+
     // Start the executor as a child process
     executorProcess = spawn(
       executorPath,
@@ -178,6 +183,10 @@ export async function ensureExecutorRunning(
       {
         stdio: ["ignore", "pipe", "pipe"],
         detached: false,
+        env: {
+          ...process.env,
+          ...(rustLog ? { RUST_LOG: rustLog } : {}),
+        },
       },
     );
 

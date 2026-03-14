@@ -33,5 +33,7 @@ export interface PluginConfig {
   wakeUrl?: string;
   wakeToken?: string;
   debounceMs?: number;
+  /** RUST_LOG value for the ad4m-executor process (e.g. "holochain=debug,kitsune=trace"). Only applies when the plugin spawns the executor (managed mode). */
+  rustLog?: string;
 }
 

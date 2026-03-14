@@ -819,6 +819,7 @@ Notes:
           endpoint,
           executorWsUrl,
           binaryPath,
+          config.rustLog,
         );
         if (!executorStartResult) {
           logger.error(
