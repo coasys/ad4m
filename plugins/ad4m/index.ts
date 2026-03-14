@@ -1007,8 +1007,8 @@ Notes:
           QuerySubscriptionProxy,
           debounceMs: config.debounceMs,
           previousResultHashes: savedState.resultHashes,
-          onWake: (sub, _result, parentChannel) => {
-            postWake(config, sub, pluginAgentDid, logger, parentChannel);
+          onWake: (sub, _result, parentChannel, allParents) => {
+            postWake(config, sub, pluginAgentDid, logger, parentChannel, allParents);
           },
           onPersist: (subs, resultHashes) => {
             if (stateDir) saveWakerState(stateDir, subs, resultHashes);

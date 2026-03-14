@@ -32,7 +32,7 @@ export interface WakerSubscriptionManagerOptions {
   /** Debounce interval in ms before firing the wake callback (default 2000) */
   debounceMs?: number;
   /** Called when a subscription fires (after debounce). Return value is ignored. */
-  onWake: (sub: WakerSubscription, result: any, parentChannel?: string) => void;
+  onWake: (sub: WakerSubscription, result: any, parentChannel?: string, allParents?: string[]) => void;
   /** Called when the active subscription list changes (for persistence). Includes last result hashes to avoid duplicate wakes on restart. */
   onPersist?: (subscriptions: WakerSubscription[], resultHashes: Record<string, string>) => void;
   /** Previously persisted result hashes (subscription id → JSON hash). Seeds lastResultHash on resubscribe to avoid duplicate wakes. */
@@ -45,7 +45,7 @@ export class WakerSubscriptionManager {
   private perspectiveClient: any;
   private logger: WakerLogger;
   private debounceMs: number;
-  private onWake: (sub: WakerSubscription, result: any, parentChannel?: string) => void;
+  private onWake: (sub: WakerSubscription, result: any, parentChannel?: string, allParents?: string[]) => void;
   private onPersist?: (subscriptions: WakerSubscription[], resultHashes: Record<string, string>) => void;
   private QuerySubscriptionProxyCtor: any;
   private previousResultHashes: Record<string, string>;
@@ -145,26 +145,27 @@ export class WakerSubscriptionManager {
         `[waker] ${sub.id}: query result changed (${count} items)`,
       );
 
-      // Extract parent channel from has_child link results
-      let parentChannel = sub.channel;
+      // Extract ALL unique parent addresses from has_child link results.
+      // A message can have multiple parents (e.g., channel + conversation thread).
+      let allParents: string[] = [];
       if (
-        !parentChannel &&
         sub.type === "mention" &&
         Array.isArray(result) &&
         result.length > 0
       ) {
-        const first = result[0];
-        if (first && first.source) {
-          parentChannel = first.source;
-          this.logger.info(
-            `[waker] ${sub.id}: found parent ${parentChannel} from has_child link`,
-          );
-        } else {
-          this.logger.warn(
-            `[waker] ${sub.id}: could not extract parent from first result: ${JSON.stringify(first).substring(0, 300)}`,
-          );
+        const seen = new Set<string>();
+        for (const item of result) {
+          if (item && item.source && !seen.has(item.source)) {
+            seen.add(item.source);
+            allParents.push(item.source);
+          }
         }
+        this.logger.info(
+          `[waker] ${sub.id}: found ${allParents.length} unique parent(s): ${allParents.join(", ")}`,
+        );
       }
+      // Fall back to subscription's channel if no parents extracted
+      const parentChannel = allParents.length > 0 ? allParents[0] : sub.channel;
 
       // Debounce the wake callback
       const existing = this.debounceTimers.get(sub.id);
@@ -173,7 +174,7 @@ export class WakerSubscriptionManager {
       this.debounceTimers.set(
         sub.id,
         setTimeout(() => {
-          this.onWake(sub, result, parentChannel);
+          this.onWake(sub, result, parentChannel, allParents);
           this.debounceTimers.delete(sub.id);
           this.persist();
         }, this.debounceMs),

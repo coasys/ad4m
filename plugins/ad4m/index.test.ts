@@ -2265,4 +2265,80 @@ describe("WakerSubscriptionManager", () => {
 
     manager.disposeAll();
   });
+
+  it("should extract all unique parents from mention results and pass them to onWake", async () => {
+    const mock = makeMockProxy();
+    let capturedParentChannel: string | undefined;
+    let capturedAllParents: string[] | undefined;
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: {},
+      logger: { ...noopLogger },
+      debounceMs: 0,
+      onWake: (_sub, _result, parentChannel, allParents) => {
+        capturedParentChannel = parentChannel;
+        capturedAllParents = allParents;
+      },
+      QuerySubscriptionProxy: mock.ProxyClass,
+    });
+
+    await manager.subscribe({
+      id: "test-multi-parent",
+      type: "mention",
+      perspective: "fake-uuid",
+      channel: "fallback-channel",
+      query: "SELECT * FROM link",
+    });
+
+    // Message belongs to both a channel and a conversation thread
+    mock.deliver([
+      { source: "channel-abc", target: "msg-1" },
+      { source: "conversation-xyz", target: "msg-1" },
+      { source: "channel-abc", target: "msg-2" }, // duplicate source
+    ]);
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(capturedAllParents).toBeDefined();
+    expect(capturedAllParents).toHaveLength(2);
+    expect(capturedAllParents).toContain("channel-abc");
+    expect(capturedAllParents).toContain("conversation-xyz");
+    // parentChannel should be the first unique parent
+    expect(capturedParentChannel).toBe("channel-abc");
+
+    manager.disposeAll();
+  });
+
+  it("should fall back to subscription channel when no parents in results", async () => {
+    const mock = makeMockProxy();
+    let capturedParentChannel: string | undefined;
+    let capturedAllParents: string[] | undefined;
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: {},
+      logger: { ...noopLogger },
+      debounceMs: 0,
+      onWake: (_sub, _result, parentChannel, allParents) => {
+        capturedParentChannel = parentChannel;
+        capturedAllParents = allParents;
+      },
+      QuerySubscriptionProxy: mock.ProxyClass,
+    });
+
+    await manager.subscribe({
+      id: "test-no-parent",
+      type: "mention",
+      perspective: "fake-uuid",
+      channel: "fallback-channel",
+      query: "SELECT * FROM link",
+    });
+
+    // Results without source fields
+    mock.deliver([{ target: "msg-1" }]);
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(capturedAllParents).toEqual([]);
+    expect(capturedParentChannel).toBe("fallback-channel");
+
+    manager.disposeAll();
+  });
 });
