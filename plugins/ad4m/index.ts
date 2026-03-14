@@ -990,7 +990,7 @@ Notes:
           },
         });
 
-        wakerClient = new Ad4mClient(apolloClient);
+        wakerClient = new Ad4mClient(apolloClient, false);
 
         // Load persisted state (subscriptions + result hashes) before creating manager
         const savedState = stateDir ? loadWakerState(stateDir) : { subscriptions: [], resultHashes: {} };
