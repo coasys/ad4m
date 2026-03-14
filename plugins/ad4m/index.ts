@@ -977,6 +977,11 @@ Notes:
             );
             await new Promise((r: any) => setTimeout(r, delay));
           },
+          on: {
+            connected: () => logger.info("[ad4m-waker] WebSocket connected"),
+            closed: (event: any) => logger.warn(`[ad4m-waker] WebSocket closed: ${JSON.stringify(event)}`),
+            error: (error: any) => logger.error(`[ad4m-waker] WebSocket error: ${error?.message ?? error}`),
+          },
         });
 
         const wsLink = new GraphQLWsLink(wsClient);
