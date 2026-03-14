@@ -319,8 +319,15 @@ impl Ad4mMcpHandler {
         let mut entries: Vec<ChildEntry> = Vec::new();
         let mut unique_dids: Vec<String> = Vec::new();
 
-        for child_link in &child_links {
+        for (i, child_link) in child_links.iter().enumerate() {
             let child_addr = &child_link.data.target;
+
+            if i == 0 {
+                log::info!(
+                    "get_children_body_parsed: first child_addr={}, body_predicate={}",
+                    child_addr, body_predicate
+                );
+            }
 
             // Get the body property link
             let body_value = match perspective
@@ -332,9 +339,41 @@ impl Ad4mMcpHandler {
                 .await
             {
                 Ok(links) if !links.is_empty() => {
+                    if i == 0 {
+                        log::info!(
+                            "get_children_body_parsed: first body link target={}",
+                            &links[0].data.target.chars().take(200).collect::<String>()
+                        );
+                    }
                     resolve_expression_value(&links[0].data.target).await
                 }
-                _ => "(no body)".to_string(),
+                Ok(_) => {
+                    if i == 0 {
+                        // For the first child, also try querying ALL links from this source
+                        // to help debug predicate mismatches
+                        let all_links = perspective
+                            .get_links(&LinkQuery {
+                                source: Some(child_addr.clone()),
+                                ..Default::default()
+                            })
+                            .await;
+                        let predicates: Vec<String> = match &all_links {
+                            Ok(links) => links.iter().map(|l| {
+                                format!("{} -> {}", l.data.predicate.as_deref().unwrap_or("(none)"), &l.data.target.chars().take(80).collect::<String>())
+                            }).collect(),
+                            Err(e) => vec![format!("error: {}", e)],
+                        };
+                        log::warn!(
+                            "get_children_body_parsed: no body link found for child_addr={}. All links from this source: {:?}",
+                            child_addr, predicates
+                        );
+                    }
+                    "(no body)".to_string()
+                }
+                Err(e) => {
+                    log::warn!("get_children_body_parsed: error querying body links: {}", e);
+                    "(no body)".to_string()
+                }
             };
 
             let author_did = child_link.author.clone();
