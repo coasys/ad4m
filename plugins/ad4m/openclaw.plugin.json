@@ -61,6 +61,12 @@
       "rustLog": {
         "type": "string",
         "description": "RUST_LOG value for the ad4m-executor process (e.g. 'holochain=debug,kitsune2=trace'). Only applies in managed mode."
+      },
+      "executorLogTarget": {
+        "type": "string",
+        "enum": ["file", "openclaw", "both"],
+        "default": "file",
+        "description": "Where to send executor logs: 'file' = ~/.ad4m/ad4m.log only (default), 'openclaw' = OpenClaw logs only, 'both' = both destinations."
       }
     },
     "required": [],

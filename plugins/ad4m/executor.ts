@@ -103,6 +103,7 @@ export async function ensureExecutorRunning(
   wsEndpoint: string = "ws://localhost:12000/graphql",
   binaryPath?: string,
   rustLog?: string,
+  logTarget: "file" | "openclaw" | "both" = "file",
 ): Promise<ExecutorStartResult> {
   logger.info(`[ad4m] Checking if executor is running at ${endpoint}...`);
 
@@ -190,10 +191,13 @@ export async function ensureExecutorRunning(
       },
     );
 
+    const logToOpenclaw = logTarget === "openclaw" || logTarget === "both";
+    const logToFile = logTarget === "file" || logTarget === "both";
+
     executorProcess.stdout?.on("data", (data: Buffer) => {
       const line = data.toString().trim();
-      logger.info(`[ad4m-executor] ${line}`);
-      if (executorLogStream) {
+      if (logToOpenclaw) logger.info(`[ad4m-executor] ${line}`);
+      if (logToFile && executorLogStream) {
         executorLogStream.write(
           `${new Date().toISOString()} [stdout] ${line}\n`,
         );
@@ -202,8 +206,8 @@ export async function ensureExecutorRunning(
 
     executorProcess.stderr?.on("data", (data: Buffer) => {
       const line = data.toString().trim();
-      logger.info(`[ad4m-executor] ${line}`);
-      if (executorLogStream) {
+      if (logToOpenclaw) logger.info(`[ad4m-executor] ${line}`);
+      if (logToFile && executorLogStream) {
         executorLogStream.write(
           `${new Date().toISOString()} [stderr] ${line}\n`,
         );

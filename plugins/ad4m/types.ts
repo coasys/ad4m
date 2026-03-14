@@ -35,5 +35,7 @@ export interface PluginConfig {
   debounceMs?: number;
   /** RUST_LOG value for the ad4m-executor process (e.g. "holochain=debug,kitsune=trace"). Only applies when the plugin spawns the executor (managed mode). */
   rustLog?: string;
+  /** Where to send executor logs: "file" (default) = ~/.ad4m/ad4m.log only, "openclaw" = openclaw logs only, "both" = both. */
+  executorLogTarget?: "file" | "openclaw" | "both";
 }
 

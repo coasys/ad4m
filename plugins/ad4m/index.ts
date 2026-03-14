@@ -820,6 +820,7 @@ Notes:
           executorWsUrl,
           binaryPath,
           config.rustLog,
+          config.executorLogTarget ?? "file",
         );
         if (!executorStartResult) {
           logger.error(
