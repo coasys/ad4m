@@ -217,11 +217,12 @@ impl Ad4mMcpHandler {
         //
         // Both functions are already defined in SurrealDBService::new().
         // Case-insensitive matching via string::lowercase() (SurrealDB built-in):
-        //   string::lowercase(fn::parse_literal(target)) lowercases the parsed value;
-        //   search terms are also lowercased in Rust before embedding in the query.
+        //   string::lowercase(<string> fn::parse_literal(target)) casts to string then
+        //   lowercases; the <string> cast is needed because fn::parse_literal can return
+        //   booleans/numbers for literal://boolean: and literal://number: URLs, and
+        //   string::lowercase() throws on non-string input.
+        //   Search terms are also lowercased in Rust before embedding in the query.
         //   DIDs are already lowercase so .to_lowercase() is a no-op for them.
-        //   If string::lowercase() receives a non-string (null/object), it returns null,
-        //   which fn::contains handles gracefully (returns false).
         let all_terms: Vec<String> = names
             .iter()
             .map(|n| n.to_lowercase())
@@ -232,7 +233,7 @@ impl Ad4mMcpHandler {
             .iter()
             .map(|t| {
                 format!(
-                    "fn::contains(string::lowercase(fn::parse_literal(target)), '{}')",
+                    "fn::contains(string::lowercase(<string> fn::parse_literal(target)), '{}')",
                     t
                 )
             })
