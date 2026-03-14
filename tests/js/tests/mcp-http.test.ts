@@ -1777,36 +1777,31 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }
         });
 
-        it("should gracefully handle subscription to non-existent perspective", async function() {
+        it("should gracefully handle subscription to non-existent perspective without throwing", async function() {
             this.timeout(15000);
 
+            var wakeCount = 0;
             var manager = new WakerSubscriptionManager({
                 perspectiveClient: wakerClient.perspective,
                 logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
                 QuerySubscriptionProxy,
                 debounceMs: 100,
-                onWake: function() {
-                    throw new Error("onWake should not be called for non-existent perspective");
-                },
+                onWake: function() { wakeCount++; },
             });
 
-            // Subscribe to a perspective UUID that doesn't exist
+            // Subscribe to a perspective UUID that doesn't exist — should NOT throw
             var bogusId = "00000000-0000-0000-0000-000000000000";
-            try {
-                await manager.subscribe({
-                    id: "test-stale-" + Date.now(),
-                    type: "mention" as const,
-                    perspective: bogusId,
-                    channel: "",
-                    query: "SELECT * FROM link WHERE predicate = 'ad4m://has_child'",
-                });
-                // If subscribe didn't throw, that's also acceptable (some impls may defer the error)
-                console.log("subscribe() did not throw — checking manager has no active subscription");
-            } catch (err: any) {
-                console.log("subscribe() threw as expected:", err.message);
-                expect(err.message).to.match(/not found|does not exist|Perspective not found/i);
-            }
+            await manager.subscribe({
+                id: "test-stale-" + Date.now(),
+                type: "mention" as const,
+                perspective: bogusId,
+                channel: "",
+                query: "SELECT * FROM link WHERE predicate = 'ad4m://has_child'",
+            });
 
+            // Should not have woken or added to active subscriptions
+            await sleep(500);
+            expect(wakeCount).to.equal(0, "onWake should not fire for non-existent perspective");
             manager.disposeAll();
         });
 

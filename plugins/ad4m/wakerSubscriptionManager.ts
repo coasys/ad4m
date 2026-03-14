@@ -79,10 +79,9 @@ export class WakerSubscriptionManager {
       this.perspectiveClient,
     );
     proxy.isSurrealDB = true;
-    // Attach a no-op catch to proxy.initialized BEFORE calling subscribe(),
-    // because subscribe() rejects this promise internally on failure and
-    // if nobody has caught it by the next microtask it becomes an
-    // unhandled promise rejection (which crashes OpenClaw).
+    // Suppress unhandled rejection from proxy.initialized — QuerySubscriptionProxy
+    // rejects this promise internally when subscribe() fails, and if nobody catches
+    // it before the next microtask it crashes the process.
     if (proxy.initialized && typeof proxy.initialized.catch === "function") {
       proxy.initialized.catch(() => {});
     }
@@ -90,8 +89,16 @@ export class WakerSubscriptionManager {
       await proxy.subscribe();
       await proxy.initialized;
     } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      this.logger.warn(
+        `[waker] ${sub.id}: subscription failed — ${msg}`,
+      );
       try { proxy.dispose(); } catch {}
-      throw err;
+      // Remove from active state so it doesn't get persisted/retried
+      this.activeSubscriptions.delete(sub.id);
+      this.resultHashes.delete(sub.id);
+      this.persist();
+      return; // Don't throw — caller should not crash
     }
     this.logger.info(`[waker] ${sub.id}: subscription initialized successfully`);
 
