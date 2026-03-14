@@ -11,14 +11,8 @@ export interface McpTool {
   inputSchema?: Record<string, any>;
 }
 
-export interface WakerSubscription {
-  id: string;
-  type: "mention" | "channel-messages";
-  perspective: string;
-  channel: string;
-  query: string;
-  neighbourhood?: string;
-}
+// WakerSubscription is defined in wakerSubscriptionManager.ts (kept import-free for testability)
+export type { WakerSubscription } from "./wakerSubscriptionManager";
 
 export interface PluginConfig {
   mode?: "managed" | "external";
