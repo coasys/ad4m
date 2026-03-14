@@ -57,6 +57,10 @@
         "type": "number",
         "default": 2000,
         "description": "Debounce interval for wake events (ms)"
+      },
+      "rustLog": {
+        "type": "string",
+        "description": "RUST_LOG value for the ad4m-executor process (e.g. 'holochain=debug,kitsune2=trace'). Only applies in managed mode."
       }
     },
     "required": [],
