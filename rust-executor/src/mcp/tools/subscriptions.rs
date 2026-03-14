@@ -145,7 +145,7 @@ impl Ad4mMcpHandler {
 
     /// Generate a single waker subscription config for mention tracking
     #[tool(
-        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. Uses fn::contains(fn::parse_literal(target), term): fn::parse_literal extracts only the .data field from literal://json: Flux message bodies, so the author DID in the surrounding expression shape does not produce false-positive wakes; for literal://string: targets it returns the decoded value; for non-literal strings (raw DIDs etc.) it returns the value unchanged so explicit DID-as-target mention links still match. Both functions are already defined in SurrealDBService::new(). Returns one subscription ORing all profile names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
+        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. Watches for any link whose target contains a mention term (using fn::contains + fn::parse_literal for literal decoding). The waker plugin resolves parent channels in a second query when the subscription fires. Returns one subscription ORing all profile names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
     )]
     pub async fn get_mention_waker_config(
         &self,
@@ -241,13 +241,13 @@ impl Ad4mMcpHandler {
 
         let mention_predicate = format!("({})", mention_conditions.join(" OR "));
 
-        // Two-hop query: find has_child links where any property of the child contains a mention.
-        // has_child -> child_id -[any predicate]-> target_with_mention
-        // The 2nd hop is predicate-agnostic so it works regardless of ontology (flux://has_body, etc.)
-        // Note: must use array::len() > 0 instead of .source IS NOT NONE because SurrealDB
-        // returns [] (empty array) for non-matching graph traversals, and [] IS NOT NONE == true.
+        // Direct body-link query: watch for any link whose target contains a mention term.
+        // Each result has `source` = message address (the base expression).
+        // Parent resolution (finding which channel the message belongs to) is done by the
+        // waker plugin in a second query after the subscription fires.
+        // This is much faster than the old two-hop graph traversal query.
         let query = format!(
-            "SELECT * FROM link WHERE predicate = 'ad4m://has_child' AND array::len(out->link[WHERE {}]) > 0",
+            "SELECT * FROM link WHERE {}",
             mention_predicate
         );
 

@@ -1306,36 +1306,33 @@ describe("buildWakeMessage", () => {
     query: "SELECT * FROM ...",
   };
 
-  it("builds a mention wake message", () => {
-    const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", "");
+  it("builds a mention wake message with per-message parents", () => {
+    const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
+      { address: "msg-1", parents: ["channel-abc", "conversation-xyz"] },
+      { address: "msg-2", parents: ["channel-abc"] },
+    ]);
     expect(msg).toContain("You were @mentioned in an AD4M neighbourhood.");
     expect(msg).toContain("Agent DID: did:key:z6Mk123");
     expect(msg).toContain("Perspective: uuid-123");
-    expect(msg).toContain("Subscription: mention-abc");
-    expect(msg).toContain("Event type: mention");
+    expect(msg).toContain("Mentioned messages (2):");
+    expect(msg).toContain("Message: msg-1");
+    expect(msg).toContain("Parents: channel-abc, conversation-xyz");
+    expect(msg).toContain("Message: msg-2");
   });
 
-  it("builds a channel-messages wake message", () => {
-    const msg = buildWakeMessage(
-      config,
-      channelSub,
-      "did:key:z6Mk456",
-      "literal://string:channel-1",
-    );
+  it("builds a channel-messages wake message without mentions", () => {
+    const msg = buildWakeMessage(config, channelSub, "did:key:z6Mk456");
     expect(msg).toContain("New messages in an AD4M neighbourhood.");
-    expect(msg).toContain("Parent: literal://string:channel-1");
     expect(msg).toContain("Perspective: uuid-456");
     expect(msg).toContain("Event type: channel-messages");
+    expect(msg).not.toContain("Mentioned messages");
   });
 
-  it("omits Parent line when parent is empty", () => {
-    const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", "");
-    expect(msg).not.toContain("Parent:");
-  });
-
-  it("omits Neighbourhood line when not set", () => {
-    const msg = buildWakeMessage(config, channelSub, "did:key:z6Mk456", "ch1");
-    expect(msg).not.toContain("Neighbourhood:");
+  it("shows (unknown) parents when empty", () => {
+    const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
+      { address: "msg-1", parents: [] },
+    ]);
+    expect(msg).toContain("Parents: (unknown)");
   });
 });
 
@@ -2161,13 +2158,17 @@ describe("WakerSubscriptionManager", () => {
     debug: vi.fn(),
   };
 
+  const mockPerspectiveClientSimple = {
+    querySurrealDB: vi.fn(() => Promise.resolve([])),
+  };
+
   it("should ignore non-array results (e.g. false) and not persist them as resultHashes", async () => {
     const mock = makeMockProxy();
     const persisted: { hashes: Record<string, string> } = { hashes: {} };
     let wakeCount = 0;
 
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: {},
+      perspectiveClient: mockPerspectiveClientSimple,
       logger: { ...noopLogger },
       QuerySubscriptionProxy: mock.ProxyClass,
       debounceMs: 10,
@@ -2206,7 +2207,7 @@ describe("WakerSubscriptionManager", () => {
     let wakeCount = 0;
 
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: {},
+      perspectiveClient: mockPerspectiveClientSimple,
       logger: { ...noopLogger },
       QuerySubscriptionProxy: mock.ProxyClass,
       debounceMs: 10,
@@ -2236,7 +2237,7 @@ describe("WakerSubscriptionManager", () => {
     let wakeCount = 0;
 
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: {},
+      perspectiveClient: mockPerspectiveClientSimple,
       logger: { ...noopLogger },
       QuerySubscriptionProxy: mock.ProxyClass,
       debounceMs: 10,
@@ -2266,18 +2267,36 @@ describe("WakerSubscriptionManager", () => {
     manager.disposeAll();
   });
 
-  it("should extract all unique parents from mention results and pass them to onWake", async () => {
+  it("should resolve per-message parents via second query for mention subscriptions", async () => {
     const mock = makeMockProxy();
-    let capturedParentChannel: string | undefined;
-    let capturedAllParents: string[] | undefined;
+    let capturedMentions: any[] | undefined;
+
+    // Mock perspectiveClient.querySurrealDB to return has_child links for parent resolution
+    const mockPerspectiveClient = {
+      querySurrealDB: vi.fn((_perspectiveId: string, query: string) => {
+        // msg-1 has two parents (channel + conversation thread)
+        if (query.includes("msg-1")) {
+          return Promise.resolve([
+            { source: "channel-abc", target: "msg-1", predicate: "ad4m://has_child" },
+            { source: "conversation-xyz", target: "msg-1", predicate: "ad4m://has_child" },
+          ]);
+        }
+        // msg-2 is only in channel-abc
+        if (query.includes("msg-2")) {
+          return Promise.resolve([
+            { source: "channel-abc", target: "msg-2", predicate: "ad4m://has_child" },
+          ]);
+        }
+        return Promise.resolve([]);
+      }),
+    };
 
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: {},
+      perspectiveClient: mockPerspectiveClient,
       logger: { ...noopLogger },
       debounceMs: 0,
-      onWake: (_sub, _result, parentChannel, allParents) => {
-        capturedParentChannel = parentChannel;
-        capturedAllParents = allParents;
+      onWake: (_sub, _result, mentions) => {
+        capturedMentions = mentions;
       },
       QuerySubscriptionProxy: mock.ProxyClass,
     });
@@ -2290,36 +2309,40 @@ describe("WakerSubscriptionManager", () => {
       query: "SELECT * FROM link",
     });
 
-    // Message belongs to both a channel and a conversation thread
+    // Body links: source = message address, target = body content with mention
     mock.deliver([
-      { source: "channel-abc", target: "msg-1" },
-      { source: "conversation-xyz", target: "msg-1" },
-      { source: "channel-abc", target: "msg-2" }, // duplicate source
+      { source: "msg-1", target: "literal://string:Hey @Marvin!" },
+      { source: "msg-2", target: "literal://string:@Marvin check this" },
     ]);
     await new Promise(r => setTimeout(r, 50));
 
-    expect(capturedAllParents).toBeDefined();
-    expect(capturedAllParents).toHaveLength(2);
-    expect(capturedAllParents).toContain("channel-abc");
-    expect(capturedAllParents).toContain("conversation-xyz");
-    // parentChannel should be the first unique parent
-    expect(capturedParentChannel).toBe("channel-abc");
+    expect(mockPerspectiveClient.querySurrealDB).toHaveBeenCalledTimes(2);
+    expect(capturedMentions).toBeDefined();
+    expect(capturedMentions).toHaveLength(2);
+    // msg-1 has two parents
+    expect(capturedMentions![0].address).toBe("msg-1");
+    expect(capturedMentions![0].parents).toEqual(["channel-abc", "conversation-xyz"]);
+    // msg-2 has one parent
+    expect(capturedMentions![1].address).toBe("msg-2");
+    expect(capturedMentions![1].parents).toEqual(["channel-abc"]);
 
     manager.disposeAll();
   });
 
-  it("should fall back to subscription channel when no parents in results", async () => {
+  it("should return empty parents array when parent resolution returns nothing", async () => {
     const mock = makeMockProxy();
-    let capturedParentChannel: string | undefined;
-    let capturedAllParents: string[] | undefined;
+    let capturedMentions: any[] | undefined;
+
+    const mockPerspectiveClient = {
+      querySurrealDB: vi.fn(() => Promise.resolve([])),
+    };
 
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: {},
+      perspectiveClient: mockPerspectiveClient,
       logger: { ...noopLogger },
       debounceMs: 0,
-      onWake: (_sub, _result, parentChannel, allParents) => {
-        capturedParentChannel = parentChannel;
-        capturedAllParents = allParents;
+      onWake: (_sub, _result, mentions) => {
+        capturedMentions = mentions;
       },
       QuerySubscriptionProxy: mock.ProxyClass,
     });
@@ -2332,12 +2355,52 @@ describe("WakerSubscriptionManager", () => {
       query: "SELECT * FROM link",
     });
 
-    // Results without source fields
-    mock.deliver([{ target: "msg-1" }]);
+    mock.deliver([{ source: "msg-1", target: "literal://string:Hey @Marvin!" }]);
     await new Promise(r => setTimeout(r, 50));
 
-    expect(capturedAllParents).toEqual([]);
-    expect(capturedParentChannel).toBe("fallback-channel");
+    expect(capturedMentions).toHaveLength(1);
+    expect(capturedMentions![0].address).toBe("msg-1");
+    expect(capturedMentions![0].parents).toEqual([]);
+
+    manager.disposeAll();
+  });
+
+  it("should handle parent resolution failure gracefully with empty parents", async () => {
+    const mock = makeMockProxy();
+    let capturedMentions: any[] | undefined;
+    let wakeCount = 0;
+
+    const mockPerspectiveClient = {
+      querySurrealDB: vi.fn(() => Promise.reject(new Error("network error"))),
+    };
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: mockPerspectiveClient,
+      logger: { ...noopLogger },
+      debounceMs: 0,
+      onWake: (_sub, _result, mentions) => {
+        capturedMentions = mentions;
+        wakeCount++;
+      },
+      QuerySubscriptionProxy: mock.ProxyClass,
+    });
+
+    await manager.subscribe({
+      id: "test-parent-fail",
+      type: "mention",
+      perspective: "fake-uuid",
+      channel: "fallback-channel",
+      query: "SELECT * FROM link",
+    });
+
+    mock.deliver([{ source: "msg-1", target: "literal://string:Hey @Marvin!" }]);
+    await new Promise(r => setTimeout(r, 50));
+
+    // Should still wake with empty parents for the message
+    expect(wakeCount).toBe(1);
+    expect(capturedMentions).toHaveLength(1);
+    expect(capturedMentions![0].address).toBe("msg-1");
+    expect(capturedMentions![0].parents).toEqual([]);
 
     manager.disposeAll();
   });

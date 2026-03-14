@@ -1,45 +1,41 @@
 import type { PluginConfig, WakerSubscription } from "./types";
+import type { MentionMessage } from "./wakerSubscriptionManager";
 
 export function buildWakeMessage(
   config: PluginConfig,
   sub: WakerSubscription,
   agentDid: string,
-  parent: string,
-  allParents?: string[],
+  mentions?: MentionMessage[],
 ): string {
   const event =
     sub.type === "mention"
       ? "You were @mentioned in an AD4M neighbourhood."
       : "New messages in an AD4M neighbourhood.";
 
-  // Build parent info: list all parents so the agent can determine
-  // which is the channel vs conversation thread etc.
-  let parentLines: string[] = [];
-  if (allParents && allParents.length > 1) {
-    // Multiple parents — the message belongs to several containers
-    // (e.g., a channel AND a conversation thread).
-    // List all so the agent can use get_children or Channel_list to identify
-    // which is the channel.
-    parentLines.push(`Parents (${allParents.length}): ${allParents.join(", ")}`);
-    parentLines.push(
-      "Note: this message has multiple parents. Use Channel_list or get_children to identify which parent is the channel.",
-    );
-  } else if (parent) {
-    parentLines.push(`Parent: ${parent}`);
-  }
-
-  return [
+  const lines: string[] = [
     event,
     "Read the AD4M skill for instructions on how to handle this.",
     "",
     `Agent DID: ${agentDid}`,
     `Perspective: ${sub.perspective}`,
-    ...parentLines,
     `Subscription: ${sub.id}`,
     `Event type: ${sub.type}`,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  ];
+
+  if (mentions && mentions.length > 0) {
+    lines.push("");
+    lines.push(`Mentioned messages (${mentions.length}):`);
+    for (const m of mentions) {
+      lines.push(`  Message: ${m.address}`);
+      if (m.parents.length > 0) {
+        lines.push(`  Parents: ${m.parents.join(", ")}`);
+      } else {
+        lines.push(`  Parents: (unknown)`);
+      }
+    }
+  }
+
+  return lines.filter(Boolean).join("\n");
 }
 
 export async function postWake(
@@ -47,14 +43,12 @@ export async function postWake(
   sub: WakerSubscription,
   agentDid: string,
   logger: any,
-  parentChannel?: string,
-  allParents?: string[],
+  mentions?: MentionMessage[],
 ): Promise<void> {
-  const effectiveChannel = parentChannel || sub.channel;
   logger.info(
-    `[ad4m-waker] postWake: sub=${sub.id}, type=${sub.type}, parentChannel=${parentChannel ?? "(none)"}, allParents=${allParents?.join(", ") ?? "(none)"}, effectiveChannel=${effectiveChannel ?? "(none)"}`,
+    `[ad4m-waker] postWake: sub=${sub.id}, type=${sub.type}, mentions=${mentions?.length ?? 0}`,
   );
-  const message = buildWakeMessage(config, sub, agentDid, effectiveChannel, allParents);
+  const message = buildWakeMessage(config, sub, agentDid, mentions);
   const body = JSON.stringify({ text: message, mode: "now" });
   logger.debug(`[ad4m-waker] wake body: ${message}`);
 

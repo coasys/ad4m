@@ -16,6 +16,14 @@ export interface WakerSubscription {
   neighbourhood?: string;
 }
 
+/** Per-message parent resolution result for mention subscriptions. */
+export interface MentionMessage {
+  /** The message's expression address (source of the body link). */
+  address: string;
+  /** All parent addresses this message belongs to (channels, conversations, etc.). */
+  parents: string[];
+}
+
 export interface WakerLogger {
   info(msg: string): void;
   warn(msg: string): void;
@@ -30,8 +38,9 @@ export interface WakerSubscriptionManagerOptions {
   logger: WakerLogger;
   /** Debounce interval in ms before firing the wake callback (default 2000) */
   debounceMs?: number;
-  /** Called when a subscription fires (after debounce). Return value is ignored. */
-  onWake: (sub: WakerSubscription, result: any, parentChannel?: string, allParents?: string[]) => void;
+  /** Called when a subscription fires (after debounce). Return value is ignored.
+   *  For mention subs, `mentions` contains per-message parent info. */
+  onWake: (sub: WakerSubscription, result: any, mentions?: MentionMessage[]) => void;
   /** Called when the active subscription list changes (for persistence). Includes last result hashes to avoid duplicate wakes on restart. */
   onPersist?: (subscriptions: WakerSubscription[], resultHashes: Record<string, string>) => void;
   /** Previously persisted result hashes (subscription id → JSON hash). Seeds lastResultHash on resubscribe to avoid duplicate wakes. */
@@ -44,7 +53,7 @@ export class WakerSubscriptionManager {
   private perspectiveClient: any;
   private logger: WakerLogger;
   private debounceMs: number;
-  private onWake: (sub: WakerSubscription, result: any, parentChannel?: string, allParents?: string[]) => void;
+  private onWake: (sub: WakerSubscription, result: any, mentions?: MentionMessage[]) => void;
   private onPersist?: (subscriptions: WakerSubscription[], resultHashes: Record<string, string>) => void;
   private QuerySubscriptionProxyCtor: any;
   private previousResultHashes: Record<string, string>;
@@ -144,27 +153,50 @@ export class WakerSubscriptionManager {
         `[waker] ${sub.id}: query result changed (${count} items)`,
       );
 
-      // Extract ALL unique parent addresses from has_child link results.
-      // A message can have multiple parents (e.g., channel + conversation thread).
-      let allParents: string[] = [];
-      if (
-        sub.type === "mention" &&
-        Array.isArray(result) &&
-        result.length > 0
-      ) {
-        const seen = new Set<string>();
+      // For mention subscriptions, the query returns body links whose target
+      // contains a mention. Each result has `source` = message address.
+      // We resolve parents per message via a second SurrealDB query.
+      let mentions: MentionMessage[] | undefined;
+
+      if (sub.type === "mention" && result.length > 0) {
+        const seenMessages = new Set<string>();
+        const messageAddresses: string[] = [];
         for (const item of result) {
-          if (item && item.source && !seen.has(item.source)) {
-            seen.add(item.source);
-            allParents.push(item.source);
+          if (item && item.source && !seenMessages.has(item.source)) {
+            seenMessages.add(item.source);
+            messageAddresses.push(item.source);
           }
         }
         this.logger.info(
-          `[waker] ${sub.id}: found ${allParents.length} unique parent(s): ${allParents.join(", ")}`,
+          `[waker] ${sub.id}: found ${messageAddresses.length} unique message(s): ${messageAddresses.join(", ")}`,
         );
+
+        mentions = [];
+        for (const msgAddr of messageAddresses) {
+          const parents: string[] = [];
+          try {
+            const escaped = msgAddr.replace(/'/g, "\\'");
+            const parentQuery = `SELECT * FROM link WHERE predicate = 'ad4m://has_child' AND target = '${escaped}'`;
+            this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
+            const parentResult = await this.perspectiveClient.querySurrealDB(sub.perspective, parentQuery);
+            if (Array.isArray(parentResult)) {
+              for (const link of parentResult) {
+                if (link && link.source) {
+                  parents.push(link.source);
+                }
+              }
+            }
+          } catch (err: any) {
+            this.logger.warn(
+              `[waker] ${sub.id}: parent resolution failed for ${msgAddr} — ${err?.message ?? err}`,
+            );
+          }
+          this.logger.info(
+            `[waker] ${sub.id}: message ${msgAddr} has ${parents.length} parent(s): ${parents.join(", ")}`,
+          );
+          mentions.push({ address: msgAddr, parents });
+        }
       }
-      // Fall back to subscription's channel if no parents extracted
-      const parentChannel = allParents.length > 0 ? allParents[0] : sub.channel;
 
       // Debounce the wake callback
       const existing = this.debounceTimers.get(sub.id);
@@ -173,7 +205,7 @@ export class WakerSubscriptionManager {
       this.debounceTimers.set(
         sub.id,
         setTimeout(() => {
-          this.onWake(sub, result, parentChannel, allParents);
+          this.onWake(sub, result, mentions);
           this.debounceTimers.delete(sub.id);
           this.persist();
         }, this.debounceMs),
