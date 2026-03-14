@@ -154,12 +154,12 @@ describe("loadWakerState / saveWakerState", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("returns empty array when state file does not exist", () => {
+  it("returns empty state when state file does not exist", () => {
     const result = loadWakerState(tmpDir);
-    expect(result).toEqual([]);
+    expect(result).toEqual({ subscriptions: [], resultHashes: {} });
   });
 
-  it("saves and loads subscriptions", () => {
+  it("saves and loads subscriptions with result hashes", () => {
     const subs: WakerSubscription[] = [
       {
         id: "mention-abc",
@@ -177,10 +177,23 @@ describe("loadWakerState / saveWakerState", () => {
         query: "SELECT ...",
       },
     ];
+    const hashes = { "mention-abc": "[{\"some\":\"data\"}]" };
 
-    saveWakerState(tmpDir, subs);
+    saveWakerState(tmpDir, subs, hashes);
     const loaded = loadWakerState(tmpDir);
-    expect(loaded).toEqual(subs);
+    expect(loaded.subscriptions).toEqual(subs);
+    expect(loaded.resultHashes).toEqual(hashes);
+  });
+
+  it("loads legacy format (plain array) as subscriptions with empty hashes", () => {
+    const subs = [{ id: "a", type: "mention", perspective: "p1", channel: "", query: "q1" }];
+    fs.writeFileSync(
+      path.join(tmpDir, "ad4m-waker-state.json"),
+      JSON.stringify(subs),
+    );
+    const loaded = loadWakerState(tmpDir);
+    expect(loaded.subscriptions).toEqual(subs);
+    expect(loaded.resultHashes).toEqual({});
   });
 
   it("overwrites existing state on save", () => {
@@ -198,9 +211,10 @@ describe("loadWakerState / saveWakerState", () => {
     ];
 
     saveWakerState(tmpDir, subs1);
-    saveWakerState(tmpDir, subs2);
+    saveWakerState(tmpDir, subs2, { "b": "hash2" });
     const loaded = loadWakerState(tmpDir);
-    expect(loaded).toEqual(subs2);
+    expect(loaded.subscriptions).toEqual(subs2);
+    expect(loaded.resultHashes).toEqual({ "b": "hash2" });
   });
 
   it("creates stateDir if it does not exist", () => {
@@ -209,19 +223,19 @@ describe("loadWakerState / saveWakerState", () => {
     expect(fs.existsSync(nestedDir)).toBe(true);
   });
 
-  it("returns empty array for invalid JSON", () => {
+  it("returns empty state for invalid JSON", () => {
     fs.writeFileSync(path.join(tmpDir, "ad4m-waker-state.json"), "not json");
     const result = loadWakerState(tmpDir);
-    expect(result).toEqual([]);
+    expect(result).toEqual({ subscriptions: [], resultHashes: {} });
   });
 
-  it("returns empty array for non-array JSON", () => {
+  it("returns empty state for non-array non-object JSON", () => {
     fs.writeFileSync(
       path.join(tmpDir, "ad4m-waker-state.json"),
       JSON.stringify({ foo: "bar" }),
     );
     const result = loadWakerState(tmpDir);
-    expect(result).toEqual([]);
+    expect(result).toEqual({ subscriptions: [], resultHashes: {} });
   });
 });
 

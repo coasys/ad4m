@@ -23,8 +23,10 @@ export interface WakerSubscriptionManagerOptions {
   debounceMs?: number;
   /** Called when a subscription fires (after debounce). Return value is ignored. */
   onWake: (sub: WakerSubscription, result: any, parentChannel?: string) => void;
-  /** Called when the active subscription list changes (for persistence). */
-  onPersist?: (subscriptions: WakerSubscription[]) => void;
+  /** Called when the active subscription list changes (for persistence). Includes last result hashes to avoid duplicate wakes on restart. */
+  onPersist?: (subscriptions: WakerSubscription[], resultHashes: Record<string, string>) => void;
+  /** Previously persisted result hashes (subscription id → JSON hash). Seeds lastResultHash on resubscribe to avoid duplicate wakes. */
+  previousResultHashes?: Record<string, string>;
   /** Optional: provide QuerySubscriptionProxy class directly (avoids require("@coasys/ad4m") at runtime). */
   QuerySubscriptionProxy?: any;
 }
@@ -34,12 +36,14 @@ export class WakerSubscriptionManager {
   private logger: WakerLogger;
   private debounceMs: number;
   private onWake: (sub: WakerSubscription, result: any, parentChannel?: string) => void;
-  private onPersist?: (subscriptions: WakerSubscription[]) => void;
+  private onPersist?: (subscriptions: WakerSubscription[], resultHashes: Record<string, string>) => void;
   private QuerySubscriptionProxyCtor: any;
+  private previousResultHashes: Record<string, string>;
 
   private proxies = new Map<string, any>();
   private activeSubscriptions = new Map<string, WakerSubscription>();
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private resultHashes = new Map<string, string>();
 
   constructor(options: WakerSubscriptionManagerOptions) {
     this.perspectiveClient = options.perspectiveClient;
@@ -48,6 +52,7 @@ export class WakerSubscriptionManager {
     this.onWake = options.onWake;
     this.onPersist = options.onPersist;
     this.QuerySubscriptionProxyCtor = options.QuerySubscriptionProxy ?? null;
+    this.previousResultHashes = options.previousResultHashes ?? {};
   }
 
   /**
@@ -78,12 +83,17 @@ export class WakerSubscriptionManager {
     await proxy.initialized;
     this.logger.info(`[waker] ${sub.id}: subscription initialized successfully`);
 
-    let lastResultHash: string | null = null;
+    // Seed from persisted hash so we don't re-wake for already-seen results after restart
+    let lastResultHash: string | null = this.previousResultHashes[sub.id] ?? null;
+    if (lastResultHash) {
+      this.logger.info(`[waker] ${sub.id}: seeded lastResultHash from persisted state`);
+    }
 
     proxy.onResult(async (result: any) => {
       const serialized = JSON.stringify(result);
       if (lastResultHash === serialized) return;
       lastResultHash = serialized;
+      this.resultHashes.set(sub.id, serialized);
 
       const count = Array.isArray(result) ? result.length : "?";
       this.logger.info(
@@ -123,6 +133,7 @@ export class WakerSubscriptionManager {
         setTimeout(() => {
           this.onWake(sub, result, parentChannel);
           this.debounceTimers.delete(sub.id);
+          this.persist();
         }, this.debounceMs),
       );
     });
@@ -156,6 +167,7 @@ export class WakerSubscriptionManager {
       this.debounceTimers.delete(id);
     }
     this.activeSubscriptions.delete(id);
+    this.resultHashes.delete(id);
     if (persist) this.persist();
   }
 
@@ -178,7 +190,11 @@ export class WakerSubscriptionManager {
 
   private persist(): void {
     if (this.onPersist) {
-      this.onPersist(this.getActive());
+      const hashes: Record<string, string> = {};
+      for (const [id, hash] of this.resultHashes) {
+        hashes[id] = hash;
+      }
+      this.onPersist(this.getActive(), hashes);
     }
   }
 }
