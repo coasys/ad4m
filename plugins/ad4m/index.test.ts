@@ -55,7 +55,7 @@ import {
 } from "./index";
 
 import ad4mPlugin from "./index";
-import { WakerSubscriptionManager } from "../../core/src/perspectives/WakerSubscriptionManager";
+import { WakerSubscriptionManager } from "./wakerSubscriptionManager";
 
 // ---------------------------------------------------------------------------
 // Helpers
