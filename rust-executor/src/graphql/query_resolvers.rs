@@ -13,6 +13,7 @@ use crate::{
     runtime_service::RuntimeService,
     types::{DecoratedLinkExpression, Model, Notification},
 };
+use crate::config::get_global_config;
 use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
 
 pub struct Query;
@@ -804,6 +805,54 @@ impl Query {
                 ad4m_executor_version: AD4M_VERSION.clone(),
             })
         })
+    }
+
+    /// Returns the domain name(s) from the TLS certificate's Subject Alternative Names,
+    /// or None if TLS is not configured.
+    async fn runtime_tls_domain(&self, _context: &RequestContext) -> FieldResult<Option<String>> {
+        let config = get_global_config();
+        let tls = match config.tls {
+            Some(tls) => tls,
+            None => return Ok(None),
+        };
+
+        let cert_pem = std::fs::read(&tls.cert_file_path).map_err(|e| {
+            FieldError::new(
+                format!("Failed to read TLS certificate: {}", e),
+                Value::null(),
+            )
+        })?;
+
+        use x509_parser::prelude::*;
+        // Parse PEM to get the first certificate
+        let (_, pem) = parse_x509_pem(&cert_pem).map_err(|e| {
+            FieldError::new(format!("Failed to parse PEM: {}", e), Value::null())
+        })?;
+        let (_, cert) = X509Certificate::from_der(&pem.contents).map_err(|e| {
+            FieldError::new(format!("Failed to parse certificate: {}", e), Value::null())
+        })?;
+
+        // Try SAN extension first
+        if let Ok(Some(san)) = cert.subject_alternative_name() {
+            for name in &san.value.general_names {
+                if let GeneralName::DNSName(dns) = name {
+                    return Ok(Some(dns.to_string()));
+                }
+            }
+        }
+
+        // Fall back to CN
+        for rdn in cert.subject().iter() {
+            for attr in rdn.iter() {
+                if attr.attr_type() == &oid_registry::OID_X509_COMMON_NAME {
+                    if let Ok(cn) = attr.as_str() {
+                        return Ok(Some(cn.to_string()));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     async fn runtime_known_link_language_templates(

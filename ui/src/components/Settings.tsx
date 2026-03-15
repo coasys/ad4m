@@ -140,9 +140,10 @@ const Profile = (props: Props) => {
     name: "",
     description: "",
     location: "",
-    rates: '[{"description": "Base rate", "priceInHOT": "0.001"}]',
+    rates: '[{"description": "Base rate", "priceInHOT": 0.001}]',
     aiModels: '["llama3"]',
     computeSpecs: "",
+    hostUrl: "",
   });
   const [hostRegStatus, setHostRegStatus] = useState<{
     type: "success" | "error" | "info";
@@ -172,9 +173,12 @@ const Profile = (props: Props) => {
       formData.append("name", hostReg.name);
       formData.append("description", hostReg.description);
       formData.append("location", hostReg.location);
-      // Auto-populate the host URL from the executor's WebSocket URL
-      const hostUrl = url?.replace("http://", "ws://").replace("https://", "wss://") || "";
-      formData.append("url", hostUrl);
+      if (!hostReg.hostUrl) {
+        setHostRegStatus({ type: "error", message: "Host URL is required. Configure TLS or enter a public URL." });
+        setHostRegistering(false);
+        return;
+      }
+      formData.append("url", hostReg.hostUrl);
       formData.append("rates", hostReg.rates);
       formData.append("aiModels", hostReg.aiModels);
       formData.append("computeSpecs", hostReg.computeSpecs);
@@ -192,7 +196,7 @@ const Profile = (props: Props) => {
       if (res.ok) {
         setHostRegStatus({
           type: "success",
-          message: data.message || "Host registered! Check your email for verification.",
+          message: data.message || `Host registered (ID: ${data.hostId}). Check your email for the verification link — the host won't be listed until verified.`,
         });
       } else {
         setHostRegStatus({
@@ -211,6 +215,26 @@ const Profile = (props: Props) => {
   };
 
   // Load MCP config on component mount
+  // Auto-populate host URL from TLS certificate domain
+  useEffect(() => {
+    const fetchTlsDomain = async () => {
+      if (!client) return;
+      try {
+        const domain = await client.runtime.tlsDomain();
+        console.log("TLS domain from certificate:", domain);
+        if (domain) {
+          setHostReg((prev) => prev.hostUrl ? prev : ({
+            ...prev,
+            hostUrl: `wss://${domain}`,
+          }));
+        }
+      } catch (e) {
+        console.log("TLS domain query failed (TLS may not be configured):", e);
+      }
+    };
+    fetchTlsDomain();
+  }, [client]);
+
   useEffect(() => {
     const loadMcpConfig = async () => {
       try {
@@ -1115,23 +1139,19 @@ const Profile = (props: Props) => {
             />
           </j-box>
 
-          {/* Host URL (auto-populated) */}
+          {/* Host URL */}
           <j-box px="500" my="500">
             <j-box mb="200">
               <j-text size="500" weight="500">Host URL</j-text>
             </j-box>
-            <j-box p="300" style={{
-              backgroundColor: "var(--j-color-ui-50)",
-              borderRadius: "6px",
-              border: "1px solid var(--j-color-ui-200)"
-            }}>
-              <j-text size="400" color="ui-600">
-                {url?.replace("http://", "ws://").replace("https://", "wss://") || "Not available — start the executor first"}
-              </j-text>
-            </j-box>
+            <j-input
+              value={hostReg.hostUrl}
+              onInput={(e: any) => handleHostRegChange("hostUrl", e.target.value)}
+              placeholder="wss://your-host-domain.com"
+            />
             <j-box mt="100">
               <j-text size="400" color="ui-400">
-                Auto-populated from your executor's WebSocket URL.
+                The public WebSocket URL where agents will connect. Auto-populated from your TLS certificate if configured.
               </j-text>
             </j-box>
           </j-box>
