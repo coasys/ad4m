@@ -212,22 +212,10 @@ export class WakerSubscriptionManager {
           }, this.debounceMs),
         );
       } else {
-        // For channel-messages: use simple result hash (no message-level tracking needed)
-        const serialized = JSON.stringify(result);
-        const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
-        if (currentSeen.has(serialized)) {
-          this.logger.info(
-            `[waker] ${sub.id}: result unchanged (${result.length} items), skipping`,
-          );
-          return;
-        }
-        // Replace the single hash entry
-        currentSeen.clear();
-        currentSeen.add(serialized);
-        this.seenMessages.set(sub.id, currentSeen);
-
+        // For channel-messages: always notify the agent on every subscription push.
+        // No deduplication — the agent reads recent messages itself.
         this.logger.info(
-          `[waker] ${sub.id}: query result changed (${result.length} items)`,
+          `[waker] ${sub.id}: channel update (${result.length} items)`,
         );
 
         const existing = this.debounceTimers.get(sub.id);
@@ -238,7 +226,6 @@ export class WakerSubscriptionManager {
           setTimeout(() => {
             this.onWake(sub, result);
             this.debounceTimers.delete(sub.id);
-            this.persist();
           }, this.debounceMs),
         );
       }
