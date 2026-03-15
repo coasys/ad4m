@@ -402,7 +402,7 @@ impl SurrealDBService {
             -- This prevents race conditions during concurrent link creation
             DEFINE INDEX IF NOT EXISTS link_unique_idx ON link FIELDS in, out, predicate, author, timestamp UNIQUE;
 
-            DEFINE FUNCTION IF NOT EXISTS fn::parse_literal($url: option<string>) {
+            DEFINE FUNCTION OVERWRITE fn::parse_literal($url: option<string>) {
                 RETURN function($url) {
                     const [url] = arguments;
                     
