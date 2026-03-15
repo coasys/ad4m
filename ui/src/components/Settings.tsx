@@ -137,7 +137,7 @@ const Profile = (props: Props) => {
   const [hostSession, setHostSession] = useState<HostSession>(null);
   const [hostData, setHostData] = useState<any>(null); // fetched host data from API
   const [hostReg, setHostReg] = useState({
-    indexUrl: "https://hosting.ad4m.dev",
+    indexUrl: import.meta.env.DEV ? "http://localhost:3100" : "https://hosting.ad4m.dev",
     email: "",
     password: "",
     name: "",
@@ -180,26 +180,27 @@ const Profile = (props: Props) => {
   // Fetch host data from API using session
   const fetchHostData = async (session: { indexUrl: string; hostId: string; authToken: string }) => {
     try {
-      const res = await fetch(`${session.indexUrl}/hosts`, {
+      const res = await fetch(`${session.indexUrl}/hosts/me`, {
         headers: { Authorization: `Bearer ${session.authToken}` },
       });
       if (res.ok) {
-        const hosts = await res.json();
-        const mine = hosts.find((h: any) => h.id === session.hostId);
-        if (mine) {
-          setHostData(mine);
-          setHostReg((prev) => ({
-            ...prev,
-            indexUrl: session.indexUrl,
-            name: mine.name || "",
-            description: mine.description || "",
-            location: mine.location || "",
-            hostUrl: mine.url || "",
-            rates: JSON.stringify(mine.rates || []),
-            aiModels: JSON.stringify(mine.aiModels || []),
-            computeSpecs: mine.computeSpecs || "",
-          }));
-        }
+        const mine = await res.json();
+        setHostData(mine);
+        setHostReg((prev) => ({
+          ...prev,
+          indexUrl: session.indexUrl,
+          name: mine.name || "",
+          description: mine.description || "",
+          location: mine.location || "",
+          hostUrl: mine.url || "",
+          rates: JSON.stringify(mine.rates || []),
+          aiModels: JSON.stringify(mine.aiModels || []),
+          computeSpecs: mine.computeSpecs || "",
+        }));
+      } else if (res.status === 401) {
+        // Token expired
+        await saveHostSession(null);
+        setHostData(null);
       }
     } catch (e) {
       console.log("Failed to fetch host data:", e);
