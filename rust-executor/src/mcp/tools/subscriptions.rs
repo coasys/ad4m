@@ -241,15 +241,35 @@ impl Ad4mMcpHandler {
 
         let mention_predicate = format!("({})", mention_conditions.join(" OR "));
 
-        // Direct body-link query: watch for any link whose target contains a mention term.
+        // Discover the body property predicate from SHACL to scope the query.
+        // Without this, the query scans ALL links which is very slow on large perspectives.
+        let perspective = self.get_readable_perspective(&params.0.perspective_id).await.ok();
+        let body_predicate = if let Some(ref p) = perspective {
+            let props = shacl::load_class_properties(p, "Message").await;
+            props.iter()
+                .find(|prop| prop.name.to_lowercase() == "body")
+                .and_then(|prop| prop.predicate.clone())
+        } else {
+            None
+        };
+
+        // Direct body-link query: watch for body links whose target contains a mention term.
         // Each result has `source` = message address (the base expression).
         // Parent resolution (finding which channel the message belongs to) is done by the
         // waker plugin in a second query after the subscription fires.
-        // This is much faster than the old two-hop graph traversal query.
-        let query = format!(
-            "SELECT * FROM link WHERE {}",
-            mention_predicate
-        );
+        let query = if let Some(ref pred) = body_predicate {
+            format!(
+                "SELECT * FROM link WHERE predicate = '{}' AND {}",
+                pred, mention_predicate
+            )
+        } else {
+            // Fallback: no SHACL body predicate found, scan all links
+            log::warn!("get_mention_waker_config: no body predicate found in SHACL for Message class, falling back to unscoped query");
+            format!(
+                "SELECT * FROM link WHERE {}",
+                mention_predicate
+            )
+        };
 
         let sub_id = format!("mention-{}", &did[did.len().saturating_sub(12)..]);
 
