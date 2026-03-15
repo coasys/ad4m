@@ -14,6 +14,9 @@
 // Imports
 // ---------------------------------------------------------------------------
 
+import * as fs from "fs";
+import * as path from "path";
+
 import { McpResponse, McpTool, PluginConfig, WakerSubscription } from "./types";
 import {
   generateRandomPassphrase,
@@ -746,6 +749,68 @@ Notes:
           },
         ],
       };
+    },
+  });
+
+  // -- Profile picture from file tool --
+
+  api.registerTool({
+    name: "ad4m_set_profile_picture_from_file",
+    description:
+      "Set your AD4M profile picture from a local image file. " +
+      "Reads the file, base64-encodes it, and uploads it. " +
+      "IMPORTANT: The image should be cropped to a square before calling this tool — " +
+      "Flux displays profile pictures as circles, so non-square images will look distorted.",
+    parameters: {
+      type: "object",
+      properties: {
+        file_path: {
+          type: "string",
+          description:
+            "Absolute path to the image file (png, jpg, gif, webp). " +
+            "Must be a square image — crop it first if needed.",
+        },
+      },
+      required: ["file_path"],
+    },
+    async execute(_id: string, params: Record<string, any>) {
+      const filePath = params.file_path as string;
+
+      if (!fs.existsSync(filePath)) {
+        return {
+          content: [{ type: "text", text: `File not found: ${filePath}` }],
+        };
+      }
+
+      const ext = path.extname(filePath).toLowerCase();
+      const mimeMap: Record<string, string> = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+      };
+      const mimeType = mimeMap[ext];
+      if (!mimeType) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Unsupported image format '${ext}'. Use png, jpg, gif, or webp.`,
+            },
+          ],
+        };
+      }
+
+      const imageData = fs.readFileSync(filePath);
+      const base64 = imageData.toString("base64");
+
+      const result = await callToolWithRetry("set_agent_profile_picture", {
+        image_base64: base64,
+        mime_type: mimeType,
+      });
+
+      return result;
     },
   });
 

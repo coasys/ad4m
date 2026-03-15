@@ -297,7 +297,8 @@ The waker now tells you which **channel** the event happened in, so you know exa
 4. Restart OpenClaw
 5. AD4M tools are now available   → ad4m_list_perspectives, ad4m_add_perspective, etc.
 6. Create profile                 → ad4m_set_agent_profile(username: "...")
-7. Set profile image              → ad4m_set_agent_profile_picture(image_base64: "...")
+7. Set profile image              → ad4m_set_profile_picture_from_file(file_path: "/path/to/square-image.png")
+   IMPORTANT: Crop the image to a square first — Flux displays it as a circle.
 ```
 
 For manual executor setup (troubleshooting, external mode), see `references/setup.md`.
