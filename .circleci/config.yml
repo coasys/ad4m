@@ -166,7 +166,7 @@ jobs:
             done
       - run:
           name: Run MCP integration tests
-          command: cd ./tests/js && pnpm run test-mcp
+          command: cd ./tests/js && pnpm install && pnpm run test-mcp
           no_output_timeout: 30m
 
   integration-tests-model:
