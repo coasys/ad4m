@@ -73,7 +73,7 @@ These are always available regardless of SDNA:
 | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `ad4m_add_child`                | Add a child to a subject                                                                                                               |
 | `ad4m_get_children`             | Get children of a subject (addresses, timestamps, authors)                                                                             |
-| `ad4m_get_children_body_parsed` | Get children with resolved body text, author names, and timestamps as a formatted transcript. **Preferred for reading conversations.** |
+| `ad4m_get_children_body_parsed` | Get the most recent N children (default 50) with resolved body text, author names, and timestamps as a formatted transcript. Use `limit` param to control count. **Preferred for reading conversations.** |
 | `ad4m_get_subject_children`     | Get children with optional class filtering                                                                                             |
 
 **Profile Tools:**

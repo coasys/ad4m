@@ -42,10 +42,10 @@ export interface WakerSubscriptionManagerOptions {
   /** Called when a subscription fires (after debounce). Return value is ignored.
    *  For mention subs, `mentions` contains per-message parent info. */
   onWake: (sub: WakerSubscription, result: any, mentions?: MentionMessage[]) => void;
-  /** Called when the active subscription list changes (for persistence). Includes last result hashes to avoid duplicate wakes on restart. */
-  onPersist?: (subscriptions: WakerSubscription[], resultHashes: Record<string, string>) => void;
-  /** Previously persisted result hashes (subscription id → JSON hash). Seeds lastResultHash on resubscribe to avoid duplicate wakes. */
-  previousResultHashes?: Record<string, string>;
+  /** Called when the active subscription list changes (for persistence). */
+  onPersist?: (subscriptions: WakerSubscription[], seenMessages: Record<string, string[]>) => void;
+  /** Previously persisted seen message IDs per subscription. Seeds seenMessages on resubscribe to avoid duplicate wakes. */
+  previousSeenMessages?: Record<string, string[]>;
   /** Optional: provide QuerySubscriptionProxy class directly (avoids require("@coasys/ad4m") at runtime). */
   QuerySubscriptionProxy?: any;
 }
@@ -55,14 +55,16 @@ export class WakerSubscriptionManager {
   private logger: WakerLogger;
   private debounceMs: number;
   private onWake: (sub: WakerSubscription, result: any, mentions?: MentionMessage[]) => void;
-  private onPersist?: (subscriptions: WakerSubscription[], resultHashes: Record<string, string>) => void;
+  private onPersist?: (subscriptions: WakerSubscription[], seenMessages: Record<string, string[]>) => void;
   private QuerySubscriptionProxyCtor: any;
-  private previousResultHashes: Record<string, string>;
+  private previousSeenMessages: Record<string, string[]>;
 
   private proxies = new Map<string, any>();
   private activeSubscriptions = new Map<string, WakerSubscription>();
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private resultHashes = new Map<string, string>();
+  /** Per-subscription set of already-processed message addresses (for mention subs)
+   *  or serialized result hash (for channel-messages subs). */
+  private seenMessages = new Map<string, Set<string>>();
 
   constructor(options: WakerSubscriptionManagerOptions) {
     this.perspectiveClient = options.perspectiveClient;
@@ -71,7 +73,7 @@ export class WakerSubscriptionManager {
     this.onWake = options.onWake;
     this.onPersist = options.onPersist;
     this.QuerySubscriptionProxyCtor = options.QuerySubscriptionProxy ?? null;
-    this.previousResultHashes = options.previousResultHashes ?? {};
+    this.previousSeenMessages = options.previousSeenMessages ?? {};
   }
 
   /**
@@ -115,16 +117,17 @@ export class WakerSubscriptionManager {
       try { proxy.dispose(); } catch {}
       // Remove from active state so it doesn't get persisted/retried
       this.activeSubscriptions.delete(sub.id);
-      this.resultHashes.delete(sub.id);
+      this.seenMessages.delete(sub.id);
       this.persist();
       return; // Don't throw — caller should not crash
     }
     this.logger.info(`[waker] ${sub.id}: subscription initialized successfully`);
 
-    // Seed from persisted hash so we don't re-wake for already-seen results after restart
-    let lastResultHash: string | null = this.previousResultHashes[sub.id] ?? null;
-    if (lastResultHash) {
-      this.logger.info(`[waker] ${sub.id}: seeded lastResultHash from persisted state`);
+    // Seed from persisted seen messages so we don't re-wake after restart
+    const seen = new Set<string>(this.previousSeenMessages[sub.id] ?? []);
+    this.seenMessages.set(sub.id, seen);
+    if (seen.size > 0) {
+      this.logger.info(`[waker] ${sub.id}: seeded ${seen.size} seen message(s) from persisted state`);
     }
 
     proxy.onResult(async (result: any) => {
@@ -139,41 +142,33 @@ export class WakerSubscriptionManager {
         );
         return;
       }
-      const serialized = JSON.stringify(result);
-      if (lastResultHash === serialized) {
-        this.logger.info(
-          `[waker] ${sub.id}: result unchanged (${result.length} items), skipping`,
-        );
-        return;
-      }
-      lastResultHash = serialized;
-      this.resultHashes.set(sub.id, serialized);
 
-      const count = result.length;
-      this.logger.info(
-        `[waker] ${sub.id}: query result changed (${count} items)`,
-      );
+      if (sub.type === "mention") {
+        // For mention subscriptions: track seen message addresses.
+        // Only wake for messages we haven't seen before.
+        const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
+        const newMessages: string[] = [];
 
-      // For mention subscriptions, the query returns body links whose target
-      // contains a mention. Each result has `source` = message address.
-      // We resolve parents per message via a second SurrealDB query.
-      let mentions: MentionMessage[] | undefined;
-
-      if (sub.type === "mention" && result.length > 0) {
-        const seenMessages = new Set<string>();
-        const messageAddresses: string[] = [];
         for (const item of result) {
-          if (item && item.source && !seenMessages.has(item.source)) {
-            seenMessages.add(item.source);
-            messageAddresses.push(item.source);
+          if (item && item.source && !currentSeen.has(item.source)) {
+            newMessages.push(item.source);
           }
         }
+
+        if (newMessages.length === 0) {
+          this.logger.info(
+            `[waker] ${sub.id}: all ${result.length} items already seen, skipping`,
+          );
+          return;
+        }
+
         this.logger.info(
-          `[waker] ${sub.id}: found ${messageAddresses.length} unique message(s): ${messageAddresses.join(", ")}`,
+          `[waker] ${sub.id}: ${newMessages.length} new message(s) out of ${result.length} total`,
         );
 
-        mentions = [];
-        for (const msgAddr of messageAddresses) {
+        // Resolve parents per new message
+        const mentions: MentionMessage[] = [];
+        for (const msgAddr of newMessages) {
           const parents: string[] = [];
           try {
             const escaped = msgAddr.replace(/'/g, "\\'");
@@ -197,20 +192,56 @@ export class WakerSubscriptionManager {
           );
           mentions.push({ address: msgAddr, parents });
         }
+
+        // Mark all new messages as seen
+        for (const addr of newMessages) {
+          currentSeen.add(addr);
+        }
+        this.seenMessages.set(sub.id, currentSeen);
+
+        // Debounce the wake callback
+        const existing = this.debounceTimers.get(sub.id);
+        if (existing) clearTimeout(existing);
+
+        this.debounceTimers.set(
+          sub.id,
+          setTimeout(() => {
+            this.onWake(sub, result, mentions);
+            this.debounceTimers.delete(sub.id);
+            this.persist();
+          }, this.debounceMs),
+        );
+      } else {
+        // For channel-messages: use simple result hash (no message-level tracking needed)
+        const serialized = JSON.stringify(result);
+        const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
+        if (currentSeen.has(serialized)) {
+          this.logger.info(
+            `[waker] ${sub.id}: result unchanged (${result.length} items), skipping`,
+          );
+          return;
+        }
+        // Replace the single hash entry
+        currentSeen.clear();
+        currentSeen.add(serialized);
+        this.seenMessages.set(sub.id, currentSeen);
+
+        this.logger.info(
+          `[waker] ${sub.id}: query result changed (${result.length} items)`,
+        );
+
+        const existing = this.debounceTimers.get(sub.id);
+        if (existing) clearTimeout(existing);
+
+        this.debounceTimers.set(
+          sub.id,
+          setTimeout(() => {
+            this.onWake(sub, result);
+            this.debounceTimers.delete(sub.id);
+            this.persist();
+          }, this.debounceMs),
+        );
       }
-
-      // Debounce the wake callback
-      const existing = this.debounceTimers.get(sub.id);
-      if (existing) clearTimeout(existing);
-
-      this.debounceTimers.set(
-        sub.id,
-        setTimeout(() => {
-          this.onWake(sub, result, mentions);
-          this.debounceTimers.delete(sub.id);
-          this.persist();
-        }, this.debounceMs),
-      );
     });
 
     this.proxies.set(sub.id, proxy);
@@ -242,7 +273,7 @@ export class WakerSubscriptionManager {
       this.debounceTimers.delete(id);
     }
     this.activeSubscriptions.delete(id);
-    this.resultHashes.delete(id);
+    this.seenMessages.delete(id);
     if (persist) this.persist();
   }
 
@@ -265,11 +296,11 @@ export class WakerSubscriptionManager {
 
   private persist(): void {
     if (this.onPersist) {
-      const hashes: Record<string, string> = {};
-      for (const [id, hash] of this.resultHashes) {
-        hashes[id] = hash;
+      const seen: Record<string, string[]> = {};
+      for (const [id, set] of this.seenMessages) {
+        seen[id] = Array.from(set);
       }
-      this.onPersist(this.getActive(), hashes);
+      this.onPersist(this.getActive(), seen);
     }
   }
 }

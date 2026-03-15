@@ -157,7 +157,7 @@ describe("loadWakerState / saveWakerState", () => {
 
   it("returns empty state when state file does not exist", () => {
     const result = loadWakerState(tmpDir);
-    expect(result).toEqual({ subscriptions: [], resultHashes: {} });
+    expect(result).toEqual({ subscriptions: [], seenMessages: {} });
   });
 
   it("saves and loads subscriptions with result hashes", () => {
@@ -178,12 +178,12 @@ describe("loadWakerState / saveWakerState", () => {
         query: "SELECT ...",
       },
     ];
-    const hashes = { "mention-abc": "[{\"some\":\"data\"}]" };
+    const seen = { "mention-abc": ["msg-1", "msg-2"] };
 
-    saveWakerState(tmpDir, subs, hashes);
+    saveWakerState(tmpDir, subs, seen);
     const loaded = loadWakerState(tmpDir);
     expect(loaded.subscriptions).toEqual(subs);
-    expect(loaded.resultHashes).toEqual(hashes);
+    expect(loaded.seenMessages).toEqual(seen);
   });
 
   it("loads legacy format (plain array) as subscriptions with empty hashes", () => {
@@ -194,7 +194,7 @@ describe("loadWakerState / saveWakerState", () => {
     );
     const loaded = loadWakerState(tmpDir);
     expect(loaded.subscriptions).toEqual(subs);
-    expect(loaded.resultHashes).toEqual({});
+    expect(loaded.seenMessages).toEqual({});
   });
 
   it("overwrites existing state on save", () => {
@@ -212,10 +212,10 @@ describe("loadWakerState / saveWakerState", () => {
     ];
 
     saveWakerState(tmpDir, subs1);
-    saveWakerState(tmpDir, subs2, { "b": "hash2" });
+    saveWakerState(tmpDir, subs2, { "b": ["msg-x"] });
     const loaded = loadWakerState(tmpDir);
     expect(loaded.subscriptions).toEqual(subs2);
-    expect(loaded.resultHashes).toEqual({ "b": "hash2" });
+    expect(loaded.seenMessages).toEqual({ "b": ["msg-x"] });
   });
 
   it("creates stateDir if it does not exist", () => {
@@ -227,7 +227,7 @@ describe("loadWakerState / saveWakerState", () => {
   it("returns empty state for invalid JSON", () => {
     fs.writeFileSync(path.join(tmpDir, "ad4m-waker-state.json"), "not json");
     const result = loadWakerState(tmpDir);
-    expect(result).toEqual({ subscriptions: [], resultHashes: {} });
+    expect(result).toEqual({ subscriptions: [], seenMessages: {} });
   });
 
   it("returns empty state for non-array non-object JSON", () => {
@@ -236,7 +236,7 @@ describe("loadWakerState / saveWakerState", () => {
       JSON.stringify({ foo: "bar" }),
     );
     const result = loadWakerState(tmpDir);
-    expect(result).toEqual({ subscriptions: [], resultHashes: {} });
+    expect(result).toEqual({ subscriptions: [], seenMessages: {} });
   });
 });
 
@@ -2162,9 +2162,9 @@ describe("WakerSubscriptionManager", () => {
     querySurrealDB: vi.fn(() => Promise.resolve([])),
   };
 
-  it("should ignore non-array results (e.g. false) and not persist them as resultHashes", async () => {
+  it("should ignore non-array results (e.g. false) and not store them as seen", async () => {
     const mock = makeMockProxy();
-    const persisted: { hashes: Record<string, string> } = { hashes: {} };
+    const persisted: { seen: Record<string, string[]> } = { seen: {} };
     let wakeCount = 0;
 
     const manager = new WakerSubscriptionManager({
@@ -2173,7 +2173,7 @@ describe("WakerSubscriptionManager", () => {
       QuerySubscriptionProxy: mock.ProxyClass,
       debounceMs: 10,
       onWake: () => { wakeCount++; },
-      onPersist: (_subs, hashes) => { persisted.hashes = hashes; },
+      onPersist: (_subs, seenMessages) => { persisted.seen = seenMessages; },
     });
 
     await manager.subscribe({
@@ -2188,21 +2188,18 @@ describe("WakerSubscriptionManager", () => {
     mock.deliver(false);
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(0);
-    expect(persisted.hashes["test-false"]).toBeUndefined();
 
     // Deliver a real result — should fire
-    mock.deliver([{ source: "channel-1", target: "msg-1", predicate: "ad4m://has_child" }]);
+    mock.deliver([{ source: "channel-1", target: "literal://string:Hey @you" }]);
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(1);
-    expect(persisted.hashes["test-false"]).toBeDefined();
-    expect(persisted.hashes["test-false"]).not.toBe("false");
+    // Seen messages should contain the message address
+    expect(persisted.seen["test-false"]).toContain("channel-1");
 
     manager.disposeAll();
   });
 
-  it("should not wake for real result after false if false were persisted as hash (regression)", async () => {
-    // This replicates the bug: if `false` had been persisted as the hash,
-    // the next real result should still trigger a wake (not be skipped).
+  it("should not re-wake for already-seen messages after restart", async () => {
     const mock = makeMockProxy();
     let wakeCount = 0;
 
@@ -2212,20 +2209,28 @@ describe("WakerSubscriptionManager", () => {
       QuerySubscriptionProxy: mock.ProxyClass,
       debounceMs: 10,
       onWake: () => { wakeCount++; },
-      // Simulate a corrupted persisted state where hash is "false"
-      previousResultHashes: { "test-regression": "false" },
+      // Simulate persisted state with previously seen messages
+      previousSeenMessages: { "test-seen": ["channel-1"] },
     });
 
     await manager.subscribe({
-      id: "test-regression",
+      id: "test-seen",
       type: "mention",
       perspective: "fake-uuid",
       channel: "",
       query: "SELECT * FROM link",
     });
 
-    // Deliver a real result — must still fire even though previous hash was "false"
-    mock.deliver([{ source: "channel-1", target: "msg-1" }]);
+    // Deliver same message that was already seen — should NOT wake
+    mock.deliver([{ source: "channel-1", target: "literal://string:Hey @you" }]);
+    await new Promise(r => setTimeout(r, 50));
+    expect(wakeCount).toBe(0);
+
+    // Deliver a new message — should wake
+    mock.deliver([
+      { source: "channel-1", target: "literal://string:Hey @you" },
+      { source: "channel-2", target: "literal://string:@you check this" },
+    ]);
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(1);
 

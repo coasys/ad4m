@@ -149,6 +149,8 @@ pub struct GetChildrenBodyParsedParams {
     pub parent_address: String,
     /// SHACL class name to discover the body property (e.g., "Message")
     pub class_name: String,
+    /// Maximum number of messages to return (most recent). Defaults to 50.
+    pub limit: Option<usize>,
 }
 
 // ============================================================================
@@ -253,7 +255,7 @@ impl Ad4mMcpHandler {
     /// Get all children of a parent with their body property resolved to plain text.
     /// Returns a formatted transcript string with author names, timestamps, and message content.
     #[tool(
-        description = "Get children of a parent with their body content resolved to readable text. Uses the SHACL class definition to discover the body property, resolves language expressions to plain text, and resolves author DIDs to display names. Returns a formatted transcript — ideal for reading conversations, task lists, etc. without multiple round-trips. The class_name parameter specifies which SHACL class to use for body property discovery (e.g., 'Message')."
+        description = "Get children of a parent with their body content resolved to readable text. Uses the SHACL class definition to discover the body property, resolves language expressions to plain text, and resolves author DIDs to display names. Returns a formatted transcript — ideal for reading conversations, task lists, etc. without multiple round-trips. The class_name parameter specifies which SHACL class to use for body property discovery (e.g., 'Message'). The limit parameter controls how many of the most recent messages to return (default 50)."
     )]
     pub async fn get_children_body_parsed(
         &self,
@@ -285,6 +287,13 @@ impl Ad4mMcpHandler {
 
         if child_links.is_empty() {
             return "(no messages)".to_string();
+        }
+
+        // Apply limit: keep only the most recent N messages
+        let limit = p.limit.unwrap_or(50);
+        let total = child_links.len();
+        if child_links.len() > limit {
+            child_links = child_links.split_off(child_links.len() - limit);
         }
 
         // Step 2: Discover the body property predicate from SHACL
@@ -407,6 +416,10 @@ impl Ad4mMcpHandler {
                 "[{}] {} ({}):\n{}",
                 entry.timestamp, display_name, entry.author_did, entry.body
             ));
+        }
+
+        if total > limit {
+            lines.insert(0, format!("(showing last {} of {} messages)", limit, total));
         }
 
         lines.join("\n\n")

@@ -997,8 +997,8 @@ Notes:
 
         wakerClient = new Ad4mClient(apolloClient, false);
 
-        // Load persisted state (subscriptions + result hashes) before creating manager
-        const savedState = stateDir ? loadWakerState(stateDir) : { subscriptions: [], resultHashes: {} };
+        // Load persisted state (subscriptions + seen messages) before creating manager
+        const savedState = stateDir ? loadWakerState(stateDir) : { subscriptions: [], seenMessages: {} };
 
         // Create subscription manager wired to the Ad4mClient and wake callback
         subscriptionManager = new WakerSubscriptionManager({
@@ -1006,12 +1006,12 @@ Notes:
           logger,
           QuerySubscriptionProxy,
           debounceMs: config.debounceMs,
-          previousResultHashes: savedState.resultHashes,
+          previousSeenMessages: savedState.seenMessages,
           onWake: (sub, _result, mentions) => {
             postWake(config, sub, pluginAgentDid, logger, mentions);
           },
-          onPersist: (subs, resultHashes) => {
-            if (stateDir) saveWakerState(stateDir, subs, resultHashes);
+          onPersist: (subs, seenMessages) => {
+            if (stateDir) saveWakerState(stateDir, subs, seenMessages);
           },
         });
 

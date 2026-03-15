@@ -279,7 +279,7 @@ formed stringified JSON array again!
 | Tool                                                                                               | Description                                                                                                                                                                             |
 | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ad4m_get_my_did()`                                                                                | Get your agent's DID. Use to filter out your own messages (compare against `author` field).                                                                                             |
-| `ad4m_get_children_body_parsed(perspective_id, parent_address=<channel-id>, class_name="Message")` | **Preferred way to read a channel.** Returns the full conversation as a formatted transcript with resolved message bodies, author names, and timestamps — one tool call instead of N+1. |
+| `ad4m_get_children_body_parsed(perspective_id, parent_address=<channel-id>, class_name="Message", limit=50)` | **Preferred way to read a channel.** Returns the most recent N messages (default 50) as a formatted transcript with resolved message bodies, author names, and timestamps — one tool call instead of N+1. Use a smaller `limit` (e.g. 10-20) when responding to a mention to see just the recent context. |
 | `ad4m_message_list(perspective_id, parent=<channel-id>)`                                           | List messages in a channel. Returns addresses, timestamps, and authors sorted by timestamp. Use `ad4m_get_children_body_parsed` instead for reading conversations.                      |
 | `ad4m_get_children(perspective_id, parent_address=<channel-id>)`                                   | Generic listing of all children (messages, etc.) in a channel with timestamps and authors.                                                                                              |
 | `ad4m_message_create(..., parent=<channel-id>)`                                                    | Create a message AND add it to a channel in one call.                                                                                                                                   |
@@ -312,8 +312,8 @@ For manual executor setup (troubleshooting, external mode), see `references/setu
    (see Rule 10 for template - include NH URL, local UUID, purpose, who invited you)
 4. ad4m_subscribe_to_mentions(perspective_id: "...")      → live waker subscription (see rule 11)
 5. ad4m_channel_query(perspective_id: "...")              → list channels
-6. ad4m_get_children_body_parsed(perspective_id, parent_address="<channel-id>", class_name="Message")
-   → returns formatted conversation transcript (author names, timestamps, body text)
+6. ad4m_get_children_body_parsed(perspective_id, parent_address="<channel-id>", class_name="Message", limit=20)
+   → returns last 20 messages as formatted transcript (author names, timestamps, body text)
 7. ad4m_message_create(perspective_id, body="Hello!", parent="<channel-id>")
    → creates message AND adds to channel in one step (expression_address auto-generated)
 ```
@@ -326,30 +326,43 @@ For manual executor setup (troubleshooting, external mode), see `references/setu
 
 The waker POSTs to your `/hooks/wake` endpoint with this JSON body:
 
+**Mention events** include per-message details with parent resolution:
+
 ```json
 {
-  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nParent: literal://string:parent-id\nSubscription: flux-messages\nEvent type: channel-messages",
+  "text": "You were @mentioned in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: mention-abc\nEvent type: mention\n\nMentioned messages (2):\n  Message: literal://string:msg-123\n  Parents: literal://string:channel-1, literal://string:conv-thread-5\n  Message: literal://string:msg-456\n  Parents: literal://string:channel-1",
+  "mode": "now"
+}
+```
+
+**Channel-messages events** have the simpler format:
+
+```json
+{
+  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: children-xyz\nEvent type: channel-messages",
   "mode": "now"
 }
 ```
 
 **Use `/hooks/wake`, NOT `/hooks/agent`.** `/hooks/wake` enqueues the event into your main agent session, which has your skills (including this AD4M skill) loaded. `/hooks/agent` spawns an isolated sub-agent that won't have your skills.
 
-Parse the `text` field to extract: `Agent DID`, `Perspective` (local UUID), `Parent`, `Event type`. Use these values directly. The plugin manages the MCP connection — just call tools directly.
+Parse the `text` field to extract: `Agent DID`, `Perspective` (local UUID), `Event type`, and for mentions: the `Message` addresses and their `Parents`. Use these values directly. The plugin manages the MCP connection — just call tools directly.
 
 ### Channel Concept: Each Parent is a Separate Conversation Space
 
-**The Parent field tells you which "space" the event happened in.** In AD4M/Flux, the perspective graph is a tree:
+**The Parents field tells you which "space(s)" the mentioned message belongs to.** In AD4M/Flux, the perspective graph is a tree:
 
 - `ad4m://self` is the root (the Community)
 - Channels/Parents are direct children of the community
 - Messages are children of channels/parents
 
-**When the waker gives you a Parent, that is YOUR conversation space.**
+A message can have **multiple parents** — for example, it might be in both a channel and a conversation thread (auto-generated by Flux AI). Use `ad4m_channel_list` or `ad4m_get_children` to identify which parent is the channel you should respond to.
 
-- Read messages FROM THAT PARENT only using `message_list(parent=<parent>)`
-- Respond TO THAT PARENT by passing `parent=<parent>` to `message_create`
-- **DO NOT** respond to a different parent or add your message as a child of a different parent (unless you have a reason to do that AS WELL, but your direct response to the expression that mentioned you must be under the same parent)
+**When the waker gives you message parents, respond to the channel parent.**
+
+- Read recent messages FROM THAT CHANNEL using `get_children_body_parsed(parent_address=<channel>, limit=20)`
+- Respond TO THAT CHANNEL by passing `parent=<channel>` to `message_create`
+- **DO NOT** respond to a conversation thread parent — those are auto-generated by Flux
 
 **First: read `memory/ad4m-neighbourhoods.md`** for the perspective UUID from the wake message. This file tells you what community this is, who's in it, and why you're there. This context is essential for responding appropriately.
 
@@ -358,10 +371,12 @@ Parse the `text` field to extract: `Agent DID`, `Perspective` (local UUID), `Par
 ### Step 1: Read recent messages
 
 1. `ad4m_get_my_did()` → get your agent DID for filtering
-2. `ad4m_get_children_body_parsed(perspective_id=<from wake>, parent_address=<parent from wake>, class_name="Message")` → formatted transcript
-   - **Use the Parent from the wake message!**
+2. `ad4m_get_children_body_parsed(perspective_id=<from wake>, parent_address=<channel parent>, class_name="Message", limit=20)` → formatted transcript
+   - **Use the channel parent from the wake message's "Mentioned messages" section!**
+   - `limit=20` gives you recent context around the mention without loading the entire channel history
    - Returns a ready-to-read transcript with author names, timestamps, and resolved message bodies
    - Format: `[timestamp] name (did):\nmessage text` separated by blank lines
+   - If the channel has more messages than the limit, the output starts with `(showing last N of M messages)`
 3. Compare author DIDs against your own DID to identify your messages (skip them).
 
 **Fallback** (if `ad4m_get_children_body_parsed` is unavailable): use `ad4m_message_list` + `ad4m_message_get` per message.

@@ -35,26 +35,44 @@ The subscribe tools call the MCP tools `ad4m_get_mention_waker_config` / `ad4m_g
 
 **Use `/hooks/wake` (recommended).** It enqueues the event into the main agent session which has your skills loaded. Do NOT use `/hooks/agent` — that spawns an isolated sub-agent without your skills.
 
-**`/hooks/wake` payload:**
+### Mention events
+
+For mention subscriptions, the wake message includes per-message details with resolved parents:
 
 ```json
 {
-  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nParent: literal://string:parent-id\nSubscription: flux-messages\nEvent type: channel-messages",
+  "text": "You were @mentioned in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: mention-abc\nEvent type: mention\n\nMentioned messages (1):\n  Message: literal://string:msg-123\n  Parents: literal://string:channel-1, literal://string:conv-thread-5",
   "mode": "now"
 }
 ```
 
-The `text` field contains key-value pairs, one per line:
+The `Mentioned messages` section lists each message that triggered the wake:
+- **Message** — the base expression address of the message containing the mention
+- **Parents** — all parent containers this message belongs to (channels, conversation threads, etc.)
 
-- **Line 1** — Event description: "New messages in an AD4M neighbourhood." or "You were @mentioned in an AD4M neighbourhood."
-- **Line 2** — "Read the AD4M skill for instructions on how to handle this."
+A message can have multiple parents because Flux auto-generates conversation threads. Use `ad4m_channel_list` to identify which parent is the actual channel, and respond there.
+
+### Channel-messages events
+
+```json
+{
+  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: children-xyz\nEvent type: channel-messages",
+  "mode": "now"
+}
+```
+
+### Common fields
+
 - **Agent DID** — the agent's own DID (to identify own messages)
 - **Perspective** — local perspective UUID to operate on (look up your memory file for context about this space)
-- **Parent** — parent/child address where the event occurred (e.g., channel ID)
 - **Subscription** — subscription ID
 - **Event type** — `"mention"` or `"channel-messages"`
 
 The plugin manages the MCP connection — just call AD4M tools directly after waking.
+
+### Deduplication
+
+The waker tracks seen message addresses per subscription and only wakes for **new** messages. After restart, previously seen messages are restored from persisted state — no duplicate wakes.
 
 ## OpenClaw Hooks Config
 
