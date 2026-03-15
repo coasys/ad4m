@@ -533,7 +533,8 @@ const Profile = (props: Props) => {
     }
   };
 
-  const formatProxy = (proxy: string) => {
+  const formatProxy = (proxy: string | null) => {
+    if (!proxy) return "";
     return proxy.replace(/^https(.*)/, "wss$1").replace(/^http(.*)/, "ws$1") + "/graphql";
   };
 
