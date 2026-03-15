@@ -343,9 +343,7 @@ impl Ad4mMcpHandler {
                 Ok(links) if !links.is_empty() => {
                     resolve_expression_value(&links[0].data.target).await
                 }
-                Ok(_) => {
-                    "(no body)".to_string()
-                }
+                Ok(_) => "(no body)".to_string(),
                 Err(e) => {
                     log::warn!("get_children_body_parsed: error querying body links: {}", e);
                     "(no body)".to_string()

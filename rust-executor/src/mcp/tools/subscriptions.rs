@@ -243,10 +243,14 @@ impl Ad4mMcpHandler {
 
         // Discover the body property predicate from SHACL to scope the query.
         // Without this, the query scans ALL links which is very slow on large perspectives.
-        let perspective = self.get_readable_perspective(&params.0.perspective_id).await.ok();
+        let perspective = self
+            .get_readable_perspective(&params.0.perspective_id)
+            .await
+            .ok();
         let body_predicate = if let Some(ref p) = perspective {
             let props = shacl::load_class_properties(p, "Message").await;
-            props.iter()
+            props
+                .iter()
                 .find(|prop| prop.name.to_lowercase() == "body")
                 .and_then(|prop| prop.predicate.clone())
         } else {
@@ -265,10 +269,7 @@ impl Ad4mMcpHandler {
         } else {
             // Fallback: no SHACL body predicate found, scan all links
             log::warn!("get_mention_waker_config: no body predicate found in SHACL for Message class, falling back to unscoped query");
-            format!(
-                "SELECT * FROM link WHERE {}",
-                mention_predicate
-            )
+            format!("SELECT * FROM link WHERE {}", mention_predicate)
         };
 
         let sub_id = format!("mention-{}", &did[did.len().saturating_sub(12)..]);
