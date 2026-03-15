@@ -187,6 +187,14 @@ impl From<SmtpConfigDto> for SmtpConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct HostRegistration {
+    pub index_url: String,
+    pub host_id: String,
+    pub auth_token: String,
+    pub email: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MultiUserConfig {
     pub enabled: bool,
     pub smtp_config: Option<SmtpConfig>,
@@ -201,6 +209,8 @@ pub struct LauncherState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_config: Option<TlsConfig>, // Deprecated - use multi_user_config.tls_config instead
     pub multi_user_config: Option<MultiUserConfig>,
+    #[serde(default)]
+    pub host_registration: Option<HostRegistration>,
     #[serde(default)]
     pub mcp_enabled: Option<bool>,
     #[serde(default)]
@@ -247,6 +257,7 @@ impl LauncherState {
                     log_config: None,
                     tls_config: None,
                     multi_user_config: None,
+                    host_registration: None,
                     mcp_enabled: None,
                     mcp_port: None,
                 }
