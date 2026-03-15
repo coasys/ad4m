@@ -1401,11 +1401,10 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(config.names).to.include("wakerbot");
             expect(config.names).to.include("WakerTest");
             expect(config.query).to.be.a('string');
-            expect(config.query).to.include("ad4m://has_child");
             expect(config.query).to.include("fn::contains");
             expect(config.query).to.include("fn::parse_literal");
-            // Should include the two-hop graph traversal
-            expect(config.query).to.include("out->link");
+            // Query uses direct body-link matching (body predicate from SHACL), not two-hop traversal
+            expect(config.query).to.include("SELECT * FROM link WHERE");
             console.log("SurrealQL query:", config.query);
         });
 
