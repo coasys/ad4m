@@ -384,9 +384,12 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     // Start holochain signal receiver as standalone task
     tokio::spawn(crate::holochain_signal_receiver());
 
-    // Eagerly install Unyt alliance DNA in the background.
-    // ensure_installed() will wait for holochain service to become available.
+    // Eagerly install Unyt alliance DNA in the background (only if membrane proof is available).
     tokio::spawn(async {
+        if unyt_service::get_membrane_proof().is_none() {
+            info!("No Unyt membrane proof stored — skipping eager DNA install");
+            return;
+        }
         match unyt_service::ensure_installed().await {
             Ok(()) => info!("Unyt alliance DNA ready"),
             Err(e) => error!("Failed to install Unyt alliance DNA: {}", e),

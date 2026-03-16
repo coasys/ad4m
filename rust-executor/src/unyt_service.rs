@@ -112,6 +112,7 @@ pub struct PaymentResult {
 /// Ensure the alliance DNA is installed. Safe to call multiple times —
 /// only the first call actually installs; subsequent calls are no-ops.
 /// Blocks until holochain service is available.
+/// Returns an error if no membrane proof has been stored yet.
 pub async fn ensure_installed() -> Result<(), AnyError> {
     // Fast path: already installed
     {
@@ -119,6 +120,13 @@ pub async fn ensure_installed() -> Result<(), AnyError> {
         if *installed {
             return Ok(());
         }
+    }
+
+    // Don't attempt install without a membrane proof
+    if get_membrane_proof().is_none() {
+        return Err(deno_core::anyhow::anyhow!(
+            "No membrane proof stored — call setUnytMembraneProof first"
+        ));
     }
 
     // Wait for holochain service to become available (no timeout — agent unlock may take a while)
