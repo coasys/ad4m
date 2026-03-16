@@ -403,6 +403,10 @@ jobs:
   build-launcher-binary-windows:
     runs-on: windows-latest
 
+    env:
+      CMAKE_ASM_NASM_COMPILER: "C:\\Program Files\\NASM\\nasm.exe"
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
     needs:
       - create-release
 
