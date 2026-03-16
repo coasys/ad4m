@@ -4028,7 +4028,7 @@ impl PerspectiveInstance {
 
         let subscription_id = Uuid::new_v4().to_string();
 
-        log::info!(
+        log::debug!(
             "subscribe_and_query_surreal: new subscription {} for query: {}",
             subscription_id,
             query
@@ -4040,7 +4040,7 @@ impl PerspectiveInstance {
             .await?;
         let result_string = serde_json::to_string(&initial_result_vec)?;
 
-        log::info!(
+        log::debug!(
             "subscribe_and_query_surreal: {} initial result has {} items",
             subscription_id,
             initial_result_vec.len()
@@ -4155,7 +4155,7 @@ impl PerspectiveInstance {
                             let mut queries = self_clone.surreal_subscribed_queries.lock().await;
                             if let Some(stored_query) = queries.get_mut(&id) {
                                 if result_string != stored_query.last_result {
-                                    log::info!(
+                                    log::debug!(
                                         "Surreal subscription {} result changed ({} items). Query: {}",
                                         id,
                                         result_vec.len(),
