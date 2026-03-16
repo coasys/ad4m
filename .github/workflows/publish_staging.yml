@@ -225,7 +225,11 @@ jobs:
   # macOS Binary Build - Uses aggressive caching (Docker not available on macOS)
   # ============================================================================
   build-launcher-binary-macos:
-    runs-on: macos-latest
+    runs-on: macos-14
+
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
     needs:
       - create-release
@@ -411,6 +415,14 @@ jobs:
       run: |
         git config --global core.longpaths true
         reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
+
+    - name: Install NASM (required for aws-lc-sys AES assembly on Windows)
+      run: choco install nasm -y
+      shell: powershell
+
+    - name: Add NASM to PATH
+      run: echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+      shell: powershell
 
     # Rust toolchain configured via rust-toolchain.toml
     - name: Install Rust toolchain
