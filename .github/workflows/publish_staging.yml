@@ -230,6 +230,7 @@ jobs:
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      RUSTFLAGS: "-C link-arg=-Wl,-ld_classic"
 
     needs:
       - create-release
