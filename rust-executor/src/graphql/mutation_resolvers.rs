@@ -3182,4 +3182,30 @@ impl Mutation {
             }),
         }
     }
+
+    /// Store a membrane proof for Unyt alliance DNA installation.
+    /// The proof should be base64-encoded bytes from the joining server.
+    async fn runtime_set_unyt_membrane_proof(
+        &self,
+        context: &RequestContext,
+        proof: String,
+    ) -> FieldResult<PaymentRequestResult> {
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can set the membrane proof",
+                Value::null(),
+            ));
+        }
+
+        match crate::unyt_service::set_membrane_proof(&proof) {
+            Ok(()) => Ok(PaymentRequestResult {
+                success: true,
+                message: "Membrane proof stored. Will be used on next DNA installation.".to_string(),
+            }),
+            Err(e) => Ok(PaymentRequestResult {
+                success: false,
+                message: format!("Failed to store membrane proof: {}", e),
+            }),
+        }
+    }
 }

@@ -740,4 +740,19 @@ export class AgentClient {
     );
     return runtimeSendHot;
   }
+
+  async setUnytMembraneProof(proof: string): Promise<PaymentRequestResult> {
+    const { runtimeSetUnytMembraneProof } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation runtimeSetUnytMembraneProof($proof: String!) {
+          runtimeSetUnytMembraneProof(proof: $proof) {
+            success
+            message
+          }
+        }`,
+        variables: { proof },
+      })
+    );
+    return runtimeSetUnytMembraneProof;
+  }
 }

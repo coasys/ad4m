@@ -242,16 +242,48 @@ roles:
     info!("Packed alliance hApp at: {}", happ_file);
 
     // Install
-    use holochain::prelude::InstallAppPayload;
-    use holochain_types::app::AppBundleSource;
+    use holochain::prelude::{InstallAppPayload, MembraneProof, SerializedBytes};
+    use holochain_types::app::{AppBundleSource, RoleSettings};
+    use std::collections::HashMap;
     use std::path::PathBuf;
+
+    // Build roles_settings with membrane proof if available
+    let roles_settings = match get_membrane_proof() {
+        Some(proof_b64) => {
+            match base64::engine::general_purpose::STANDARD.decode(&proof_b64) {
+                Ok(proof_bytes) => {
+                    info!("Using stored membrane proof ({} bytes) for DNA installation", proof_bytes.len());
+                    let membrane_proof = MembraneProof::from(SerializedBytes::from(
+                        holochain::prelude::UnsafeBytes::from(proof_bytes),
+                    ));
+                    let mut settings = HashMap::new();
+                    settings.insert(
+                        UNYT_CELL_NAME.into(),
+                        RoleSettings::Provisioned {
+                            membrane_proof: Some(membrane_proof),
+                            modifiers: None,
+                        },
+                    );
+                    Some(settings)
+                }
+                Err(e) => {
+                    warn!("Failed to decode membrane proof base64: {}. Installing without proof.", e);
+                    None
+                }
+            }
+        }
+        None => {
+            warn!("No membrane proof stored — DNA installation may fail if membrane proof is required");
+            None
+        }
+    };
 
     let payload = InstallAppPayload {
         source: AppBundleSource::Path(PathBuf::from(&happ_file)),
         agent_key: None,
         installed_app_id: Some(UNYT_APP_ID.to_string()),
         network_seed: None,
-        roles_settings: None,
+        roles_settings,
         ignore_genesis_failure: false,
     };
 
@@ -323,6 +355,28 @@ pub fn version_info() -> (Option<String>, String) {
         db.get_setting("unyt_dna_version")
     }).unwrap_or(None);
     (installed, ALLIANCE_DNA_VERSION.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Membrane proof management
+// ---------------------------------------------------------------------------
+
+/// Store a membrane proof (base64-encoded bytes) for use during DNA installation.
+/// This should be called before `ensure_installed()` with auth material obtained
+/// from the hosting API / joining server.
+pub fn set_membrane_proof(proof_base64: &str) -> Result<(), AnyError> {
+    Ad4mDb::with_global_instance(|db| {
+        db.set_setting("unyt_membrane_proof", proof_base64)
+    })?;
+    info!("Stored Unyt membrane proof ({} bytes encoded)", proof_base64.len());
+    Ok(())
+}
+
+/// Retrieve the stored membrane proof, if any.
+pub fn get_membrane_proof() -> Option<String> {
+    Ad4mDb::with_global_instance(|db| {
+        db.get_setting("unyt_membrane_proof")
+    }).unwrap_or(None)
 }
 
 /// Capture the DNA hash from the installed app for signal routing.
