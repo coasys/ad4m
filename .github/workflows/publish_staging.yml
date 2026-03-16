@@ -80,9 +80,6 @@ jobs:
     - name: pnpm Install
       run: pnpm install --no-frozen-lockfile
 
-    - name: Install core dependencies
-      run: cd ./core && pnpm install --no-frozen-lockfile
-
     - name: Build AD4M-CLI
       env:
         RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
@@ -190,9 +187,6 @@ jobs:
 
     - name: pnpm Install
       run: pnpm install --no-frozen-lockfile
-
-    - name: Install core dependencies
-      run: cd ./core && pnpm install --no-frozen-lockfile
 
     - name: Build AD4M-CLI
       env:
@@ -308,10 +302,7 @@ jobs:
         path: ui
 
     - name: pnpm Install
-      run: pnpm install
-
-    - name: Install core dependencies
-      run: cd ./core && pnpm install
+      run: pnpm install --no-frozen-lockfile
 
     #- name: Decrypt and install certificates
     #  env:
@@ -473,10 +464,7 @@ jobs:
         path: ui
 
     - name: pnpm Install
-      run: pnpm install
-
-    - name: Install core dependencies
-      run: cd ./core && pnpm install
+      run: pnpm install --no-frozen-lockfile
 
     - name: Build AD4M-CLI
       env:
@@ -569,9 +557,6 @@ jobs:
 
       - name: Install deps
         run: pnpm install --no-frozen-lockfile
-
-      - name: Install core dependencies
-        run: cd ./core && pnpm install --no-frozen-lockfile
 
       - name: Build modules
         run: pnpm run build-npm-packages

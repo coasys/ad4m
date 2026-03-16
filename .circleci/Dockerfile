@@ -105,4 +105,10 @@ RUN for f in /usr/include/x86_64-linux-gnu/cudnn*.h; do \
 ENV PATH="/usr/local/cuda-12.5/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/usr/local/cuda-12.5/lib64"
 
+
+# nvidia-smi is part of the NVIDIA driver, not the toolkit.
+# In a CI build container (no GPU), create a stub so build scripts that probe for it don't fail.
+RUN printf '#!/bin/bash\necho "NVIDIA-SMI 535.00  Driver Version: 535.00  CUDA Version: 12.5"\nexit 0' > /usr/local/bin/nvidia-smi && \
+    chmod +x /usr/local/bin/nvidia-smi
+
 USER circleci
