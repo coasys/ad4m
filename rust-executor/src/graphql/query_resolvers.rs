@@ -2,6 +2,7 @@
 use super::graphql_types::*;
 use crate::agent::{capabilities::*, did_document_for_context, signatures, AgentContext};
 use crate::ai_service::AIService;
+use crate::config::get_global_config;
 use crate::languages::LanguageController;
 use crate::types::{AITask, DecoratedExpressionProof, ModelType};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
@@ -806,6 +807,59 @@ impl Query {
         })
     }
 
+    /// Returns the domain name(s) from the TLS certificate's Subject Alternative Names,
+    /// or None if TLS is not configured.
+    async fn runtime_tls_domain(&self, context: &RequestContext) -> FieldResult<Option<String>> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        let config = get_global_config();
+        let tls = match config.tls {
+            Some(tls) => tls,
+            None => return Ok(None),
+        };
+
+        let cert_pem = std::fs::read(&tls.cert_file_path).map_err(|e| {
+            FieldError::new(
+                format!("Failed to read TLS certificate: {}", e),
+                Value::null(),
+            )
+        })?;
+
+        use x509_parser::prelude::*;
+        // Parse PEM to get the first certificate
+        let (_, pem) = parse_x509_pem(&cert_pem)
+            .map_err(|e| FieldError::new(format!("Failed to parse PEM: {}", e), Value::null()))?;
+        let (_, cert) = X509Certificate::from_der(&pem.contents).map_err(|e| {
+            FieldError::new(format!("Failed to parse certificate: {}", e), Value::null())
+        })?;
+
+        // Try SAN extension first, skipping wildcard entries
+        if let Ok(Some(san)) = cert.subject_alternative_name() {
+            for name in &san.value.general_names {
+                if let GeneralName::DNSName(dns) = name {
+                    if !dns.contains('*') {
+                        return Ok(Some(dns.to_string()));
+                    }
+                }
+            }
+        }
+
+        // Fall back to CN, skipping wildcard entries
+        for rdn in cert.subject().iter() {
+            for attr in rdn.iter() {
+                if attr.attr_type() == &oid_registry::OID_X509_COMMON_NAME {
+                    if let Ok(cn) = attr.as_str() {
+                        if !cn.contains('*') {
+                            return Ok(Some(cn.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     async fn runtime_known_link_language_templates(
         &self,
         context: &RequestContext,
@@ -924,8 +978,31 @@ impl Query {
                 }
             }
 
+            let free_access: bool =
+                Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user.username))
+                    .map_err(|e| {
+                        FieldError::new(
+                            format!("Failed to get user free access: {}", e),
+                            Value::null(),
+                        )
+                    })?;
+
+            let remaining_credits = if free_access {
+                "unlimited".to_string()
+            } else {
+                let credits =
+                    Ad4mDb::with_global_instance(|db| db.get_user_credits(&user.username))
+                        .map_err(|e| {
+                            FieldError::new(
+                                format!("Failed to get user credits: {}", e),
+                                Value::null(),
+                            )
+                        })?;
+                format!("{}", credits)
+            };
+
             user_stats.push(UserStatistics {
-                email: user.username,
+                email: user.username.clone(),
                 did: user.did,
                 last_seen: user.last_seen.map(|ts| {
                     DateTime::from(
@@ -934,6 +1011,8 @@ impl Query {
                     )
                 }),
                 perspective_count,
+                remaining_credits,
+                free_access,
             });
         }
 

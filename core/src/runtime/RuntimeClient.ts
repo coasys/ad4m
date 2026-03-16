@@ -78,6 +78,15 @@ export class RuntimeClient {
         return runtimeInfo
     }
 
+    async tlsDomain(): Promise<string | null> {
+        const { runtimeTlsDomain } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeTlsDomain {
+                runtimeTlsDomain
+            }`,
+        }));
+        return runtimeTlsDomain
+    }
+
     async quit(): Promise<Boolean> {
         const result = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation runtimeQuit { runtimeQuit }`
@@ -413,6 +422,8 @@ export class RuntimeClient {
                     did
                     lastSeen
                     perspectiveCount
+                    remainingCredits
+                    freeAccess
                 }
             }`
         }))
