@@ -487,10 +487,10 @@ jobs:
       env:
         RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
         # libort_sys (ONNX Runtime) ships with static MT CRT; Rust MSVC defaults to dynamic MD.
-        # aws-lc-sys: force cmake builder + explicit NASM/perl so AES assembly gets compiled
-        AWS_LC_SYS_CMAKE_BUILDER: "1"
-        CMAKE_ASM_NASM_COMPILER: "C:\\Program Files\\NASM\\nasm.exe"
-        PERL_EXECUTABLE: "C:\\Strawberry\\perl\\bin\\perl.exe"
+        # aws-lc-sys on Windows MSVC: cmake finds NASM+perl but still fails to link
+        # the AES-NI assembly into the final .lib (bcm.obj references unresolved symbols).
+        # OPENSSL_NO_ASM=1 compiles bcm.c in software-only mode — no assembly symbols needed.
+        OPENSSL_NO_ASM: "1"
         # +crt-static makes Rust use MT too — fixes LNK2038/LNK1169 CRT mismatch in generate_snapshot.
         RUSTFLAGS: -C target-feature=+crt-static
         # Use system git so cargo does NOT auto-fetch chromium submodules from coasys/deno.git
