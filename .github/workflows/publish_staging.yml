@@ -57,7 +57,7 @@ jobs:
   build-launcher-binary-linux:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
+      image: coasys/ad4m-ci-linux:latest@sha256:3c13c9fe481bcd1103dae1646a03793dd632ef58cd8868f952fe175871ec4132
 
     needs:
       - create-release
@@ -167,7 +167,7 @@ jobs:
   build-launcher-binary-linux-cuda:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
+      image: coasys/ad4m-ci-linux:latest@sha256:3c13c9fe481bcd1103dae1646a03793dd632ef58cd8868f952fe175871ec4132
 
     needs:
       - create-release
@@ -611,7 +611,7 @@ jobs:
   crates-publish:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
+      image: coasys/ad4m-ci-linux:latest@sha256:3c13c9fe481bcd1103dae1646a03793dd632ef58cd8868f952fe175871ec4132
     steps:
       - uses: actions/checkout@v3
 
