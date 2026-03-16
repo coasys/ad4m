@@ -265,6 +265,25 @@ pub async fn hc_agent_infos(executor_url: String, cap_token: String) -> Result<S
     query_path = "src/runtime.gql",
     response_derives = "Debug"
 )]
+pub struct NetworkMetrics;
+
+pub async fn network_metrics(executor_url: String, cap_token: String) -> Result<String> {
+    let response_data: network_metrics::ResponseData = query(
+        executor_url,
+        cap_token,
+        NetworkMetrics::build_query(network_metrics::Variables {}),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->network-metrics query")?;
+    Ok(response_data.runtime_get_network_metrics)
+}
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
 pub struct HcAddAgentInfos;
 
 pub async fn hc_add_agent_infos(
@@ -534,6 +553,10 @@ impl RuntimeClient {
 
     pub async fn hc_agent_infos(&self) -> Result<String> {
         hc_agent_infos(self.info.executor_url.clone(), self.info.cap_token.clone()).await
+    }
+
+    pub async fn network_metrics(&self) -> Result<String> {
+        network_metrics(self.info.executor_url.clone(), self.info.cap_token.clone()).await
     }
 
     pub async fn hc_add_agent_infos(

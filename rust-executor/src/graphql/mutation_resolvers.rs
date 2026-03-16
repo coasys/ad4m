@@ -2984,13 +2984,25 @@ impl Mutation {
         context: &RequestContext,
         address: String,
     ) -> FieldResult<bool> {
-        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        let _ = address;
-        // TODO: implement actual hot wallet address storage
-        Err(FieldError::new(
-            "Set hot wallet address not yet implemented",
-            Value::null(),
-        ))
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_UPDATE_CAPABILITY)?;
+
+        let user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
+            FieldError::new(
+                "Setting hot wallet address requires multi-user authentication",
+                Value::null(),
+            )
+        })?;
+
+        Ad4mDb::with_global_instance(|db| {
+            db.set_user_hot_wallet(&user_email, &address).map_err(|e| {
+                FieldError::new(
+                    format!("Failed to set hot wallet address: {}", e),
+                    Value::null(),
+                )
+            })
+        })?;
+
+        Ok(true)
     }
 
     async fn runtime_request_payment(
@@ -2998,12 +3010,89 @@ impl Mutation {
         context: &RequestContext,
         #[allow(non_snake_case)] amountHOT: String,
     ) -> FieldResult<PaymentRequestResult> {
-        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        let _ = amountHOT;
-        // TODO: implement actual payment request via Unit
-        Err(FieldError::new(
-            "Request payment not yet implemented",
-            Value::null(),
-        ))
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_UPDATE_CAPABILITY)?;
+
+        let user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
+            FieldError::new(
+                "Payment requests require multi-user authentication",
+                Value::null(),
+            )
+        })?;
+
+        // TODO(Phase 2): Create a DB record / enqueue a retryable job here once
+        // Unit payment integration is implemented. Until then no external request
+        // is made and no state is persisted — callers must not treat this response
+        // as a completed or queued payment.
+        log::warn!(
+            "runtime_request_payment: no-op mock for user={} amount={} HOT — \
+             Unit integration not yet implemented, no payment was queued",
+            user_email,
+            amountHOT
+        );
+
+        Ok(PaymentRequestResult {
+            success: false,
+            message: format!(
+                "No action taken: payment request for {} HOT by {} was acknowledged but not queued. \
+                 Unit integration is not yet implemented (Phase 2).",
+                amountHOT, user_email
+            ),
+        })
+    }
+
+    async fn runtime_set_user_credits(
+        &self,
+        context: &RequestContext,
+        email: String,
+        amount: f64,
+    ) -> FieldResult<bool> {
+        // Admin-only: only the launcher's admin credential can set user credits
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can set user credits",
+                Value::null(),
+            ));
+        }
+
+        if amount < 0.0 || amount.is_nan() || amount.is_infinite() {
+            return Err(FieldError::new(
+                "Invalid credit amount: must be a finite, non-negative number",
+                Value::null(),
+            ));
+        }
+
+        Ad4mDb::with_global_instance(|db| {
+            db.set_user_credits(&email, amount).map_err(|e| {
+                FieldError::new(format!("Failed to set user credits: {}", e), Value::null())
+            })
+        })?;
+
+        Ok(true)
+    }
+
+    async fn runtime_set_user_free_access(
+        &self,
+        context: &RequestContext,
+        email: String,
+        enabled: bool,
+    ) -> FieldResult<bool> {
+        // Admin-only: only the launcher's admin credential can grant/revoke free access
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can set user free access",
+                Value::null(),
+            ));
+        }
+
+        Ad4mDb::with_global_instance(|db| {
+            db.set_user_free_access(&email, enabled).map_err(|e| {
+                FieldError::new(
+                    format!("Failed to set user free access: {}", e),
+                    Value::null(),
+                )
+            })
+        })?;
+
+        Ok(true)
     }
 }

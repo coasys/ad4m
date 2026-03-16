@@ -944,12 +944,49 @@ impl Query {
         &self,
         context: &RequestContext,
     ) -> FieldResult<HostingUserInfo> {
-        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        // TODO: implement actual hosting user info lookup
-        Err(FieldError::new(
-            "Hosting user info not yet implemented",
-            Value::null(),
-        ))
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        let user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
+            FieldError::new(
+                "Hosting user info requires multi-user authentication",
+                Value::null(),
+            )
+        })?;
+
+        let free_access = Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user_email))
+            .map_err(|e| {
+            FieldError::new(
+                format!("Failed to get free access status: {}", e),
+                Value::null(),
+            )
+        })?;
+
+        let remaining_credits = if free_access {
+            "unlimited".to_string()
+        } else {
+            let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(&user_email))
+                .map_err(|e| {
+                    FieldError::new(format!("Failed to get user credits: {}", e), Value::null())
+                })?;
+            credits.to_string()
+        };
+
+        let hot_wallet_address =
+            Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email)).map_err(
+                |e| {
+                    FieldError::new(
+                        format!("Failed to get hot wallet address: {}", e),
+                        Value::null(),
+                    )
+                },
+            )?;
+
+        Ok(HostingUserInfo {
+            email: user_email,
+            remaining_credits,
+            hot_wallet_address,
+            free_access,
+        })
     }
 
     async fn ai_get_models(&self, context: &RequestContext) -> FieldResult<Vec<Model>> {

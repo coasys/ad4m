@@ -326,9 +326,24 @@ impl Ad4mDb {
             [],
         );
 
+        // Helper to run ALTER TABLE ADD COLUMN migrations, ignoring "duplicate column name"
+        // errors (column already exists from a previous migration) but propagating all others.
+        let alter_add_column = |sql: &str| -> Result<(), AnyError> {
+            match conn.execute(sql, []) {
+                Ok(_) => Ok(()),
+                Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+                Err(e) => Err(e.into()),
+            }
+        };
+
         // Add user_email column to notifications table for multi-user support
         // This column tracks which user created the notification (NULL for main agent)
-        let _ = conn.execute("ALTER TABLE notifications ADD COLUMN user_email TEXT", []);
+        alter_add_column("ALTER TABLE notifications ADD COLUMN user_email TEXT")?;
+
+        // Add hosting columns to users table
+        alter_add_column("ALTER TABLE users ADD COLUMN remaining_credits REAL DEFAULT 0")?;
+        alter_add_column("ALTER TABLE users ADD COLUMN hot_wallet_address TEXT")?;
+        alter_add_column("ALTER TABLE users ADD COLUMN free_access BOOLEAN DEFAULT 0")?;
 
         Ok(Self { conn })
     }
@@ -2078,6 +2093,24 @@ impl Ad4mDb {
         //     serde_json::to_value(model_status)?,
         // );
 
+        // Export users
+        let users: Vec<serde_json::Value> = self
+            .conn
+            .prepare("SELECT username, did, password_hash, last_seen, remaining_credits, hot_wallet_address, free_access FROM users")?
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "username": row.get::<_, String>(0)?,
+                    "did": row.get::<_, String>(1)?,
+                    "password_hash": row.get::<_, String>(2)?,
+                    "last_seen": row.get::<_, Option<i64>>(3)?,
+                    "remaining_credits": row.get::<_, Option<f64>>(4)?,
+                    "hot_wallet_address": row.get::<_, Option<String>>(5)?,
+                    "free_access": row.get::<_, Option<bool>>(6)?
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        export_data.insert("users".to_string(), serde_json::to_value(users)?);
+
         // Export friends
         let mut stmt = self.conn.prepare("SELECT friend FROM friends")?;
         let friends: Vec<String> = stmt
@@ -2534,6 +2567,50 @@ impl Ad4mDb {
         //     }
         // }
 
+        // Import users
+        if let Some(users) = data.get("users") {
+            match serde_json::from_value::<Vec<serde_json::Value>>(users.clone()) {
+                Ok(users) => {
+                    result.users.total = users.len() as i32;
+                    log::debug!("Importing {} users", users.len());
+                    for user in users {
+                        let username = user["username"].as_str().unwrap_or("<unknown>");
+                        match self.conn.execute(
+                            "INSERT OR REPLACE INTO users (username, did, password_hash, last_seen, remaining_credits, hot_wallet_address, free_access) 
+                                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![
+                                user["username"].as_str().unwrap_or(""),
+                                user["did"].as_str().unwrap_or(""),
+                                user["password_hash"].as_str().unwrap_or(""),
+                                user["last_seen"].as_i64(),
+                                user["remaining_credits"].as_f64(),
+                                user["hot_wallet_address"].as_str(),
+                                user["free_access"].as_bool()
+                            ],
+                        ) {
+                            Ok(_) => result.users.imported += 1,
+                            Err(e) => {
+                                result.users.failed += 1;
+                                result.users.errors.push(format!(
+                                    "Failed to import user {}: {}",
+                                    username, e
+                                ));
+                                log::warn!("Failed to import user {}: {}", username, e)
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    result.users.failed = 1;
+                    result
+                        .users
+                        .errors
+                        .push(format!("Failed to parse users: {}", e));
+                    log::warn!("Failed to parse users: {}", e)
+                }
+            }
+        }
+
         // Import friends
         if let Some(friends) = data.get("friends") {
             match serde_json::from_value::<Vec<String>>(friends.clone()) {
@@ -2736,6 +2813,97 @@ impl Ad4mDb {
     pub fn verify_user_password(&self, username: &str, password: &str) -> Ad4mDbResult<bool> {
         let user = self.get_user_internal(username)?;
         Self::verify_password(password, &user.password_hash)
+    }
+
+    // Hosting credit & access functions
+
+    pub fn get_user_credits(&self, email: &str) -> Ad4mDbResult<f64> {
+        let credits: f64 = self.conn.query_row(
+            "SELECT COALESCE(remaining_credits, 0) FROM users WHERE username = ?1",
+            [email],
+            |row| row.get(0),
+        )?;
+        Ok(credits)
+    }
+
+    /// Validate that a credit amount is finite and non-negative.
+    fn validate_credit_amount(amount: f64) -> Ad4mDbResult<()> {
+        if amount.is_nan() || amount.is_infinite() {
+            return Err(anyhow!("Invalid credit amount: must be a finite number"));
+        }
+        if amount < 0.0 {
+            return Err(anyhow!("Invalid credit amount: must be non-negative"));
+        }
+        Ok(())
+    }
+
+    /// Require that an UPDATE affected at least one row, otherwise the user was not found.
+    fn require_user_row(rows: usize, email: &str) -> Ad4mDbResult<()> {
+        if rows == 0 {
+            return Err(anyhow!("User not found: {}", email));
+        }
+        Ok(())
+    }
+
+    pub fn set_user_credits(&self, email: &str, amount: f64) -> Ad4mDbResult<()> {
+        Self::validate_credit_amount(amount)?;
+        let rows = self.conn.execute(
+            "UPDATE users SET remaining_credits = ?1 WHERE username = ?2",
+            params![amount, email],
+        )?;
+        Self::require_user_row(rows, email)
+    }
+
+    pub fn add_user_credits(&self, email: &str, amount: f64) -> Ad4mDbResult<()> {
+        Self::validate_credit_amount(amount)?;
+        let rows = self.conn.execute(
+            "UPDATE users SET remaining_credits = COALESCE(remaining_credits, 0) + ?1 WHERE username = ?2",
+            params![amount, email],
+        )?;
+        Self::require_user_row(rows, email)
+    }
+
+    pub fn deduct_user_credits(&self, email: &str, amount: f64) -> Ad4mDbResult<()> {
+        Self::validate_credit_amount(amount)?;
+        let rows = self.conn.execute(
+            "UPDATE users SET remaining_credits = MAX(0, COALESCE(remaining_credits, 0) - ?1) WHERE username = ?2",
+            params![amount, email],
+        )?;
+        Self::require_user_row(rows, email)
+    }
+
+    pub fn get_user_hot_wallet(&self, email: &str) -> Ad4mDbResult<Option<String>> {
+        let result: Option<String> = self.conn.query_row(
+            "SELECT hot_wallet_address FROM users WHERE username = ?1",
+            [email],
+            |row| row.get(0),
+        )?;
+        Ok(result)
+    }
+
+    pub fn set_user_hot_wallet(&self, email: &str, address: &str) -> Ad4mDbResult<()> {
+        let rows = self.conn.execute(
+            "UPDATE users SET hot_wallet_address = ?1 WHERE username = ?2",
+            params![address, email],
+        )?;
+        Self::require_user_row(rows, email)
+    }
+
+    pub fn get_user_free_access(&self, email: &str) -> Ad4mDbResult<bool> {
+        let free_access: bool = self.conn.query_row(
+            "SELECT COALESCE(free_access, 0) FROM users WHERE username = ?1",
+            [email],
+            |row| row.get(0),
+        )?;
+        Ok(free_access)
+    }
+
+    pub fn set_user_free_access(&self, email: &str, enabled: bool) -> Ad4mDbResult<()> {
+        let rows = self.conn.execute(
+            "UPDATE users SET free_access = ?1 WHERE username = ?2",
+            params![enabled, email],
+        )?;
+        Self::require_user_row(rows, email)
     }
 
     // Settings management functions
