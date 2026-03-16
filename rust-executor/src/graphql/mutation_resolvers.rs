@@ -47,8 +47,8 @@ const LINK_WRITE_RATE: f64 = 0.000000001; // per link write
 /// Returns Err if credits are insufficient or the DB operation fails.
 fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
-        let free =
-            Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)).unwrap_or(false);
+        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
         if !free {
             Ad4mDb::with_global_instance(|db| db.deduct_user_credits_if_available(email, amount))
                 .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
@@ -62,11 +62,11 @@ fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
 /// happens after the operation via reserve_compute_credits with the exact cost.
 fn check_compute_credits(auth_token: &str) -> FieldResult<()> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
-        let free =
-            Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)).unwrap_or(false);
+        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
         if !free {
-            let credits =
-                Ad4mDb::with_global_instance(|db| db.get_user_credits(email)).unwrap_or(0.0);
+            let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
+                .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
             if credits <= 0.0 {
                 return Err(FieldError::new(
                     "Insufficient compute credits",
@@ -1931,8 +1931,6 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        reserve_compute_credits(&context.auth_token, LINK_WRITE_RATE)?;
-
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let result = perspective
@@ -1944,6 +1942,7 @@ impl Mutation {
             )
             .await?;
 
+        reserve_compute_credits(&context.auth_token, LINK_WRITE_RATE)?;
         Ok(result)
     }
 
@@ -1959,14 +1958,13 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        reserve_compute_credits(&context.auth_token, LINK_WRITE_RATE)?;
-
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let link = crate::types::LinkExpression::try_from(link)?;
         let result = perspective
             .add_link_expression(link, link_status_from_input(status)?, batch_id)
             .await?;
 
+        reserve_compute_credits(&context.auth_token, LINK_WRITE_RATE)?;
         Ok(result)
     }
 
@@ -1983,7 +1981,6 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
         let link_count = links.len();
-        reserve_compute_credits(&context.auth_token, link_count as f64 * LINK_WRITE_RATE)?;
 
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
@@ -1996,6 +1993,7 @@ impl Mutation {
             )
             .await?;
 
+        reserve_compute_credits(&context.auth_token, link_count as f64 * LINK_WRITE_RATE)?;
         Ok(result)
     }
 
@@ -2012,10 +2010,6 @@ impl Mutation {
         )?;
         // Only charge for additions, not removals
         let additions_count = mutations.additions.len();
-        reserve_compute_credits(
-            &context.auth_token,
-            additions_count as f64 * LINK_WRITE_RATE,
-        )?;
 
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
@@ -2023,6 +2017,10 @@ impl Mutation {
             .link_mutations(mutations, link_status_from_input(status)?, &agent_context)
             .await?;
 
+        reserve_compute_credits(
+            &context.auth_token,
+            additions_count as f64 * LINK_WRITE_RATE,
+        )?;
         Ok(result)
     }
 
