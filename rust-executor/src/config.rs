@@ -7,6 +7,27 @@ use std::sync::{Arc, Mutex};
 lazy_static::lazy_static! {
     /// Global SMTP configuration for sending emails
     pub static ref SMTP_CONFIG: Arc<Mutex<Option<SmtpConfig>>> = Arc::new(Mutex::new(None));
+
+    /// Global Ad4mConfig instance, set once during startup
+    pub static ref GLOBAL_AD4M_CONFIG: Arc<Mutex<Option<Ad4mConfig>>> = Arc::new(Mutex::new(None));
+}
+
+/// Store the Ad4mConfig globally so services can access it without passing it through every call
+pub fn set_global_config(config: Ad4mConfig) {
+    let mut global_config = GLOBAL_AD4M_CONFIG
+        .lock()
+        .expect("Failed to lock GLOBAL_AD4M_CONFIG");
+    *global_config = Some(config);
+}
+
+/// Get a clone of the global Ad4mConfig
+pub fn get_global_config() -> Ad4mConfig {
+    let global_config = GLOBAL_AD4M_CONFIG
+        .lock()
+        .expect("Failed to lock GLOBAL_AD4M_CONFIG");
+    global_config
+        .clone()
+        .expect("GLOBAL_AD4M_CONFIG not initialized")
 }
 
 /// Set the global SMTP config (called during server initialization)
@@ -66,6 +87,10 @@ pub struct Ad4mConfig {
     pub log_holochain_metrics: Option<bool>,
     pub enable_multi_user: Option<bool>,
     pub smtp_config: Option<SmtpConfig>,
+    /// Enable MCP (Model Context Protocol) server for AI agent integration
+    pub enable_mcp: Option<bool>,
+    /// Port for MCP HTTP server (default: 3001)
+    pub mcp_port: Option<u16>,
 }
 
 impl Ad4mConfig {
@@ -101,10 +126,10 @@ impl Ad4mConfig {
             self.connect_holochain = Some(false);
         }
         if self.hc_proxy_url.is_none() {
-            self.hc_proxy_url = Some("ws://relay.ad4m.dev:4433".to_string());
+            self.hc_proxy_url = Some("ws://bootstrap.ad4m.dev:4433".to_string());
         }
         if self.hc_bootstrap_url.is_none() {
-            self.hc_bootstrap_url = Some("http://relay.ad4m.dev:4433".to_string());
+            self.hc_bootstrap_url = Some("http://bootstrap.ad4m.dev:4433".to_string());
         }
         if self.hc_use_bootstrap.is_none() {
             self.hc_use_bootstrap = Some(true);
@@ -153,6 +178,8 @@ impl Default for Ad4mConfig {
             log_holochain_metrics: None,
             enable_multi_user: None,
             smtp_config: None,
+            enable_mcp: None,
+            mcp_port: None,
         };
         config.prepare();
         config

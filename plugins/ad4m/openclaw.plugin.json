@@ -1,0 +1,105 @@
+{
+  "id": "ad4m-openclaw-plugin",
+  "name": "AD4M",
+  "description": "Connect to AD4M — join P2P neighbourhoods, message humans and other AI agents, watch for changes in real-time. Bridges AD4M's MCP server into OpenClaw as native agent tools.",
+  "version": "0.1.0",
+  "skills": ["skills/ad4m"],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "mode": {
+        "type": "string",
+        "enum": ["managed", "external"],
+        "default": "managed",
+        "description": "Plugin mode: 'managed' = auto-manages executor + agent, 'external' = connect to existing executor"
+      },
+      "mcpEndpoint": {
+        "type": "string",
+        "description": "AD4M executor MCP endpoint URL"
+      },
+      "token": {
+        "type": "string",
+        "description": "Auth token — JWT obtained during external mode setup. In managed mode this is generated automatically and not persisted."
+      },
+      "agentPassphrase": {
+        "type": "string",
+        "description": "Passphrase for the AD4M agent identity (auto-generated on first run)"
+      },
+      "ad4mBinaryPath": {
+        "type": "string",
+        "description": "Full path to the ad4m-executor binary. Only needed if ad4m-executor is not in PATH."
+      },
+      "toolRefreshIntervalMs": {
+        "type": "number",
+        "default": 30000,
+        "description": "How often to poll for new dynamic SHACL tools (ms)"
+      },
+      "executorWsUrl": {
+        "type": "string",
+        "default": "ws://localhost:12000/graphql",
+        "description": "AD4M executor GraphQL WebSocket URL"
+      },
+      "wakerEnabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable the embedded AD4M waker service"
+      },
+      "wakeUrl": {
+        "type": "string",
+        "default": "http://localhost:18789/hooks/wake",
+        "description": "OpenClaw wake endpoint URL"
+      },
+      "wakeToken": {
+        "type": "string",
+        "description": "Override for the OpenClaw hooks token. If omitted, read from hooks.token in OpenClaw global config."
+      },
+      "debounceMs": {
+        "type": "number",
+        "default": 2000,
+        "description": "Debounce interval for wake events (ms)"
+      },
+      "rustLog": {
+        "type": "string",
+        "description": "RUST_LOG value for the ad4m-executor process (e.g. 'holochain=debug,kitsune2=trace'). Only applies in managed mode."
+      },
+      "executorLogTarget": {
+        "type": "string",
+        "enum": ["file", "openclaw", "both"],
+        "default": "file",
+        "description": "Where to send executor logs: 'file' = ~/.ad4m/ad4m.log only (default), 'openclaw' = OpenClaw logs only, 'both' = both destinations."
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  },
+  "uiHints": {
+    "mcpEndpoint": {
+      "label": "MCP Endpoint",
+      "placeholder": "http://localhost:3001/mcp"
+    },
+    "token": {
+      "label": "Auth Token",
+      "sensitive": true
+    },
+    "agentPassphrase": {
+      "label": "Agent Passphrase",
+      "sensitive": true
+    },
+    "ad4mBinaryPath": {
+      "label": "Executor Binary Path",
+      "placeholder": "/usr/local/bin/ad4m-executor"
+    },
+    "executorWsUrl": {
+      "label": "Executor WebSocket URL",
+      "placeholder": "ws://localhost:12000/graphql"
+    },
+    "wakeUrl": {
+      "label": "Wake Endpoint URL",
+      "placeholder": "http://localhost:18789/hooks/wake"
+    },
+    "wakeToken": {
+      "label": "Wake Token",
+      "sensitive": true
+    }
+  }
+}

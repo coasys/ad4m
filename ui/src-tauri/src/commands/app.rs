@@ -357,3 +357,30 @@ pub fn set_smtp_config(config: SmtpConfigDto) -> Result<(), String> {
 
     Ok(())
 }
+
+#[tauri::command]
+pub fn get_mcp_config() -> (bool, u16) {
+    if let Ok(state) = LauncherState::load() {
+        (
+            state.mcp_enabled.unwrap_or(false),
+            state.mcp_port.unwrap_or(3001),
+        )
+    } else {
+        (false, 3001)
+    }
+}
+
+#[tauri::command]
+pub fn set_mcp_config(enabled: bool, port: u16) -> Result<(), String> {
+    let mut state =
+        LauncherState::load().map_err(|e| format!("Failed to load launcher state: {}", e))?;
+
+    state.mcp_enabled = Some(enabled);
+    state.mcp_port = Some(port);
+
+    state
+        .save()
+        .map_err(|e| format!("Failed to save launcher state: {}", e))?;
+
+    Ok(())
+}

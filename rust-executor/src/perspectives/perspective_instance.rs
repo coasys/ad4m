@@ -1,16 +1,14 @@
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::parse_shacl_to_links;
 use super::update_perspective;
-use super::utils::{
-    prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string,
-};
+use super::utils::{prolog_get_all_string_bindings, prolog_resolution_to_string};
 use crate::agent::AgentContext;
 use crate::agent::{create_signed_expression, did_for_context};
 use crate::graphql::graphql_types::{
-    DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery,
-    LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle,
-    PerspectiveLinkUpdatedWithOwner, PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter,
-    PerspectiveState, PerspectiveStateFilter,
+    DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter,
+    OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
+    PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter, PerspectiveState,
+    PerspectiveStateFilter,
 };
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
@@ -296,6 +294,11 @@ impl PerspectiveInstance {
                     .expect("must be some")
                     .clone();
 
+                log::debug!(
+                    "ensure_link_language: checking language {} for perspective",
+                    nh.data.link_language
+                );
+
                 match LanguageController::language_by_address(nh.data.link_language.clone()).await {
                     Ok(Some(mut language)) => {
                         // Set local agents before storing the language
@@ -333,6 +336,14 @@ impl PerspectiveInstance {
                         {
                             let mut link_language_guard = self.link_language.write().await;
                             *link_language_guard = Some(language);
+                        }
+                        // Cache language→perspective mapping for fast signal routing
+                        {
+                            let handle = self.persisted.lock().await.clone();
+                            crate::perspectives::register_link_language_perspective(
+                                nh.data.link_language.clone(),
+                                handle,
+                            );
                         }
                         if self.persisted.lock().await.state
                             == PerspectiveState::NeighbourhoodCreationInitiated
@@ -815,53 +826,7 @@ impl PerspectiveInstance {
         log::debug!("telepresence_signal_from_link_language: perspective={}, recipient_did={:?}, signal_author={}",
             handle.uuid, recipient_did, signal.author);
 
-        // If recipient_did is specified, only publish to that specific recipient
-        // Otherwise, publish to all owners (broadcast)
-        if let Some(recipient) = recipient_did {
-            log::debug!("Publishing signal to specific recipient: {}", recipient);
-            get_global_pubsub()
-                .await
-                .publish(
-                    &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                    &serde_json::to_string(&NeighbourhoodSignalFilter {
-                        perspective: handle.clone(),
-                        signal: signal.clone(),
-                        recipient: Some(recipient),
-                    })
-                    .unwrap(),
-                )
-                .await;
-        } else if let Some(owners) = &handle.owners {
-            // Broadcast to all owners
-            for owner_did in owners {
-                get_global_pubsub()
-                    .await
-                    .publish(
-                        &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                        &serde_json::to_string(&NeighbourhoodSignalFilter {
-                            perspective: handle.clone(),
-                            signal: signal.clone(),
-                            recipient: Some(owner_did.clone()),
-                        })
-                        .unwrap(),
-                    )
-                    .await;
-            }
-        } else {
-            // No owners - publish without recipient for backwards compatibility
-            get_global_pubsub()
-                .await
-                .publish(
-                    &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                    &serde_json::to_string(&NeighbourhoodSignalFilter {
-                        perspective: handle,
-                        signal,
-                        recipient: None,
-                    })
-                    .unwrap(),
-                )
-                .await;
-        }
+        super::publish_telepresence_signal(handle, signal, recipient_did).await;
     }
 
     pub async fn add_link(
@@ -1656,10 +1621,6 @@ impl PerspectiveInstance {
             .expect("just initialized Literal couldn't be turned into URL");
 
         let mut sdna_links: Vec<Link> = Vec::new();
-
-        // Preserve original Prolog code for SHACL generation if needed
-        let original_prolog_code = sdna_code.clone();
-        let perspective_uuid = self.persisted.lock().await.uuid.clone();
 
         // Check if SHACL definition already exists for this class BEFORE doing anything
         if matches!(sdna_type, SdnaType::SubjectClass) {
@@ -3333,11 +3294,14 @@ impl PerspectiveInstance {
                     .await?;
                 }
                 Action::RemoveLink => {
+                    let remove_source = source.clone();
+                    let remove_predicate = predicate.clone();
+                    let remove_target = if target == "*" { None } else { Some(target) };
                     let link_expressions = self
                         .get_links(&LinkQuery {
-                            source: Some(source),
-                            predicate,
-                            target: if target == "*" { None } else { Some(target) },
+                            source: Some(remove_source.clone()),
+                            predicate: remove_predicate.clone(),
+                            target: remove_target.clone(),
                             from_date: None,
                             until_date: None,
                             limit: None,
@@ -3347,6 +3311,21 @@ impl PerspectiveInstance {
                         self.remove_link(link_expression.into(), batch_id.clone())
                             .await?;
                     }
+                    // Also prune matching links from pending batch additions
+                    if let Some(ref bid) = batch_id {
+                        let mut batches = self.batch_store.write().await;
+                        if let Some(diff) = batches.get_mut(bid) {
+                            diff.additions.retain(|link_expr| {
+                                let source_match = link_expr.data.source == remove_source;
+                                let pred_match = remove_predicate.is_none()
+                                    || link_expr.data.predicate == remove_predicate;
+                                let target_match = remove_target.is_none()
+                                    || link_expr.data.target
+                                        == remove_target.as_deref().unwrap_or("");
+                                !(source_match && pred_match && target_match)
+                            });
+                        }
+                    }
                 }
                 Action::SetSingleTarget => {
                     if predicate.is_none() {
@@ -3355,6 +3334,7 @@ impl PerspectiveInstance {
                         );
                         continue;
                     }
+                    // Remove matching persisted links
                     let link_expressions = self
                         .get_links(&LinkQuery {
                             source: Some(source.clone()),
@@ -3368,6 +3348,18 @@ impl PerspectiveInstance {
                     for link_expression in link_expressions {
                         self.remove_link(link_expression.into(), batch_id.clone())
                             .await?;
+                    }
+                    // Also prune matching links from pending batch additions so
+                    // that a previous add in the same batch doesn't survive and
+                    // create a duplicate (e.g. save+update in one transaction).
+                    if let Some(ref bid) = batch_id {
+                        let mut batches = self.batch_store.write().await;
+                        if let Some(diff) = batches.get_mut(bid) {
+                            diff.additions.retain(|link_expr| {
+                                !(link_expr.data.source == source
+                                    && link_expr.data.predicate == predicate)
+                            });
+                        }
                     }
                     self.add_link(
                         Link {
@@ -3382,6 +3374,7 @@ impl PerspectiveInstance {
                     .await?;
                 }
                 Action::CollectionSetter => {
+                    // Remove matching persisted links
                     let link_expressions = self
                         .get_links(&LinkQuery {
                             source: Some(source.clone()),
@@ -3395,6 +3388,16 @@ impl PerspectiveInstance {
                     for link_expression in link_expressions {
                         self.remove_link(link_expression.into(), batch_id.clone())
                             .await?;
+                    }
+                    // Also prune matching links from pending batch additions
+                    if let Some(ref bid) = batch_id {
+                        let mut batches = self.batch_store.write().await;
+                        if let Some(diff) = batches.get_mut(bid) {
+                            diff.additions.retain(|link_expr| {
+                                !(link_expr.data.source == source
+                                    && link_expr.data.predicate == predicate)
+                            });
+                        }
                     }
                     self.add_links(
                         parameters
@@ -3423,7 +3426,7 @@ impl PerspectiveInstance {
     async fn subject_class_option_to_class_name(
         &mut self,
         subject_class: SubjectClassOption,
-        context: &AgentContext,
+        _context: &AgentContext,
     ) -> Result<String, AnyError> {
         //let method_start = std::time::Instant::now();
         //log::info!("🔍 SUBJECT CLASS: Starting class name resolution...");
@@ -3500,7 +3503,7 @@ impl PerspectiveInstance {
     }
 
     /// Get resolve language from SHACL links
-    async fn get_resolve_language_from_shacl(
+    pub async fn get_resolve_language_from_shacl(
         &self,
         class_name: &str,
         property: &str,
@@ -3536,15 +3539,6 @@ impl PerspectiveInstance {
             ))
     }
 
-    async fn get_destructor_actions(&self, class_name: &str) -> Result<Vec<Command>, AnyError> {
-        self.get_shape_actions_from_shacl(class_name, "ad4m://destructor")
-            .await?
-            .ok_or(anyhow!(
-                "No SHACL destructor found for class: {}. Ensure the class has SHACL definitions.",
-                class_name
-            ))
-    }
-
     async fn get_property_setter_actions(
         &self,
         class_name: &str,
@@ -3554,29 +3548,12 @@ impl PerspectiveInstance {
             .await
     }
 
-    async fn get_collection_adder_actions(
-        &self,
-        class_name: &str,
-        collection: &str,
-    ) -> Result<Option<Vec<Command>>, AnyError> {
-        self.get_property_actions_from_shacl(class_name, collection, "ad4m://adder")
-            .await
-    }
-
-    async fn get_collection_remover_actions(
-        &self,
-        class_name: &str,
-        collection: &str,
-    ) -> Result<Option<Vec<Command>>, AnyError> {
-        self.get_property_actions_from_shacl(class_name, collection, "ad4m://remover")
-            .await
-    }
-
-    async fn resolve_property_value(
+    pub async fn resolve_property_value(
         &self,
         class_name: &str,
         property: &str,
         value: &serde_json::Value,
+        context: &AgentContext,
     ) -> Result<String, AnyError> {
         // Get resolve language from SHACL links
         let resolve_language = self
@@ -3585,19 +3562,17 @@ impl PerspectiveInstance {
 
         if let Some(resolve_language) = resolve_language {
             // Create an expression for the value
-            let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
-            let content = serde_json::to_string(value)
-                .map_err(|e| anyhow!("Failed to serialize JSON value: {}", e))?;
-            if let Some(ref mut js) = *lock {
-                let result = js.execute(format!(
-                    r#"JSON.stringify(
-                        (await core.callResolver("Mutation", "expressionCreate", {{ languageAddress: "{}", content: {} }})).Ok
-                    )"#,
-                    resolve_language, content
-                )).await?;
-                Ok(result.trim_matches('"').to_string())
-            } else {
-                Ok(value.to_string())
+            let controller = crate::languages::LanguageController::global_instance();
+            let agent_context = context.clone();
+            match controller
+                .expression_create(&resolve_language, value.clone(), &agent_context)
+                .await
+            {
+                Ok(url) => Ok(url),
+                Err(e) => {
+                    log::warn!("Failed to create expression on {}: {}", resolve_language, e);
+                    Ok(value.to_string())
+                }
             }
         } else {
             let uri = match value {
@@ -3667,7 +3642,7 @@ impl PerspectiveInstance {
                         self.get_property_setter_actions(&class_name, prop).await?
                     {
                         let target_value = self
-                            .resolve_property_value(&class_name, prop, value)
+                            .resolve_property_value(&class_name, prop, value, context)
                             .await?;
 
                         //log::info!("🎯 CREATE SUBJECT: Property '{}' setter resolved in {:?}",
@@ -3808,33 +3783,26 @@ impl PerspectiveInstance {
                 let value = if resolve_expression_uri {
                     match &property_value {
                         scryer_prolog::Term::String(s) => {
-                            //println!("getting expr url: {}", s);
-                            let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
-
-                            if let Some(ref mut js) = *lock {
-                                let result = js.execute(format!(
-                                        r#"JSON.stringify(await core.callResolver("Query", "expression", {{ url: "{}" }}))"#,
-                                        s
-                                    ))
-                                    .await?;
-
-                                let result: JsResultType<Option<ExpressionRendered>> =
-                                    serde_json::from_str(&result)?;
-
-                                match result {
-                                    JsResultType::Ok(Some(expr)) => expr.data,
-                                    JsResultType::Ok(None) | JsResultType::Error(_) => {
-                                        prolog_value_to_json_string(property_value.clone())
+                            let controller =
+                                crate::languages::LanguageController::global_instance();
+                            if let Ok((lang_address, expression_address)) =
+                                crate::languages::LanguageController::parse_expr_url(s)
+                            {
+                                match controller
+                                    .get_expression(&lang_address, &expression_address)
+                                    .await
+                                {
+                                    Ok(Some(expr_json)) => {
+                                        let rendered = crate::graphql::query_resolvers::build_expression_rendered(&expr_json, &lang_address);
+                                        rendered.data
                                     }
+                                    _ => prolog_value_to_json_string(property_value.clone()),
                                 }
                             } else {
                                 prolog_value_to_json_string(property_value.clone())
                             }
                         }
-                        _x => {
-                            //println!("Couldn't get expression subjectentity: {:?}", x);
-                            prolog_value_to_json_string(property_value.clone())
-                        }
+                        _x => prolog_value_to_json_string(property_value.clone()),
                     }
                 } else {
                     prolog_value_to_json_string(property_value.clone())
@@ -4060,11 +4028,23 @@ impl PerspectiveInstance {
 
         let subscription_id = Uuid::new_v4().to_string();
 
+        log::debug!(
+            "subscribe_and_query_surreal: new subscription {} for query: {}",
+            subscription_id,
+            query
+        );
+
         // Execute surreal query with user context for $agentDid and $perspectiveId substitution
         let initial_result_vec = self
             .surreal_query_notification(query.clone(), user_email.clone())
             .await?;
         let result_string = serde_json::to_string(&initial_result_vec)?;
+
+        log::debug!(
+            "subscribe_and_query_surreal: {} initial result has {} items",
+            subscription_id,
+            initial_result_vec.len()
+        );
 
         let subscribed_query = SurrealSubscribedQuery {
             query,
@@ -4134,6 +4114,12 @@ impl PerspectiveInstance {
         // DON'T clone the potentially huge last_result string
         let queries = {
             let queries_guard = self.surreal_subscribed_queries.lock().await;
+            if !queries_guard.is_empty() {
+                log::debug!(
+                    "check_surreal_subscribed_queries: checking {} active subscription(s)",
+                    queries_guard.len()
+                );
+            }
             queries_guard
                 .iter()
                 .map(|(id, query)| {
@@ -4157,6 +4143,7 @@ impl PerspectiveInstance {
 
             // Spawn query check future
             let self_clone = self.clone();
+            let query_for_log = query_string.clone();
             let query_future = async move {
                 match self_clone
                     .surreal_query_notification(query_string, user_email)
@@ -4168,6 +4155,17 @@ impl PerspectiveInstance {
                             let mut queries = self_clone.surreal_subscribed_queries.lock().await;
                             if let Some(stored_query) = queries.get_mut(&id) {
                                 if result_string != stored_query.last_result {
+                                    log::debug!(
+                                        "Surreal subscription {} result changed ({} items). Query: {}",
+                                        id,
+                                        result_vec.len(),
+                                        query_for_log
+                                    );
+                                    log::debug!(
+                                        "Surreal subscription {} new result (first 500 chars): {}",
+                                        id,
+                                        &result_string[..result_string.len().min(500)]
+                                    );
                                     // Release lock before sending update
                                     drop(queries);
                                     self_clone

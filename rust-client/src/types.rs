@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-use crate::agent::by_did::{ByDidAgentByDid, ByDidAgentByDidPerspectiveLinks};
-use crate::agent::me::{MeAgent, MeAgentPerspectiveLinks};
-use crate::perspectives::query_links::QueryLinksPerspectiveQueryLinks;
-use crate::perspectives::subscription_link_added::SubscriptionLinkAddedPerspectiveLinkAdded;
+use crate::agent::{
+    ByDidAgentByDid, ByDidAgentByDidPerspectiveLinks, MeAgent, MeAgentPerspectiveLinks,
+};
+use crate::perspectives::{
+    QueryLinksPerspectiveQueryLinks, SubscriptionLinkAddedPerspectiveLinkAdded,
+};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Link {
@@ -49,8 +51,7 @@ pub struct Resource {
     pub pointers: Vec<String>,
 }
 
-use crate::agent::request_capability::CapabilityInput;
-use crate::agent::request_capability::ResourceInput;
+use crate::agent::{CapabilityInput, ResourceInput};
 
 impl From<Capability> for CapabilityInput {
     fn from(cap: Capability) -> Self {
@@ -154,9 +155,10 @@ impl From<ByDidAgentByDidPerspectiveLinks> for LinkExpression {
     }
 }
 
-use crate::perspectives::snapshot::SnapshotPerspectiveSnapshotLinks;
-use crate::perspectives::snapshot::SnapshotPerspectiveSnapshotLinksData;
-use crate::perspectives::snapshot::SnapshotPerspectiveSnapshotLinksProof;
+use crate::perspectives::{
+    SnapshotPerspectiveSnapshotLinks, SnapshotPerspectiveSnapshotLinksData,
+    SnapshotPerspectiveSnapshotLinksProof,
+};
 
 impl From<SnapshotPerspectiveSnapshotLinks> for LinkExpression {
     fn from(link: SnapshotPerspectiveSnapshotLinks) -> Self {
@@ -219,7 +221,7 @@ impl From<LinkExpression> for LinkExpressionInput {
     }
 }
 
-use crate::perspectives::all::AllPerspectivesNeighbourhoodDataMetaLinks;
+use crate::perspectives::AllPerspectivesNeighbourhoodDataMetaLinks;
 
 impl From<AllPerspectivesNeighbourhoodDataMetaLinks> for LinkExpression {
     fn from(link: AllPerspectivesNeighbourhoodDataMetaLinks) -> Self {
@@ -247,7 +249,7 @@ pub struct Perspective {
     pub links: Vec<LinkExpression>,
 }
 
-use crate::perspectives::snapshot::SnapshotPerspectiveSnapshot;
+use crate::perspectives::SnapshotPerspectiveSnapshot;
 use crate::runtime::set_status::ExpressionProofInput;
 use crate::runtime::set_status::LinkExpressionInput;
 use crate::runtime::set_status::LinkInput;

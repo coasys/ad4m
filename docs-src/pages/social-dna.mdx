@@ -168,24 +168,15 @@ Here's how a Todo class maps to SHACL:
 <Tabs items={['TypeScript Model', 'Generated SHACL', 'Stored as Links']}>
   <Tab>
     ```typescript
-    @ModelOptions({ name: "Todo" })
+    @Model({ name: "Todo" })
     class Todo extends Ad4mModel {
-      @Property({
-        through: "todo://state",
-        initial: "todo://ready"
-      })
+      @Property({ through: "todo://state", initial: "todo://ready" })
       state: string = "";
 
-      @Optional({
-        through: "todo://has_title",
-        writable: true,
-        resolveLanguage: "literal"
-      })
+      @Property({ through: "todo://has_title" })
       title?: string;
 
-      @Collection({
-        through: "todo://comment"
-      })
+      @HasMany({ through: "todo://comment" })
       comments: string[] = [];
     }
     ```
@@ -214,7 +205,6 @@ Here's how a Todo class maps to SHACL:
         sh:datatype xsd:string ;
         sh:maxCount 1 ;
         ad4m:resolveLanguage "literal" ;
-        ad4m:writable true ;
       ] ;
 
       # Collection: comments (unbounded)
@@ -258,7 +248,7 @@ Here's how a Todo class maps to SHACL:
 | `sh:class <uri>` | Reference to another Subject Class | Typed relationship |
 | `ad4m://initial` | Default value on creation | Initial state |
 | `ad4m://resolveLanguage` | Expression language for values | `"literal"` for inline values |
-| `ad4m://writable` | Property can be updated | Enables setter generation |
+| `ad4m://readOnly` | Property is read-only | Computed/immutable property |
 
 ### Using Subject Classes in Code
 
@@ -274,47 +264,33 @@ This TypeScript-based approach provides:
 Here's how to define and use Subject Classes the recommended way:
 
 ```typescript
-import { Ad4mModel, ModelOptions, Property, Optional, Collection } from '@coasys/ad4m';
+import { Ad4mModel, Model, Property, HasMany } from '@coasys/ad4m';
 
-@ModelOptions({ name: "Todo" })
+@Model({ name: "Todo" })
 class Todo extends Ad4mModel {
-  @Property({
-    through: "todo://state",
-    initial: "todo://ready"
-  })
+  @Property({ through: "todo://state", initial: "todo://ready" })
   state: string = "";
 
-  @Optional({
-    through: "todo://has_title",
-    writable: true,
-    resolveLanguage: "literal"
-  })
+  @Property({ through: "todo://has_title" })
   title?: string;
 
-  @Collection({
-    through: "todo://comment"
-  })
+  @HasMany({ through: "todo://comment" })
   comments: string[] = [];
-
-  // Static query methods
-  @InstanceQuery()
-  static async all(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
-
-  @InstanceQuery({ where: { state: "todo://done" }})
-  static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 }
 
-// Register the class with a perspective
-await perspective.ensureSDNASubjectClass(Todo);
+// Register the class with a perspective (once at app startup)
+await Todo.register(perspective);
 
 // Use it with full type safety and ActiveRecord patterns
 const todo = new Todo(perspective);
 todo.state = "todo://doing";
 await todo.save();
 
-// Query with type safety
-const todos = await Todo.all(perspective);
-const doneTodos = await Todo.allDone(perspective);
+// Query with the fluent API
+const todos = await Todo.findAll(perspective);
+const doneTodos = await Todo.query(perspective)
+  .where({ state: "todo://done" })
+  .get();
 ```
 
 This approach automatically generates SHACL and provides a rich development experience.
@@ -356,7 +332,7 @@ For a complete understanding, here are the basic PerspectiveProxy methods that p
 
 ```typescript
 // Add a subject class definition (SHACL) to a perspective
-await perspective.ensureSDNASubjectClass(Todo);
+await Todo.register(perspective);
 
 // Or add SHACL directly
 await perspective.addShacl("Todo", shape);
@@ -536,7 +512,7 @@ To add Social DNA to a Perspective:
 
 ```typescript
 // Recommended: Use Model Classes (auto-generates SHACL)
-await perspective.ensureSDNASubjectClass(Todo);
+await Todo.register(perspective);
 
 // Or add SHACL shapes directly
 const shape = new SHACLShape('todo://Todo');

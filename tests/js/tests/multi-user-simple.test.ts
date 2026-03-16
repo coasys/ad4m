@@ -1,5 +1,5 @@
 import path from "path";
-import { Ad4mClient, Ad4mModel, ExpressionProof, Link, LinkExpression, LinkInput, ModelOptions, Perspective, PerspectiveUnsignedInput, Property } from "@coasys/ad4m";
+import { Ad4mClient, Ad4mModel, ExpressionProof, Link, LinkExpression, LinkInput, Model, Perspective, PerspectiveUnsignedInput, Property } from "@coasys/ad4m";
 import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
@@ -512,16 +512,15 @@ describe("Multi-User Simple integration tests", () => {
         
         before(async () => {
             // Import necessary decorators and classes
-            const { ModelOptions, Property, Optional } = await import("@coasys/ad4m");
+            const { Model, Property } = await import("@coasys/ad4m");
 
             // Define a proper subject class with decorators
-            @ModelOptions({
+            @Model({
                 name: "TestSubject"
             })
             class TestSubjectClass {
                 @Property({
                     through: "test://name",
-                    writable: true,
                     initial: "test://initial",
                     resolveLanguage: "literal"
                 })
@@ -790,6 +789,9 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         it("should publish managed users to the agent language", async () => {
+            // Ensure multi-user is enabled
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+
             // Create two users
             const user1Result = await adminAd4mClient!.agent.createUser("agentlang1@example.com", "password1");
             const user2Result = await adminAd4mClient!.agent.createUser("agentlang2@example.com", "password2");
@@ -1060,7 +1062,7 @@ describe("Multi-User Simple integration tests", () => {
             console.log("User 1 created perspective:", perspective1.uuid);
 
             // Add some initial links to the perspective
-            const link1 = new Link({source: "user1", target: "data1", predicate: "test://created"});
+            const link1 = new Link({source: "test://user1", target: "test://data1", predicate: "test://created"});
             await client1.perspective.addLink(perspective1.uuid, link1);
 
             console.log("Cloning link language...");
@@ -1103,7 +1105,7 @@ describe("Multi-User Simple integration tests", () => {
             console.log("✅ Both users can access the shared neighbourhood");
 
             // User 2 adds a link to the shared perspective
-            const link2 = new Link({source: "user2", target: "data2", predicate: "test://added"});
+            const link2 = new Link({source: "test://user2", target: "test://data2", predicate: "test://added"});
             await client2.perspective.addLink(user2SharedPerspective!.uuid, link2);
 
             // Wait for sync
@@ -1121,11 +1123,11 @@ describe("Multi-User Simple integration tests", () => {
             expect(user2Links.length).to.be.greaterThan(1);
 
             // Verify specific links exist
-            const user1SeesUser2Link = user1Links.some(l => 
-                l.data.source === "user2" && l.data.target === "data2"
+            const user1SeesUser2Link = user1Links.some(l =>
+                l.data.source === "test://user2" && l.data.target === "test://data2"
             );
-            const user2SeesUser1Link = user2Links.some(l => 
-                l.data.source === "user1" && l.data.target === "data1"
+            const user2SeesUser1Link = user2Links.some(l =>
+                l.data.source === "test://user1" && l.data.target === "test://data1"
             );
 
             expect(user1SeesUser2Link).to.be.true;
@@ -1153,13 +1155,12 @@ describe("Multi-User Simple integration tests", () => {
             // User 1 creates a perspective and shares it as a neighbourhood
             const perspective1 = await client1.perspective.add("Prolog Pool Test");
 
-            @ModelOptions({
+            @Model({
                 name: "User1Model"
             })
             class User1Model extends Ad4mModel {
                 @Property({
                     through: "test://user1-property",
-                    writable: true,
                     initial: "test://user1-initial",
                     resolveLanguage: "literal"
                 })
@@ -1198,13 +1199,12 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("User 2 joined, adding their own SDNA...");
 
-            @ModelOptions({
+            @Model({
                 name: "User2Model"
             })
             class User2Model extends Ad4mModel {
                 @Property({
                     through: "test://user2-property",
-                    writable: true,
                     initial: "test://user2-initial",
                     resolveLanguage: "literal"
                 })
@@ -1230,13 +1230,15 @@ describe("Multi-User Simple integration tests", () => {
             
             let classesSeenByUser1 = await perspective1.subjectClasses()
             console.log("User 1 sees classes:", classesSeenByUser1);
-            expect(classesSeenByUser1.length).to.equal(1);
+            // In a shared neighbourhood, SDNA links propagate, so both users
+            // eventually see both classes once sync completes.
+            expect(classesSeenByUser1.length).to.equal(2);
 
             let classesSeenByUser2 = await user2SharedPerspective!.subjectClasses()
             console.log("User 2 sees classes:", classesSeenByUser2);
             expect(classesSeenByUser2.length).to.equal(2);
 
-            console.log("✅ Prolog pool isolation working correctly - users have separate SDNA contexts");
+            console.log("✅ Prolog pool working correctly - both users see shared SDNA classes");
         });
 
         it("should route neighbourhood signals locally between users on the same node", async () => {
@@ -2119,35 +2121,43 @@ describe("Multi-User Simple integration tests", () => {
             });
             console.log("Node 2 User 2 added link");
 
-            // Wait for synchronization
-            console.log("\nWaiting for sync...");
-            await sleep(10000);
+            // Wait for cross-node Holochain gossip synchronization with retry
+            console.log("\nWaiting for cross-node sync (polling until all users see >= 5 links)...");
+            const syncTimeout = 120000; // 2 minutes max
+            const syncStart = Date.now();
+            let synced = false;
 
-            // Query links from each user's perspective
-            console.log("\nQuerying links from each user's perspective...");
+            let node1User1Links: any[] = [];
+            let node1User2Links: any[] = [];
+            let node2User1Links: any[] = [];
+            let node2User2Links: any[] = [];
 
-            const node1User1Links = await node1User1Client!.perspective.queryLinks(
-                node1User1Neighbourhood!.uuid,
-                new LinkQuery({})
-            );
+            while (!synced && Date.now() - syncStart < syncTimeout) {
+                await sleep(5000);
+
+                node1User1Links = await node1User1Client!.perspective.queryLinks(
+                    node1User1Neighbourhood!.uuid, new LinkQuery({})
+                );
+                node1User2Links = await node1User2Client!.perspective.queryLinks(
+                    node1User2Neighbourhood!.uuid, new LinkQuery({})
+                );
+                node2User1Links = await node2User1Client!.perspective.queryLinks(
+                    node2User1Neighbourhood!.uuid, new LinkQuery({})
+                );
+                node2User2Links = await node2User2Client!.perspective.queryLinks(
+                    node2User2Neighbourhood!.uuid, new LinkQuery({})
+                );
+
+                const counts = [node1User1Links.length, node1User2Links.length, node2User1Links.length, node2User2Links.length];
+                console.log(`  Sync check: link counts = [${counts.join(', ')}] (need >= 5 each)`);
+
+                synced = counts.every(c => c >= 5);
+            }
+
+            console.log(`\nQuerying links from each user's perspective...`);
             console.log(`Node 1 User 1 sees ${node1User1Links.length} links`);
-
-            const node1User2Links = await node1User2Client!.perspective.queryLinks(
-                node1User2Neighbourhood!.uuid,
-                new LinkQuery({})
-            );
             console.log(`Node 1 User 2 sees ${node1User2Links.length} links`);
-
-            const node2User1Links = await node2User1Client!.perspective.queryLinks(
-                node2User1Neighbourhood!.uuid,
-                new LinkQuery({})
-            );
             console.log(`Node 2 User 1 sees ${node2User1Links.length} links`);
-
-            const node2User2Links = await node2User2Client!.perspective.queryLinks(
-                node2User2Neighbourhood!.uuid,
-                new LinkQuery({})
-            );
             console.log(`Node 2 User 2 sees ${node2User2Links.length} links`);
 
             // All users should see at least 5 links (1 from setup + 4 from each user)
@@ -2756,6 +2766,330 @@ describe("Multi-User Simple integration tests", () => {
                 expect(error.message).to.include("Permission denied");
                 console.log("✅ Managed user correctly blocked from calling grantNotification");
             }
+        });
+    });
+
+    describe("Cross-Node Signal Routing: Remote Main Agent <-> Local Managed User (Flux Scenario)", () => {
+        // This test replicates the Flux bug:
+        // - Node 1: standalone main agent (no multi-user)
+        // - Node 2: main agent + managed user (multi-user enabled)
+        // - Signal routing should work between Node 1 main agent and Node 2 managed user
+        //
+        // Bug: managed user on Node 2 does not receive signals from Node 1's main agent,
+        // even though the reverse direction works.
+        const node3AppDataPath = path.join(TEST_DIR, "agents", "flux-remote-main");
+        const node3GqlPort = 16100;
+        const node3HcAdminPort = 16101;
+        const node3HcAppPort = 16102;
+
+        let node3ExecutorProcess: ChildProcess | null = null;
+        let node3MainClient: Ad4mClient | null = null;
+
+        // Node 2 (local, multi-user) reuses the executor from the top-level before()
+        // We just need a managed user on it
+        let localManagedUserClient: Ad4mClient | null = null;
+        let localMainAgentDid: string = "";
+        let localManagedUserDid: string = "";
+        let remoteMainAgentDid: string = "";
+
+        before(async function() {
+            this.timeout(300000);
+
+            console.log("\n=== [Flux Scenario] Setting up remote standalone node (Node 3) ===");
+            if (!fs.existsSync(node3AppDataPath)) {
+                fs.mkdirSync(node3AppDataPath, { recursive: true });
+            }
+
+            // Start Node 3 as a standalone main agent (no multi-user)
+            node3ExecutorProcess = await startExecutor(
+                node3AppDataPath,
+                bootstrapSeedPath,
+                node3GqlPort,
+                node3HcAdminPort,
+                node3HcAppPort,
+                false,
+                undefined,
+                proxyUrl!,
+                bootstrapUrl!
+            );
+
+            // @ts-ignore
+            node3MainClient = new Ad4mClient(apolloClient(node3GqlPort), false);
+            await node3MainClient.agent.generate("passphrase");
+            // Note: we do NOT enable multi-user on Node 3 - it's a standalone agent
+
+            const node3Agent = await node3MainClient.agent.me();
+            remoteMainAgentDid = node3Agent.did;
+            console.log("Remote Main Agent (Node 3) DID:", remoteMainAgentDid);
+
+            // Get the local main agent's DID (from the top-level executor)
+            const localMainAgent = await adminAd4mClient!.agent.me();
+            localMainAgentDid = localMainAgent.did;
+            console.log("Local Main Agent (Node 2) DID:", localMainAgentDid);
+
+            // Ensure multi-user is enabled on local node
+            const multiUserEnabled = await adminAd4mClient!.runtime.multiUserEnabled();
+            if (!multiUserEnabled) {
+                await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+            }
+
+            // Make nodes known to each other
+            console.log("\n=== [Flux Scenario] Exchanging agent infos ===");
+            const localAgentInfos = await adminAd4mClient!.runtime.hcAgentInfos();
+            const node3AgentInfos = await node3MainClient.runtime.hcAgentInfos();
+            await adminAd4mClient!.runtime.hcAddAgentInfos(node3AgentInfos);
+            await node3MainClient.runtime.hcAddAgentInfos(localAgentInfos);
+
+            // NOTE: Managed user is NOT created here - it is created inside the
+            // test after the remote agent has already joined the neighbourhood,
+            // matching the real Flux production scenario.
+
+            console.log("\n=== [Flux Scenario] Setup complete ===\n");
+        });
+
+        after(async function() {
+            this.timeout(20000);
+            if (node3ExecutorProcess) {
+                while (!node3ExecutorProcess?.killed) {
+                    let status = node3ExecutorProcess?.kill();
+                    console.log("killed node 3 executor with", status);
+                    await sleep(500);
+                }
+            }
+        });
+
+        it("should route signals between remote main agent and local managed user", async function() {
+            this.timeout(300000);
+
+            console.log("\n=== [Flux Scenario] Testing signal routing ===");
+
+            // Step 1: Local main agent creates and publishes a neighbourhood
+            const perspective = await adminAd4mClient!.perspective.add("Flux Scenario NH");
+            const linkLanguage = await adminAd4mClient!.languages.applyTemplateAndPublish(
+                DIFF_SYNC_OFFICIAL,
+                JSON.stringify({uid: uuidv4(), name: "Flux Scenario Test"})
+            );
+            const neighbourhoodUrl = await adminAd4mClient!.neighbourhood.publishFromPerspective(
+                perspective.uuid,
+                linkLanguage.address,
+                new Perspective([])
+            );
+            console.log("Published neighbourhood:", neighbourhoodUrl);
+
+            // Step 2: Remote main agent joins the neighbourhood FIRST
+            // The remote agent is already in before the managed user even exists.
+            console.log("Remote main agent joining neighbourhood...");
+            await node3MainClient!.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await sleep(3000);
+
+            // Exchange agent infos so the two nodes can find each other
+            console.log("Exchanging agent infos after remote join...");
+            for (let attempt = 1; attempt <= 5; attempt++) {
+                try {
+                    const localInfos = await adminAd4mClient!.runtime.hcAgentInfos();
+                    const remoteInfos = await node3MainClient!.runtime.hcAgentInfos();
+                    await adminAd4mClient!.runtime.hcAddAgentInfos(remoteInfos);
+                    await node3MainClient!.runtime.hcAddAgentInfos(localInfos);
+                    console.log(`Agent info exchange attempt ${attempt}/5 successful`);
+                } catch (error) {
+                    console.log(`Agent info exchange attempt ${attempt} failed:`, error);
+                }
+                if (attempt < 5) await sleep(3000);
+            }
+
+            // Wait for the two main agents to fully sync
+            console.log("Waiting for main agents to sync...");
+            await sleep(15000);
+
+            // Verify the two main agents see each other before proceeding
+            const localMainPerspectives = await adminAd4mClient!.perspective.all();
+            const localMainNH = localMainPerspectives.find(p => p.sharedUrl === neighbourhoodUrl);
+            expect(localMainNH).to.not.be.undefined;
+            const localMainProxy = await localMainNH!.getNeighbourhoodProxy();
+
+            const remotePerspectives = await node3MainClient!.perspective.all();
+            const remoteNH = remotePerspectives.find(p => p.sharedUrl === neighbourhoodUrl);
+            expect(remoteNH).to.not.be.undefined;
+            const remoteProxy = await remoteNH!.getNeighbourhoodProxy();
+
+            console.log("Verifying main agents see each other...");
+            const pollUntilSeen = async (proxy: any, expectedDids: string[], label: string, maxAttempts = 50) => {
+                for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                    const others = await proxy.otherAgents();
+                    const allFound = expectedDids.every((did: string) => others.includes(did));
+                    if (allFound) {
+                        console.log(`${label} sees all expected agents`);
+                        return others;
+                    }
+                    if (attempt < maxAttempts) await sleep(2000);
+                }
+                const finalOthers = await proxy.otherAgents();
+                console.log(`${label} final others after polling:`, finalOthers);
+                return finalOthers;
+            };
+
+            await pollUntilSeen(localMainProxy!, [remoteMainAgentDid], "Local Main Agent");
+            await pollUntilSeen(remoteProxy!, [localMainAgentDid], "Remote Main Agent");
+            console.log("Main agents synced and see each other.");
+
+            // Step 3: NOW create the managed user (simulating late signup in Flux)
+            // This is the critical difference: the managed user does not exist yet
+            // when the link language initializes and the signal routing cache is
+            // populated. The managed user is created fresh here, after the remote
+            // agent is already fully synced in the neighbourhood.
+            console.log("\n--- Creating managed user (late signup) ---");
+            await adminAd4mClient!.agent.createUser("flux-managed@example.com", "fluxpass");
+            const managedToken = await adminAd4mClient!.agent.loginUser("flux-managed@example.com", "fluxpass");
+            // @ts-ignore
+            localManagedUserClient = new Ad4mClient(apolloClient(gqlPort, managedToken), false);
+            const managedAgent = await localManagedUserClient.agent.me();
+            localManagedUserDid = managedAgent.did;
+            console.log("Created managed user DID:", localManagedUserDid);
+
+            // Step 4: Managed user joins the neighbourhood
+            console.log("Managed user joining neighbourhood (late joiner)...");
+            await localManagedUserClient!.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await sleep(5000);
+
+            // Re-exchange agent infos so the remote node can discover
+            // the managed user's DID-to-AgentPubKey mapping
+            console.log("Re-exchanging agent infos after managed user join...");
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    const localInfos = await adminAd4mClient!.runtime.hcAgentInfos();
+                    const remoteInfos = await node3MainClient!.runtime.hcAgentInfos();
+                    await adminAd4mClient!.runtime.hcAddAgentInfos(remoteInfos);
+                    await node3MainClient!.runtime.hcAddAgentInfos(localInfos);
+                    console.log(`Post-managed-join agent info exchange ${attempt}/3 successful`);
+                } catch (error) {
+                    console.log(`Post-managed-join agent info exchange ${attempt} failed:`, error);
+                }
+                if (attempt < 3) await sleep(3000);
+            }
+
+            // Wait for the managed user's DID link to gossip
+            console.log("Waiting for managed user DID gossip...");
+            await sleep(10000);
+
+            // Get managed user's neighbourhood proxy
+            const localManagedPerspectives = await localManagedUserClient!.perspective.all();
+            const localManagedNH = localManagedPerspectives.find(p => p.sharedUrl === neighbourhoodUrl);
+            expect(localManagedNH).to.not.be.undefined;
+            const localManagedProxy = await localManagedNH!.getNeighbourhoodProxy();
+
+            // Wait for the managed user to be discovered by remote
+            console.log("Waiting for managed user DHT gossip / peer discovery...");
+
+            // Remote main agent should see the managed user
+            const remoteOthers = await pollUntilSeen(
+                remoteProxy!,
+                [localManagedUserDid],
+                "Remote Main Agent"
+            );
+            expect(remoteOthers).to.include(localManagedUserDid,
+                "Remote main agent should see local managed user in others()");
+            console.log("✅ Remote main agent sees managed user in others()");
+
+            // Managed user should see the remote main agent
+            const managedOthers = await pollUntilSeen(
+                localManagedProxy!,
+                [remoteMainAgentDid],
+                "Local Managed User"
+            );
+            expect(managedOthers).to.include(remoteMainAgentDid,
+                "Local managed user should see remote main agent in others()");
+            console.log("✅ Managed user sees remote main agent in others()");
+
+            // Set up signal handlers for all three agents
+            const managedReceivedSignals: any[] = [];
+            const remoteReceivedSignals: any[] = [];
+            const localMainReceivedSignals: any[] = [];
+
+            localManagedProxy!.addSignalHandler((signal: any) => {
+                console.log("  [RECV] Managed user got signal from:", signal.author);
+                managedReceivedSignals.push(signal);
+            });
+            remoteProxy!.addSignalHandler((signal: any) => {
+                console.log("  [RECV] Remote main agent got signal from:", signal.author);
+                remoteReceivedSignals.push(signal);
+            });
+            localMainProxy!.addSignalHandler((signal: any) => {
+                console.log("  [RECV] Local main agent got signal from:", signal.author);
+                localMainReceivedSignals.push(signal);
+            });
+            await sleep(3000); // Let subscriptions stabilize
+
+            const maxWaitTime = 30000;
+            const waitForSignal = async (signals: any[], label: string) => {
+                const start = Date.now();
+                while (signals.length === 0 && (Date.now() - start) < maxWaitTime) {
+                    await sleep(100);
+                }
+                if (signals.length > 0) {
+                    console.log(`  ✅ ${label}: received signal from ${signals[0].author}`);
+                } else {
+                    console.log(`  ❌ ${label}: NO signal received after ${maxWaitTime}ms`);
+                }
+            };
+
+            // === Test A: Remote main agent -> Managed user (directed) ===
+            console.log("\n--- Test A: Remote main agent -> Managed user (directed) ---");
+            managedReceivedSignals.length = 0;
+            await remoteProxy!.sendSignalU(localManagedUserDid, new PerspectiveUnsignedInput([
+                { source: "test://A", predicate: "test://remote-to-managed", target: "test://directed" }
+            ]));
+            await waitForSignal(managedReceivedSignals, "Managed user");
+            const testAPass = managedReceivedSignals.length > 0;
+
+            // === Test B: Managed user -> Remote main agent (directed) ===
+            console.log("\n--- Test B: Managed user -> Remote main agent (directed) ---");
+            remoteReceivedSignals.length = 0;
+            await localManagedProxy!.sendSignalU(remoteMainAgentDid, new PerspectiveUnsignedInput([
+                { source: "test://B", predicate: "test://managed-to-remote", target: "test://directed" }
+            ]));
+            await waitForSignal(remoteReceivedSignals, "Remote main agent");
+            const testBPass = remoteReceivedSignals.length > 0;
+
+            // === Test C: Remote main agent -> Local main agent (directed, control) ===
+            console.log("\n--- Test C: Remote main agent -> Local main agent (directed, control) ---");
+            localMainReceivedSignals.length = 0;
+            await remoteProxy!.sendSignalU(localMainAgentDid, new PerspectiveUnsignedInput([
+                { source: "test://C", predicate: "test://remote-to-local-main", target: "test://directed" }
+            ]));
+            await waitForSignal(localMainReceivedSignals, "Local main agent");
+            const testCPass = localMainReceivedSignals.length > 0;
+
+            // === Test D: Remote main agent broadcasts -> managed user should receive ===
+            console.log("\n--- Test D: Remote main agent broadcast -> Managed user receives ---");
+            managedReceivedSignals.length = 0;
+            await remoteProxy!.sendBroadcastU(new PerspectiveUnsignedInput([
+                { source: "test://D", predicate: "test://remote-broadcast", target: "test://broadcast" }
+            ]));
+            await waitForSignal(managedReceivedSignals, "Managed user (broadcast)");
+            const testDPass = managedReceivedSignals.length > 0;
+
+            // === Test E: Managed user broadcasts -> remote main agent should receive ===
+            console.log("\n--- Test E: Managed user broadcast -> Remote main agent receives ---");
+            remoteReceivedSignals.length = 0;
+            await localManagedProxy!.sendBroadcastU(new PerspectiveUnsignedInput([
+                { source: "test://E", predicate: "test://managed-broadcast", target: "test://broadcast" }
+            ]));
+            await waitForSignal(remoteReceivedSignals, "Remote main agent (broadcast)");
+            const testEPass = remoteReceivedSignals.length > 0;
+
+            // === Results ===
+            console.log("\n=== Results ===");
+            console.log(`Test A (remote->managed directed):   ${testAPass ? "PASS" : "FAIL"}`);
+            console.log(`Test B (managed->remote directed):   ${testBPass ? "PASS" : "FAIL"}`);
+            console.log(`Test C (remote->local main control): ${testCPass ? "PASS" : "FAIL"}`);
+            console.log(`Test D (remote broadcast->managed):  ${testDPass ? "PASS" : "FAIL"}`);
+            console.log(`Test E (managed broadcast->remote):  ${testEPass ? "PASS" : "FAIL"}`);
+
+            expect(testAPass, "BUG: Managed user did NOT receive directed signal from remote main agent").to.be.true;
+            expect(testBPass, "BUG: Remote main agent did NOT receive directed signal from managed user").to.be.true;
+            expect(testCPass, "Control failed: Local main agent did NOT receive signal from remote main agent").to.be.true;
+            expect(testDPass, "BUG: Managed user did NOT receive broadcast from remote main agent").to.be.true;
+            expect(testEPass, "BUG: Remote main agent did NOT receive broadcast from managed user").to.be.true;
         });
     });
 })

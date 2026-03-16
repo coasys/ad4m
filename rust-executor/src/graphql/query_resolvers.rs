@@ -2,7 +2,8 @@
 use super::graphql_types::*;
 use crate::agent::{capabilities::*, did_document_for_context, signatures, AgentContext};
 use crate::ai_service::AIService;
-use crate::types::{AITask, ModelType};
+use crate::languages::LanguageController;
+use crate::types::{AITask, DecoratedExpressionProof, ModelType};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
 use crate::{
     db::Ad4mDb,
@@ -13,7 +14,6 @@ use crate::{
     types::{DecoratedLinkExpression, Model, Notification},
 };
 use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
-use std::env;
 
 pub struct Query;
 
@@ -119,19 +119,42 @@ impl Query {
         };
 
         if !did_match {
-            let mut js = context.js_handle.clone();
-            let result = js
-                .execute(format!(
-                    r#"JSON.stringify(
-                        await core.callResolver("Query", "agentByDID",
-                            {{ did: "{}" }},
+            // Look up the agent expression via the agent language
+            let controller = LanguageController::global_instance();
+            let agent_lang = controller.get_agent_language().await;
+            if let Ok(lang) = agent_lang {
+                let lang_address = lang.address().to_string();
+                match controller.get_expression(&lang_address, &did).await {
+                    Ok(Some(expr_json)) => {
+                        let agent: Option<Agent> = serde_json::from_value(
+                            expr_json
+                                .get("data")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null),
                         )
-                    )"#,
-                    did,
-                ))
-                .await?;
-            let result: JsResultType<Option<Agent>> = serde_json::from_str(&result)?;
-            result.get_graphql_result()
+                        .ok();
+                        // Verify link signatures in the agent's perspective,
+                        // same as agent_me() does
+                        let agent = agent.map(|mut a| {
+                            if a.perspective.is_some() {
+                                a.perspective.as_mut().unwrap().verify_link_signatures();
+                            }
+                            a
+                        });
+                        Ok(agent)
+                    }
+                    Ok(None) => Ok(None),
+                    Err(e) => {
+                        log::warn!("agentByDID: failed to get expression for {}: {}", did, e);
+                        Err(FieldError::new(
+                            format!("agentByDID: failed to get expression for {}: {}", did, e),
+                            Value::null(),
+                        ))
+                    }
+                }
+            } else {
+                Ok(None)
+            }
         } else {
             let agent_service = agent_instance.lock().expect("agent lock");
             let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
@@ -205,15 +228,37 @@ impl Query {
         url: String,
     ) -> FieldResult<Option<ExpressionRendered>> {
         check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "expression", {{ url: "{}" }}))"#,
-                url
-            ))
-            .await?;
-        let result: JsResultType<Option<ExpressionRendered>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let controller = LanguageController::global_instance();
+        let parsed = LanguageController::parse_expr_url(&url);
+
+        if let Ok((lang_address, expression_address)) = parsed {
+            let is_literal = lang_address == "literal";
+            let is_loaded = is_literal || controller.is_language_loaded(&lang_address).await;
+
+            if is_loaded {
+                match controller
+                    .get_expression(&lang_address, &expression_address)
+                    .await
+                {
+                    Ok(Some(expr_json)) => {
+                        return Ok(Some(build_expression_rendered(&expr_json, &lang_address)));
+                    }
+                    Ok(None) => {
+                        return Ok(None);
+                    }
+                    Err(e) => {
+                        return Err(FieldError::new(
+                            format!("Failed to get expression {}: {}", url, e),
+                            Value::null(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Language not loaded
+        Ok(None)
     }
 
     async fn expression_interactions(
@@ -222,15 +267,20 @@ impl Query {
         url: String,
     ) -> FieldResult<Vec<InteractionMeta>> {
         check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "expressionInteractions", {{ url: "{}" }}))"#,
-                url,
-            ))
-            .await?;
-        let result: JsResultType<Vec<InteractionMeta>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let controller = LanguageController::global_instance();
+        if let Ok((lang_address, _)) = LanguageController::parse_expr_url(&url) {
+            if controller.is_language_loaded(&lang_address).await {
+                return controller.expression_interactions(&url).await.map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to get expression interactions for {}: {}", url, e),
+                        Value::null(),
+                    )
+                });
+            }
+        }
+
+        Ok(vec![])
     }
 
     async fn expression_many(
@@ -238,21 +288,38 @@ impl Query {
         context: &RequestContext,
         urls: Vec<String>,
     ) -> FieldResult<Vec<Option<ExpressionRendered>>> {
-        let urls_string = urls
-            .into_iter()
-            .map(|url| format!("\"{}\"", url))
-            .collect::<Vec<String>>()
-            .join(",");
         check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "expressionMany", {{ urls: [{}] }}))"#,
-                urls_string,
-            ))
-            .await?;
-        let result: JsResultType<Vec<Option<ExpressionRendered>>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let controller = LanguageController::global_instance();
+        let mut results = Vec::new();
+
+        for url in urls.iter() {
+            if let Ok((lang_address, expression_address)) = LanguageController::parse_expr_url(url)
+            {
+                let is_literal = lang_address == "literal";
+                let is_loaded = is_literal || controller.is_language_loaded(&lang_address).await;
+
+                if is_loaded {
+                    match controller
+                        .get_expression(&lang_address, &expression_address)
+                        .await
+                    {
+                        Ok(Some(expr_json)) => {
+                            results
+                                .push(Some(build_expression_rendered(&expr_json, &lang_address)));
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            log::warn!("get_expression failed for {}: {}", url, e);
+                        }
+                    }
+                }
+            }
+            results.push(None);
+        }
+
+        Ok(results)
     }
 
     async fn expression_raw(
@@ -261,15 +328,34 @@ impl Query {
         url: String,
     ) -> FieldResult<Option<String>> {
         check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "expressionRaw", {{ url: "{}" }}))"#,
-                url,
-            ))
-            .await?;
-        let result: JsResultType<Option<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let controller = LanguageController::global_instance();
+        if let Ok((lang_address, expression_address)) = LanguageController::parse_expr_url(&url) {
+            let is_literal = lang_address == "literal";
+            let is_loaded = is_literal || controller.is_language_loaded(&lang_address).await;
+
+            if is_loaded {
+                match controller
+                    .get_expression(&lang_address, &expression_address)
+                    .await
+                {
+                    Ok(Some(expr_json)) => {
+                        return Ok(Some(serde_json::to_string(&expr_json)?));
+                    }
+                    Ok(None) => {
+                        return Ok(None);
+                    }
+                    Err(e) => {
+                        return Err(FieldError::new(
+                            format!("Failed to get expression {}: {}", url, e),
+                            Value::null(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     async fn get_trusted_agents(&self, context: &RequestContext) -> FieldResult<Vec<String>> {
@@ -290,15 +376,55 @@ impl Query {
         address: String,
     ) -> FieldResult<LanguageHandle> {
         check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "language", {{ address: "{}" }}))"#,
+
+        let controller = LanguageController::global_instance();
+
+        // If not already loaded, try to install/load it (includes trust verification)
+        if !controller.is_language_loaded(&address).await {
+            controller.language_by_ref(&address).await.map_err(|e| {
+                // Extract the inner message for LoadError to match expected API format
+                let msg = match &e {
+                    crate::languages::error::LanguageError::LoadError { message, .. } => {
+                        message.clone()
+                    }
+                    other => other.to_string(),
+                };
+                FieldError::new(msg, Value::null())
+            })?;
+        }
+
+        if controller.is_language_loaded(&address).await {
+            let name = controller.get_language_name(&address).await;
+            let settings = controller.get_settings_public(&address);
+            let settings_str = if settings.is_null() {
+                None
+            } else {
+                Some(serde_json::to_string(&settings).unwrap_or_default())
+            };
+
+            let (constructor_icon_json, icon_json, settings_icon_json) =
+                controller.get_language_icons(&address).await;
+
+            let constructor_icon =
+                constructor_icon_json.and_then(|j| serde_json::from_str::<Icon>(&j).ok());
+            let icon = icon_json.and_then(|j| serde_json::from_str::<Icon>(&j).ok());
+            let settings_icon =
+                settings_icon_json.and_then(|j| serde_json::from_str::<Icon>(&j).ok());
+
+            return Ok(LanguageHandle {
                 address,
-            ))
-            .await?;
-        let result: JsResultType<LanguageHandle> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+                name,
+                settings: settings_str,
+                constructor_icon,
+                icon,
+                settings_icon,
+            });
+        }
+
+        Err(FieldError::new(
+            format!("Language not loaded: {}", address),
+            Value::null(),
+        ))
     }
 
     async fn language_meta(
@@ -307,15 +433,17 @@ impl Query {
         address: String,
     ) -> FieldResult<LanguageMeta> {
         check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "languageMeta", {{ address: "{}" }}))"#,
-                address,
-            ))
-            .await?;
-        let result: JsResultType<LanguageMeta> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let controller = LanguageController::global_instance();
+        controller
+            .get_language_expression(&address)
+            .await
+            .map_err(|e| {
+                FieldError::new(
+                    format!("Failed to get language meta for {}: {}", address, e),
+                    Value::null(),
+                )
+            })
     }
 
     async fn language_source(
@@ -324,15 +452,14 @@ impl Query {
         address: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "languageSource", {{ address: "{}" }}))"#,
-                address,
-            ))
-            .await?;
-        let result: JsResultType<String> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let controller = LanguageController::global_instance();
+        controller.get_language_source(&address).await.map_err(|e| {
+            FieldError::new(
+                format!("Failed to get language source for {}: {}", address, e),
+                Value::null(),
+            )
+        })
     }
 
     async fn languages(
@@ -340,17 +467,30 @@ impl Query {
         context: &RequestContext,
         filter: Option<String>,
     ) -> FieldResult<Vec<LanguageHandle>> {
-        let filter_string = filter.map_or("null".to_string(), |f| f.to_string());
         check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "languages", {{ filter: "{}" }}))"#,
-                filter_string,
-            ))
-            .await?;
-        let result: JsResultType<Vec<LanguageHandle>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let controller = LanguageController::global_instance();
+        let refs = controller.get_installed_languages(filter.as_deref()).await;
+
+        let mut handles = Vec::new();
+        for lang_ref in refs {
+            let settings = controller.get_settings_public(&lang_ref.address);
+            let settings_str = if settings.is_null() {
+                None
+            } else {
+                Some(serde_json::to_string(&settings).unwrap_or_default())
+            };
+
+            handles.push(LanguageHandle {
+                address: lang_ref.address,
+                name: lang_ref.name,
+                settings: settings_str,
+                constructor_icon: None,
+                icon: None,
+                settings_icon: None,
+            });
+        }
+        Ok(handles)
     }
 
     async fn neighbourhood_has_telepresence_adapter(
@@ -613,16 +753,9 @@ impl Query {
             return Ok(PerspectiveExpression::default());
         }
 
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.friendsDirectMessageLanguage("{}") ? await (await core.friendsDirectMessageLanguage("{}")).directMessageAdapter.status()  : null)"#,
-                did,
-                did
-            ))
-            .await?;
-        let result: PerspectiveExpression = serde_json::from_str(&result)?;
-        Ok(result)
+        // Direct message status requires DM language - return default for now
+        log::warn!("runtime_friend_status: DM language interaction not yet ported to Rust");
+        Ok(PerspectiveExpression::default())
     }
 
     async fn runtime_friends(&self, context: &RequestContext) -> FieldResult<Vec<String>> {
@@ -694,18 +827,10 @@ impl Query {
         filter: Option<String>,
     ) -> FieldResult<Vec<PerspectiveExpression>> {
         check_capability(&context.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)?;
-        let filter_str = filter
-            .map(|val| format!(r#"{{ filter: "{}" }}"#, val))
-            .unwrap_or_else(|| String::from("{ filter: null }"));
-        let script = format!(
-            r#"JSON.stringify(await (await core.myDirectMessageLanguage()).directMessageAdapter.inbox("{}"))"#,
-            filter_str,
-        );
-        let mut js = context.js_handle.clone();
-        let result = js.execute(script).await?;
-        let result: Vec<PerspectiveExpression> = serde_json::from_str(&result)?;
-        println!("llllll inbox result: {:?}", result);
-        Ok(result)
+        let _ = filter;
+        // Direct message inbox requires DM language - return empty for now
+        log::warn!("runtime_message_inbox: DM language interaction not yet ported to Rust");
+        Ok(vec![])
     }
 
     async fn runtime_message_outbox(
@@ -815,6 +940,18 @@ impl Query {
         Ok(user_stats)
     }
 
+    async fn runtime_hosting_user_info(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<HostingUserInfo> {
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        // TODO: implement actual hosting user info lookup
+        Err(FieldError::new(
+            "Hosting user info not yet implemented",
+            Value::null(),
+        ))
+    }
+
     async fn ai_get_models(&self, context: &RequestContext) -> FieldResult<Vec<Model>> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
         let models_result = Ad4mDb::with_global_instance(|db| db.get_models());
@@ -862,5 +999,59 @@ impl Query {
             Ok(status) => Ok(status),
             Err(e) => Err(FieldError::new(e.to_string(), Value::null())),
         }
+    }
+}
+
+/// Build an ExpressionRendered from a raw JsonValue expression and language address.
+pub fn build_expression_rendered(
+    expr_json: &serde_json::Value,
+    lang_address: &str,
+) -> ExpressionRendered {
+    let author = expr_json
+        .get("author")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let timestamp = expr_json
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let data = match expr_json.get("data") {
+        Some(d) => serde_json::to_string(d).unwrap_or_default(),
+        None => String::new(),
+    };
+
+    let proof = if let Some(p) = expr_json.get("proof") {
+        DecoratedExpressionProof {
+            key: p
+                .get("key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            signature: p
+                .get("signature")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            valid: p.get("valid").and_then(|v| v.as_bool()),
+            invalid: p.get("invalid").and_then(|v| v.as_bool()),
+        }
+    } else {
+        DecoratedExpressionProof::default()
+    };
+
+    ExpressionRendered {
+        author,
+        timestamp,
+        data,
+        proof,
+        language: LanguageRef {
+            address: lang_address.to_string(),
+            name: String::new(),
+        },
+        icon: Icon { code: None },
     }
 }

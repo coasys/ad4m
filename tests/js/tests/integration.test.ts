@@ -67,11 +67,22 @@ export class TestContext {
     }
 
     async makeAllNodesKnown() {
-      const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
-      const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
-    
-      await this.#alice!.runtime.hcAddAgentInfos(bobAgentInfo);
-      await this.#bob!.runtime.hcAddAgentInfos(aliceAgentInfo);
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        try {
+          const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
+          const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
+
+          await this.#alice!.runtime.hcAddAgentInfos(bobAgentInfo);
+          await this.#bob!.runtime.hcAddAgentInfos(aliceAgentInfo);
+          console.log(`Agent info exchange attempt ${attempt} successful`);
+          break;
+        } catch (error) {
+          console.log(`Agent info exchange attempt ${attempt} failed:`, error);
+          if (attempt < 5) {
+            await sleep(3000);
+          }
+        }
+      }
     }
 }
 let testContext: TestContext = new TestContext()

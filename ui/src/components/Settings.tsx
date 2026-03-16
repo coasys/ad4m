@@ -97,6 +97,11 @@ const Profile = (props: Props) => {
 
   const [restartingHolochain, setRestartingHolochain] = useState(false);
 
+  // MCP Configuration state
+  const [mcpEnabled, setMcpEnabled] = useState(false);
+  const [mcpPort, setMcpPort] = useState(3001);
+  const [mcpChanged, setMcpChanged] = useState(false);
+
   const [logConfig, setLogConfig] = useState<Record<string, string>>({});
   const [newCrateName, setNewCrateName] = useState<string>("");
   const [newCrateLevel, setNewCrateLevel] = useState<string>("info");
@@ -126,6 +131,20 @@ const Profile = (props: Props) => {
   const [smtpTestStatus, setSmtpTestStatus] = useState<string>("");
   const [smtpTestEmail, setSmtpTestEmail] = useState<string>("");
   const [showSmtpPassword, setShowSmtpPassword] = useState(false);
+
+  // Load MCP config on component mount
+  useEffect(() => {
+    const loadMcpConfig = async () => {
+      try {
+        const [enabled, port] = await invoke<[boolean, number]>("get_mcp_config");
+        setMcpEnabled(enabled);
+        setMcpPort(port);
+      } catch (error) {
+        console.error("Failed to load MCP config:", error);
+      }
+    };
+    loadMcpConfig();
+  }, []);
 
   // Load current log config on component mount
   useEffect(() => {
@@ -635,6 +654,67 @@ const Profile = (props: Props) => {
           Advanced mode
         </j-toggle>
       </j-box>
+
+      <j-box px="500" my="500">
+        <j-toggle full="" checked={mcpEnabled} onChange={async (e) => {
+          try {
+            const newEnabled = e.target.checked;
+            await invoke("set_mcp_config", { enabled: newEnabled, port: mcpPort });
+            setMcpEnabled(newEnabled);
+            setMcpChanged(true);
+          } catch (error) {
+            console.error("Failed to toggle MCP:", error);
+            e.target.checked = !e.target.checked;
+          }
+        }}>
+          Enable MCP Server (AI Agent Integration)
+        </j-toggle>
+      </j-box>
+
+      {mcpEnabled && (
+        <>
+          <j-box px="500" my="300">
+            <j-box mb="200">
+              <j-text size="500" weight="500">MCP Port</j-text>
+            </j-box>
+            <j-input
+              type="number"
+              value={mcpPort.toString()}
+              onChange={(e) => {
+                const port = parseInt((e.target as HTMLInputElement).value);
+                if (!isNaN(port) && port > 0 && port < 65536) {
+                  setMcpPort(port);
+                  invoke("set_mcp_config", { enabled: true, port }).catch(console.error);
+                  setMcpChanged(true);
+                }
+              }}
+              placeholder="3001"
+            />
+            <j-box mt="200">
+              <j-text size="300" color="ui-500">
+                AI agents connect via MCP at http://localhost:{mcpPort}/mcp
+              </j-text>
+            </j-box>
+          </j-box>
+
+          {mcpChanged && (
+            <j-box px="500" my="500">
+              <j-box p="400" style={{
+                backgroundColor: "#fff3cd",
+                borderRadius: "8px",
+                border: "1px solid #ffc107"
+              }}>
+                <j-flex a="center" gap="300">
+                  <j-icon name="exclamation-triangle" color="warning"></j-icon>
+                  <j-text size="500">
+                    Restart required: MCP settings will take effect after restarting the launcher.
+                  </j-text>
+                </j-flex>
+              </j-box>
+            </j-box>
+          )}
+        </>
+      )}
 
       <j-box px="500" my="500">
         <j-toggle full="" checked={multiUserEnabled} onChange={async (e) => {

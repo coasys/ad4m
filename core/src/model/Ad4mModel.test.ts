@@ -1,25 +1,25 @@
 import { Ad4mModel } from "./Ad4mModel";
-import { ModelOptions, Property, Optional, ReadOnly, Collection, Flag } from "./decorators";
+import { Model, Property, Optional, ReadOnly, HasMany, Flag } from "./decorators";
 
 describe("Ad4mModel.getModelMetadata()", () => {
   it("should extract basic model metadata with className", () => {
-    @ModelOptions({ name: "SimpleModel" })
+    @Model({ name: "SimpleModel" })
     class SimpleModel extends Ad4mModel {}
 
     const metadata = SimpleModel.getModelMetadata();
     
     expect(metadata.className).toBe("SimpleModel");
     expect(metadata.properties).toEqual({});
-    expect(metadata.collections).toEqual({});
+    expect(metadata.relations).toEqual({});
   });
 
   it("should extract property metadata with all fields", () => {
-    @ModelOptions({ name: "PropertyModel" })
+    @Model({ name: "PropertyModel" })
     class PropertyModel extends Ad4mModel {
       @Property({ through: "test://name", resolveLanguage: "literal" })
       name: string = "";
       
-      @Optional({ through: "test://optional", writable: true })
+      @Optional({ through: "test://optional" })
       optional: string = "";
       
       @ReadOnly({ through: "test://readonly", prologGetter: "custom_getter" })
@@ -36,17 +36,17 @@ describe("Ad4mModel.getModelMetadata()", () => {
     
     // Verify "name" property
     expect(metadata.properties.name.predicate).toBe("test://name");
-    expect(metadata.properties.name.required).toBe(true);
-    expect(metadata.properties.name.writable).toBe(true);
+    expect(metadata.properties.name.required).toBe(false);
+    expect(metadata.properties.name.readOnly).toBe(false);
     expect(metadata.properties.name.resolveLanguage).toBe("literal");
     
     // Verify "optional" property
     expect(metadata.properties.optional.predicate).toBe("test://optional");
-    expect(metadata.properties.optional.writable).toBe(true);
+    expect(metadata.properties.optional.readOnly).toBe(false);
     
     // Verify "readonly" property
     expect(metadata.properties.readonly.predicate).toBe("test://readonly");
-    expect(metadata.properties.readonly.writable).toBe(false);
+    expect(metadata.properties.readonly.readOnly).toBe(true);
     expect(metadata.properties.readonly.prologGetter).toBe("custom_getter");
     
     // Verify "type" property (flag)
@@ -55,42 +55,31 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.type.initial).toBe("test://flag");
   });
 
-  it("should extract collection metadata with where clauses", () => {
-    @ModelOptions({ name: "CollectionModel" })
-    class CollectionModel extends Ad4mModel {
-      @Collection({ through: "test://items" })
+  it("should extract relation metadata with various options", () => {
+    @Model({ name: "RelationModel" })
+    class RelationModel extends Ad4mModel {
+      @HasMany({ through: "test://items" })
       items: string[] = [];
       
-      @Collection({ 
-        through: "test://filtered",
-        where: { condition: "triple(Target, 'test://active', 'true')" }
-      })
-      filtered: string[] = [];
-      
-      @Collection({ through: "test://local", local: true })
+      @HasMany({ through: "test://local", local: true })
       local: string[] = [];
     }
 
-    const metadata = CollectionModel.getModelMetadata();
+    const metadata = RelationModel.getModelMetadata();
     
-    // Should have 3 collections
-    expect(Object.keys(metadata.collections)).toHaveLength(3);
+    // Should have 2 relations
+    expect(Object.keys(metadata.relations)).toHaveLength(2);
     
-    // Verify "items" collection
-    expect(metadata.collections.items.predicate).toBe("test://items");
-    expect(metadata.collections.items.where).toBeUndefined();
+    // Verify "items" relation
+    expect(metadata.relations.items.predicate).toBe("test://items");
     
-    // Verify "filtered" collection
-    expect(metadata.collections.filtered.predicate).toBe("test://filtered");
-    expect(metadata.collections.filtered.where?.condition).toBe("triple(Target, 'test://active', 'true')");
-    
-    // Verify "local" collection
-    expect(metadata.collections.local.predicate).toBe("test://local");
-    expect(metadata.collections.local.local).toBe(true);
+    // Verify "local" relation
+    expect(metadata.relations.local.predicate).toBe("test://local");
+    expect(metadata.relations.local.local).toBe(true);
   });
 
   it("should extract transform function from property metadata", () => {
-    @ModelOptions({ name: "TransformModel" })
+    @Model({ name: "TransformModel" })
     class TransformModel extends Ad4mModel {
       @Optional({ 
         through: "test://data",
@@ -110,7 +99,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
   });
 
   it("should extract custom getter and setter from property metadata", () => {
-    @ModelOptions({ name: "CustomModel" })
+    @Model({ name: "CustomModel" })
     class CustomModel extends Ad4mModel {
       @Optional({
         through: "test://computed",
@@ -128,34 +117,35 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.computed.prologSetter).toContain("setSingleTarget");
   });
 
-  it("should handle collection with isInstance where clause", () => {
-    @ModelOptions({ name: "Comment" })
+  it("should handle relation with typed target relation", () => {
+    @Model({ name: "Comment" })
     class Comment extends Ad4mModel {}
     
-    @ModelOptions({ name: "Post" })
+    @Model({ name: "Post" })
     class Post extends Ad4mModel {
-      @Collection({ 
+      @HasMany({ 
         through: "post://comment",
-        where: { isInstance: Comment }
+        target: () => Comment
       })
       comments: string[] = [];
     }
 
     const metadata = Post.getModelMetadata();
     
-    // Assert isInstance is defined
-    expect(metadata.collections.comments.where?.isInstance).toBeDefined();
+    // Assert relation exists with correct predicate
+    expect(metadata.relations.comments).toBeDefined();
+    expect(metadata.relations.comments.predicate).toBe("post://comment");
   });
 
-  it("should throw error for class without @ModelOptions decorator", () => {
+  it("should throw error for class without @Model decorator", () => {
     class NoDecoratorModel extends Ad4mModel {}
 
     // Assert that calling getModelMetadata throws an error
-    expect(() => NoDecoratorModel.getModelMetadata()).toThrow("Model class must be decorated with @ModelOptions");
+    expect(() => NoDecoratorModel.getModelMetadata()).toThrow("Model class must be decorated with @Model");
   });
 
-  it("should handle complex model with mixed property and collection types", () => {
-    @ModelOptions({ name: "Recipe" })
+  it("should handle complex model with mixed property and relation types", () => {
+    @Model({ name: "Recipe" })
     class Recipe extends Ad4mModel {
       @Property({ through: "recipe://name", resolveLanguage: "literal" })
       name: string = "";
@@ -166,10 +156,10 @@ describe("Ad4mModel.getModelMetadata()", () => {
       @ReadOnly({ through: "recipe://rating", prologGetter: "avg_rating(Base, Value)" })
       rating: number = 0;
       
-      @Collection({ through: "recipe://ingredient" })
+      @HasMany({ through: "recipe://ingredient" })
       ingredients: string[] = [];
       
-      @Collection({ through: "recipe://step", local: true })
+      @HasMany({ through: "recipe://step", local: true })
       steps: string[] = [];
     }
 
@@ -184,10 +174,10 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.description).toBeDefined();
     expect(metadata.properties.rating).toBeDefined();
     
-    // Assert collections has 2 entries
-    expect(Object.keys(metadata.collections)).toHaveLength(2);
-    expect(metadata.collections.ingredients).toBeDefined();
-    expect(metadata.collections.steps).toBeDefined();
+    // Assert relations has 2 entries
+    expect(Object.keys(metadata.relations)).toHaveLength(2);
+    expect(metadata.relations.ingredients).toBeDefined();
+    expect(metadata.relations.steps).toBeDefined();
     
     // Verify all metadata fields are correctly extracted
     expect(metadata.properties.name.predicate).toBe("recipe://name");
@@ -195,9 +185,9 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.description.predicate).toBe("recipe://description");
     expect(metadata.properties.rating.predicate).toBe("recipe://rating");
     expect(metadata.properties.rating.prologGetter).toBe("avg_rating(Base, Value)");
-    expect(metadata.collections.ingredients.predicate).toBe("recipe://ingredient");
-    expect(metadata.collections.steps.predicate).toBe("recipe://step");
-    expect(metadata.collections.steps.local).toBe(true);
+    expect(metadata.relations.ingredients.predicate).toBe("recipe://ingredient");
+    expect(metadata.relations.steps.predicate).toBe("recipe://step");
+    expect(metadata.relations.steps.local).toBe(true);
   });
 });
 
@@ -230,7 +220,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.properties.name).toBeDefined();
     expect(metadata.properties.name.predicate).toBe("product://name");
     expect(metadata.properties.name.required).toBe(true);
-    expect(metadata.properties.name.writable).toBe(true);
+    expect(metadata.properties.name.readOnly).toBe(false);
     expect(metadata.properties.name.resolveLanguage).toBe("literal");
 
     expect(metadata.properties.price).toBeDefined();
@@ -243,7 +233,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.properties.description.required).toBe(false);
   });
 
-  it("should extract collections from a model created via fromJSONSchema with arrays", () => {
+  it("should extract relations from a model created via fromJSONSchema with arrays", () => {
     const schema = {
       title: "Post",
       type: "object",
@@ -271,13 +261,13 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     // Verify className
     expect(metadata.className).toBe("Post");
 
-    // Verify collections are extracted
-    expect(Object.keys(metadata.collections).length).toBeGreaterThan(0);
-    expect(metadata.collections.tags).toBeDefined();
-    expect(metadata.collections.tags.predicate).toBe("post://tags");
+    // Verify relations are extracted
+    expect(Object.keys(metadata.relations).length).toBeGreaterThan(0);
+    expect(metadata.relations.tags).toBeDefined();
+    expect(metadata.relations.tags.predicate).toBe("post://tags");
 
-    expect(metadata.collections.comments).toBeDefined();
-    expect(metadata.collections.comments.predicate).toBe("post://comments");
+    expect(metadata.relations.comments).toBeDefined();
+    expect(metadata.relations.comments.predicate).toBe("post://comments");
 
     // Verify properties (should include at least title)
     expect(metadata.properties.title).toBeDefined();
@@ -321,7 +311,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     // Verify x-ad4m metadata is respected
     expect(metadata.properties.name.predicate).toBe("foaf://name");
     expect(metadata.properties.name.resolveLanguage).toBe("literal");
-    expect(metadata.properties.name.writable).toBe(true);
+    expect(metadata.properties.name.readOnly).toBe(false);
     expect(metadata.properties.name.required).toBe(true);
 
     expect(metadata.properties.email.predicate).toBe("foaf://mbox");
@@ -403,16 +393,16 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.properties.published.predicate).toBe("article://published");
     expect(metadata.properties.published.required).toBe(true);
 
-    // Verify collections
-    expect(metadata.collections.authors).toBeDefined();
-    expect(metadata.collections.authors.predicate).toBe("article://authors");
+    // Verify relations
+    expect(metadata.relations.authors).toBeDefined();
+    expect(metadata.relations.authors.predicate).toBe("article://authors");
 
-    expect(metadata.collections.tags).toBeDefined();
-    expect(metadata.collections.tags.predicate).toBe("article://tags");
-    expect(metadata.collections.tags.local).toBe(true);
+    expect(metadata.relations.tags).toBeDefined();
+    expect(metadata.relations.tags.predicate).toBe("article://tags");
+    expect(metadata.relations.tags.local).toBe(true);
   });
 
-  it("should handle models with only an auto-generated type flag", () => {
+  it("should handle models with no properties (open-world, no auto-flag)", () => {
     const schema = {
       title: "EmptyModel",
       type: "object",
@@ -429,11 +419,14 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     // Should have className
     expect(metadata.className).toBe("EmptyModel");
 
-    // Should have the auto-generated __ad4m_type property
-    expect(metadata.properties.__ad4m_type).toBeDefined();
-    expect(metadata.properties.__ad4m_type.predicate).toBe("ad4m://type");
-    expect(metadata.properties.__ad4m_type.initial).toBe("empty://instance");
-    expect(metadata.properties.__ad4m_type.flag).toBe(true);
+    // Should NOT have an auto-generated __ad4m_type property —
+    // models with all-optional properties use open-world structural matching.
+    expect(metadata.properties.__ad4m_type).toBeUndefined();
+
+    // SHACL shape should still be valid with empty constructor/destructor
+    const { shape } = (EmptyModelClass as any).generateSHACL();
+    expect(shape.constructor_actions).toEqual([]);
+    expect(shape.destructor_actions).toEqual([]);
   });
 });
 
@@ -446,16 +439,16 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     return query.replace(/\s+/g, ' ').trim();
   }
 
-  // Test Recipe model
-  @ModelOptions({ name: "Recipe" })
+  // Test Recipe model — explicit required: true to test required-property query filters
+  @Model({ name: "Recipe" })
   class Recipe extends Ad4mModel {
-    @Property({ through: "recipe://name" })
+    @Property({ through: "recipe://name", required: true })
     name: string = "";
     
-    @Property({ through: "recipe://rating" })
+    @Property({ through: "recipe://rating", required: true })
     rating: number = 0;
     
-    @Collection({ through: "recipe://ingredient" })
+    @HasMany({ through: "recipe://ingredient" })
     ingredients: string[] = [];
   }
 
@@ -465,7 +458,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     expect(query).toContain("id AS source");
     expect(query).toContain("uri AS source_uri");
     expect(query).toContain("FROM node");
-    expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
+    expect(query).toContain("->link AS links");
     expect(query).toContain("WHERE");
     // Should have graph traversal filters for required properties
     expect(query).toContain("count(->link[WHERE");
@@ -475,17 +468,17 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: "Pasta" } });
     
     // Should have graph traversal filters for required properties and user filter
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name']) > 0");
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://rating']) > 0");
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Pasta']) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name']) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://rating']) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
   });
 
   it("should generate query with multiple property filters", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: "Pasta", rating: 5 } });
     
     expect(query).toContain("WHERE");
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Pasta']) > 0");
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://rating' AND out.uri = 5]) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://rating' AND fn::parse_literal(out.uri) = 5]) > 0");
     expect(query).toContain("AND");
   });
 
@@ -521,14 +514,14 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: { not: "Salad" } } });
 
     // Not operator uses graph traversal with count = 0
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Salad']) = 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Salad']) = 0");
   });
 
   it("should handle not operator with array (NOT IN)", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: { not: ["Salad", "Soup"] } } });
 
     // Not operator with array uses graph traversal with count = 0
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri IN ['Salad', 'Soup']]) = 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) IN ['Salad', 'Soup']]) = 0");
   });
 
   it("should handle between operator (filtered in JavaScript, not SQL)", async () => {
@@ -564,8 +557,8 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     expect(query).not.toContain("SELECT source FROM node");
   });
 
-  it.skip("should handle contains operator on special field (base)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: { contains: "test" } } });
+  it.skip("should handle contains operator on special field (id)", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { contains: "test" } } });
     
     expect(query).toContain("WHERE source CONTAINS 'test'");
   });
@@ -573,7 +566,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   it("should handle array values (IN clause)", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: ["Pasta", "Pizza"] } });
     
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri IN ['Pasta', 'Pizza']]) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) IN ['Pasta', 'Pizza']]) > 0");
   });
 
   it.skip("should handle special fields (author, timestamp) without subqueries", async () => {
@@ -618,7 +611,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
     // WHERE clause uses graph traversal filters
     expect(query).toContain("WHERE");
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Pasta']) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
     // Comparison operators (gt) are filtered in JavaScript, not SQL
     expect(query).not.toContain("out.uri > 4");
     expect(query).not.toContain("target > 4");
@@ -632,24 +625,24 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { properties: ["name"] });
 
     // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
-    expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
+    expect(query).toContain("->link AS links");
     
   });
 
-  it("should only select requested collections", async () => {
-    @ModelOptions({ name: "MultiCollectionModel" })
-    class MultiCollectionModel extends Ad4mModel {
-      @Collection({ through: "test://coll1" })
+  it("should select all link data for relations", async () => {
+    @Model({ name: "MultiRelationModel" })
+    class MultiRelationModel extends Ad4mModel {
+      @HasMany({ through: "test://coll1" })
       coll1: string[] = [];
 
-      @Collection({ through: "test://coll2" })
+      @HasMany({ through: "test://coll2" })
       coll2: string[] = [];
     }
 
-    const query = await MultiCollectionModel.queryToSurrealQL(mockPerspective, { collections: ["coll1"] });
+    const query = await MultiRelationModel.queryToSurrealQL(mockPerspective, {});
 
-    // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
-    expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
+    // With array::group(), all link data is selected
+    expect(query).toContain("->link AS links");
     
   });
 
@@ -664,8 +657,8 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { rating: 5 } });
     
     // Numeric values should not have quotes around them
-    expect(query).toContain("out.uri = 5");
-    expect(query).not.toContain("out.uri = '5'");
+    expect(query).toContain("fn::parse_literal(out.uri) = 5");
+    expect(query).not.toContain("fn::parse_literal(out.uri) = '5'");
   });
 
   it("should handle complex nested query (comparisons, ORDER BY, LIMIT handled in JS)", async () => {
@@ -682,7 +675,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const normalized = normalizeQuery(query);
 
     // Verify graph traversal filters are present
-    expect(normalized).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Pasta']) > 0");
+    expect(normalized).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
     // Comparison operators (gte, lte) are filtered in JavaScript, not SQL
     expect(normalized).not.toContain("out.uri >= 4");
     expect(normalized).not.toContain("target >= 4");
@@ -709,51 +702,51 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     
     // Should have WHERE clause filtering for required properties using graph traversal
     expect(query).toContain("WHERE");
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name']) > 0");
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://rating']) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name']) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://rating']) > 0");
     expect(query).not.toContain("ORDER BY");
     expect(query).not.toContain("START");
   });
 
-  it("should handle base special field", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: "literal://test" } });
+  it("should handle id special field", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: "literal://test" } });
     
     expect(query).toContain("uri = 'literal://test'");
   });
 
-  it("should handle base special field with array (IN clause)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: ["literal://test1", "literal://test2"] } });
+  it("should handle id special field with array (IN clause)", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: ["literal://test1", "literal://test2"] } });
     
     expect(query).toContain("uri IN ['literal://test1', 'literal://test2']");
   });
 
-  it("should handle base special field with not operator", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: { not: "literal://test" } } });
+  it("should handle id special field with not operator", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { not: "literal://test" } } });
     
     expect(query).toContain("uri != 'literal://test'");
   });
 
-  it("should handle base special field with not operator and array (NOT IN)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: { not: ["literal://test1", "literal://test2"] } } });
+  it("should handle id special field with not operator and array (NOT IN)", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { not: ["literal://test1", "literal://test2"] } } });
     
     expect(query).toContain("uri NOT IN ['literal://test1', 'literal://test2']");
   });
 
-  it("should handle base special field with between operator", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: { between: ["literal://a", "literal://z"] } } } as any);
+  it("should handle id special field with between operator", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { between: ["literal://a", "literal://z"] } } } as any);
     
     const normalized = normalizeQuery(query);
     expect(normalized).toContain("uri >= 'literal://a' AND uri <= 'literal://z'");
   });
 
-  it("should handle base special field with gt operator", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: { gt: "literal://m" } } } as any);
+  it("should handle id special field with gt operator", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { gt: "literal://m" } } } as any);
     
     expect(query).toContain("uri > 'literal://m'");
   });
 
-  it("should handle base special field with gte and lte operators", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: { gte: "literal://a", lte: "literal://z" } } } as any);
+  it("should handle id special field with gte and lte operators", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { gte: "literal://a", lte: "literal://z" } } } as any);
     
     const normalized = normalizeQuery(query);
     expect(normalized).toContain("uri >= 'literal://a'");
@@ -793,7 +786,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
     const normalized = normalizeQuery(query);
     // Regular properties use graph traversal filters
-    expect(normalized).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Pasta']) > 0");
+    expect(normalized).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
     // Comparison operators (gt) are filtered in JavaScript, not SQL
     expect(normalized).not.toContain("out.uri > 4");
     expect(normalized).not.toContain("target > 4");
@@ -802,7 +795,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   });
 
   it("should handle boolean values", async () => {
-    @ModelOptions({ name: "Task" })
+    @Model({ name: "Task" })
     class Task extends Ad4mModel {
       @Property({ through: "task://completed" })
       completed: boolean = false;
@@ -810,13 +803,13 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
     const query = await Task.queryToSurrealQL(mockPerspective, { where: { completed: true } });
     
-    expect(query).toContain("out.uri = true");
+    expect(query).toContain("fn::parse_literal(out.uri) = true");
   });
 
   it("should handle array of numbers", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { rating: [4, 5] } });
     
-    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://rating' AND out.uri IN [4, 5]]) > 0");
+    expect(query).toContain("count(->link[WHERE predicate = 'recipe://rating' AND fn::parse_literal(out.uri) IN [4, 5]]) > 0");
   });
 
   it("should skip unknown properties in where clause", async () => {
@@ -846,26 +839,18 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     expect(query).not.toContain("ORDER BY");
   });
 
-  it("should generate query with only properties, no collections", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { properties: ["name", "rating"], collections: [] });
+  it("should generate query with only properties specified", async () => {
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { properties: ["name", "rating"] });
 
     // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
-    expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
-    
-  });
-
-  it("should generate query with only collections, no properties", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { properties: [], collections: ["ingredients"] });
-
-    // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
-    expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
+    expect(query).toContain("->link AS links");
     
   });
 });
 
 describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () => {
   // Test Recipe model
-  @ModelOptions({ name: "Recipe" })
+  @Model({ name: "Recipe" })
   class Recipe extends Ad4mModel {
     @Property({ through: "recipe://name" })
     name: string = "";
@@ -873,7 +858,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     @Property({ through: "recipe://rating" })
     rating: number = 0;
     
-    @Collection({ through: "recipe://ingredient" })
+    @HasMany({ through: "recipe://ingredient" })
     ingredients: string[] = [];
   }
 
@@ -965,13 +950,12 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     // rating and ingredients should be removed since only "name" was requested
     expect(recipe.rating).toBeUndefined();
     expect(recipe.ingredients).toBeUndefined();
-    // author and timestamp should still be present
-    expect(recipe.author).toBe("did:key:alice");
-    // Timestamp is converted to Unix epoch (milliseconds)
-    expect(recipe.timestamp).toBe(new Date("2023-01-01T00:00:00Z").getTime());
+    // author, createdAt, updatedAt are also stripped unless explicitly requested
+    expect(recipe.author).toBeUndefined();
+    expect(recipe.timestamp).toBeUndefined();
   });
 
-  it("should filter collections when query specifies collections", async () => {
+  it("should filter properties when query specifies properties", async () => {
     const surrealResults = [
       {
         source: "node:abc123",
@@ -987,15 +971,14 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
 
     const result = await Recipe.instancesFromSurrealResult(
       mockPerspective,
-      { collections: ["ingredients"] },
+      { properties: ["name"] },
       surrealResults
     );
 
     expect(result.results).toHaveLength(1);
     const recipe = result.results[0];
-    expect(recipe.ingredients).toEqual(["pasta", "tomato"]);
-    // name and rating should be removed since only "ingredients" was requested
-    expect(recipe.name).toBeUndefined();
+    expect(recipe.name).toBe("Pasta");
+    // rating and ingredients should be removed since only "name" was requested
     expect(recipe.rating).toBeUndefined();
   });
 
@@ -1231,7 +1214,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
 
 describe("Ad4mModel.count() with advanced where conditions", () => {
   // Test Recipe model
-  @ModelOptions({ name: "Recipe" })
+  @Model({ name: "Recipe" })
   class Recipe extends Ad4mModel {
     @Property({ through: "recipe://name" })
     name: string = "";
@@ -1239,7 +1222,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     @Property({ through: "recipe://rating" })
     rating: number = 0;
     
-    @Collection({ through: "recipe://ingredient" })
+    @HasMany({ through: "recipe://ingredient" })
     ingredients: string[] = [];
   }
 

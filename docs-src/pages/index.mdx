@@ -32,7 +32,7 @@ and executes code that interfaces with Languages-protocol-like abstractions that
 protocols. This instance serves as the back-end that UIs and apps connect to, providing a unified, interoperable gateway to the user's digital world.
 
 At its core, **AD4M inverts the typical app-centric model**. Instead of apps owning your data and social graph, your AD4M instance owns them,
-running on your device (or a trusted host) and exposing a GraphQL API, wrapped by our JavaScript client library, for apps to query and interact with.
+running on your device (or a trusted host) and exposing a GraphQL API and an [MCP server](/developer-guides/mcp), for apps and AI agents alike to query and interact with.
 For example, a chat app might connect to `localhost:4000/graphql` to fetch messages stored in a Perspective, addressed via a Language like
 `QmXyz123://message789`. This local runtime attaches to existing Languages-say, `http` for web content or `solid` for semantic triples-executing
 their logic to read or write Expressions (data objects). Developers don't rewrite the web; they extend it, with AD4M harmonizing these connections
@@ -260,49 +260,24 @@ For app developers, writing queries directly is optional-AD4M's `Ad4mModel` clas
 This TypeScript base class lets you define model classes with properties and relationships, automatically using **SurrealDB** under the hood for
 fast query performance (10-100x faster than Prolog). Here's how you define a model:
 ```typescript
-import { Ad4mModel, ModelOptions, Property, Collection, Flag, Optional, ReadOnly } from "@coasys/ad4m";
+import { Ad4mModel, Model, Property, HasMany, Flag, ReadOnly } from "@coasys/ad4m";
 
-@ModelOptions({
-    name: "Todo"
-})
+@Model({ name: "Todo" })
 class Todo extends Ad4mModel {
-    @Property({
-        through: "todo://state",
-        initial: "todo://ready"
-    })
+    @Property({ through: "todo://state", initial: "todo://ready" })
     state: string = "";
 
-    @Optional({
-        through: "todo://has_title",
-        writable: true,
-        resolveLanguage: "literal"
-    })
+    @Property({ through: "todo://has_title" })
     title: string = "";
 
     @ReadOnly({
-        getter: 'triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true'
+        through: "todo://is_liked",
+        getter: 'count(->link[WHERE predicate = "flux://has_reaction" AND out.uri = "flux://thumbsup"]) > 0'
     })
     isLiked: boolean = false;
 
-    @Collection({ through: "todo://comment" })
+    @HasMany({ through: "todo://comment" })
     comments: string[] = [];
-
-    @Collection({
-        through: "flux://entry_type",
-        where: { prologCondition: 'triple(Target, "flux://has_reaction", "flux://thumbsup")' }
-    })
-    likedMessages: string[] = [];
-
-    // Static query methods
-    static async all(perspective: PerspectiveProxy): Promise<Todo[]> {
-        return await Todo.findAll(perspective);
-    }
-
-    static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> {
-        return await Todo.findAll(perspective, {
-            where: { state: "todo://done" }
-        });
-    }
 }
 ```
 
@@ -325,12 +300,14 @@ todo.state = "todo://ready";
 await todo.save();
 
 // Query todos
-const allTodos = await Todo.all(perspective);
-const doneTodos = await Todo.allDone(perspective);
+const allTodos = await Todo.findAll(perspective);
+const doneTodos = await Todo.query(perspective)
+  .where({ state: "todo://done" })
+  .get();
 
 // Update a todo
 todo.state = "todo://done";
-await todo.update();
+await todo.save();
 
 // Delete a todo
 await todo.delete();

@@ -16,7 +16,7 @@ jobs:
       - name: setup node
         uses: actions/setup-node@v3
         with:
-          node-version: 18
+          node-version: 24
 
       - uses: pnpm/action-setup@v4
 
@@ -57,7 +57,7 @@ jobs:
   build-launcher-binary-linux:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
+      image: coasys/ad4m-ci-linux:latest@sha256:3605cfd2c0aee389ac9e7bb499a8e2633d0367ef3cc148d6668b2dbdff846ce0
 
     needs:
       - create-release
@@ -167,7 +167,7 @@ jobs:
   build-launcher-binary-linux-cuda:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
+      image: coasys/ad4m-ci-linux:latest@sha256:3605cfd2c0aee389ac9e7bb499a8e2633d0367ef3cc148d6668b2dbdff846ce0
 
     needs:
       - create-release
@@ -277,10 +277,10 @@ jobs:
 
     - uses: pnpm/action-setup@v4
 
-    - name: Use Node.js 18.x
+    - name: Use Node.js 24.x
       uses: actions/setup-node@v3
       with:
-        node-version: 18.x
+        node-version: 24.x
         cache: 'pnpm'
 
     # Cache Homebrew packages
@@ -457,10 +457,10 @@ jobs:
 
     - uses: pnpm/action-setup@v4
 
-    - name: Use Node.js 18.x
+    - name: Use Node.js 24.x
       uses: actions/setup-node@v3
       with:
-        node-version: 18.x
+        node-version: 24.x
         cache: 'pnpm'
 
     - name: Install protobuf compiler
@@ -546,10 +546,10 @@ jobs:
 
       - uses: pnpm/action-setup@v4
 
-      - name: Use Node.js 18.x
+      - name: Use Node.js 24.x
         uses: actions/setup-node@v3
         with:
-          node-version: 18.x
+          node-version: 24.x
           registry-url: 'https://registry.npmjs.org'
 
       - name: Extract version
@@ -581,39 +581,30 @@ jobs:
           cd core
           sed -i 's/"private": true/"private": false/' package.json
 
-      - name: Publish all npm packages
-        run: |
-          # Write auth token via both methods to ensure npm/pnpm picks it up
-          # actions/setup-node sets NPM_CONFIG_USERCONFIG to a temp .npmrc — write auth there
-          TARGET_NPMRC="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$TARGET_NPMRC"
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
-          echo "npm version: $(npm --version), node: $(node --version)"
-          echo "npmrc target: $TARGET_NPMRC ($(wc -c < "$TARGET_NPMRC") bytes)"
-          TAG="${{ env.NPM_TAG }}"
-          echo "Publishing with tag: $TAG"
-          FAILED=0
-          for PKG in core connect ad4m-hooks/helpers ad4m-hooks/react ad4m-hooks/vue executor test-runner; do
-            echo "=== Publishing $PKG ==="
-            set +e
-            OUTPUT=$(cd "$PKG" && npm publish --access public --tag "$TAG" --registry https://registry.npmjs.org 2>&1)
-            EXIT=$?
-            set -e
-            echo "$OUTPUT"
-            if [ $EXIT -ne 0 ]; then
-              if echo "$OUTPUT" | grep -qE "previously published|cannot publish over|already exists|E403.*cannot publish"; then
-                echo "SKIP: $PKG already published"
-              else
-                echo "FAIL: $PKG (exit $EXIT)"
-                FAILED=1
-              fi
-            else
-              echo "OK: $PKG published"
-            fi
-          done
-          exit $FAILED
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.COASYS_NPM_TOKEN }}
+      - name: Publish core
+        run: cd core && npm publish --access public --tag ${{ env.NPM_TAG }}
+
+      - name: Publish connect
+        run: cd connect && npm publish --access public --tag ${{ env.NPM_TAG }}
+
+      - name: Publish ad4m hook helpers
+        run: cd ad4m-hooks/helpers && npm publish --access public --tag ${{ env.NPM_TAG }}
+
+      - name: Publish ad4m react hooks
+        run: cd ad4m-hooks/react && npm publish --access public --tag ${{ env.NPM_TAG }}
+
+
+      - name: Publish ad4m vue hooks
+        run: cd ad4m-hooks/vue && npm publish --access public --tag ${{ env.NPM_TAG }}
+
+      - name: Publish executor
+        run: cd executor && npm publish --access public --tag ${{ env.NPM_TAG }}
+
+
+      - name: Publish Test runner
+        run: cd test-runner && npm publish --access public --tag ${{ env.NPM_TAG }}
+
+
 
   # ============================================================================
   # Crates Publish - Uses Docker container
@@ -621,7 +612,7 @@ jobs:
   crates-publish:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
+      image: coasys/ad4m-ci-linux:latest@sha256:3605cfd2c0aee389ac9e7bb499a8e2633d0367ef3cc148d6668b2dbdff846ce0
     steps:
       - uses: actions/checkout@v3
 

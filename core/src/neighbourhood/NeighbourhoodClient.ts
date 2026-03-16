@@ -1,4 +1,4 @@
-import { ApolloClient, ApolloQueryResult, gql } from "@apollo/client/core"
+import { ApolloClient, gql, FetchResult } from "@apollo/client/core"
 import { Address } from "../Address"
 import { DID } from "../DID"
 import { OnlineAgent, TelepresenceSignalCallback } from "../language/Language"
@@ -16,7 +16,7 @@ export class NeighbourhoodClient {
     }
 
     async publishFromPerspective(
-        perspectiveUUID: string, 
+        perspectiveUUID: string,
         linkLanguage: Address,
         meta: Perspective
     ): Promise<string> {
@@ -45,18 +45,18 @@ export class NeighbourhoodClient {
                     name
                     sharedUrl
                     state
-                    neighbourhood { 
+                    neighbourhood {
                         data {
-                            linkLanguage 
-                            meta { 
+                            linkLanguage
+                            meta {
                                 links
                                     {
                                         author
                                         timestamp
                                         data { source, predicate, target }
                                         proof { valid, invalid, signature, key }
-                                    }  
-                            } 
+                                    }
+                            }
                         }
                         author
                     }
@@ -95,7 +95,7 @@ export class NeighbourhoodClient {
                     status {
                         author
                         timestamp
-                        data { 
+                        data {
                             links {
                                 author
                                 timestamp
@@ -225,13 +225,19 @@ export class NeighbourhoodClient {
     dispatchSignal(perspectiveUUID:string, signal: any) {
         const handlers = this.#signalHandlers.get(perspectiveUUID)
         if (handlers) {
-            handlers.forEach(handler => handler(signal))
+            for (const handler of handlers) {
+                try {
+                    handler(signal)
+                } catch(e) {
+                    console.error("Error in signal handler:", e)
+                }
+            }
         }
     }
 
     async subscribeToSignals(perspectiveUUID: string): Promise<void> {
         const that = this
-        await this.#apolloClient.subscribe({
+        this.#apolloClient.subscribe({
             query: gql`subscription neighbourhoodSignal($perspectiveUUID: String!) {
                 neighbourhoodSignal(perspectiveUUID: $perspectiveUUID) {
                     author
@@ -243,16 +249,23 @@ export class NeighbourhoodClient {
                                 timestamp
                                 data { source, predicate, target }
                                 proof { valid, invalid, signature, key }
-                            }  
+                            }
                     }
                     proof { valid, invalid, signature, key }
                 }
             }`,
             variables: { perspectiveUUID }
         }).subscribe({
-            next: (result: ApolloQueryResult<any>) => {
-                const { neighbourhoodSignal } = unwrapApolloResult(result)
-                that.dispatchSignal(perspectiveUUID, neighbourhoodSignal)
+            next: (result: FetchResult<any>) => {
+                try {
+                    const { neighbourhoodSignal } = unwrapApolloResult(result)
+                    that.dispatchSignal(perspectiveUUID, neighbourhoodSignal)
+                } catch(e) {
+                    console.error("Error in signal subscription:", e)
+                }
+            },
+            error: (err: any) => {
+                console.error("Signal subscription error for perspective", perspectiveUUID, err)
             }
         })
     }
@@ -262,9 +275,12 @@ export class NeighbourhoodClient {
         if (!handlersForPerspective) {
             handlersForPerspective = []
             this.#signalHandlers.set(perspectiveUUID, handlersForPerspective)
+            // Push handler BEFORE subscribing so it's available when signals arrive
+            handlersForPerspective.push(handler)
             await this.subscribeToSignals(perspectiveUUID)
+        } else {
+            handlersForPerspective.push(handler)
         }
-        handlersForPerspective.push(handler)
     }
 
     removeSignalHandler(perspectiveUUID: string, handler: TelepresenceSignalCallback): void {

@@ -5,8 +5,8 @@ pub mod shacl_parser;
 pub mod shacl_to_prolog;
 pub mod utils; // TODO: Remove this module after all users have migrated to SurrealDB
 use crate::graphql::graphql_types::{
-    LinkQuery, LinkStatus, PerspectiveExpression, PerspectiveHandle, PerspectiveRemovedWithOwner,
-    PerspectiveState, PerspectiveWithOwner,
+    LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveExpression, PerspectiveHandle,
+    PerspectiveRemovedWithOwner, PerspectiveState, PerspectiveWithOwner,
 };
 use lazy_static::lazy_static;
 use perspective_instance::PerspectiveInstance;
@@ -16,8 +16,8 @@ use std::sync::RwLock;
 
 use crate::db::Ad4mDb;
 use crate::pubsub::{
-    get_global_pubsub, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_REMOVED_TOPIC,
-    PERSPECTIVE_UPDATED_TOPIC,
+    get_global_pubsub, get_global_pubsub_sync, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC,
+    PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
 };
 use crate::types::{LinkExpression, PerspectiveDiff};
 
@@ -25,6 +25,9 @@ lazy_static! {
     static ref PERSPECTIVES: RwLock<HashMap<String, RwLock<PerspectiveInstance>>> =
         RwLock::new(HashMap::new());
     static ref APP_DATA_PATH: RwLock<Option<String>> = RwLock::new(None);
+    /// Cache mapping link_language address → PerspectiveHandle for fast signal routing
+    static ref LINK_LANG_TO_PERSPECTIVE_HANDLE: RwLock<HashMap<String, PerspectiveHandle>> =
+        RwLock::new(HashMap::new());
 }
 
 /// Set the application data path for file-based SurrealDB storage
@@ -272,6 +275,15 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
         Ad4mDb::with_global_instance(|db| {
             db.update_perspective(handle).map_err(|e| e.to_string())
         })?;
+
+        // Update the signal routing cache if this perspective has a link language.
+        // Without this, the cached PerspectiveHandle retains a stale owners list,
+        // causing signals (especially broadcasts) to not be delivered to owners
+        // added after the cache was first populated (e.g. managed users joining
+        // an existing neighbourhood).
+        if let Some(nh) = &handle.neighbourhood {
+            register_link_language_perspective(nh.data.link_language.clone(), handle.clone());
+        }
     }
 
     // Publish one event per owner so each user gets their own notification
@@ -375,7 +387,32 @@ pub fn handle_perspective_diff_from_link_language(diff: PerspectiveDiff, languag
     ));
 }
 
+/// Register a mapping from link_language address to PerspectiveHandle for fast signal routing
+pub fn register_link_language_perspective(language_address: String, handle: PerspectiveHandle) {
+    LINK_LANG_TO_PERSPECTIVE_HANDLE
+        .write()
+        .unwrap()
+        .insert(language_address, handle);
+}
+
+/// Look up PerspectiveHandle by link language address from cache
+fn cached_perspective_handle(language_address: &str) -> Option<PerspectiveHandle> {
+    LINK_LANG_TO_PERSPECTIVE_HANDLE
+        .read()
+        .unwrap()
+        .get(language_address)
+        .cloned()
+}
+
 async fn perspective_by_link_language(language_address: String) -> Option<PerspectiveInstance> {
+    // Fast path: check cache first
+    if let Some(handle) = cached_perspective_handle(&language_address) {
+        if let Some(perspective) = get_perspective(&handle.uuid) {
+            return Some(perspective);
+        }
+    }
+
+    // Slow path: iterate all perspectives (and populate cache)
     let perspectives = PERSPECTIVES
         .read()
         .unwrap()
@@ -385,8 +422,10 @@ async fn perspective_by_link_language(language_address: String) -> Option<Perspe
     for perspective in perspectives.into_iter() {
         let handle = perspective.persisted.lock().await.clone();
 
-        if let Some(nh) = handle.neighbourhood {
+        if let Some(nh) = &handle.neighbourhood {
             if nh.data.link_language == language_address {
+                // Populate cache for future lookups
+                register_link_language_perspective(language_address, handle);
                 return Some(perspective);
             }
         }
@@ -432,15 +471,118 @@ pub async fn handle_sync_state_changed_from_link_language_impl(
 }
 
 pub fn handle_telepresence_signal_from_link_language(
-    signal: PerspectiveExpression,
+    mut signal: PerspectiveExpression,
     language_address: String,
     recipient_did: Option<String>,
 ) {
-    tokio::spawn(handle_telepresence_signal_from_link_language_impl(
-        signal,
-        language_address,
-        recipient_did,
-    ));
+    // Fast path: if we have a cached PerspectiveHandle, publish directly to PubSub
+    // without going through the expensive perspective_by_link_language async lookup.
+    // Uses synchronous publish to avoid Tokio task scheduling contention that can
+    // delay spawned tasks by seconds when the executor is busy with Deno operations.
+    if let Some(handle) = cached_perspective_handle(&language_address) {
+        signal.verify_signatures();
+        publish_telepresence_signal_sync(handle, signal, recipient_did);
+    } else {
+        // Slow path: need to look up perspective by language address
+        tokio::spawn(handle_telepresence_signal_from_link_language_impl(
+            signal,
+            language_address,
+            recipient_did,
+        ));
+    }
+}
+
+/// Publish a telepresence signal to PubSub for delivery to GraphQL subscribers
+pub(crate) async fn publish_telepresence_signal(
+    handle: PerspectiveHandle,
+    signal: PerspectiveExpression,
+    recipient_did: Option<String>,
+) {
+    if let Some(recipient) = recipient_did {
+        get_global_pubsub()
+            .await
+            .publish(
+                &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                &serde_json::to_string(&NeighbourhoodSignalFilter {
+                    perspective: handle,
+                    signal,
+                    recipient: Some(recipient),
+                })
+                .unwrap(),
+            )
+            .await;
+    } else if let Some(owners) = handle.owners.as_ref().filter(|o| !o.is_empty()) {
+        for owner_did in owners {
+            get_global_pubsub()
+                .await
+                .publish(
+                    &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                    &serde_json::to_string(&NeighbourhoodSignalFilter {
+                        perspective: handle.clone(),
+                        signal: signal.clone(),
+                        recipient: Some(owner_did.clone()),
+                    })
+                    .unwrap(),
+                )
+                .await;
+        }
+    } else {
+        get_global_pubsub()
+            .await
+            .publish(
+                &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                &serde_json::to_string(&NeighbourhoodSignalFilter {
+                    perspective: handle,
+                    signal,
+                    recipient: None,
+                })
+                .unwrap(),
+            )
+            .await;
+    }
+}
+
+/// Synchronous version of publish_telepresence_signal for use in Deno op context
+/// where tokio::spawn tasks get delayed by Tokio scheduler contention.
+fn publish_telepresence_signal_sync(
+    handle: PerspectiveHandle,
+    signal: PerspectiveExpression,
+    recipient_did: Option<String>,
+) {
+    let pubsub = get_global_pubsub_sync();
+    if let Some(recipient) = recipient_did {
+        pubsub.publish_sync(
+            &NEIGHBOURHOOD_SIGNAL_TOPIC,
+            &serde_json::to_string(&NeighbourhoodSignalFilter {
+                perspective: handle,
+                signal,
+                recipient: Some(recipient),
+            })
+            .unwrap(),
+        );
+    } else if let Some(owners) = &handle.owners {
+        for owner_did in owners {
+            pubsub.publish_sync(
+                &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                &serde_json::to_string(&NeighbourhoodSignalFilter {
+                    perspective: handle.clone(),
+                    signal: signal.clone(),
+                    recipient: Some(owner_did.clone()),
+                })
+                .unwrap(),
+            );
+        }
+    } else {
+        pubsub.publish_sync(
+            &NEIGHBOURHOOD_SIGNAL_TOPIC,
+            &serde_json::to_string(&NeighbourhoodSignalFilter {
+                perspective: handle,
+                signal,
+                recipient: None,
+            })
+            .unwrap(),
+        );
+    }
 }
 
 pub async fn handle_telepresence_signal_from_link_language_impl(

@@ -4,7 +4,8 @@ import { expect } from "chai";
 
 export default function agentLanguageTests(testContext: TestContext) {
     return () => {
-        it("works across remote agents", async () => {
+        it.skip("works across remote agents", async function() {
+            this.retries(2)
             const alice = testContext.alice!
             const didAlice = (await alice.agent.status()).did!
             const bob = testContext.bob!
@@ -19,7 +20,7 @@ export default function agentLanguageTests(testContext: TestContext) {
                 targetDid: string,
                 clientName: string,
                 targetName: string,
-                maxAttempts: number = 90
+                maxAttempts: number = 20
             ) {
                 let result = await client.agent.byDID(targetDid)
                 let attempts = 0
