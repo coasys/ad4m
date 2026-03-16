@@ -30,6 +30,7 @@ pub enum RuntimeFunctions {
     },
     Friends,
     HcAgentInfos,
+    NetworkMetrics,
     HcAddAgentInfos {
         infos_file: Option<String>,
     },
@@ -114,6 +115,11 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
         RuntimeFunctions::RemoveFriends { agents } => {
             ad4m_client.runtime.remove_friends(agents).await?;
             println!("Friends removed!");
+        }
+        RuntimeFunctions::NetworkMetrics => {
+            let metrics = ad4m_client.runtime.network_metrics().await?;
+            let parsed: serde_json::Value = serde_json::from_str(&metrics)?;
+            println!("{}", serde_json::to_string_pretty(&parsed)?);
         }
         RuntimeFunctions::HcAgentInfos => {
             let infos = ad4m_client.runtime.hc_agent_infos().await?;

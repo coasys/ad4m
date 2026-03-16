@@ -55,7 +55,6 @@ commands:
           name: Build bootstrap languages
           command: pnpm run build-languages
 
-
 jobs:
   build-and-test:
     machine: true
@@ -167,7 +166,7 @@ jobs:
             done
       - run:
           name: Run MCP integration tests
-          command: cd ./tests/js && pnpm run test-mcp
+          command: cd ./tests/js && pnpm install && pnpm run test-mcp
           no_output_timeout: 30m
 
   integration-tests-model:
@@ -208,11 +207,26 @@ jobs:
           name: Run integration test script
           command: ./tests/bats/bin/bats tests/integration.bats
 
+  plugin-ad4m-tests:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          working_directory: plugins/ad4m
+          command: npm install
+      - run:
+          name: Run tests
+          working_directory: plugins/ad4m
+          command: npm test
+
 workflows:
   version: 2
   build-and-test:
     jobs:
       - build-and-test
+      - plugin-ad4m-tests
       - integration-tests-js:
           requires:
             - build-and-test

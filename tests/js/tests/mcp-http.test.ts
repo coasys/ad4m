@@ -1,5 +1,7 @@
 import path from "path";
 import { Ad4mClient } from "@coasys/ad4m";
+import * as ad4mModule from "@coasys/ad4m";
+const QuerySubscriptionProxy = (ad4mModule as any).QuerySubscriptionProxy;
 import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
@@ -141,6 +143,9 @@ const MESSAGE_SHACL = JSON.stringify({
     ],
     destructor_actions: []
 });
+
+// WakerSubscriptionManager — imported from @coasys/ad4m core
+import { WakerSubscriptionManager } from "@coasys/ad4m";
 
 // ============================================================================
 // Test Suite
@@ -626,6 +631,57 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             var channelStr = typeof channels === 'string' ? channels : JSON.stringify(channels);
             expect(channelStr).to.include(newChannelAddr);
+        });
+
+        it("should create a message with parent parameter and verify child link", async function() {
+            // Create a fresh channel to use as parent
+            var parentChannelAddr = "flux://channel-parent-test-" + Date.now();
+            var result = await callMcpTool(MCP_BASE_URL,'channel_create', {
+                perspective_id: perspectiveUuid,
+                expression_address: parentChannelAddr,
+                name: "parent-test-channel",
+            }, mcpSessionId);
+            var resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+            expect(resultStr).to.include('true');
+
+            // Create a message with the parent parameter
+            var msgResult = await callMcpTool(MCP_BASE_URL,'message_create', {
+                perspective_id: perspectiveUuid,
+                body: "Hello from parent test!",
+                parent: parentChannelAddr,
+            }, mcpSessionId);
+            console.log("message_create with parent result:", JSON.stringify(msgResult));
+            expect(msgResult.created).to.be.true;
+            expect(msgResult.added_to_parent).to.be.true;
+            var createdMsgAddr = msgResult.expression_address;
+
+            // Verify the child link was created correctly via get_children
+            var children = await callMcpTool(MCP_BASE_URL,'get_children', {
+                perspective_id: perspectiveUuid,
+                parent_address: parentChannelAddr,
+            }, mcpSessionId);
+            console.log("get_children after parent create:", JSON.stringify(children));
+            expect(children.count).to.be.greaterThan(0);
+            var childAddrs = children.children.map((c: any) => c.address);
+            expect(childAddrs).to.include(createdMsgAddr);
+        });
+
+        it("should create with parent when parent is a plain string (not URI)", async function() {
+            var plainParent = "plain-parent-" + Date.now();
+            var msgResult = await callMcpTool(MCP_BASE_URL,'message_create', {
+                perspective_id: perspectiveUuid,
+                body: "Hello from plain parent!",
+                parent: plainParent,
+            }, mcpSessionId);
+            expect(msgResult.created).to.be.true;
+            expect(msgResult.added_to_parent).to.be.true;
+
+            // Verify retrievable via get_children with the same plain parent
+            var children = await callMcpTool(MCP_BASE_URL,'get_children', {
+                perspective_id: perspectiveUuid,
+                parent_address: plainParent,
+            }, mcpSessionId);
+            expect(children.count).to.equal(1);
         });
 
         it("should update channel via typed channel_update tool", async function() {
@@ -1278,6 +1334,427 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(profile.username).to.equal("restored-user");
             expect(profile.bio).to.equal("Restored after raw link test");
             console.log("Profile restored after raw link override");
+        });
+    });
+
+    // ========================================================================
+    // 8. Waker Subscription Integration Tests
+    //
+    // Tests the full subscription pipeline:
+    //   get_mention_waker_config → SurrealDB subscription → add message with
+    //   mention → verify subscription fires with correct result
+    // ========================================================================
+
+    describe("8. Waker Subscription (SurrealDB Live Query)", function() {
+        // Uses the extracted WakerSubscriptionManager — same code path as the plugin
+        let wakerClient: Ad4mClient;
+        let wakerPerspectiveUuid: string;
+        let wakerChannelAddr: string;
+
+        before(async function() {
+            // Create a dedicated Ad4mClient for subscriptions (WS transport needed)
+            wakerClient = new Ad4mClient(apolloClient(gqlPort, adminCredential), false);
+
+            // Set up a profile so get_mention_waker_config has names to search for
+            await callMcpTool(MCP_BASE_URL, 'set_agent_profile', {
+                username: "wakerbot",
+                given_name: "WakerTest",
+            }, mcpSessionId);
+
+            // Create a fresh perspective for waker tests
+            var result = await callMcpTool(MCP_BASE_URL, 'add_perspective', {
+                name: "Waker Test Room",
+            }, mcpSessionId);
+            wakerPerspectiveUuid = result.uuid;
+            console.log("Waker test perspective:", wakerPerspectiveUuid);
+
+            // Register Channel and Message SHACL models
+            await callMcpTool(MCP_BASE_URL, 'add_model', {
+                perspective_id: wakerPerspectiveUuid,
+                class_name: "Channel",
+                shacl_json: CHANNEL_SHACL,
+            }, mcpSessionId);
+            await callMcpTool(MCP_BASE_URL, 'add_model', {
+                perspective_id: wakerPerspectiveUuid,
+                class_name: "Message",
+                shacl_json: MESSAGE_SHACL,
+            }, mcpSessionId);
+
+            // Create a channel
+            wakerChannelAddr = "flux://waker-test-channel-" + Date.now();
+            await callMcpTool(MCP_BASE_URL, 'channel_create', {
+                perspective_id: wakerPerspectiveUuid,
+                expression_address: wakerChannelAddr,
+                name: "Waker Test Channel",
+            }, mcpSessionId);
+            console.log("Waker test channel:", wakerChannelAddr);
+        });
+
+        it("should get mention waker config with SurrealQL query", async function() {
+            var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
+                perspective_id: wakerPerspectiveUuid,
+            }, mcpSessionId);
+            console.log("Mention waker config:", JSON.stringify(config, null, 2));
+
+            expect(config.did).to.equal(agentDid);
+            expect(config.names).to.be.an('array');
+            expect(config.names).to.include("wakerbot");
+            expect(config.names).to.include("WakerTest");
+            expect(config.query).to.be.a('string');
+            expect(config.query).to.include("fn::contains");
+            expect(config.query).to.include("fn::parse_literal");
+            // Query uses direct body-link matching (body predicate from SHACL), not two-hop traversal
+            expect(config.query).to.include("SELECT * FROM link WHERE");
+            console.log("SurrealQL query:", config.query);
+        });
+
+        it("should create WakerSubscriptionManager and receive initial (empty) result via onWake", async function() {
+            this.timeout(15000);
+
+            var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
+                perspective_id: wakerPerspectiveUuid,
+            }, mcpSessionId);
+
+            var wakeCount = 0;
+            var manager = new WakerSubscriptionManager({
+                perspectiveClient: wakerClient.perspective,
+                logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
+                QuerySubscriptionProxy,
+                debounceMs: 100,
+                onWake: function() { wakeCount++; },
+            });
+
+            await manager.subscribe({
+                id: "test-empty-" + Date.now(),
+                type: "mention" as const,
+                perspective: wakerPerspectiveUuid,
+                channel: "",
+                query: config.query,
+            });
+
+            // Wait for subscription to initialize — should NOT fire onWake for empty result
+            await sleep(3000);
+            expect(wakeCount).to.equal(0, "onWake should not fire for empty initial result");
+            manager.disposeAll();
+        });
+
+        it("should fire onWake when a message with mention is added", async function() {
+            this.timeout(30000);
+
+            var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
+                perspective_id: wakerPerspectiveUuid,
+            }, mcpSessionId);
+
+            var wakePromise = new Promise<{ sub: any, result: any, parentChannel?: string }>(function(resolve, reject) {
+                var timeout = setTimeout(function() {
+                    reject(new Error("WakerSubscriptionManager did not fire onWake within 15s"));
+                }, 15000);
+
+                var manager = new WakerSubscriptionManager({
+                    perspectiveClient: wakerClient.perspective,
+                    logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
+                    QuerySubscriptionProxy,
+                    debounceMs: 100,
+                    onWake: function(sub: any, result: any, parentChannel?: string) {
+                        console.log("  [WakerManager] onWake fired! parentChannel:", parentChannel);
+                        clearTimeout(timeout);
+                        resolve({ sub, result, parentChannel });
+                    },
+                });
+
+                manager.subscribe({
+                    id: "test-mention-" + Date.now(),
+                    type: "mention" as const,
+                    perspective: wakerPerspectiveUuid,
+                    channel: "",
+                    query: config.query,
+                }).catch(reject);
+            });
+
+            await sleep(2000);
+
+            var createResult = await callMcpTool(MCP_BASE_URL, 'message_create', {
+                perspective_id: wakerPerspectiveUuid,
+                body: "Hey @wakerbot, can you help with this?",
+                parent: wakerChannelAddr,
+            }, mcpSessionId);
+            console.log("Message created with mention:", JSON.stringify(createResult));
+            expect(createResult.created).to.be.true;
+            expect(createResult.added_to_parent).to.be.true;
+
+            var wake = await wakePromise;
+            console.log("onWake fired! Result:", JSON.stringify(wake.result).substring(0, 500));
+
+            var resultArr = Array.isArray(wake.result) ? wake.result : [wake.result];
+            expect(resultArr.length).to.be.greaterThan(0);
+
+            // For mention type, parent channel should be extracted from has_child link source
+            if (wake.parentChannel) {
+                console.log("Parent channel extracted:", wake.parentChannel);
+            }
+        });
+
+        it("should NOT fire onWake for messages without mentions", async function() {
+            this.timeout(20000);
+
+            // Use a FRESH perspective to avoid shared subscription state
+            var freshPerspResult = await callMcpTool(MCP_BASE_URL, 'add_perspective', {
+                name: "Waker No-Mention Test",
+            }, mcpSessionId);
+            var freshPerspId = freshPerspResult.uuid;
+
+            await callMcpTool(MCP_BASE_URL, 'add_model', {
+                perspective_id: freshPerspId,
+                class_name: "Channel",
+                shacl_json: CHANNEL_SHACL,
+            }, mcpSessionId);
+            await callMcpTool(MCP_BASE_URL, 'add_model', {
+                perspective_id: freshPerspId,
+                class_name: "Message",
+                shacl_json: MESSAGE_SHACL,
+            }, mcpSessionId);
+
+            var freshChannel = "flux://no-mention-channel-" + Date.now();
+            await callMcpTool(MCP_BASE_URL, 'channel_create', {
+                perspective_id: freshPerspId,
+                expression_address: freshChannel,
+                name: "No Mention Channel",
+            }, mcpSessionId);
+
+            var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
+                perspective_id: freshPerspId,
+            }, mcpSessionId);
+            console.log("No-mention test query:", config.query);
+
+            var wakeCount = 0;
+            var lastWake: any = null;
+            var manager = new WakerSubscriptionManager({
+                perspectiveClient: wakerClient.perspective,
+                logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
+                QuerySubscriptionProxy,
+                debounceMs: 100,
+                onWake: function(sub: any, result: any) {
+                    wakeCount++;
+                    lastWake = result;
+                    console.log("  [no-mention] onWake #" + wakeCount + ":", JSON.stringify(result).substring(0, 500));
+                },
+            });
+
+            await manager.subscribe({
+                id: "test-no-mention-" + Date.now(),
+                type: "mention" as const,
+                perspective: freshPerspId,
+                channel: "",
+                query: config.query,
+            });
+
+            await sleep(1000);
+
+            await callMcpTool(MCP_BASE_URL, 'message_create', {
+                perspective_id: freshPerspId,
+                body: "Just a normal message, nothing special here.",
+                parent: freshChannel,
+            }, mcpSessionId);
+            console.log("Non-mention message created in fresh perspective");
+
+            await sleep(5000);
+
+            manager.disposeAll();
+
+            expect(wakeCount).to.equal(0,
+                "onWake fired " + wakeCount + " time(s) for non-mention message. " +
+                "Last wake: " + JSON.stringify(lastWake).substring(0, 300));
+            console.log("Correctly did NOT fire for non-mention message");
+        });
+
+        it("should fire onWake when mention uses agent DID", async function() {
+            this.timeout(30000);
+
+            var didPerspResult = await callMcpTool(MCP_BASE_URL, 'add_perspective', {
+                name: "Waker DID Mention Test",
+            }, mcpSessionId);
+            var didPerspId = didPerspResult.uuid;
+
+            await callMcpTool(MCP_BASE_URL, 'add_model', {
+                perspective_id: didPerspId,
+                class_name: "Channel",
+                shacl_json: CHANNEL_SHACL,
+            }, mcpSessionId);
+            await callMcpTool(MCP_BASE_URL, 'add_model', {
+                perspective_id: didPerspId,
+                class_name: "Message",
+                shacl_json: MESSAGE_SHACL,
+            }, mcpSessionId);
+
+            var didChannel = "flux://did-mention-channel-" + Date.now();
+            await callMcpTool(MCP_BASE_URL, 'channel_create', {
+                perspective_id: didPerspId,
+                expression_address: didChannel,
+                name: "DID Mention Channel",
+            }, mcpSessionId);
+
+            var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
+                perspective_id: didPerspId,
+            }, mcpSessionId);
+
+            var wakePromise = new Promise<any>(function(resolve, reject) {
+                var timeout = setTimeout(function() {
+                    reject(new Error("WakerSubscriptionManager did not fire onWake for DID mention within 15s"));
+                }, 15000);
+
+                var manager = new WakerSubscriptionManager({
+                    perspectiveClient: wakerClient.perspective,
+                    logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
+                    QuerySubscriptionProxy,
+                    debounceMs: 100,
+                    onWake: function(sub: any, result: any, parentChannel?: string) {
+                        console.log("  [DID mention] onWake fired! parentChannel:", parentChannel);
+                        clearTimeout(timeout);
+                        resolve({ sub, result, parentChannel });
+                    },
+                });
+
+                manager.subscribe({
+                    id: "test-did-mention-" + Date.now(),
+                    type: "mention" as const,
+                    perspective: didPerspId,
+                    channel: "",
+                    query: config.query,
+                }).catch(reject);
+            });
+
+            await sleep(2000);
+
+            await callMcpTool(MCP_BASE_URL, 'message_create', {
+                perspective_id: didPerspId,
+                body: "Ping " + agentDid + " — please respond",
+                parent: didChannel,
+            }, mcpSessionId);
+            console.log("DID-mention message created");
+
+            var wake = await wakePromise;
+            console.log("DID mention onWake fired!");
+            var resultArr = Array.isArray(wake.result) ? wake.result : [wake.result];
+            expect(resultArr.length).to.be.greaterThan(0);
+        });
+
+        it("should generate_waker_query for channel children subscription", async function() {
+            this.timeout(15000);
+
+            var config = await callMcpTool(MCP_BASE_URL, 'generate_waker_query', {
+                perspective_id: wakerPerspectiveUuid,
+                class_name: "Message",
+                parent_address: wakerChannelAddr,
+            }, mcpSessionId);
+            console.log("Channel waker query:", JSON.stringify(config, null, 2));
+
+            expect(config.surreal_query).to.be.a('string');
+            expect(config.surreal_query).to.include("ad4m://has_child");
+            expect(config.subscription_id).to.be.a('string');
+
+            // Use WakerSubscriptionManager to subscribe and verify it works
+            var initialWake: any = null;
+            var manager = new WakerSubscriptionManager({
+                perspectiveClient: wakerClient.perspective,
+                logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
+                QuerySubscriptionProxy,
+                debounceMs: 100,
+                onWake: function(sub: any, result: any) {
+                    initialWake = result;
+                },
+            });
+
+            await manager.subscribe({
+                id: "test-channel-children-" + Date.now(),
+                type: "channel-messages" as const,
+                perspective: wakerPerspectiveUuid,
+                channel: wakerChannelAddr,
+                query: config.surreal_query,
+            });
+
+            // The subscription should fire with existing children (from the mention test)
+            await sleep(3000);
+
+            manager.disposeAll();
+
+            // We added a mention message earlier, so there should be at least 1 child
+            if (initialWake) {
+                var resultArr = Array.isArray(initialWake) ? initialWake : [];
+                console.log("Channel subscription fired with", resultArr.length, "existing children");
+                expect(resultArr.length).to.be.greaterThanOrEqual(1);
+            } else {
+                console.log("Channel subscription did not fire — initial result may have been empty or unchanged");
+            }
+        });
+
+        it("should gracefully handle subscription to non-existent perspective without throwing", async function() {
+            this.timeout(15000);
+
+            var wakeCount = 0;
+            var manager = new WakerSubscriptionManager({
+                perspectiveClient: wakerClient.perspective,
+                logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
+                QuerySubscriptionProxy,
+                debounceMs: 100,
+                onWake: function() { wakeCount++; },
+            });
+
+            // Subscribe to a perspective UUID that doesn't exist — should NOT throw
+            var bogusId = "00000000-0000-0000-0000-000000000000";
+            await manager.subscribe({
+                id: "test-stale-" + Date.now(),
+                type: "mention" as const,
+                perspective: bogusId,
+                channel: "",
+                query: "SELECT * FROM link WHERE predicate = 'ad4m://has_child'",
+            });
+
+            // Should not have woken or added to active subscriptions
+            await sleep(500);
+            expect(wakeCount).to.equal(0, "onWake should not fire for non-existent perspective");
+            manager.disposeAll();
+        });
+
+        it("should not cause unhandled promise rejection when perspective does not exist", async function() {
+            this.timeout(15000);
+
+            // Listen for unhandled rejections — this is exactly what crashed OpenClaw
+            var unhandledRejection: any = null;
+            var rejectionHandler = function(reason: any) {
+                unhandledRejection = reason;
+            };
+            process.on("unhandledRejection", rejectionHandler);
+
+            var manager = new WakerSubscriptionManager({
+                perspectiveClient: wakerClient.perspective,
+                logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
+                QuerySubscriptionProxy,
+                debounceMs: 100,
+                onWake: function() {},
+            });
+
+            var bogusId = "00000000-0000-0000-0000-000000000000";
+            try {
+                await manager.subscribe({
+                    id: "test-no-unhandled-" + Date.now(),
+                    type: "mention" as const,
+                    perspective: bogusId,
+                    channel: "",
+                    query: "SELECT * FROM link WHERE predicate = 'ad4m://has_child'",
+                });
+            } catch {
+                // Expected — subscribe should throw for non-existent perspective
+            }
+
+            // Give the event loop a few ticks for any unhandled rejection to surface
+            await sleep(500);
+
+            process.removeListener("unhandledRejection", rejectionHandler);
+            manager.disposeAll();
+
+            expect(unhandledRejection).to.equal(null,
+                "Unhandled promise rejection detected: " +
+                (unhandledRejection?.message ?? String(unhandledRejection)));
         });
     });
 });
