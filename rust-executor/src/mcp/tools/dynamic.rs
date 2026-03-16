@@ -491,8 +491,18 @@ impl Ad4mMcpHandler {
             Ok(_) => {
                 // If parent is provided, add as child
                 if let Some(parent_addr) = parent {
-                    let parent_encoded = Self::encode_literal(&parent_addr);
-                    let child_encoded = Self::encode_literal(&expression_address);
+                    // Only encode if not already a URI — avoids double-encoding
+                    // values like "literal://string:abc" into "literal://string:literal%3A..."
+                    let parent_encoded = if parent_addr.contains("://") {
+                        parent_addr.clone()
+                    } else {
+                        Self::encode_literal(&parent_addr)
+                    };
+                    let child_encoded = if expression_address.contains("://") {
+                        expression_address.clone()
+                    } else {
+                        Self::encode_literal(&expression_address)
+                    };
 
                     let link = Link {
                         source: parent_encoded,
@@ -667,7 +677,11 @@ impl Ad4mMcpHandler {
         };
 
         // First get all children of the parent via ad4m://has_child
-        let parent_encoded = Self::encode_literal(&parent);
+        let parent_encoded = if parent.contains("://") {
+            parent.clone()
+        } else {
+            Self::encode_literal(&parent)
+        };
         let child_links = match perspective
             .get_links(&LinkQuery {
                 source: Some(parent_encoded),
@@ -684,7 +698,8 @@ impl Ad4mMcpHandler {
         // We need to find the type marker for the class
         let shape_links = Self::get_shacl_shape_links(&perspective, class_name).await;
 
-        let mut instances: Vec<String> = Vec::new();
+        // Track which child addresses matched the SHACL type
+        let mut matched_addrs: Vec<String> = Vec::new();
 
         if let Some(shape_link) = shape_links.first() {
             let shape_uri = &shape_link.data.target;
@@ -728,7 +743,7 @@ impl Ad4mMcpHandler {
                                     .unwrap_or_default();
 
                                 if !type_links.is_empty() {
-                                    instances.push(child_addr.clone());
+                                    matched_addrs.push(child_addr.clone());
                                 }
                             }
                         }
@@ -737,10 +752,27 @@ impl Ad4mMcpHandler {
             }
         }
 
-        // If no SHACL found, return all children (fallback)
-        if instances.is_empty() {
-            instances = child_links.iter().map(|l| l.data.target.clone()).collect();
-        }
+        // Build rich instances from child_links, filtered by matched addresses
+        // If no SHACL match, include all children (fallback)
+        let use_all = matched_addrs.is_empty();
+        let mut instances: Vec<serde_json::Value> = child_links
+            .iter()
+            .filter(|l| use_all || matched_addrs.contains(&l.data.target))
+            .map(|l| {
+                json!({
+                    "address": l.data.target,
+                    "timestamp": l.timestamp,
+                    "author": l.author,
+                })
+            })
+            .collect();
+
+        // Sort by timestamp
+        instances.sort_by(|a, b| {
+            let ta = a.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+            let tb = b.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+            ta.cmp(tb)
+        });
 
         serde_json::to_string_pretty(&json!({
             "parent": parent,
