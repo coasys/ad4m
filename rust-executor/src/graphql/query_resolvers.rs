@@ -833,21 +833,25 @@ impl Query {
             FieldError::new(format!("Failed to parse certificate: {}", e), Value::null())
         })?;
 
-        // Try SAN extension first
+        // Try SAN extension first, skipping wildcard entries
         if let Ok(Some(san)) = cert.subject_alternative_name() {
             for name in &san.value.general_names {
                 if let GeneralName::DNSName(dns) = name {
-                    return Ok(Some(dns.to_string()));
+                    if !dns.contains('*') {
+                        return Ok(Some(dns.to_string()));
+                    }
                 }
             }
         }
 
-        // Fall back to CN
+        // Fall back to CN, skipping wildcard entries
         for rdn in cert.subject().iter() {
             for attr in rdn.iter() {
                 if attr.attr_type() == &oid_registry::OID_X509_COMMON_NAME {
                     if let Ok(cn) = attr.as_str() {
-                        return Ok(Some(cn.to_string()));
+                        if !cn.contains('*') {
+                            return Ok(Some(cn.to_string()));
+                        }
                     }
                 }
             }

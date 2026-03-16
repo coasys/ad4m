@@ -246,9 +246,9 @@ impl<'de> Deserialize<'de> for HostRegistration {
             Ok(decrypted) => decrypted,
             Err(e) => {
                 log::warn!(
-                    "Host registration auth_token decryption failed for '{}': {}. \
+                    "Host registration auth_token decryption failed for host_id '{}': {}. \
                      Treating as plaintext for backwards compatibility migration.",
-                    helper.email,
+                    helper.host_id,
                     e
                 );
                 helper.auth_token

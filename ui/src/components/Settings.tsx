@@ -1478,6 +1478,8 @@ const Profile = (props: Props) => {
                   onChange={(e) => {
                     const f = e.target.files?.[0] || null;
                     if (f && f.size > 2 * 1024 * 1024) {
+                      setProfilePic(null);
+                      e.target.value = "";
                       setHostRegStatus({ type: "error", message: "Profile picture must be under 2MB." });
                       return;
                     }
