@@ -383,6 +383,11 @@ impl HolochainService {
                                         },
                                     }
                                 }
+                                HolochainServiceRequest::NewSignKeypair(response_tx) => {
+                                    let result = service.conductor.keystore().new_sign_keypair_random().await
+                                        .map_err(|e| anyhow!("Failed to generate new signing keypair: {}", e));
+                                    let _ = response_tx.send(HolochainServiceResponse::NewSignKeypair(result));
+                                }
                             };
                         };
                         error!("Holochain service receiver closed");
@@ -951,6 +956,175 @@ pub async fn run_local_hc_services() -> Result<(), AnyError> {
 #[cfg(test)]
 mod tests {
     use tokio::time::{Duration, Instant};
+
+    /// Integration test: start a real Holochain conductor and generate signing keypairs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_new_sign_keypair_random() {
+        use super::*;
+
+        // Init V8 / Deno platform (once) — required by Holochain
+        {
+            use std::sync::Once;
+            static V8_INIT: Once = Once::new();
+            V8_INIT.call_once(|| {
+                deno_core::v8::V8::set_flags_from_string("--no-opt");
+                deno_core::JsRuntime::init_platform(None, false);
+            });
+        }
+
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        let tmp = std::env::temp_dir().join(format!("ad4m_test_keypair_{}", std::process::id()));
+        let conductor_path = tmp.join("conductor");
+        std::fs::create_dir_all(&conductor_path).unwrap();
+
+        // Cleanup on drop
+        struct CleanupDir(std::path::PathBuf);
+        impl Drop for CleanupDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = CleanupDir(tmp.clone());
+
+        let config = LocalConductorConfig {
+            passphrase: "test-passphrase".into(),
+            conductor_path: conductor_path.to_string_lossy().into(),
+            data_path: tmp.to_string_lossy().into(),
+            use_bootstrap: false,
+            use_proxy: false,
+            use_local_proxy: false,
+            use_mdns: false,
+            proxy_url: "ws://localhost:4444".into(),
+            bootstrap_url: "http://localhost:4445".into(),
+            relay_url: None,
+            app_port: 0,
+        };
+
+        let service = HolochainService::new(config)
+            .await
+            .expect("Failed to start conductor");
+
+        // Generate first keypair
+        let key1 = service
+            .conductor
+            .keystore()
+            .new_sign_keypair_random()
+            .await
+            .expect("Failed to generate first keypair");
+        let raw1 = key1.get_raw_39();
+        assert_eq!(raw1.len(), 39, "Agent key should be 39 bytes");
+
+        // Generate second keypair — must be different
+        let key2 = service
+            .conductor
+            .keystore()
+            .new_sign_keypair_random()
+            .await
+            .expect("Failed to generate second keypair");
+        let raw2 = key2.get_raw_39();
+        assert_eq!(raw2.len(), 39);
+        assert_ne!(raw1, raw2, "Two generated keys must be distinct");
+
+        // Both keys should be in the keystore now
+        let all_keys = service
+            .conductor
+            .keystore()
+            .list_public_keys()
+            .await
+            .expect("Failed to list keys");
+        assert!(
+            all_keys.len() >= 2,
+            "Keystore should have at least 2 keys, got {}",
+            all_keys.len()
+        );
+        assert!(all_keys.contains(&key1), "Key1 should be in keystore");
+        assert!(all_keys.contains(&key2), "Key2 should be in keystore");
+
+        // Verify round-trip: base64 encode then decode back
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(raw1);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .expect("base64 decode failed");
+        let reconstructed = holochain::prelude::AgentPubKey::from_raw_39(decoded);
+        assert_eq!(
+            key1, reconstructed,
+            "Round-trip base64 encode/decode should produce the same key"
+        );
+
+        service.shutdown().await.expect("Failed to shut down");
+    }
+
+    /// Integration test: generate keypairs via the HolochainServiceInterface message-passing path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_new_sign_keypair_via_interface() {
+        use super::*;
+
+        {
+            use std::sync::Once;
+            static V8_INIT2: Once = Once::new();
+            V8_INIT2.call_once(|| {
+                // V8 may already be initialized by the other test
+            });
+        }
+
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        let tmp = std::env::temp_dir().join(format!("ad4m_test_keypair_iface_{}", std::process::id()));
+        let conductor_path = tmp.join("conductor");
+        std::fs::create_dir_all(&conductor_path).unwrap();
+
+        struct CleanupDir(std::path::PathBuf);
+        impl Drop for CleanupDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = CleanupDir(tmp.clone());
+
+        let config = LocalConductorConfig {
+            passphrase: "test-passphrase-iface".into(),
+            conductor_path: conductor_path.to_string_lossy().into(),
+            data_path: tmp.to_string_lossy().into(),
+            use_bootstrap: false,
+            use_proxy: false,
+            use_local_proxy: false,
+            use_mdns: false,
+            proxy_url: "ws://localhost:4444".into(),
+            bootstrap_url: "http://localhost:4445".into(),
+            relay_url: None,
+            app_port: 0,
+        };
+
+        // Use HolochainService::init which sets up the full message-passing loop
+        HolochainService::init(config).await.expect("Failed to init holochain service");
+
+        // Get the interface
+        let iface = get_holochain_service().await;
+
+        // Generate keypair via interface
+        let key1 = iface
+            .new_sign_keypair_random()
+            .await
+            .expect("Failed to generate keypair via interface");
+        assert_eq!(key1.get_raw_39().len(), 39);
+
+        let key2 = iface
+            .new_sign_keypair_random()
+            .await
+            .expect("Failed to generate second keypair via interface");
+        assert_ne!(key1, key2, "Two generated keys via interface must be distinct");
+
+        // Also verify get_agent_key still works
+        let existing_key = iface
+            .get_agent_key()
+            .await
+            .expect("Failed to get existing agent key");
+        assert_eq!(existing_key.get_raw_39().len(), 39);
+
+        iface.shutdown().await.expect("Failed to shutdown");
+    }
 
     #[tokio::test]
     async fn test_signal_loop_performance() {

@@ -286,9 +286,33 @@ roles:
         }
     };
 
+    // Use the pre-generated agent key if stored
+    let agent_key = match Ad4mDb::with_global_instance(|db| {
+        db.get_setting("unyt_agent_key")
+    }).unwrap_or(None) {
+        Some(key_b64) => {
+            use base64::Engine;
+            match base64::engine::general_purpose::STANDARD.decode(&key_b64) {
+                Ok(bytes) => {
+                    let key = holochain::prelude::AgentPubKey::from_raw_39(bytes);
+                    info!("Using pre-generated Unyt agent key");
+                    Some(key)
+                }
+                Err(e) => {
+                    warn!("Failed to decode stored Unyt agent key: {}. Will generate new.", e);
+                    None
+                }
+            }
+        }
+        None => {
+            info!("No pre-generated Unyt agent key — Holochain will create one");
+            None
+        }
+    };
+
     let payload = InstallAppPayload {
         source: AppBundleSource::Path(PathBuf::from(&happ_file)),
-        agent_key: None,
+        agent_key,
         installed_app_id: Some(UNYT_APP_ID.to_string()),
         network_seed: None,
         roles_settings,
@@ -385,6 +409,36 @@ pub fn get_membrane_proof() -> Option<String> {
     Ad4mDb::with_global_instance(|db| {
         db.get_setting("unyt_membrane_proof")
     }).unwrap_or(None)
+}
+
+/// Pre-generate a Holochain agent key for the Unyt DNA and store it.
+/// Returns the base64-encoded agent pubkey (39-byte raw form).
+/// If a key was already generated, returns the stored one.
+pub async fn get_or_create_agent_key() -> Result<String, AnyError> {
+    // Check if we already have one stored
+    if let Some(existing) = Ad4mDb::with_global_instance(|db| {
+        db.get_setting("unyt_agent_key")
+    }).unwrap_or(None) {
+        return Ok(existing);
+    }
+
+    let hc = match maybe_get_holochain_service().await {
+        Some(hc) => hc,
+        None => return Err(deno_core::anyhow::anyhow!("Holochain service not available")),
+    };
+
+    let agent_key = hc.new_sign_keypair_random().await?;
+    let key_b64 = {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(agent_key.get_raw_39())
+    };
+
+    Ad4mDb::with_global_instance(|db| {
+        db.set_setting("unyt_agent_key", &key_b64)
+    })?;
+
+    info!("Generated and stored Unyt agent key: {}", key_b64);
+    Ok(key_b64)
 }
 
 /// Capture the DNA hash from the installed app for signal routing.

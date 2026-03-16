@@ -1117,6 +1117,23 @@ impl Query {
         }
     }
 
+    /// Get or create the Holochain agent public key for the Unyt DNA (base64).
+    /// Available even before Unyt DNA is installed — needed to request membrane proof.
+    async fn runtime_unyt_agent_key(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        match crate::unyt_service::get_or_create_agent_key().await {
+            Ok(key) => Ok(key),
+            Err(e) => Err(FieldError::new(
+                format!("Failed to get/create Unyt agent key: {}", e),
+                Value::null(),
+            )),
+        }
+    }
+
     /// Get Unyt DNA version info (installed vs bundled).
     async fn runtime_unyt_version_info(
         &self,
