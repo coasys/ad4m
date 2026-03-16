@@ -16,7 +16,7 @@ export class ConnectionOptions extends LitElement {
   @state() private loading = true;
   @state() private localNodeDetected = false;
   @state() private newPort = 0;
-  @state() private newRemoteUrl = "";
+  @state() private newRemoteUrl = sessionStorage.getItem("ad4m-connect-remote-url") || "";
   @state() private isMobile = false;
 
   static styles = [
@@ -91,7 +91,7 @@ export class ConnectionOptions extends LitElement {
   async connectedCallback() {
     super.connectedCallback();
     this.newPort = this.port;
-    this.newRemoteUrl = this.remoteUrl || "";
+    this.newRemoteUrl = this.remoteUrl || sessionStorage.getItem("ad4m-connect-remote-url") || "";
     this.checkMobile();
     window.addEventListener('resize', this.checkMobile);
     await this.detectLocalNode();
@@ -105,7 +105,7 @@ export class ConnectionOptions extends LitElement {
 
   willUpdate(changedProps: PropertyValues) {
     if (changedProps.has('port')) this.newPort = this.port;
-    if (changedProps.has('remoteUrl')) this.newRemoteUrl = this.remoteUrl || "";
+    if (changedProps.has('remoteUrl')) this.newRemoteUrl = this.remoteUrl || sessionStorage.getItem("ad4m-connect-remote-url") || "";
   }
 
   render() {
@@ -196,6 +196,7 @@ export class ConnectionOptions extends LitElement {
                 @input=${(e: Event) => {
                   const input = e.target as HTMLInputElement;
                   this.newRemoteUrl = input.value;
+                  sessionStorage.setItem("ad4m-connect-remote-url", input.value);
 
                   if (this.remoteNodeError) this.clearRemoteNodeError();
                 }}
