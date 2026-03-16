@@ -39,39 +39,22 @@ const TOKEN_RATE: f64 = 0.000002; // per token (prompt + completion)
 const EMBEDDING_TOKEN_RATE: f64 = 0.0000001; // per input token
 const LINK_WRITE_RATE: f64 = 0.000000001; // per link write
 
-/// Check if user has sufficient credits for compute. Returns Ok(()) if:
+/// Atomically reserve (check-and-deduct) compute credits for a user.
+/// Returns Ok(()) if:
 /// - No user email in token (single-user mode, no billing)
 /// - User has free_access enabled
-/// - User has remaining_credits > 0
-/// Returns Err if credits are depleted.
-fn check_compute_credits(auth_token: &str) -> FieldResult<()> {
+/// - Credits were successfully reserved (atomic deduction)
+/// Returns Err if credits are insufficient or the DB operation fails.
+fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
         let free =
             Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)).unwrap_or(false);
         if !free {
-            let credits =
-                Ad4mDb::with_global_instance(|db| db.get_user_credits(email)).unwrap_or(0.0);
-            if credits <= 0.0 {
-                return Err(FieldError::new(
-                    "Insufficient compute credits",
-                    graphql_value!(null),
-                ));
-            }
+            Ad4mDb::with_global_instance(|db| db.deduct_user_credits_if_available(email, amount))
+                .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
         }
     }
     Ok(())
-}
-
-/// Deduct credits from user after a successful compute operation.
-/// Skips deduction for single-user mode (no email) or free_access users.
-fn deduct_compute_credits(auth_token: &str, amount: f64) {
-    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
-        let free =
-            Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)).unwrap_or(false);
-        if !free {
-            let _ = Ad4mDb::with_global_instance(|db| db.deduct_user_credits(email, amount));
-        }
-    }
 }
 
 // Helper function to get perspective with access control
@@ -1927,7 +1910,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        check_compute_credits(&context.auth_token)?;
+        reserve_compute_credits(&context.auth_token, LINK_WRITE_RATE)?;
 
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
@@ -1939,8 +1922,6 @@ impl Mutation {
                 &agent_context,
             )
             .await?;
-
-        deduct_compute_credits(&context.auth_token, LINK_WRITE_RATE);
 
         Ok(result)
     }
@@ -1957,15 +1938,13 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        check_compute_credits(&context.auth_token)?;
+        reserve_compute_credits(&context.auth_token, LINK_WRITE_RATE)?;
 
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let link = crate::types::LinkExpression::try_from(link)?;
         let result = perspective
             .add_link_expression(link, link_status_from_input(status)?, batch_id)
             .await?;
-
-        deduct_compute_credits(&context.auth_token, LINK_WRITE_RATE);
 
         Ok(result)
     }
@@ -1982,9 +1961,9 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        check_compute_credits(&context.auth_token)?;
-
         let link_count = links.len();
+        reserve_compute_credits(&context.auth_token, link_count as f64 * LINK_WRITE_RATE)?;
+
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let result = perspective
@@ -1995,8 +1974,6 @@ impl Mutation {
                 &agent_context,
             )
             .await?;
-
-        deduct_compute_credits(&context.auth_token, link_count as f64 * LINK_WRITE_RATE);
 
         Ok(result)
     }
@@ -2012,20 +1989,18 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        check_compute_credits(&context.auth_token)?;
-
+        // Only charge for additions, not removals
         let additions_count = mutations.additions.len();
+        reserve_compute_credits(
+            &context.auth_token,
+            additions_count as f64 * LINK_WRITE_RATE,
+        )?;
+
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let result = perspective
             .link_mutations(mutations, link_status_from_input(status)?, &agent_context)
             .await?;
-
-        // Only charge for additions, not removals
-        deduct_compute_credits(
-            &context.auth_token,
-            additions_count as f64 * LINK_WRITE_RATE,
-        );
 
         Ok(result)
     }
@@ -2860,7 +2835,6 @@ impl Mutation {
         prompt: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
-        check_compute_credits(&context.auth_token)?;
 
         let result = AIService::global_instance()
             .await?
@@ -2868,7 +2842,7 @@ impl Mutation {
             .await?;
 
         let total_tokens = result.prompt_tokens + result.completion_tokens;
-        deduct_compute_credits(&context.auth_token, total_tokens as f64 * TOKEN_RATE);
+        reserve_compute_credits(&context.auth_token, total_tokens as f64 * TOKEN_RATE)?;
 
         Ok(result.text)
     }
@@ -2880,17 +2854,16 @@ impl Mutation {
         text: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
-        check_compute_credits(&context.auth_token)?;
 
         let result = AIService::global_instance()
             .await?
             .embed(model_id, text)
             .await?;
 
-        deduct_compute_credits(
+        reserve_compute_credits(
             &context.auth_token,
             result.token_count as f64 * EMBEDDING_TOKEN_RATE,
-        );
+        )?;
 
         let json_string = serde_json::to_string(&result.embeddings)
             .map_err(|e| FieldError::from(format!("Failed to serialize vector: {}", e)))?;

@@ -51,7 +51,8 @@ pub struct EmbedResult {
 /// Used by the Kalosum backend to populate PromptResult/EmbedResult.
 /// Will be replaced by exact counts when Ollama is integrated.
 fn estimate_token_count(text: &str) -> usize {
-    (text.len() + 3) / 4
+    let chars = text.chars().count();
+    (chars + 3) / 4
 }
 
 static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
