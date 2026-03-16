@@ -5,9 +5,12 @@ import { isEmbedded, setLocal, getLocal, removeLocal, connectWebSocket } from '.
 import { Ad4mClient, VerificationRequestResult } from "@coasys/ad4m";
 import autoBind from "auto-bind";
 
-import { Ad4mConnectOptions, ConnectionStates, AuthStates, ConfigStates } from './types';
+import { Ad4mConnectOptions, ConnectionStates, AuthStates, ConfigStates, RemoteHost, UserInfo } from './types';
+import { fetchUserInfo, requestPayment } from './services/hostIndex';
 
 const DEFAULT_PORT = 12000;
+const DEFAULT_INDEX_URL = "https://hosting.ad4m.dev";
+const CREDIT_POLL_INTERVAL_MS = 30000;
 
 export default class Ad4mConnect extends EventTarget {
   options: Ad4mConnectOptions;
@@ -24,6 +27,12 @@ export default class Ad4mConnect extends EventTarget {
   requestId?: string;
   requestedRestart: boolean = false;
 
+  // Hosting state
+  connectedHost: RemoteHost | null = null;
+  userInfo: UserInfo | null = null;
+  hostIndexUrl: string;
+  private creditPollInterval: ReturnType<typeof setInterval> | null = null;
+
   private embeddedResolve?: (client: Ad4mClient) => void;
   private embeddedReject?: (error: Error) => void;
 
@@ -36,6 +45,26 @@ export default class Ad4mConnect extends EventTarget {
     this.url = options.url || getLocal("ad4m-url") || `ws://localhost:${this.port}/graphql`;
     this.token = getLocal("ad4m-token") || '';
     this.embedded = isEmbedded();
+    this.hostIndexUrl = options.hostIndexUrl || DEFAULT_INDEX_URL;
+
+    // Restore last connected host for UI pinning
+    const lastHost = getLocal("ad4m-last-host");
+    if (lastHost) {
+      try {
+        const parsed = JSON.parse(lastHost);
+        if (parsed && parsed.id && parsed.url && parsed.name) {
+          this.connectedHost = {
+            id: parsed.id,
+            name: parsed.name,
+            profilePicUrl: parsed.profilePicUrl || "",
+            location: parsed.location || "",
+            url: parsed.url,
+            rates: parsed.rates || [],
+            aiModels: parsed.aiModels || [],
+          };
+        }
+      } catch { /* ignore corrupt data */ }
+    }
 
     if (this.embedded) this.initializeEmbeddedMode();
   }
@@ -233,10 +262,57 @@ export default class Ad4mConnect extends EventTarget {
     // Update auth state (will trigger authstatechange event)
     this.notifyAuthChange('unauthenticated');
     
+    // Clear hosting state
+    this.connectedHost = null;
+    this.userInfo = null;
+    this.stopCreditPolling();
+    removeLocal('ad4m-last-host');
+
     // Update connection state
     this.notifyConnectionChange('not-connected');
     
     console.log('[Ad4m Connect] Disconnected successfully');
+  }
+
+  // Hosting — credit polling & top-up
+
+  startCreditPolling(): void {
+    this.stopCreditPolling();
+
+    const poll = async () => {
+      try {
+        const info = await fetchUserInfo(this.url, this.token);
+        this.userInfo = info;
+        this.dispatchEvent(new CustomEvent('userinfochange', { detail: info }));
+
+        if (info.remainingCredits <= 0) {
+          this.dispatchEvent(new CustomEvent('creditdepleted'));
+        }
+      } catch (error) {
+        console.error('[Ad4m Connect] Credit polling error:', error);
+      }
+    };
+
+    // Immediate first poll, then every 30s
+    poll();
+    this.creditPollInterval = setInterval(poll, CREDIT_POLL_INTERVAL_MS);
+  }
+
+  stopCreditPolling(): void {
+    if (this.creditPollInterval) {
+      clearInterval(this.creditPollInterval);
+      this.creditPollInterval = null;
+    }
+  }
+
+  async requestTopUp(amountHOT: number): Promise<{ success: boolean; message: string }> {
+    return requestPayment(this.url, this.token, amountHOT);
+  }
+
+  /** Persist selected host after successful auth */
+  setConnectedHost(host: RemoteHost): void {
+    this.connectedHost = host;
+    setLocal('ad4m-last-host', JSON.stringify({ id: host.id, url: host.url, name: host.name }));
   }
 
   // Embedded mode
