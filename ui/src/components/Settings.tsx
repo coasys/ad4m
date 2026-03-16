@@ -12,6 +12,7 @@ import { Ad4minContext } from "../context/Ad4minContext";
 import { AgentContext } from "../context/AgentContext";
 import { buildAd4mClient, copyTextToClipboard } from "../util";
 import ActionButton from "./ActionButton";
+import Wallet from "./Wallet";
 import { cardStyle } from "./styles";
 import { HoloHash } from '@spartan-hc/holo-hash';
 
@@ -1518,6 +1519,9 @@ const Profile = (props: Props) => {
           )}
         </>
       )}
+
+      {/* mHOT Wallet Section (shown when multi-user mode is enabled) */}
+      {multiUserEnabled && <Wallet />}
 
       {/* TLS Configuration Section */}
       <j-box px="500" my="500">

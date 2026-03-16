@@ -660,4 +660,58 @@ export class AgentClient {
     );
     return runtimeSetUserFreeAccess;
   }
+
+  // mHOT Wallet methods
+
+  async hotWalletBalance(): Promise<string> {
+    const { runtimeHotWalletBalance } = unwrapApolloResult(
+      await this.#apolloClient.query({
+        query: gql`query runtimeHotWalletBalance {
+          runtimeHotWalletBalance
+        }`,
+        fetchPolicy: "network-only",
+      })
+    );
+    return runtimeHotWalletBalance;
+  }
+
+  async hotWalletHistory(page?: number, perPage?: number): Promise<string> {
+    const { runtimeHotWalletHistory } = unwrapApolloResult(
+      await this.#apolloClient.query({
+        query: gql`query runtimeHotWalletHistory($page: Int, $perPage: Int) {
+          runtimeHotWalletHistory(page: $page, perPage: $perPage)
+        }`,
+        variables: { page, perPage },
+        fetchPolicy: "network-only",
+      })
+    );
+    return runtimeHotWalletHistory;
+  }
+
+  async hotAgentPubkey(): Promise<string> {
+    const { runtimeHotAgentPubkey } = unwrapApolloResult(
+      await this.#apolloClient.query({
+        query: gql`query runtimeHotAgentPubkey {
+          runtimeHotAgentPubkey
+        }`,
+        fetchPolicy: "network-only",
+      })
+    );
+    return runtimeHotAgentPubkey;
+  }
+
+  async sendHot(recipient: string, amount: string): Promise<PaymentRequestResult> {
+    const { runtimeSendHot } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation runtimeSendHot($recipient: String!, $amount: String!) {
+          runtimeSendHot(recipient: $recipient, amount: $amount) {
+            success
+            message
+          }
+        }`,
+        variables: { recipient, amount },
+      })
+    );
+    return runtimeSendHot;
+  }
 }

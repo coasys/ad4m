@@ -44,6 +44,17 @@ struct ExpressionSchema {
 
 pub type Ad4mDbResult<T> = Result<T, AnyError>;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentRequest {
+    pub id: i64,
+    pub user_email: String,
+    pub amount_hot: String,
+    pub proposal_action_hash: Option<String>,
+    pub status: String,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
 use std::sync::{Arc, Mutex};
 
 lazy_static! {
@@ -344,6 +355,19 @@ impl Ad4mDb {
         alter_add_column("ALTER TABLE users ADD COLUMN remaining_credits REAL DEFAULT 0")?;
         alter_add_column("ALTER TABLE users ADD COLUMN hot_wallet_address TEXT")?;
         alter_add_column("ALTER TABLE users ADD COLUMN free_access BOOLEAN DEFAULT 0")?;
+
+        // Payment requests table for tracking mHOT payment proposals
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS payment_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_email TEXT NOT NULL,
+                amount_hot TEXT NOT NULL,
+                proposal_action_hash TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                completed_at TEXT
+            )",
+        )?;
 
         Ok(Self { conn })
     }
@@ -2906,6 +2930,61 @@ impl Ad4mDb {
         Self::require_user_row(rows, email)
     }
 
+    // Payment request management functions
+
+    pub fn create_payment_request(
+        &self,
+        email: &str,
+        amount_hot: &str,
+        action_hash: &str,
+    ) -> Ad4mDbResult<i64> {
+        self.conn.execute(
+            "INSERT INTO payment_requests (user_email, amount_hot, proposal_action_hash) VALUES (?1, ?2, ?3)",
+            params![email, amount_hot, action_hash],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn complete_payment_request(&self, action_hash: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "UPDATE payment_requests SET status = 'completed', completed_at = datetime('now') WHERE proposal_action_hash = ?1 AND status = 'pending'",
+            params![action_hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_pending_payment_requests(&self) -> Ad4mDbResult<Vec<PaymentRequest>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, user_email, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests WHERE status = 'pending'",
+        )?;
+        let requests = stmt
+            .query_map([], |row| {
+                Ok(PaymentRequest {
+                    id: row.get(0)?,
+                    user_email: row.get(1)?,
+                    amount_hot: row.get(2)?,
+                    proposal_action_hash: row.get(3)?,
+                    status: row.get(4)?,
+                    created_at: row.get(5)?,
+                    completed_at: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(requests)
+    }
+
+    pub fn get_user_by_hot_wallet_address(&self, address: &str) -> Ad4mDbResult<Option<String>> {
+        let result = self
+            .conn
+            .query_row(
+                "SELECT username FROM users WHERE hot_wallet_address = ?1",
+                [address],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(result)
+    }
+
     // Settings management functions
     pub fn get_setting(&self, key: &str) -> Ad4mDbResult<Option<String>> {
         let result = self
@@ -4576,5 +4655,97 @@ mod tests {
         );
 
         println!("✅ User list ordering tests passed");
+    }
+
+    #[test]
+    fn test_payment_requests_crud() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Create a user first
+        db.add_user("alice@example.com", "did:test:alice", "hash123")
+            .unwrap();
+
+        // Create payment request
+        let id = db
+            .create_payment_request("alice@example.com", "100.5", "uhCAkABC123")
+            .unwrap();
+        assert!(id > 0);
+
+        // Should appear in pending list
+        let pending = db.get_pending_payment_requests().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].user_email, "alice@example.com");
+        assert_eq!(pending[0].amount_hot, "100.5");
+        assert_eq!(pending[0].proposal_action_hash.as_deref(), Some("uhCAkABC123"));
+        assert_eq!(pending[0].status, "pending");
+
+        // Complete it
+        db.complete_payment_request("uhCAkABC123").unwrap();
+
+        // No longer pending
+        let pending = db.get_pending_payment_requests().unwrap();
+        assert_eq!(pending.len(), 0);
+
+        // Completing again is a no-op (already completed)
+        db.complete_payment_request("uhCAkABC123").unwrap();
+
+        println!("✅ Payment requests CRUD tests passed");
+    }
+
+    #[test]
+    fn test_get_user_by_hot_wallet_address() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Create users
+        db.add_user("alice@example.com", "did:test:alice", "hash1")
+            .unwrap();
+        db.add_user("bob@example.com", "did:test:bob", "hash2")
+            .unwrap();
+
+        // No wallet set yet
+        let result = db.get_user_by_hot_wallet_address("uhCAkXYZ").unwrap();
+        assert!(result.is_none());
+
+        // Set wallet
+        db.set_user_hot_wallet("alice@example.com", "uhCAkXYZ")
+            .unwrap();
+
+        // Should find alice
+        let result = db.get_user_by_hot_wallet_address("uhCAkXYZ").unwrap();
+        assert_eq!(result, Some("alice@example.com".to_string()));
+
+        // Bob's wallet not set
+        let result = db.get_user_by_hot_wallet_address("uhCAkOther").unwrap();
+        assert!(result.is_none());
+
+        println!("✅ Reverse wallet lookup tests passed");
+    }
+
+    #[test]
+    fn test_multiple_payment_requests() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        db.add_user("alice@example.com", "did:test:alice", "hash1")
+            .unwrap();
+
+        // Create multiple requests
+        db.create_payment_request("alice@example.com", "50", "hash1")
+            .unwrap();
+        db.create_payment_request("alice@example.com", "75", "hash2")
+            .unwrap();
+        db.create_payment_request("alice@example.com", "100", "hash3")
+            .unwrap();
+
+        let pending = db.get_pending_payment_requests().unwrap();
+        assert_eq!(pending.len(), 3);
+
+        // Complete one
+        db.complete_payment_request("hash2").unwrap();
+
+        let pending = db.get_pending_payment_requests().unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().all(|r| r.proposal_action_hash.as_deref() != Some("hash2")));
+
+        println!("✅ Multiple payment requests tests passed");
     }
 }

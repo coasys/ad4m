@@ -3019,25 +3019,57 @@ impl Mutation {
             )
         })?;
 
-        // TODO(Phase 2): Create a DB record / enqueue a retryable job here once
-        // Unit payment integration is implemented. Until then no external request
-        // is made and no state is persisted — callers must not treat this response
-        // as a completed or queued payment.
-        log::warn!(
-            "runtime_request_payment: no-op mock for user={} amount={} HOT — \
-             Unit integration not yet implemented, no payment was queued",
-            user_email,
-            amountHOT
-        );
-
-        Ok(PaymentRequestResult {
-            success: false,
-            message: format!(
-                "No action taken: payment request for {} HOT by {} was acknowledged but not queued. \
-                 Unit integration is not yet implemented (Phase 2).",
-                amountHOT, user_email
-            ),
+        // Look up user's mHOT wallet address (= Holochain AgentPubKey)
+        let wallet_address = Ad4mDb::with_global_instance(|db| {
+            db.get_user_hot_wallet(&user_email)
         })
+        .map_err(|e| FieldError::new(format!("DB error: {}", e), Value::null()))?;
+
+        let wallet_address = match wallet_address {
+            Some(addr) if !addr.is_empty() => addr,
+            _ => {
+                return Ok(PaymentRequestResult {
+                    success: false,
+                    message: "User has not set their mHOT wallet address. Call setHotWalletAddress first.".to_string(),
+                });
+            }
+        };
+
+        // Create payment proposal via Unyt alliance DNA
+        let note = format!("AD4M hosting top-up: {} HOT for {}", amountHOT, user_email);
+        match crate::unyt_service::create_proposal(&amountHOT, &wallet_address, Some(&note)).await {
+            Ok(proposal_hash) => {
+                // Record the payment request in the DB
+                if let Err(e) = Ad4mDb::with_global_instance(|db| {
+                    db.create_payment_request(&user_email, &amountHOT, &proposal_hash)
+                }) {
+                    log::error!("Failed to record payment request in DB: {}", e);
+                }
+
+                log::info!(
+                    "Created mHOT payment proposal {} for user={} amount={}",
+                    proposal_hash, user_email, amountHOT
+                );
+
+                Ok(PaymentRequestResult {
+                    success: true,
+                    message: format!(
+                        "Payment proposal created (hash: {}). Awaiting approval in user's mHOT wallet.",
+                        proposal_hash
+                    ),
+                })
+            }
+            Err(e) => {
+                log::error!(
+                    "Failed to create mHOT payment proposal for user={}: {}",
+                    user_email, e
+                );
+                Ok(PaymentRequestResult {
+                    success: false,
+                    message: format!("Failed to create payment proposal: {}", e),
+                })
+            }
+        }
     }
 
     async fn runtime_set_user_credits(
@@ -3094,5 +3126,36 @@ impl Mutation {
         })?;
 
         Ok(true)
+    }
+
+    /// Send mHOT from the host's wallet to an external address.
+    async fn runtime_send_hot(
+        &self,
+        context: &RequestContext,
+        recipient: String,
+        amount: String,
+    ) -> FieldResult<PaymentRequestResult> {
+        // Admin-only: only the host operator can send from the wallet
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can send mHOT",
+                Value::null(),
+            ));
+        }
+
+        match crate::unyt_service::send_hot(&recipient, &amount, Some("AD4M host withdrawal")).await
+        {
+            Ok(commitment_hash) => Ok(PaymentRequestResult {
+                success: true,
+                message: format!(
+                    "Sent {} HOT to {} (commitment: {})",
+                    amount, recipient, commitment_hash
+                ),
+            }),
+            Err(e) => Ok(PaymentRequestResult {
+                success: false,
+                message: format!("Failed to send mHOT: {}", e),
+            }),
+        }
     }
 }

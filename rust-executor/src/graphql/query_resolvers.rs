@@ -1055,6 +1055,68 @@ impl Query {
         })
     }
 
+    /// Get the host's mHOT wallet balance from the alliance DNA ledger.
+    async fn runtime_hot_wallet_balance(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        match crate::unyt_service::get_ledger().await {
+            Ok(ledger) => {
+                // Extract balance from ledger JSON
+                let balance = ledger
+                    .get("balance")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                Ok(serde_json::to_string(&balance).unwrap_or_else(|_| "{}".to_string()))
+            }
+            Err(e) => Err(FieldError::new(
+                format!("Failed to get mHOT wallet balance: {}", e),
+                Value::null(),
+            )),
+        }
+    }
+
+    /// Get the host's mHOT transaction history.
+    async fn runtime_hot_wallet_history(
+        &self,
+        context: &RequestContext,
+        page: Option<i32>,
+        per_page: Option<i32>,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        match crate::unyt_service::get_history(
+            page.map(|p| p as u64),
+            per_page.unwrap_or(20) as u64,
+        )
+        .await
+        {
+            Ok(history) => Ok(serde_json::to_string(&history).unwrap_or_else(|_| "[]".to_string())),
+            Err(e) => Err(FieldError::new(
+                format!("Failed to get mHOT wallet history: {}", e),
+                Value::null(),
+            )),
+        }
+    }
+
+    /// Get the host's mHOT agent public key (their identity on the mHOT DHT).
+    async fn runtime_hot_agent_pubkey(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        match crate::unyt_service::whoami().await {
+            Ok(pubkey) => Ok(pubkey),
+            Err(e) => Err(FieldError::new(
+                format!("Failed to get mHOT agent pubkey: {}", e),
+                Value::null(),
+            )),
+        }
+    }
+
     async fn ai_get_models(&self, context: &RequestContext) -> FieldResult<Vec<Model>> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
         let models_result = Ad4mDb::with_global_instance(|db| db.get_models());
