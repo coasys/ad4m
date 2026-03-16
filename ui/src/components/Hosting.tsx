@@ -100,32 +100,31 @@ const Hosting = () => {
     }
   };
 
-  const fetchHostData = async (session: { indexUrl: string; hostId: string; authToken: string }) => {
+  const fetchHostData = async (session: { indexUrl: string; hostId: string; authToken: string }): Promise<boolean> => {
     try {
-      const res = await fetch(`${session.indexUrl}/hosts`, {
+      const res = await fetch(`${session.indexUrl}/hosts/me`, {
         headers: { Authorization: `Bearer ${session.authToken}` },
       });
       if (res.ok) {
-        const hosts = await res.json();
-        const mine = hosts.find((h: any) => h.id === session.hostId);
-        if (mine) {
-          setHostData(mine);
-          setHostReg((prev) => ({
-            ...prev,
-            indexUrl: session.indexUrl,
-            name: mine.name || "",
-            description: mine.description || "",
-            location: mine.location || "",
-            hostUrl: mine.url || "",
-            rates: JSON.stringify(mine.rates || []),
-            aiModels: JSON.stringify(mine.aiModels || []),
-            computeSpecs: mine.computeSpecs || "",
-          }));
-        }
+        const mine = await res.json();
+        setHostData(mine);
+        setHostReg((prev) => ({
+          ...prev,
+          indexUrl: session.indexUrl,
+          name: mine.name || prev.name,
+          description: mine.description || prev.description,
+          location: mine.location || prev.location,
+          hostUrl: mine.url || prev.hostUrl,
+          rates: (mine.rates && mine.rates.length > 0) ? JSON.stringify(mine.rates) : prev.rates,
+          aiModels: (mine.aiModels && mine.aiModels.length > 0) ? JSON.stringify(mine.aiModels) : prev.aiModels,
+          computeSpecs: mine.computeSpecs || prev.computeSpecs,
+        }));
+        return !!mine.emailVerified;
       }
     } catch (e) {
       console.log("Failed to fetch host data:", e);
     }
+    return false;
   };
 
   // ---- Registration flow ----
@@ -149,6 +148,14 @@ const Hosting = () => {
       const data = await res.json();
 
       if (res.ok) {
+        // Save session immediately — register returns authToken+hostId
+        const session = {
+          indexUrl: hostReg.indexUrl,
+          hostId: data.hostId,
+          authToken: data.authToken,
+          email: hostReg.email,
+        };
+        await saveHostSession(session);
         setHostRegStatus({
           type: "success",
           message: "Registration successful! Check your email for a verification code.",
@@ -183,18 +190,20 @@ const Hosting = () => {
       const res = await fetch(`${hostReg.indexUrl}/hosts/verify-email`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email: hostReg.email,
-          code: verificationCode,
-        }),
+        body: JSON.stringify({ token: verificationCode }),
       });
 
       const data = await res.json();
 
       if (res.ok) {
-        setHostRegStatus({ type: "success", message: "Email verified! Logging in..." });
-        // Auto-login after verification
-        await handleLogin();
+        setHostRegStatus({ type: "success", message: "Email verified!" });
+        if (hostSession) {
+          await fetchHostData(hostSession);
+          setRegStep("logged-in");
+        } else {
+          // Fallback: login if session was lost
+          await handleLogin();
+        }
       } else {
         setHostRegStatus({
           type: "error",
@@ -206,6 +215,34 @@ const Hosting = () => {
         type: "error",
         message: `Network error: ${err.message || "Could not reach index API"}`,
       });
+    } finally {
+      setHostRegistering(false);
+    }
+  };
+
+  const handleResendVerification = async () => {
+    if (!hostSession) {
+      setHostRegStatus({ type: "error", message: "Not logged in. Please log in first." });
+      return;
+    }
+    setHostRegistering(true);
+    setHostRegStatus(null);
+    try {
+      const res = await fetch(`${hostSession.indexUrl}/hosts/resend-verification`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${hostSession.authToken}`,
+        },
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setHostRegStatus({ type: "success", message: "Verification code resent. Check your email." });
+      } else {
+        setHostRegStatus({ type: "error", message: data.error || `Resend failed (${res.status})` });
+      }
+    } catch (err: any) {
+      setHostRegStatus({ type: "error", message: `Network error: ${err.message || "Could not reach index API"}` });
     } finally {
       setHostRegistering(false);
     }
@@ -237,20 +274,19 @@ const Hosting = () => {
           email: hostReg.email,
         };
         await saveHostSession(session);
-        await fetchHostData(session);
-        setRegStep("logged-in");
-        setHostRegStatus({ type: "success", message: "Logged in successfully." });
-      } else {
-        // If login fails with "email not verified", go to verify step
-        if (data.error && data.error.toLowerCase().includes("verif")) {
-          setRegStep("verify");
-          setHostRegStatus({ type: "info", message: data.error });
+        const verified = await fetchHostData(session);
+        if (verified) {
+          setRegStep("logged-in");
+          setHostRegStatus({ type: "success", message: "Logged in successfully." });
         } else {
-          setHostRegStatus({
-            type: "error",
-            message: data.error || `Login failed (${res.status})`,
-          });
+          setRegStep("verify");
+          setHostRegStatus({ type: "info", message: "Email not yet verified. Check your inbox or resend the code." });
         }
+      } else {
+        setHostRegStatus({
+          type: "error",
+          message: data.error || `Login failed (${res.status})`,
+        });
       }
     } catch (err: any) {
       setHostRegStatus({
@@ -475,8 +511,8 @@ const Hosting = () => {
           };
           setHostSession(session);
           setHostReg((prev) => ({ ...prev, indexUrl: session.indexUrl, email: session.email }));
-          setRegStep("logged-in");
-          await fetchHostData(session);
+          const verified = await fetchHostData(session);
+          setRegStep(verified ? "logged-in" : "verify");
         }
       } catch (e) {
         console.log("Failed to load host registration:", e);
@@ -745,7 +781,7 @@ const Hosting = () => {
           )}
 
           {/* Step 2: Email Verification */}
-          {regStep === "verify" && !hostSession && (
+          {regStep === "verify" && (
             <>
               <j-box px="500" my="400">
                 <j-box p="400" style={{ backgroundColor: "#e7f3ff", borderRadius: "8px", border: "1px solid #2196f3" }}>
@@ -772,6 +808,9 @@ const Hosting = () => {
                 <j-flex gap="400">
                   <j-button variant="primary" size="lg" onClick={handleVerifyEmail} loading={hostRegistering} disabled={hostRegistering}>
                     Verify
+                  </j-button>
+                  <j-button variant="subtle" size="lg" onClick={handleResendVerification} disabled={hostRegistering}>
+                    Resend Code
                   </j-button>
                   <j-button variant="subtle" size="lg" onClick={() => { setRegStep("credentials"); setHostRegStatus(null); }}>
                     Back
