@@ -160,6 +160,16 @@ const Profile = (props: Props) => {
     setHostRegStatus(null);
   };
 
+  // Safely parse a fetch response as JSON, falling back to text on non-JSON responses
+  const safeJson = async (res: Response): Promise<any> => {
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      return res.json();
+    }
+    const text = await res.text();
+    throw new Error(text || `Unexpected response (${res.status})`);
+  };
+
   // Save session to launcher config
   const saveHostSession = async (session: HostSession) => {
     setHostSession(session);
@@ -184,7 +194,7 @@ const Profile = (props: Props) => {
         headers: { Authorization: `Bearer ${session.authToken}` },
       });
       if (res.ok) {
-        const mine = await res.json();
+        const mine = await safeJson(res);
         setHostData(mine);
         setHostReg((prev) => ({
           ...prev,
@@ -240,7 +250,7 @@ const Profile = (props: Props) => {
         body: formData,
       });
 
-      const data = await res.json();
+      const data = await safeJson(res).catch(() => ({}));
 
       if (res.ok) {
         const session = {
@@ -250,6 +260,7 @@ const Profile = (props: Props) => {
           email: hostReg.email,
         };
         await saveHostSession(session);
+        setHostReg((prev) => ({ ...prev, password: '' }));
         setHostRegStatus({
           type: "success",
           message: `Host registered. Check your email for the verification link.`,
@@ -286,7 +297,7 @@ const Profile = (props: Props) => {
         body: JSON.stringify({ email: hostReg.email, password: hostReg.password }),
       });
 
-      const data = await res.json();
+      const data = await safeJson(res).catch(() => ({}));
 
       if (res.ok) {
         const session = {
@@ -297,6 +308,7 @@ const Profile = (props: Props) => {
         };
         await saveHostSession(session);
         await fetchHostData(session);
+        setHostReg((prev) => ({ ...prev, password: '' }));
         setHostRegStatus({ type: "success", message: "Logged in successfully." });
       } else {
         setHostRegStatus({
@@ -339,7 +351,7 @@ const Profile = (props: Props) => {
         body: formData,
       });
 
-      const data = await res.json();
+      const data = await safeJson(res).catch(() => ({}));
 
       if (res.ok) {
         setHostData(data);
@@ -370,6 +382,7 @@ const Profile = (props: Props) => {
   const handleLogoutHost = async () => {
     await saveHostSession(null);
     setHostData(null);
+    setHostReg((prev) => ({ ...prev, password: '' }));
     setHostRegStatus(null);
   };
 

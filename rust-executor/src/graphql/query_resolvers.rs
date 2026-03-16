@@ -809,7 +809,9 @@ impl Query {
 
     /// Returns the domain name(s) from the TLS certificate's Subject Alternative Names,
     /// or None if TLS is not configured.
-    async fn runtime_tls_domain(&self, _context: &RequestContext) -> FieldResult<Option<String>> {
+    async fn runtime_tls_domain(&self, context: &RequestContext) -> FieldResult<Option<String>> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
         let config = get_global_config();
         let tls = match config.tls {
             Some(tls) => tls,
@@ -972,6 +974,29 @@ impl Query {
                 }
             }
 
+            let free_access: bool =
+                Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user.username))
+                    .map_err(|e| {
+                        FieldError::new(
+                            format!("Failed to get user free access: {}", e),
+                            Value::null(),
+                        )
+                    })?;
+
+            let remaining_credits = if free_access {
+                "unlimited".to_string()
+            } else {
+                let credits =
+                    Ad4mDb::with_global_instance(|db| db.get_user_credits(&user.username))
+                        .map_err(|e| {
+                            FieldError::new(
+                                format!("Failed to get user credits: {}", e),
+                                Value::null(),
+                            )
+                        })?;
+                format!("{}", credits)
+            };
+
             user_stats.push(UserStatistics {
                 email: user.username.clone(),
                 did: user.did,
@@ -982,23 +1007,8 @@ impl Query {
                     )
                 }),
                 perspective_count,
-                remaining_credits: {
-                    let free =
-                        Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user.username))
-                            .unwrap_or(false);
-                    if free {
-                        "unlimited".to_string()
-                    } else {
-                        let credits =
-                            Ad4mDb::with_global_instance(|db| db.get_user_credits(&user.username))
-                                .unwrap_or(0.0);
-                        format!("{}", credits)
-                    }
-                },
-                free_access: Ad4mDb::with_global_instance(|db| {
-                    db.get_user_free_access(&user.username)
-                })
-                .unwrap_or(false),
+                remaining_credits,
+                free_access,
             });
         }
 
