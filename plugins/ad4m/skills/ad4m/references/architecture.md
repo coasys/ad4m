@@ -22,10 +22,11 @@ Perspective "My Notes"
 Perspectives are local by default. Publishing a perspective as a neighbourhood makes it shared.
 
 ### Key Operations
-- `add_perspective(name)` — create a new perspective
-- `query_links(perspective_id, source?, predicate?, target?)` — query links by source/predicate/target
-- `add_link(perspective_id, source, predicate, target)` — add a link
-- `add_model(perspective_id, class_name, shacl_json)` — register a subject class schema
+
+- `ad4m_add_perspective(name)` — create a new perspective
+- `ad4m_query_links(perspective_id, source?, predicate?, target?)` — query links by source/predicate/target
+- `ad4m_add_link(perspective_id, source, predicate, target)` — add a link
+- `ad4m_add_model(perspective_id, class_name, shacl_json)` — register a subject class schema
 
 ## Links
 
@@ -33,23 +34,25 @@ The fundamental data unit. An RDF-like triple:
 
 ```typescript
 interface Link {
-  source: string;      // URI — what the link is about
-  predicate?: string;  // URI — the relationship type (optional)
-  target: string;      // URI — what it points to
+  source: string; // URI — what the link is about
+  predicate?: string; // URI — the relationship type (optional)
+  target: string; // URI — what it points to
 }
 ```
 
 Wrapped as `LinkExpression` with metadata:
+
 ```typescript
 interface LinkExpression {
-  data: Link;          // The actual triple
-  author: string;      // DID of creator
-  timestamp: string;   // ISO datetime
-  proof: object;       // Cryptographic signature
+  data: Link; // The actual triple
+  author: string; // DID of creator
+  timestamp: string; // ISO datetime
+  proof: object; // Cryptographic signature
 }
 ```
 
 ### URI Conventions
+
 - `ad4m://self` — the perspective itself
 - `literal://string:value` — inline string literal
 - `literal://number:42` — inline number
@@ -60,11 +63,13 @@ interface LinkExpression {
 ## Languages
 
 Protocol abstractions that handle expression storage and retrieval. A language defines:
+
 - How to create expressions (write)
 - How to retrieve expressions by address (read)
 - Optionally: real-time sync via Holochain
 
 Examples:
+
 - **Holochain-based languages** — P2P shared state (used for neighbourhoods)
 - **Note/IPFS language** — content-addressed immutable storage
 - **Direct message language** — encrypted P2P messaging
@@ -81,12 +86,14 @@ Agent A's Perspective ←──sync──→ Agent B's Perspective
 ```
 
 ### Creating a Neighbourhood
+
 1. Create a perspective
-2. Publish with a link language: `neighbourhoodPublishFromPerspective(perspectiveUUID, linkLanguage, meta)`
+2. Publish with a link language: `ad4m_neighbourhoodPublishFromPerspective(perspectiveUUID, linkLanguage, meta)`
 3. Share the `neighbourhood://...` URL
 
 ### Joining a Neighbourhood
-1. `neighbourhoodJoinFromUrl(url)` — downloads meta, installs required languages, syncs links
+
+1. `ad4m_neighbourhoodJoinFromUrl(url)` — downloads meta, installs required languages, syncs links
 
 ## Subject Classes (SHACL SDNA)
 
@@ -94,7 +101,7 @@ Subject classes impose structure on the link graph using SHACL (Shapes Constrain
 
 ### How It Works
 
-Classes are registered via the `add_model` MCP tool (or `add_sdna()` in Rust) using a JSON representation of a SHACL shape. The JSON is parsed by `SHACLShape` / `PropertyShape` structs and converted to RDF links in the perspective.
+Classes are registered via the `ad4m_add_model` MCP tool (or `add_sdna()` in Rust) using a JSON representation of a SHACL shape. The JSON is parsed by `SHACLShape` / `PropertyShape` structs and converted to RDF links in the perspective.
 
 ### SHACL JSON Format
 
@@ -162,59 +169,61 @@ Classes are registered via the `add_model` MCP tool (or `add_sdna()` in Rust) us
 
 ### Top-Level Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `target_class` | string (URI) | Fully qualified class URI. The scheme becomes the namespace (e.g. `message://Message` → namespace `message://`) |
-| `constructor_actions` | AD4MAction[] | Link operations executed when creating an instance |
-| `destructor_actions` | AD4MAction[] | Link operations executed when deleting an instance |
-| `properties` | PropertyShape[] | Property definitions (see below) |
+| Field                 | Type            | Description                                                                                                     |
+| --------------------- | --------------- | --------------------------------------------------------------------------------------------------------------- |
+| `target_class`        | string (URI)    | Fully qualified class URI. The scheme becomes the namespace (e.g. `message://Message` → namespace `message://`) |
+| `constructor_actions` | AD4MAction[]    | Link operations executed when creating an instance                                                              |
+| `destructor_actions`  | AD4MAction[]    | Link operations executed when deleting an instance                                                              |
+| `properties`          | PropertyShape[] | Property definitions (see below)                                                                                |
 
 ### PropertyShape Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `path` | string (URI) | Predicate URI used in links for this property |
-| `name` | string? | Property name (derived from `path` if omitted) |
-| `datatype` | string? | Value type constraint, e.g. `xsd://string`, `xsd://dateTime` |
-| `min_count` | number? | Minimum cardinality. `1` = required on creation |
-| `max_count` | number? | Maximum cardinality. `1` = scalar property. Omit or `> 1` = collection |
-| `writable` | bool? | Whether the property can be updated after creation |
-| `collection` | bool? | Explicit collection flag (alternative to omitting `max_count`) |
-| `node_kind` | string? | `"IRI"` for references to other entities, `"Literal"` for values |
-| `local` | bool? | If true, links are stored locally (not shared in neighbourhood) |
-| `resolve_language` | string? | Language to use when resolving expression URIs (e.g. `"literal"`) |
-| `setter` | AD4MAction[] | Actions for setting a scalar property value |
-| `adder` | AD4MAction[] | Actions for adding to a collection |
-| `remover` | AD4MAction[] | Actions for removing from a collection |
+| Field              | Type         | Description                                                            |
+| ------------------ | ------------ | ---------------------------------------------------------------------- |
+| `path`             | string (URI) | Predicate URI used in links for this property                          |
+| `name`             | string?      | Property name (derived from `path` if omitted)                         |
+| `datatype`         | string?      | Value type constraint, e.g. `xsd://string`, `xsd://dateTime`           |
+| `min_count`        | number?      | Minimum cardinality. `1` = required on creation                        |
+| `max_count`        | number?      | Maximum cardinality. `1` = scalar property. Omit or `> 1` = collection |
+| `writable`         | bool?        | Whether the property can be updated after creation                     |
+| `collection`       | bool?        | Explicit collection flag (alternative to omitting `max_count`)         |
+| `node_kind`        | string?      | `"IRI"` for references to other entities, `"Literal"` for values       |
+| `local`            | bool?        | If true, links are stored locally (not shared in neighbourhood)        |
+| `resolve_language` | string?      | Language to use when resolving expression URIs (e.g. `"literal"`)      |
+| `setter`           | AD4MAction[] | Actions for setting a scalar property value                            |
+| `adder`            | AD4MAction[] | Actions for adding to a collection                                     |
+| `remover`          | AD4MAction[] | Actions for removing from a collection                                 |
 
 ### AD4MAction Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `action` | string | Operation: `"addLink"`, `"removeLink"`, or `"setSingleTarget"` |
-| `source` | string | `"this"` (instance URI) or a literal URI |
-| `predicate` | string | Predicate URI for the link |
-| `target` | string | `"value"` (substituted at runtime) or a literal URI |
-| `local` | bool? | If true, the link is local-only |
+| Field       | Type   | Description                                                    |
+| ----------- | ------ | -------------------------------------------------------------- |
+| `action`    | string | Operation: `"addLink"`, `"removeLink"`, or `"setSingleTarget"` |
+| `source`    | string | `"this"` (instance URI) or a literal URI                       |
+| `predicate` | string | Predicate URI for the link                                     |
+| `target`    | string | `"value"` (substituted at runtime) or a literal URI            |
+| `local`     | bool?  | If true, the link is local-only                                |
 
 ### Generated MCP Tools
 
 Once registered, dynamic tools are auto-generated:
 
-| Property type | Generated tools |
-|--------------|-----------------|
-| Scalar (`max_count: 1`) | `{class}_set_{prop}` |
+| Property type                                     | Generated tools                               |
+| ------------------------------------------------- | --------------------------------------------- |
+| Scalar (`max_count: 1`)                           | `{class}_set_{prop}`                          |
 | Collection (`collection: true` or no `max_count`) | `{class}_add_{prop}`, `{class}_remove_{prop}` |
-| Required (`min_count: 1`) | Parameter included in `{class}_create` |
+| Required (`min_count: 1`)                         | Parameter included in `{class}_create`        |
 
 ### Link Mapping
 
 When you set `message.body = "Hello"` via a subject class:
+
 ```
 Link: (<message-instance-uri>) --message://body--> (literal://string:Hello)
 ```
 
 When you add to a collection `message.reactions.add(uri)`:
+
 ```
 Link: (<message-instance-uri>) --message://reactions--> (<reaction-uri>)
 ```
@@ -222,6 +231,7 @@ Link: (<message-instance-uri>) --message://reactions--> (<reaction-uri>)
 ### SDNA Storage in Perspectives
 
 SHACL definitions are decomposed into RDF links in the perspective. Key link patterns:
+
 ```
 (ad4m://self) --ad4m://has_shacl--> (literal://string:shacl://Message)
 (literal://string:shacl://Message) --ad4m://shacl_shape_uri--> (message://MessageShape)

@@ -1,6 +1,6 @@
 version: 2.1
 references:
-  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:3605cfd2c0aee389ac9e7bb499a8e2633d0367ef3cc148d6668b2dbdff846ce0
+  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:27f8c304877b03c74551175fc7727cfdd32b13fa6bb229d3fa18cee47889df4c
 
 # Self-hosted machine runner on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04)
 # Resource class: coasys/marvin
@@ -54,7 +54,6 @@ commands:
       - run:
           name: Build bootstrap languages
           command: pnpm run build-languages
-
 
 jobs:
   build-and-test:
@@ -167,7 +166,7 @@ jobs:
             done
       - run:
           name: Run MCP integration tests
-          command: cd ./tests/js && pnpm run test-mcp
+          command: cd ./tests/js && pnpm install && pnpm run test-mcp
           no_output_timeout: 30m
 
   integration-tests-model:
@@ -208,11 +207,26 @@ jobs:
           name: Run integration test script
           command: ./tests/bats/bin/bats tests/integration.bats
 
+  plugin-ad4m-tests:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          working_directory: plugins/ad4m
+          command: npm install
+      - run:
+          name: Run tests
+          working_directory: plugins/ad4m
+          command: npm test
+
 workflows:
   version: 2
   build-and-test:
     jobs:
       - build-and-test
+      - plugin-ad4m-tests
       - integration-tests-js:
           requires:
             - build-and-test

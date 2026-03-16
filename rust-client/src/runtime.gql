@@ -50,6 +50,10 @@ query HcAgentInfos {
   runtimeHcAgentInfos
 }
 
+query NetworkMetrics {
+  runtimeGetNetworkMetrics
+}
+
 mutation HcAddAgentInfos($agentInfos: String!) {
   runtimeHcAddAgentInfos(agentInfos: $agentInfos)
 }
