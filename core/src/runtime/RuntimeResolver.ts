@@ -234,10 +234,14 @@ export class HostingUserInfo {
     @Field({ nullable: true })
     hotWalletAddress?: string;
 
-    constructor(email: string, remainingCredits: string, hotWalletAddress?: string) {
+    @Field()
+    freeAccess: boolean;
+
+    constructor(email: string, remainingCredits: string, hotWalletAddress?: string, freeAccess: boolean = false) {
         this.email = email;
         this.remainingCredits = remainingCredits;
         this.hotWalletAddress = hotWalletAddress;
+        this.freeAccess = freeAccess;
     }
 }
 
@@ -597,7 +601,7 @@ export default class RuntimeResolver {
 
     @Query(returns => HostingUserInfo)
     runtimeHostingUserInfo(): HostingUserInfo {
-        return new HostingUserInfo("test@example.com", "100000000", null)
+        return new HostingUserInfo("test@example.com", "100000000", null, false)
     }
 
     @Mutation(returns => Boolean)
@@ -612,6 +616,22 @@ export default class RuntimeResolver {
         @Arg("amountHOT") amountHOT: string
     ): PaymentRequestResult {
         return new PaymentRequestResult(true, "Mock payment of " + amountHOT + " base units credited")
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeSetUserCredits(
+        @Arg("email") email: string,
+        @Arg("amount") amount: number
+    ): boolean {
+        return true
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeSetUserFreeAccess(
+        @Arg("email") email: string,
+        @Arg("enabled") enabled: boolean
+    ): boolean {
+        return true
     }
 }
 
