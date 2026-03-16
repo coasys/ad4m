@@ -3128,6 +3128,30 @@ impl Mutation {
         Ok(true)
     }
 
+    /// Reinstall the Unyt alliance DNA (e.g. after version update).
+    async fn runtime_reinstall_unyt_dna(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<PaymentRequestResult> {
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can reinstall the Unyt DNA",
+                Value::null(),
+            ));
+        }
+
+        match crate::unyt_service::reinstall().await {
+            Ok(()) => Ok(PaymentRequestResult {
+                success: true,
+                message: "Unyt alliance DNA reinstalled successfully".to_string(),
+            }),
+            Err(e) => Ok(PaymentRequestResult {
+                success: false,
+                message: format!("Failed to reinstall: {}", e),
+            }),
+        }
+    }
+
     /// Send mHOT from the host's wallet to an external address.
     async fn runtime_send_hot(
         &self,

@@ -13,6 +13,10 @@ const Wallet = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Version info
+  const [versionInfo, setVersionInfo] = useState<{ installed: string | null; bundled: string; needsUpdate: boolean } | null>(null);
+  const [reinstalling, setReinstalling] = useState(false);
+
   // Send form
   const [sendRecipient, setSendRecipient] = useState("");
   const [sendAmount, setSendAmount] = useState("");
@@ -66,6 +70,18 @@ const Wallet = () => {
         errors.push(`History: ${e.message}`);
       }
 
+      // Fetch version info
+      try {
+        const viStr = await client.agent.unytVersionInfo();
+        if (viStr) {
+          try {
+            setVersionInfo(JSON.parse(viStr));
+          } catch {}
+        }
+      } catch (e: any) {
+        console.warn("Failed to fetch version info:", e.message);
+      }
+
       if (errors.length > 0) {
         setError(errors.join("; "));
       }
@@ -101,6 +117,23 @@ const Wallet = () => {
     }
   };
 
+  const handleReinstall = async () => {
+    if (!client) return;
+    setReinstalling(true);
+    try {
+      const result = await client.agent.reinstallUnytDna();
+      if (result?.success) {
+        fetchWalletData();
+      } else {
+        setError(result?.message || "Reinstall failed");
+      }
+    } catch (e: any) {
+      setError(`Reinstall error: ${e.message}`);
+    } finally {
+      setReinstalling(false);
+    }
+  };
+
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text).catch(() => {});
   };
@@ -132,6 +165,27 @@ const Wallet = () => {
           </j-button>
         </j-flex>
       </j-box>
+
+      {/* Version Info & Reinstall */}
+      {versionInfo && (
+        <j-box px="500" my="300">
+          <j-flex a="center" gap="300">
+            <j-text size="400" color="ui-500">
+              DNA: v{versionInfo.installed || "unknown"} {versionInfo.needsUpdate ? `→ v${versionInfo.bundled} available` : "(up to date)"}
+            </j-text>
+            {versionInfo.needsUpdate && (
+              <j-button size="xs" variant="primary" onClick={handleReinstall} loading={reinstalling} disabled={reinstalling}>
+                Reinstall
+              </j-button>
+            )}
+            {!versionInfo.needsUpdate && (
+              <j-button size="xs" variant="subtle" onClick={handleReinstall} loading={reinstalling} disabled={reinstalling}>
+                Reinstall
+              </j-button>
+            )}
+          </j-flex>
+        </j-box>
+      )}
 
       {/* Agent Pubkey */}
       {agentPubkey && (

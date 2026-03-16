@@ -1117,6 +1117,20 @@ impl Query {
         }
     }
 
+    /// Get Unyt DNA version info (installed vs bundled).
+    async fn runtime_unyt_version_info(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+        let (installed, bundled) = crate::unyt_service::version_info();
+        Ok(serde_json::json!({
+            "installed": installed,
+            "bundled": bundled,
+            "needsUpdate": installed.as_deref() != Some(bundled.as_str()),
+        }).to_string())
+    }
+
     async fn ai_get_models(&self, context: &RequestContext) -> FieldResult<Vec<Model>> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
         let models_result = Ad4mDb::with_global_instance(|db| db.get_models());

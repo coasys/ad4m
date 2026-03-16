@@ -26,9 +26,10 @@ use crate::holochain_service::interface::{get_holochain_service, maybe_get_holoc
 pub const UNYT_APP_ID: &str = "unyt-mhot";
 const UNYT_CELL_NAME: &str = "alliance";
 const UNYT_ZOME: &str = "transactor";
+const ALLIANCE_DNA_VERSION: &str = "0.61.0";
 
-/// Embedded alliance DNA bytes (from unyt-sandbox v0.56.0 release).
-const ALLIANCE_DNA_BYTES: &[u8] = include_bytes!("resources/alliance.dna");
+/// Embedded alliance DNA bytes.
+const ALLIANCE_DNA_BYTES: &[u8] = include_bytes!("resources/alliance_0.61.0.dna");
 
 // ---------------------------------------------------------------------------
 // Global state: the DNA hash of the installed alliance cell, used for signal routing
@@ -169,15 +170,36 @@ pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
         None => return Err(deno_core::anyhow::anyhow!("Holochain service not available")),
     };
 
-    // Check if already installed
+    // Check if already installed with correct version
     if let Ok(Some(_)) = hc.get_app_info(UNYT_APP_ID.to_string()).await {
-        info!("Unyt alliance DNA already installed");
-        // Still capture the DNA hash for signal routing
+        let installed_version = Ad4mDb::with_global_instance(|db| {
+            db.get_setting("unyt_dna_version")
+        }).unwrap_or(None);
+
+        if installed_version.as_deref() == Some(ALLIANCE_DNA_VERSION) {
+            info!("Unyt alliance DNA v{} already installed", ALLIANCE_DNA_VERSION);
+            capture_dna_hash().await;
+            return Ok(());
+        }
+        // Version mismatch — will be handled by explicit reinstall
+        info!(
+            "Unyt alliance DNA installed but version mismatch (installed={}, bundled={})",
+            installed_version.as_deref().unwrap_or("unknown"),
+            ALLIANCE_DNA_VERSION
+        );
         capture_dna_hash().await;
         return Ok(());
     }
 
-    info!("Installing Unyt alliance DNA...");
+    do_install(data_path, &hc).await
+}
+
+/// Actually perform the DNA installation (shared by install and reinstall).
+async fn do_install(
+    data_path: &Path,
+    hc: &crate::holochain_service::interface::HolochainServiceInterface,
+) -> Result<(), AnyError> {
+    info!("Installing Unyt alliance DNA v{}...", ALLIANCE_DNA_VERSION);
 
     // Write DNA to data directory
     let unyt_dir = data_path.join("unyt");
@@ -190,7 +212,7 @@ pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
     let happ_dir = unyt_dir.join("happ");
     std::fs::create_dir_all(&happ_dir)?;
 
-    // Write happ.yaml manifest (manifest_version "0" for this holochain version)
+    // Write happ.yaml manifest with network seed and properties for the test network
     let happ_yaml = format!(
         r#"---
 manifest_version: "0"
@@ -202,6 +224,11 @@ roles:
       deferred: false
     dna:
       path: {}
+      modifiers:
+        network_seed: "Ga-FM2jL7uq3NDI9QX1Zl"
+        properties:
+          progenitor_pubkey: "uhCAkdeTV-5BNlhK4pC9tVpVwlUhzcOA8zqn3lEhtkN41qWGo0PWr"
+          joining_server_signer: "uhCAk_Jbtn_3RR-VCLPtJdhcQvVrpM7Vw5vHGog8_CwW5tO0_Cf37"
 "#,
         dna_path.to_string_lossy()
     );
@@ -241,10 +268,61 @@ roles:
         }
     }
 
+    // Store installed version
+    if let Err(e) = Ad4mDb::with_global_instance(|db| {
+        db.set_setting("unyt_dna_version", ALLIANCE_DNA_VERSION)
+    }) {
+        warn!("Failed to store Unyt DNA version in DB: {}", e);
+    }
+
     // Capture DNA hash for signal routing
     capture_dna_hash().await;
 
     Ok(())
+}
+
+/// Reinstall the alliance DNA (uninstall old, install new).
+pub async fn reinstall() -> Result<(), AnyError> {
+    let hc = match maybe_get_holochain_service().await {
+        Some(hc) => hc,
+        None => return Err(deno_core::anyhow::anyhow!("Holochain service not available")),
+    };
+
+    // Uninstall existing
+    info!("Uninstalling old Unyt alliance DNA...");
+    if let Err(e) = hc.remove_app(UNYT_APP_ID.to_string()).await {
+        warn!("Failed to uninstall old Unyt DNA (may not exist): {}", e);
+    }
+
+    // Reset install flag
+    {
+        let mut installed = INSTALL_ONCE.lock().await;
+        *installed = false;
+    }
+
+    let data_path = {
+        let config = crate::config::get_global_config();
+        std::path::PathBuf::from(
+            config
+                .app_data_path
+                .as_ref()
+                .ok_or_else(|| deno_core::anyhow::anyhow!("App data path not configured"))?,
+        )
+    };
+
+    do_install(&data_path, &hc).await?;
+
+    let mut installed = INSTALL_ONCE.lock().await;
+    *installed = true;
+    Ok(())
+}
+
+/// Get installed vs bundled version info.
+pub fn version_info() -> (Option<String>, String) {
+    let installed = Ad4mDb::with_global_instance(|db| {
+        db.get_setting("unyt_dna_version")
+    }).unwrap_or(None);
+    (installed, ALLIANCE_DNA_VERSION.to_string())
 }
 
 /// Capture the DNA hash from the installed app for signal routing.

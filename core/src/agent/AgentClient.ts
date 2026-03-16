@@ -700,6 +700,32 @@ export class AgentClient {
     return runtimeHotAgentPubkey;
   }
 
+  async unytVersionInfo(): Promise<string> {
+    const { runtimeUnytVersionInfo } = unwrapApolloResult(
+      await this.#apolloClient.query({
+        query: gql`query runtimeUnytVersionInfo {
+          runtimeUnytVersionInfo
+        }`,
+        fetchPolicy: "network-only",
+      })
+    );
+    return runtimeUnytVersionInfo;
+  }
+
+  async reinstallUnytDna(): Promise<PaymentRequestResult> {
+    const { runtimeReinstallUnytDna } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation runtimeReinstallUnytDna {
+          runtimeReinstallUnytDna {
+            success
+            message
+          }
+        }`,
+      })
+    );
+    return runtimeReinstallUnytDna;
+  }
+
   async sendHot(recipient: string, amount: string): Promise<PaymentRequestResult> {
     const { runtimeSendHot } = unwrapApolloResult(
       await this.#apolloClient.mutate({
