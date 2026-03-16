@@ -2,6 +2,7 @@
 use super::graphql_types::*;
 use crate::agent::{capabilities::*, did_document_for_context, signatures, AgentContext};
 use crate::ai_service::AIService;
+use crate::config::get_global_config;
 use crate::languages::LanguageController;
 use crate::types::{AITask, DecoratedExpressionProof, ModelType};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
@@ -13,7 +14,6 @@ use crate::{
     runtime_service::RuntimeService,
     types::{DecoratedLinkExpression, Model, Notification},
 };
-use crate::config::get_global_config;
 use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
 
 pub struct Query;
@@ -825,9 +825,8 @@ impl Query {
 
         use x509_parser::prelude::*;
         // Parse PEM to get the first certificate
-        let (_, pem) = parse_x509_pem(&cert_pem).map_err(|e| {
-            FieldError::new(format!("Failed to parse PEM: {}", e), Value::null())
-        })?;
+        let (_, pem) = parse_x509_pem(&cert_pem)
+            .map_err(|e| FieldError::new(format!("Failed to parse PEM: {}", e), Value::null()))?;
         let (_, cert) = X509Certificate::from_der(&pem.contents).map_err(|e| {
             FieldError::new(format!("Failed to parse certificate: {}", e), Value::null())
         })?;
