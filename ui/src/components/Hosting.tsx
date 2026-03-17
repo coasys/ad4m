@@ -103,7 +103,8 @@ const Hosting = () => {
     }
   };
 
-  const fetchHostData = async (session: { indexUrl: string; hostId: string; authToken: string }): Promise<boolean> => {
+  // Returns "verified", "unverified", or "expired" (token invalid)
+  const fetchHostData = async (session: { indexUrl: string; hostId: string; authToken: string }): Promise<"verified" | "unverified" | "expired"> => {
     try {
       const res = await fetch(`${session.indexUrl}/hosts/me`, {
         headers: { Authorization: `Bearer ${session.authToken}` },
@@ -122,19 +123,16 @@ const Hosting = () => {
           aiModels: (mine.aiModels && mine.aiModels.length > 0) ? JSON.stringify(mine.aiModels) : prev.aiModels,
           computeSpecs: mine.computeSpecs || prev.computeSpecs,
         }));
-        return !!mine.emailVerified;
+        return mine.emailVerified ? "verified" : "unverified";
       }
       if (res.status === 401) {
         console.warn("Host session token expired or invalid, clearing session");
-        setHostSession(null);
-        saveSession(null);
-        setRegStep("credentials");
-        return false;
+        return "expired";
       }
     } catch (e) {
       console.log("Failed to fetch host data:", e);
     }
-    return false;
+    return "expired";
   };
 
   const fetchMembraneProof = async (session: { indexUrl: string; hostId: string; authToken: string }) => {
@@ -352,17 +350,19 @@ const Hosting = () => {
           email: hostReg.email,
         };
         await saveHostSession(session);
-        const verified = await fetchHostData(session);
-        if (verified) {
+        const result = await fetchHostData(session);
+        if (result === "verified") {
           setRegStep("logged-in");
           setHostRegStatus({ type: "success", message: "Logged in successfully." });
-          // Automatically fetch membrane proof if not already done
           if (membraneProofStatus !== "done") {
             fetchMembraneProof(session);
           }
-        } else {
+        } else if (result === "unverified") {
           setRegStep("verify");
           setHostRegStatus({ type: "info", message: "Email not yet verified. Check your inbox or resend the code." });
+        } else {
+          setHostRegStatus({ type: "error", message: "Session expired. Please log in again." });
+          setRegStep("credentials");
         }
       } else {
         setHostRegStatus({
@@ -591,13 +591,20 @@ const Hosting = () => {
             authToken: reg.auth_token,
             email: reg.email,
           };
-          setHostSession(session);
           setHostReg((prev) => ({ ...prev, indexUrl: session.indexUrl, email: session.email }));
-          const verified = await fetchHostData(session);
-          setRegStep(verified ? "logged-in" : "verify");
-          // If verified but membrane proof might be missing, try to fetch it
-          if (verified) {
+          const result = await fetchHostData(session);
+          if (result === "verified") {
+            setHostSession(session);
+            setRegStep("logged-in");
             fetchMembraneProof(session);
+          } else if (result === "unverified") {
+            setHostSession(session);
+            setRegStep("verify");
+          } else {
+            // Token expired/invalid — clear stored session, go to login
+            setHostSession(null);
+            saveSession(null);
+            setRegStep("credentials");
           }
         }
       } catch (e) {
@@ -905,12 +912,238 @@ const Hosting = () => {
             </>
           )}
 
-          {/* Step 3: Logged in — host profile fields */}
+          {/* Step 3: Logged in — editable host profile card */}
           {regStep === "logged-in" && hostSession && (
             <>
+              <j-box px="500" my="400">
+                <div style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  gap: "12px",
+                  padding: "24px 20px",
+                  borderRadius: "12px",
+                  background: "var(--j-color-ui-50)",
+                  border: "1px solid var(--j-color-ui-200)",
+                }}>
+                  {/* Profile picture — clickable to change */}
+                  <label style={{ cursor: "pointer", position: "relative" as const }}>
+                    {hostData?.profilePicUrl && !profilePic ? (
+                      <div style={{ position: "relative" as const }}>
+                        <img
+                          src={hostData.profilePicUrl}
+                          alt=""
+                          style={{
+                            width: "72px", height: "72px", borderRadius: "50%",
+                            objectFit: "cover", background: "var(--j-color-ui-200)",
+                          }}
+                        />
+                        <div style={{
+                          position: "absolute" as const, bottom: 0, right: 0,
+                          width: "24px", height: "24px", borderRadius: "50%",
+                          background: "var(--j-color-primary-500)", display: "flex",
+                          alignItems: "center", justifyContent: "center",
+                        }}>
+                          <j-icon name="pencil" size="xs" color="white"></j-icon>
+                        </div>
+                      </div>
+                    ) : profilePic ? (
+                      <div style={{ position: "relative" as const }}>
+                        <img
+                          src={URL.createObjectURL(profilePic)}
+                          alt=""
+                          style={{
+                            width: "72px", height: "72px", borderRadius: "50%",
+                            objectFit: "cover", background: "var(--j-color-ui-200)",
+                          }}
+                        />
+                        <div style={{
+                          position: "absolute" as const, bottom: 0, right: 0,
+                          width: "24px", height: "24px", borderRadius: "50%",
+                          background: "var(--j-color-primary-500)", display: "flex",
+                          alignItems: "center", justifyContent: "center",
+                        }}>
+                          <j-icon name="pencil" size="xs" color="white"></j-icon>
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{
+                        width: "72px", height: "72px", borderRadius: "50%",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        background: "var(--j-color-ui-200)", flexDirection: "column" as const, gap: "2px",
+                        border: "2px dashed var(--j-color-ui-400)",
+                      }}>
+                        <j-icon name="camera" size="sm" color="ui-500"></j-icon>
+                        <span style={{ fontSize: "9px", color: "var(--j-color-ui-500)", fontWeight: 600, textTransform: "uppercase" as const }}>Set Photo</span>
+                      </div>
+                    )}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        const f = (e.target as HTMLInputElement).files?.[0] || null;
+                        if (f && f.size > 2 * 1024 * 1024) {
+                          setHostRegStatus({ type: "error", message: "Profile picture must be under 2MB." });
+                          return;
+                        }
+                        setProfilePic(f);
+                        setHostRegStatus(null);
+                      }}
+                    />
+                  </label>
+
+                  {/* Name */}
+                  <input
+                    value={hostReg.name}
+                    onChange={(e) => handleHostRegChange("name", e.target.value)}
+                    placeholder="Host Name"
+                    style={{
+                      fontSize: "22px", fontWeight: 700, textAlign: "center" as const,
+                      background: "transparent", border: "none", borderBottom: "1px dashed var(--j-color-ui-300)",
+                      color: "var(--j-color-black)", width: "100%", padding: "4px 0",
+                      outline: "none",
+                    }}
+                  />
+
+                  {/* Location */}
+                  <input
+                    value={hostReg.location}
+                    onChange={(e) => handleHostRegChange("location", e.target.value)}
+                    placeholder="Location (e.g. Frankfurt, DE)"
+                    style={{
+                      fontSize: "14px", textAlign: "center" as const,
+                      background: "transparent", border: "none", borderBottom: "1px dashed var(--j-color-ui-300)",
+                      color: "var(--j-color-ui-500)", width: "100%", padding: "2px 0",
+                      outline: "none",
+                    }}
+                  />
+
+                  {/* Description */}
+                  <textarea
+                    value={hostReg.description}
+                    onChange={(e) => handleHostRegChange("description", e.target.value)}
+                    placeholder="A brief description of your host"
+                    rows={2}
+                    style={{
+                      fontSize: "14px", textAlign: "center" as const, lineHeight: "1.4",
+                      background: "transparent", border: "none", borderBottom: "1px dashed var(--j-color-ui-300)",
+                      color: "var(--j-color-ui-400)", width: "100%", padding: "2px 0",
+                      outline: "none", resize: "vertical" as const, fontFamily: "inherit",
+                    }}
+                  />
+
+                  {/* AI Models */}
+                  <div style={{ width: "100%", marginTop: "4px" }}>
+                    <j-text size="300" weight="600" color="ui-500" style={{ textTransform: "uppercase" as const, letterSpacing: "0.5px", display: "block", marginBottom: "6px" }}>AI Models</j-text>
+                    <input
+                      value={hostReg.aiModels}
+                      onChange={(e) => handleHostRegChange("aiModels", e.target.value)}
+                      placeholder='["llama3", "mistral"]'
+                      style={{
+                        fontSize: "13px", width: "100%", padding: "6px 8px",
+                        background: "var(--j-color-ui-100)", border: "1px solid var(--j-color-ui-200)",
+                        borderRadius: "6px", color: "var(--j-color-primary-500)", outline: "none",
+                        fontFamily: "inherit",
+                      }}
+                    />
+                    {/* Model chips preview */}
+                    {(() => {
+                      try {
+                        const models = JSON.parse(hostReg.aiModels);
+                        if (Array.isArray(models) && models.length > 0) {
+                          return (
+                            <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "6px", marginTop: "8px" }}>
+                              {models.map((m: string, i: number) => (
+                                <span key={i} style={{
+                                  fontSize: "13px", padding: "4px 12px", borderRadius: "12px",
+                                  background: "rgba(33, 150, 243, 0.1)", color: "var(--j-color-primary-500)",
+                                }}>{m}</span>
+                              ))}
+                            </div>
+                          );
+                        }
+                      } catch { /* ignore */ }
+                      return null;
+                    })()}
+                  </div>
+
+                  {/* Rates */}
+                  <div style={{ width: "100%", marginTop: "8px", borderTop: "1px solid var(--j-color-ui-200)", paddingTop: "12px" }}>
+                    <j-text size="300" weight="600" color="ui-500" style={{ textTransform: "uppercase" as const, letterSpacing: "0.5px", display: "block", marginBottom: "6px" }}>Pricing</j-text>
+                    <input
+                      value={hostReg.rates}
+                      onChange={(e) => handleHostRegChange("rates", e.target.value)}
+                      placeholder='[{"description": "Base rate", "priceInHOT": 0.001}]'
+                      style={{
+                        fontSize: "13px", width: "100%", padding: "6px 8px",
+                        background: "var(--j-color-ui-100)", border: "1px solid var(--j-color-ui-200)",
+                        borderRadius: "6px", color: "var(--j-color-ui-700)", outline: "none",
+                        fontFamily: "inherit",
+                      }}
+                    />
+                    {/* Rates table preview */}
+                    {(() => {
+                      try {
+                        const rates = JSON.parse(hostReg.rates);
+                        if (Array.isArray(rates) && rates.length > 0) {
+                          return (
+                            <table style={{ width: "100%", borderCollapse: "collapse", marginTop: "8px" }}>
+                              <tbody>
+                                {rates.map((r: any, i: number) => (
+                                  <tr key={i} style={{ borderBottom: i < rates.length - 1 ? "1px solid var(--j-color-ui-100)" : "none" }}>
+                                    <td style={{ padding: "6px 0", fontSize: "14px", color: "var(--j-color-ui-700)" }}>{r.description}</td>
+                                    <td style={{ padding: "6px 0", fontSize: "13px", textAlign: "right" as const, fontFamily: "monospace", color: "var(--j-color-primary-500)" }}>
+                                      {r.priceInHOT} HOT
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          );
+                        }
+                      } catch { /* ignore */ }
+                      return null;
+                    })()}
+                  </div>
+
+                  {/* Compute Specs */}
+                  <div style={{ width: "100%", marginTop: "4px" }}>
+                    <j-text size="300" weight="600" color="ui-500" style={{ textTransform: "uppercase" as const, letterSpacing: "0.5px", display: "block", marginBottom: "6px" }}>Compute</j-text>
+                    <input
+                      value={hostReg.computeSpecs}
+                      onChange={(e) => handleHostRegChange("computeSpecs", e.target.value)}
+                      placeholder="e.g. 8 CPU, 32GB RAM, RTX 4090"
+                      style={{
+                        fontSize: "14px", width: "100%", padding: "6px 8px",
+                        background: "var(--j-color-ui-100)", border: "1px solid var(--j-color-ui-200)",
+                        borderRadius: "6px", color: "var(--j-color-ui-600)", outline: "none",
+                        fontFamily: "inherit",
+                      }}
+                    />
+                  </div>
+
+                  {/* Host URL */}
+                  <div style={{ width: "100%", marginTop: "4px" }}>
+                    <j-text size="300" weight="600" color="ui-500" style={{ textTransform: "uppercase" as const, letterSpacing: "0.5px", display: "block", marginBottom: "6px" }}>Endpoint URL</j-text>
+                    <input
+                      value={hostReg.hostUrl}
+                      onChange={(e) => handleHostRegChange("hostUrl", e.target.value)}
+                      placeholder="wss://your-host-domain.com"
+                      style={{
+                        fontSize: "13px", width: "100%", padding: "6px 8px",
+                        background: "var(--j-color-ui-100)", border: "1px solid var(--j-color-ui-200)",
+                        borderRadius: "6px", color: "var(--j-color-ui-400)", outline: "none",
+                        fontFamily: "monospace",
+                      }}
+                    />
+                  </div>
+                </div>
+              </j-box>
+
               {/* Membrane proof / Unyt DNA status */}
               {membraneProofStatus === "fetching" && (
-                <j-box px="500" my="400">
+                <j-box px="500" my="300">
                   <j-box p="400" style={{ backgroundColor: "#e7f3ff", borderRadius: "8px", border: "1px solid #2196f3" }}>
                     <j-flex a="center" gap="300">
                       <j-spinner size="sm"></j-spinner>
@@ -920,17 +1153,17 @@ const Hosting = () => {
                 </j-box>
               )}
               {membraneProofStatus === "done" && (
-                <j-box px="500" my="400">
+                <j-box px="500" my="300">
                   <j-box p="400" style={{ backgroundColor: "#e8f5e9", borderRadius: "8px", border: "1px solid #4caf50" }}>
                     <j-flex a="center" gap="300">
                       <j-icon name="check-circle" color="success"></j-icon>
-                      <j-text size="500">Unyt DHT auth material received. DNA will be installed automatically.</j-text>
+                      <j-text size="500">Unyt DHT auth material received.</j-text>
                     </j-flex>
                   </j-box>
                 </j-box>
               )}
               {membraneProofStatus === "error" && (
-                <j-box px="500" my="400">
+                <j-box px="500" my="300">
                   <j-box p="400" style={{ backgroundColor: "#ffebee", borderRadius: "8px", border: "1px solid #f44336" }}>
                     <j-flex a="center" gap="300" wrap="wrap">
                       <j-icon name="x-circle" color="danger"></j-icon>
@@ -943,66 +1176,10 @@ const Hosting = () => {
                 </j-box>
               )}
 
-              <j-box px="500" my="400">
-                <j-box mb="200"><j-text size="500" weight="500">Host Name</j-text></j-box>
-                <j-input value={hostReg.name} onInput={(e: any) => handleHostRegChange("name", e.target.value)} placeholder="My AD4M Host" />
-              </j-box>
-
-              <j-box px="500" my="400">
-                <j-box mb="200"><j-text size="500" weight="500">Description</j-text></j-box>
-                <j-input value={hostReg.description} onInput={(e: any) => handleHostRegChange("description", e.target.value)} placeholder="A brief description of your host" />
-              </j-box>
-
-              <j-box px="500" my="400">
-                <j-box mb="200"><j-text size="500" weight="500">Location</j-text></j-box>
-                <j-input value={hostReg.location} onInput={(e: any) => handleHostRegChange("location", e.target.value)} placeholder="e.g. US-East, EU-West" />
-              </j-box>
-
-              <j-box px="500" my="400">
-                <j-box mb="200"><j-text size="500" weight="500">Host URL</j-text></j-box>
-                <j-input value={hostReg.hostUrl} onInput={(e: any) => handleHostRegChange("hostUrl", e.target.value)} placeholder="wss://your-host-domain.com" />
-                <j-box mt="100">
-                  <j-text size="400" color="ui-400">Auto-populated from TLS certificate if configured.</j-text>
-                </j-box>
-              </j-box>
-
-              <j-box px="500" my="400">
-                <j-box mb="200"><j-text size="500" weight="500">Rates (JSON)</j-text></j-box>
-                <j-input value={hostReg.rates} onInput={(e: any) => handleHostRegChange("rates", e.target.value)} placeholder='[{"description": "Base rate", "priceInHOT": 0.001}]' />
-              </j-box>
-
-              <j-box px="500" my="400">
-                <j-box mb="200"><j-text size="500" weight="500">AI Models (JSON)</j-text></j-box>
-                <j-input value={hostReg.aiModels} onInput={(e: any) => handleHostRegChange("aiModels", e.target.value)} placeholder='["llama3", "mistral"]' />
-              </j-box>
-
-              <j-box px="500" my="400">
-                <j-box mb="200"><j-text size="500" weight="500">Compute Specs</j-text></j-box>
-                <j-input value={hostReg.computeSpecs} onInput={(e: any) => handleHostRegChange("computeSpecs", e.target.value)} placeholder="e.g. 8 CPU, 32GB RAM, RTX 4090" />
-              </j-box>
-
-              <j-box px="500" my="400">
-                <j-box mb="200"><j-text size="500" weight="500">Profile Picture</j-text></j-box>
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) => {
-                    const f = (e.target as HTMLInputElement).files?.[0] || null;
-                    if (f && f.size > 2 * 1024 * 1024) {
-                      setHostRegStatus({ type: "error", message: "Profile picture must be under 2MB." });
-                      return;
-                    }
-                    setProfilePic(f);
-                    setHostRegStatus(null);
-                  }}
-                  style={{ fontSize: "14px" }}
-                />
-              </j-box>
-
               <StatusMessage />
 
               <j-box px="500" my="400">
-                <j-flex gap="400">
+                <j-flex gap="400" j="center">
                   <j-button variant="primary" size="lg" onClick={handleUpdateHost} loading={hostRegistering} disabled={hostRegistering}>
                     Save Changes
                   </j-button>
