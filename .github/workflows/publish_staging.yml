@@ -249,6 +249,14 @@ jobs:
         ls -la "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld-classic"
 
     # Rust toolchain configured via rust-toolchain.toml
+    - name: Select Xcode 15.4 (has ld_classic for branch islands)
+      run: |
+        sudo xcode-select -s /Applications/Xcode_15.4.app
+        xcodebuild -version
+        xcrun ld -v 2>&1 | head -1 || true
+        # Verify ld_classic exists
+        ls -la /Applications/Xcode_15.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld-classic || true
+
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
