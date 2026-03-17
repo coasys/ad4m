@@ -34,6 +34,50 @@ use base64::prelude::*;
 // Use the shared can_access_perspective function from query_resolvers
 use super::query_resolvers::can_access_perspective;
 
+// Pricing constants for compute billing (initial values, can tune later)
+const TOKEN_RATE: f64 = 0.000002; // per token (prompt + completion)
+const EMBEDDING_TOKEN_RATE: f64 = 0.0000001; // per input token
+const LINK_WRITE_RATE: f64 = 0.000000001; // per link write
+
+/// Atomically reserve (check-and-deduct) compute credits for a user.
+/// Returns Ok(()) if:
+/// - No user email in token (single-user mode, no billing)
+/// - User has free_access enabled
+/// - Credits were successfully reserved (atomic deduction)
+/// Returns Err if credits are insufficient or the DB operation fails.
+fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
+    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+        if !free {
+            Ad4mDb::with_global_instance(|db| db.deduct_user_credits_if_available(email, amount))
+                .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+        }
+    }
+    Ok(())
+}
+
+/// Read-only credit check. Returns Ok(()) if the user can afford compute.
+/// Used as a fast pre-check before expensive operations; the actual deduction
+/// happens after the operation via reserve_compute_credits with the exact cost.
+fn check_compute_credits(auth_token: &str) -> FieldResult<()> {
+    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+        if !free {
+            let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
+                .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+            if credits <= 0.0 {
+                return Err(FieldError::new(
+                    "Insufficient compute credits",
+                    graphql_value!(null),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 // Helper function to get perspective with access control
 async fn get_perspective_with_access_control(
     uuid: &str,
@@ -1887,17 +1931,22 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-
+        check_compute_credits(&context.auth_token)?;
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
-        Ok(perspective
+        let result = perspective
             .add_link(
                 link.into(),
                 link_status_from_input(status)?,
                 batch_id,
                 &agent_context,
             )
-            .await?)
+            .await?;
+
+        if let Err(e) = reserve_compute_credits(&context.auth_token, LINK_WRITE_RATE) {
+            log::warn!("Call exceeded compute credits (add_link): result returned but future calls will fail. Details: {:?}", e);
+        }
+        Ok(result)
     }
 
     async fn perspective_add_link_expression(
@@ -1912,11 +1961,17 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
+        check_compute_credits(&context.auth_token)?;
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let link = crate::types::LinkExpression::try_from(link)?;
-        Ok(perspective
+        let result = perspective
             .add_link_expression(link, link_status_from_input(status)?, batch_id)
-            .await?)
+            .await?;
+
+        if let Err(e) = reserve_compute_credits(&context.auth_token, LINK_WRITE_RATE) {
+            log::warn!("Call exceeded compute credits (add_link_expression): result returned but future calls will fail. Details: {:?}", e);
+        }
+        Ok(result)
     }
 
     async fn perspective_add_links(
@@ -1931,16 +1986,26 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
+        check_compute_credits(&context.auth_token)?;
+        let link_count = links.len();
+
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
-        Ok(perspective
+        let result = perspective
             .add_links(
                 links.into_iter().map(|l| l.into()).collect(),
                 link_status_from_input(status)?,
                 batch_id,
                 &agent_context,
             )
-            .await?)
+            .await?;
+
+        if let Err(e) =
+            reserve_compute_credits(&context.auth_token, link_count as f64 * LINK_WRITE_RATE)
+        {
+            log::warn!("Call exceeded compute credits (add_links, count={}): result returned but future calls will fail. Details: {:?}", link_count, e);
+        }
+        Ok(result)
     }
 
     async fn perspective_link_mutations(
@@ -1954,11 +2019,24 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
+        check_compute_credits(&context.auth_token)?;
+        // Only charge for additions, not removals
+        let additions_count = mutations.additions.len();
+
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
-        Ok(perspective
+        let result = perspective
             .link_mutations(mutations, link_status_from_input(status)?, &agent_context)
-            .await?)
+            .await?;
+
+        if let Err(e) = reserve_compute_credits(
+            &context.auth_token,
+            additions_count as f64 * LINK_WRITE_RATE,
+        ) {
+            log::warn!("Call exceeded compute credits (link_mutations, additions={}): result returned but future calls will fail. Details: {:?}", additions_count, e
+            );
+        }
+        Ok(result)
     }
 
     async fn perspective_publish_snapshot(
@@ -2791,10 +2869,21 @@ impl Mutation {
         prompt: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
-        Ok(AIService::global_instance()
+        check_compute_credits(&context.auth_token)?;
+
+        let result = AIService::global_instance()
             .await?
             .prompt(task_id, prompt)
-            .await?)
+            .await?;
+
+        let total_tokens = result.prompt_tokens + result.completion_tokens;
+        if let Err(e) =
+            reserve_compute_credits(&context.auth_token, total_tokens as f64 * TOKEN_RATE)
+        {
+            log::warn!("Call exceeded compute credits (ai_prompt, tokens={}): result returned but future calls will fail. Details: {:?}", total_tokens, e);
+        }
+
+        Ok(result.text)
     }
 
     async fn ai_embed(
@@ -2804,11 +2893,21 @@ impl Mutation {
         text: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
-        let vector = AIService::global_instance()
+        check_compute_credits(&context.auth_token)?;
+
+        let result = AIService::global_instance()
             .await?
             .embed(model_id, text)
             .await?;
-        let json_string = serde_json::to_string(&vector)
+
+        if let Err(e) = reserve_compute_credits(
+            &context.auth_token,
+            result.token_count as f64 * EMBEDDING_TOKEN_RATE,
+        ) {
+            log::warn!("Call exceeded compute credits (ai_embed, tokens={}): result returned but future calls will fail. Details: {:?}", result.token_count, e);
+        }
+
+        let json_string = serde_json::to_string(&result.embeddings)
             .map_err(|e| FieldError::from(format!("Failed to serialize vector: {}", e)))?;
 
         // Compress the JSON string using zlib compression
