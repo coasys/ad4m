@@ -203,6 +203,7 @@ export const sharedStyles = css`
     display: flex;
     flex-direction: column;
     gap: 30px;
+    padding: 2px;
   }
 
   .box {

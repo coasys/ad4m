@@ -79,6 +79,7 @@
   },
   "typedef": [ true, "call-signature", "arrow-call-signature" ],
   "ts-node": {
-    "files": true
+    "files": true,
+    "transpileOnly": true
   },
 }

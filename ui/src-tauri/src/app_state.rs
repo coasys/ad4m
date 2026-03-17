@@ -186,12 +186,82 @@ impl From<SmtpConfigDto> for SmtpConfig {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Clone)]
 pub struct HostRegistration {
     pub index_url: String,
     pub host_id: String,
-    pub auth_token: String,
+    pub auth_token: String, // Plain token in memory, encrypted on disk
     pub email: String,
+}
+
+impl fmt::Debug for HostRegistration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HostRegistration")
+            .field("index_url", &self.index_url)
+            .field("host_id", &self.host_id)
+            .field("auth_token", &"<redacted>")
+            .field("email", &self.email)
+            .finish()
+    }
+}
+
+impl Serialize for HostRegistration {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let encrypted = encrypt_password(&self.auth_token).map_err(|e| {
+            serde::ser::Error::custom(format!("Failed to encrypt auth_token: {}", e))
+        })?;
+
+        let mut state = serializer.serialize_struct("HostRegistration", 4)?;
+        state.serialize_field("index_url", &self.index_url)?;
+        state.serialize_field("host_id", &self.host_id)?;
+        state.serialize_field("auth_token", &encrypted)?;
+        state.serialize_field("email", &self.email)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for HostRegistration {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct HostRegistrationHelper {
+            index_url: String,
+            host_id: String,
+            auth_token: String,
+            email: String,
+        }
+
+        let helper = HostRegistrationHelper::deserialize(deserializer)?;
+
+        // Try to decrypt the auth_token.
+        // If decryption fails, assume it's plain text (backwards compatibility).
+        let plain_token = match decrypt_password(&helper.auth_token) {
+            Ok(decrypted) => decrypted,
+            Err(e) => {
+                log::warn!(
+                    "Host registration auth_token decryption failed for host_id '{}': {}. \
+                     Treating as plaintext for backwards compatibility migration.",
+                    helper.host_id,
+                    e
+                );
+                helper.auth_token
+            }
+        };
+
+        Ok(HostRegistration {
+            index_url: helper.index_url,
+            host_id: helper.host_id,
+            auth_token: plain_token,
+            email: helper.email,
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

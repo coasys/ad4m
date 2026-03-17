@@ -1,6 +1,7 @@
 extern crate remove_dir_all;
 use crate::app_state::{
-    AgentConfigDir, HostRegistration, LauncherState, MultiUserConfig, SmtpConfig, SmtpConfigDto, TlsConfig,
+    AgentConfigDir, HostRegistration, LauncherState, MultiUserConfig, SmtpConfig, SmtpConfigDto,
+    TlsConfig,
 };
 use crate::util::create_tray_message_windows;
 use crate::{config::data_path, get_main_window};
