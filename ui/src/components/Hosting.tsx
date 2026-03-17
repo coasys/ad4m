@@ -123,6 +123,14 @@ const Hosting = () => {
     }
   };
 
+  // Helper to get full profile pic URL (handle relative paths)
+  const getProfilePicUrl = (url: string | undefined) => {
+    if (!url) return null;
+    if (url.startsWith("http")) return url;
+    // Prepend the hosting index URL for relative paths like /uploads/...
+    return `${hostSession?.indexUrl || hostReg.indexUrl}${url}`;
+  };
+
   // Returns "verified", "unverified", or "expired" (token invalid)
   const fetchHostData = async (session: {
     indexUrl: string;
@@ -1246,7 +1254,7 @@ const Hosting = () => {
                     {hostData?.profilePicUrl && !profilePic ? (
                       <div style={{ position: "relative" as const }}>
                         <img
-                          src={hostData.profilePicUrl}
+                          src={getProfilePicUrl(hostData.profilePicUrl)!}
                           alt=""
                           style={{
                             width: "72px",
