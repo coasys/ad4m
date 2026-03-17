@@ -14,6 +14,7 @@ type HostSession = {
 } | null;
 
 type RegStep = "credentials" | "verify" | "logged-in";
+type MembraneProofStatus = "none" | "fetching" | "done" | "error";
 
 const Hosting = () => {
   const {
@@ -50,6 +51,8 @@ const Hosting = () => {
   const [hostRegistering, setHostRegistering] = useState(false);
   const [profilePic, setProfilePic] = useState<File | null>(null);
   const [verificationCode, setVerificationCode] = useState("");
+  const [membraneProofStatus, setMembraneProofStatus] = useState<MembraneProofStatus>("none");
+  const [membraneProofError, setMembraneProofError] = useState<string | null>(null);
 
   // ---- SMTP state ----
   const [smtpConfig, setSmtpConfig] = useState<{
@@ -127,6 +130,72 @@ const Hosting = () => {
     return false;
   };
 
+  const fetchMembraneProof = async (session: { indexUrl: string; hostId: string; authToken: string }) => {
+    if (!client) return;
+
+    // Skip if we already have the proof or DNA is installed
+    try {
+      const vi = await client.runtime.unytVersionInfo();
+      if (vi) {
+        const info = JSON.parse(vi);
+        if (info.installed) {
+          console.log("Unyt DNA already installed, skipping membrane proof fetch");
+          setMembraneProofStatus("done");
+          return;
+        }
+      }
+    } catch {
+      // Not installed yet, proceed
+    }
+
+    setMembraneProofStatus("fetching");
+    setMembraneProofError(null);
+    try {
+      // 1. Get or create the Holochain agent key for the Unyt DNA
+      const agentKey = await client.runtime.unytAgentKey();
+      console.log("Unyt agent key:", agentKey);
+
+      // 2. Request membrane proof from the hosting index API
+      const res = await fetch(`${session.indexUrl}/hosts/${session.hostId}/request-membrane-proof`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.authToken}`,
+        },
+        body: JSON.stringify({ agent_key: agentKey }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(data.error || `Failed to get membrane proof (${res.status})`);
+      }
+
+      const data = await res.json();
+      const proofs: Record<string, string> = data.membrane_proofs || {};
+      const proofKeys = Object.keys(proofs);
+
+      if (proofKeys.length === 0) {
+        throw new Error("No membrane proofs returned from joining service");
+      }
+
+      // 3. Store the first membrane proof (there's typically one role)
+      const proof = proofs[proofKeys[0]];
+      console.log("Got membrane proof for role:", proofKeys[0], "length:", proof.length);
+      const result = await client.runtime.unytSetMembraneProof(proof);
+
+      if (!result.success) {
+        throw new Error(result.message || "Failed to store membrane proof");
+      }
+
+      console.log("Membrane proof stored, Unyt DNA will be installed automatically");
+      setMembraneProofStatus("done");
+    } catch (e: any) {
+      console.error("Failed to fetch membrane proof:", e);
+      setMembraneProofError(e.message || "Unknown error");
+      setMembraneProofStatus("error");
+    }
+  };
+
   // ---- Registration flow ----
 
   const handleRegister = async () => {
@@ -196,10 +265,12 @@ const Hosting = () => {
       const data = await res.json();
 
       if (res.ok) {
-        setHostRegStatus({ type: "success", message: "Email verified!" });
+        setHostRegStatus({ type: "success", message: "Email verified! Fetching auth material..." });
         if (hostSession) {
           await fetchHostData(hostSession);
           setRegStep("logged-in");
+          // Automatically fetch membrane proof after verification
+          fetchMembraneProof(hostSession);
         } else {
           // Fallback: login if session was lost
           await handleLogin();
@@ -278,6 +349,10 @@ const Hosting = () => {
         if (verified) {
           setRegStep("logged-in");
           setHostRegStatus({ type: "success", message: "Logged in successfully." });
+          // Automatically fetch membrane proof if not already done
+          if (membraneProofStatus !== "done") {
+            fetchMembraneProof(session);
+          }
         } else {
           setRegStep("verify");
           setHostRegStatus({ type: "info", message: "Email not yet verified. Check your inbox or resend the code." });
@@ -513,6 +588,10 @@ const Hosting = () => {
           setHostReg((prev) => ({ ...prev, indexUrl: session.indexUrl, email: session.email }));
           const verified = await fetchHostData(session);
           setRegStep(verified ? "logged-in" : "verify");
+          // If verified but membrane proof might be missing, try to fetch it
+          if (verified) {
+            fetchMembraneProof(session);
+          }
         }
       } catch (e) {
         console.log("Failed to load host registration:", e);
@@ -823,6 +902,41 @@ const Hosting = () => {
           {/* Step 3: Logged in — host profile fields */}
           {regStep === "logged-in" && hostSession && (
             <>
+              {/* Membrane proof / Unyt DNA status */}
+              {membraneProofStatus === "fetching" && (
+                <j-box px="500" my="400">
+                  <j-box p="400" style={{ backgroundColor: "#e7f3ff", borderRadius: "8px", border: "1px solid #2196f3" }}>
+                    <j-flex a="center" gap="300">
+                      <j-spinner size="sm"></j-spinner>
+                      <j-text size="500">Fetching Unyt DHT auth material...</j-text>
+                    </j-flex>
+                  </j-box>
+                </j-box>
+              )}
+              {membraneProofStatus === "done" && (
+                <j-box px="500" my="400">
+                  <j-box p="400" style={{ backgroundColor: "#e8f5e9", borderRadius: "8px", border: "1px solid #4caf50" }}>
+                    <j-flex a="center" gap="300">
+                      <j-icon name="check-circle" color="success"></j-icon>
+                      <j-text size="500">Unyt DHT auth material received. DNA will be installed automatically.</j-text>
+                    </j-flex>
+                  </j-box>
+                </j-box>
+              )}
+              {membraneProofStatus === "error" && (
+                <j-box px="500" my="400">
+                  <j-box p="400" style={{ backgroundColor: "#ffebee", borderRadius: "8px", border: "1px solid #f44336" }}>
+                    <j-flex a="center" gap="300" wrap="wrap">
+                      <j-icon name="x-circle" color="danger"></j-icon>
+                      <j-text size="500">Failed to fetch auth material: {membraneProofError}</j-text>
+                      <j-button size="sm" variant="subtle" onClick={() => fetchMembraneProof(hostSession)}>
+                        Retry
+                      </j-button>
+                    </j-flex>
+                  </j-box>
+                </j-box>
+              )}
+
               <j-box px="500" my="400">
                 <j-box mb="200"><j-text size="500" weight="500">Host Name</j-text></j-box>
                 <j-input value={hostReg.name} onInput={(e: any) => handleHostRegChange("name", e.target.value)} placeholder="My AD4M Host" />
