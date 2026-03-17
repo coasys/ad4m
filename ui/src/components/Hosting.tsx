@@ -124,6 +124,13 @@ const Hosting = () => {
         }));
         return !!mine.emailVerified;
       }
+      if (res.status === 401) {
+        console.warn("Host session token expired or invalid, clearing session");
+        setHostSession(null);
+        saveSession(null);
+        setRegStep("credentials");
+        return false;
+      }
     } catch (e) {
       console.log("Failed to fetch host data:", e);
     }
