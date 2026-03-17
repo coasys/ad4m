@@ -34,10 +34,18 @@ use base64::prelude::*;
 // Use the shared can_access_perspective function from query_resolvers
 use super::query_resolvers::can_access_perspective;
 
-// Pricing constants for compute billing (initial values, can tune later)
-const TOKEN_RATE: f64 = 0.000002; // per token (prompt + completion)
-const EMBEDDING_TOKEN_RATE: f64 = 0.0000001; // per input token
-const LINK_WRITE_RATE: f64 = 0.000000001; // per link write
+// Default pricing in HOT (used when no rate is configured in the DB)
+const DEFAULT_TOKEN_RATE: f64 = 12.5;   // per token (prompt + completion)
+const DEFAULT_EMBEDDING_TOKEN_RATE: f64 = 1.0; // per input token
+const DEFAULT_LINK_WRITE_RATE: f64 = 0.25; // per link write
+
+/// Look up a rate from the host_rates DB table, falling back to the given default.
+fn get_rate(description: &str, default: f64) -> f64 {
+    Ad4mDb::with_global_instance(|db| db.get_host_rate(description))
+        .ok()
+        .flatten()
+        .unwrap_or(default)
+}
 
 /// Atomically reserve (check-and-deduct) compute credits for a user.
 /// Returns Ok(()) if:
@@ -1943,7 +1951,7 @@ impl Mutation {
             )
             .await?;
 
-        if let Err(e) = reserve_compute_credits(&context.auth_token, LINK_WRITE_RATE) {
+        if let Err(e) = reserve_compute_credits(&context.auth_token, get_rate("link write", DEFAULT_LINK_WRITE_RATE)) {
             log::warn!("Call exceeded compute credits (add_link): result returned but future calls will fail. Details: {:?}", e);
         }
         Ok(result)
@@ -1968,7 +1976,7 @@ impl Mutation {
             .add_link_expression(link, link_status_from_input(status)?, batch_id)
             .await?;
 
-        if let Err(e) = reserve_compute_credits(&context.auth_token, LINK_WRITE_RATE) {
+        if let Err(e) = reserve_compute_credits(&context.auth_token, get_rate("link write", DEFAULT_LINK_WRITE_RATE)) {
             log::warn!("Call exceeded compute credits (add_link_expression): result returned but future calls will fail. Details: {:?}", e);
         }
         Ok(result)
@@ -2001,7 +2009,7 @@ impl Mutation {
             .await?;
 
         if let Err(e) =
-            reserve_compute_credits(&context.auth_token, link_count as f64 * LINK_WRITE_RATE)
+            reserve_compute_credits(&context.auth_token, link_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE))
         {
             log::warn!("Call exceeded compute credits (add_links, count={}): result returned but future calls will fail. Details: {:?}", link_count, e);
         }
@@ -2031,7 +2039,7 @@ impl Mutation {
 
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
-            additions_count as f64 * LINK_WRITE_RATE,
+            additions_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE),
         ) {
             log::warn!("Call exceeded compute credits (link_mutations, additions={}): result returned but future calls will fail. Details: {:?}", additions_count, e
             );
@@ -2878,7 +2886,7 @@ impl Mutation {
 
         let total_tokens = result.prompt_tokens + result.completion_tokens;
         if let Err(e) =
-            reserve_compute_credits(&context.auth_token, total_tokens as f64 * TOKEN_RATE)
+            reserve_compute_credits(&context.auth_token, total_tokens as f64 * get_rate("per token", DEFAULT_TOKEN_RATE))
         {
             log::warn!("Call exceeded compute credits (ai_prompt, tokens={}): result returned but future calls will fail. Details: {:?}", total_tokens, e);
         }
@@ -2902,7 +2910,7 @@ impl Mutation {
 
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
-            result.token_count as f64 * EMBEDDING_TOKEN_RATE,
+            result.token_count as f64 * get_rate("embedding per token", DEFAULT_EMBEDDING_TOKEN_RATE),
         ) {
             log::warn!("Call exceeded compute credits (ai_embed, tokens={}): result returned but future calls will fail. Details: {:?}", result.token_count, e);
         }
