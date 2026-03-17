@@ -959,78 +959,80 @@ const Hosting = () => {
                 background: "var(--j-color-ui-50)",
               }}
             >
-              <Wallet />
+              <Wallet key="wallet" />
             </div>
           </j-box>
 
           {/* ===== UNYT DNA (Expandable) ===== */}
           {false && (
-          <ExpandableSection
-            title="Unyt DNA"
-            expanded={unytExpanded}
-            onToggle={() => setUnytExpanded(!unytExpanded)}
-            badge={
-              membraneProofStatus === "done" ? (
-                <j-badge variant="success">Connected</j-badge>
-              ) : membraneProofStatus === "error" ? (
-                <j-badge variant="danger">Error</j-badge>
-              ) : undefined
-            }
-          >
-            <j-box mb="300">
-              <j-text size="400" color="ui-500">
-                Required for receiving mHOT payments. The Unyt DNA enables your
-                AD4M instance to join the payment network.
-              </j-text>
-            </j-box>
-            {membraneProofStatus === "fetching" && (
-              <j-flex a="center" gap="300">
-                <j-spinner size="sm"></j-spinner>
-                <j-text size="400">Fetching auth material...</j-text>
-              </j-flex>
-            )}
-            {membraneProofStatus === "done" && (
-              <j-flex a="center" gap="300">
-                <j-icon name="check-circle" color="success"></j-icon>
-                <j-text size="400">Connected to Unyt DHT</j-text>
-                <j-button
-                  size="sm"
-                  variant="subtle"
-                  onClick={() => fetchMembraneProof(hostSession!)}
-                >
-                  Re-fetch
-                </j-button>
-              </j-flex>
-            )}
-            {membraneProofStatus === "error" && (
-              <j-flex a="center" gap="300" wrap="wrap">
-                <j-icon name="x-circle" color="danger"></j-icon>
-                <j-text size="400" color="danger">
-                  {membraneProofError || "Failed to connect"}
+            <ExpandableSection
+              title="Unyt DNA"
+              expanded={unytExpanded}
+              onToggle={() => setUnytExpanded(!unytExpanded)}
+              badge={
+                membraneProofStatus === "done" ? (
+                  <j-badge variant="success">Connected</j-badge>
+                ) : membraneProofStatus === "error" ? (
+                  <j-badge variant="danger">Error</j-badge>
+                ) : undefined
+              }
+            >
+              <j-box mb="300">
+                <j-text size="400" color="ui-500">
+                  Required for receiving mHOT payments. The Unyt DNA enables
+                  your AD4M instance to join the payment network.
                 </j-text>
+              </j-box>
+              {membraneProofStatus === "fetching" && (
+                <j-flex a="center" gap="300">
+                  <j-spinner size="sm"></j-spinner>
+                  <j-text size="400">Fetching auth material...</j-text>
+                </j-flex>
+              )}
+              {membraneProofStatus === "done" && (
+                <j-flex a="center" gap="300">
+                  <j-icon name="check-circle" color="success"></j-icon>
+                  <j-text size="400">Connected to Unyt DHT</j-text>
+                  <j-button
+                    size="sm"
+                    variant="subtle"
+                    onClick={() => fetchMembraneProof(hostSession!)}
+                  >
+                    Re-fetch
+                  </j-button>
+                </j-flex>
+              )}
+              {membraneProofStatus === "error" && (
+                <j-flex a="center" gap="300" wrap="wrap">
+                  <j-icon name="x-circle" color="danger"></j-icon>
+                  <j-text size="400" color="danger">
+                    {membraneProofError || "Failed to connect"}
+                  </j-text>
+                  <j-button
+                    size="sm"
+                    variant="primary"
+                    onClick={() =>
+                      hostSession && fetchMembraneProof(hostSession)
+                    }
+                  >
+                    Retry
+                  </j-button>
+                </j-flex>
+              )}
+              {membraneProofStatus === "none" && hostSession && (
                 <j-button
-                  size="sm"
                   variant="primary"
-                  onClick={() => hostSession && fetchMembraneProof(hostSession)}
+                  onClick={() => fetchMembraneProof(hostSession)}
                 >
-                  Retry
+                  Connect
                 </j-button>
-              </j-flex>
-            )}
-            {membraneProofStatus === "none" && hostSession && (
-              <j-button
-                variant="primary"
-                onClick={() => fetchMembraneProof(hostSession)}
-              >
-                Connect
-              </j-button>
-            )}
-            {!hostSession && (
-              <j-text size="400" color="ui-400">
-                Log in to hosting profile to connect
-              </j-text>
-            )}
-          </ExpandableSection>
+              )}
+              {!hostSession && (
+                <j-text size="400" color="ui-400">
+                  Log in to hosting profile to connect
+                </j-text>
+              )}
+            </ExpandableSection>
           )}
 
           {/* ===== TABS ===== */}

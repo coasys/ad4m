@@ -14,7 +14,11 @@ const Wallet = () => {
   const [error, setError] = useState<string | null>(null);
 
   // Version info
-  const [versionInfo, setVersionInfo] = useState<{ installed: string | null; bundled: string; needsUpdate: boolean } | null>(null);
+  const [versionInfo, setVersionInfo] = useState<{
+    installed: string | null;
+    bundled: string;
+    needsUpdate: boolean;
+  } | null>(null);
   const [reinstalling, setReinstalling] = useState(false);
 
   // Send form
@@ -103,7 +107,10 @@ const Wallet = () => {
     setSendLoading(true);
     setSendResult(null);
     try {
-      const result = await client.runtime.unytSendHot(sendRecipient, sendAmount);
+      const result = await client.runtime.unytSendHot(
+        sendRecipient,
+        sendAmount,
+      );
       setSendResult(result?.message || "Unknown result");
       if (result?.success) {
         setSendRecipient("");
@@ -138,30 +145,37 @@ const Wallet = () => {
     navigator.clipboard.writeText(text).catch(() => {});
   };
 
-  if (loading) {
-    return (
-      <j-box px="500" py="500">
-        <j-text size="500" color="ui-500">Loading wallet...</j-text>
-      </j-box>
-    );
-  }
-
+  // Always render the structure, just show loading state inline
   return (
     <div>
       {error && (
         <j-box px="500" py="300">
-          <j-text size="400" color="danger-500">{error}</j-text>
+          <j-text size="400" color="danger-500">
+            {error}
+          </j-text>
         </j-box>
       )}
 
       {/* Header */}
-
-      <j-box px="500" my="300" pt="100" style={{ borderTop: "1px solid var(--j-color-ui-200)" }}>
+      <j-box
+        px="500"
+        my="300"
+        pt="100"
+        style={{ borderTop: "1px solid var(--j-color-ui-200)" }}
+      >
         <j-flex a="center" j="between">
-          <j-text size="800" weight="600" color="black">
-            Earnings
-          </j-text>
-          <j-button size="sm" variant="subtle" onClick={fetchWalletData}>
+          <j-flex a="center" gap="300">
+            <j-text size="800" weight="600" color="black">
+              Earnings
+            </j-text>
+            {loading && <j-spinner size="sm"></j-spinner>}
+          </j-flex>
+          <j-button
+            size="sm"
+            variant="subtle"
+            onClick={fetchWalletData}
+            disabled={loading}
+          >
             Refresh
           </j-button>
         </j-flex>
@@ -171,11 +185,20 @@ const Wallet = () => {
       {agentPubkey && (
         <j-box px="500" my="300">
           <j-flex a="center" gap="200">
-          <j-text size="400" weight="500" color="ui-500">Your address:</j-text>
-            <j-text size="400" style={{ fontFamily: "monospace", wordBreak: "break-all" }}>
+            <j-text size="400" weight="500" color="ui-500">
+              Your address:
+            </j-text>
+            <j-text
+              size="400"
+              style={{ fontFamily: "monospace", wordBreak: "break-all" }}
+            >
               {agentPubkey}
             </j-text>
-            <j-button size="xs" variant="subtle" onClick={() => copyToClipboard(agentPubkey)}>
+            <j-button
+              size="xs"
+              variant="subtle"
+              onClick={() => copyToClipboard(agentPubkey)}
+            >
               Copy
             </j-button>
           </j-flex>
@@ -186,15 +209,30 @@ const Wallet = () => {
         <j-box px="500" my="300">
           <j-flex a="center" gap="300">
             <j-text size="400" color="ui-500">
-              DNA: v{versionInfo.installed || "unknown"} {versionInfo.needsUpdate ? `→ v${versionInfo.bundled} available` : "(up to date)"}
+              DNA: v{versionInfo.installed || "unknown"}{" "}
+              {versionInfo.needsUpdate
+                ? `→ v${versionInfo.bundled} available`
+                : "(up to date)"}
             </j-text>
             {versionInfo.needsUpdate && (
-              <j-button size="xs" variant="primary" onClick={handleReinstall} loading={reinstalling} disabled={reinstalling}>
+              <j-button
+                size="xs"
+                variant="primary"
+                onClick={handleReinstall}
+                loading={reinstalling}
+                disabled={reinstalling}
+              >
                 Reinstall
               </j-button>
             )}
             {!versionInfo.needsUpdate && (
-              <j-button size="xs" variant="subtle" onClick={handleReinstall} loading={reinstalling} disabled={reinstalling}>
+              <j-button
+                size="xs"
+                variant="subtle"
+                onClick={handleReinstall}
+                loading={reinstalling}
+                disabled={reinstalling}
+              >
                 Reinstall
               </j-button>
             )}
@@ -206,35 +244,47 @@ const Wallet = () => {
       <j-box px="500" my="200">
         <j-box mt="200">
           <j-flex a="center" gap="200">
-          <j-text size="400" weight="500" color="ui-500">Balance</j-text>
-          {Object.entries(balance).length > 0 ? (
-            Object.entries(balance).map(([unit, amount]) => (
-              <j-text key={unit} size="700" weight="700" color="black">
-                {amount} {unit === "0" ? "mHOT" : `Unit ${unit}`}
+            <j-text size="400" weight="500" color="ui-500">
+              Balance
+            </j-text>
+            {loading ? (
+              <j-spinner size="sm"></j-spinner>
+            ) : Object.entries(balance).length > 0 ? (
+              Object.entries(balance).map(([unit, amount]) => (
+                <j-text key={unit} size="700" weight="700" color="black">
+                  {amount} {unit === "0" ? "mHOT" : `Unit ${unit}`}
+                </j-text>
+              ))
+            ) : (
+              <j-text size="500" color="ui-400">
+                No balance data
               </j-text>
-            ))
-          ) : (
-            <j-text size="500" color="ui-400">No balance data</j-text>
-          )}
+            )}
           </j-flex>
         </j-box>
       </j-box>
-    
+
       {/* Send Form */}
-      <j-box px="500" my="400" >
-        <j-text size="500" weight="600" color="black">Withdraw</j-text>
+      <j-box px="500" my="400">
+        <j-text size="500" weight="600" color="black">
+          Withdraw
+        </j-text>
         <j-box mb="200">
-            <j-text size="400" weight="500">Amount (HOT)</j-text>
-          </j-box>
+          <j-text size="400" weight="500">
+            Amount (HOT)
+          </j-text>
+        </j-box>
         <j-flex a="center" gap="200">
           <j-input
-              value={sendAmount}
-              onInput={(e: any) => setSendAmount(e.target.value)}
-              placeholder="100"
-              type="number"
-            />
-          
-          <j-text size="400" weight="500">To:</j-text>
+            value={sendAmount}
+            onInput={(e: any) => setSendAmount(e.target.value)}
+            placeholder="100"
+            type="number"
+          />
+
+          <j-text size="400" weight="500">
+            To:
+          </j-text>
           <j-input
             value={sendRecipient}
             onInput={(e: any) => setSendRecipient(e.target.value)}
@@ -252,7 +302,12 @@ const Wallet = () => {
 
         {sendResult && (
           <j-box mt="200">
-            <j-text size="400" color={sendResult.startsWith("Error") ? "danger-500" : "success-500"}>
+            <j-text
+              size="400"
+              color={
+                sendResult.startsWith("Error") ? "danger-500" : "success-500"
+              }
+            >
               {sendResult}
             </j-text>
           </j-box>
@@ -261,11 +316,17 @@ const Wallet = () => {
 
       {/* Transaction History */}
       <j-box px="500" my="400">
-        <j-text size="500" weight="600" color="black">Transaction History</j-text>
+        <j-text size="500" weight="600" color="black">
+          Transaction History
+        </j-text>
         <j-box mt="300">
           {Array.isArray(history) && history.length > 0 ? (
             history.map((tx: any, i: number) => (
-              <j-box key={i} py="200" style={{ borderBottom: "1px solid var(--j-color-ui-100)" }}>
+              <j-box
+                key={i}
+                py="200"
+                style={{ borderBottom: "1px solid var(--j-color-ui-100)" }}
+              >
                 <j-flex j="between" a="center">
                   <j-text size="400" weight="500">
                     {tx.tx_type || "Transaction"}
@@ -275,14 +336,22 @@ const Wallet = () => {
                   </j-text>
                 </j-flex>
                 {tx.counterparty && (
-                  <j-text size="300" color="ui-400" style={{ fontFamily: "monospace" }}>
-                    {Array.isArray(tx.counterparty) ? tx.counterparty[0]?.substring(0, 20) + "..." : ""}
+                  <j-text
+                    size="300"
+                    color="ui-400"
+                    style={{ fontFamily: "monospace" }}
+                  >
+                    {Array.isArray(tx.counterparty)
+                      ? tx.counterparty[0]?.substring(0, 20) + "..."
+                      : ""}
                   </j-text>
                 )}
               </j-box>
             ))
           ) : (
-            <j-text size="400" color="ui-400">No transactions yet</j-text>
+            <j-text size="400" color="ui-400">
+              No transactions yet
+            </j-text>
           )}
         </j-box>
       </j-box>
