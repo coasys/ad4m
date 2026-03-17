@@ -333,10 +333,13 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private async handleSetWalletAddress(e: CustomEvent) {
-    // In a real implementation, this would call a core method to persist the wallet address
-    // For now, update userInfo locally
-    if (this.userInfo) {
-      this.userInfo = { ...this.userInfo, hotWalletAddress: e.detail.address };
+    try {
+      await this.core.ad4mClient!.agent.setHotWalletAddress(e.detail.address);
+      if (this.userInfo) {
+        this.userInfo = { ...this.userInfo, hotWalletAddress: e.detail.address };
+      }
+    } catch (error) {
+      console.error('[Ad4m Connect] Failed to set wallet address:', error);
     }
   }
 
