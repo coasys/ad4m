@@ -469,8 +469,11 @@ jobs:
         node-version: 24.x
         cache: 'pnpm'
 
-    - name: Install protobuf compiler
-      run: choco install protoc -y
+    - name: Install protobuf compiler and NASM
+      run: |
+        choco install protoc -y
+        choco install nasm -y
+        echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
     - name: Extract version
       id: extract_version

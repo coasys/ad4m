@@ -76,6 +76,7 @@ dependencies = [
  "ad4m-client",
  "anyhow",
  "argon2",
+ "aws-lc-sys",
  "axum 0.8.4",
  "base64 0.21.7",
  "candle-core",
