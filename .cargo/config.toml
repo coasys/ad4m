@@ -20,6 +20,15 @@ AWS_LC_SYS_PREBUILT_NASM = "1"
 # env vars. Only used when building with --features cuda.
 CUDA_COMPUTE_CAP = "80"
 
+# macOS ARM64: use ld_classic linker to generate branch island stubs.
+# The binary exceeds ARM64's ±128MB B/BL limit (V8 + ONNX = ~140MB).
+# ld_classic automatically inserts branch islands for long-range branches.
+# Available on Xcode 15.x (macos-14 CI runner default is 15.4).
+# This MUST be in config.toml (not RUSTFLAGS env var) because turborepo
+# strips env vars before they reach cargo.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-ld_classic"]
+
 [net]
 # Use system git instead of cargo's built-in libgit2.
 # Required because coasys/deno.git has heavy chromium submodules
