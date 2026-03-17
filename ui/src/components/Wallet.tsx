@@ -155,10 +155,11 @@ const Wallet = () => {
       )}
 
       {/* Header */}
-      <j-box px="500" my="500" pt="500" style={{ borderTop: "1px solid var(--j-color-ui-200)" }}>
+
+      <j-box px="500" my="300" pt="100" style={{ borderTop: "1px solid var(--j-color-ui-200)" }}>
         <j-flex a="center" j="between">
-          <j-text size="600" weight="600" color="black">
-            mHOT Wallet
+          <j-text size="800" weight="600" color="black">
+            Earnings
           </j-text>
           <j-button size="sm" variant="subtle" onClick={fetchWalletData}>
             Refresh
@@ -166,8 +167,22 @@ const Wallet = () => {
         </j-flex>
       </j-box>
 
+      {/* Agent Pubkey */}
+      {agentPubkey && (
+        <j-box px="500" my="300">
+          <j-flex a="center" gap="200">
+          <j-text size="400" weight="500" color="ui-500">Your address:</j-text>
+            <j-text size="400" style={{ fontFamily: "monospace", wordBreak: "break-all" }}>
+              {agentPubkey}
+            </j-text>
+            <j-button size="xs" variant="subtle" onClick={() => copyToClipboard(agentPubkey)}>
+              Copy
+            </j-button>
+          </j-flex>
+        </j-box>
+      )}
       {/* Version Info & Reinstall */}
-      {versionInfo && (
+      {false && versionInfo && (
         <j-box px="500" my="300">
           <j-flex a="center" gap="300">
             <j-text size="400" color="ui-500">
@@ -187,25 +202,11 @@ const Wallet = () => {
         </j-box>
       )}
 
-      {/* Agent Pubkey */}
-      {agentPubkey && (
-        <j-box px="500" my="300">
-          <j-text size="400" weight="500" color="ui-500">Your mHOT Agent Key</j-text>
-          <j-flex a="center" gap="200">
-            <j-text size="400" style={{ fontFamily: "monospace", wordBreak: "break-all" }}>
-              {agentPubkey}
-            </j-text>
-            <j-button size="xs" variant="subtle" onClick={() => copyToClipboard(agentPubkey)}>
-              Copy
-            </j-button>
-          </j-flex>
-        </j-box>
-      )}
-
       {/* Balance */}
-      <j-box px="500" my="400">
-        <j-text size="400" weight="500" color="ui-500">Balance</j-text>
+      <j-box px="500" my="200">
         <j-box mt="200">
+          <j-flex a="center" gap="200">
+          <j-text size="400" weight="500" color="ui-500">Balance</j-text>
           {Object.entries(balance).length > 0 ? (
             Object.entries(balance).map(([unit, amount]) => (
               <j-text key={unit} size="700" weight="700" color="black">
@@ -215,34 +216,30 @@ const Wallet = () => {
           ) : (
             <j-text size="500" color="ui-400">No balance data</j-text>
           )}
+          </j-flex>
         </j-box>
       </j-box>
-
+    
       {/* Send Form */}
-      <j-box px="500" my="400" style={cardStyle}>
-        <j-text size="500" weight="600" color="black">Send mHOT</j-text>
-        <j-box mt="300">
-          <j-box mb="200">
-            <j-text size="400" weight="500">Recipient Agent Key</j-text>
+      <j-box px="500" my="400" >
+        <j-text size="500" weight="600" color="black">Withdraw</j-text>
+        <j-box mb="200">
+            <j-text size="400" weight="500">Amount (HOT)</j-text>
           </j-box>
+        <j-flex a="center" gap="200">
+          <j-input
+              value={sendAmount}
+              onInput={(e: any) => setSendAmount(e.target.value)}
+              placeholder="100"
+              type="number"
+            />
+          
+          <j-text size="400" weight="500">To:</j-text>
           <j-input
             value={sendRecipient}
             onInput={(e: any) => setSendRecipient(e.target.value)}
             placeholder="uhCAk..."
           />
-        </j-box>
-        <j-box mt="300">
-          <j-box mb="200">
-            <j-text size="400" weight="500">Amount (HOT)</j-text>
-          </j-box>
-          <j-input
-            value={sendAmount}
-            onInput={(e: any) => setSendAmount(e.target.value)}
-            placeholder="100"
-            type="number"
-          />
-        </j-box>
-        <j-box mt="300">
           <j-button
             variant="primary"
             onClick={handleSend}
@@ -251,7 +248,8 @@ const Wallet = () => {
           >
             Send
           </j-button>
-        </j-box>
+        </j-flex>
+
         {sendResult && (
           <j-box mt="200">
             <j-text size="400" color={sendResult.startsWith("Error") ? "danger-500" : "success-500"}>

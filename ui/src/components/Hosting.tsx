@@ -90,6 +90,13 @@ const Hosting = () => {
   const [certPathError, setCertPathError] = useState("");
   const [keyPathError, setKeyPathError] = useState("");
 
+  // ---- UI state ----
+  const [activeTab, setActiveTab] = useState<"users" | "settings">("settings");
+  const [unytExpanded, setUnytExpanded] = useState(false);
+  const [hostingProfileExpanded, setHostingProfileExpanded] = useState(true);
+  const [tlsExpanded, setTlsExpanded] = useState(false);
+  const [smtpExpanded, setSmtpExpanded] = useState(false);
+
   // ---- Helpers ----
 
   const handleHostRegChange = (field: string, value: string) => {
@@ -816,8 +823,9 @@ const Hosting = () => {
     loadSmtpConfig();
   }, []);
 
-  // ---- Status message component ----
+  // ==== RENDER ====
 
+  // Status message component
   const StatusMessage = () => {
     if (!hostRegStatus) return null;
     const bg =
@@ -863,7 +871,53 @@ const Hosting = () => {
     );
   };
 
-  // ==== RENDER ====
+  // Expandable section helper
+  const ExpandableSection = ({
+    title,
+    expanded,
+    onToggle,
+    children,
+    badge,
+  }: {
+    title: string;
+    expanded: boolean;
+    onToggle: () => void;
+    children: React.ReactNode;
+    badge?: React.ReactNode;
+  }) => (
+    <j-box
+      my="300"
+      style={{
+        border: "1px solid var(--j-color-ui-200)",
+        borderRadius: "8px",
+        overflow: "hidden",
+      }}
+    >
+      <j-flex
+        a="center"
+        j="between"
+        p="400"
+        style={{
+          background: "var(--j-color-ui-50)",
+          cursor: "pointer",
+          borderBottom: expanded ? "1px solid var(--j-color-ui-200)" : "none",
+        }}
+        onClick={onToggle}
+      >
+        <j-flex a="center" gap="300">
+          <j-icon
+            name={expanded ? "chevron-down" : "chevron-right"}
+            size="sm"
+          ></j-icon>
+          <j-text size="500" weight="600">
+            {title}
+          </j-text>
+          {badge}
+        </j-flex>
+      </j-flex>
+      {expanded && <j-box p="400">{children}</j-box>}
+    </j-box>
+  );
 
   return (
     <div>
@@ -895,1263 +949,1016 @@ const Hosting = () => {
 
       {multiUserEnabled && (
         <>
-          {/* ===== USERS SECTION ===== */}
-          <j-box
-            px="500"
-            my="500"
-            pt="500"
-            style={{ borderTop: "1px solid var(--j-color-ui-200)" }}
-          >
-            <j-flex a="center" j="between">
-              <j-text size="600" weight="600" color="black">
-                Users
-              </j-text>
-              <j-button size="sm" variant="subtle" onClick={getUsers}>
-                Refresh
-              </j-button>
-            </j-flex>
+          {/* ===== WALLET (Simple Framed) ===== */}
+          <j-box px="500" my="100">
+            <div
+              style={{
+                border: "1px solid var(--j-color-ui-200)",
+                borderRadius: "12px",
+                padding: "10px",
+                background: "var(--j-color-ui-50)",
+              }}
+            >
+              <Wallet />
+            </div>
           </j-box>
 
-          {usersLoading ? (
-            <j-box px="500" py="300">
-              <j-flex gap="300" a="center">
+          {/* ===== UNYT DNA (Expandable) ===== */}
+          {false && (
+          <ExpandableSection
+            title="Unyt DNA"
+            expanded={unytExpanded}
+            onToggle={() => setUnytExpanded(!unytExpanded)}
+            badge={
+              membraneProofStatus === "done" ? (
+                <j-badge variant="success">Connected</j-badge>
+              ) : membraneProofStatus === "error" ? (
+                <j-badge variant="danger">Error</j-badge>
+              ) : undefined
+            }
+          >
+            <j-box mb="300">
+              <j-text size="400" color="ui-500">
+                Required for receiving mHOT payments. The Unyt DNA enables your
+                AD4M instance to join the payment network.
+              </j-text>
+            </j-box>
+            {membraneProofStatus === "fetching" && (
+              <j-flex a="center" gap="300">
                 <j-spinner size="sm"></j-spinner>
-                <j-text color="ui-500">Loading users...</j-text>
+                <j-text size="400">Fetching auth material...</j-text>
               </j-flex>
-            </j-box>
-          ) : users.length === 0 ? (
-            <j-box px="500" my="300">
-              <j-text size="500" color="ui-400">
-                No users yet. Users will appear here when they connect.
-              </j-text>
-            </j-box>
-          ) : (
-            <div style={{ ...listStyle, padding: "0 20px", marginTop: 0 }}>
-              <j-text
-                size="400"
-                color="ui-500"
-                style={{ marginBottom: "8px", display: "block" }}
-              >
-                {users.length} user{users.length !== 1 ? "s" : ""} registered
-              </j-text>
-              {users.map((user, index) => (
-                <div
-                  key={`user-${index}`}
-                  style={{ ...cardStyle, width: "100%" }}
+            )}
+            {membraneProofStatus === "done" && (
+              <j-flex a="center" gap="300">
+                <j-icon name="check-circle" color="success"></j-icon>
+                <j-text size="400">Connected to Unyt DHT</j-text>
+                <j-button
+                  size="sm"
+                  variant="subtle"
+                  onClick={() => fetchMembraneProof(hostSession!)}
                 >
-                  <j-flex gap="500" direction="column">
-                    <j-flex gap="400" a="center">
-                      <j-avatar size="lg" hash={user.email}></j-avatar>
-                      <j-flex direction="column" gap="100">
-                        <j-flex gap="300" a="center">
-                          <j-text
-                            nomargin
-                            variant="heading-sm"
-                            size="600"
-                            weight="600"
-                          >
-                            {user.email}
-                          </j-text>
-                          {getStatusBadge(user.lastSeen)}
-                          {(user as any).freeAccess && (
-                            <j-badge variant="success">Free Access</j-badge>
-                          )}
+                  Re-fetch
+                </j-button>
+              </j-flex>
+            )}
+            {membraneProofStatus === "error" && (
+              <j-flex a="center" gap="300" wrap="wrap">
+                <j-icon name="x-circle" color="danger"></j-icon>
+                <j-text size="400" color="danger">
+                  {membraneProofError || "Failed to connect"}
+                </j-text>
+                <j-button
+                  size="sm"
+                  variant="primary"
+                  onClick={() => hostSession && fetchMembraneProof(hostSession)}
+                >
+                  Retry
+                </j-button>
+              </j-flex>
+            )}
+            {membraneProofStatus === "none" && hostSession && (
+              <j-button
+                variant="primary"
+                onClick={() => fetchMembraneProof(hostSession)}
+              >
+                Connect
+              </j-button>
+            )}
+            {!hostSession && (
+              <j-text size="400" color="ui-400">
+                Log in to hosting profile to connect
+              </j-text>
+            )}
+          </ExpandableSection>
+          )}
+
+          {/* ===== TABS ===== */}
+          <j-box px="500" mt="500">
+            <j-tabs
+              value={activeTab}
+              onChange={(e: any) => setActiveTab(e.target.value)}
+              variant="segment"
+            >
+              <j-tab-item value="settings">Settings</j-tab-item>
+              <j-tab-item value="users">Users</j-tab-item>
+            </j-tabs>
+          </j-box>
+
+          {/* ===== USERS TAB ===== */}
+          {activeTab === "users" && (
+            <j-box px="500" my="400">
+              {usersLoading ? (
+                <j-flex gap="300" a="center">
+                  <j-spinner size="sm"></j-spinner>
+                  <j-text color="ui-500">Loading users...</j-text>
+                </j-flex>
+              ) : users.length === 0 ? (
+                <j-text size="500" color="ui-400">
+                  No users yet. Users will appear here when they connect.
+                </j-text>
+              ) : (
+                <div style={{ ...listStyle, padding: "0 20px", marginTop: 0 }}>
+                  <j-text
+                    size="400"
+                    color="ui-500"
+                    style={{ marginBottom: "8px", display: "block" }}
+                  >
+                    {users.length} user{users.length !== 1 ? "s" : ""}{" "}
+                    registered
+                  </j-text>
+                  {users.map((user, index) => (
+                    <div
+                      key={`user-${index}`}
+                      style={{ ...cardStyle, width: "100%" }}
+                    >
+                      <j-flex gap="500" direction="column">
+                        <j-flex gap="400" a="center">
+                          <j-avatar size="lg" hash={user.email}></j-avatar>
+                          <j-flex direction="column" gap="100">
+                            <j-flex gap="300" a="center">
+                              <j-text
+                                nomargin
+                                variant="heading-sm"
+                                size="600"
+                                weight="600"
+                              >
+                                {user.email}
+                              </j-text>
+                              {getStatusBadge(user.lastSeen)}
+                              {(user as any).freeAccess && (
+                                <j-badge variant="success">Free Access</j-badge>
+                              )}
+                            </j-flex>
+                            <j-text
+                              nomargin
+                              size="300"
+                              color="ui-500"
+                              style={{
+                                wordBreak: "break-all",
+                                fontFamily: "monospace",
+                              }}
+                            >
+                              {user.did || "DID not set"}
+                            </j-text>
+                          </j-flex>
                         </j-flex>
-                        <j-text
-                          nomargin
-                          size="300"
-                          color="ui-500"
+
+                        <j-flex gap="600">
+                          <j-flex direction="column" gap="100">
+                            <j-text
+                              nomargin
+                              size="300"
+                              color="ui-500"
+                              weight="500"
+                            >
+                              LAST SEEN
+                            </j-text>
+                            <j-text nomargin size="400">
+                              {formatLastSeen(user.lastSeen)}
+                            </j-text>
+                          </j-flex>
+                          <j-flex direction="column" gap="100">
+                            <j-text
+                              nomargin
+                              size="300"
+                              color="ui-500"
+                              weight="500"
+                            >
+                              PERSPECTIVES
+                            </j-text>
+                            <j-text nomargin size="400">
+                              {user.perspectiveCount}
+                            </j-text>
+                          </j-flex>
+                          <j-flex direction="column" gap="100">
+                            <j-text
+                              nomargin
+                              size="300"
+                              color="ui-500"
+                              weight="500"
+                            >
+                              CREDITS
+                            </j-text>
+                            <j-text nomargin size="400" weight="600">
+                              {(user as any).remainingCredits === "unlimited"
+                                ? "Unlimited"
+                                : (user as any).remainingCredits || "0"}
+                            </j-text>
+                          </j-flex>
+                        </j-flex>
+
+                        <j-box
                           style={{
-                            wordBreak: "break-all",
-                            fontFamily: "monospace",
+                            borderTop: "1px solid var(--j-color-ui-200)",
+                            paddingTop: "var(--j-space-400)",
                           }}
                         >
-                          {user.did || "DID not set"}
-                        </j-text>
-                      </j-flex>
-                    </j-flex>
-
-                    <j-flex gap="600">
-                      <j-flex direction="column" gap="100">
-                        <j-text nomargin size="300" color="ui-500" weight="500">
-                          LAST SEEN
-                        </j-text>
-                        <j-text nomargin size="400">
-                          {formatLastSeen(user.lastSeen)}
-                        </j-text>
-                      </j-flex>
-                      <j-flex direction="column" gap="100">
-                        <j-text nomargin size="300" color="ui-500" weight="500">
-                          PERSPECTIVES
-                        </j-text>
-                        <j-text nomargin size="400">
-                          {user.perspectiveCount}
-                        </j-text>
-                      </j-flex>
-                      <j-flex direction="column" gap="100">
-                        <j-text nomargin size="300" color="ui-500" weight="500">
-                          CREDITS
-                        </j-text>
-                        <j-text nomargin size="400" weight="600">
-                          {(user as any).remainingCredits === "unlimited"
-                            ? "Unlimited"
-                            : (user as any).remainingCredits || "0"}
-                        </j-text>
-                      </j-flex>
-                    </j-flex>
-
-                    <j-box
-                      style={{
-                        borderTop: "1px solid var(--j-color-ui-200)",
-                        paddingTop: "var(--j-space-400)",
-                      }}
-                    >
-                      <j-flex gap="500" a="center" wrap="wrap">
-                        <j-toggle
-                          checked={(user as any).freeAccess}
-                          disabled={actionLoading[`free-${user.email}`]}
-                          onChange={() =>
-                            handleToggleFreeAccess(
-                              user.email,
-                              (user as any).freeAccess,
-                            )
-                          }
-                        >
-                          Free access
-                        </j-toggle>
-                        {!(user as any).freeAccess && (
-                          <j-flex gap="300" a="center">
-                            <j-input
-                              size="sm"
-                              type="number"
-                              placeholder="Amount"
-                              value={creditAmounts[user.email] || ""}
-                              onInput={(e: any) =>
-                                setCreditAmounts((prev) => ({
-                                  ...prev,
-                                  [user.email]: e.target.value,
-                                }))
+                          <j-flex gap="500" a="center" wrap="wrap">
+                            <j-toggle
+                              checked={(user as any).freeAccess}
+                              disabled={actionLoading[`free-${user.email}`]}
+                              onChange={() =>
+                                handleToggleFreeAccess(
+                                  user.email,
+                                  (user as any).freeAccess,
+                                )
                               }
-                            ></j-input>
-                            <j-button
-                              size="sm"
-                              variant="primary"
-                              disabled={
-                                actionLoading[`credits-${user.email}`] ||
-                                !creditAmounts[user.email] ||
-                                parseFloat(creditAmounts[user.email]) <= 0
-                              }
-                              onClick={() => handleSetCredits(user.email)}
                             >
-                              {actionLoading[`credits-${user.email}`]
-                                ? "Setting..."
-                                : "Set Credits"}
-                            </j-button>
+                              Free access
+                            </j-toggle>
+                            {!(user as any).freeAccess && (
+                              <j-flex gap="300" a="center">
+                                <j-input
+                                  size="sm"
+                                  type="number"
+                                  placeholder="Amount"
+                                  value={creditAmounts[user.email] || ""}
+                                  onInput={(e: any) =>
+                                    setCreditAmounts((prev) => ({
+                                      ...prev,
+                                      [user.email]: e.target.value,
+                                    }))
+                                  }
+                                ></j-input>
+                                <j-button
+                                  size="sm"
+                                  variant="primary"
+                                  disabled={
+                                    actionLoading[`credits-${user.email}`] ||
+                                    !creditAmounts[user.email] ||
+                                    parseFloat(creditAmounts[user.email]) <= 0
+                                  }
+                                  onClick={() => handleSetCredits(user.email)}
+                                >
+                                  {actionLoading[`credits-${user.email}`]
+                                    ? "Setting..."
+                                    : "Set Credits"}
+                                </j-button>
+                              </j-flex>
+                            )}
                           </j-flex>
-                        )}
+                        </j-box>
                       </j-flex>
-                    </j-box>
-                  </j-flex>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          )}
-
-          {/* ===== PAID HOSTING REGISTRATION ===== */}
-          <j-box
-            px="500"
-            my="500"
-            pt="500"
-            style={{ borderTop: "1px solid var(--j-color-ui-200)" }}
-          >
-            <j-flex a="center" j="between">
-              <j-text size="600" weight="600" color="black">
-                Paid Hosting
-              </j-text>
-              {hostSession && (
-                <j-text size="400" color="ui-500">
-                  Logged in as {hostSession.email}
-                </j-text>
               )}
-            </j-flex>
-          </j-box>
-
-          <j-box px="500" my="300">
-            <j-text size="500" color="ui-500">
-              Get paid in mHOT for hosting this AD4M instance for others.
-              Registration is required both for showing up in ad4m-connect (so
-              people can find this instance) and for getting a joining code for
-              the mHOT Unyt DHT (to receive payments).
-            </j-text>
-          </j-box>
-
-          {/* Index API URL */}
-          <j-box px="500" my="400">
-            <j-box mb="200">
-              <j-text size="500" weight="500">
-                Index API URL
-              </j-text>
             </j-box>
-            <j-input
-              value={hostReg.indexUrl}
-              onInput={(e: any) =>
-                handleHostRegChange("indexUrl", e.target.value)
-              }
-              placeholder="https://hosting.ad4m.dev"
-              disabled={!!hostSession}
-            />
-          </j-box>
-
-          {/* Step 1: Credentials */}
-          {regStep === "credentials" && !hostSession && (
-            <>
-              <j-box px="500" my="400">
-                <j-box mb="200">
-                  <j-text size="500" weight="500">
-                    Email
-                  </j-text>
-                </j-box>
-                <j-input
-                  value={hostReg.email}
-                  onInput={(e: any) =>
-                    handleHostRegChange("email", e.target.value)
-                  }
-                  placeholder="admin@example.com"
-                />
-              </j-box>
-
-              <j-box px="500" my="400">
-                <j-box mb="200">
-                  <j-text size="500" weight="500">
-                    Password
-                  </j-text>
-                </j-box>
-                <j-input
-                  type="password"
-                  value={hostReg.password}
-                  onInput={(e: any) =>
-                    handleHostRegChange("password", e.target.value)
-                  }
-                  placeholder="Password"
-                />
-              </j-box>
-
-              <StatusMessage />
-
-              <j-box px="500" my="400">
-                <j-flex gap="400">
-                  <j-button
-                    variant="primary"
-                    size="lg"
-                    onClick={handleLogin}
-                    loading={hostRegistering}
-                    disabled={hostRegistering}
-                  >
-                    Login
-                  </j-button>
-                  <j-button
-                    variant="subtle"
-                    size="lg"
-                    onClick={handleRegister}
-                    loading={hostRegistering}
-                    disabled={hostRegistering}
-                  >
-                    Register
-                  </j-button>
-                </j-flex>
-              </j-box>
-            </>
           )}
 
-          {/* Step 2: Email Verification */}
-          {regStep === "verify" && (
-            <>
-              <j-box px="500" my="400">
-                <j-box
-                  p="400"
-                  style={{
-                    backgroundColor: "#e7f3ff",
-                    borderRadius: "8px",
-                    border: "1px solid #2196f3",
-                  }}
-                >
-                  <j-text size="500">
-                    A verification code has been sent to{" "}
-                    <strong>{hostReg.email}</strong>. Enter the code below.
-                  </j-text>
-                </j-box>
-              </j-box>
-
-              <j-box px="500" my="400">
-                <j-box mb="200">
-                  <j-text size="500" weight="500">
-                    Verification Code
-                  </j-text>
-                </j-box>
-                <j-input
-                  value={verificationCode}
-                  onInput={(e: any) => setVerificationCode(e.target.value)}
-                  placeholder="Enter 6-digit code"
-                />
-              </j-box>
-
-              <StatusMessage />
-
-              <j-box px="500" my="400">
-                <j-flex gap="400">
-                  <j-button
-                    variant="primary"
-                    size="lg"
-                    onClick={handleVerifyEmail}
-                    loading={hostRegistering}
-                    disabled={hostRegistering}
-                  >
-                    Verify
-                  </j-button>
-                  <j-button
-                    variant="subtle"
-                    size="lg"
-                    onClick={handleResendVerification}
-                    disabled={hostRegistering}
-                  >
-                    Resend Code
-                  </j-button>
-                  <j-button
-                    variant="subtle"
-                    size="lg"
-                    onClick={() => {
-                      setRegStep("credentials");
-                      setHostRegStatus(null);
+          {/* ===== SETTINGS TAB ===== */}
+          {activeTab === "settings" && (
+            <j-box px="500" my="400">
+              {/* Hosting Profile */}
+              <ExpandableSection
+                title="Hosting Profile"
+                expanded={hostingProfileExpanded}
+                onToggle={() =>
+                  setHostingProfileExpanded(!hostingProfileExpanded)
+                }
+                badge={
+                  hostSession ? (
+                    <j-badge variant="success">{hostSession.email}</j-badge>
+                  ) : (
+                    <j-badge variant="gray">Not logged in</j-badge>
+                  )
+                }
+              >
+                {!hostSession ? (
+                  // Login/Register form - nice card style
+                  <div
+                    style={{
+                      padding: "20px",
+                      background: "var(--j-color-ui-50)",
+                      borderRadius: "12px",
+                      border: "1px solid var(--j-color-ui-200)",
                     }}
                   >
-                    Back
-                  </j-button>
-                </j-flex>
-              </j-box>
-            </>
-          )}
+                    <j-box mb="400">
+                      <j-text size="400" color="ui-500">
+                        Register to appear in ad4m-connect and receive mHOT
+                        payments.
+                      </j-text>
+                    </j-box>
 
-          {/* Step 3: Logged in — editable host profile card */}
-          {regStep === "logged-in" && hostSession && (
-            <>
-              <j-box px="500" my="400">
-                <div
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "center",
-                    gap: "12px",
-                    padding: "24px 20px",
-                    borderRadius: "12px",
-                    background: "var(--j-color-ui-50)",
-                    border: "1px solid var(--j-color-ui-200)",
-                  }}
-                >
-                  {/* Profile picture — clickable to change */}
-                  <label
-                    style={{ cursor: "pointer", position: "relative" as const }}
+                    <j-box mb="300">
+                      <j-text size="400" weight="500" mb="200">
+                        Index API URL
+                      </j-text>
+                      <j-input
+                        value={hostReg.indexUrl}
+                        onInput={(e: any) =>
+                          handleHostRegChange("indexUrl", e.target.value)
+                        }
+                        placeholder="https://hosting.ad4m.dev"
+                      />
+                    </j-box>
+
+                    <j-box mb="300">
+                      <j-text size="400" weight="500" mb="200">
+                        Email
+                      </j-text>
+                      <j-input
+                        value={hostReg.email}
+                        onInput={(e: any) =>
+                          handleHostRegChange("email", e.target.value)
+                        }
+                        placeholder="admin@example.com"
+                      />
+                    </j-box>
+
+                    <j-box mb="400">
+                      <j-text size="400" weight="500" mb="200">
+                        Password
+                      </j-text>
+                      <j-input
+                        type="password"
+                        value={hostReg.password}
+                        onInput={(e: any) =>
+                          handleHostRegChange("password", e.target.value)
+                        }
+                        placeholder="Password"
+                      />
+                    </j-box>
+
+                    <StatusMessage />
+
+                    <j-flex gap="300">
+                      <j-button
+                        variant="primary"
+                        onClick={handleLogin}
+                        loading={hostRegistering}
+                        disabled={hostRegistering}
+                      >
+                        Login
+                      </j-button>
+                      <j-button
+                        variant="subtle"
+                        onClick={handleRegister}
+                        loading={hostRegistering}
+                        disabled={hostRegistering}
+                      >
+                        Register
+                      </j-button>
+                    </j-flex>
+                  </div>
+                ) : regStep === "verify" ? (
+                  // Email verification
+                  <j-box>
+                    <j-box
+                      mb="400"
+                      p="300"
+                      style={{ background: "#e7f3ff", borderRadius: "8px" }}
+                    >
+                      <j-text size="400">
+                        Verification code sent to{" "}
+                        <strong>{hostReg.email}</strong>
+                      </j-text>
+                    </j-box>
+                    <j-box mb="300">
+                      <j-text size="400" weight="500" mb="200">
+                        Code
+                      </j-text>
+                      <j-input
+                        value={verificationCode}
+                        onInput={(e: any) =>
+                          setVerificationCode(e.target.value)
+                        }
+                        placeholder="123456"
+                      />
+                    </j-box>
+                    <StatusMessage />
+                    <j-flex gap="300">
+                      <j-button
+                        variant="primary"
+                        onClick={handleVerifyEmail}
+                        loading={hostRegistering}
+                      >
+                        Verify
+                      </j-button>
+                      <j-button
+                        variant="subtle"
+                        onClick={handleResendVerification}
+                        disabled={hostRegistering}
+                      >
+                        Resend
+                      </j-button>
+                    </j-flex>
+                  </j-box>
+                ) : (
+                  // Logged in - show profile in a nice card
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      gap: "16px",
+                      padding: "24px",
+                      background: "var(--j-color-ui-50)",
+                      borderRadius: "12px",
+                      border: "1px solid var(--j-color-ui-200)",
+                    }}
                   >
-                    {hostData?.profilePicUrl && !profilePic ? (
-                      <div style={{ position: "relative" as const }}>
-                        <img
-                          src={getProfilePicUrl(hostData.profilePicUrl)!}
-                          alt=""
-                          style={{
-                            width: "72px",
-                            height: "72px",
-                            borderRadius: "50%",
-                            objectFit: "cover",
-                            background: "var(--j-color-ui-200)",
-                          }}
-                        />
-                        <div
-                          style={{
-                            position: "absolute" as const,
-                            bottom: 0,
-                            right: 0,
-                            width: "24px",
-                            height: "24px",
-                            borderRadius: "50%",
-                            background: "var(--j-color-primary-500)",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                          }}
-                        >
-                          <j-icon
-                            name="pencil"
-                            size="xs"
-                            color="white"
-                          ></j-icon>
+                    {/* Profile picture */}
+                    <label
+                      style={{
+                        cursor: "pointer",
+                        position: "relative" as const,
+                      }}
+                    >
+                      {hostData?.profilePicUrl && !profilePic ? (
+                        <div style={{ position: "relative" as const }}>
+                          <img
+                            src={getProfilePicUrl(hostData.profilePicUrl)!}
+                            alt=""
+                            style={{
+                              width: "80px",
+                              height: "80px",
+                              borderRadius: "50%",
+                              objectFit: "cover",
+                              background: "var(--j-color-ui-200)",
+                            }}
+                          />
+                          <div
+                            style={{
+                              position: "absolute",
+                              bottom: 0,
+                              right: 0,
+                              width: "24px",
+                              height: "24px",
+                              borderRadius: "50%",
+                              background: "var(--j-color-primary-500)",
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                            }}
+                          >
+                            <j-icon
+                              name="pencil"
+                              size="xs"
+                              color="white"
+                            ></j-icon>
+                          </div>
                         </div>
-                      </div>
-                    ) : profilePic ? (
-                      <div style={{ position: "relative" as const }}>
+                      ) : profilePic ? (
                         <img
                           src={URL.createObjectURL(profilePic)}
                           alt=""
                           style={{
-                            width: "72px",
-                            height: "72px",
+                            width: "80px",
+                            height: "80px",
                             borderRadius: "50%",
                             objectFit: "cover",
                             background: "var(--j-color-ui-200)",
                           }}
                         />
+                      ) : (
                         <div
                           style={{
-                            position: "absolute" as const,
-                            bottom: 0,
-                            right: 0,
-                            width: "24px",
-                            height: "24px",
+                            width: "80px",
+                            height: "80px",
                             borderRadius: "50%",
-                            background: "var(--j-color-primary-500)",
                             display: "flex",
                             alignItems: "center",
                             justifyContent: "center",
+                            background: "var(--j-color-ui-200)",
+                            border: "2px dashed var(--j-color-ui-400)",
                           }}
                         >
                           <j-icon
-                            name="pencil"
-                            size="xs"
-                            color="white"
+                            name="camera"
+                            size="md"
+                            color="ui-500"
                           ></j-icon>
                         </div>
-                      </div>
-                    ) : (
-                      <div
-                        style={{
-                          width: "72px",
-                          height: "72px",
-                          borderRadius: "50%",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          background: "var(--j-color-ui-200)",
-                          flexDirection: "column" as const,
-                          gap: "2px",
-                          border: "2px dashed var(--j-color-ui-400)",
+                      )}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        style={{ display: "none" }}
+                        onChange={(e) => {
+                          const f =
+                            (e.target as HTMLInputElement).files?.[0] || null;
+                          if (f && f.size > 2 * 1024 * 1024) {
+                            setHostRegStatus({
+                              type: "error",
+                              message: "Max 2MB",
+                            });
+                            return;
+                          }
+                          setProfilePic(f);
                         }}
-                      >
-                        <j-icon name="camera" size="sm" color="ui-500"></j-icon>
-                        <span
-                          style={{
-                            fontSize: "9px",
-                            color: "var(--j-color-ui-500)",
-                            fontWeight: 600,
-                            textTransform: "uppercase" as const,
-                          }}
-                        >
-                          Set Photo
-                        </span>
-                      </div>
-                    )}
+                      />
+                    </label>
+
+                    {/* Name */}
                     <input
-                      type="file"
-                      accept="image/*"
-                      style={{ display: "none" }}
-                      onChange={(e) => {
-                        const f =
-                          (e.target as HTMLInputElement).files?.[0] || null;
-                        if (f && f.size > 2 * 1024 * 1024) {
-                          setHostRegStatus({
-                            type: "error",
-                            message: "Profile picture must be under 2MB.",
-                          });
-                          return;
-                        }
-                        setProfilePic(f);
-                        setHostRegStatus(null);
-                      }}
-                    />
-                  </label>
-
-                  {/* Name */}
-                  <input
-                    value={hostReg.name}
-                    onChange={(e) =>
-                      handleHostRegChange("name", e.target.value)
-                    }
-                    placeholder="Host Name"
-                    style={{
-                      fontSize: "22px",
-                      fontWeight: 700,
-                      textAlign: "center" as const,
-                      background: "transparent",
-                      border: "none",
-                      borderBottom: "1px dashed var(--j-color-ui-300)",
-                      color: "var(--j-color-black)",
-                      width: "100%",
-                      padding: "4px 0",
-                      outline: "none",
-                    }}
-                  />
-
-                  {/* Location */}
-                  <input
-                    value={hostReg.location}
-                    onChange={(e) =>
-                      handleHostRegChange("location", e.target.value)
-                    }
-                    placeholder="Location (e.g. Frankfurt, DE)"
-                    style={{
-                      fontSize: "14px",
-                      textAlign: "center" as const,
-                      background: "transparent",
-                      border: "none",
-                      borderBottom: "1px dashed var(--j-color-ui-300)",
-                      color: "var(--j-color-ui-500)",
-                      width: "100%",
-                      padding: "2px 0",
-                      outline: "none",
-                    }}
-                  />
-
-                  {/* Description */}
-                  <textarea
-                    value={hostReg.description}
-                    onChange={(e) =>
-                      handleHostRegChange("description", e.target.value)
-                    }
-                    placeholder="A brief description of your host"
-                    rows={2}
-                    style={{
-                      fontSize: "14px",
-                      textAlign: "center" as const,
-                      lineHeight: "1.4",
-                      background: "transparent",
-                      border: "none",
-                      borderBottom: "1px dashed var(--j-color-ui-300)",
-                      color: "var(--j-color-ui-400)",
-                      width: "100%",
-                      padding: "2px 0",
-                      outline: "none",
-                      resize: "vertical" as const,
-                      fontFamily: "inherit",
-                    }}
-                  />
-
-                  {/* AI Models */}
-                  <div style={{ width: "100%", marginTop: "4px" }}>
-                    <j-text
-                      size="300"
-                      weight="600"
-                      color="ui-500"
-                      style={{
-                        textTransform: "uppercase" as const,
-                        letterSpacing: "0.5px",
-                        display: "block",
-                        marginBottom: "6px",
-                      }}
-                    >
-                      AI Models
-                    </j-text>
-                    {aiModels.length > 0 ? (
-                      <div
-                        style={{
-                          display: "flex",
-                          flexWrap: "wrap",
-                          justifyContent: "center",
-                          gap: "6px",
-                        }}
-                      >
-                        {aiModels.map((m: any, i: number) => (
-                          <span
-                            key={i}
-                            style={{
-                              fontSize: "13px",
-                              padding: "4px 12px",
-                              borderRadius: "12px",
-                              background: "rgba(33, 150, 243, 0.1)",
-                              color: "var(--j-color-primary-500)",
-                            }}
-                          >
-                            {m.name}
-                          </span>
-                        ))}
-                      </div>
-                    ) : (
-                      <j-text
-                        size="300"
-                        color="ui-400"
-                        style={{ fontStyle: "italic" }}
-                      >
-                        No models configured
-                      </j-text>
-                    )}
-                    <j-text
-                      size="200"
-                      color="ui-400"
-                      style={{ display: "block", marginTop: "6px" }}
-                    >
-                      AI models can be added and removed in the AI section.
-                    </j-text>
-                  </div>
-
-                  {/* Rates */}
-                  <div
-                    style={{
-                      width: "100%",
-                      marginTop: "8px",
-                      borderTop: "1px solid var(--j-color-ui-200)",
-                      paddingTop: "12px",
-                    }}
-                  >
-                    <j-text
-                      size="300"
-                      weight="600"
-                      color="ui-500"
-                      style={{
-                        textTransform: "uppercase" as const,
-                        letterSpacing: "0.5px",
-                        display: "block",
-                        marginBottom: "6px",
-                      }}
-                    >
-                      Pricing
-                    </j-text>
-                    <input
-                      value={hostReg.rates}
+                      value={hostReg.name}
                       onChange={(e) =>
-                        handleHostRegChange("rates", e.target.value)
+                        handleHostRegChange("name", e.target.value)
                       }
-                      placeholder='[{"description": "Base rate", "priceInHOT": 0.001}]'
+                      placeholder="Host Name"
                       style={{
-                        fontSize: "13px",
+                        fontSize: "20px",
+                        fontWeight: 700,
+                        textAlign: "center",
+                        background: "transparent",
+                        border: "none",
+                        borderBottom: "1px dashed var(--j-color-ui-300)",
+                        color: "var(--j-color-black)",
                         width: "100%",
-                        padding: "6px 8px",
-                        background: "var(--j-color-ui-100)",
-                        border: "1px solid var(--j-color-ui-200)",
-                        borderRadius: "6px",
-                        color: "var(--j-color-ui-700)",
+                        padding: "4px 0",
                         outline: "none",
-                        fontFamily: "inherit",
                       }}
                     />
-                    {/* Rates table preview */}
-                    {(() => {
-                      try {
-                        const rates = JSON.parse(hostReg.rates);
-                        if (Array.isArray(rates) && rates.length > 0) {
-                          return (
-                            <table
-                              style={{
-                                width: "100%",
-                                borderCollapse: "collapse",
-                                marginTop: "8px",
-                              }}
-                            >
-                              <tbody>
-                                {rates.map((r: any, i: number) => (
-                                  <tr
-                                    key={i}
-                                    style={{
-                                      borderBottom:
-                                        i < rates.length - 1
-                                          ? "1px solid var(--j-color-ui-100)"
-                                          : "none",
-                                    }}
-                                  >
-                                    <td
-                                      style={{
-                                        padding: "6px 0",
-                                        fontSize: "14px",
-                                        color: "var(--j-color-ui-700)",
-                                      }}
-                                    >
-                                      {r.description}
-                                    </td>
-                                    <td
-                                      style={{
-                                        padding: "6px 0",
-                                        fontSize: "13px",
-                                        textAlign: "right" as const,
-                                        fontFamily: "monospace",
-                                        color: "var(--j-color-primary-500)",
-                                      }}
-                                    >
-                                      {r.priceInHOT} HOT
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          );
-                        }
-                      } catch {
-                        /* ignore */
-                      }
-                      return null;
-                    })()}
-                  </div>
 
-                  {/* Compute Specs */}
-                  <div style={{ width: "100%", marginTop: "4px" }}>
-                    <j-text
-                      size="300"
-                      weight="600"
-                      color="ui-500"
-                      style={{
-                        textTransform: "uppercase" as const,
-                        letterSpacing: "0.5px",
-                        display: "block",
-                        marginBottom: "6px",
-                      }}
-                    >
-                      Compute
-                    </j-text>
+                    {/* Location */}
                     <input
-                      value={hostReg.computeSpecs}
+                      value={hostReg.location}
                       onChange={(e) =>
-                        handleHostRegChange("computeSpecs", e.target.value)
+                        handleHostRegChange("location", e.target.value)
                       }
-                      placeholder="e.g. 8 CPU, 32GB RAM, RTX 4090"
+                      placeholder="Location (e.g. Frankfurt, DE)"
                       style={{
                         fontSize: "14px",
+                        textAlign: "center",
+                        background: "transparent",
+                        border: "none",
+                        borderBottom: "1px dashed var(--j-color-ui-300)",
+                        color: "var(--j-color-ui-500)",
                         width: "100%",
-                        padding: "6px 8px",
-                        background: "var(--j-color-ui-100)",
-                        border: "1px solid var(--j-color-ui-200)",
-                        borderRadius: "6px",
-                        color: "var(--j-color-ui-600)",
+                        padding: "2px 0",
                         outline: "none",
+                      }}
+                    />
+
+                    {/* Description */}
+                    <textarea
+                      value={hostReg.description}
+                      onChange={(e) =>
+                        handleHostRegChange("description", e.target.value)
+                      }
+                      placeholder="A brief description of your host"
+                      rows={2}
+                      style={{
+                        fontSize: "14px",
+                        textAlign: "center",
+                        lineHeight: "1.4",
+                        background: "transparent",
+                        border: "none",
+                        borderBottom: "1px dashed var(--j-color-ui-300)",
+                        color: "var(--j-color-ui-400)",
+                        width: "100%",
+                        padding: "2px 0",
+                        outline: "none",
+                        resize: "vertical",
                         fontFamily: "inherit",
                       }}
                     />
-                  </div>
 
-                  {/* Host URL */}
-                  <div style={{ width: "100%", marginTop: "4px" }}>
-                    <j-text
-                      size="300"
-                      weight="600"
-                      color="ui-500"
-                      style={{
-                        textTransform: "uppercase" as const,
-                        letterSpacing: "0.5px",
-                        display: "block",
-                        marginBottom: "6px",
-                      }}
-                    >
-                      Endpoint URL
-                    </j-text>
-                    <input
-                      value={hostReg.hostUrl}
-                      onChange={(e) =>
-                        handleHostRegChange("hostUrl", e.target.value)
-                      }
-                      placeholder="wss://your-host-domain.com"
-                      style={{
-                        fontSize: "13px",
-                        width: "100%",
-                        padding: "6px 8px",
-                        background: "var(--j-color-ui-100)",
-                        border: "1px solid var(--j-color-ui-200)",
-                        borderRadius: "6px",
-                        color: "var(--j-color-ui-400)",
-                        outline: "none",
-                        fontFamily: "monospace",
-                      }}
-                    />
-                  </div>
-                </div>
-              </j-box>
-
-              {/* Membrane proof / Unyt DNA status */}
-              {membraneProofStatus === "fetching" && (
-                <j-box px="500" my="300">
-                  <j-box
-                    p="400"
-                    style={{
-                      backgroundColor: "#e7f3ff",
-                      borderRadius: "8px",
-                      border: "1px solid #2196f3",
-                    }}
-                  >
-                    <j-flex a="center" gap="300">
-                      <j-spinner size="sm"></j-spinner>
-                      <j-text size="500">
-                        Fetching Unyt DHT auth material...
-                      </j-text>
-                    </j-flex>
-                  </j-box>
-                </j-box>
-              )}
-              {membraneProofStatus === "done" && (
-                <j-box px="500" my="300">
-                  <j-box
-                    p="400"
-                    style={{
-                      backgroundColor: "#e8f5e9",
-                      borderRadius: "8px",
-                      border: "1px solid #4caf50",
-                    }}
-                  >
-                    <j-flex a="center" gap="300">
-                      <j-icon name="check-circle" color="success"></j-icon>
-                      <j-text size="500">
-                        Unyt DHT auth material received.
-                      </j-text>
-                    </j-flex>
-                  </j-box>
-                </j-box>
-              )}
-              {membraneProofStatus === "error" && (
-                <j-box px="500" my="300">
-                  <j-box
-                    p="400"
-                    style={{
-                      backgroundColor: "#ffebee",
-                      borderRadius: "8px",
-                      border: "1px solid #f44336",
-                    }}
-                  >
-                    <j-flex a="center" gap="300" wrap="wrap">
-                      <j-icon name="x-circle" color="danger"></j-icon>
-                      <j-text size="500">
-                        Failed to fetch auth material: {membraneProofError}
-                      </j-text>
-                      <j-button
-                        size="sm"
-                        variant="subtle"
-                        onClick={() => fetchMembraneProof(hostSession)}
+                    {/* Endpoint URL */}
+                    <div style={{ width: "100%" }}>
+                      <j-text
+                        size="300"
+                        weight="600"
+                        color="ui-500"
+                        style={{
+                          textTransform: "uppercase",
+                          letterSpacing: "0.5px",
+                          display: "block",
+                          marginBottom: "6px",
+                        }}
                       >
-                        Retry
-                      </j-button>
-                    </j-flex>
-                  </j-box>
-                </j-box>
-              )}
-
-              <StatusMessage />
-
-              <j-box px="500" my="400">
-                <j-flex gap="400" j="center">
-                  <j-button
-                    variant="primary"
-                    size="lg"
-                    onClick={handleUpdateHost}
-                    loading={hostRegistering}
-                    disabled={hostRegistering}
-                  >
-                    Save Changes
-                  </j-button>
-                  <j-button variant="subtle" size="lg" onClick={handleLogout}>
-                    Logout
-                  </j-button>
-                </j-flex>
-              </j-box>
-            </>
-          )}
-
-          {/* ===== WALLET ===== */}
-          <Wallet />
-
-          {/* ===== SMTP CONFIGURATION ===== */}
-          <j-box
-            px="500"
-            my="500"
-            pt="500"
-            style={{ borderTop: "1px solid var(--j-color-ui-200)" }}
-          >
-            <j-text size="600" weight="600" color="black">
-              Email Configuration (SMTP)
-            </j-text>
-          </j-box>
-
-          <j-box px="500" my="300">
-            <j-text size="500" color="ui-500">
-              Configure SMTP settings for email verification. Required for
-              email-based user authentication.
-            </j-text>
-          </j-box>
-
-          {smtpConfig && (
-            <>
-              <j-box px="500" my="400">
-                <j-toggle
-                  checked={smtpConfig.enabled}
-                  onChange={(e: any) => {
-                    const newConfig = {
-                      ...smtpConfig,
-                      enabled: e.target.checked,
-                    };
-                    setSmtpConfig(newConfig);
-                    handleSmtpConfigChange(newConfig);
-                  }}
-                >
-                  Enable Email/SMTP
-                </j-toggle>
-              </j-box>
-
-              {smtpConfig.enabled && (
-                <>
-                  <j-box px="500" my="400">
-                    <j-box mb="200">
-                      <j-text size="500" weight="500">
-                        SMTP Host
+                        Endpoint URL
                       </j-text>
-                    </j-box>
-                    <j-input
-                      value={smtpConfig.host}
-                      onChange={(e: any) =>
-                        setSmtpConfig({ ...smtpConfig, host: e.target.value })
-                      }
-                      placeholder="smtp.gmail.com"
-                    />
-                  </j-box>
-                  <j-box px="500" my="400">
-                    <j-box mb="200">
-                      <j-text size="500" weight="500">
-                        SMTP Port
-                      </j-text>
-                    </j-box>
-                    <j-input
-                      type="number"
-                      value={smtpConfig.port.toString()}
-                      onChange={(e: any) =>
-                        setSmtpConfig({
-                          ...smtpConfig,
-                          port: parseInt(e.target.value) || 587,
-                        })
-                      }
-                      placeholder="587"
-                    />
-                    <j-box mt="200">
-                      <j-text size="300" color="ui-500">
-                        Common: 587 (STARTTLS), 465 (SSL/TLS), 25 (unencrypted)
-                      </j-text>
-                    </j-box>
-                  </j-box>
-                  <j-box px="500" my="400">
-                    <j-box mb="200">
-                      <j-text size="500" weight="500">
-                        Username
-                      </j-text>
-                    </j-box>
-                    <j-input
-                      value={smtpConfig.username}
-                      onChange={(e: any) =>
-                        setSmtpConfig({
-                          ...smtpConfig,
-                          username: e.target.value,
-                        })
-                      }
-                      placeholder="your-email@example.com"
-                    />
-                  </j-box>
-                  <j-box px="500" my="400">
-                    <j-box mb="200">
-                      <j-text size="500" weight="500">
-                        Password / App Password
-                      </j-text>
-                    </j-box>
-                    <j-input
-                      type={showSmtpPassword ? "text" : "password"}
-                      value={smtpConfig.password}
-                      onChange={(e: any) =>
-                        setSmtpConfig({
-                          ...smtpConfig,
-                          password: e.target.value,
-                        })
-                      }
-                      placeholder="Enter SMTP password"
-                    >
-                      <j-button
-                        onClick={() => setShowSmtpPassword(!showSmtpPassword)}
-                        slot="end"
-                        variant="link"
-                        square
-                      >
-                        <j-icon
-                          name={showSmtpPassword ? "eye-slash" : "eye"}
-                          size="sm"
-                        ></j-icon>
-                      </j-button>
-                    </j-input>
-                  </j-box>
-                  <j-box px="500" my="400">
-                    <j-box mb="200">
-                      <j-text size="500" weight="500">
-                        From Email Address
-                      </j-text>
-                    </j-box>
-                    <j-input
-                      value={smtpConfig.from_address}
-                      onChange={(e: any) =>
-                        setSmtpConfig({
-                          ...smtpConfig,
-                          from_address: e.target.value,
-                        })
-                      }
-                      placeholder="noreply@yourdomain.com"
-                    />
-                  </j-box>
-                  <j-box px="500" my="400">
-                    <j-button
-                      onClick={() => handleSmtpConfigChange(smtpConfig)}
-                      variant="primary"
-                      full
-                    >
-                      Save SMTP Configuration
-                    </j-button>
-                  </j-box>
-
-                  {/* Test Email */}
-                  <j-box px="500" my="400">
-                    <j-box mb="200">
-                      <j-text size="500" weight="500">
-                        Test Email
-                      </j-text>
-                    </j-box>
-                    <j-flex gap="200" a="center">
-                      <j-input
-                        value={smtpTestEmail}
-                        onChange={(e: any) => setSmtpTestEmail(e.target.value)}
-                        placeholder="test@example.com"
-                        style={{ flexGrow: "1" }}
+                      <input
+                        value={hostReg.hostUrl}
+                        onChange={(e) =>
+                          handleHostRegChange("hostUrl", e.target.value)
+                        }
+                        placeholder="wss://your-host-domain.com"
+                        style={{
+                          fontSize: "13px",
+                          width: "100%",
+                          padding: "8px 12px",
+                          background: "var(--j-color-ui-100)",
+                          border: "1px solid var(--j-color-ui-200)",
+                          borderRadius: "6px",
+                          color: "var(--j-color-ui-600)",
+                          outline: "none",
+                          fontFamily: "monospace",
+                        }}
                       />
-                      <j-button
-                        onClick={handleSmtpTest}
-                        variant="secondary"
-                        loading={smtpTesting}
-                        disabled={smtpTesting}
+                    </div>
+
+                    {/* Compute Specs */}
+                    <div style={{ width: "100%" }}>
+                      <j-text
+                        size="300"
+                        weight="600"
+                        color="ui-500"
+                        style={{
+                          textTransform: "uppercase",
+                          letterSpacing: "0.5px",
+                          display: "block",
+                          marginBottom: "6px",
+                        }}
                       >
-                        Send Test
-                      </j-button>
-                    </j-flex>
-                    {smtpTestStatus && (
-                      <j-box mt="200">
-                        <j-text
-                          size="400"
-                          color={
-                            smtpTestStatus.includes("success")
-                              ? "success-500"
-                              : "danger-500"
-                          }
+                        Compute
+                      </j-text>
+                      <input
+                        value={hostReg.computeSpecs}
+                        onChange={(e) =>
+                          handleHostRegChange("computeSpecs", e.target.value)
+                        }
+                        placeholder="e.g. 8 CPU, 32GB RAM, RTX 4090"
+                        style={{
+                          fontSize: "14px",
+                          width: "100%",
+                          padding: "8px 12px",
+                          background: "var(--j-color-ui-100)",
+                          border: "1px solid var(--j-color-ui-200)",
+                          borderRadius: "6px",
+                          color: "var(--j-color-ui-600)",
+                          outline: "none",
+                          fontFamily: "inherit",
+                        }}
+                      />
+                    </div>
+
+                    {/* AI Models */}
+                    <div style={{ width: "100%" }}>
+                      <j-text
+                        size="300"
+                        weight="600"
+                        color="ui-500"
+                        style={{
+                          textTransform: "uppercase",
+                          letterSpacing: "0.5px",
+                          display: "block",
+                          marginBottom: "6px",
+                        }}
+                      >
+                        AI Models
+                      </j-text>
+                      {aiModels.length > 0 ? (
+                        <div
+                          style={{
+                            display: "flex",
+                            flexWrap: "wrap",
+                            justifyContent: "center",
+                            gap: "6px",
+                          }}
                         >
-                          {smtpTestStatus}
+                          {aiModels.map((m: any, i: number) => (
+                            <span
+                              key={i}
+                              style={{
+                                fontSize: "13px",
+                                padding: "4px 12px",
+                                borderRadius: "12px",
+                                background: "rgba(33, 150, 243, 0.1)",
+                                color: "var(--j-color-primary-500)",
+                              }}
+                            >
+                              {m.name}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <j-text
+                          size="300"
+                          color="ui-400"
+                          style={{ fontStyle: "italic" }}
+                        >
+                          No models configured
                         </j-text>
-                      </j-box>
-                    )}
-                  </j-box>
+                      )}
+                      <j-text
+                        size="200"
+                        color="ui-400"
+                        style={{ display: "block", marginTop: "6px" }}
+                      >
+                        AI models can be added in the AI section.
+                      </j-text>
+                    </div>
 
-                  {smtpChanged && (
-                    <j-box px="500" my="400">
-                      <j-box
-                        p="400"
+                    {/* Pricing */}
+                    <div style={{ width: "100%" }}>
+                      <j-text
+                        size="300"
+                        weight="600"
+                        color="ui-500"
                         style={{
-                          backgroundColor: "#fff3cd",
-                          borderRadius: "8px",
-                          border: "1px solid #ffc107",
+                          textTransform: "uppercase",
+                          letterSpacing: "0.5px",
+                          display: "block",
+                          marginBottom: "6px",
                         }}
                       >
-                        <j-flex a="center" gap="300">
-                          <j-icon
-                            name="exclamation-triangle"
-                            color="warning"
-                          ></j-icon>
-                          <j-text size="500">
-                            Restart required for SMTP changes to take effect.
-                          </j-text>
-                        </j-flex>
-                      </j-box>
-                    </j-box>
-                  )}
-                </>
-              )}
-            </>
-          )}
-
-          {/* ===== TLS CONFIGURATION ===== */}
-          <j-box
-            px="500"
-            my="500"
-            pt="500"
-            style={{ borderTop: "1px solid var(--j-color-ui-200)" }}
-          >
-            <j-text size="600" weight="600" color="black">
-              TLS/HTTPS Configuration
-            </j-text>
-          </j-box>
-
-          <j-box px="500" my="300">
-            <j-text size="500" color="ui-500">
-              Enable HTTPS for secure remote access. Required for multi-user
-              mode over the web.
-            </j-text>
-          </j-box>
-
-          {tlsConfig && (
-            <>
-              <j-box px="500" my="400">
-                <j-toggle
-                  checked={tlsConfig.enabled}
-                  onChange={(e: any) =>
-                    setTlsConfig({ ...tlsConfig, enabled: e.target.checked })
-                  }
-                >
-                  Enable TLS/HTTPS
-                </j-toggle>
-              </j-box>
-
-              {tlsConfig.enabled && (
-                <>
-                  <j-box px="500" my="400">
-                    <j-box mb="200">
-                      <j-text size="500" weight="500">
-                        Certificate File
+                        Pricing
                       </j-text>
-                    </j-box>
-                    <j-flex gap="200" a="center">
-                      <j-input
-                        value={tlsConfig.cert_file_path}
-                        onChange={(e: any) =>
-                          setTlsConfig({
-                            ...tlsConfig,
-                            cert_file_path: e.target.value,
-                          })
+                      <input
+                        value={hostReg.rates}
+                        onChange={(e) =>
+                          handleHostRegChange("rates", e.target.value)
                         }
-                        placeholder="/path/to/certificate.pem"
-                        style={{ flexGrow: "1" }}
-                        error={!!certPathError}
+                        placeholder='[{"description": "Base rate", "priceInHOT": 0.001}]'
+                        style={{
+                          fontSize: "13px",
+                          width: "100%",
+                          padding: "8px 12px",
+                          background: "var(--j-color-ui-100)",
+                          border: "1px solid var(--j-color-ui-200)",
+                          borderRadius: "6px",
+                          color: "var(--j-color-ui-700)",
+                          outline: "none",
+                          fontFamily: "inherit",
+                        }}
                       />
+                    </div>
+
+                    <StatusMessage />
+
+                    <j-flex gap="300" mt="200">
                       <j-button
-                        onClick={handleCertFilePicker}
-                        variant="secondary"
-                        size="sm"
+                        variant="primary"
+                        onClick={handleUpdateHost}
+                        loading={hostRegistering}
                       >
-                        Browse
+                        Save Changes
+                      </j-button>
+                      <j-button variant="subtle" onClick={handleLogout}>
+                        Logout
                       </j-button>
                     </j-flex>
-                    {certPathError && (
-                      <j-box mt="200">
-                        <j-text size="300" color="danger-500">
-                          {certPathError}
-                        </j-text>
-                      </j-box>
-                    )}
-                  </j-box>
+                  </div>
+                )}
+              </ExpandableSection>
 
-                  <j-box px="500" my="400">
-                    <j-box mb="200">
-                      <j-text size="500" weight="500">
-                        Private Key File
-                      </j-text>
-                    </j-box>
-                    <j-flex gap="200" a="center">
-                      <j-input
-                        value={tlsConfig.key_file_path}
-                        onChange={(e: any) =>
-                          setTlsConfig({
-                            ...tlsConfig,
-                            key_file_path: e.target.value,
-                          })
-                        }
-                        placeholder="/path/to/private-key.pem"
-                        style={{ flexGrow: "1" }}
-                        error={!!keyPathError}
-                      />
-                      <j-button
-                        onClick={handleKeyFilePicker}
-                        variant="secondary"
-                        size="sm"
-                      >
-                        Browse
-                      </j-button>
-                    </j-flex>
-                    {keyPathError && (
-                      <j-box mt="200">
-                        <j-text size="300" color="danger-500">
-                          {keyPathError}
-                        </j-text>
-                      </j-box>
-                    )}
-                  </j-box>
-
-                  <j-box px="500" my="400">
-                    <j-box mb="200">
-                      <j-text size="500" weight="500">
-                        TLS Port
-                      </j-text>
-                    </j-box>
-                    <j-input
-                      type="number"
-                      value={tlsConfig.tls_port?.toString() || "12001"}
-                      onChange={(e: any) =>
-                        setTlsConfig({
+              {/* TLS Settings */}
+              <ExpandableSection
+                title="TLS Configuration"
+                expanded={tlsExpanded}
+                onToggle={() => setTlsExpanded(!tlsExpanded)}
+                badge={
+                  tlsConfig?.enabled ? (
+                    <j-badge variant="success">Enabled</j-badge>
+                  ) : (
+                    <j-badge variant="gray">Disabled</j-badge>
+                  )
+                }
+              >
+                {tlsConfig && (
+                  <>
+                    <j-toggle
+                      checked={tlsConfig.enabled}
+                      onChange={(e: any) => {
+                        const newConfig = {
                           ...tlsConfig,
-                          tls_port: parseInt(e.target.value) || null,
-                        })
-                      }
-                      placeholder="12001"
-                    />
-                    <j-box mt="200">
-                      <j-text size="300" color="ui-500">
-                        Port for remote HTTPS/WSS access.
-                      </j-text>
-                    </j-box>
-                  </j-box>
-
-                  <j-box px="500" my="400">
-                    <j-button
-                      onClick={() => handleTlsConfigChange(tlsConfig)}
-                      variant="primary"
-                      full
-                    >
-                      Save TLS Configuration
-                    </j-button>
-                  </j-box>
-
-                  {tlsChanged && (
-                    <j-box px="500" my="400">
-                      <j-box
-                        p="400"
-                        style={{
-                          backgroundColor: "#fff3cd",
-                          borderRadius: "8px",
-                          border: "1px solid #ffc107",
-                        }}
-                      >
-                        <j-flex a="center" gap="300">
-                          <j-icon
-                            name="exclamation-triangle"
-                            color="warning"
-                          ></j-icon>
-                          <j-text size="500">
-                            Restart required for TLS changes to take effect.
-                          </j-text>
-                        </j-flex>
-                      </j-box>
-                    </j-box>
-                  )}
-
-                  <j-box px="500" my="400">
-                    <j-box
-                      p="400"
-                      style={{
-                        backgroundColor: "#e7f3ff",
-                        borderRadius: "8px",
-                        border: "1px solid #2196f3",
+                          enabled: e.target.checked,
+                        };
+                        setTlsConfig(newConfig);
+                        handleTlsConfigChange(newConfig);
                       }}
                     >
-                      <j-text size="400">
-                        <strong>Note:</strong> When TLS is enabled, AD4M runs
-                        two GraphQL servers:
-                        <br />- <strong>HTTP on 127.0.0.1:12000</strong> — local
-                        apps
-                        <br />-{" "}
-                        <strong>
-                          HTTPS on 0.0.0.0:{tlsConfig.tls_port || 12001}
-                        </strong>{" "}
-                        — remote access
-                      </j-text>
-                    </j-box>
-                  </j-box>
-                </>
-              )}
-            </>
+                      Enable TLS
+                    </j-toggle>
+
+                    {tlsConfig.enabled && (
+                      <j-box mt="400">
+                        <j-box mb="300">
+                          <j-text size="400" weight="500" mb="200">
+                            Certificate File
+                          </j-text>
+                          <j-flex gap="200">
+                            <j-input
+                              value={tlsConfig.cert_file_path}
+                              readonly
+                            />
+                            <j-button
+                              variant="subtle"
+                              onClick={handleCertFilePicker}
+                            >
+                              Browse
+                            </j-button>
+                          </j-flex>
+                          {certPathError && (
+                            <j-text size="300" color="danger">
+                              {certPathError}
+                            </j-text>
+                          )}
+                        </j-box>
+                        <j-box mb="300">
+                          <j-text size="400" weight="500" mb="200">
+                            Private Key File
+                          </j-text>
+                          <j-flex gap="200">
+                            <j-input value={tlsConfig.key_file_path} readonly />
+                            <j-button
+                              variant="subtle"
+                              onClick={handleKeyFilePicker}
+                            >
+                              Browse
+                            </j-button>
+                          </j-flex>
+                          {keyPathError && (
+                            <j-text size="300" color="danger">
+                              {keyPathError}
+                            </j-text>
+                          )}
+                        </j-box>
+                        <j-box mb="300">
+                          <j-text size="400" weight="500" mb="200">
+                            TLS Port
+                          </j-text>
+                          <j-input
+                            type="number"
+                            value={tlsConfig.tls_port?.toString() || "12001"}
+                            onInput={(e: any) =>
+                              setTlsConfig({
+                                ...tlsConfig,
+                                tls_port: parseInt(e.target.value) || 12001,
+                              })
+                            }
+                          />
+                        </j-box>
+                      </j-box>
+                    )}
+                  </>
+                )}
+              </ExpandableSection>
+
+              {/* SMTP Settings */}
+              <ExpandableSection
+                title="Email Configuration (SMTP)"
+                expanded={smtpExpanded}
+                onToggle={() => setSmtpExpanded(!smtpExpanded)}
+                badge={
+                  smtpConfig?.enabled ? (
+                    <j-badge variant="success">Enabled</j-badge>
+                  ) : (
+                    <j-badge variant="gray">Disabled</j-badge>
+                  )
+                }
+              >
+                {smtpConfig && (
+                  <>
+                    <j-toggle
+                      checked={smtpConfig.enabled}
+                      onChange={(e: any) => {
+                        const newConfig = {
+                          ...smtpConfig,
+                          enabled: e.target.checked,
+                        };
+                        setSmtpConfig(newConfig);
+                        handleSmtpConfigChange(newConfig);
+                      }}
+                    >
+                      Enable Email/SMTP
+                    </j-toggle>
+
+                    {smtpConfig.enabled && (
+                      <j-box mt="400">
+                        <j-box mb="300">
+                          <j-text size="400" weight="500" mb="200">
+                            SMTP Host
+                          </j-text>
+                          <j-input
+                            value={smtpConfig.host}
+                            onChange={(e: any) =>
+                              setSmtpConfig({
+                                ...smtpConfig,
+                                host: e.target.value,
+                              })
+                            }
+                            placeholder="smtp.gmail.com"
+                          />
+                        </j-box>
+                        <j-box mb="300">
+                          <j-text size="400" weight="500" mb="200">
+                            Port
+                          </j-text>
+                          <j-input
+                            type="number"
+                            value={smtpConfig.port.toString()}
+                            onChange={(e: any) =>
+                              setSmtpConfig({
+                                ...smtpConfig,
+                                port: parseInt(e.target.value) || 587,
+                              })
+                            }
+                          />
+                        </j-box>
+                        <j-box mb="300">
+                          <j-text size="400" weight="500" mb="200">
+                            Username
+                          </j-text>
+                          <j-input
+                            value={smtpConfig.username}
+                            onChange={(e: any) =>
+                              setSmtpConfig({
+                                ...smtpConfig,
+                                username: e.target.value,
+                              })
+                            }
+                          />
+                        </j-box>
+                        <j-box mb="300">
+                          <j-text size="400" weight="500" mb="200">
+                            Password
+                          </j-text>
+                          <j-input
+                            type={showSmtpPassword ? "text" : "password"}
+                            value={smtpConfig.password}
+                            onChange={(e: any) =>
+                              setSmtpConfig({
+                                ...smtpConfig,
+                                password: e.target.value,
+                              })
+                            }
+                          >
+                            <j-button
+                              onClick={() =>
+                                setShowSmtpPassword(!showSmtpPassword)
+                              }
+                              slot="end"
+                              variant="link"
+                              square
+                            >
+                              <j-icon
+                                name={showSmtpPassword ? "eye-slash" : "eye"}
+                                size="sm"
+                              ></j-icon>
+                            </j-button>
+                          </j-input>
+                        </j-box>
+                        <j-box mb="300">
+                          <j-text size="400" weight="500" mb="200">
+                            From Address
+                          </j-text>
+                          <j-input
+                            value={smtpConfig.from_address}
+                            onChange={(e: any) =>
+                              setSmtpConfig({
+                                ...smtpConfig,
+                                from_address: e.target.value,
+                              })
+                            }
+                            placeholder="noreply@example.com"
+                          />
+                        </j-box>
+
+                        <j-flex gap="300" mb="400">
+                          <j-button
+                            variant="primary"
+                            onClick={() => handleSmtpConfigChange(smtpConfig)}
+                          >
+                            Save
+                          </j-button>
+                          <j-button
+                            variant="subtle"
+                            onClick={() => {
+                              setSmtpTestEmail(hostSession?.email || "");
+                              setSmtpTesting(true);
+                            }}
+                          >
+                            Send Test
+                          </j-button>
+                        </j-flex>
+
+                        {smtpTesting && (
+                          <j-box mb="300">
+                            <j-flex gap="200">
+                              <j-input
+                                value={smtpTestEmail}
+                                onInput={(e: any) =>
+                                  setSmtpTestEmail(e.target.value)
+                                }
+                                placeholder="test@example.com"
+                              />
+                              <j-button
+                                variant="primary"
+                                onClick={handleSmtpTest}
+                                loading={smtpTesting}
+                              >
+                                Send
+                              </j-button>
+                            </j-flex>
+                            {smtpTestStatus && (
+                              <j-text size="300" mt="200">
+                                {smtpTestStatus}
+                              </j-text>
+                            )}
+                          </j-box>
+                        )}
+                      </j-box>
+                    )}
+                  </>
+                )}
+              </ExpandableSection>
+            </j-box>
           )}
         </>
       )}
