@@ -409,7 +409,6 @@ jobs:
     runs-on: windows-latest
 
     env:
-      CMAKE_ASM_NASM_COMPILER: "C:\\Program Files\\NASM\\nasm.exe"
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
     needs:
@@ -425,13 +424,10 @@ jobs:
         git config --global core.longpaths true
         reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
 
-    - name: Install NASM (required for aws-lc-sys AES assembly on Windows)
-      run: choco install nasm -y
-      shell: powershell
-
-    - name: Add NASM to PATH
-      run: echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
-      shell: powershell
+    # NOTE: Do NOT install NASM here! aws-lc-sys 0.35.0 detects NASM via
+    # test_nasm_command() and tries to use it through cmake, which fails.
+    # Without NASM, it falls back to prebuilt .obj files (controlled by
+    # AWS_LC_SYS_PREBUILT_NASM=1 in .cargo/config.toml).
 
     # Rust toolchain configured via rust-toolchain.toml
     - name: Install Rust toolchain
@@ -449,7 +445,7 @@ jobs:
           ui/src-tauri
         cache-targets: true
         cache-all-crates: true
-        shared-key: "staging-windows-v7-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
+        shared-key: "staging-windows-v8-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
 
     - name: Install GO
       uses: actions/setup-go@v4
