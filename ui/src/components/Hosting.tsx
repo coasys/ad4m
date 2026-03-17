@@ -43,7 +43,7 @@ const Hosting = () => {
     name: "",
     description: "",
     location: "",
-    rates: '[{"description": "Base rate", "priceInHOT": 0.001}]',
+    rates: '[{"description": "link write", "priceInHOT": 0.25}]',
     aiModels: "[]",
     computeSpecs: "",
     hostUrl: "",
@@ -521,6 +521,12 @@ const Hosting = () => {
 
       if (res.ok) {
         setHostData(data);
+        // Also persist rates to executor DB for credit deduction
+        try {
+          if (client) await client.runtime.setHostRates(hostReg.rates);
+        } catch (e) {
+          console.warn("Failed to sync rates to executor DB:", e);
+        }
         setHostRegStatus({
           type: "success",
           message: "Host updated successfully.",
@@ -673,7 +679,7 @@ const Hosting = () => {
     const key = `free-${email}`;
     setActionLoading((prev) => ({ ...prev, [key]: true }));
     try {
-      await client!.agent.setUserFreeAccess(email, !currentFreeAccess);
+      await client!.runtime.setUserFreeAccess(email, !currentFreeAccess);
       await getUsers();
     } catch (error) {
       console.error("Failed to toggle free access:", error);
@@ -688,7 +694,7 @@ const Hosting = () => {
     const key = `credits-${email}`;
     setActionLoading((prev) => ({ ...prev, [key]: true }));
     try {
-      await client!.agent.setUserCredits(email, amount);
+      await client!.runtime.setUserCredits(email, amount);
       setCreditAmounts((prev) => ({ ...prev, [email]: "" }));
       await getUsers();
     } catch (error) {
@@ -781,6 +787,22 @@ const Hosting = () => {
       }
     };
     fetchAiModels();
+
+    // Load saved rates from executor DB
+    const fetchHostRates = async () => {
+      try {
+        const rates = await client.runtime.getHostRates();
+        if (rates.length > 0) {
+          setHostReg((prev) => ({
+            ...prev,
+            rates: JSON.stringify(rates),
+          }));
+        }
+      } catch (e) {
+        console.error("Failed to fetch host rates from DB:", e);
+      }
+    };
+    fetchHostRates();
   }, [client]);
 
   useEffect(() => {
@@ -1661,24 +1683,128 @@ const Hosting = () => {
                       >
                         Pricing
                       </j-text>
-                      <input
-                        value={hostReg.rates}
-                        onChange={(e) =>
-                          handleHostRegChange("rates", e.target.value)
-                        }
-                        placeholder='[{"description": "Base rate", "priceInHOT": 0.001}]'
-                        style={{
+                      {(() => {
+                        let parsed: { description: string; priceInHOT: number }[] = [];
+                        try { parsed = JSON.parse(hostReg.rates); } catch {}
+                        if (!Array.isArray(parsed)) parsed = [];
+
+                        // Defaults in HOT (at ~$0.0004/HOT)
+                        const DEFAULT_LINK_PRICE = 0.25;    // ~$0.0001 per link
+                        const DEFAULT_TOKEN_PRICE = 12.5;   // ~$0.005 per token, avg API pricing
+
+                        const getPrice = (desc: string) =>
+                          parsed.find((r) => r.description === desc)?.priceInHOT ?? 0;
+
+                        const getDefault = (desc: string) =>
+                          desc === "link write" ? DEFAULT_LINK_PRICE : DEFAULT_TOKEN_PRICE;
+
+                        const setPrice = (desc: string, val: string) => {
+                          const num = parseFloat(val) || 0;
+                          const updated = parsed.filter((r) => r.description !== desc);
+                          if (num > 0) updated.push({ description: desc, priceInHOT: num });
+                          handleHostRegChange("rates", JSON.stringify(updated));
+                        };
+
+                        const inputStyle: React.CSSProperties = {
                           fontSize: "13px",
-                          width: "100%",
-                          padding: "8px 12px",
+                          width: "110px",
+                          padding: "6px 10px",
                           background: "var(--j-color-ui-100)",
                           border: "1px solid var(--j-color-ui-200)",
                           borderRadius: "6px",
                           color: "var(--j-color-ui-700)",
                           outline: "none",
                           fontFamily: "inherit",
-                        }}
-                      />
+                          textAlign: "right",
+                        };
+
+                        const rowStyle: React.CSSProperties = {
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          padding: "8px 12px",
+                          borderBottom: "1px solid var(--j-color-ui-100)",
+                        };
+
+                        const labelStyle: React.CSSProperties = {
+                          fontSize: "13px",
+                          color: "var(--j-color-ui-600)",
+                        };
+
+                        const modelNames: string[] = aiModels.map((m: any) => m.name);
+
+                        return (
+                          <div
+                            style={{
+                              border: "1px solid var(--j-color-ui-200)",
+                              borderRadius: "8px",
+                              overflow: "hidden",
+                            }}
+                          >
+                            {/* Header */}
+                            <div
+                              style={{
+                                ...rowStyle,
+                                background: "var(--j-color-ui-50)",
+                                fontWeight: 600,
+                                fontSize: "12px",
+                                textTransform: "uppercase",
+                                letterSpacing: "0.5px",
+                                color: "var(--j-color-ui-500)",
+                              }}
+                            >
+                              <span>Item</span>
+                              <span>Price (HOT)</span>
+                            </div>
+
+                            {/* Base link price */}
+                            <div style={rowStyle}>
+                              <span style={labelStyle}>Link (base rate per link write)</span>
+                              <input
+                                type="number"
+                                step="0.000001"
+                                min="0"
+                                value={getPrice("link write") || ""}
+                                onChange={(e) => setPrice("link write", e.target.value)}
+                                placeholder={String(getDefault("link write"))}
+                                onBlur={(e) => {
+                                  if (!e.target.value && !getPrice("link write"))
+                                    setPrice("link write", String(getDefault("link write")));
+                                }}
+                                style={inputStyle}
+                              />
+                            </div>
+
+                            {/* Per-model token prices */}
+                            {modelNames.map((name) => (
+                              <div key={name} style={rowStyle}>
+                                <span style={labelStyle}>{name} <span style={{ color: "var(--j-color-ui-400)", fontSize: "12px" }}>(per token)</span></span>
+                                <input
+                                  type="number"
+                                  step="0.000001"
+                                  min="0"
+                                  value={getPrice(`${name} per token`) || ""}
+                                  onChange={(e) => setPrice(`${name} per token`, e.target.value)}
+                                  placeholder={String(getDefault(`${name} per token`))}
+                                  onBlur={(e) => {
+                                    if (!e.target.value && !getPrice(`${name} per token`))
+                                      setPrice(`${name} per token`, String(getDefault(`${name} per token`)));
+                                  }}
+                                  style={inputStyle}
+                                />
+                              </div>
+                            ))}
+
+                            {modelNames.length === 0 && (
+                              <div style={{ ...rowStyle, borderBottom: "none" }}>
+                                <span style={{ ...labelStyle, fontStyle: "italic", color: "var(--j-color-ui-400)" }}>
+                                  Add AI models above to set per-token prices
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     <StatusMessage />

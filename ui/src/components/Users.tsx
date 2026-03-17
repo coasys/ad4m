@@ -69,7 +69,7 @@ const Users = () => {
     const key = `free-${email}`;
     setActionLoading(prev => ({ ...prev, [key]: true }));
     try {
-      await client!.agent.setUserFreeAccess(email, !currentFreeAccess);
+      await client!.runtime.setUserFreeAccess(email, !currentFreeAccess);
       await getUsers();
     } catch (error) {
       console.error("Failed to toggle free access:", error);
@@ -85,7 +85,7 @@ const Users = () => {
     const key = `credits-${email}`;
     setActionLoading(prev => ({ ...prev, [key]: true }));
     try {
-      await client!.agent.setUserCredits(email, amount);
+      await client!.runtime.setUserCredits(email, amount);
       setCreditAmounts(prev => ({ ...prev, [email]: "" }));
       await getUsers();
     } catch (error) {

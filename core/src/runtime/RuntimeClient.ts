@@ -551,6 +551,50 @@ export class RuntimeClient {
         return runtimeSendHot
     }
 
+    async setUserCredits(email: string, amount: number): Promise<boolean> {
+        const { runtimeSetUserCredits } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeSetUserCredits($email: String!, $amount: Float!) {
+                runtimeSetUserCredits(email: $email, amount: $amount)
+            }`,
+            variables: { email, amount },
+        }))
+        return runtimeSetUserCredits
+    }
+
+    async setUserFreeAccess(email: string, enabled: boolean): Promise<boolean> {
+        const { runtimeSetUserFreeAccess } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeSetUserFreeAccess($email: String!, $enabled: Boolean!) {
+                runtimeSetUserFreeAccess(email: $email, enabled: $enabled)
+            }`,
+            variables: { email, enabled },
+        }))
+        return runtimeSetUserFreeAccess
+    }
+
+    async setHostRates(ratesJson: string): Promise<boolean> {
+        const { runtimeSetHostRates } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeSetHostRates($ratesJson: String!) {
+                runtimeSetHostRates(ratesJson: $ratesJson)
+            }`,
+            variables: { ratesJson },
+        }))
+        return runtimeSetHostRates
+    }
+
+    async getHostRates(): Promise<{ description: string; priceInHOT: number }[]> {
+        const { runtimeHostRates } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeHostRates {
+                runtimeHostRates
+            }`,
+            fetchPolicy: 'network-only',
+        }))
+        try {
+            return JSON.parse(runtimeHostRates)
+        } catch {
+            return []
+        }
+    }
+
     addNotificationTriggeredCallback(cb: NotificationTriggeredCallback) {
         this.#notificationTriggeredCallbacks.push(cb)
     }

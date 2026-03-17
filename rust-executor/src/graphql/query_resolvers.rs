@@ -1068,6 +1068,29 @@ impl Query {
         })
     }
 
+    /// Get the host's configured rates for credit deduction.
+    async fn runtime_host_rates(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        let rates = Ad4mDb::with_global_instance(|db| {
+            db.get_host_rates().map_err(|e| {
+                FieldError::new(format!("Failed to get host rates: {}", e), Value::null())
+            })
+        })?;
+
+        let json: Vec<serde_json::Value> = rates
+            .into_iter()
+            .map(|(desc, price)| {
+                serde_json::json!({ "description": desc, "priceInHOT": price })
+            })
+            .collect();
+
+        Ok(serde_json::to_string(&json).unwrap_or_else(|_| "[]".to_string()))
+    }
+
     /// Get the host's mHOT wallet balance from the alliance DNA ledger.
     async fn runtime_hot_wallet_balance(
         &self,

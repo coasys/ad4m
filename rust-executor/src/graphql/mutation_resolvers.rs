@@ -3183,6 +3183,42 @@ impl Mutation {
         }
     }
 
+    /// Set host rates used for credit deduction.
+    /// Expects a JSON string: [{"description": "...", "priceInHOT": 0.01}, ...]
+    async fn runtime_set_host_rates(
+        &self,
+        context: &RequestContext,
+        rates_json: String,
+    ) -> FieldResult<bool> {
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can set host rates",
+                Value::null(),
+            ));
+        }
+
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&rates_json).map_err(|e| {
+            FieldError::new(format!("Invalid rates JSON: {}", e), Value::null())
+        })?;
+
+        let rates: Vec<(String, f64)> = parsed
+            .iter()
+            .filter_map(|item| {
+                let desc = item.get("description")?.as_str()?.to_string();
+                let price = item.get("priceInHOT")?.as_f64()?;
+                Some((desc, price))
+            })
+            .collect();
+
+        Ad4mDb::with_global_instance(|db| {
+            db.set_host_rates(&rates).map_err(|e| {
+                FieldError::new(format!("Failed to set host rates: {}", e), Value::null())
+            })
+        })?;
+
+        Ok(true)
+    }
+
     /// Store a membrane proof for Unyt alliance DNA installation.
     /// The proof should be base64-encoded bytes from the joining server.
     async fn runtime_set_unyt_membrane_proof(

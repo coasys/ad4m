@@ -356,6 +356,14 @@ impl Ad4mDb {
         alter_add_column("ALTER TABLE users ADD COLUMN hot_wallet_address TEXT")?;
         alter_add_column("ALTER TABLE users ADD COLUMN free_access BOOLEAN DEFAULT 0")?;
 
+        // Host rates table — stores per-item pricing used for credit deduction
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS host_rates (
+                description TEXT PRIMARY KEY,
+                price_in_hot REAL NOT NULL
+            )",
+        )?;
+
         // Payment requests table for tracking mHOT payment proposals
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS payment_requests (
@@ -2928,6 +2936,42 @@ impl Ad4mDb {
             params![enabled, email],
         )?;
         Self::require_user_row(rows, email)
+    }
+
+    // Host rates management functions
+
+    pub fn set_host_rates(&self, rates: &[(String, f64)]) -> Ad4mDbResult<()> {
+        self.conn.execute("DELETE FROM host_rates", [])?;
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO host_rates (description, price_in_hot) VALUES (?1, ?2)",
+        )?;
+        for (desc, price) in rates {
+            stmt.execute(params![desc, price])?;
+        }
+        Ok(())
+    }
+
+    pub fn get_host_rates(&self) -> Ad4mDbResult<Vec<(String, f64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT description, price_in_hot FROM host_rates",
+        )?;
+        let rates = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rates)
+    }
+
+    pub fn get_host_rate(&self, description: &str) -> Ad4mDbResult<Option<f64>> {
+        let result = self.conn.query_row(
+            "SELECT price_in_hot FROM host_rates WHERE description = ?1",
+            [description],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(price) => Ok(Some(price)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     // Payment request management functions
