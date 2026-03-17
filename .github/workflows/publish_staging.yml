@@ -230,11 +230,12 @@ jobs:
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-      # B/BL out of range fix: the binary exceeds ARM64's ±128MB branch limit.
-      # -no_fixup_chains disables chained fixups, enabling the linker to generate
-      # branch island stubs for long-range B/BL instructions.
-      # -ld_classic was removed in Xcode 16.2 so we use the modern linker option.
-      RUSTFLAGS: "-C link-arg=-Wl,-no_fixup_chains"
+      # Cross-compile to x86_64 on ARM64 macos-14 runner.
+      # The binary exceeds ARM64's ±128MB B/BL branch instruction limit
+      # (V8 + ONNX Runtime = ~140MB text segment). x86_64 uses 32-bit
+      # relative addressing (±2GB), avoiding the issue entirely.
+      # x86_64 binaries run on Apple Silicon via Rosetta 2.
+      CARGO_BUILD_TARGET: "x86_64-apple-darwin"
 
     needs:
       - create-release
@@ -260,7 +261,7 @@ jobs:
           ui/src-tauri
         cache-targets: true
         cache-all-crates: true
-        shared-key: "staging-v5-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
+        shared-key: "staging-v6-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
 
     - name: Install GO
       uses: actions/setup-go@v4
@@ -345,7 +346,9 @@ jobs:
         #APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         #APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         #APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      run: pnpm run package-ad4m
+      # Use explicit --target for Tauri cross-compilation to x86_64
+      run: |
+        cd ui && pnpm run build && pnpm tauri build --verbose --features metal --target x86_64-apple-darwin
 
     - name: Upload Release macOS DMG Asset
       id: upload-release-macos-asset
@@ -354,8 +357,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: "/Users/runner/work/ad4m/ad4m/target/release/bundle/dmg/ADAM Launcher_${{ steps.extract_version.outputs.version }}_aarch64.dmg"
-        asset_name: ADAM Launcher_${{ steps.extract_version.outputs.version }}_aarch64.dmg
+        asset_path: "/Users/runner/work/ad4m/ad4m/target/x86_64-apple-darwin/release/bundle/dmg/ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64.dmg"
+        asset_name: ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64.dmg
         asset_content_type: application/octet-stream
 
     #- name: Upload Release Macos update Asset
@@ -387,8 +390,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /Users/runner/work/ad4m/ad4m/target/release/ad4m
-        asset_name: ad4m-cli-client-macos-${{ steps.extract_version.outputs.version }}-aarch64
+        asset_path: /Users/runner/work/ad4m/ad4m/target/x86_64-apple-darwin/release/ad4m
+        asset_name: ad4m-cli-client-macos-${{ steps.extract_version.outputs.version }}-x64
         asset_content_type: application/octet-stream
 
     - name: Upload Release AD4M CLI executor macOS Binary
@@ -398,8 +401,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /Users/runner/work/ad4m/ad4m/target/release/ad4m-executor
-        asset_name: ad4m-cli-executor-macos-${{ steps.extract_version.outputs.version }}-aarch64
+        asset_path: /Users/runner/work/ad4m/ad4m/target/x86_64-apple-darwin/release/ad4m-executor
+        asset_name: ad4m-cli-executor-macos-${{ steps.extract_version.outputs.version }}-x64
         asset_content_type: application/octet-stream
 
   # ============================================================================
