@@ -499,16 +499,20 @@ jobs:
     - name: pnpm Install
       run: pnpm install --no-frozen-lockfile
 
-    - name: Build AD4M-CLI
+    - name: Verify NASM
+      run: |
+        nasm -version
+        where nasm
+
+    - name: Build AD4M-CLI (direct cargo — bypasses turbo env stripping)
       env:
         RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
-        # aws-lc-sys: AWS_LC_SYS_PREBUILT_NASM=1 is set in .cargo/config.toml
-        # so it's always available to cargo build scripts (turbo strips step-level env vars).
-        # +crt-static makes Rust use MT too — fixes LNK2038/LNK1169 CRT mismatch in generate_snapshot.
+        # +crt-static makes Rust use MT too — fixes LNK2038/LNK1169 CRT mismatch.
         RUSTFLAGS: -C target-feature=+crt-static
-        # Use system git so cargo does NOT auto-fetch chromium submodules from coasys/deno.git
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-      run: pnpm build-libs
+      run: |
+        cargo build --release --manifest-path rust-executor/Cargo.toml
+        cargo build --release --manifest-path cli/Cargo.toml
 
     - name: Build Launcher binary
       run: pnpm run package-ad4m
