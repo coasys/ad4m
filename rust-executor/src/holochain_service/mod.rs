@@ -471,6 +471,10 @@ impl HolochainService {
                 network_config.relay_url = Url2::parse("http://bootstrap.ad4m.dev:4433/relay");
             }
 
+            network_config.bootstrap_url = Url2::parse("https://dev-test-bootstrap2.holochain.org/");
+            network_config.signal_url = Url2::parse("wss://dev-test-bootstrap2.holochain.org/");
+            network_config.relay_url = Url2::parse("https://use1-1.relay.n0.iroh-canary.iroh.link./");
+
             config.network = network_config;
 
             config
