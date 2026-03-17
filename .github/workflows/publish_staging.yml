@@ -256,7 +256,7 @@ jobs:
           ui/src-tauri
         cache-targets: true
         cache-all-crates: true
-        shared-key: "staging-v3-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
+        shared-key: "staging-v4-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
 
     - name: Install GO
       uses: actions/setup-go@v4
@@ -445,7 +445,7 @@ jobs:
           ui/src-tauri
         cache-targets: true
         cache-all-crates: true
-        shared-key: "staging-windows-v3-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
+        shared-key: "staging-windows-v4-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
 
     - name: Install GO
       uses: actions/setup-go@v4
@@ -487,10 +487,10 @@ jobs:
       env:
         RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
         # libort_sys (ONNX Runtime) ships with static MT CRT; Rust MSVC defaults to dynamic MD.
-        # aws-lc-sys on Windows MSVC: cmake finds NASM+perl but still fails to link
-        # the AES-NI assembly into the final .lib (bcm.obj references unresolved symbols).
-        # OPENSSL_NO_ASM=1 compiles bcm.c in software-only mode — no assembly symbols needed.
-        OPENSSL_NO_ASM: "1"
+        # aws-lc-sys: use pre-compiled .obj files shipped in the crate (no NASM needed).
+        # The prebuilt-nasm.bat script copies .obj files from the crate's prebuilt-nasm/ dir.
+        # Also sets CMAKE_ASM_NASM_COMPILE_OPTIONS_MSVC_* to avoid MSVC option injection.
+        AWS_LC_SYS_PREBUILT_NASM: "1"
         # +crt-static makes Rust use MT too — fixes LNK2038/LNK1169 CRT mismatch in generate_snapshot.
         RUSTFLAGS: -C target-feature=+crt-static
         # Use system git so cargo does NOT auto-fetch chromium submodules from coasys/deno.git
