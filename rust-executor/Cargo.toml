@@ -155,6 +155,10 @@ fs_extra = "1.3.0"
 # Force static CRT on Windows MSVC to match libort_sys (ONNX Runtime) and avoid LNK2038 mismatch
 [target.'cfg(target_env = "msvc")'.dependencies]
 surrealdb-librocksdb-sys = { version = "0.17", features = ["mt_static"] }
+# aws-lc-sys: use pre-compiled NASM assembly objects on Windows.
+# Without this, aws-lc-sys needs NASM installed and cmake integration which
+# fails on MSVC. The prebuilt-nasm feature ships .obj files in the crate.
+aws-lc-sys = { version = "0.35", features = ["prebuilt-nasm"] }
 
 [patch.crates-io]
 rusqlite = { version = "0.34.0" }
