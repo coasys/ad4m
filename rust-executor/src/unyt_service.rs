@@ -580,15 +580,27 @@ pub async fn create_proposal(
     };
 
     let result = call_zome("create_proposal", Some(encode_payload(&input)?)).await?;
+    info!("create_proposal raw result: {:?}", result);
 
-    match result {
-        JsonValue::String(hash) => Ok(hash),
-        other => Ok(serde_json::to_string(&other)?),
+    // ActionHashB64 comes back as a string like "uhCkk..."
+    match &result {
+        JsonValue::String(hash) => Ok(hash.clone()),
+        // If it comes as binary, convert to HoloHash string
+        other => {
+            if let Some(hash_str) = binary_json_to_holohash(other) {
+                Ok(hash_str)
+            } else {
+                Ok(serde_json::to_string(other)?)
+            }
+        }
     }
 }
 
-/// Get transaction status by action hash.
-pub async fn get_status(action_hash: &str) -> Result<JsonValue, AnyError> {
+/// Get transaction status by action hash (accepts ActionHashB64 string like "uhCkk...").
+pub async fn get_status(action_hash_b64: &str) -> Result<JsonValue, AnyError> {
+    // The zome expects ActionHash (raw bytes), so convert from base64 representation
+    let action_hash = holochain::prelude::ActionHash::try_from(action_hash_b64)
+        .map_err(|e| deno_core::anyhow::anyhow!("Invalid action hash '{}': {}", action_hash_b64, e))?;
     call_zome("get_status", Some(encode_payload(&action_hash)?)).await
 }
 
@@ -643,6 +655,59 @@ pub async fn send_hot(
     match result {
         JsonValue::String(hash) => Ok(hash),
         other => Ok(serde_json::to_string(&other)?),
+    }
+}
+
+/// Accept a commitment (step 3 in the negotiated flow: Proposal → Commitment → Accept).
+/// The commitment_hash is an ActionHashB64 string.
+pub async fn accept_commitment(
+    commitment_hash_b64: &str,
+    note: Option<&str>,
+) -> Result<String, AnyError> {
+    let input = AcceptInput {
+        commitment: commitment_hash_b64.to_string(),
+        note: note.map(|n| n.to_string()),
+    };
+
+    let result = call_zome("create_accept", Some(encode_payload(&input)?)).await?;
+    info!("create_accept raw result: {:?}", result);
+
+    match &result {
+        JsonValue::String(hash) => Ok(hash.clone()),
+        other => {
+            if let Some(hash_str) = binary_json_to_holohash(other) {
+                Ok(hash_str)
+            } else {
+                Ok(serde_json::to_string(other)?)
+            }
+        }
+    }
+}
+
+/// Helper: credit user and mark payment request as completed.
+fn credit_and_complete(request: &crate::db::PaymentRequest) {
+    match request.amount_hot.parse::<f64>() {
+        Ok(amount) => {
+            if let Err(e) = Ad4mDb::with_global_instance(|db| {
+                db.add_user_credits(&request.user_email, amount)
+            }) {
+                error!("Failed to credit user {}: {}", request.user_email, e);
+            } else {
+                info!(
+                    "Credited user {} with {} HOT",
+                    request.user_email, amount
+                );
+            }
+        }
+        Err(e) => {
+            error!("Failed to parse amount '{}': {}", request.amount_hot, e);
+        }
+    }
+
+    if let Some(ref action_hash) = request.proposal_action_hash {
+        let _ = Ad4mDb::with_global_instance(|db| {
+            db.complete_payment_request(action_hash)
+        });
     }
 }
 
@@ -793,44 +858,58 @@ pub async fn check_pending_payments() {
         if let Some(ref action_hash) = request.proposal_action_hash {
             match get_status(action_hash).await {
                 Ok(status) => {
-                    // Check if the transaction has been completed
-                    let status_str = status
-                        .as_str()
-                        .unwrap_or_else(|| {
-                            status.get("status").and_then(|s| s.as_str()).unwrap_or("")
-                        });
+                    info!("Payment request {} status: {:?}", action_hash, status);
 
-                    let is_completed = status_str == "Completed"
-                        || status_str == "completed"
-                        || status.get("Completed").is_some();
+                    // State is { status: WatchStatus, initial_amount, action_message, related_transaction }
+                    // WatchStatus::Completed serializes as "Completed" string
+                    let watch_status = status.get("status");
+                    let is_completed = match watch_status {
+                        Some(serde_json::Value::String(s)) => s == "Completed",
+                        // Enum variant with data: {"Completed": ...}
+                        Some(serde_json::Value::Object(obj)) => obj.contains_key("Completed"),
+                        _ => false,
+                    };
 
                     if is_completed {
                         info!(
                             "Payment request {} completed for user {}",
                             action_hash, request.user_email
                         );
+                        credit_and_complete(&request);
+                        continue;
+                    }
 
-                        // Credit the user
-                        match request.amount_hot.parse::<f64>() {
-                            Ok(amount) => {
-                                if let Err(e) = Ad4mDb::with_global_instance(|db| {
-                                    db.add_user_credits(&request.user_email, amount)
-                                }) {
-                                    error!("Failed to credit user {}: {}", request.user_email, e);
-                                }
+                    // Check if there's a Commitment in related_transaction that we need to Accept
+                    let needs_accept = status.get("related_transaction")
+                        .and_then(|rt| rt.as_array())
+                        .and_then(|txs| txs.iter().find(|tx| {
+                            tx.get("tx_type").and_then(|t| t.as_str()) == Some("Commitment")
+                        }))
+                        .and_then(|commitment_tx| {
+                            commitment_tx.get("id").and_then(|id| id.as_str()).map(|s| s.to_string())
+                        });
+
+                    if let Some(commitment_hash) = needs_accept {
+                        info!(
+                            "Payment request {}: found commitment {}, auto-accepting...",
+                            action_hash, commitment_hash
+                        );
+                        match accept_commitment(&commitment_hash, None).await {
+                            Ok(accept_hash) => {
+                                info!(
+                                    "Auto-accepted commitment {} -> accept hash: {}",
+                                    commitment_hash, accept_hash
+                                );
+                                // After accept, the payment may still need a receipt step.
+                                // We'll detect completion on the next poll cycle.
                             }
                             Err(e) => {
-                                error!(
-                                    "Failed to parse amount '{}': {}",
-                                    request.amount_hot, e
+                                warn!(
+                                    "Failed to auto-accept commitment {}: {}",
+                                    commitment_hash, e
                                 );
                             }
                         }
-
-                        // Mark as completed
-                        let _ = Ad4mDb::with_global_instance(|db| {
-                            db.complete_payment_request(action_hash)
-                        });
                     }
                 }
                 Err(e) => {
