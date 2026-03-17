@@ -32,6 +32,29 @@ use log::error;
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
+/// Result of an LLM prompt call, with token counts for billing.
+/// Token counts are estimated (chars/4) with the current Kalosum backend.
+/// When Ollama is integrated, these will be exact from the API response.
+pub struct PromptResult {
+    pub text: String,
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+}
+
+/// Result of an embedding call, with token count for billing.
+pub struct EmbedResult {
+    pub embeddings: Vec<f32>,
+    pub token_count: usize,
+}
+
+/// Rough token count estimation (~4 chars per token for English text).
+/// Used by the Kalosum backend to populate PromptResult/EmbedResult.
+/// Will be replaced by exact counts when Ollama is integrated.
+fn estimate_token_count(text: &str) -> usize {
+    let chars = text.chars().count();
+    (chars + 3) / 4
+}
+
 static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
 static TRANSCRIPTION_TIMEOUT_SECS: u64 = 30; // 30 seconds (was 2 minutes)
 static TRANSCRIPTION_CHECK_INTERVAL_SECS: u64 = 5; // 5 seconds (was 10)
@@ -941,7 +964,7 @@ impl AIService {
         Ok(())
     }
 
-    pub async fn prompt(&self, task_id: String, prompt: String) -> Result<String> {
+    pub async fn prompt(&self, task_id: String, prompt: String) -> Result<PromptResult> {
         let (result_sender, rx) = oneshot::channel();
 
         // Retrieve the task to find the associated model_id
@@ -950,6 +973,8 @@ impl AIService {
             .ok_or_else(|| anyhow::anyhow!("Task not found for task_id: {}", task_id))?;
 
         let model_id = Self::replace_model_variables(&task.model_id)?;
+
+        let prompt_tokens = estimate_token_count(&prompt);
 
         let llm_channel = self.llm_channel.lock().await;
         if let Some(sender) = llm_channel.get(&model_id) {
@@ -965,7 +990,14 @@ impl AIService {
             ));
         }
 
-        rx.await?
+        let text = rx.await??;
+        let completion_tokens = estimate_token_count(&text);
+
+        Ok(PromptResult {
+            text,
+            prompt_tokens,
+            completion_tokens,
+        })
     }
 
     // -------------------------------------
@@ -1028,7 +1060,8 @@ impl AIService {
             .insert(model_name, bert_tx);
     }
 
-    pub async fn embed(&self, model_id: String, text: String) -> Result<Vec<f32>> {
+    pub async fn embed(&self, model_id: String, text: String) -> Result<EmbedResult> {
+        let token_count = estimate_token_count(&text);
         let (result_sender, rx) = oneshot::channel();
         let embedding_channel = self.embedding_channel.lock().await;
         if let Some(sender) = embedding_channel.get(&model_id) {
@@ -1044,7 +1077,11 @@ impl AIService {
             ));
         }
 
-        rx.await?
+        let embeddings = rx.await??;
+        Ok(EmbedResult {
+            embeddings,
+            token_count,
+        })
     }
 
     // -------------------------------------
@@ -1497,7 +1534,7 @@ mod tests {
             .embed("bert".into(), "Test string".into())
             .await
             .expect("embed to return a result");
-        assert!(vector.len() > 300)
+        assert!(vector.embeddings.len() > 300)
     }
 
     #[ignore]
@@ -1521,8 +1558,8 @@ mod tests {
             .prompt(task.task_id, "Test string".into())
             .await
             .expect("prompt to return a result");
-        println!("Response: {}", response);
-        assert!(!response.is_empty())
+        println!("Response: {}", response.text);
+        assert!(!response.text.is_empty())
     }
 
     #[ignore]
@@ -1568,7 +1605,11 @@ mod tests {
             .collect::<Result<Vec<_>>>()
             .expect("all prompts to return results");
 
-        let response = responses.join("\n");
+        let response = responses
+            .iter()
+            .map(|r| r.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         println!("Responses: {}", response);
         assert!(!response.is_empty())
     }
@@ -1675,6 +1716,6 @@ mod tests {
             .prompt(task.task_id.clone(), "Test input".into())
             .await
             .expect("prompt to work after model update");
-        assert!(!response.is_empty());
+        assert!(!response.text.is_empty());
     }
 }

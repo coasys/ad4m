@@ -2904,6 +2904,30 @@ impl Ad4mDb {
         Self::require_user_row(rows, email)
     }
 
+    /// Atomically check that the user has sufficient credits and deduct them.
+    /// Returns Ok(()) if free_access is enabled or credits were successfully reserved.
+    /// Returns Err if credits are insufficient or the user is not found.
+    pub fn deduct_user_credits_if_available(&self, email: &str, amount: f64) -> Ad4mDbResult<()> {
+        Self::validate_credit_amount(amount)?;
+        let rows = self.conn.execute(
+            "UPDATE users SET remaining_credits = remaining_credits - ?1 WHERE username = ?2 AND COALESCE(remaining_credits, 0) >= ?1",
+            params![amount, email],
+        )?;
+        if rows == 0 {
+            // Distinguish user-not-found from insufficient credits
+            let exists: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM users WHERE username = ?1)",
+                [email],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(anyhow!("User not found: {}", email));
+            }
+            return Err(anyhow!("Insufficient compute credits"));
+        }
+        Ok(())
+    }
+
     pub fn get_user_hot_wallet(&self, email: &str) -> Ad4mDbResult<Option<String>> {
         let result: Option<String> = self.conn.query_row(
             "SELECT hot_wallet_address FROM users WHERE username = ?1",
