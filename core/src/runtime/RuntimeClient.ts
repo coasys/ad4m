@@ -477,6 +477,80 @@ export class RuntimeClient {
         return runtimeEmailTestSetExpiry
     }
 
+    // ---- Unyt / mHOT methods ----
+
+    async unytAgentKey(): Promise<string> {
+        const { runtimeUnytAgentKey } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeUnytAgentKey { runtimeUnytAgentKey }`,
+            fetchPolicy: "network-only",
+        }))
+        return runtimeUnytAgentKey
+    }
+
+    async unytHotAgentPubkey(): Promise<string> {
+        const { runtimeHotAgentPubkey } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeHotAgentPubkey { runtimeHotAgentPubkey }`,
+            fetchPolicy: "network-only",
+        }))
+        return runtimeHotAgentPubkey
+    }
+
+    async unytWalletBalance(): Promise<string> {
+        const { runtimeHotWalletBalance } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeHotWalletBalance { runtimeHotWalletBalance }`,
+            fetchPolicy: "network-only",
+        }))
+        return runtimeHotWalletBalance
+    }
+
+    async unytWalletHistory(page?: number, perPage?: number): Promise<string> {
+        const { runtimeHotWalletHistory } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeHotWalletHistory($page: Int, $perPage: Int) {
+                runtimeHotWalletHistory(page: $page, perPage: $perPage)
+            }`,
+            variables: { page, perPage },
+            fetchPolicy: "network-only",
+        }))
+        return runtimeHotWalletHistory
+    }
+
+    async unytVersionInfo(): Promise<string> {
+        const { runtimeUnytVersionInfo } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeUnytVersionInfo { runtimeUnytVersionInfo }`,
+            fetchPolicy: "network-only",
+        }))
+        return runtimeUnytVersionInfo
+    }
+
+    async unytSetMembraneProof(proof: string): Promise<{ success: boolean; message: string }> {
+        const { runtimeSetUnytMembraneProof } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeSetUnytMembraneProof($proof: String!) {
+                runtimeSetUnytMembraneProof(proof: $proof) { success message }
+            }`,
+            variables: { proof },
+        }))
+        return runtimeSetUnytMembraneProof
+    }
+
+    async unytReinstallDna(): Promise<{ success: boolean; message: string }> {
+        const { runtimeReinstallUnytDna } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeReinstallUnytDna {
+                runtimeReinstallUnytDna { success message }
+            }`,
+        }))
+        return runtimeReinstallUnytDna
+    }
+
+    async unytSendHot(recipient: string, amount: string): Promise<{ success: boolean; message: string }> {
+        const { runtimeSendHot } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeSendHot($recipient: String!, $amount: String!) {
+                runtimeSendHot(recipient: $recipient, amount: $amount) { success message }
+            }`,
+            variables: { recipient, amount },
+        }))
+        return runtimeSendHot
+    }
+
     addNotificationTriggeredCallback(cb: NotificationTriggeredCallback) {
         this.#notificationTriggeredCallbacks.push(cb)
     }

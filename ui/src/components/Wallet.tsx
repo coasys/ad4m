@@ -33,7 +33,7 @@ const Wallet = () => {
 
       // Fetch balance
       try {
-        const balStr = await client.agent.hotWalletBalance();
+        const balStr = await client.runtime.unytWalletBalance();
         if (balStr) {
           try {
             setBalance(JSON.parse(balStr));
@@ -48,7 +48,7 @@ const Wallet = () => {
 
       // Fetch pubkey
       try {
-        const pk = await client.agent.hotAgentPubkey();
+        const pk = await client.runtime.unytHotAgentPubkey();
         setAgentPubkey(pk || "");
       } catch (e: any) {
         console.error("Failed to fetch agent pubkey:", e);
@@ -57,7 +57,7 @@ const Wallet = () => {
 
       // Fetch history
       try {
-        const histStr = await client.agent.hotWalletHistory(undefined, 20);
+        const histStr = await client.runtime.unytWalletHistory(undefined, 20);
         if (histStr) {
           try {
             setHistory(JSON.parse(histStr));
@@ -72,7 +72,7 @@ const Wallet = () => {
 
       // Fetch version info
       try {
-        const viStr = await client.agent.unytVersionInfo();
+        const viStr = await client.runtime.unytVersionInfo();
         if (viStr) {
           try {
             setVersionInfo(JSON.parse(viStr));
@@ -103,7 +103,7 @@ const Wallet = () => {
     setSendLoading(true);
     setSendResult(null);
     try {
-      const result = await client.agent.sendHot(sendRecipient, sendAmount);
+      const result = await client.runtime.unytSendHot(sendRecipient, sendAmount);
       setSendResult(result?.message || "Unknown result");
       if (result?.success) {
         setSendRecipient("");
@@ -121,7 +121,7 @@ const Wallet = () => {
     if (!client) return;
     setReinstalling(true);
     try {
-      const result = await client.agent.reinstallUnytDna();
+      const result = await client.runtime.unytReinstallDna();
       if (result?.success) {
         fetchWalletData();
       } else {
