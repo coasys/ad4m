@@ -127,6 +127,7 @@ include_dir = "0.6.0"
 rustls = "0.23"
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
+x509-parser = "0.16"
 
 kalosm = { version = "0.3.2", git = "https://github.com/coasys/floneum.git", branch = "coasys-2-without-pdf", features = ["language", "sound"] }
 candle-core = "0.8.2"

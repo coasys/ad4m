@@ -8,3 +8,6 @@ export { default as CrossIcon } from "./CrossIcon";
 export { default as RefreshIcon } from "./RefreshIcon";
 export { default as ArrowLeftRightIcon } from "./ArrowLeftRightIcon";
 export { default as ArrowLeftIcon } from "./ArrowLeftIcon";
+export { default as GlobeIcon } from "./GlobeIcon";
+export { default as CreditIcon } from "./CreditIcon";
+export { default as WalletIcon } from "./WalletIcon";

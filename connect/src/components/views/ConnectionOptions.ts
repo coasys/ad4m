@@ -1,22 +1,18 @@
 import { LitElement, html, css, PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { sharedStyles } from "../../styles/shared-styles";
-import { DownloadIcon, LocalIcon, RefreshIcon, RemoteIcon, CheckIcon } from "../icons";
+import { DownloadIcon, LocalIcon, RefreshIcon, CheckIcon, GlobeIcon } from "../icons";
 import CrossIcon from "../icons/CrossIcon";
 import { connectWebSocket } from "../../utils";
 
 @customElement("connection-options")
 export class ConnectionOptions extends LitElement {
   @property({ type: Number }) port: number;
-  @property({ type: String }) remoteUrl?: string;
-  @property({ type: Boolean }) connectingToRemoteNode: boolean = false;
-  @property({ type: Boolean }) remoteNodeError: boolean = false;
-  @property({ type: Boolean }) showMultiUserOption: boolean = false;
+  @property({ type: Boolean }) showHosting: boolean = false;
 
   @state() private loading = true;
   @state() private localNodeDetected = false;
   @state() private newPort = 0;
-  @state() private newRemoteUrl = "";
   @state() private isMobile = false;
 
   static styles = [
@@ -61,12 +57,8 @@ export class ConnectionOptions extends LitElement {
     this.dispatchEvent(new CustomEvent("connect-local-node", { bubbles: true, composed: true }));
   }
 
-  private async connectRemoteNode() {
-    this.dispatchEvent(new CustomEvent("connect-remote-node", { detail: { remoteUrl: this.newRemoteUrl }, bubbles: true, composed: true }));
-  }
-
-  private clearRemoteNodeError() {
-    this.dispatchEvent(new CustomEvent("clear-remote-node-error", { bubbles: true, composed: true }));
+  private browseHosts() {
+    this.dispatchEvent(new CustomEvent("browse-hosts", { bubbles: true, composed: true }));
   }
 
   private async detectLocalNode() {
@@ -91,7 +83,6 @@ export class ConnectionOptions extends LitElement {
   async connectedCallback() {
     super.connectedCallback();
     this.newPort = this.port;
-    this.newRemoteUrl = this.remoteUrl || "";
     this.checkMobile();
     window.addEventListener('resize', this.checkMobile);
     await this.detectLocalNode();
@@ -105,7 +96,6 @@ export class ConnectionOptions extends LitElement {
 
   willUpdate(changedProps: PropertyValues) {
     if (changedProps.has('port')) this.newPort = this.port;
-    if (changedProps.has('remoteUrl')) this.newRemoteUrl = this.remoteUrl || "";
   }
 
   render() {
@@ -119,7 +109,7 @@ export class ConnectionOptions extends LitElement {
         </div>
 
         <div class="options">
-          ${!this.isMobile ? html`
+          ${!this.isMobile || !this.showHosting ? html`
             <div class="box">
               <div class="box-header">
                 ${LocalIcon()}
@@ -172,57 +162,17 @@ export class ConnectionOptions extends LitElement {
             </div>
           ` : ''}
 
-          ${this.showMultiUserOption ? html`
+          ${this.showHosting ? html`
             <div class="box">
               <div class="box-header">
-                ${RemoteIcon()}
+                ${GlobeIcon()}
                 <h3>Remote Node</h3>
               </div>
 
-              ${this.remoteUrl
-                ? html`
-                    <div class="state success">
-                      ${CheckIcon()}
-                      <p>Remote configuration detected</p>
-                    </div>
-                  `
-                : html`<p style="margin-bottom: -12px">Enter the URL of a remote AD4M node</p>`
-              }
+              <p>Browse hosted AD4M nodes or enter a URL</p>
 
-              <input
-                type="text"
-                placeholder="https://ad4m-node:12000/graphql"
-                .value=${this.newRemoteUrl}
-                @input=${(e: Event) => {
-                  const input = e.target as HTMLInputElement;
-                  this.newRemoteUrl = input.value;
-
-                  if (this.remoteNodeError) this.clearRemoteNodeError();
-                }}
-                @keydown=${(e: KeyboardEvent) => {
-                  if (e.key === 'Enter' && !this.connectingToRemoteNode && this.newRemoteUrl.trim().length) {
-                    this.connectRemoteNode();
-                  }
-                }}
-                style= "font-size: 16px;"
-              />
-
-              ${this.remoteNodeError
-                ? html`
-                    <div class="state danger">
-                      ${CrossIcon()}
-                      <p>Unable to connect to remote node</p>
-                    </div>
-                  `
-                : ''
-              }
-
-              <button 
-                class="primary"
-                ?disabled=${this.connectingToRemoteNode || this.newRemoteUrl.trim().length === 0}
-                @click=${this.connectRemoteNode}
-              >
-                ${this.connectingToRemoteNode ? "Connecting..." : "Connect to Remote Node"}
+              <button class="primary" @click=${this.browseHosts}>
+                Connect to Remote Node
               </button>
             </div>
           ` : '' }
@@ -237,22 +187,3 @@ declare global {
     "connection-options": ConnectionOptions;
   }
 }
-
-// import QRCodeIcon from "../icons/QRCodeIcon";
-// ${showQRCode
-//   ? html`
-//       <div class="option">
-//         <div class="option-header">
-//           ${QRCodeIcon()}
-//           <h3>Scan QR Code</h3>
-//         </div>
-//         <p class="option-description">
-//           Scan a QR code from another device
-//         </p>
-//         <button class="secondary" @click=${this.handleScanQR}>
-//           Scan QR Code
-//         </button>
-//       </div>
-//     `
-//   : ""
-// }

@@ -1,6 +1,7 @@
 extern crate remove_dir_all;
 use crate::app_state::{
-    AgentConfigDir, LauncherState, MultiUserConfig, SmtpConfig, SmtpConfigDto, TlsConfig,
+    AgentConfigDir, HostRegistration, LauncherState, MultiUserConfig, SmtpConfig, SmtpConfigDto,
+    TlsConfig,
 };
 use crate::util::create_tray_message_windows;
 use crate::{config::data_path, get_main_window};
@@ -382,5 +383,21 @@ pub fn set_mcp_config(enabled: bool, port: u16) -> Result<(), String> {
         .save()
         .map_err(|e| format!("Failed to save launcher state: {}", e))?;
 
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_host_registration() -> Option<HostRegistration> {
+    LauncherState::load().ok()?.host_registration
+}
+
+#[tauri::command]
+pub fn set_host_registration(registration: Option<HostRegistration>) -> Result<(), String> {
+    let mut state =
+        LauncherState::load().map_err(|e| format!("Failed to load launcher state: {}", e))?;
+    state.host_registration = registration;
+    state
+        .save()
+        .map_err(|e| format!("Failed to save launcher state: {}", e))?;
     Ok(())
 }
