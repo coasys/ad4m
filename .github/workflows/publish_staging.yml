@@ -273,7 +273,7 @@ jobs:
           ui/src-tauri
         cache-targets: true
         cache-all-crates: true
-        shared-key: "staging-v8-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
+        shared-key: "staging-v12-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
 
     - name: Install GO
       uses: actions/setup-go@v4
@@ -504,15 +504,16 @@ jobs:
         nasm -version
         where nasm
 
-    - name: Build AD4M-CLI (direct cargo — bypasses turbo env stripping)
+    - name: Build AD4M-CLI
       env:
         RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
         # +crt-static makes Rust use MT too — fixes LNK2038/LNK1169 CRT mismatch.
         RUSTFLAGS: -C target-feature=+crt-static
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-      run: |
-        cargo build --release --manifest-path rust-executor/Cargo.toml
-        cargo build --release --manifest-path cli/Cargo.toml
+        # Force turbo to skip its task cache — stale cache returns aws-lc-sys
+        # compiled without NASM assembly, causing LNK2019 unresolved symbols.
+        TURBO_FORCE: "true"
+      run: pnpm build-libs
 
     - name: Build Launcher binary
       run: pnpm run package-ad4m
