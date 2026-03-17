@@ -767,7 +767,6 @@ const Hosting = () => {
                               placeholder="Amount"
                               value={creditAmounts[user.email] || ""}
                               onInput={(e: any) => setCreditAmounts((prev) => ({ ...prev, [user.email]: e.target.value }))}
-                              style={{ width: "120px" }}
                             ></j-input>
                             <j-button
                               size="sm"
