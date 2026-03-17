@@ -55,39 +55,35 @@ pub async fn is_alliance_cell(cell_id_key: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Input for `create_proposal` zome call.
+/// Must match the Unyt alliance integrity zome's `ProposalInput` exactly.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ProposalInput {
+    /// Counterparty agent public key (AgentPubKeyB64)
+    pub counterparty: String,
     /// Amount map: unit_symbol -> amount_string, e.g. {"HOT": "100"}
     pub amount: BTreeMap<String, String>,
-    /// Counterparty agent public keys (base64)
-    pub counterparty: Vec<String>,
-    /// Optional note
-    pub note: Option<ProposalPayload>,
+    /// Optional note (plain string)
+    pub note: Option<String>,
     /// Lane definitions (action hashes) — can be empty for simple transfers
-    pub lane_definitions: Vec<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "type", content = "value")]
-pub enum ProposalPayload {
-    SimpleNote(String),
-    None,
+    #[serde(default)]
+    pub lane_definitions: Vec<serde_json::Value>,
 }
 
 /// Input for `create_commitment` zome call.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CommitmentInput {
-    pub counterparty: Vec<String>,
+    pub counterparty: String,
     pub amount: BTreeMap<String, String>,
-    pub note: Option<ProposalPayload>,
-    pub lane_definitions: Vec<String>,
+    pub note: Option<String>,
+    #[serde(default)]
+    pub lane_definitions: Vec<serde_json::Value>,
 }
 
 /// Input for `create_accept` zome call.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AcceptInput {
     pub commitment: String,
-    pub note: Option<ProposalPayload>,
+    pub note: Option<String>,
 }
 
 /// Pagination for `get_history`.
@@ -573,12 +569,13 @@ pub async fn create_proposal(
     note: Option<&str>,
 ) -> Result<String, AnyError> {
     let mut amount = BTreeMap::new();
-    amount.insert("HOT".to_string(), amount_hot.to_string());
+    // "0" is the base unit index in the UnitMap (not the symbol "HOT")
+    amount.insert("0".to_string(), amount_hot.to_string());
 
     let input = ProposalInput {
+        counterparty: counterparty_agent_key.to_string(),
         amount,
-        counterparty: vec![counterparty_agent_key.to_string()],
-        note: note.map(|n| ProposalPayload::SimpleNote(n.to_string())),
+        note: note.map(|n| n.to_string()),
         lane_definitions: vec![],
     };
 
@@ -631,12 +628,13 @@ pub async fn send_hot(
     note: Option<&str>,
 ) -> Result<String, AnyError> {
     let mut amount = BTreeMap::new();
-    amount.insert("HOT".to_string(), amount_hot.to_string());
+    // "0" is the base unit index in the UnitMap (not the symbol "HOT")
+    amount.insert("0".to_string(), amount_hot.to_string());
 
     let input = CommitmentInput {
-        counterparty: vec![recipient_agent_key.to_string()],
+        counterparty: recipient_agent_key.to_string(),
         amount,
-        note: note.map(|n| ProposalPayload::SimpleNote(n.to_string())),
+        note: note.map(|n| n.to_string()),
         lane_definitions: vec![],
     };
 
