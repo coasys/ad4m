@@ -504,6 +504,18 @@ jobs:
         nasm -version
         where nasm
 
+    - name: Clean stale aws-lc-sys artifacts (force NASM rebuild)
+      run: |
+        # Swatinem/rust-cache restores target/ with aws-lc-sys compiled WITHOUT NASM.
+        # Cargo fingerprints say "up to date" and skips recompilation.
+        # Delete the stale artifacts so cargo rebuilds with NASM available.
+        if (Test-Path "target\release\build") {
+          Get-ChildItem "target\release\build" -Directory -Filter "aws-lc-sys-*" | Remove-Item -Recurse -Force
+        }
+        if (Test-Path "target\release\deps") {
+          Get-ChildItem "target\release\deps" -Filter "*aws_lc_sys*" | Remove-Item -Force
+        }
+
     - name: Build AD4M-CLI
       env:
         RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
