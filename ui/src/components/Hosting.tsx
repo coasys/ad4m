@@ -40,7 +40,7 @@ const Hosting = () => {
     description: "",
     location: "",
     rates: '[{"description": "Base rate", "priceInHOT": 0.001}]',
-    aiModels: '["llama3"]',
+    aiModels: '[]',
     computeSpecs: "",
     hostUrl: "",
   });
@@ -68,6 +68,9 @@ const Hosting = () => {
   const [smtpTestStatus, setSmtpTestStatus] = useState("");
   const [smtpTestEmail, setSmtpTestEmail] = useState("");
   const [showSmtpPassword, setShowSmtpPassword] = useState(false);
+
+  // ---- AI Models state ----
+  const [aiModels, setAiModels] = useState<any[]>([]);
 
   // ---- TLS state ----
   const [tlsConfig, setTlsConfig] = useState<{
@@ -631,6 +634,21 @@ const Hosting = () => {
   }, [client]);
 
   useEffect(() => {
+    if (!client) return;
+    const fetchAiModels = async () => {
+      try {
+        const models = await client.ai.getModels();
+        setAiModels(models);
+        const modelNames = models.map((m: any) => m.name);
+        setHostReg((prev) => ({ ...prev, aiModels: JSON.stringify(modelNames) }));
+      } catch (e) {
+        console.error("Failed to fetch AI models:", e);
+      }
+    };
+    fetchAiModels();
+  }, [client]);
+
+  useEffect(() => {
     const loadTlsConfig = async () => {
       try {
         const config = await invoke<typeof tlsConfig>("get_tls_config");
@@ -1036,36 +1054,21 @@ const Hosting = () => {
                   {/* AI Models */}
                   <div style={{ width: "100%", marginTop: "4px" }}>
                     <j-text size="300" weight="600" color="ui-500" style={{ textTransform: "uppercase" as const, letterSpacing: "0.5px", display: "block", marginBottom: "6px" }}>AI Models</j-text>
-                    <input
-                      value={hostReg.aiModels}
-                      onChange={(e) => handleHostRegChange("aiModels", e.target.value)}
-                      placeholder='["llama3", "mistral"]'
-                      style={{
-                        fontSize: "13px", width: "100%", padding: "6px 8px",
-                        background: "var(--j-color-ui-100)", border: "1px solid var(--j-color-ui-200)",
-                        borderRadius: "6px", color: "var(--j-color-primary-500)", outline: "none",
-                        fontFamily: "inherit",
-                      }}
-                    />
-                    {/* Model chips preview */}
-                    {(() => {
-                      try {
-                        const models = JSON.parse(hostReg.aiModels);
-                        if (Array.isArray(models) && models.length > 0) {
-                          return (
-                            <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "6px", marginTop: "8px" }}>
-                              {models.map((m: string, i: number) => (
-                                <span key={i} style={{
-                                  fontSize: "13px", padding: "4px 12px", borderRadius: "12px",
-                                  background: "rgba(33, 150, 243, 0.1)", color: "var(--j-color-primary-500)",
-                                }}>{m}</span>
-                              ))}
-                            </div>
-                          );
-                        }
-                      } catch { /* ignore */ }
-                      return null;
-                    })()}
+                    {aiModels.length > 0 ? (
+                      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "6px" }}>
+                        {aiModels.map((m: any, i: number) => (
+                          <span key={i} style={{
+                            fontSize: "13px", padding: "4px 12px", borderRadius: "12px",
+                            background: "rgba(33, 150, 243, 0.1)", color: "var(--j-color-primary-500)",
+                          }}>{m.name}</span>
+                        ))}
+                      </div>
+                    ) : (
+                      <j-text size="300" color="ui-400" style={{ fontStyle: "italic" }}>No models configured</j-text>
+                    )}
+                    <j-text size="200" color="ui-400" style={{ display: "block", marginTop: "6px" }}>
+                      AI models can be added and removed in the AI section.
+                    </j-text>
                   </div>
 
                   {/* Rates */}
