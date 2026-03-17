@@ -1943,7 +1943,9 @@ impl Mutation {
             )
             .await?;
 
-        reserve_compute_credits(&context.auth_token, LINK_WRITE_RATE)?;
+        if let Err(e) = reserve_compute_credits(&context.auth_token, LINK_WRITE_RATE) {
+            log::warn!("Call exceeded compute credits (add_link): result returned but future calls will fail. Details: {:?}", e);
+        }
         Ok(result)
     }
 
@@ -1966,7 +1968,9 @@ impl Mutation {
             .add_link_expression(link, link_status_from_input(status)?, batch_id)
             .await?;
 
-        reserve_compute_credits(&context.auth_token, LINK_WRITE_RATE)?;
+        if let Err(e) = reserve_compute_credits(&context.auth_token, LINK_WRITE_RATE) {
+            log::warn!("Call exceeded compute credits (add_link_expression): result returned but future calls will fail. Details: {:?}", e);
+        }
         Ok(result)
     }
 
@@ -1996,7 +2000,11 @@ impl Mutation {
             )
             .await?;
 
-        reserve_compute_credits(&context.auth_token, link_count as f64 * LINK_WRITE_RATE)?;
+        if let Err(e) =
+            reserve_compute_credits(&context.auth_token, link_count as f64 * LINK_WRITE_RATE)
+        {
+            log::warn!("Call exceeded compute credits (add_links, count={}): result returned but future calls will fail. Details: {:?}", link_count, e);
+        }
         Ok(result)
     }
 
@@ -2021,10 +2029,13 @@ impl Mutation {
             .link_mutations(mutations, link_status_from_input(status)?, &agent_context)
             .await?;
 
-        reserve_compute_credits(
+        if let Err(e) = reserve_compute_credits(
             &context.auth_token,
             additions_count as f64 * LINK_WRITE_RATE,
-        )?;
+        ) {
+            log::warn!("Call exceeded compute credits (link_mutations, additions={}): result returned but future calls will fail. Details: {:?}", additions_count, e
+            );
+        }
         Ok(result)
     }
 
@@ -2866,7 +2877,11 @@ impl Mutation {
             .await?;
 
         let total_tokens = result.prompt_tokens + result.completion_tokens;
-        reserve_compute_credits(&context.auth_token, total_tokens as f64 * TOKEN_RATE)?;
+        if let Err(e) =
+            reserve_compute_credits(&context.auth_token, total_tokens as f64 * TOKEN_RATE)
+        {
+            log::warn!("Call exceeded compute credits (ai_prompt, tokens={}): result returned but future calls will fail. Details: {:?}", total_tokens, e);
+        }
 
         Ok(result.text)
     }
@@ -2885,10 +2900,12 @@ impl Mutation {
             .embed(model_id, text)
             .await?;
 
-        reserve_compute_credits(
+        if let Err(e) = reserve_compute_credits(
             &context.auth_token,
             result.token_count as f64 * EMBEDDING_TOKEN_RATE,
-        )?;
+        ) {
+            log::warn!("Call exceeded compute credits (ai_embed, tokens={}): result returned but future calls will fail. Details: {:?}", result.token_count, e);
+        }
 
         let json_string = serde_json::to_string(&result.embeddings)
             .map_err(|e| FieldError::from(format!("Failed to serialize vector: {}", e)))?;
