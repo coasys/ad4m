@@ -241,6 +241,13 @@ jobs:
     - name: Fetch source code
       uses: actions/checkout@v3
 
+    - name: Select Xcode 15.4 (has ld-classic for branch islands)
+      run: |
+        sudo xcode-select -s /Applications/Xcode_15.4.app
+        xcodebuild -version
+        # Verify ld-classic binary exists at the path used in .cargo/config.toml
+        ls -la "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld-classic"
+
     # Rust toolchain configured via rust-toolchain.toml
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
@@ -258,7 +265,7 @@ jobs:
           ui/src-tauri
         cache-targets: true
         cache-all-crates: true
-        shared-key: "staging-v7-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
+        shared-key: "staging-v8-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
 
     - name: Install GO
       uses: actions/setup-go@v4
