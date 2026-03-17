@@ -470,6 +470,7 @@ export class Ad4mConnectElement extends LitElement {
     if (this.currentView === "remote-authentication") {
       return html`
         <remote-authentication
+          .host=${this.selectedHost}
           .remoteAuthLoading=${this.remoteAuthLoading}
           .remoteAuthState=${this.remoteAuthState}
           .emailCodeError=${this.emailCodeError}
