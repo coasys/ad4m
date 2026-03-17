@@ -209,7 +209,7 @@ const Wallet = () => {
           {Object.entries(balance).length > 0 ? (
             Object.entries(balance).map(([unit, amount]) => (
               <j-text key={unit} size="700" weight="700" color="black">
-                {amount} {unit}
+                {amount} {unit === "0" ? "mHOT" : `Unit ${unit}`}
               </j-text>
             ))
           ) : (
