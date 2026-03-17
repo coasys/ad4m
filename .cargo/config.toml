@@ -8,6 +8,18 @@
 # Anyone cloning this repo gets the right binaries automatically.
 RUSTY_V8_MIRROR = "https://github.com/coasys/rusty_v8/releases/download"
 
+# aws-lc-sys on Windows: use pre-compiled NASM assembly objects shipped with
+# the crate instead of trying to invoke NASM at build time. This avoids
+# cmake/NASM integration issues on GitHub Actions Windows runners.
+# Set here (not in CI env vars) because turborepo may strip env vars before
+# they reach cargo build scripts.
+AWS_LC_SYS_PREBUILT_NASM = "1"
+
+# CUDA compute capability for bindgen_cuda (candle-kernels build script).
+# Must reach the cargo build script directly — turborepo strips step-level
+# env vars. Only used when building with --features cuda.
+CUDA_COMPUTE_CAP = "80"
+
 [net]
 # Use system git instead of cargo's built-in libgit2.
 # Required because coasys/deno.git has heavy chromium submodules

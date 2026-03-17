@@ -230,7 +230,11 @@ jobs:
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-      RUSTFLAGS: "-C link-arg=-Wl,-ld_classic"
+      # B/BL out of range fix: the binary exceeds ARM64's ±128MB branch limit.
+      # -no_fixup_chains disables chained fixups, enabling the linker to generate
+      # branch island stubs for long-range B/BL instructions.
+      # -ld_classic was removed in Xcode 16.2 so we use the modern linker option.
+      RUSTFLAGS: "-C link-arg=-Wl,-no_fixup_chains"
 
     needs:
       - create-release
@@ -256,7 +260,7 @@ jobs:
           ui/src-tauri
         cache-targets: true
         cache-all-crates: true
-        shared-key: "staging-v4-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
+        shared-key: "staging-v5-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
 
     - name: Install GO
       uses: actions/setup-go@v4
@@ -445,7 +449,7 @@ jobs:
           ui/src-tauri
         cache-targets: true
         cache-all-crates: true
-        shared-key: "staging-windows-v6-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
+        shared-key: "staging-windows-v7-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
 
     - name: Install GO
       uses: actions/setup-go@v4
@@ -486,14 +490,8 @@ jobs:
     - name: Build AD4M-CLI
       env:
         RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
-        # libort_sys (ONNX Runtime) ships with static MT CRT; Rust MSVC defaults to dynamic MD.
-        # aws-lc-sys: use pre-compiled .obj files shipped in the crate (no NASM needed).
-        # The prebuilt-nasm.bat script copies .obj files from the crate's prebuilt-nasm/ dir.
-        # Also sets CMAKE_ASM_NASM_COMPILE_OPTIONS_MSVC_* to avoid MSVC option injection.
-        # aws-lc-sys 0.35.x on MSVC: cmake fails to link NASM assembly into lib.
-        # AWS_LC_SYS_NO_ASM is the ACTUAL crate env var (read by build.rs is_no_asm()).
-        # OPENSSL_NO_ASM was wrong — only a cmake define, never read by build.rs.
-        AWS_LC_SYS_NO_ASM: "1"
+        # aws-lc-sys: AWS_LC_SYS_PREBUILT_NASM=1 is set in .cargo/config.toml
+        # so it's always available to cargo build scripts (turbo strips step-level env vars).
         # +crt-static makes Rust use MT too — fixes LNK2038/LNK1169 CRT mismatch in generate_snapshot.
         RUSTFLAGS: -C target-feature=+crt-static
         # Use system git so cargo does NOT auto-fetch chromium submodules from coasys/deno.git
