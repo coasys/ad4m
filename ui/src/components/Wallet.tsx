@@ -161,20 +161,15 @@ const Wallet = () => {
   return (
     <div>
       {error && (
-        <j-box px="500" py="300">
+        <div style={{ padding: "0 20px", margin: "12px 0" }}>
           <j-text size="400" color="danger-500">
             {error}
           </j-text>
-        </j-box>
+        </div>
       )}
 
       {/* Header */}
-      <j-box
-        px="500"
-        my="300"
-        pt="100"
-        style={{ borderTop: "1px solid var(--j-color-ui-200)" }}
-      >
+      <div style={{ padding: "4px 20px", margin: "12px 0" }}>
         <j-flex a="center" j="between">
           <j-flex a="center" gap="300">
             <j-text size="800" weight="600" color="black">
@@ -191,11 +186,11 @@ const Wallet = () => {
             Refresh
           </j-button>
         </j-flex>
-      </j-box>
+      </div>
 
       {/* Agent Pubkey */}
       {agentPubkey && (
-        <j-box px="500" my="300">
+        <div style={{ padding: "0 20px", margin: "12px 0" }}>
           <j-flex a="center" gap="200">
             <j-text size="400" weight="500" color="ui-500">
               Your address:
@@ -214,46 +209,11 @@ const Wallet = () => {
               Copy
             </j-button>
           </j-flex>
-        </j-box>
-      )}
-      {/* Version Info & Reinstall */}
-      {false && versionInfo && (
-        <j-box px="500" my="300">
-          <j-flex a="center" gap="300">
-            <j-text size="400" color="ui-500">
-              DNA: v{versionInfo.installed || "unknown"}{" "}
-              {versionInfo.needsUpdate
-                ? `→ v${versionInfo.bundled} available`
-                : "(up to date)"}
-            </j-text>
-            {versionInfo.needsUpdate && (
-              <j-button
-                size="xs"
-                variant="primary"
-                onClick={handleReinstall}
-                loading={reinstalling}
-                disabled={reinstalling}
-              >
-                Reinstall
-              </j-button>
-            )}
-            {!versionInfo.needsUpdate && (
-              <j-button
-                size="xs"
-                variant="subtle"
-                onClick={handleReinstall}
-                loading={reinstalling}
-                disabled={reinstalling}
-              >
-                Reinstall
-              </j-button>
-            )}
-          </j-flex>
-        </j-box>
+        </div>
       )}
 
       {/* Balance + Withdraw on same line */}
-      <j-box px="500" my="200">
+      <div style={{ padding: "0 20px", margin: "8px 0" }}>
         <j-flex a="center" j="between">
           <j-flex a="center" gap="200">
             <j-text size="400" weight="500" color="ui-500">
@@ -292,12 +252,12 @@ const Wallet = () => {
         </j-flex>
 
         {withdrawOpen && (
-          <j-box mt="300">
-            <j-box mb="200">
+          <div style={{ marginTop: "12px" }}>
+            <div style={{ marginBottom: "8px" }}>
               <j-text size="400" weight="500">
                 Amount (HOT)
               </j-text>
-            </j-box>
+            </div>
             <j-flex a="center" gap="200">
               <j-input
                 value={sendAmount}
@@ -316,11 +276,11 @@ const Wallet = () => {
                 Max
               </j-button>
             </j-flex>
-            <j-box mt="200" mb="200">
+            <div style={{ margin: "8px 0" }}>
               <j-text size="400" weight="500">
                 To
               </j-text>
-            </j-box>
+            </div>
             <j-flex a="center" gap="200">
               <j-input
                 value={sendRecipient}
@@ -339,7 +299,7 @@ const Wallet = () => {
             </j-flex>
 
             {confirmSend && (
-              <j-box mt="300" py="300" px="400" style={{ background: "var(--j-color-ui-50)", borderRadius: "8px", border: "1px solid var(--j-color-warning-300)" }}>
+              <div style={{ marginTop: "12px", padding: "12px 16px", background: "var(--j-color-ui-50)", borderRadius: "8px", border: "1px solid var(--j-color-warning-300)" }}>
                 <j-text size="400" weight="500">
                   Confirm: Send {sendAmount} mHOT to {sendRecipient.substring(0, 12)}...?
                 </j-text>
@@ -359,11 +319,11 @@ const Wallet = () => {
                     Cancel
                   </j-button>
                 </j-flex>
-              </j-box>
+              </div>
             )}
 
             {sendResult && (
-              <j-box mt="200">
+              <div style={{ marginTop: "8px" }}>
                 <j-text
                   size="400"
                   color={
@@ -372,14 +332,14 @@ const Wallet = () => {
                 >
                   {sendResult}
                 </j-text>
-              </j-box>
+              </div>
             )}
-          </j-box>
+          </div>
         )}
-      </j-box>
+      </div>
 
       {/* Transaction History */}
-      <j-box px="500" my="400">
+      <div style={{ padding: "0 20px", margin: "16px 0" }}>
         <j-button
           size="sm"
           variant="subtle"
@@ -397,7 +357,7 @@ const Wallet = () => {
         </j-button>
 
         {historyOpen && (
-          <j-box mt="300">
+          <div style={{ marginTop: "12px" }}>
             {(() => {
               if (!Array.isArray(history) || history.length === 0) {
                 return (
@@ -516,10 +476,9 @@ const Wallet = () => {
                 }
 
                 return (
-                  <j-box
+                  <div
                     key={i}
-                    py="200"
-                    style={{ borderBottom: "1px solid var(--j-color-ui-100)", opacity: isRejected ? 0.6 : 1 }}
+                    style={{ padding: "8px 0", borderBottom: "1px solid var(--j-color-ui-100)", opacity: isRejected ? 0.6 : 1 }}
                   >
                     <j-flex j="between" a="center">
                       <j-flex a="center" gap="200">
@@ -547,13 +506,13 @@ const Wallet = () => {
                         {isIncoming ? "From: " : "To: "}{counterparty.length > 24 ? counterparty.substring(0, 24) + "..." : counterparty}
                       </j-text>
                     )}
-                  </j-box>
+                  </div>
                 );
               });
             })()}
-          </j-box>
+          </div>
         )}
-      </j-box>
+      </div>
     </div>
   );
 };
