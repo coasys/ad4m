@@ -1,4 +1,4 @@
-import { useContext, useEffect, useState, useCallback } from "react";
+import React, { useContext, useEffect, useState, useCallback } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { cardStyle } from "./styles";
 
@@ -114,10 +114,11 @@ const Wallet = () => {
     }).catch((e: any) => console.warn("Failed to fetch users:", e));
   }, [client]);
 
+  const initialLoadDone = React.useRef(false);
   const fetchWalletData = useCallback(async () => {
     if (!client) return;
     try {
-      setLoading(true);
+      if (!initialLoadDone.current) setLoading(true);
       setError(null);
 
       const errors: string[] = [];
@@ -183,6 +184,7 @@ const Wallet = () => {
       setError(e.message || "Failed to load wallet data");
     } finally {
       setLoading(false);
+      initialLoadDone.current = true;
     }
   }, [client]);
 

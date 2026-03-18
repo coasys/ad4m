@@ -16,6 +16,54 @@ type HostSession = {
 type RegStep = "credentials" | "verify" | "logged-in";
 type MembraneProofStatus = "none" | "fetching" | "done" | "error";
 
+// Extracted outside the component to avoid remounting on every parent re-render
+const ExpandableSection = ({
+  title,
+  expanded,
+  onToggle,
+  children,
+  badge,
+}: {
+  title: string;
+  expanded: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+  badge?: React.ReactNode;
+}) => (
+  <j-box
+    my="300"
+    style={{
+      border: "1px solid var(--j-color-ui-200)",
+      borderRadius: "8px",
+      overflow: "hidden",
+    }}
+  >
+    <j-flex
+      a="center"
+      j="between"
+      p="400"
+      style={{
+        background: "var(--j-color-ui-50)",
+        cursor: "pointer",
+        borderBottom: expanded ? "1px solid var(--j-color-ui-200)" : "none",
+      }}
+      onClick={onToggle}
+    >
+      <j-flex a="center" gap="300">
+        <j-icon
+          name={expanded ? "chevron-down" : "chevron-right"}
+          size="sm"
+        ></j-icon>
+        <j-text size="500" weight="600">
+          {title}
+        </j-text>
+        {badge}
+      </j-flex>
+    </j-flex>
+    {expanded && <j-box p="400">{children}</j-box>}
+  </j-box>
+);
+
 const Hosting = () => {
   const {
     state: { client, multiUserEnabled },
@@ -847,8 +895,8 @@ const Hosting = () => {
 
   // ==== RENDER ====
 
-  // Status message component
-  const StatusMessage = () => {
+  // Status message as a render function (not a component) to avoid remounting
+  const renderStatusMessage = () => {
     if (!hostRegStatus) return null;
     const bg =
       hostRegStatus.type === "success"
@@ -893,53 +941,7 @@ const Hosting = () => {
     );
   };
 
-  // Expandable section helper
-  const ExpandableSection = ({
-    title,
-    expanded,
-    onToggle,
-    children,
-    badge,
-  }: {
-    title: string;
-    expanded: boolean;
-    onToggle: () => void;
-    children: React.ReactNode;
-    badge?: React.ReactNode;
-  }) => (
-    <j-box
-      my="300"
-      style={{
-        border: "1px solid var(--j-color-ui-200)",
-        borderRadius: "8px",
-        overflow: "hidden",
-      }}
-    >
-      <j-flex
-        a="center"
-        j="between"
-        p="400"
-        style={{
-          background: "var(--j-color-ui-50)",
-          cursor: "pointer",
-          borderBottom: expanded ? "1px solid var(--j-color-ui-200)" : "none",
-        }}
-        onClick={onToggle}
-      >
-        <j-flex a="center" gap="300">
-          <j-icon
-            name={expanded ? "chevron-down" : "chevron-right"}
-            size="sm"
-          ></j-icon>
-          <j-text size="500" weight="600">
-            {title}
-          </j-text>
-          {badge}
-        </j-flex>
-      </j-flex>
-      {expanded && <j-box p="400">{children}</j-box>}
-    </j-box>
-  );
+  // ExpandableSection moved outside component to prevent remounting
 
   return (
     <div>
@@ -1306,7 +1308,7 @@ const Hosting = () => {
                       />
                     </j-box>
 
-                    <StatusMessage />
+                    {renderStatusMessage()}
 
                     <j-flex gap="300">
                       <j-button
@@ -1352,7 +1354,7 @@ const Hosting = () => {
                         placeholder="123456"
                       />
                     </j-box>
-                    <StatusMessage />
+                    {renderStatusMessage()}
                     <j-flex gap="300">
                       <j-button
                         variant="primary"
@@ -1811,7 +1813,7 @@ const Hosting = () => {
                       })()}
                     </div>
 
-                    <StatusMessage />
+                    {renderStatusMessage()}
 
                     <j-flex gap="300" mt="200">
                       <j-button
