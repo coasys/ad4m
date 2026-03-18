@@ -2,6 +2,38 @@ import { useContext, useEffect, useState, useCallback } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { cardStyle } from "./styles";
 
+const HotLogo = ({ size = 14 }: { size?: number }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 1175.48 847.82"
+    width={size}
+    height={size * (847.82 / 1175.48)}
+    style={{ display: "inline-block", verticalAlign: "middle" }}
+  >
+    <path
+      fill="#007f88"
+      d="M30.73.93C12.93,2.33-.77,5.13,0,7.23c7.1,16.9,51,116.4,51.6,117s10.8,1.3,22.8,1.8c53.2,2,95.3,12.4,140.8,34.9,32.7,16.1,56.9,33.4,82.1,58.5,37.1,37,61.3,78.1,75.5,128.4,1.6,5.8,2.9,11,2.9,11.8,0,1.1-8.1,1.3-43.9,1.3-24.2,0-45,.4-46.3.9-1.9.7-6.9,11.5-27.7,59.2-14,32.1-25.6,59.1-25.8,60-.7,2.6,7.7,4.9,28.7,8,4.3.7,30.1,1.4,60.6,1.8l53.1.6-3.2,11c-35.8,121.4-146.9,206.3-283,216.5-7.7.5-17.8,1-22.5,1h-8.5L31,780.23c-22.5,51.5-26,60.3-24.5,60.8,6.8,2.5,22,3.4,57.2,3.4,45,0,66.9-2,104-9.6,151.5-31.1,277.4-127.5,334.4-256.3,11-24.8,23.9-65.6,26.2-82.7l.7-4.9h113.7l.4,2.2c8.2,40.2,17.1,67.3,32.5,99.3,46.3,96.4,133.1,175.1,240.6,218.3a517.15,517.15,0,0,0,205.5,36.9c29.4-.9,52.8-4.2,51.6-7.3-1-2.6-50.8-116.9-51.1-117.2s-10.6-.7-23.1-1.2c-35.1-1.4-61.5-5.5-91.3-14-45.9-13.2-91.3-37.1-126.1-66.3-43.8-36.9-75.5-82.8-92.3-133.7-1.9-5.8-3.8-11.9-4.1-13.7l-.7-3.2,42.8-.3c23.5-.2,43.5-.7,44.3-1.1,1.3-.7,52.5-116.8,52.5-119.1,0-1.5-12.9-5.3-24.6-7.2-8.6-1.4-19.5-1.8-63-2.1l-52.7-.5,2-7.1c29.2-103.4,118.8-185.5,234.3-214.6,25.5-6.4,50.3-9.7,82.5-11,19.2-.8,21.6-1.1,22.8-2.7.8-1.1,12.6-27.6,26.2-58.9,16.7-38.3,24.4-57.2,23.7-57.7-2.2-1.2-16.2-3.7-27.2-4.8-16-1.7-62.7-1.4-83.3.4-117.8,10.5-224,58-303.6,135.6-48.6,47.4-82.7,100.6-103.7,162-5.4,15.5-11.9,39.9-13.9,51.7l-1.2,7.3H530.73l-.4-2.3c-.3-1.2-1.4-6.9-2.6-12.7-16.5-82-63.1-161.7-128.9-220.4C323.93,58.63,230.53,16.73,127.73,4,96.83.23,57-1.07,30.73.93Z"
+    />
+  </svg>
+);
+
+const CopyIcon = ({ size = 14 }: { size?: number }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    style={{ display: "inline-block", verticalAlign: "middle" }}
+  >
+    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+  </svg>
+);
+
 const Wallet = () => {
   const {
     state: { client },
@@ -168,54 +200,66 @@ const Wallet = () => {
         </div>
       )}
 
-      {/* Header */}
+      {/* Header + Address */}
       <div style={{ padding: "4px 20px", margin: "12px 0" }}>
         <j-flex a="center" j="between">
-          <j-flex a="center" gap="300">
+          <div style={{ display: "flex", alignItems: "baseline", gap: "4px" }}>
             <j-text size="800" weight="600" color="black">
               Earnings
             </j-text>
             {loading && <j-spinner size="sm"></j-spinner>}
-          </j-flex>
-          <j-button
-            size="sm"
-            variant="subtle"
+            {agentPubkey && (
+              <span
+                onClick={() => copyToClipboard(agentPubkey)}
+                title={agentPubkey}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "4px",
+                  cursor: "pointer",
+                  fontFamily: "monospace",
+                  fontSize: "12px",
+                  color: "var(--j-color-ui-400)",
+                  padding: "2px 4px",
+                  borderRadius: "4px",
+                  transition: "background 0.15s",
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = "var(--j-color-ui-100)")}
+                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+              >
+                {agentPubkey.substring(0, 8)}...{agentPubkey.substring(agentPubkey.length - 6)}
+                <CopyIcon size={12} />
+              </span>
+            )}
+          </div>
+          <span
             onClick={fetchWalletData}
-            disabled={loading}
+            style={{
+              cursor: loading ? "default" : "pointer",
+              opacity: loading ? 0.4 : 0.6,
+              display: "inline-flex",
+              alignItems: "center",
+              padding: "4px",
+              borderRadius: "4px",
+              transition: "opacity 0.15s",
+            }}
+            onMouseEnter={(e) => { if (!loading) e.currentTarget.style.opacity = "1"; }}
+            onMouseLeave={(e) => { if (!loading) e.currentTarget.style.opacity = "0.6"; }}
+            title="Refresh"
           >
-            Refresh
-          </j-button>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="23 4 23 10 17 10" />
+              <polyline points="1 20 1 14 7 14" />
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+            </svg>
+          </span>
         </j-flex>
       </div>
 
-      {/* Agent Pubkey */}
-      {agentPubkey && (
-        <div style={{ padding: "0 20px", margin: "12px 0" }}>
-          <j-flex a="center" gap="200">
-            <j-text size="400" weight="500" color="ui-500">
-              Your address:
-            </j-text>
-            <j-text
-              size="400"
-              style={{ fontFamily: "monospace", wordBreak: "break-all" }}
-            >
-              {agentPubkey}
-            </j-text>
-            <j-button
-              size="xs"
-              variant="subtle"
-              onClick={() => copyToClipboard(agentPubkey)}
-            >
-              Copy
-            </j-button>
-          </j-flex>
-        </div>
-      )}
-
       {/* Balance + Withdraw on same line */}
       <div style={{ padding: "0 20px", margin: "8px 0" }}>
-        <j-flex a="center" j="between">
-          <j-flex a="center" gap="200">
+        <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: "8px" }}>
             <j-text size="400" weight="500" color="ui-500">
               Balance
             </j-text>
@@ -223,16 +267,21 @@ const Wallet = () => {
               <j-spinner size="sm"></j-spinner>
             ) : Object.entries(balance).length > 0 ? (
               Object.entries(balance).map(([unit, amount]) => (
-                <j-text key={unit} size="700" weight="700" color="black">
-                  {amount} {unit === "0" ? "mHOT" : `Unit ${unit}`}
-                </j-text>
+                <span key={unit} style={{ display: "inline-flex", alignItems: "baseline", gap: "8px" }}>
+                  <j-text size="700" weight="700" color="black">
+                    {amount}
+                  </j-text>
+                  <span style={{ display: "inline-flex", alignItems: "baseline", gap: "3px", fontSize: "14px" }}>
+                    <span style={{ opacity: 0.6 }}>mirrored</span> <HotLogo size={22} />
+                  </span>
+                </span>
               ))
             ) : (
               <j-text size="500" color="ui-400">
                 No balance data
               </j-text>
             )}
-          </j-flex>
+          </div>
           <j-button
             size="sm"
             variant="subtle"
@@ -249,7 +298,7 @@ const Wallet = () => {
               <polyline points="6 9 12 15 18 9" />
             </svg>
           </j-button>
-        </j-flex>
+        </div>
 
         {withdrawOpen && (
           <div style={{ marginTop: "12px" }}>
@@ -301,7 +350,7 @@ const Wallet = () => {
             {confirmSend && (
               <div style={{ marginTop: "12px", padding: "12px 16px", background: "var(--j-color-ui-50)", borderRadius: "8px", border: "1px solid var(--j-color-warning-300)" }}>
                 <j-text size="400" weight="500">
-                  Confirm: Send {sendAmount} mHOT to {sendRecipient.substring(0, 12)}...?
+                  Confirm: Send {sendAmount} <span style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}><span style={{ fontSize: "0.75em", opacity: 0.6 }}>mirrored</span> <HotLogo size={16} /></span> to {sendRecipient.substring(0, 12)}...?
                 </j-text>
                 <j-flex gap="200" mt="200">
                   <j-button
@@ -493,7 +542,7 @@ const Wallet = () => {
                       </j-flex>
                       {amountStr && (
                         <j-text size="400" weight="500" color={amountColor}>
-                          {isIncoming && !isRejected ? "+" : isSend ? "-" : ""}{amountStr} mHOT
+                          {isIncoming && !isRejected ? "+" : isSend ? "-" : ""}{amountStr} <span style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}><span style={{ fontSize: "0.75em", opacity: 0.6 }}>m</span><HotLogo size={14} /></span>
                         </j-text>
                       )}
                     </j-flex>
