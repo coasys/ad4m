@@ -186,6 +186,11 @@ export class Ad4mConnectElement extends LitElement {
 
     this.core.addEventListener('creditdepleted', () => {
       this.lowCredit = true;
+      // Auto-open the dashboard so the user sees the top-up options
+      if (this.core.connectedHost && !this.modalOpen) {
+        this.currentView = "logged-in-dashboard";
+        this.modalOpen = true;
+      }
       this.requestUpdate();
     });
 
