@@ -123,15 +123,20 @@ jobs:
           no_output_timeout: 30m
       - run:
           name: Collect logs on failure
-          when: on_fail
+          when: always
           command: |
             mkdir -p /tmp/test-artifacts
-            cp -r tests/js/tst-tmp/agents/*/ad4m/logs /tmp/test-artifacts/ 2>/dev/null || true
-            cp -r tests/js/tst-tmp/agents/*/ad4m/holochain /tmp/test-artifacts/ 2>/dev/null || true
+            shopt -s nullglob
+            for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
+              agent_id="$(basename "$(dirname "$ad4m_dir")")"
+              mkdir -p "/tmp/test-artifacts/$agent_id"
+              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+              cp -r "$ad4m_dir/holochain" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+            done
             # Capture port state for debugging
             lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
       - store_artifacts:
-          when: on_fail
+          when: always
           path: /tmp/test-artifacts
           destination: test-logs
 

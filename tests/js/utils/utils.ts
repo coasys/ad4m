@@ -327,17 +327,27 @@ export async function gracefulShutdown(proc: ChildProcess | null | undefined, la
     console.log(`Sending SIGTERM to ${label} (PID ${proc.pid})...`);
     proc.kill('SIGTERM');
 
-    // Wait for process to exit gracefully
-    const start = Date.now();
-    while (!proc.killed && Date.now() - start < timeoutMs) {
-        await sleep(500);
-    }
+    // Wait for the process to actually exit (not just signal sent)
+    const exited = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), timeoutMs);
+        proc!.on('close', () => {
+            clearTimeout(timer);
+            resolve(true);
+        });
+    });
 
-    if (!proc.killed) {
+    if (!exited) {
         console.log(`${label} did not exit after ${timeoutMs}ms, sending SIGKILL...`);
         proc.kill('SIGKILL');
-        await sleep(1000);
+        // Wait for SIGKILL to take effect
+        await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 5000);
+            proc!.on('close', () => {
+                clearTimeout(timer);
+                resolve();
+            });
+        });
     }
 
-    console.log(`${label} shut down (killed=${proc.killed})`);
+    console.log(`${label} shut down (pid=${proc.pid})`);
 }

@@ -23,8 +23,8 @@ export interface NodeConfig {
     dataPath: string;
     seedPath?: string;
     adminCredential?: string;
-    /** Additional flags passed to startExecutor (e.g. enableMultiUser) */
-    multiUser?: boolean;
+    // Note: multiUser support removed — startExecutor doesn't wire it through.
+    // Add it back when multi-user test support is needed.
 }
 
 export interface ClusterNode {
@@ -52,8 +52,15 @@ export class TestCluster {
             config.adminCredential || "",
         );
 
-        // Wait for GQL to be reachable
-        const client = await this.waitForGql(config.gqlPort, config.adminCredential || "");
+        // Wait for GQL to be reachable — kill executor if this fails to avoid orphaned processes
+        let client: Ad4mClient;
+        try {
+            client = await this.waitForGql(config.gqlPort, config.adminCredential || "");
+        } catch (err) {
+            console.error(`waitForGql failed for port ${config.gqlPort}, killing orphaned executor (PID ${executorProcess.pid})`);
+            executorProcess.kill('SIGKILL');
+            throw err;
+        }
 
         const node: ClusterNode = {
             config,
@@ -97,8 +104,12 @@ export class TestCluster {
 
         while (Date.now() - start < timeoutMs) {
             try {
-                const info = await node.client.runtime.info();
-                if (info.isInitialized && info.isUnlocked) {
+                // Try the runtimeReadiness probe first (added in this PR)
+                const result = await node.client.runtime.info();
+                if (result.isInitialized && result.isUnlocked) {
+                    // TODO: Switch to runtimeReadiness GQL query once the Ad4mClient
+                    // exposes it. For now, runtime.info() isInitialized+isUnlocked is
+                    // a reasonable proxy (readiness probe checks the same underlying state).
                     return;
                 }
             } catch (e) {

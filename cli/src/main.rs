@@ -251,8 +251,12 @@ async fn main() -> Result<()> {
     {
         // Set PID file path as env var so the executor can write/clean it up
         if let Some(ref pf) = pid_file {
+            // SAFETY: set_var is called during sequential startup before any concurrent
+            // tasks are spawned, so no data race is possible.
             #[allow(deprecated)]
-            unsafe { std::env::set_var("AD4M_PID_FILE", pf); }
+            unsafe {
+                std::env::set_var("AD4M_PID_FILE", pf);
+            }
         }
         let _ = tokio::spawn(async move {
             rust_executor::run(Ad4mConfig {
@@ -348,7 +352,10 @@ async fn main() -> Result<()> {
             hc_bootstrap_url: _,
             connect_holochain: _,
             admin_credential: _,
-            enable_multi_user: _
+            enable_multi_user: _,
+            enable_mcp: _,
+            mcp_port: _,
+            pid_file: _,
         } => unreachable!(),
         Domain::RunLocalHcServices {} => unreachable!(),
         Domain::Eve { command: _ } => unreachable!(),

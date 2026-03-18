@@ -44,8 +44,11 @@ teardown_file() {
         done
         kill -9 "$AD4M_PID" 2>/dev/null || true
     fi
-    # Port-based fallback in case PID tracking missed something
-    lsof -ti:4000 | xargs -r kill -9 2>/dev/null || true
+    # Port-based fallback: only kill ad4m/ad4m-executor processes on port 4000
+    lsof -ti:4000 2>/dev/null | while read pid; do
+        cmd="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
+        case "$cmd" in *ad4m*) kill -9 "$pid" 2>/dev/null || true ;; esac
+    done
 }
 
 setup() {
