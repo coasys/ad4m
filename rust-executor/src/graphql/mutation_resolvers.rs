@@ -47,18 +47,19 @@ fn get_rate(description: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-/// Atomically reserve (check-and-deduct) compute credits for a user.
+/// Deduct compute credits for a user after an operation completes.
+/// Uses clamped deduction (credits go to 0, never negative) so that the
+/// pre-check in check_compute_credits will block subsequent operations.
 /// Returns Ok(()) if:
 /// - No user email in token (single-user mode, no billing)
 /// - User has free_access enabled
-/// - Credits were successfully reserved (atomic deduction)
-/// Returns Err if credits are insufficient or the DB operation fails.
+/// - Credits were successfully deducted (clamped to 0)
 fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
             .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
         if !free {
-            Ad4mDb::with_global_instance(|db| db.deduct_user_credits_if_available(email, amount))
+            Ad4mDb::with_global_instance(|db| db.deduct_user_credits(email, amount))
                 .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
         }
     }
