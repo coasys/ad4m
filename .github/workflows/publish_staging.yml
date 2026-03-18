@@ -513,23 +513,20 @@ jobs:
         if ($check) { Write-Host "WARNING: nasm still found at $($check.Source)!" }
         else { Write-Host "OK: nasm not found on PATH" }
 
-    - name: Pre-build aws-lc-sys (ensure prebuilt-nasm .obj files are compiled)
-      env:
-        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
-        RUSTFLAGS: -C target-feature=+crt-static
-        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-      run: |
-        cargo build --release -p aws-lc-sys 2>&1
-
     - name: Build AD4M-CLI
       env:
         RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
         RUSTFLAGS: -C target-feature=+crt-static
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-        # Force turbo to re-run cargo (not return stale cached output).
-        # Without this, turbo returns aws-lc-sys compiled without NASM assembly.
-        TURBO_FORCE: "true"
-      run: pnpm build-libs
+      run: |
+        # Build languages first (turbo handles JS deps)
+        pnpm run build-languages --concurrency=1 --force
+        # Build Rust directly — bypassing turbo entirely.
+        # Turbo's subprocess environment causes aws-lc-sys's cmake to miss
+        # prebuilt-nasm .obj files despite all env vars being correctly set.
+        cd rust-executor
+        pnpm run build-deno-snapshot
+        cargo build --release 2>&1
 
     - name: Build Launcher binary
       run: pnpm run package-ad4m
