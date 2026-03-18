@@ -52,6 +52,46 @@ jobs:
           prerelease: true
 
   # ============================================================================
+  # Generate V8 Deno Snapshot — runs on Linux, artifact shared to Windows
+  # Windows cannot build generate_snapshot.exe due to irreconcilable CRT
+  # mismatch (surrealdb-librocksdb-sys mt_static /MT vs V8/deno /MD).
+  # The snapshot is architecture-specific (x86_64) but OS-independent.
+  # ============================================================================
+  generate-deno-snapshot:
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:a0ab4b6358b7314a2ad49e232ba6c53b28a56e7f02641f226b2ed05544cc66d8
+
+    needs:
+      - create-release
+
+    steps:
+    - name: Fetch source code
+      uses: actions/checkout@v3
+
+    - name: Use Node.js 24.x
+      uses: actions/setup-node@v3
+      with:
+        node-version: 24.x
+
+    - uses: pnpm/action-setup@v4
+
+    - name: pnpm Install
+      run: pnpm install --no-frozen-lockfile
+
+    - name: Generate deno snapshot
+      env:
+        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      run: |
+        cd rust-executor && pnpm run build-deno-snapshot && cd ..
+
+    - name: Upload snapshot artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: deno-snapshot
+        path: rust-executor/CUSTOM_DENO_SNAPSHOT.bin
+        retention-days: 1
+
   # Linux Binary Build - Uses Docker container (all deps pre-installed)
   # ============================================================================
   build-launcher-binary-linux:
@@ -426,6 +466,7 @@ jobs:
 
     needs:
       - create-release
+      - generate-deno-snapshot
 
     steps:
     - name: Fetch source code
@@ -521,16 +562,11 @@ jobs:
         cd connect && pnpm run build && cd ..
         cd dapp && pnpm run build && cd ..
 
-    - name: Generate deno snapshot
-      env:
-        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
-        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-        # generate_snapshot.exe has irreconcilable CRT conflicts:
-        # surrealdb-librocksdb-sys mt_static → /MT, V8/deno deps → /MD.
-        # /FORCE overrides ALL fatal linker errors (LNK1169 duplicates +
-        # LNK1319 mismatches). Safe because generate_snapshot is a build tool.
-        RUSTFLAGS: -C target-feature=+crt-static -C link-arg=/FORCE
-      run: cd rust-executor && pnpm run build-deno-snapshot && cd ..
+    - name: Download deno snapshot from Linux build
+      uses: actions/download-artifact@v4
+      with:
+        name: deno-snapshot
+        path: rust-executor/
 
     - name: Build AD4M-CLI
       env:
