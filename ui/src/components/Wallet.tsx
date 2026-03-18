@@ -390,7 +390,7 @@ const Wallet = () => {
             <circle cx="12" cy="12" r="10" />
             <polyline points="12 6 12 12 16 14" />
           </svg>
-          Transaction History ({Array.isArray(history) ? history.length : 0})
+          Transaction History
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ transform: historyOpen ? "rotate(180deg)" : "rotate(0)", transition: "transform 0.2s" }}>
             <polyline points="6 9 12 15 18 9" />
           </svg>
@@ -398,30 +398,133 @@ const Wallet = () => {
 
         {historyOpen && (
           <j-box mt="300">
-            {Array.isArray(history) && history.length > 0 ? (
-              history.map((tx: any, i: number) => {
-                const isIncoming = tx.direction === "incoming";
-                const counterparty = tx.counterparty
+            {(() => {
+              if (!Array.isArray(history) || history.length === 0) {
+                return (
+                  <j-text size="400" color="ui-400">
+                    No transactions yet
+                  </j-text>
+                );
+              }
+
+              // Collapse proposal flows: group by root proposal ID, show only final status
+              // Each tx may have a nested "history" array tracing back to the root proposal
+              const getRootId = (tx: any): string => {
+                // Recursively walk history to find the deepest Proposal
+                const findDeepest = (t: any): string | null => {
+                  if (t.history && Array.isArray(t.history) && t.history.length > 0) {
+                    for (const h of t.history) {
+                      const deeper = findDeepest(h);
+                      if (deeper) return deeper;
+                    }
+                    // Return the deepest item's id
+                    return t.history[t.history.length - 1]?.id || null;
+                  }
+                  return null;
+                };
+                return findDeepest(tx) || tx.id || `unknown-${tx.timestamp}`;
+              };
+
+              // Priority: Reject > Accept/Receipt > Commitment > Proposal
+              // Reject must be highest so it overwrites a completed send
+              const typePriority: Record<string, number> = {
+                Reject: 5, Accept: 4, Receipt: 4, Commitment: 2, Proposal: 1,
+              };
+
+              const grouped = new Map<string, any>();
+              for (const tx of history) {
+                const rootId = getRootId(tx);
+                const existing = grouped.get(rootId);
+                const txPrio = typePriority[tx.tx_type] ?? 0;
+                const existPrio = existing ? (typePriority[existing.tx_type] ?? 0) : -1;
+                if (!existing || txPrio > existPrio) {
+                  grouped.set(rootId, tx);
+                }
+              }
+
+              const collapsed = Array.from(grouped.values())
+                .sort((a, b) => {
+                  const ta = a.timestamp || new Date(a.created_at).getTime() / 1000;
+                  const tb = b.timestamp || new Date(b.created_at).getTime() / 1000;
+                  return (tb || 0) - (ta || 0);
+                });
+
+              return collapsed.map((tx: any, i: number) => {
+                const isRejected = tx.status === "rejected" || tx.direction === "rejected" || tx.tx_type === "Reject";
+                const isCompleted = tx.tx_type === "Accept" || tx.tx_type === "Receipt";
+                const isPending = tx.status === "pending" || tx.tx_type === "Proposal" || tx.tx_type === "Commitment";
+
+                // Determine direction from amount sign (negative = sent, positive = received)
+                const amountObj = tx.amount;
+                let rawAmount = "";
+                if (typeof amountObj === "object" && amountObj !== null && !Array.isArray(amountObj)) {
+                  rawAmount = amountObj["0"] || Object.values(amountObj)[0] as string || "";
+                } else if (typeof amountObj === "string") {
+                  rawAmount = amountObj;
+                }
+                const numAmount = parseFloat(rawAmount) || 0;
+                const isSend = numAmount < 0;
+                const isIncoming = numAmount > 0;
+
+                const counterpartyKey = tx.counterparty
                   ? (Array.isArray(tx.counterparty) ? tx.counterparty[0] : tx.counterparty)
                   : null;
-                const amount = tx.amount
-                  ? (typeof tx.amount === "object" ? JSON.stringify(tx.amount) : String(tx.amount))
-                  : "";
+                const counterparty = tx.counterparty_email || counterpartyKey;
+                const absAmount = Math.abs(numAmount);
+                const amountStr = absAmount ? String(absAmount) : "";
+
                 const timestamp = tx.timestamp || tx.created_at;
+                // Zome timestamps are microseconds
                 const dateStr = timestamp
-                  ? new Date(typeof timestamp === "number" ? timestamp * 1000 : timestamp).toLocaleString()
+                  ? new Date(typeof timestamp === "number"
+                    ? (timestamp > 1e15 ? timestamp / 1000 : timestamp > 1e12 ? timestamp : timestamp * 1000)
+                    : timestamp
+                  ).toLocaleString()
                   : null;
+
+                let label: string;
+                let statusColor: string;
+                let amountColor: string;
+                if (isRejected) {
+                  label = "✕ Rejected";
+                  statusColor = "danger-500";
+                  amountColor = "danger-500";
+                } else if (isCompleted && isSend) {
+                  label = "↑ Sent";
+                  statusColor = "black";
+                  amountColor = "ui-500";
+                } else if (isCompleted && isIncoming) {
+                  label = "↓ Received";
+                  statusColor = "success-500";
+                  amountColor = "success-500";
+                } else if (isPending && isSend) {
+                  label = "↑ Sending";
+                  statusColor = "warning-500";
+                  amountColor = "warning-500";
+                } else if (isPending && isIncoming) {
+                  label = "↓ Pending approval";
+                  statusColor = "warning-500";
+                  amountColor = "warning-500";
+                } else if (isIncoming) {
+                  label = "↓ Received";
+                  statusColor = "success-500";
+                  amountColor = "success-500";
+                } else {
+                  label = "↑ Sent";
+                  statusColor = "black";
+                  amountColor = "ui-500";
+                }
 
                 return (
                   <j-box
                     key={i}
                     py="200"
-                    style={{ borderBottom: "1px solid var(--j-color-ui-100)" }}
+                    style={{ borderBottom: "1px solid var(--j-color-ui-100)", opacity: isRejected ? 0.6 : 1 }}
                   >
                     <j-flex j="between" a="center">
                       <j-flex a="center" gap="200">
-                        <j-text size="400" weight="500" color={isIncoming ? "success-500" : "black"}>
-                          {isIncoming ? "↓ Received" : (tx.tx_type || "Sent")}
+                        <j-text size="400" weight="500" color={statusColor}>
+                          {label}
                         </j-text>
                         {dateStr && (
                           <j-text size="300" color="ui-400">
@@ -429,9 +532,11 @@ const Wallet = () => {
                           </j-text>
                         )}
                       </j-flex>
-                      <j-text size="400" weight="500" color={isIncoming ? "success-500" : "ui-500"}>
-                        {isIncoming ? "+" : "-"}{amount}
-                      </j-text>
+                      {amountStr && (
+                        <j-text size="400" weight="500" color={amountColor}>
+                          {isIncoming && !isRejected ? "+" : isSend ? "-" : ""}{amountStr} mHOT
+                        </j-text>
+                      )}
                     </j-flex>
                     {counterparty && (
                       <j-text
@@ -439,17 +544,13 @@ const Wallet = () => {
                         color="ui-400"
                         style={{ fontFamily: "monospace" }}
                       >
-                        {isIncoming ? "From: " : "To: "}{counterparty.substring(0, 24)}...
+                        {isIncoming ? "From: " : "To: "}{counterparty.length > 24 ? counterparty.substring(0, 24) + "..." : counterparty}
                       </j-text>
                     )}
                   </j-box>
                 );
-              })
-            ) : (
-              <j-text size="400" color="ui-400">
-                No transactions yet
-              </j-text>
-            )}
+              });
+            })()}
           </j-box>
         )}
       </j-box>

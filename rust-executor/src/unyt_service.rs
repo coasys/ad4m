@@ -1007,6 +1007,7 @@ pub async fn check_pending_sends() {
     for (_recipient, _amount, proposal_hash) in pending {
         match get_status(&proposal_hash).await {
             Ok(status) => {
+                log::info!("Outgoing send {} status: {:?}", proposal_hash, status);
                 let watch_status = status.get("status");
                 let is_completed = match watch_status {
                     Some(serde_json::Value::String(s)) => s == "Completed",
@@ -1056,13 +1057,28 @@ pub async fn check_pending_sends() {
                             info!("Auto-accepted commitment {} -> {}", commitment_hash, accept_hash);
                         }
                         Err(e) => {
-                            warn!("Failed to auto-accept commitment {}: {}", commitment_hash, e);
+                            let err_str = format!("{}", e);
+                            if err_str.contains("Link does not exist") || err_str.contains("not found") {
+                                info!("Outgoing send {} was rejected (link removed), marking as rejected", proposal_hash);
+                                let _ = Ad4mDb::with_global_instance(|db| db.reject_pending_send(&proposal_hash));
+                            } else {
+                                warn!("Failed to auto-accept commitment {}: {}", commitment_hash, e);
+                            }
                         }
                     }
                 }
             }
             Err(e) => {
-                warn!("Failed to check status of outgoing send {}: {}", proposal_hash, e);
+                let err_str = format!("{}", e);
+                if err_str.contains("Link does not exist") || err_str.contains("not found") {
+                    info!("Outgoing send {} was rejected (get_status failed), marking as rejected", proposal_hash);
+                    match Ad4mDb::with_global_instance(|db| db.reject_pending_send(&proposal_hash)) {
+                        Ok(_) => info!("Successfully marked send {} as rejected in DB", proposal_hash),
+                        Err(e) => warn!("Failed to mark send {} as rejected: {}", proposal_hash, e),
+                    }
+                } else {
+                    warn!("Failed to check status of outgoing send {}: {}", proposal_hash, e);
+                }
             }
         }
     }

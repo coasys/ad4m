@@ -3095,6 +3095,32 @@ impl Ad4mDb {
         Ok(sends)
     }
 
+    /// Get all sends (for transaction history display)
+    pub fn get_all_sends(&self) -> Ad4mDbResult<Vec<(String, String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT recipient, amount_hot, status, created_at FROM pending_sends ORDER BY created_at DESC",
+        )?;
+        let sends = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sends)
+    }
+
+    /// Get all payment requests (for transaction history display)
+    pub fn get_all_payment_requests(&self) -> Ad4mDbResult<Vec<(String, String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT user_email, amount_hot, status, created_at FROM payment_requests ORDER BY created_at DESC",
+        )?;
+        let requests = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(requests)
+    }
+
     pub fn get_user_by_hot_wallet_address(&self, address: &str) -> Ad4mDbResult<Option<String>> {
         let result = self
             .conn

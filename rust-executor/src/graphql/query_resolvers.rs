@@ -1106,7 +1106,7 @@ impl Query {
         }
     }
 
-    /// Get the host's mHOT transaction history.
+    /// Get the host's mHOT transaction history (outgoing + incoming).
     async fn runtime_hot_wallet_history(
         &self,
         context: &RequestContext,
@@ -1115,18 +1115,109 @@ impl Query {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
 
+        // Fetch outgoing history
+        let mut all_txs: Vec<serde_json::Value> = Vec::new();
+
         match crate::unyt_service::get_history(
             page.map(|p| p as u64),
-            per_page.unwrap_or(20) as u64,
+            per_page.unwrap_or(50) as u64,
         )
         .await
         {
-            Ok(history) => Ok(serde_json::to_string(&history).unwrap_or_else(|_| "[]".to_string())),
-            Err(e) => Err(FieldError::new(
-                format!("Failed to get mHOT wallet history: {}", e),
-                Value::null(),
-            )),
+            Ok(history) => {
+                // get_history returns {"items": [...], "low_boundary": ..., "end_of_chain": ...}
+                let items = history.get("items").and_then(|v| v.as_array())
+                    .or_else(|| history.as_array());
+                if let Some(arr) = items {
+                    for tx in arr {
+                        all_txs.push(tx.clone());
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to get outgoing history: {}", e);
+            }
         }
+
+        // Fetch incoming transactions via notification links
+        match crate::unyt_service::get_all_notification_links().await {
+            Ok(links) => {
+                log::info!("get_all_notification_links raw result: {}", links);
+                match crate::unyt_service::get_actionable_transactions(links).await {
+                    Ok(incoming) => {
+                        log::info!("get_actionable_transactions raw result: {}", incoming);
+                        // Result is {"proposal_actionable":[], "commitment_actionable":[], "accept_actionable":[], "reject_actionable":[]}
+                        if let Some(obj) = incoming.as_object() {
+                            for (category, txs) in obj {
+                                if let Some(arr) = txs.as_array() {
+                                    for tx in arr {
+                                        let mut tx = tx.clone();
+                                        if let Some(tx_obj) = tx.as_object_mut() {
+                                            let direction = if category == "reject_actionable" {
+                                                "rejected"
+                                            } else {
+                                                "incoming"
+                                            };
+                                            tx_obj.insert("direction".to_string(), serde_json::Value::String(direction.to_string()));
+                                        }
+                                        all_txs.push(tx);
+                                    }
+                                }
+                            }
+                        } else if let Some(arr) = incoming.as_array() {
+                            for tx in arr {
+                                let mut tx = tx.clone();
+                                if let Some(obj) = tx.as_object_mut() {
+                                    obj.insert("direction".to_string(), serde_json::Value::String("incoming".to_string()));
+                                }
+                                all_txs.push(tx);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to get actionable transactions: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to get notification links: {}", e);
+            }
+        }
+
+        // Process any reject items to update DB status
+        for tx in &all_txs {
+            if tx.get("direction").and_then(|v| v.as_str()) == Some("rejected") {
+                // Find the original proposal hash from the history chain
+                if let Some(history_arr) = tx.get("history").and_then(|h| h.as_array()) {
+                    for hist_tx in history_arr {
+                        if let Some(hash) = hist_tx.get("id").and_then(|v| v.as_str()) {
+                            let _ = Ad4mDb::with_global_instance(|db| db.reject_pending_send(hash));
+                            let _ = Ad4mDb::with_global_instance(|db| db.complete_payment_request(hash));
+                        }
+                    }
+                }
+                // Also try the reject's own parent reference
+                if let Some(id) = tx.get("id").and_then(|v| v.as_str()) {
+                    let _ = Ad4mDb::with_global_instance(|db| db.reject_pending_send(id));
+                }
+            }
+        }
+
+        // Enrich counterparty agent pubkeys with user emails from DB
+        for tx in &mut all_txs {
+            if let Some(counterparty_arr) = tx.get("counterparty").and_then(|c| c.as_array()).map(|a| a.to_vec()) {
+                if let Some(pubkey) = counterparty_arr.first().and_then(|v| v.as_str()) {
+                    if let Ok(Some(email)) = Ad4mDb::with_global_instance(|db| db.get_user_by_hot_wallet_address(pubkey)) {
+                        if let Some(obj) = tx.as_object_mut() {
+                            obj.insert("counterparty_email".to_string(), serde_json::Value::String(email));
+                        }
+                    }
+                }
+            }
+        }
+
+        log::info!("Returning {} total transaction history items", all_txs.len());
+        Ok(serde_json::to_string(&all_txs).unwrap_or_else(|_| "[]".to_string()))
     }
 
     /// Get the host's mHOT agent public key (their identity on the mHOT DHT).
