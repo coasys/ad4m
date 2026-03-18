@@ -35,7 +35,7 @@ use base64::prelude::*;
 use super::query_resolvers::can_access_perspective;
 
 // Default pricing in HOT (used when no rate is configured in the DB)
-const DEFAULT_TOKEN_RATE: f64 = 12.5;   // per token (prompt + completion)
+const DEFAULT_TOKEN_RATE: f64 = 12.5; // per token (prompt + completion)
 const DEFAULT_EMBEDDING_TOKEN_RATE: f64 = 1.0; // per input token
 const DEFAULT_LINK_WRITE_RATE: f64 = 0.25; // per link write
 
@@ -1951,7 +1951,10 @@ impl Mutation {
             )
             .await?;
 
-        if let Err(e) = reserve_compute_credits(&context.auth_token, get_rate("link write", DEFAULT_LINK_WRITE_RATE)) {
+        if let Err(e) = reserve_compute_credits(
+            &context.auth_token,
+            get_rate("link write", DEFAULT_LINK_WRITE_RATE),
+        ) {
             log::warn!("Call exceeded compute credits (add_link): result returned but future calls will fail. Details: {:?}", e);
         }
         Ok(result)
@@ -1976,7 +1979,10 @@ impl Mutation {
             .add_link_expression(link, link_status_from_input(status)?, batch_id)
             .await?;
 
-        if let Err(e) = reserve_compute_credits(&context.auth_token, get_rate("link write", DEFAULT_LINK_WRITE_RATE)) {
+        if let Err(e) = reserve_compute_credits(
+            &context.auth_token,
+            get_rate("link write", DEFAULT_LINK_WRITE_RATE),
+        ) {
             log::warn!("Call exceeded compute credits (add_link_expression): result returned but future calls will fail. Details: {:?}", e);
         }
         Ok(result)
@@ -2008,9 +2014,10 @@ impl Mutation {
             )
             .await?;
 
-        if let Err(e) =
-            reserve_compute_credits(&context.auth_token, link_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE))
-        {
+        if let Err(e) = reserve_compute_credits(
+            &context.auth_token,
+            link_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE),
+        ) {
             log::warn!("Call exceeded compute credits (add_links, count={}): result returned but future calls will fail. Details: {:?}", link_count, e);
         }
         Ok(result)
@@ -2885,9 +2892,10 @@ impl Mutation {
             .await?;
 
         let total_tokens = result.prompt_tokens + result.completion_tokens;
-        if let Err(e) =
-            reserve_compute_credits(&context.auth_token, total_tokens as f64 * get_rate("per token", DEFAULT_TOKEN_RATE))
-        {
+        if let Err(e) = reserve_compute_credits(
+            &context.auth_token,
+            total_tokens as f64 * get_rate("per token", DEFAULT_TOKEN_RATE),
+        ) {
             log::warn!("Call exceeded compute credits (ai_prompt, tokens={}): result returned but future calls will fail. Details: {:?}", total_tokens, e);
         }
 
@@ -2910,7 +2918,8 @@ impl Mutation {
 
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
-            result.token_count as f64 * get_rate("embedding per token", DEFAULT_EMBEDDING_TOKEN_RATE),
+            result.token_count as f64
+                * get_rate("embedding per token", DEFAULT_EMBEDDING_TOKEN_RATE),
         ) {
             log::warn!("Call exceeded compute credits (ai_embed, tokens={}): result returned but future calls will fail. Details: {:?}", result.token_count, e);
         }
@@ -3127,10 +3136,8 @@ impl Mutation {
         })?;
 
         // Look up user's mHOT wallet address (= Holochain AgentPubKey)
-        let wallet_address = Ad4mDb::with_global_instance(|db| {
-            db.get_user_hot_wallet(&user_email)
-        })
-        .map_err(|e| FieldError::new(format!("DB error: {}", e), Value::null()))?;
+        let wallet_address = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
+            .map_err(|e| FieldError::new(format!("DB error: {}", e), Value::null()))?;
 
         let wallet_address = match wallet_address {
             Some(addr) if !addr.is_empty() => addr,
@@ -3155,7 +3162,9 @@ impl Mutation {
 
                 log::info!(
                     "Created mHOT payment proposal {} for user={} amount={}",
-                    proposal_hash, user_email, amountHOT
+                    proposal_hash,
+                    user_email,
+                    amountHOT
                 );
 
                 Ok(PaymentRequestResult {
@@ -3169,7 +3178,8 @@ impl Mutation {
             Err(e) => {
                 log::error!(
                     "Failed to create mHOT payment proposal for user={}: {}",
-                    user_email, e
+                    user_email,
+                    e
                 );
                 Ok(PaymentRequestResult {
                     success: false,
@@ -3304,9 +3314,8 @@ impl Mutation {
             ));
         }
 
-        let parsed: Vec<serde_json::Value> = serde_json::from_str(&rates_json).map_err(|e| {
-            FieldError::new(format!("Invalid rates JSON: {}", e), Value::null())
-        })?;
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&rates_json)
+            .map_err(|e| FieldError::new(format!("Invalid rates JSON: {}", e), Value::null()))?;
 
         let rates: Vec<(String, f64)> = parsed
             .iter()
@@ -3343,7 +3352,8 @@ impl Mutation {
         match crate::unyt_service::set_membrane_proof(&proof) {
             Ok(()) => Ok(PaymentRequestResult {
                 success: true,
-                message: "Membrane proof stored. Will be used on next DNA installation.".to_string(),
+                message: "Membrane proof stored. Will be used on next DNA installation."
+                    .to_string(),
             }),
             Err(e) => Ok(PaymentRequestResult {
                 success: false,

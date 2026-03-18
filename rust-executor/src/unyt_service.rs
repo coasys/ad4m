@@ -7,10 +7,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use base64::Engine;
 use deno_core::error::AnyError;
 use holochain::prelude::{ExternIO, ZomeCallResponse};
 use log::{error, info, warn};
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tokio::sync::RwLock;
@@ -37,7 +37,8 @@ const ALLIANCE_DNA_BYTES: &[u8] = include_bytes!("resources/alliance_0.61.0.dna"
 
 lazy_static! {
     static ref ALLIANCE_DNA_HASH: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
-    static ref INSTALL_ONCE: Arc<tokio::sync::Mutex<bool>> = Arc::new(tokio::sync::Mutex::new(false));
+    static ref INSTALL_ONCE: Arc<tokio::sync::Mutex<bool>> =
+        Arc::new(tokio::sync::Mutex::new(false));
 }
 
 /// Check if a cell_id_key (hex dna_hash:hex agent_key) belongs to the alliance DNA.
@@ -171,17 +172,23 @@ pub async fn ensure_installed() -> Result<(), AnyError> {
 pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
     let hc = match maybe_get_holochain_service().await {
         Some(hc) => hc,
-        None => return Err(deno_core::anyhow::anyhow!("Holochain service not available")),
+        None => {
+            return Err(deno_core::anyhow::anyhow!(
+                "Holochain service not available"
+            ))
+        }
     };
 
     // Check if already installed with correct version
     if let Ok(Some(_)) = hc.get_app_info(UNYT_APP_ID.to_string()).await {
-        let installed_version = Ad4mDb::with_global_instance(|db| {
-            db.get_setting("unyt_dna_version")
-        }).unwrap_or(None);
+        let installed_version =
+            Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_version")).unwrap_or(None);
 
         if installed_version.as_deref() == Some(ALLIANCE_DNA_VERSION) {
-            info!("Unyt alliance DNA v{} already installed", ALLIANCE_DNA_VERSION);
+            info!(
+                "Unyt alliance DNA v{} already installed",
+                ALLIANCE_DNA_VERSION
+            );
             capture_dna_hash().await;
             return Ok(());
         }
@@ -240,9 +247,7 @@ roles:
     std::fs::write(&happ_yaml_path, &happ_yaml)?;
 
     // Pack happ
-    let happ_file = hc
-        .pack_happ(happ_dir.to_string_lossy().to_string())
-        .await?;
+    let happ_file = hc.pack_happ(happ_dir.to_string_lossy().to_string()).await?;
     info!("Packed alliance hApp at: {}", happ_file);
 
     // Install
@@ -253,29 +258,33 @@ roles:
 
     // Build roles_settings with membrane proof if available
     let roles_settings = match get_membrane_proof() {
-        Some(proof_b64) => {
-            match base64::engine::general_purpose::STANDARD.decode(&proof_b64) {
-                Ok(proof_bytes) => {
-                    info!("Using stored membrane proof ({} bytes) for DNA installation", proof_bytes.len());
-                    let membrane_proof = MembraneProof::from(SerializedBytes::from(
-                        holochain::prelude::UnsafeBytes::from(proof_bytes),
-                    ));
-                    let mut settings = HashMap::new();
-                    settings.insert(
-                        UNYT_CELL_NAME.into(),
-                        RoleSettings::Provisioned {
-                            membrane_proof: Some(membrane_proof),
-                            modifiers: None,
-                        },
-                    );
-                    Some(settings)
-                }
-                Err(e) => {
-                    warn!("Failed to decode membrane proof base64: {}. Installing without proof.", e);
-                    None
-                }
+        Some(proof_b64) => match base64::engine::general_purpose::STANDARD.decode(&proof_b64) {
+            Ok(proof_bytes) => {
+                info!(
+                    "Using stored membrane proof ({} bytes) for DNA installation",
+                    proof_bytes.len()
+                );
+                let membrane_proof = MembraneProof::from(SerializedBytes::from(
+                    holochain::prelude::UnsafeBytes::from(proof_bytes),
+                ));
+                let mut settings = HashMap::new();
+                settings.insert(
+                    UNYT_CELL_NAME.into(),
+                    RoleSettings::Provisioned {
+                        membrane_proof: Some(membrane_proof),
+                        modifiers: None,
+                    },
+                );
+                Some(settings)
             }
-        }
+            Err(e) => {
+                warn!(
+                    "Failed to decode membrane proof base64: {}. Installing without proof.",
+                    e
+                );
+                None
+            }
+        },
         None => {
             warn!("No membrane proof stored — DNA installation may fail if membrane proof is required");
             None
@@ -283,26 +292,26 @@ roles:
     };
 
     // Use the pre-generated agent key if stored (in Holochain "uhCAk..." format)
-    let agent_key = match Ad4mDb::with_global_instance(|db| {
-        db.get_setting("unyt_agent_key")
-    }).unwrap_or(None) {
-        Some(key_str) => {
-            match holochain::prelude::AgentPubKey::try_from(key_str.as_str()) {
+    let agent_key =
+        match Ad4mDb::with_global_instance(|db| db.get_setting("unyt_agent_key")).unwrap_or(None) {
+            Some(key_str) => match holochain::prelude::AgentPubKey::try_from(key_str.as_str()) {
                 Ok(key) => {
                     info!("Using pre-generated Unyt agent key: {}", key_str);
                     Some(key)
                 }
                 Err(e) => {
-                    warn!("Failed to parse stored Unyt agent key '{}': {}. Will generate new.", key_str, e);
+                    warn!(
+                        "Failed to parse stored Unyt agent key '{}': {}. Will generate new.",
+                        key_str, e
+                    );
                     None
                 }
+            },
+            None => {
+                info!("No pre-generated Unyt agent key — Holochain will create one");
+                None
             }
-        }
-        None => {
-            info!("No pre-generated Unyt agent key — Holochain will create one");
-            None
-        }
-    };
+        };
 
     let payload = InstallAppPayload {
         source: AppBundleSource::Path(PathBuf::from(&happ_file)),
@@ -327,9 +336,9 @@ roles:
     }
 
     // Store installed version
-    if let Err(e) = Ad4mDb::with_global_instance(|db| {
-        db.set_setting("unyt_dna_version", ALLIANCE_DNA_VERSION)
-    }) {
+    if let Err(e) =
+        Ad4mDb::with_global_instance(|db| db.set_setting("unyt_dna_version", ALLIANCE_DNA_VERSION))
+    {
         warn!("Failed to store Unyt DNA version in DB: {}", e);
     }
 
@@ -343,7 +352,11 @@ roles:
 pub async fn reinstall() -> Result<(), AnyError> {
     let hc = match maybe_get_holochain_service().await {
         Some(hc) => hc,
-        None => return Err(deno_core::anyhow::anyhow!("Holochain service not available")),
+        None => {
+            return Err(deno_core::anyhow::anyhow!(
+                "Holochain service not available"
+            ))
+        }
     };
 
     // Uninstall existing
@@ -377,9 +390,8 @@ pub async fn reinstall() -> Result<(), AnyError> {
 
 /// Get installed vs bundled version info.
 pub fn version_info() -> (Option<String>, String) {
-    let installed = Ad4mDb::with_global_instance(|db| {
-        db.get_setting("unyt_dna_version")
-    }).unwrap_or(None);
+    let installed =
+        Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_version")).unwrap_or(None);
     (installed, ALLIANCE_DNA_VERSION.to_string())
 }
 
@@ -391,18 +403,17 @@ pub fn version_info() -> (Option<String>, String) {
 /// This should be called before `ensure_installed()` with auth material obtained
 /// from the hosting API / joining server.
 pub fn set_membrane_proof(proof_base64: &str) -> Result<(), AnyError> {
-    Ad4mDb::with_global_instance(|db| {
-        db.set_setting("unyt_membrane_proof", proof_base64)
-    })?;
-    info!("Stored Unyt membrane proof ({} bytes encoded)", proof_base64.len());
+    Ad4mDb::with_global_instance(|db| db.set_setting("unyt_membrane_proof", proof_base64))?;
+    info!(
+        "Stored Unyt membrane proof ({} bytes encoded)",
+        proof_base64.len()
+    );
     Ok(())
 }
 
 /// Retrieve the stored membrane proof, if any.
 pub fn get_membrane_proof() -> Option<String> {
-    Ad4mDb::with_global_instance(|db| {
-        db.get_setting("unyt_membrane_proof")
-    }).unwrap_or(None)
+    Ad4mDb::with_global_instance(|db| db.get_setting("unyt_membrane_proof")).unwrap_or(None)
 }
 
 /// Pre-generate a Holochain agent key for the Unyt DNA and store it.
@@ -410,9 +421,9 @@ pub fn get_membrane_proof() -> Option<String> {
 /// If a key was already generated, returns the stored one.
 pub async fn get_or_create_agent_key() -> Result<String, AnyError> {
     // Check if we already have one stored (and it's valid)
-    if let Some(existing) = Ad4mDb::with_global_instance(|db| {
-        db.get_setting("unyt_agent_key")
-    }).unwrap_or(None) {
+    if let Some(existing) =
+        Ad4mDb::with_global_instance(|db| db.get_setting("unyt_agent_key")).unwrap_or(None)
+    {
         // Validate it's in the correct format
         if holochain::prelude::AgentPubKey::try_from(existing.as_str()).is_ok() {
             return Ok(existing);
@@ -422,16 +433,18 @@ pub async fn get_or_create_agent_key() -> Result<String, AnyError> {
 
     let hc = match maybe_get_holochain_service().await {
         Some(hc) => hc,
-        None => return Err(deno_core::anyhow::anyhow!("Holochain service not available")),
+        None => {
+            return Err(deno_core::anyhow::anyhow!(
+                "Holochain service not available"
+            ))
+        }
     };
 
     let agent_key = hc.new_sign_keypair_random().await?;
     // Use Holochain's native Display format: "u" + base64url_no_pad(39 bytes)
     let key_str = agent_key.to_string();
 
-    Ad4mDb::with_global_instance(|db| {
-        db.set_setting("unyt_agent_key", &key_str)
-    })?;
+    Ad4mDb::with_global_instance(|db| db.set_setting("unyt_agent_key", &key_str))?;
 
     info!("Generated and stored Unyt agent key: {}", key_str);
     Ok(key_str)
@@ -457,7 +470,10 @@ async fn capture_dna_hash() {
                         .collect::<String>();
                     let mut lock = ALLIANCE_DNA_HASH.write().await;
                     *lock = Some(dna_hash_hex.clone());
-                    info!("Captured alliance DNA hash for signal routing: {}", dna_hash_hex);
+                    info!(
+                        "Captured alliance DNA hash for signal routing: {}",
+                        dna_hash_hex
+                    );
                     return;
                 }
             }
@@ -599,8 +615,9 @@ pub async fn create_proposal(
 /// Get transaction status by action hash (accepts ActionHashB64 string like "uhCkk...").
 pub async fn get_status(action_hash_b64: &str) -> Result<JsonValue, AnyError> {
     // The zome expects ActionHash (raw bytes), so convert from base64 representation
-    let action_hash = holochain::prelude::ActionHash::try_from(action_hash_b64)
-        .map_err(|e| deno_core::anyhow::anyhow!("Invalid action hash '{}': {}", action_hash_b64, e))?;
+    let action_hash = holochain::prelude::ActionHash::try_from(action_hash_b64).map_err(|e| {
+        deno_core::anyhow::anyhow!("Invalid action hash '{}': {}", action_hash_b64, e)
+    })?;
     call_zome("get_status", Some(encode_payload(&action_hash)?)).await
 }
 
@@ -625,11 +642,7 @@ pub async fn get_all_notification_links() -> Result<JsonValue, AnyError> {
 
 /// Get actionable transactions from notification links.
 pub async fn get_actionable_transactions(links: JsonValue) -> Result<JsonValue, AnyError> {
-    call_zome(
-        "get_actionable_transactions",
-        Some(encode_payload(&links)?),
-    )
-    .await
+    call_zome("get_actionable_transactions", Some(encode_payload(&links)?)).await
 }
 
 /// Send mHOT to an external address (host withdrawal).
@@ -688,15 +701,12 @@ pub async fn accept_commitment(
 fn credit_and_complete(request: &crate::db::PaymentRequest) {
     match request.amount_hot.parse::<f64>() {
         Ok(amount) => {
-            if let Err(e) = Ad4mDb::with_global_instance(|db| {
-                db.add_user_credits(&request.user_email, amount)
-            }) {
+            if let Err(e) =
+                Ad4mDb::with_global_instance(|db| db.add_user_credits(&request.user_email, amount))
+            {
                 error!("Failed to credit user {}: {}", request.user_email, e);
             } else {
-                info!(
-                    "Credited user {} with {} HOT",
-                    request.user_email, amount
-                );
+                info!("Credited user {} with {} HOT", request.user_email, amount);
             }
         }
         Err(e) => {
@@ -705,9 +715,7 @@ fn credit_and_complete(request: &crate::db::PaymentRequest) {
     }
 
     if let Some(ref action_hash) = request.proposal_action_hash {
-        let _ = Ad4mDb::with_global_instance(|db| {
-            db.complete_payment_request(action_hash)
-        });
+        let _ = Ad4mDb::with_global_instance(|db| db.complete_payment_request(action_hash));
     }
 }
 
@@ -739,10 +747,7 @@ pub async fn handle_signal(payload_json: &JsonValue) {
         }
     };
 
-    let tx_type_str = tx
-        .get("tx_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let tx_type_str = tx.get("tx_type").and_then(|v| v.as_str()).unwrap_or("");
 
     // We're interested in Accept and Receipt types — these indicate completed payments
     if tx_type_str != "Accept" && tx_type_str != "Receipt" {
@@ -760,9 +765,8 @@ pub async fn handle_signal(payload_json: &JsonValue) {
         .or_else(|| {
             // Try other unit names
             amount.and_then(|a| {
-                a.as_object().and_then(|obj| {
-                    obj.values().next().and_then(|v| v.as_str())
-                })
+                a.as_object()
+                    .and_then(|obj| obj.values().next().and_then(|v| v.as_str()))
             })
         });
 
@@ -790,19 +794,21 @@ pub async fn handle_signal(payload_json: &JsonValue) {
     };
 
     // Look up user by their mHOT wallet address (= agent pubkey)
-    let user_email = Ad4mDb::with_global_instance(|db| {
-        db.get_user_by_hot_wallet_address(counterparty)
-    });
+    let user_email =
+        Ad4mDb::with_global_instance(|db| db.get_user_by_hot_wallet_address(counterparty));
 
     match user_email {
         Ok(Some(email)) => {
             // Parse amount and credit user
             match hot_amount.parse::<f64>() {
                 Ok(amount_f64) => {
-                    if let Err(e) = Ad4mDb::with_global_instance(|db| {
-                        db.add_user_credits(&email, amount_f64)
-                    }) {
-                        error!("Failed to credit user {} with {} HOT: {}", email, amount_f64, e);
+                    if let Err(e) =
+                        Ad4mDb::with_global_instance(|db| db.add_user_credits(&email, amount_f64))
+                    {
+                        error!(
+                            "Failed to credit user {} with {} HOT: {}",
+                            email, amount_f64, e
+                        );
                     } else {
                         info!(
                             "Credited user {} with {} HOT from mHOT payment",
@@ -813,9 +819,7 @@ pub async fn handle_signal(payload_json: &JsonValue) {
                     // Update payment request status if we have one
                     let tx_id = tx.get("id").and_then(|v| v.as_str());
                     if let Some(id) = tx_id {
-                        let _ = Ad4mDb::with_global_instance(|db| {
-                            db.complete_payment_request(id)
-                        });
+                        let _ = Ad4mDb::with_global_instance(|db| db.complete_payment_request(id));
                     }
                 }
                 Err(e) => {
@@ -880,13 +884,19 @@ pub async fn check_pending_payments() {
                     }
 
                     // Check if there's a Commitment in related_transaction that we need to Accept
-                    let needs_accept = status.get("related_transaction")
+                    let needs_accept = status
+                        .get("related_transaction")
                         .and_then(|rt| rt.as_array())
-                        .and_then(|txs| txs.iter().find(|tx| {
-                            tx.get("tx_type").and_then(|t| t.as_str()) == Some("Commitment")
-                        }))
+                        .and_then(|txs| {
+                            txs.iter().find(|tx| {
+                                tx.get("tx_type").and_then(|t| t.as_str()) == Some("Commitment")
+                            })
+                        })
                         .and_then(|commitment_tx| {
-                            commitment_tx.get("id").and_then(|id| id.as_str()).map(|s| s.to_string())
+                            commitment_tx
+                                .get("id")
+                                .and_then(|id| id.as_str())
+                                .map(|s| s.to_string())
                         });
 
                     if let Some(commitment_hash) = needs_accept {

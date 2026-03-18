@@ -1069,10 +1069,7 @@ impl Query {
     }
 
     /// Get the host's configured rates for credit deduction.
-    async fn runtime_host_rates(
-        &self,
-        context: &RequestContext,
-    ) -> FieldResult<String> {
+    async fn runtime_host_rates(&self, context: &RequestContext) -> FieldResult<String> {
         check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
 
         let rates = Ad4mDb::with_global_instance(|db| {
@@ -1083,19 +1080,14 @@ impl Query {
 
         let json: Vec<serde_json::Value> = rates
             .into_iter()
-            .map(|(desc, price)| {
-                serde_json::json!({ "description": desc, "priceInHOT": price })
-            })
+            .map(|(desc, price)| serde_json::json!({ "description": desc, "priceInHOT": price }))
             .collect();
 
         Ok(serde_json::to_string(&json).unwrap_or_else(|_| "[]".to_string()))
     }
 
     /// Get the host's mHOT wallet balance from the alliance DNA ledger.
-    async fn runtime_hot_wallet_balance(
-        &self,
-        context: &RequestContext,
-    ) -> FieldResult<String> {
+    async fn runtime_hot_wallet_balance(&self, context: &RequestContext) -> FieldResult<String> {
         check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
 
         match crate::unyt_service::get_ledger().await {
@@ -1138,10 +1130,7 @@ impl Query {
     }
 
     /// Get the host's mHOT agent public key (their identity on the mHOT DHT).
-    async fn runtime_hot_agent_pubkey(
-        &self,
-        context: &RequestContext,
-    ) -> FieldResult<String> {
+    async fn runtime_hot_agent_pubkey(&self, context: &RequestContext) -> FieldResult<String> {
         check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
 
         match crate::unyt_service::whoami().await {
@@ -1155,10 +1144,7 @@ impl Query {
 
     /// Get or create the Holochain agent public key for the Unyt DNA (base64).
     /// Available even before Unyt DNA is installed — needed to request membrane proof.
-    async fn runtime_unyt_agent_key(
-        &self,
-        context: &RequestContext,
-    ) -> FieldResult<String> {
+    async fn runtime_unyt_agent_key(&self, context: &RequestContext) -> FieldResult<String> {
         check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
 
         match crate::unyt_service::get_or_create_agent_key().await {
@@ -1171,17 +1157,15 @@ impl Query {
     }
 
     /// Get Unyt DNA version info (installed vs bundled).
-    async fn runtime_unyt_version_info(
-        &self,
-        context: &RequestContext,
-    ) -> FieldResult<String> {
+    async fn runtime_unyt_version_info(&self, context: &RequestContext) -> FieldResult<String> {
         check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
         let (installed, bundled) = crate::unyt_service::version_info();
         Ok(serde_json::json!({
             "installed": installed,
             "bundled": bundled,
             "needsUpdate": installed.as_deref() != Some(bundled.as_str()),
-        }).to_string())
+        })
+        .to_string())
     }
 
     async fn ai_get_models(&self, context: &RequestContext) -> FieldResult<Vec<Model>> {

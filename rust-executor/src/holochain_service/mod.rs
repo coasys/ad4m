@@ -471,9 +471,11 @@ impl HolochainService {
                 network_config.relay_url = Url2::parse("http://bootstrap.ad4m.dev:4433/relay");
             }
 
-            network_config.bootstrap_url = Url2::parse("https://dev-test-bootstrap2.holochain.org/");
+            network_config.bootstrap_url =
+                Url2::parse("https://dev-test-bootstrap2.holochain.org/");
             network_config.signal_url = Url2::parse("wss://dev-test-bootstrap2.holochain.org/");
-            network_config.relay_url = Url2::parse("https://use1-1.relay.n0.iroh-canary.iroh.link./");
+            network_config.relay_url =
+                Url2::parse("https://use1-1.relay.n0.iroh-canary.iroh.link./");
 
             config.network = network_config;
 
@@ -1075,7 +1077,8 @@ mod tests {
 
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-        let tmp = std::env::temp_dir().join(format!("ad4m_test_keypair_iface_{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("ad4m_test_keypair_iface_{}", std::process::id()));
         let conductor_path = tmp.join("conductor");
         std::fs::create_dir_all(&conductor_path).unwrap();
 
@@ -1102,7 +1105,9 @@ mod tests {
         };
 
         // Use HolochainService::init which sets up the full message-passing loop
-        HolochainService::init(config).await.expect("Failed to init holochain service");
+        HolochainService::init(config)
+            .await
+            .expect("Failed to init holochain service");
 
         // Get the interface
         let iface = get_holochain_service().await;
@@ -1118,7 +1123,10 @@ mod tests {
             .new_sign_keypair_random()
             .await
             .expect("Failed to generate second keypair via interface");
-        assert_ne!(key1, key2, "Two generated keys via interface must be distinct");
+        assert_ne!(
+            key1, key2,
+            "Two generated keys via interface must be distinct"
+        );
 
         // Also verify get_agent_key still works
         let existing_key = iface

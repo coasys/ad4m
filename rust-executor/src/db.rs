@@ -2966,9 +2966,9 @@ impl Ad4mDb {
 
     pub fn set_host_rates(&self, rates: &[(String, f64)]) -> Ad4mDbResult<()> {
         self.conn.execute("DELETE FROM host_rates", [])?;
-        let mut stmt = self.conn.prepare(
-            "INSERT INTO host_rates (description, price_in_hot) VALUES (?1, ?2)",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("INSERT INTO host_rates (description, price_in_hot) VALUES (?1, ?2)")?;
         for (desc, price) in rates {
             stmt.execute(params![desc, price])?;
         }
@@ -2976,9 +2976,9 @@ impl Ad4mDb {
     }
 
     pub fn get_host_rates(&self) -> Ad4mDbResult<Vec<(String, f64)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT description, price_in_hot FROM host_rates",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT description, price_in_hot FROM host_rates")?;
         let rates = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -4744,7 +4744,10 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].user_email, "alice@example.com");
         assert_eq!(pending[0].amount_hot, "100.5");
-        assert_eq!(pending[0].proposal_action_hash.as_deref(), Some("uhCAkABC123"));
+        assert_eq!(
+            pending[0].proposal_action_hash.as_deref(),
+            Some("uhCAkABC123")
+        );
         assert_eq!(pending[0].status, "pending");
 
         // Complete it
@@ -4812,7 +4815,9 @@ mod tests {
 
         let pending = db.get_pending_payment_requests().unwrap();
         assert_eq!(pending.len(), 2);
-        assert!(pending.iter().all(|r| r.proposal_action_hash.as_deref() != Some("hash2")));
+        assert!(pending
+            .iter()
+            .all(|r| r.proposal_action_hash.as_deref() != Some("hash2")));
 
         println!("✅ Multiple payment requests tests passed");
     }
