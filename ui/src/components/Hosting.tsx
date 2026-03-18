@@ -1732,13 +1732,20 @@ const Hosting = () => {
                         const DEFAULT_LINK_PRICE = 0.25;    // ~$0.0001 per link
                         const DEFAULT_TOKEN_PRICE = 12.5;   // ~$0.005 per token, avg API pricing
 
-                        // Auto-populate missing defaults so they're always saved
+                        // Sync rates with current model list: add missing, remove stale
                         const modelNames: string[] = aiModels.map((m: any) => m.name);
+                        const validKeys = new Set(["link write", ...modelNames]);
                         const has = (desc: string) => parsed.some((r) => r.description === desc);
-                        let changed = false;
+
+                        // Remove entries for deleted models or old "per token" format
+                        const before = parsed.length;
+                        parsed = parsed.filter((r) => validKeys.has(r.description));
+
+                        // Add defaults for new models
+                        let changed = parsed.length !== before;
                         if (!has("link write")) { parsed.push({ description: "link write", priceInHOT: DEFAULT_LINK_PRICE }); changed = true; }
                         for (const name of modelNames) {
-                          if (!has(name)) { parsed.push({ description: name, priceInHOT: DEFAULT_TOKEN_PRICE }); changed = true; }
+                          if (!parsed.some((r) => r.description === name)) { parsed.push({ description: name, priceInHOT: DEFAULT_TOKEN_PRICE }); changed = true; }
                         }
                         if (changed) {
                           // Schedule state update for next tick to avoid updating during render
