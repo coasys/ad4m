@@ -521,13 +521,15 @@ jobs:
       run: |
         # Turbo's subprocess breaks aws-lc-sys prebuilt-nasm on Windows.
         # Run each dependency manually in correct order (from turbo.json):
-        # 1. @coasys/ad4m — generates schema.gql (needed by rust-client)
+        # 1. @coasys/ad4m — generates schema.gql + TS types
         cd core && pnpm run build && cd ..
-        # 2. @coasys/dapp — generates dapp/dist (embedded by include_dir!)
+        # 2. @coasys/ad4m-connect — depends on @coasys/ad4m
+        cd connect && pnpm run build && cd ..
+        # 3. @coasys/dapp — depends on ad4m + ad4m-connect; dist/ embedded via include_dir!
         cd dapp && pnpm run build && cd ..
-        # 3. Generate deno snapshot (needs V8 download)
+        # 4. Generate deno snapshot (V8 heap snapshot)
         cd rust-executor && pnpm run build-deno-snapshot && cd ..
-        # 4. Build Rust workspace directly (bypasses turbo)
+        # 5. Build Rust workspace directly (bypasses turbo)
         cargo build --release
 
     - name: Build Launcher binary
