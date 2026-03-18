@@ -519,11 +519,13 @@ jobs:
         RUSTFLAGS: -C target-feature=+crt-static
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       run: |
-        # Build languages first (turbo handles JS deps)
+        # 1. Generate GraphQL schema (schema.gql is gitignored, needed by rust-client)
+        cd core && pnpm run build && cd ..
+        # 2. Build languages (turbo handles JS deps)
         pnpm run build-languages --concurrency=1 --force
-        # Build Rust directly — bypassing turbo entirely.
-        # Turbo's subprocess environment causes aws-lc-sys's cmake to miss
-        # prebuilt-nasm .obj files despite all env vars being correctly set.
+        # 3. Build Rust directly — bypassing turbo entirely.
+        #    Turbo's subprocess environment prevents aws-lc-sys prebuilt-nasm
+        #    from working correctly on Windows.
         cd rust-executor
         pnpm run build-deno-snapshot
         cargo build --release 2>&1
