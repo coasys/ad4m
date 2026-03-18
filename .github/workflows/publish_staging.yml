@@ -519,12 +519,15 @@ jobs:
         RUSTFLAGS: -C target-feature=+crt-static
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       run: |
-        # 1. Generate GraphQL schema (schema.gql is gitignored, needed by rust-client)
+        # Turbo's subprocess breaks aws-lc-sys prebuilt-nasm on Windows.
+        # Run each dependency manually in correct order (from turbo.json):
+        # 1. @coasys/ad4m — generates schema.gql (needed by rust-client)
         cd core && pnpm run build && cd ..
-        # 2. Generate deno snapshot (needs V8 binary download)
+        # 2. @coasys/dapp — generates dapp/dist (embedded by include_dir!)
+        cd dapp && pnpm run build && cd ..
+        # 3. Generate deno snapshot (needs V8 download)
         cd rust-executor && pnpm run build-deno-snapshot && cd ..
-        # 3. Build Rust directly from workspace root — bypassing turbo.
-        #    Turbo's subprocess prevents aws-lc-sys prebuilt-nasm from working.
+        # 4. Build Rust workspace directly (bypasses turbo)
         cargo build --release
 
     - name: Build Launcher binary
