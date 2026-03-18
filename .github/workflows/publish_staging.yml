@@ -496,15 +496,23 @@ jobs:
     - name: pnpm Install
       run: pnpm install --no-frozen-lockfile
 
+    - name: Hide Strawberry Perl NASM (force aws-lc-sys prebuilt-nasm)
+      run: |
+        # Strawberry Perl ships nasm.exe which makes aws-lc-sys's
+        # test_nasm_command() return true, skipping the prebuilt-nasm
+        # mechanism. But cmake can't properly use Strawberry's NASM,
+        # causing LNK2019 unresolved assembly symbols. Renaming it
+        # forces aws-lc-sys to use its built-in prebuilt .obj files.
+        if (Test-Path "C:\Strawberry\c\bin\nasm.exe") {
+          Rename-Item "C:\Strawberry\c\bin\nasm.exe" "C:\Strawberry\c\bin\nasm.exe.bak"
+          Write-Host "Renamed Strawberry nasm.exe to force prebuilt-nasm"
+        }
+
     - name: Build AD4M-CLI
       env:
         RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
         RUSTFLAGS: -C target-feature=+crt-static
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-        # Force turbo to skip its task cache. Without this, turbo returns
-        # stale build output from before Strawberry Perl's NASM was available
-        # to cmake, causing LNK2019 unresolved assembly symbols.
-        TURBO_FORCE: "true"
       run: pnpm build-libs
 
     - name: Build Launcher binary
