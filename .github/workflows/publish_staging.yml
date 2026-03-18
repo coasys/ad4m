@@ -526,6 +526,9 @@ jobs:
         RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
         RUSTFLAGS: -C target-feature=+crt-static
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+        # Force turbo to re-run cargo (not return stale cached output).
+        # Without this, turbo returns aws-lc-sys compiled without NASM assembly.
+        TURBO_FORCE: "true"
       run: pnpm build-libs
 
     - name: Build Launcher binary
