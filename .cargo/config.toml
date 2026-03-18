@@ -14,6 +14,11 @@ RUSTY_V8_MIRROR = "https://github.com/coasys/rusty_v8/releases/download"
 # Set here (not in CI env vars) because turborepo strips env vars.
 AWS_LC_SYS_PREBUILT_NASM = "1"
 
+# Force cmake builder path for aws-lc-sys. Without this, aws-lc-sys tries
+# the cc_builder first (which fails for MSVC targets), then falls through to
+# cmake. Explicit CMAKE_BUILDER=1 ensures the cmake path is taken directly.
+AWS_LC_SYS_CMAKE_BUILDER = "1"
+
 # CUDA compute capability for candle-kernels (A100 = sm_80).
 # Without this, bindgen_cuda panics when nvidia-smi isn't available.
 CUDA_COMPUTE_CAP = "80"

@@ -496,17 +496,32 @@ jobs:
     - name: pnpm Install
       run: pnpm install --no-frozen-lockfile
 
-    - name: Hide Strawberry Perl NASM (force aws-lc-sys prebuilt-nasm)
+    - name: Hide ALL NASM executables (force aws-lc-sys prebuilt-nasm)
       run: |
-        # Strawberry Perl ships nasm.exe which makes aws-lc-sys's
-        # test_nasm_command() return true, skipping the prebuilt-nasm
-        # mechanism. But cmake can't properly use Strawberry's NASM,
-        # causing LNK2019 unresolved assembly symbols. Renaming it
-        # forces aws-lc-sys to use its built-in prebuilt .obj files.
-        if (Test-Path "C:\Strawberry\c\bin\nasm.exe") {
-          Rename-Item "C:\Strawberry\c\bin\nasm.exe" "C:\Strawberry\c\bin\nasm.exe.bak"
-          Write-Host "Renamed Strawberry nasm.exe to force prebuilt-nasm"
+        # aws-lc-sys runs "nasm -version" to detect NASM. If found, it skips
+        # prebuilt-nasm and relies on cmake to use NASM — which fails silently.
+        # Hide ALL nasm.exe to force the prebuilt .obj mechanism.
+        $nasms = @(Get-Command nasm -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)
+        foreach ($n in $nasms) {
+          Write-Host "Hiding: $n"
+          Rename-Item $n "$n.hidden" -ErrorAction SilentlyContinue
         }
+        @("C:\Strawberry\c\bin\nasm.exe", "C:\Program Files\NASM\nasm.exe") | ForEach-Object {
+          if (Test-Path $_) { Rename-Item $_ "$_.hidden"; Write-Host "Hid: $_" }
+        }
+        $check = Get-Command nasm -ErrorAction SilentlyContinue
+        if ($check) { Write-Host "WARNING: nasm still found at $($check.Source)!" }
+        else { Write-Host "OK: nasm not found on PATH" }
+
+    - name: Pre-build aws-lc-sys (verbose — diagnose prebuilt-nasm)
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
+        RUSTFLAGS: -C target-feature=+crt-static
+        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      run: |
+        cargo build --release -p aws-lc-sys -vv 2>&1 | findstr /i "nasm prebuilt cmake warning aws_lc builder selected" || true
+        echo "--- aws-lc-sys build artifacts ---"
+        dir target\release\build\aws-lc-sys-* /s /b 2>nul | findstr /i "\.obj \.lib \.a" | head -20 || true
 
     - name: Build AD4M-CLI
       env:
