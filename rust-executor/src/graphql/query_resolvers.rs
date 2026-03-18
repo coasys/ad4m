@@ -1001,6 +1001,10 @@ impl Query {
                 format!("{}", credits)
             };
 
+            let hot_wallet_address =
+                Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user.username))
+                    .unwrap_or(None);
+
             user_stats.push(UserStatistics {
                 email: user.username.clone(),
                 did: user.did,
@@ -1013,10 +1017,22 @@ impl Query {
                 perspective_count,
                 remaining_credits,
                 free_access,
+                hot_wallet_address,
             });
         }
 
         Ok(user_stats)
+    }
+
+    async fn runtime_user_wallet_address(
+        &self,
+        context: &RequestContext,
+        email: String,
+    ) -> FieldResult<Option<String>> {
+        check_capability(&context.capabilities, &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)?;
+        let addr = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&email))
+            .map_err(|e| FieldError::new(format!("Failed to get wallet address: {}", e), Value::null()))?;
+        Ok(addr)
     }
 
     async fn runtime_hosting_user_info(
@@ -1125,13 +1141,17 @@ impl Query {
         .await
         {
             Ok(history) => {
+                log::info!("get_history raw result: {}", history);
                 // get_history returns {"items": [...], "low_boundary": ..., "end_of_chain": ...}
                 let items = history.get("items").and_then(|v| v.as_array())
                     .or_else(|| history.as_array());
                 if let Some(arr) = items {
+                    log::info!("get_history parsed {} items", arr.len());
                     for tx in arr {
                         all_txs.push(tx.clone());
                     }
+                } else {
+                    log::warn!("get_history: could not extract items array from response");
                 }
             }
             Err(e) => {
@@ -1181,6 +1201,35 @@ impl Query {
             }
             Err(e) => {
                 log::warn!("Failed to get notification links: {}", e);
+            }
+        }
+
+        // Add pending sends from DB so they show immediately in the UI
+        if let Ok(pending) = Ad4mDb::with_global_instance(|db| db.get_pending_sends()) {
+            log::info!("DB pending sends: {} items", pending.len());
+            for (recipient, amount, proposal_hash) in &pending {
+                // Check if this proposal is already in all_txs (from zome history)
+                let already_present = all_txs.iter().any(|tx| {
+                    tx.get("id").and_then(|v| v.as_str()) == Some(proposal_hash.as_str())
+                        || tx.get("history").and_then(|h| h.as_array()).map_or(false, |arr| {
+                            arr.iter().any(|h| h.get("id").and_then(|v| v.as_str()) == Some(proposal_hash.as_str()))
+                        })
+                });
+                if !already_present {
+                    let mut tx = serde_json::json!({
+                        "id": proposal_hash,
+                        "tx_type": "Proposal",
+                        "amount": { "0": format!("-{}", amount.trim_start_matches('-')) },
+                        "counterparty": [recipient],
+                        "status": "pending",
+                        "direction": "outgoing",
+                    });
+                    // Enrich with email
+                    if let Ok(Some(email)) = Ad4mDb::with_global_instance(|db| db.get_user_by_hot_wallet_address(recipient)) {
+                        tx.as_object_mut().unwrap().insert("counterparty_email".to_string(), serde_json::Value::String(email));
+                    }
+                    all_txs.push(tx);
+                }
             }
         }
 

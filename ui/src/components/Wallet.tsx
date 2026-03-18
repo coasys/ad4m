@@ -62,6 +62,58 @@ const Wallet = () => {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [confirmSend, setConfirmSend] = useState(false);
 
+  // Contacts
+  type Contact = { name: string; address: string };
+  const CONTACTS_KEY = "wallet_contacts";
+  const loadContacts = (): Contact[] => {
+    try { return JSON.parse(localStorage.getItem(CONTACTS_KEY) || "[]"); } catch { return []; }
+  };
+  const [contacts, setContacts] = useState<Contact[]>(loadContacts);
+  const [showContacts, setShowContacts] = useState(false);
+  const [contactFilter, setContactFilter] = useState("");
+  const [newContactName, setNewContactName] = useState("");
+  const [newContactAddr, setNewContactAddr] = useState("");
+  const [editingContact, setEditingContact] = useState<number | null>(null);
+
+  const saveContacts = (c: Contact[]) => {
+    setContacts(c);
+    localStorage.setItem(CONTACTS_KEY, JSON.stringify(c));
+  };
+  const addContact = () => {
+    if (!newContactName.trim() || !newContactAddr.trim()) return;
+    saveContacts([...contacts, { name: newContactName.trim(), address: newContactAddr.trim() }]);
+    setNewContactName("");
+    setNewContactAddr("");
+  };
+  const removeContact = (idx: number) => {
+    saveContacts(contacts.filter((_, i) => i !== idx));
+  };
+  const selectContact = (c: Contact) => {
+    setSendRecipient(c.address);
+    setShowContacts(false);
+  };
+  const saveAsContact = () => {
+    if (!sendRecipient) return;
+    setNewContactAddr(sendRecipient);
+    setShowContacts(true);
+  };
+
+  // Registered users
+  const [registeredUsers, setRegisteredUsers] = useState<{ email: string; did: string; walletAddress?: string }[]>([]);
+  useEffect(() => {
+    if (!client) return;
+    client.runtime.listUsers().then((users: any[]) => {
+      console.log("listUsers raw:", JSON.stringify(users));
+      setRegisteredUsers(
+        (users || []).map((u: any) => ({
+          email: u.email,
+          did: u.did,
+          walletAddress: u.hotWalletAddress || undefined,
+        }))
+      );
+    }).catch((e: any) => console.warn("Failed to fetch users:", e));
+  }, [client]);
+
   const fetchWalletData = useCallback(async () => {
     if (!client) return;
     try {
@@ -145,14 +197,29 @@ const Wallet = () => {
     setConfirmSend(true);
   };
 
+  // Resolve email to wallet address
+  const resolveRecipient = (input: string): string => {
+    if (input.includes("@")) {
+      const user = registeredUsers.find(u => u.email.toLowerCase() === input.toLowerCase());
+      if (user?.walletAddress) return user.walletAddress;
+    }
+    return input;
+  };
+
   const handleSendConfirm = async () => {
     if (!client || !sendRecipient || !sendAmount) return;
     setConfirmSend(false);
     setSendLoading(true);
     setSendResult(null);
     try {
+      const resolved = resolveRecipient(sendRecipient);
+      if (sendRecipient.includes("@") && resolved === sendRecipient) {
+        setSendResult("Error: No wallet address found for that email");
+        setSendLoading(false);
+        return;
+      }
       const result = await client.runtime.unytSendHot(
-        sendRecipient,
+        resolved,
         sendAmount,
       );
       setSendResult(result?.message || "Unknown result");
@@ -330,27 +397,150 @@ const Wallet = () => {
                 To
               </j-text>
             </div>
-            <j-flex a="center" gap="200">
-              <j-input
-                value={sendRecipient}
-                onInput={(e: any) => setSendRecipient(e.target.value)}
-                placeholder="uhCAk..."
-                style={{ flex: 1 }}
-              />
-              <j-button
-                variant="primary"
-                onClick={handleSendClick}
-                loading={sendLoading}
-                disabled={!sendRecipient || !sendAmount || sendLoading}
-              >
-                Send
-              </j-button>
-            </j-flex>
+            <div style={{ position: "relative" }}>
+              <j-flex a="center" gap="200">
+                <j-input
+                  value={sendRecipient}
+                  onInput={(e: any) => {
+                    setSendRecipient(e.target.value);
+                    setContactFilter(e.target.value);
+                    if (e.target.value.length > 0) setShowContacts(true);
+                  }}
+                  placeholder="email or uhCAk..."
+                  style={{ flex: 1 }}
+                />
+                <j-button
+                  size="sm"
+                  variant="subtle"
+                  onClick={() => { setContactFilter(""); setShowContacts(!showContacts); }}
+                  title="Contacts"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                    <circle cx="9" cy="7" r="4" />
+                    <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                  </svg>
+                </j-button>
+                <j-button
+                  variant="primary"
+                  onClick={handleSendClick}
+                  loading={sendLoading}
+                  disabled={!sendRecipient || !sendAmount || sendLoading}
+                >
+                  Send
+                </j-button>
+              </j-flex>
+
+              {showContacts && (
+                <div style={{
+                  position: "absolute", top: "100%", left: 0, right: 0, zIndex: 9999,
+                  marginTop: "4px", background: "var(--j-color-white)", border: "1px solid var(--j-color-ui-200)",
+                  borderRadius: "8px", boxShadow: "0 4px 12px rgba(0,0,0,0.1)", maxHeight: "280px", overflow: "auto",
+                }}>
+                  {/* Registered users (filtered by input) */}
+                  {(() => {
+                    const q = contactFilter.toLowerCase();
+                    const filtered = registeredUsers.filter(u =>
+                      u.walletAddress && (!q || u.email.toLowerCase().includes(q) || u.walletAddress.toLowerCase().includes(q))
+                    );
+                    if (filtered.length === 0) return null;
+                    return <>
+                      <div style={{ padding: "6px 12px", borderBottom: "1px solid var(--j-color-ui-100)" }}>
+                        <j-text size="300" color="ui-400" weight="600">Users</j-text>
+                      </div>
+                      {filtered.map((u, i) => (
+                        <div
+                          key={`user-${i}`}
+                          onClick={async () => {
+                            if (u.walletAddress) {
+                              setSendRecipient(u.walletAddress);
+                            } else {
+                              // Resolve wallet address from email
+                              setSendRecipient("resolving...");
+                              try {
+                                const addr = await client!.runtime.userWalletAddress(u.email);
+                                setSendRecipient(addr || `no wallet for ${u.email}`);
+                              } catch {
+                                setSendRecipient(u.email);
+                              }
+                            }
+                            setContactFilter("");
+                            setShowContacts(false);
+                          }}
+                          style={{
+                            padding: "8px 12px", cursor: "pointer",
+                            display: "flex", justifyContent: "space-between", alignItems: "center",
+                            borderBottom: "1px solid var(--j-color-ui-50)",
+                          }}
+                          onMouseEnter={(e) => (e.currentTarget.style.background = "var(--j-color-ui-50)")}
+                          onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                        >
+                          <j-text size="400">{u.email}</j-text>
+                          <j-text size="300" color="ui-400" style={{ fontFamily: "monospace" }}>
+                            {u.walletAddress ? u.walletAddress.substring(0, 8) + "..." : "no wallet"}
+                          </j-text>
+                        </div>
+                      ))}
+                    </>;
+                  })()}
+
+                  {/* Saved contacts (filtered) */}
+                  {(() => {
+                    const q = contactFilter.toLowerCase();
+                    const filtered = contacts.filter(c =>
+                      !q || c.name.toLowerCase().includes(q) || c.address.toLowerCase().includes(q)
+                    );
+                    if (filtered.length === 0) return null;
+                    return <div style={{ padding: "6px 12px", borderBottom: "1px solid var(--j-color-ui-100)", borderTop: "1px solid var(--j-color-ui-200)" }}>
+                      <j-text size="300" color="ui-400" weight="600">Contacts</j-text>
+                    </div>;
+                  })()}
+                  {contacts.filter(c => {
+                    const q = contactFilter.toLowerCase();
+                    return !q || c.name.toLowerCase().includes(q) || c.address.toLowerCase().includes(q);
+                  }).map((c, i) => (
+                    <div
+                      key={`contact-${i}`}
+                      style={{
+                        padding: "8px 12px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center",
+                        borderBottom: "1px solid var(--j-color-ui-50)",
+                      }}
+                      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--j-color-ui-50)")}
+                      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                    >
+                      <div onClick={() => selectContact(c)} style={{ flex: 1 }}>
+                        <j-text size="400" weight="500">{c.name}</j-text>
+                        <j-text size="300" color="ui-400" style={{ fontFamily: "monospace" }}>
+                          {c.address.substring(0, 12)}...
+                        </j-text>
+                      </div>
+                      <span onClick={() => removeContact(i)} style={{ cursor: "pointer", opacity: 0.4, padding: "4px" }} title="Remove">✕</span>
+                    </div>
+                  ))}
+
+                  {/* Add new contact */}
+                  <div style={{ padding: "8px 12px", borderTop: "1px solid var(--j-color-ui-200)" }}>
+                    <j-text size="300" color="ui-400" weight="600" style={{ marginBottom: "4px" }}>Add contact</j-text>
+                    <div style={{ display: "flex", gap: "4px", marginTop: "4px" }}>
+                      <j-input size="sm" value={newContactName} onInput={(e: any) => setNewContactName(e.target.value)} placeholder="Name" style={{ flex: 1 }} />
+                      <j-input size="sm" value={newContactAddr} onInput={(e: any) => setNewContactAddr(e.target.value)} placeholder="Address" style={{ flex: 2 }} />
+                      <j-button size="sm" variant="subtle" onClick={addContact} disabled={!newContactName.trim() || !newContactAddr.trim()}>+</j-button>
+                    </div>
+                    {sendRecipient && !contacts.some(c => c.address === sendRecipient) && (
+                      <j-button size="sm" variant="subtle" onClick={saveAsContact} style={{ marginTop: "4px", width: "100%" }}>
+                        Save current address as contact
+                      </j-button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
 
             {confirmSend && (
               <div style={{ marginTop: "12px", padding: "12px 16px", background: "var(--j-color-ui-50)", borderRadius: "8px", border: "1px solid var(--j-color-warning-300)" }}>
                 <j-text size="400" weight="500">
-                  Confirm: Send {sendAmount} <span style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}><span style={{ fontSize: "0.75em", opacity: 0.6 }}>mirrored</span> <HotLogo size={16} /></span> to {sendRecipient.substring(0, 12)}...?
+                  Confirm: Send {sendAmount} <span style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}><span style={{ fontSize: "0.75em", opacity: 0.6 }}>mirrored</span> <HotLogo size={16} /></span> to {sendRecipient.includes("@") ? sendRecipient : sendRecipient.substring(0, 12) + "..."}?
                 </j-text>
                 <j-flex gap="200" mt="200">
                   <j-button

@@ -212,6 +212,9 @@ export class UserStatistics {
 
     @Field()
     freeAccess: boolean;
+
+    @Field({nullable: true})
+    hotWalletAddress?: string;
 }
 
 @ObjectType()

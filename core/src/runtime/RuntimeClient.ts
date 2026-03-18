@@ -424,10 +424,21 @@ export class RuntimeClient {
                     perspectiveCount
                     remainingCredits
                     freeAccess
+                    hotWalletAddress
                 }
             }`
         }))
         return runtimeListUsers
+    }
+
+    async userWalletAddress(email: string): Promise<string | null> {
+        const { runtimeUserWalletAddress } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeUserWalletAddress($email: String!) {
+                runtimeUserWalletAddress(email: $email)
+            }`,
+            variables: { email }
+        }))
+        return runtimeUserWalletAddress
     }
 
     async emailTestModeEnable(): Promise<boolean> {
