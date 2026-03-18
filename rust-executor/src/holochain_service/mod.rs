@@ -226,6 +226,23 @@ impl HolochainService {
                                         },
                                     }
                                 }
+                                HolochainServiceRequest::EnableApp(app_id, response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(10),
+                                        async {
+                                            service.conductor.clone().enable_app(app_id).await
+                                                .map(|_| ())
+                                                .map_err(|e| anyhow!("Could not enable app: {:?}", e))
+                                        }
+                                    ).await.map_err(|_| anyhow!("Timeout error; Enable App")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::EnableApp(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::EnableApp(Err(err)));
+                                        },
+                                    }
+                                }
                                 HolochainServiceRequest::AgentInfos(response_tx) => {
                                     match timeout(
                                         std::time::Duration::from_secs(30),

@@ -40,6 +40,7 @@ pub enum HolochainServiceRequest {
     PackHapp(String, oneshot::Sender<HolochainServiceResponse>),
     UnPackHapp(String, oneshot::Sender<HolochainServiceResponse>),
     NewSignKeypair(oneshot::Sender<HolochainServiceResponse>),
+    EnableApp(String, oneshot::Sender<HolochainServiceResponse>),
 }
 
 #[derive(Debug)]
@@ -61,6 +62,7 @@ pub enum HolochainServiceResponse {
     PackHapp(Result<String, AnyError>),
     UnPackHapp(Result<String, AnyError>),
     NewSignKeypair(Result<HoloHash<Agent>, AnyError>),
+    EnableApp(Result<(), AnyError>),
 }
 
 impl HolochainServiceInterface {
@@ -112,6 +114,16 @@ impl HolochainServiceInterface {
             .send(HolochainServiceRequest::RemoveApp(app_id, response_tx))?;
         match response_rx.await? {
             HolochainServiceResponse::RemoveApp(result) => result,
+            _ => unreachable!(),
+        }
+    }
+
+    pub async fn enable_app(&self, app_id: String) -> Result<(), AnyError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.sender
+            .send(HolochainServiceRequest::EnableApp(app_id, response_tx))?;
+        match response_rx.await? {
+            HolochainServiceResponse::EnableApp(result) => result,
             _ => unreachable!(),
         }
     }

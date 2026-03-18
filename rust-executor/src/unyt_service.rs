@@ -202,6 +202,32 @@ pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
         return Ok(());
     }
 
+    // App not found via get_app_info. Check if we previously installed it
+    // (DB has version marker) — if so, the app may be in a disabled/broken state.
+    // Try to enable it rather than reinstalling, to preserve the source chain
+    // (which holds transaction history and balances).
+    let previously_installed =
+        Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_version"))
+            .unwrap_or(None)
+            .is_some();
+
+    if previously_installed {
+        info!("Unyt DNA was previously installed but not found by conductor — attempting to enable existing app");
+        match hc.enable_app(UNYT_APP_ID.to_string()).await {
+            Ok(_) => {
+                info!("Successfully re-enabled Unyt alliance DNA");
+                capture_dna_hash().await;
+                return Ok(());
+            }
+            Err(e) => {
+                warn!("Failed to enable existing Unyt app: {}. Will attempt fresh install.", e);
+                // Fall through to do_install as last resort — this may fail with
+                // GenesisFailed if the source chain exists, but we don't want to
+                // remove_app and lose the user's transaction history.
+            }
+        }
+    }
+
     do_install(data_path, &hc).await
 }
 
