@@ -521,14 +521,11 @@ jobs:
       run: |
         # 1. Generate GraphQL schema (schema.gql is gitignored, needed by rust-client)
         cd core && pnpm run build && cd ..
-        # 2. Build languages (turbo handles JS deps)
-        pnpm run build-languages --concurrency=1 --force
-        # 3. Build Rust directly — bypassing turbo entirely.
-        #    Turbo's subprocess environment prevents aws-lc-sys prebuilt-nasm
-        #    from working correctly on Windows.
-        cd rust-executor
-        pnpm run build-deno-snapshot
-        cargo build --release 2>&1
+        # 2. Generate deno snapshot (needs V8 binary download)
+        cd rust-executor && pnpm run build-deno-snapshot && cd ..
+        # 3. Build Rust directly from workspace root — bypassing turbo.
+        #    Turbo's subprocess prevents aws-lc-sys prebuilt-nasm from working.
+        cargo build --release
 
     - name: Build Launcher binary
       run: pnpm run package-ad4m
