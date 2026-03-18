@@ -37,7 +37,7 @@ export async function fetchUserInfo(ad4mClient: Ad4mClient): Promise<UserInfo> {
     email: info.email,
     remainingCredits: info.remainingCredits === "unlimited" ? Infinity : (parseFloat(info.remainingCredits) || 0),
     hotWalletAddress: info.hotWalletAddress || null,
-    freeAccess: info.remainingCredits === "unlimited",
+    freeAccess: info.freeAccess,
   };
 }
 

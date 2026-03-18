@@ -24,12 +24,11 @@ const PriceInput = ({ initialValue, placeholder, style, onCommit }: {
   onCommit: (val: string) => void;
 }) => {
   const [local, setLocal] = React.useState(initialValue ? String(initialValue) : "");
-  const initialized = React.useRef(false);
+  const focused = React.useRef(false);
   // Update local when initialValue changes externally (but not while user is editing)
   React.useEffect(() => {
-    if (!initialized.current && initialValue) {
+    if (!focused.current && initialValue) {
       setLocal(String(initialValue));
-      initialized.current = true;
     }
   }, [initialValue]);
   return (
@@ -38,7 +37,8 @@ const PriceInput = ({ initialValue, placeholder, style, onCommit }: {
       inputMode="decimal"
       value={local}
       onChange={(e) => setLocal(e.target.value)}
-      onBlur={() => onCommit(local)}
+      onFocus={() => { focused.current = true; }}
+      onBlur={() => { focused.current = false; onCommit(local); }}
       onKeyDown={(e) => { if (e.key === "Enter") { (e.target as HTMLInputElement).blur(); } }}
       placeholder={placeholder}
       style={style}
@@ -149,7 +149,8 @@ const Hosting = () => {
     from_address: string;
   } | null>(null);
   const [smtpChanged, setSmtpChanged] = useState(false);
-  const [smtpTesting, setSmtpTesting] = useState(false);
+  const [smtpTestVisible, setSmtpTestVisible] = useState(false);
+  const [smtpTestLoading, setSmtpTestLoading] = useState(false);
   const [smtpTestStatus, setSmtpTestStatus] = useState("");
   const [smtpTestEmail, setSmtpTestEmail] = useState("");
   const [showSmtpPassword, setShowSmtpPassword] = useState(false);
@@ -221,7 +222,7 @@ const Hosting = () => {
     indexUrl: string;
     hostId: string;
     authToken: string;
-  }): Promise<"verified" | "unverified" | "expired"> => {
+  }): Promise<"verified" | "unverified" | "expired" | "unavailable"> => {
     try {
       const res = await fetch(`${session.indexUrl}/hosts/me`, {
         headers: { Authorization: `Bearer ${session.authToken}` },
@@ -232,10 +233,10 @@ const Hosting = () => {
         setHostReg((prev) => ({
           ...prev,
           indexUrl: session.indexUrl,
-          name: mine.name || prev.name,
-          description: mine.description || prev.description,
-          location: mine.location || prev.location,
-          hostUrl: mine.url || prev.hostUrl,
+          name: mine.name ?? prev.name,
+          description: mine.description ?? prev.description,
+          location: mine.location ?? prev.location,
+          hostUrl: mine.url ?? prev.hostUrl,
           rates:
             mine.rates && mine.rates.length > 0
               ? JSON.stringify(mine.rates)
@@ -254,8 +255,9 @@ const Hosting = () => {
       }
     } catch (e) {
       console.log("Failed to fetch host data:", e);
+      return "unavailable";
     }
-    return "expired";
+    return "unavailable";
   };
 
   const fetchMembraneProof = async (session: {
@@ -544,12 +546,17 @@ const Hosting = () => {
             message:
               "Email not yet verified. Check your inbox or resend the code.",
           });
-        } else {
+        } else if (result === "expired") {
           setHostRegStatus({
             type: "error",
             message: "Session expired. Please log in again.",
           });
           setRegStep("credentials");
+        } else {
+          setHostRegStatus({
+            type: "error",
+            message: "Could not reach the host service. Please try again later.",
+          });
         }
       } else {
         setHostRegStatus({
@@ -638,8 +645,12 @@ const Hosting = () => {
   const handleLogout = async () => {
     await saveHostSession(null);
     setHostData(null);
+    setHostSession(null);
     setRegStep("credentials");
     setHostRegStatus(null);
+    setHostReg((prev) => ({ ...prev, password: "" }));
+    setMembraneProofStatus("none");
+    membraneProofAttempted.current = false;
   };
 
   // ---- SMTP handlers ----
@@ -657,7 +668,7 @@ const Hosting = () => {
 
   const handleSmtpTest = async () => {
     if (!smtpConfig || !smtpTestEmail) return;
-    setSmtpTesting(true);
+    setSmtpTestLoading(true);
     setSmtpTestStatus("");
     try {
       await invoke<void>("test_smtp_config", {
@@ -668,7 +679,7 @@ const Hosting = () => {
     } catch (error) {
       setSmtpTestStatus("Failed: " + error);
     } finally {
-      setSmtpTesting(false);
+      setSmtpTestLoading(false);
     }
   };
 
@@ -696,7 +707,8 @@ const Hosting = () => {
       filters: [{ name: "Certificate", extensions: ["pem", "crt", "cert"] }],
     });
     if (filePath && tlsConfig) {
-      setTlsConfig({ ...tlsConfig, cert_file_path: filePath.toString() });
+      const newConfig = { ...tlsConfig, cert_file_path: filePath.toString() };
+      handleTlsConfigChange(newConfig);
     }
   };
 
@@ -706,7 +718,8 @@ const Hosting = () => {
       filters: [{ name: "Private Key", extensions: ["pem", "key"] }],
     });
     if (filePath && tlsConfig) {
-      setTlsConfig({ ...tlsConfig, key_file_path: filePath.toString() });
+      const newConfig = { ...tlsConfig, key_file_path: filePath.toString() };
+      handleTlsConfigChange(newConfig);
     }
   };
 
@@ -817,11 +830,15 @@ const Hosting = () => {
           } else if (result === "unverified") {
             setHostSession(session);
             setRegStep("verify");
-          } else {
+          } else if (result === "expired") {
             // Token expired/invalid — clear stored session, go to login
             setHostSession(null);
             saveHostSession(null);
             setRegStep("credentials");
+          } else {
+            // Transient error — keep session, let user retry
+            setHostSession(session);
+            setRegStep("logged-in");
           }
         }
       } catch (e) {
@@ -2098,14 +2115,14 @@ const Hosting = () => {
                             variant="subtle"
                             onClick={() => {
                               setSmtpTestEmail(hostSession?.email || "");
-                              setSmtpTesting(true);
+                              setSmtpTestVisible(true);
                             }}
                           >
                             Send Test
                           </j-button>
                         </j-flex>
 
-                        {smtpTesting && (
+                        {smtpTestVisible && (
                           <j-box mb="300">
                             <j-flex gap="200">
                               <j-input
@@ -2118,7 +2135,7 @@ const Hosting = () => {
                               <j-button
                                 variant="primary"
                                 onClick={handleSmtpTest}
-                                loading={smtpTesting}
+                                loading={smtpTestLoading}
                               >
                                 Send
                               </j-button>

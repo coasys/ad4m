@@ -111,12 +111,10 @@ pub struct PaymentResult {
 /// Blocks until holochain service is available.
 /// Returns an error if no membrane proof has been stored yet.
 pub async fn ensure_installed() -> Result<(), AnyError> {
-    // Fast path: already installed
-    {
-        let installed = INSTALL_ONCE.lock().await;
-        if *installed {
-            return Ok(());
-        }
+    // Acquire the lock for the entire install sequence to prevent races.
+    let mut installed = INSTALL_ONCE.lock().await;
+    if *installed {
+        return Ok(());
     }
 
     // Don't attempt install without a membrane proof
@@ -148,7 +146,6 @@ pub async fn ensure_installed() -> Result<(), AnyError> {
     for attempt in 1..=5 {
         match install_alliance_dna(&data_path).await {
             Ok(()) => {
-                let mut installed = INSTALL_ONCE.lock().await;
                 *installed = true;
                 return Ok(());
             }
@@ -585,7 +582,8 @@ fn binary_json_to_holohash(val: &JsonValue) -> Option<String> {
     if bytes.is_empty() {
         return None;
     }
-    Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes))
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes);
+    Some(format!("u{}", encoded))
 }
 
 /// Get the host's agent public key on the mHOT DHT.
@@ -869,6 +867,27 @@ pub async fn handle_signal(payload_json: &JsonValue) {
 
     info!("Unyt signal: received {} transaction", tx_type_str);
 
+    // Extract the proposal hash so we can check idempotency against payment_requests
+    let proposal_hash = tx
+        .get("proposal")
+        .and_then(|v| v.as_str())
+        .or_else(|| tx.get("related_proposal").and_then(|v| v.as_str()))
+        .or_else(|| tx_id.as_deref());
+
+    // Idempotency: if we have a proposal hash, check whether this payment was already completed
+    if let Some(hash) = proposal_hash {
+        match Ad4mDb::with_global_instance(|db| db.get_payment_request_by_hash(hash)) {
+            Ok(Some(ref req)) if req.status == "completed" => {
+                info!(
+                    "Unyt signal: payment for proposal {} already completed, ignoring duplicate",
+                    hash
+                );
+                return;
+            }
+            _ => {}
+        }
+    }
+
     // Extract amount from the transaction
     let amount = tx.get("amount");
     let hot_amount = amount
@@ -911,6 +930,11 @@ pub async fn handle_signal(payload_json: &JsonValue) {
     match user_email {
         Ok(Some(email)) => match hot_amount.parse::<f64>() {
             Ok(amount_f64) => {
+                // Mark completed before crediting to prevent double-credit from concurrent signals
+                if let Some(hash) = proposal_hash {
+                    let _ = Ad4mDb::with_global_instance(|db| db.complete_payment_request(hash));
+                }
+
                 if let Err(e) =
                     Ad4mDb::with_global_instance(|db| db.add_user_credits(&email, amount_f64))
                 {
@@ -923,10 +947,6 @@ pub async fn handle_signal(payload_json: &JsonValue) {
                         "Credited user {} with {} HOT from mHOT payment",
                         email, amount_f64
                     );
-                }
-
-                if let Some(ref id) = tx_id {
-                    let _ = Ad4mDb::with_global_instance(|db| db.complete_payment_request(id));
                 }
             }
             Err(e) => {

@@ -354,6 +354,9 @@ impl Ad4mDb {
         // Add hosting columns to users table
         alter_add_column("ALTER TABLE users ADD COLUMN remaining_credits REAL DEFAULT 0")?;
         alter_add_column("ALTER TABLE users ADD COLUMN hot_wallet_address TEXT")?;
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_hot_wallet_address ON users(hot_wallet_address) WHERE hot_wallet_address IS NOT NULL",
+        )?;
         alter_add_column("ALTER TABLE users ADD COLUMN free_access BOOLEAN DEFAULT 0")?;
 
         // Host rates table — stores per-item pricing used for credit deduction
@@ -370,11 +373,15 @@ impl Ad4mDb {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_email TEXT NOT NULL,
                 amount_hot TEXT NOT NULL,
-                proposal_action_hash TEXT,
+                proposal_action_hash TEXT UNIQUE,
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 completed_at TEXT
             )",
+        )?;
+        // Add unique index for existing databases that already created the table without UNIQUE
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_requests_proposal_hash ON payment_requests(proposal_action_hash) WHERE proposal_action_hash IS NOT NULL",
         )?;
 
         // Pending outgoing sends (proposals we created to send funds)
@@ -383,11 +390,15 @@ impl Ad4mDb {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 recipient TEXT NOT NULL,
                 amount_hot TEXT NOT NULL,
-                proposal_action_hash TEXT NOT NULL,
+                proposal_action_hash TEXT NOT NULL UNIQUE,
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 completed_at TEXT
             )",
+        )?;
+        // Add unique index for existing databases that already created the table without UNIQUE
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_sends_proposal_hash ON pending_sends(proposal_action_hash)",
         )?;
 
         Ok(Self { conn })
@@ -2182,6 +2193,61 @@ impl Ad4mDb {
             serde_json::to_value(languages)?,
         );
 
+        // Export host_rates
+        let host_rates: Vec<serde_json::Value> = self
+            .conn
+            .prepare("SELECT description, price_in_hot FROM host_rates")?
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "description": row.get::<_, String>(0)?,
+                    "price_in_hot": row.get::<_, f64>(1)?
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        export_data.insert("host_rates".to_string(), serde_json::to_value(host_rates)?);
+
+        // Export payment_requests
+        let payment_requests: Vec<serde_json::Value> = self
+            .conn
+            .prepare("SELECT id, user_email, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests")?
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, i64>(0)?,
+                    "user_email": row.get::<_, String>(1)?,
+                    "amount_hot": row.get::<_, String>(2)?,
+                    "proposal_action_hash": row.get::<_, Option<String>>(3)?,
+                    "status": row.get::<_, String>(4)?,
+                    "created_at": row.get::<_, String>(5)?,
+                    "completed_at": row.get::<_, Option<String>>(6)?
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        export_data.insert(
+            "payment_requests".to_string(),
+            serde_json::to_value(payment_requests)?,
+        );
+
+        // Export pending_sends
+        let pending_sends: Vec<serde_json::Value> = self
+            .conn
+            .prepare("SELECT id, recipient, amount_hot, proposal_action_hash, status, created_at, completed_at FROM pending_sends")?
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, i64>(0)?,
+                    "recipient": row.get::<_, String>(1)?,
+                    "amount_hot": row.get::<_, String>(2)?,
+                    "proposal_action_hash": row.get::<_, String>(3)?,
+                    "status": row.get::<_, String>(4)?,
+                    "created_at": row.get::<_, String>(5)?,
+                    "completed_at": row.get::<_, Option<String>>(6)?
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        export_data.insert(
+            "pending_sends".to_string(),
+            serde_json::to_value(pending_sends)?,
+        );
+
         Ok(serde_json::Value::Object(export_data))
     }
 
@@ -2762,6 +2828,73 @@ impl Ad4mDb {
             }
         }
 
+        // Import host_rates
+        if let Some(host_rates) = data.get("host_rates") {
+            if let Ok(rates) = serde_json::from_value::<Vec<serde_json::Value>>(host_rates.clone())
+            {
+                log::debug!("Importing {} host_rates", rates.len());
+                for rate in rates {
+                    if let Err(e) = self.conn.execute(
+                        "INSERT OR REPLACE INTO host_rates (description, price_in_hot) VALUES (?1, ?2)",
+                        params![
+                            rate["description"].as_str().unwrap_or(""),
+                            rate["price_in_hot"].as_f64().unwrap_or(0.0)
+                        ],
+                    ) {
+                        log::warn!("Failed to import host_rate: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Import payment_requests
+        if let Some(payment_requests) = data.get("payment_requests") {
+            if let Ok(requests) =
+                serde_json::from_value::<Vec<serde_json::Value>>(payment_requests.clone())
+            {
+                log::debug!("Importing {} payment_requests", requests.len());
+                for req in requests {
+                    if let Err(e) = self.conn.execute(
+                        "INSERT OR IGNORE INTO payment_requests (user_email, amount_hot, proposal_action_hash, status, created_at, completed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            req["user_email"].as_str().unwrap_or(""),
+                            req["amount_hot"].as_str().unwrap_or("0"),
+                            req["proposal_action_hash"].as_str(),
+                            req["status"].as_str().unwrap_or("pending"),
+                            req["created_at"].as_str().unwrap_or(""),
+                            req["completed_at"].as_str()
+                        ],
+                    ) {
+                        log::warn!("Failed to import payment_request: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Import pending_sends
+        if let Some(pending_sends) = data.get("pending_sends") {
+            if let Ok(sends) =
+                serde_json::from_value::<Vec<serde_json::Value>>(pending_sends.clone())
+            {
+                log::debug!("Importing {} pending_sends", sends.len());
+                for send in sends {
+                    if let Err(e) = self.conn.execute(
+                        "INSERT OR IGNORE INTO pending_sends (recipient, amount_hot, proposal_action_hash, status, created_at, completed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            send["recipient"].as_str().unwrap_or(""),
+                            send["amount_hot"].as_str().unwrap_or("0"),
+                            send["proposal_action_hash"].as_str().unwrap_or(""),
+                            send["status"].as_str().unwrap_or("pending"),
+                            send["created_at"].as_str().unwrap_or(""),
+                            send["completed_at"].as_str()
+                        ],
+                    ) {
+                        log::warn!("Failed to import pending_send: {}", e);
+                    }
+                }
+            }
+        }
+
         Ok(result)
     }
 
@@ -2951,11 +3084,21 @@ impl Ad4mDb {
     }
 
     pub fn set_user_hot_wallet(&self, email: &str, address: &str) -> Ad4mDbResult<()> {
-        let rows = self.conn.execute(
+        match self.conn.execute(
             "UPDATE users SET hot_wallet_address = ?1 WHERE username = ?2",
             params![address, email],
-        )?;
-        Self::require_user_row(rows, email)
+        ) {
+            Ok(rows) => Self::require_user_row(rows, email),
+            Err(rusqlite::Error::SqliteFailure(err, _))
+                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(anyhow!(
+                    "Wallet address {} is already associated with another user",
+                    address
+                ))
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub fn get_user_free_access(&self, email: &str) -> Ad4mDbResult<bool> {
@@ -2978,13 +3121,15 @@ impl Ad4mDb {
     // Host rates management functions
 
     pub fn set_host_rates(&self, rates: &[(String, f64)]) -> Ad4mDbResult<()> {
-        self.conn.execute("DELETE FROM host_rates", [])?;
-        let mut stmt = self
-            .conn
-            .prepare("INSERT INTO host_rates (description, price_in_hot) VALUES (?1, ?2)")?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM host_rates", [])?;
+        let mut stmt =
+            tx.prepare("INSERT INTO host_rates (description, price_in_hot) VALUES (?1, ?2)")?;
         for (desc, price) in rates {
             stmt.execute(params![desc, price])?;
         }
+        drop(stmt);
+        tx.commit()?;
         Ok(())
     }
 
@@ -3020,7 +3165,7 @@ impl Ad4mDb {
         action_hash: &str,
     ) -> Ad4mDbResult<i64> {
         self.conn.execute(
-            "INSERT INTO payment_requests (user_email, amount_hot, proposal_action_hash) VALUES (?1, ?2, ?3)",
+            "INSERT OR IGNORE INTO payment_requests (user_email, amount_hot, proposal_action_hash) VALUES (?1, ?2, ?3)",
             params![email, amount_hot, action_hash],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -3032,6 +3177,29 @@ impl Ad4mDb {
             params![action_hash],
         )?;
         Ok(())
+    }
+
+    pub fn get_payment_request_by_hash(
+        &self,
+        action_hash: &str,
+    ) -> Ad4mDbResult<Option<PaymentRequest>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, user_email, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests WHERE proposal_action_hash = ?1",
+        )?;
+        let mut requests = stmt
+            .query_map(params![action_hash], |row| {
+                Ok(PaymentRequest {
+                    id: row.get(0)?,
+                    user_email: row.get(1)?,
+                    amount_hot: row.get(2)?,
+                    proposal_action_hash: row.get(3)?,
+                    status: row.get(4)?,
+                    created_at: row.get(5)?,
+                    completed_at: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(requests.pop())
     }
 
     pub fn get_pending_payment_requests(&self) -> Ad4mDbResult<Vec<PaymentRequest>> {
@@ -3061,7 +3229,7 @@ impl Ad4mDb {
         proposal_hash: &str,
     ) -> Ad4mDbResult<i64> {
         self.conn.execute(
-            "INSERT INTO pending_sends (recipient, amount_hot, proposal_action_hash) VALUES (?1, ?2, ?3)",
+            "INSERT OR IGNORE INTO pending_sends (recipient, amount_hot, proposal_action_hash) VALUES (?1, ?2, ?3)",
             params![recipient, amount_hot, proposal_hash],
         )?;
         Ok(self.conn.last_insert_rowid())

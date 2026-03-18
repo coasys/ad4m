@@ -1033,6 +1033,7 @@ impl Query {
             &context.capabilities,
             &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
         )?;
+        let email = email.trim().to_lowercase();
         let addr =
             Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&email)).map_err(|e| {
                 FieldError::new(
@@ -1138,6 +1139,21 @@ impl Query {
         per_page: Option<i32>,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        // Validate pagination parameters
+        if let Some(p) = page {
+            if p < 0 {
+                return Err(FieldError::new("page must be non-negative", Value::Null));
+            }
+        }
+        if let Some(pp) = per_page {
+            if pp < 0 {
+                return Err(FieldError::new(
+                    "per_page must be non-negative",
+                    Value::Null,
+                ));
+            }
+        }
 
         // Fetch outgoing history
         let mut all_txs: Vec<serde_json::Value> = Vec::new();
@@ -1260,26 +1276,9 @@ impl Query {
             }
         }
 
-        // Process any reject items to update DB status
-        for tx in &all_txs {
-            if tx.get("direction").and_then(|v| v.as_str()) == Some("rejected") {
-                // Find the original proposal hash from the history chain
-                if let Some(history_arr) = tx.get("history").and_then(|h| h.as_array()) {
-                    for hist_tx in history_arr {
-                        if let Some(hash) = hist_tx.get("id").and_then(|v| v.as_str()) {
-                            let _ = Ad4mDb::with_global_instance(|db| db.reject_pending_send(hash));
-                            let _ = Ad4mDb::with_global_instance(|db| {
-                                db.complete_payment_request(hash)
-                            });
-                        }
-                    }
-                }
-                // Also try the reject's own parent reference
-                if let Some(id) = tx.get("id").and_then(|v| v.as_str()) {
-                    let _ = Ad4mDb::with_global_instance(|db| db.reject_pending_send(id));
-                }
-            }
-        }
+        // NOTE: Rejection reconciliation (reject_pending_send, complete_payment_request)
+        // is handled by check_pending_sends() and check_pending_payments() in unyt_service.rs,
+        // which run periodically. This query resolver is intentionally read-only.
 
         // Enrich counterparty agent pubkeys with user emails from DB
         for tx in &mut all_txs {

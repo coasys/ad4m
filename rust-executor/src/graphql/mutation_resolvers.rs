@@ -3144,6 +3144,20 @@ impl Mutation {
             )
         })?;
 
+        // Validate amountHOT is a positive number
+        let parsed_amount: f64 = amountHOT.trim().parse().map_err(|_| {
+            FieldError::new(
+                format!("Invalid amountHOT '{}': must be a valid number", amountHOT),
+                Value::null(),
+            )
+        })?;
+        if parsed_amount <= 0.0 {
+            return Err(FieldError::new(
+                format!("amountHOT must be positive, got {}", parsed_amount),
+                Value::null(),
+            ));
+        }
+
         // Look up user's mHOT wallet address (= Holochain AgentPubKey)
         let wallet_address = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
             .map_err(|e| FieldError::new(format!("DB error: {}", e), Value::null()))?;

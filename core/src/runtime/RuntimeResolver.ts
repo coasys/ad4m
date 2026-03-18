@@ -684,6 +684,11 @@ export default class RuntimeResolver {
     }
 
     @Query(returns => String)
+    runtimeUnytAgentKey(): string {
+        return ""
+    }
+
+    @Query(returns => String)
     runtimeUnytVersionInfo(): string {
         return ""
     }
