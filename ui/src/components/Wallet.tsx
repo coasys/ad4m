@@ -26,6 +26,9 @@ const Wallet = () => {
   const [sendAmount, setSendAmount] = useState("");
   const [sendLoading, setSendLoading] = useState(false);
   const [sendResult, setSendResult] = useState<string | null>(null);
+  const [withdrawOpen, setWithdrawOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [confirmSend, setConfirmSend] = useState(false);
 
   const fetchWalletData = useCallback(async () => {
     if (!client) return;
@@ -61,10 +64,13 @@ const Wallet = () => {
 
       // Fetch history
       try {
-        const histStr = await client.runtime.unytWalletHistory(undefined, 20);
+        const histStr = await client.runtime.unytWalletHistory(undefined, 50);
+        console.log("Wallet history raw:", histStr);
         if (histStr) {
           try {
-            setHistory(JSON.parse(histStr));
+            const parsed = JSON.parse(histStr);
+            console.log("Wallet history parsed:", parsed);
+            setHistory(parsed);
           } catch {
             setHistory([]);
           }
@@ -102,8 +108,14 @@ const Wallet = () => {
     return () => clearInterval(interval);
   }, [fetchWalletData]);
 
-  const handleSend = async () => {
+  const handleSendClick = () => {
+    if (!sendRecipient || !sendAmount) return;
+    setConfirmSend(true);
+  };
+
+  const handleSendConfirm = async () => {
     if (!client || !sendRecipient || !sendAmount) return;
+    setConfirmSend(false);
     setSendLoading(true);
     setSendResult(null);
     try {
@@ -240,9 +252,9 @@ const Wallet = () => {
         </j-box>
       )}
 
-      {/* Balance */}
+      {/* Balance + Withdraw on same line */}
       <j-box px="500" my="200">
-        <j-box mt="200">
+        <j-flex a="center" j="between">
           <j-flex a="center" gap="200">
             <j-text size="400" weight="500" color="ui-500">
               Balance
@@ -261,99 +273,185 @@ const Wallet = () => {
               </j-text>
             )}
           </j-flex>
-        </j-box>
-      </j-box>
-
-      {/* Send Form */}
-      <j-box px="500" my="400">
-        <j-text size="500" weight="600" color="black">
-          Withdraw
-        </j-text>
-        <j-box mb="200">
-          <j-text size="400" weight="500">
-            Amount (HOT)
-          </j-text>
-        </j-box>
-        <j-flex a="center" gap="200">
-          <j-input
-            value={sendAmount}
-            onInput={(e: any) => setSendAmount(e.target.value)}
-            placeholder="100"
-            type="number"
-          />
-
-          <j-text size="400" weight="500">
-            To:
-          </j-text>
-          <j-input
-            value={sendRecipient}
-            onInput={(e: any) => setSendRecipient(e.target.value)}
-            placeholder="uhCAk..."
-          />
           <j-button
-            variant="primary"
-            onClick={handleSend}
-            loading={sendLoading}
-            disabled={!sendRecipient || !sendAmount || sendLoading}
+            size="sm"
+            variant="subtle"
+            onClick={() => setWithdrawOpen(!withdrawOpen)}
+            style={{ display: "flex", alignItems: "center", gap: "6px" }}
           >
-            Send
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: "4px" }}>
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            Withdraw
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ transform: withdrawOpen ? "rotate(180deg)" : "rotate(0)", transition: "transform 0.2s" }}>
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
           </j-button>
         </j-flex>
 
-        {sendResult && (
-          <j-box mt="200">
-            <j-text
-              size="400"
-              color={
-                sendResult.startsWith("Error") ? "danger-500" : "success-500"
-              }
-            >
-              {sendResult}
-            </j-text>
+        {withdrawOpen && (
+          <j-box mt="300">
+            <j-box mb="200">
+              <j-text size="400" weight="500">
+                Amount (HOT)
+              </j-text>
+            </j-box>
+            <j-flex a="center" gap="200">
+              <j-input
+                value={sendAmount}
+                onInput={(e: any) => setSendAmount(e.target.value)}
+                placeholder="100"
+                type="number"
+              />
+              <j-button
+                size="sm"
+                variant="subtle"
+                onClick={() => {
+                  const bal = balance["0"] || Object.values(balance)[0];
+                  if (bal) setSendAmount(bal);
+                }}
+              >
+                Max
+              </j-button>
+            </j-flex>
+            <j-box mt="200" mb="200">
+              <j-text size="400" weight="500">
+                To
+              </j-text>
+            </j-box>
+            <j-flex a="center" gap="200">
+              <j-input
+                value={sendRecipient}
+                onInput={(e: any) => setSendRecipient(e.target.value)}
+                placeholder="uhCAk..."
+                style={{ flex: 1 }}
+              />
+              <j-button
+                variant="primary"
+                onClick={handleSendClick}
+                loading={sendLoading}
+                disabled={!sendRecipient || !sendAmount || sendLoading}
+              >
+                Send
+              </j-button>
+            </j-flex>
+
+            {confirmSend && (
+              <j-box mt="300" py="300" px="400" style={{ background: "var(--j-color-ui-50)", borderRadius: "8px", border: "1px solid var(--j-color-warning-300)" }}>
+                <j-text size="400" weight="500">
+                  Confirm: Send {sendAmount} mHOT to {sendRecipient.substring(0, 12)}...?
+                </j-text>
+                <j-flex gap="200" mt="200">
+                  <j-button
+                    variant="primary"
+                    size="sm"
+                    onClick={handleSendConfirm}
+                  >
+                    Confirm
+                  </j-button>
+                  <j-button
+                    variant="subtle"
+                    size="sm"
+                    onClick={() => setConfirmSend(false)}
+                  >
+                    Cancel
+                  </j-button>
+                </j-flex>
+              </j-box>
+            )}
+
+            {sendResult && (
+              <j-box mt="200">
+                <j-text
+                  size="400"
+                  color={
+                    sendResult.startsWith("Error") ? "danger-500" : "success-500"
+                  }
+                >
+                  {sendResult}
+                </j-text>
+              </j-box>
+            )}
           </j-box>
         )}
       </j-box>
 
       {/* Transaction History */}
       <j-box px="500" my="400">
-        <j-text size="500" weight="600" color="black">
-          Transaction History
-        </j-text>
-        <j-box mt="300">
-          {Array.isArray(history) && history.length > 0 ? (
-            history.map((tx: any, i: number) => (
-              <j-box
-                key={i}
-                py="200"
-                style={{ borderBottom: "1px solid var(--j-color-ui-100)" }}
-              >
-                <j-flex j="between" a="center">
-                  <j-text size="400" weight="500">
-                    {tx.tx_type || "Transaction"}
-                  </j-text>
-                  <j-text size="400" color="ui-500">
-                    {tx.amount ? JSON.stringify(tx.amount) : ""}
-                  </j-text>
-                </j-flex>
-                {tx.counterparty && (
-                  <j-text
-                    size="300"
-                    color="ui-400"
-                    style={{ fontFamily: "monospace" }}
+        <j-button
+          size="sm"
+          variant="subtle"
+          onClick={() => setHistoryOpen(!historyOpen)}
+          style={{ display: "flex", alignItems: "center", gap: "6px" }}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: "4px" }}>
+            <circle cx="12" cy="12" r="10" />
+            <polyline points="12 6 12 12 16 14" />
+          </svg>
+          Transaction History ({Array.isArray(history) ? history.length : 0})
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ transform: historyOpen ? "rotate(180deg)" : "rotate(0)", transition: "transform 0.2s" }}>
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </j-button>
+
+        {historyOpen && (
+          <j-box mt="300">
+            {Array.isArray(history) && history.length > 0 ? (
+              history.map((tx: any, i: number) => {
+                const isIncoming = tx.direction === "incoming";
+                const counterparty = tx.counterparty
+                  ? (Array.isArray(tx.counterparty) ? tx.counterparty[0] : tx.counterparty)
+                  : null;
+                const amount = tx.amount
+                  ? (typeof tx.amount === "object" ? JSON.stringify(tx.amount) : String(tx.amount))
+                  : "";
+                const timestamp = tx.timestamp || tx.created_at;
+                const dateStr = timestamp
+                  ? new Date(typeof timestamp === "number" ? timestamp * 1000 : timestamp).toLocaleString()
+                  : null;
+
+                return (
+                  <j-box
+                    key={i}
+                    py="200"
+                    style={{ borderBottom: "1px solid var(--j-color-ui-100)" }}
                   >
-                    {Array.isArray(tx.counterparty)
-                      ? tx.counterparty[0]?.substring(0, 20) + "..."
-                      : ""}
-                  </j-text>
-                )}
-              </j-box>
-            ))
-          ) : (
-            <j-text size="400" color="ui-400">
-              No transactions yet
-            </j-text>
-          )}
-        </j-box>
+                    <j-flex j="between" a="center">
+                      <j-flex a="center" gap="200">
+                        <j-text size="400" weight="500" color={isIncoming ? "success-500" : "black"}>
+                          {isIncoming ? "↓ Received" : (tx.tx_type || "Sent")}
+                        </j-text>
+                        {dateStr && (
+                          <j-text size="300" color="ui-400">
+                            {dateStr}
+                          </j-text>
+                        )}
+                      </j-flex>
+                      <j-text size="400" weight="500" color={isIncoming ? "success-500" : "ui-500"}>
+                        {isIncoming ? "+" : "-"}{amount}
+                      </j-text>
+                    </j-flex>
+                    {counterparty && (
+                      <j-text
+                        size="300"
+                        color="ui-400"
+                        style={{ fontFamily: "monospace" }}
+                      >
+                        {isIncoming ? "From: " : "To: "}{counterparty.substring(0, 24)}...
+                      </j-text>
+                    )}
+                  </j-box>
+                );
+              })
+            ) : (
+              <j-text size="400" color="ui-400">
+                No transactions yet
+              </j-text>
+            )}
+          </j-box>
+        )}
       </j-box>
     </div>
   );

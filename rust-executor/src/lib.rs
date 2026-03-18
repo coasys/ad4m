@@ -401,6 +401,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
             unyt_service::check_pending_payments().await;
+            unyt_service::check_pending_sends().await;
         }
     });
 

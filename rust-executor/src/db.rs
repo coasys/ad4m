@@ -377,6 +377,19 @@ impl Ad4mDb {
             )",
         )?;
 
+        // Pending outgoing sends (proposals we created to send funds)
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS pending_sends (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipient TEXT NOT NULL,
+                amount_hot TEXT NOT NULL,
+                proposal_action_hash TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                completed_at TEXT
+            )",
+        )?;
+
         Ok(Self { conn })
     }
 
@@ -3039,6 +3052,47 @@ impl Ad4mDb {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(requests)
+    }
+
+    pub fn create_pending_send(
+        &self,
+        recipient: &str,
+        amount_hot: &str,
+        proposal_hash: &str,
+    ) -> Ad4mDbResult<i64> {
+        self.conn.execute(
+            "INSERT INTO pending_sends (recipient, amount_hot, proposal_action_hash) VALUES (?1, ?2, ?3)",
+            params![recipient, amount_hot, proposal_hash],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn complete_pending_send(&self, proposal_hash: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "UPDATE pending_sends SET status = 'completed', completed_at = datetime('now') WHERE proposal_action_hash = ?1 AND status = 'pending'",
+            params![proposal_hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn reject_pending_send(&self, proposal_hash: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "UPDATE pending_sends SET status = 'rejected', completed_at = datetime('now') WHERE proposal_action_hash = ?1 AND status = 'pending'",
+            params![proposal_hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_pending_sends(&self) -> Ad4mDbResult<Vec<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT recipient, amount_hot, proposal_action_hash FROM pending_sends WHERE status = 'pending'",
+        )?;
+        let sends = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sends)
     }
 
     pub fn get_user_by_hot_wallet_address(&self, address: &str) -> Ad4mDbResult<Option<String>> {
