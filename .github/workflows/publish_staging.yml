@@ -513,24 +513,28 @@ jobs:
         if ($check) { Write-Host "WARNING: nasm still found at $($check.Source)!" }
         else { Write-Host "OK: nasm not found on PATH" }
 
+    - name: Build JS dependencies + generate deno snapshot
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
+        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      run: |
+        # Build JS deps in turbo dependency order (turbo itself breaks
+        # aws-lc-sys prebuilt-nasm, so we bypass it for cargo).
+        cd core && pnpm run build && cd ..
+        cd connect && pnpm run build && cd ..
+        cd dapp && pnpm run build && cd ..
+        # Generate deno snapshot WITHOUT +crt-static — the generate_snapshot
+        # binary links C++ libs (msvcprt) that conflict with static CRT.
+        cd rust-executor && pnpm run build-deno-snapshot && cd ..
+
     - name: Build AD4M-CLI
       env:
         RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
+        # +crt-static for the main binary only (fixes LNK2038 CRT mismatch
+        # between surrealdb-librocksdb-sys MT and libort_sys MT).
         RUSTFLAGS: -C target-feature=+crt-static
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-      run: |
-        # Turbo's subprocess breaks aws-lc-sys prebuilt-nasm on Windows.
-        # Run each dependency manually in correct order (from turbo.json):
-        # 1. @coasys/ad4m — generates schema.gql + TS types
-        cd core && pnpm run build && cd ..
-        # 2. @coasys/ad4m-connect — depends on @coasys/ad4m
-        cd connect && pnpm run build && cd ..
-        # 3. @coasys/dapp — depends on ad4m + ad4m-connect; dist/ embedded via include_dir!
-        cd dapp && pnpm run build && cd ..
-        # 4. Generate deno snapshot (V8 heap snapshot)
-        cd rust-executor && pnpm run build-deno-snapshot && cd ..
-        # 5. Build Rust workspace directly (bypasses turbo)
-        cargo build --release
+      run: cargo build --release
 
     - name: Build Launcher binary
       run: pnpm run package-ad4m
