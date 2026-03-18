@@ -662,7 +662,10 @@ pub async fn send_hot(
         db.create_pending_send(recipient_agent_key, amount_hot, &proposal_hash)
     });
 
-    info!("Created outgoing proposal {} to send {} HOT to {}", proposal_hash, amount_hot, recipient_agent_key);
+    info!(
+        "Created outgoing proposal {} to send {} HOT to {}",
+        proposal_hash, amount_hot, recipient_agent_key
+    );
     Ok(proposal_hash)
 }
 
@@ -743,16 +746,23 @@ pub async fn handle_signal(payload_json: &JsonValue) {
     };
 
     let tx_type_str = tx.get("tx_type").and_then(|v| v.as_str()).unwrap_or("");
-    info!("Unyt signal: received tx_type={}, payload={}", tx_type_str, tx);
+    info!(
+        "Unyt signal: received tx_type={}, payload={}",
+        tx_type_str, tx
+    );
 
     let tx_id = tx.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
 
     // Handle incoming Proposal: auto-commit (accept the offer to receive funds)
     if tx_type_str == "Proposal" {
         if let Some(ref proposal_hash) = tx_id {
-            info!("Unyt signal: incoming proposal {}, auto-committing...", proposal_hash);
+            info!(
+                "Unyt signal: incoming proposal {}, auto-committing...",
+                proposal_hash
+            );
             // Build commitment input from the proposal
-            let counterparty = tx.get("counterparty")
+            let counterparty = tx
+                .get("counterparty")
                 .and_then(|c| c.as_array())
                 .and_then(|arr| arr.first())
                 .and_then(|v| v.as_str());
@@ -772,7 +782,9 @@ pub async fn handle_signal(payload_json: &JsonValue) {
                     lane_definitions: vec![],
                 };
                 match call_zome("create_commitment", Some(encode_payload(&input).unwrap())).await {
-                    Ok(result) => info!("Auto-committed to proposal {}: {:?}", proposal_hash, result),
+                    Ok(result) => {
+                        info!("Auto-committed to proposal {}: {:?}", proposal_hash, result)
+                    }
                     Err(e) => warn!("Failed to auto-commit to proposal {}: {}", proposal_hash, e),
                 }
             }
@@ -783,10 +795,19 @@ pub async fn handle_signal(payload_json: &JsonValue) {
     // Handle incoming Commitment on our proposal: auto-accept to finalize transfer
     if tx_type_str == "Commitment" {
         if let Some(ref commitment_hash) = tx_id {
-            info!("Unyt signal: incoming commitment {}, auto-accepting...", commitment_hash);
+            info!(
+                "Unyt signal: incoming commitment {}, auto-accepting...",
+                commitment_hash
+            );
             match accept_commitment(commitment_hash, None).await {
-                Ok(accept_hash) => info!("Auto-accepted commitment {} -> {}", commitment_hash, accept_hash),
-                Err(e) => warn!("Failed to auto-accept commitment {}: {}", commitment_hash, e),
+                Ok(accept_hash) => info!(
+                    "Auto-accepted commitment {} -> {}",
+                    commitment_hash, accept_hash
+                ),
+                Err(e) => warn!(
+                    "Failed to auto-accept commitment {}: {}",
+                    commitment_hash, e
+                ),
             }
         }
         return;
@@ -795,12 +816,16 @@ pub async fn handle_signal(payload_json: &JsonValue) {
     // Handle rejection: clean up pending sends/payment requests
     if tx_type_str == "Rejection" || tx_type_str == "Declined" || tx_type_str == "Cancelled" {
         // Try to find the related proposal hash and mark as rejected
-        let related_hash = tx.get("proposal")
+        let related_hash = tx
+            .get("proposal")
             .and_then(|v| v.as_str())
             .or_else(|| tx.get("related_proposal").and_then(|v| v.as_str()))
             .or_else(|| tx_id.as_deref());
         if let Some(hash) = related_hash {
-            info!("Unyt signal: transaction {} rejected/declined, cleaning up", hash);
+            info!(
+                "Unyt signal: transaction {} rejected/declined, cleaning up",
+                hash
+            );
             let _ = Ad4mDb::with_global_instance(|db| db.reject_pending_send(hash));
             let _ = Ad4mDb::with_global_instance(|db| db.complete_payment_request(hash));
         }
@@ -855,32 +880,30 @@ pub async fn handle_signal(payload_json: &JsonValue) {
         Ad4mDb::with_global_instance(|db| db.get_user_by_hot_wallet_address(counterparty));
 
     match user_email {
-        Ok(Some(email)) => {
-            match hot_amount.parse::<f64>() {
-                Ok(amount_f64) => {
-                    if let Err(e) =
-                        Ad4mDb::with_global_instance(|db| db.add_user_credits(&email, amount_f64))
-                    {
-                        error!(
-                            "Failed to credit user {} with {} HOT: {}",
-                            email, amount_f64, e
-                        );
-                    } else {
-                        info!(
-                            "Credited user {} with {} HOT from mHOT payment",
-                            email, amount_f64
-                        );
-                    }
-
-                    if let Some(ref id) = tx_id {
-                        let _ = Ad4mDb::with_global_instance(|db| db.complete_payment_request(id));
-                    }
+        Ok(Some(email)) => match hot_amount.parse::<f64>() {
+            Ok(amount_f64) => {
+                if let Err(e) =
+                    Ad4mDb::with_global_instance(|db| db.add_user_credits(&email, amount_f64))
+                {
+                    error!(
+                        "Failed to credit user {} with {} HOT: {}",
+                        email, amount_f64, e
+                    );
+                } else {
+                    info!(
+                        "Credited user {} with {} HOT from mHOT payment",
+                        email, amount_f64
+                    );
                 }
-                Err(e) => {
-                    error!("Failed to parse HOT amount '{}': {}", hot_amount, e);
+
+                if let Some(ref id) = tx_id {
+                    let _ = Ad4mDb::with_global_instance(|db| db.complete_payment_request(id));
                 }
             }
-        }
+            Err(e) => {
+                error!("Failed to parse HOT amount '{}': {}", hot_amount, e);
+            }
+        },
         Ok(None) => {
             info!(
                 "Unyt signal: received payment from unknown wallet {}",
@@ -1017,20 +1040,28 @@ pub async fn check_pending_sends() {
 
                 if is_completed {
                     info!("Outgoing send {} completed", proposal_hash);
-                    let _ = Ad4mDb::with_global_instance(|db| db.complete_pending_send(&proposal_hash));
+                    let _ =
+                        Ad4mDb::with_global_instance(|db| db.complete_pending_send(&proposal_hash));
                     continue;
                 }
 
                 // Check for rejection
                 let is_rejected = match watch_status {
-                    Some(serde_json::Value::String(s)) => s == "Rejected" || s == "Declined" || s == "Cancelled",
-                    Some(serde_json::Value::Object(obj)) => obj.contains_key("Rejected") || obj.contains_key("Declined") || obj.contains_key("Cancelled"),
+                    Some(serde_json::Value::String(s)) => {
+                        s == "Rejected" || s == "Declined" || s == "Cancelled"
+                    }
+                    Some(serde_json::Value::Object(obj)) => {
+                        obj.contains_key("Rejected")
+                            || obj.contains_key("Declined")
+                            || obj.contains_key("Cancelled")
+                    }
                     _ => false,
                 };
 
                 if is_rejected {
                     info!("Outgoing send {} was rejected", proposal_hash);
-                    let _ = Ad4mDb::with_global_instance(|db| db.reject_pending_send(&proposal_hash));
+                    let _ =
+                        Ad4mDb::with_global_instance(|db| db.reject_pending_send(&proposal_hash));
                     continue;
                 }
 
@@ -1051,18 +1082,31 @@ pub async fn check_pending_sends() {
                     });
 
                 if let Some(commitment_hash) = needs_accept {
-                    info!("Outgoing send {}: found commitment {}, auto-accepting...", proposal_hash, commitment_hash);
+                    info!(
+                        "Outgoing send {}: found commitment {}, auto-accepting...",
+                        proposal_hash, commitment_hash
+                    );
                     match accept_commitment(&commitment_hash, None).await {
                         Ok(accept_hash) => {
-                            info!("Auto-accepted commitment {} -> {}", commitment_hash, accept_hash);
+                            info!(
+                                "Auto-accepted commitment {} -> {}",
+                                commitment_hash, accept_hash
+                            );
                         }
                         Err(e) => {
                             let err_str = format!("{}", e);
-                            if err_str.contains("Link does not exist") || err_str.contains("not found") {
+                            if err_str.contains("Link does not exist")
+                                || err_str.contains("not found")
+                            {
                                 info!("Outgoing send {} was rejected (link removed), marking as rejected", proposal_hash);
-                                let _ = Ad4mDb::with_global_instance(|db| db.reject_pending_send(&proposal_hash));
+                                let _ = Ad4mDb::with_global_instance(|db| {
+                                    db.reject_pending_send(&proposal_hash)
+                                });
                             } else {
-                                warn!("Failed to auto-accept commitment {}: {}", commitment_hash, e);
+                                warn!(
+                                    "Failed to auto-accept commitment {}: {}",
+                                    commitment_hash, e
+                                );
                             }
                         }
                     }
@@ -1071,13 +1115,23 @@ pub async fn check_pending_sends() {
             Err(e) => {
                 let err_str = format!("{}", e);
                 if err_str.contains("Link does not exist") || err_str.contains("not found") {
-                    info!("Outgoing send {} was rejected (get_status failed), marking as rejected", proposal_hash);
-                    match Ad4mDb::with_global_instance(|db| db.reject_pending_send(&proposal_hash)) {
-                        Ok(_) => info!("Successfully marked send {} as rejected in DB", proposal_hash),
+                    info!(
+                        "Outgoing send {} was rejected (get_status failed), marking as rejected",
+                        proposal_hash
+                    );
+                    match Ad4mDb::with_global_instance(|db| db.reject_pending_send(&proposal_hash))
+                    {
+                        Ok(_) => info!(
+                            "Successfully marked send {} as rejected in DB",
+                            proposal_hash
+                        ),
                         Err(e) => warn!("Failed to mark send {} as rejected: {}", proposal_hash, e),
                     }
                 } else {
-                    warn!("Failed to check status of outgoing send {}: {}", proposal_hash, e);
+                    warn!(
+                        "Failed to check status of outgoing send {}: {}",
+                        proposal_hash, e
+                    );
                 }
             }
         }

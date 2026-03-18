@@ -3088,9 +3088,7 @@ impl Ad4mDb {
             "SELECT recipient, amount_hot, proposal_action_hash FROM pending_sends WHERE status = 'pending'",
         )?;
         let sends = stmt
-            .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(sends)
     }

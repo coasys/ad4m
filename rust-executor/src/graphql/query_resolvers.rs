@@ -1029,9 +1029,17 @@ impl Query {
         context: &RequestContext,
         email: String,
     ) -> FieldResult<Option<String>> {
-        check_capability(&context.capabilities, &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)?;
-        let addr = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&email))
-            .map_err(|e| FieldError::new(format!("Failed to get wallet address: {}", e), Value::null()))?;
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
+        )?;
+        let addr =
+            Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&email)).map_err(|e| {
+                FieldError::new(
+                    format!("Failed to get wallet address: {}", e),
+                    Value::null(),
+                )
+            })?;
         Ok(addr)
     }
 
@@ -1143,7 +1151,9 @@ impl Query {
             Ok(history) => {
                 log::info!("get_history raw result: {}", history);
                 // get_history returns {"items": [...], "low_boundary": ..., "end_of_chain": ...}
-                let items = history.get("items").and_then(|v| v.as_array())
+                let items = history
+                    .get("items")
+                    .and_then(|v| v.as_array())
                     .or_else(|| history.as_array());
                 if let Some(arr) = items {
                     log::info!("get_history parsed {} items", arr.len());
@@ -1178,7 +1188,10 @@ impl Query {
                                             } else {
                                                 "incoming"
                                             };
-                                            tx_obj.insert("direction".to_string(), serde_json::Value::String(direction.to_string()));
+                                            tx_obj.insert(
+                                                "direction".to_string(),
+                                                serde_json::Value::String(direction.to_string()),
+                                            );
                                         }
                                         all_txs.push(tx);
                                     }
@@ -1188,7 +1201,10 @@ impl Query {
                             for tx in arr {
                                 let mut tx = tx.clone();
                                 if let Some(obj) = tx.as_object_mut() {
-                                    obj.insert("direction".to_string(), serde_json::Value::String("incoming".to_string()));
+                                    obj.insert(
+                                        "direction".to_string(),
+                                        serde_json::Value::String("incoming".to_string()),
+                                    );
                                 }
                                 all_txs.push(tx);
                             }
@@ -1211,9 +1227,15 @@ impl Query {
                 // Check if this proposal is already in all_txs (from zome history)
                 let already_present = all_txs.iter().any(|tx| {
                     tx.get("id").and_then(|v| v.as_str()) == Some(proposal_hash.as_str())
-                        || tx.get("history").and_then(|h| h.as_array()).map_or(false, |arr| {
-                            arr.iter().any(|h| h.get("id").and_then(|v| v.as_str()) == Some(proposal_hash.as_str()))
-                        })
+                        || tx
+                            .get("history")
+                            .and_then(|h| h.as_array())
+                            .map_or(false, |arr| {
+                                arr.iter().any(|h| {
+                                    h.get("id").and_then(|v| v.as_str())
+                                        == Some(proposal_hash.as_str())
+                                })
+                            })
                 });
                 if !already_present {
                     let mut tx = serde_json::json!({
@@ -1225,8 +1247,13 @@ impl Query {
                         "direction": "outgoing",
                     });
                     // Enrich with email
-                    if let Ok(Some(email)) = Ad4mDb::with_global_instance(|db| db.get_user_by_hot_wallet_address(recipient)) {
-                        tx.as_object_mut().unwrap().insert("counterparty_email".to_string(), serde_json::Value::String(email));
+                    if let Ok(Some(email)) = Ad4mDb::with_global_instance(|db| {
+                        db.get_user_by_hot_wallet_address(recipient)
+                    }) {
+                        tx.as_object_mut().unwrap().insert(
+                            "counterparty_email".to_string(),
+                            serde_json::Value::String(email),
+                        );
                     }
                     all_txs.push(tx);
                 }
@@ -1241,7 +1268,9 @@ impl Query {
                     for hist_tx in history_arr {
                         if let Some(hash) = hist_tx.get("id").and_then(|v| v.as_str()) {
                             let _ = Ad4mDb::with_global_instance(|db| db.reject_pending_send(hash));
-                            let _ = Ad4mDb::with_global_instance(|db| db.complete_payment_request(hash));
+                            let _ = Ad4mDb::with_global_instance(|db| {
+                                db.complete_payment_request(hash)
+                            });
                         }
                     }
                 }
@@ -1254,18 +1283,30 @@ impl Query {
 
         // Enrich counterparty agent pubkeys with user emails from DB
         for tx in &mut all_txs {
-            if let Some(counterparty_arr) = tx.get("counterparty").and_then(|c| c.as_array()).map(|a| a.to_vec()) {
+            if let Some(counterparty_arr) = tx
+                .get("counterparty")
+                .and_then(|c| c.as_array())
+                .map(|a| a.to_vec())
+            {
                 if let Some(pubkey) = counterparty_arr.first().and_then(|v| v.as_str()) {
-                    if let Ok(Some(email)) = Ad4mDb::with_global_instance(|db| db.get_user_by_hot_wallet_address(pubkey)) {
+                    if let Ok(Some(email)) =
+                        Ad4mDb::with_global_instance(|db| db.get_user_by_hot_wallet_address(pubkey))
+                    {
                         if let Some(obj) = tx.as_object_mut() {
-                            obj.insert("counterparty_email".to_string(), serde_json::Value::String(email));
+                            obj.insert(
+                                "counterparty_email".to_string(),
+                                serde_json::Value::String(email),
+                            );
                         }
                     }
                 }
             }
         }
 
-        log::info!("Returning {} total transaction history items", all_txs.len());
+        log::info!(
+            "Returning {} total transaction history items",
+            all_txs.len()
+        );
         Ok(serde_json::to_string(&all_txs).unwrap_or_else(|_| "[]".to_string()))
     }
 
