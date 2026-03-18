@@ -220,7 +220,10 @@ pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
                 return Ok(());
             }
             Err(e) => {
-                warn!("Failed to enable existing Unyt app: {}. Will attempt fresh install.", e);
+                warn!(
+                    "Failed to enable existing Unyt app: {}. Will attempt fresh install.",
+                    e
+                );
                 // Fall through to do_install as last resort — this may fail with
                 // GenesisFailed if the source chain exists, but we don't want to
                 // remove_app and lose the user's transaction history.
