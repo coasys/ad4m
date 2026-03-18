@@ -1738,8 +1738,7 @@ const Hosting = () => {
                         let changed = false;
                         if (!has("link write")) { parsed.push({ description: "link write", priceInHOT: DEFAULT_LINK_PRICE }); changed = true; }
                         for (const name of modelNames) {
-                          const desc = `${name} per token`;
-                          if (!has(desc)) { parsed.push({ description: desc, priceInHOT: DEFAULT_TOKEN_PRICE }); changed = true; }
+                          if (!has(name)) { parsed.push({ description: name, priceInHOT: DEFAULT_TOKEN_PRICE }); changed = true; }
                         }
                         if (changed) {
                           // Schedule state update for next tick to avoid updating during render
@@ -1830,10 +1829,10 @@ const Hosting = () => {
                               <div key={name} style={rowStyle}>
                                 <span style={labelStyle}>{name} <span style={{ color: "var(--j-color-ui-400)", fontSize: "12px" }}>(per token)</span></span>
                                 <PriceInput
-                                  initialValue={getPrice(`${name} per token`)}
-                                  placeholder={String(getDefault(`${name} per token`))}
+                                  initialValue={getPrice(name)}
+                                  placeholder={String(getDefault(name))}
                                   style={inputStyle}
-                                  onCommit={(val) => commitPrice(`${name} per token`, val)}
+                                  onCommit={(val) => commitPrice(name, val)}
                                 />
                               </div>
                             ))}

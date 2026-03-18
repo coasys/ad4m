@@ -2893,11 +2893,17 @@ impl Mutation {
             .await?;
 
         let total_tokens = result.prompt_tokens + result.completion_tokens;
+        // Look up rate by model name (the host_rates key is just the model name)
+        let model_name = Ad4mDb::with_global_instance(|db| db.get_model(result.model_id.clone()))
+            .ok()
+            .flatten()
+            .map(|m| m.name)
+            .unwrap_or_default();
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
-            total_tokens as f64 * get_rate("per token", DEFAULT_TOKEN_RATE),
+            total_tokens as f64 * get_rate(&model_name, DEFAULT_TOKEN_RATE),
         ) {
-            log::warn!("Call exceeded compute credits (ai_prompt, tokens={}): result returned but future calls will fail. Details: {:?}", total_tokens, e);
+            log::warn!("Call exceeded compute credits (ai_prompt, model={}, tokens={}): result returned but future calls will fail. Details: {:?}", model_name, total_tokens, e);
         }
 
         Ok(result.text)
