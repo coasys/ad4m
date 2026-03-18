@@ -513,15 +513,13 @@ jobs:
         if ($check) { Write-Host "WARNING: nasm still found at $($check.Source)!" }
         else { Write-Host "OK: nasm not found on PATH" }
 
-    - name: Pre-build aws-lc-sys (verbose — diagnose prebuilt-nasm)
+    - name: Pre-build aws-lc-sys (ensure prebuilt-nasm .obj files are compiled)
       env:
         RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
         RUSTFLAGS: -C target-feature=+crt-static
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       run: |
-        cargo build --release -p aws-lc-sys -vv 2>&1 | findstr /i "nasm prebuilt cmake warning aws_lc builder selected" || true
-        echo "--- aws-lc-sys build artifacts ---"
-        dir target\release\build\aws-lc-sys-* /s /b 2>nul | findstr /i "\.obj \.lib \.a" | head -20 || true
+        cargo build --release -p aws-lc-sys 2>&1
 
     - name: Build AD4M-CLI
       env:
