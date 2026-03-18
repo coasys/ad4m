@@ -513,9 +513,13 @@ jobs:
         if ($check) { Write-Host "WARNING: nasm still found at $($check.Source)!" }
         else { Write-Host "OK: nasm not found on PATH" }
 
-    - name: Build JS dependencies + generate deno snapshot
+    - name: Build AD4M-CLI
       env:
         RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
+        # +crt-static: all Rust + C/C++ deps use static CRT (/MT).
+        # /NODEFAULTLIB:msvcprt: suppress dynamic C++ runtime that some
+        # pre-built libs reference, preventing LNK2005 multiply-defined symbols.
+        RUSTFLAGS: -C target-feature=+crt-static -C link-arg=/NODEFAULTLIB:msvcprt
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       run: |
         # Build JS deps in turbo dependency order (turbo itself breaks
@@ -523,18 +527,9 @@ jobs:
         cd core && pnpm run build && cd ..
         cd connect && pnpm run build && cd ..
         cd dapp && pnpm run build && cd ..
-        # Generate deno snapshot WITHOUT +crt-static — the generate_snapshot
-        # binary links C++ libs (msvcprt) that conflict with static CRT.
+        # Generate deno snapshot + build workspace in one step (same CRT mode)
         cd rust-executor && pnpm run build-deno-snapshot && cd ..
-
-    - name: Build AD4M-CLI
-      env:
-        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
-        # +crt-static for the main binary only (fixes LNK2038 CRT mismatch
-        # between surrealdb-librocksdb-sys MT and libort_sys MT).
-        RUSTFLAGS: -C target-feature=+crt-static
-        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-      run: cargo build --release
+        cargo build --release
 
     - name: Build Launcher binary
       run: pnpm run package-ad4m
