@@ -1692,6 +1692,20 @@ const Hosting = () => {
                         const DEFAULT_LINK_PRICE = 0.25;    // ~$0.0001 per link
                         const DEFAULT_TOKEN_PRICE = 12.5;   // ~$0.005 per token, avg API pricing
 
+                        // Auto-populate missing defaults so they're always saved
+                        const modelNames: string[] = aiModels.map((m: any) => m.name);
+                        const has = (desc: string) => parsed.some((r) => r.description === desc);
+                        let changed = false;
+                        if (!has("link write")) { parsed.push({ description: "link write", priceInHOT: DEFAULT_LINK_PRICE }); changed = true; }
+                        for (const name of modelNames) {
+                          const desc = `${name} per token`;
+                          if (!has(desc)) { parsed.push({ description: desc, priceInHOT: DEFAULT_TOKEN_PRICE }); changed = true; }
+                        }
+                        if (changed) {
+                          // Schedule state update for next tick to avoid updating during render
+                          setTimeout(() => handleHostRegChange("rates", JSON.stringify(parsed)), 0);
+                        }
+
                         const getPrice = (desc: string) =>
                           parsed.find((r) => r.description === desc)?.priceInHOT ?? 0;
 
@@ -1731,8 +1745,6 @@ const Hosting = () => {
                           color: "var(--j-color-ui-600)",
                         };
 
-                        const modelNames: string[] = aiModels.map((m: any) => m.name);
-
                         return (
                           <div
                             style={{
@@ -1767,10 +1779,6 @@ const Hosting = () => {
                                 value={getPrice("link write") || ""}
                                 onChange={(e) => setPrice("link write", e.target.value)}
                                 placeholder={String(getDefault("link write"))}
-                                onBlur={(e) => {
-                                  if (!e.target.value && !getPrice("link write"))
-                                    setPrice("link write", String(getDefault("link write")));
-                                }}
                                 style={inputStyle}
                               />
                             </div>
@@ -1786,10 +1794,6 @@ const Hosting = () => {
                                   value={getPrice(`${name} per token`) || ""}
                                   onChange={(e) => setPrice(`${name} per token`, e.target.value)}
                                   placeholder={String(getDefault(`${name} per token`))}
-                                  onBlur={(e) => {
-                                    if (!e.target.value && !getPrice(`${name} per token`))
-                                      setPrice(`${name} per token`, String(getDefault(`${name} per token`)));
-                                  }}
                                   style={inputStyle}
                                 />
                               </div>

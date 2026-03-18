@@ -255,11 +255,22 @@ export class HostBrowser extends LitElement {
     this.dispatchEvent(new CustomEvent("retry", { bubbles: true, composed: true }));
   }
 
-  private formatRates(rates: RemoteHost["rates"]): string {
-    if (rates.length === 0) return "";
-    const shown = rates.slice(0, 2).map(r => r.description).join(", ");
-    const extra = rates.length > 2 ? ` +${rates.length - 2} more` : "";
-    return shown + extra;
+  private formatPrice(price: number): string {
+    if (price >= 0.01) return price.toFixed(2);
+    if (price >= 0.0001) return price.toFixed(4);
+    if (price >= 0.000001) return price.toFixed(6);
+    return price.toExponential(2);
+  }
+
+  private getLinkPrice(rates: RemoteHost["rates"]): number | null {
+    const r = rates.find(r => r.description === "link write");
+    return r ? r.priceInHOT : null;
+  }
+
+  private getAvgTokenPrice(rates: RemoteHost["rates"]): number | null {
+    const tokenRates = rates.filter(r => r.description.endsWith("per token"));
+    if (tokenRates.length === 0) return null;
+    return tokenRates.reduce((sum, r) => sum + r.priceInHOT, 0) / tokenRates.length;
   }
 
   private getSortedHosts(): RemoteHost[] {
@@ -310,7 +321,9 @@ export class HostBrowser extends LitElement {
                     ${host.aiModels.map(model => html`<span class="model-chip">${model}</span>`)}
                   </div>
                   ${host.rates.length > 0 ? html`
-                    <p class="rates-preview">${this.formatRates(host.rates)}</p>
+                    <p class="rates-preview">
+                      ${this.getLinkPrice(host.rates) != null ? html`Link: ${this.formatPrice(this.getLinkPrice(host.rates)!)} HOT` : ''}${this.getLinkPrice(host.rates) != null && this.getAvgTokenPrice(host.rates) != null ? ' · ' : ''}${this.getAvgTokenPrice(host.rates) != null ? html`Token: ~${this.formatPrice(this.getAvgTokenPrice(host.rates)!)} HOT` : ''}
+                    </p>
                   ` : ''}
                 </div>
               </div>
