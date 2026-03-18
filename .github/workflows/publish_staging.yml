@@ -496,33 +496,15 @@ jobs:
     - name: pnpm Install
       run: pnpm install --no-frozen-lockfile
 
-    - name: Clean stale aws-lc-sys artifacts
-      run: |
-        # Delete stale aws-lc-sys build artifacts from Swatinem cache.
-        # Ensures aws-lc-sys rebuilds with prebuilt-nasm .obj files.
-        if (Test-Path "target\release\build") {
-          Get-ChildItem "target\release\build" -Directory -Filter "aws-lc-sys-*" | Remove-Item -Recurse -Force
-        }
-        if (Test-Path "target\release\deps") {
-          Get-ChildItem "target\release\deps" -Filter "*aws_lc_sys*" | Remove-Item -Force
-        }
-
-    - name: Pre-build aws-lc-sys with verbose output
-      env:
-        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
-        RUSTFLAGS: -C target-feature=+crt-static
-        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-      run: |
-        cd rust-executor
-        cargo build --release -p aws-lc-sys -vv 2>&1 | findstr /i "nasm prebuilt cmake asm warning aws_lc" || true
-        echo "=== aws-lc-sys build output ==="
-        dir ..\target\release\build\aws-lc-sys-* 2>NUL || echo "No aws-lc-sys build dir found"
-
     - name: Build AD4M-CLI
       env:
         RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
         RUSTFLAGS: -C target-feature=+crt-static
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+        # Force turbo to skip its task cache. Without this, turbo returns
+        # stale build output from before Strawberry Perl's NASM was available
+        # to cmake, causing LNK2019 unresolved assembly symbols.
+        TURBO_FORCE: "true"
       run: pnpm build-libs
 
     - name: Build Launcher binary
