@@ -16,6 +16,36 @@ type HostSession = {
 type RegStep = "credentials" | "verify" | "logged-in";
 type MembraneProofStatus = "none" | "fetching" | "done" | "error";
 
+// Uncontrolled price input that only commits value on blur/Enter
+const PriceInput = ({ initialValue, placeholder, style, onCommit }: {
+  initialValue: number;
+  placeholder: string;
+  style: React.CSSProperties;
+  onCommit: (val: string) => void;
+}) => {
+  const [local, setLocal] = React.useState(initialValue ? String(initialValue) : "");
+  const initialized = React.useRef(false);
+  // Update local when initialValue changes externally (but not while user is editing)
+  React.useEffect(() => {
+    if (!initialized.current && initialValue) {
+      setLocal(String(initialValue));
+      initialized.current = true;
+    }
+  }, [initialValue]);
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={local}
+      onChange={(e) => setLocal(e.target.value)}
+      onBlur={() => onCommit(local)}
+      onKeyDown={(e) => { if (e.key === "Enter") { (e.target as HTMLInputElement).blur(); } }}
+      placeholder={placeholder}
+      style={style}
+    />
+  );
+};
+
 // Extracted outside the component to avoid remounting on every parent re-render
 const ExpandableSection = ({
   title,
@@ -1722,10 +1752,15 @@ const Hosting = () => {
                         const getDefault = (desc: string) =>
                           desc === "link write" ? DEFAULT_LINK_PRICE : DEFAULT_TOKEN_PRICE;
 
-                        const setPrice = (desc: string, val: string) => {
-                          const num = parseFloat(val) || 0;
+                        const commitPrice = (desc: string, val: string) => {
+                          const num = parseFloat(val);
                           const updated = parsed.filter((r) => r.description !== desc);
-                          if (num > 0) updated.push({ description: desc, priceInHOT: num });
+                          if (!isNaN(num) && num > 0) {
+                            updated.push({ description: desc, priceInHOT: num });
+                          } else {
+                            // Reset to default if invalid
+                            updated.push({ description: desc, priceInHOT: getDefault(desc) });
+                          }
                           handleHostRegChange("rates", JSON.stringify(updated));
                         };
 
@@ -1782,14 +1817,11 @@ const Hosting = () => {
                             {/* Base link price */}
                             <div style={rowStyle}>
                               <span style={labelStyle}>Link (base rate per link write)</span>
-                              <input
-                                type="number"
-                                step="0.000001"
-                                min="0"
-                                value={getPrice("link write") || ""}
-                                onChange={(e) => setPrice("link write", e.target.value)}
+                              <PriceInput
+                                initialValue={getPrice("link write")}
                                 placeholder={String(getDefault("link write"))}
                                 style={inputStyle}
+                                onCommit={(val) => commitPrice("link write", val)}
                               />
                             </div>
 
@@ -1797,14 +1829,11 @@ const Hosting = () => {
                             {modelNames.map((name) => (
                               <div key={name} style={rowStyle}>
                                 <span style={labelStyle}>{name} <span style={{ color: "var(--j-color-ui-400)", fontSize: "12px" }}>(per token)</span></span>
-                                <input
-                                  type="number"
-                                  step="0.000001"
-                                  min="0"
-                                  value={getPrice(`${name} per token`) || ""}
-                                  onChange={(e) => setPrice(`${name} per token`, e.target.value)}
+                                <PriceInput
+                                  initialValue={getPrice(`${name} per token`)}
                                   placeholder={String(getDefault(`${name} per token`))}
                                   style={inputStyle}
+                                  onCommit={(val) => commitPrice(`${name} per token`, val)}
                                 />
                               </div>
                             ))}
