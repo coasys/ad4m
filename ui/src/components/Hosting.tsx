@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useState } from "react";
+import React, { useCallback, useContext, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
 import { Ad4minContext } from "../context/Ad4minContext";
@@ -800,6 +800,14 @@ const Hosting = () => {
     };
     loadHostSession();
   }, []);
+
+  // Auto-fetch membrane proof once when we have a session + client but no proof yet
+  const membraneProofAttempted = React.useRef(false);
+  useEffect(() => {
+    if (!client || !hostSession || membraneProofStatus === "done" || membraneProofStatus === "fetching" || membraneProofAttempted.current) return;
+    membraneProofAttempted.current = true;
+    fetchMembraneProof(hostSession);
+  }, [client, hostSession]);
 
   // Auto-populate host URL from TLS domain
   useEffect(() => {

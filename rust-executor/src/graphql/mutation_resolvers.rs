@@ -3350,11 +3350,20 @@ impl Mutation {
         }
 
         match crate::unyt_service::set_membrane_proof(&proof) {
-            Ok(()) => Ok(PaymentRequestResult {
-                success: true,
-                message: "Membrane proof stored. Will be used on next DNA installation."
-                    .to_string(),
-            }),
+            Ok(()) => {
+                // Trigger DNA installation now that we have the proof
+                tokio::spawn(async {
+                    match crate::unyt_service::ensure_installed().await {
+                        Ok(()) => log::info!("Unyt alliance DNA installed after membrane proof was set"),
+                        Err(e) => log::error!("Failed to install Unyt alliance DNA after membrane proof: {}", e),
+                    }
+                });
+                Ok(PaymentRequestResult {
+                    success: true,
+                    message: "Membrane proof stored. DNA installation started."
+                        .to_string(),
+                })
+            }
             Err(e) => Ok(PaymentRequestResult {
                 success: false,
                 message: format!("Failed to store membrane proof: {}", e),
