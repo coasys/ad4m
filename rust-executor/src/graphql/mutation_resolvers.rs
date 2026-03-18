@@ -2499,8 +2499,8 @@ impl Mutation {
             let _ = tx.send(());
             Ok(true)
         } else {
-            log::warn!("runtime_quit: shutdown channel unavailable, falling back to process::exit");
-            std::process::exit(0);
+            log::warn!("runtime_quit: shutdown channel already consumed, shutdown is in progress");
+            Ok(true)
         }
     }
 
