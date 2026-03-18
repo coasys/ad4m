@@ -513,23 +513,31 @@ jobs:
         if ($check) { Write-Host "WARNING: nasm still found at $($check.Source)!" }
         else { Write-Host "OK: nasm not found on PATH" }
 
-    - name: Build AD4M-CLI
-      env:
-        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
-        # +crt-static: all Rust + C/C++ deps use static CRT (/MT).
-        # /NODEFAULTLIB:msvcprt: suppress dynamic C++ runtime that some
-        # pre-built libs reference, preventing LNK2005 multiply-defined symbols.
-        RUSTFLAGS: -C target-feature=+crt-static -C link-arg=/NODEFAULTLIB:msvcprt
-        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    - name: Build JS dependencies
       run: |
         # Build JS deps in turbo dependency order (turbo itself breaks
         # aws-lc-sys prebuilt-nasm, so we bypass it for cargo).
         cd core && pnpm run build && cd ..
         cd connect && pnpm run build && cd ..
         cd dapp && pnpm run build && cd ..
-        # Generate deno snapshot + build workspace in one step (same CRT mode)
-        cd rust-executor && pnpm run build-deno-snapshot && cd ..
-        cargo build --release
+
+    - name: Generate deno snapshot
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
+        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+        # generate_snapshot.exe has CRT conflicts (libcpmt.lib MT vs msvcprt.lib MD)
+        # from surrealdb-librocksdb-sys mt_static + other deps compiled with /MD.
+        # /FORCE:MULTIPLE allows linking despite duplicate symbols — this is safe
+        # since generate_snapshot is a build-time tool, not shipped.
+        RUSTFLAGS: -C target-feature=+crt-static -C link-arg=/FORCE:MULTIPLE
+      run: cd rust-executor && pnpm run build-deno-snapshot && cd ..
+
+    - name: Build AD4M-CLI
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
+        RUSTFLAGS: -C target-feature=+crt-static
+        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      run: cargo build --release
 
     - name: Build Launcher binary
       run: pnpm run package-ad4m
