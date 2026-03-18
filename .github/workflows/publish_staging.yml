@@ -484,11 +484,8 @@ jobs:
         node-version: 24.x
         cache: 'pnpm'
 
-    - name: Install protobuf compiler and NASM
-      run: |
-        choco install protoc -y
-        choco install nasm -y
-        echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+    - name: Install protobuf compiler
+      run: choco install protoc -y
 
     - name: Extract version
       id: extract_version
@@ -499,16 +496,10 @@ jobs:
     - name: pnpm Install
       run: pnpm install --no-frozen-lockfile
 
-    - name: Verify NASM
+    - name: Clean stale aws-lc-sys artifacts
       run: |
-        nasm -version
-        where nasm
-
-    - name: Clean stale aws-lc-sys artifacts (force NASM rebuild)
-      run: |
-        # Swatinem/rust-cache restores target/ with aws-lc-sys compiled WITHOUT NASM.
-        # Cargo fingerprints say "up to date" and skips recompilation.
-        # Delete the stale artifacts so cargo rebuilds with NASM available.
+        # Delete stale aws-lc-sys build artifacts from Swatinem cache.
+        # Ensures aws-lc-sys rebuilds with prebuilt-nasm .obj files.
         if (Test-Path "target\release\build") {
           Get-ChildItem "target\release\build" -Directory -Filter "aws-lc-sys-*" | Remove-Item -Recurse -Force
         }
@@ -522,10 +513,8 @@ jobs:
         # +crt-static makes Rust use MT too — fixes LNK2038/LNK1169 CRT mismatch.
         RUSTFLAGS: -C target-feature=+crt-static
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-        TURBO_FORCE: "true"
-        # cmake can't find NASM on its own even when it's on PATH.
-        # Tell aws-lc-sys's cmake exactly where NASM is.
-        CMAKE_ASM_NASM_COMPILER: "C:\\Program Files\\NASM\\nasm.exe"
+        # aws-lc-sys uses prebuilt NASM .obj files (AWS_LC_SYS_PREBUILT_NASM=1 in .cargo/config.toml)
+        # No real NASM needed — cmake's FindNASM silently fails on Windows runners.
       run: pnpm build-libs
 
     - name: Build Launcher binary
