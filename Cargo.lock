@@ -1601,7 +1601,7 @@ dependencies = [
  "bitflags 2.9.4",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.11.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1621,7 +1621,7 @@ dependencies = [
  "bitflags 2.9.4",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.11.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1641,7 +1641,7 @@ dependencies = [
  "bitflags 2.9.4",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.11.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -7096,7 +7096,7 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 [[package]]
 name = "fixt"
 version = "0.7.0-dev.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "holochain_serialized_bytes",
  "lazy_static",
@@ -8671,7 +8671,7 @@ dependencies = [
 [[package]]
 name = "hdi"
 version = "0.8.0-dev.7"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "getrandom 0.3.4",
  "hdk_derive",
@@ -8690,7 +8690,7 @@ dependencies = [
 [[package]]
 name = "hdk"
 version = "0.7.0-dev.10"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "getrandom 0.3.4",
  "hdi",
@@ -8707,7 +8707,7 @@ dependencies = [
 [[package]]
 name = "hdk_derive"
 version = "0.7.0-dev.7"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "darling 0.21.3",
  "heck 0.5.0",
@@ -9050,7 +9050,7 @@ dependencies = [
 [[package]]
 name = "holo_hash"
 version = "0.7.0-dev.6"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "base64 0.22.1",
  "blake2b_simd",
@@ -9077,7 +9077,7 @@ dependencies = [
 [[package]]
 name = "holochain"
 version = "0.7.0-dev.16"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9165,7 +9165,7 @@ dependencies = [
 [[package]]
 name = "holochain_cascade"
 version = "0.7.0-dev.16"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "async-trait",
  "fixt",
@@ -9191,7 +9191,7 @@ dependencies = [
 [[package]]
 name = "holochain_cli_bundle"
 version = "0.7.0-dev.15"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "anyhow",
  "clap 4.6.0",
@@ -9225,7 +9225,7 @@ dependencies = [
 [[package]]
 name = "holochain_conductor_api"
 version = "0.7.0-dev.15"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "derive_more 2.1.1",
  "holo_hash",
@@ -9255,7 +9255,7 @@ dependencies = [
 [[package]]
 name = "holochain_conductor_config"
 version = "0.7.0-dev.15"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "ansi_term",
  "anyhow",
@@ -9272,7 +9272,7 @@ dependencies = [
 [[package]]
 name = "holochain_data"
 version = "0.7.0-dev.5"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "base64 0.22.1",
  "holo_hash",
@@ -9290,7 +9290,7 @@ dependencies = [
 [[package]]
 name = "holochain_integrity_types"
 version = "0.7.0-dev.7"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "derive_builder",
  "holo_hash",
@@ -9311,7 +9311,7 @@ dependencies = [
 [[package]]
 name = "holochain_keystore"
 version = "0.7.0-dev.9"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "base64 0.22.1",
  "derive_more 2.1.1",
@@ -9340,7 +9340,7 @@ dependencies = [
 [[package]]
 name = "holochain_metrics"
 version = "0.7.0-dev.3"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "digest 0.10.7",
  "dirs 6.0.0",
@@ -9364,7 +9364,7 @@ dependencies = [
 [[package]]
 name = "holochain_nonce"
 version = "0.7.0-dev.1"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "getrandom 0.3.4",
  "holochain_secure_primitive",
@@ -9374,7 +9374,7 @@ dependencies = [
 [[package]]
 name = "holochain_p2p"
 version = "0.7.0-dev.16"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -9414,7 +9414,7 @@ dependencies = [
 [[package]]
 name = "holochain_secure_primitive"
 version = "0.7.0-dev.1"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "paste",
  "serde",
@@ -9452,7 +9452,7 @@ dependencies = [
 [[package]]
 name = "holochain_sqlite"
 version = "0.7.0-dev.12"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9493,7 +9493,7 @@ dependencies = [
 [[package]]
 name = "holochain_state"
 version = "0.7.0-dev.16"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "async-recursion",
  "base64 0.22.1",
@@ -9527,7 +9527,7 @@ dependencies = [
 [[package]]
 name = "holochain_state_types"
 version = "0.7.0-dev.7"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "holo_hash",
  "holochain_integrity_types",
@@ -9537,7 +9537,7 @@ dependencies = [
 [[package]]
 name = "holochain_test_wasm_common"
 version = "0.7.0-dev.10"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "hdk",
  "holochain_serialized_bytes",
@@ -9547,7 +9547,7 @@ dependencies = [
 [[package]]
 name = "holochain_timestamp"
 version = "0.7.0-dev.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -9575,7 +9575,7 @@ dependencies = [
 [[package]]
 name = "holochain_trace"
 version = "0.7.0-dev.1"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "chrono",
  "derive_more 2.1.1",
@@ -9591,7 +9591,7 @@ dependencies = [
 [[package]]
 name = "holochain_types"
 version = "0.7.0-dev.15"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9656,7 +9656,7 @@ dependencies = [
 [[package]]
 name = "holochain_util"
 version = "0.7.0-dev.1"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "backtrace",
  "cfg-if",
@@ -9673,7 +9673,7 @@ dependencies = [
 [[package]]
 name = "holochain_wasm_test_utils"
 version = "0.7.0-dev.16"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "holochain_types",
  "strum 0.27.2",
@@ -9729,7 +9729,7 @@ dependencies = [
 [[package]]
 name = "holochain_websocket"
 version = "0.7.0-dev.15"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9747,7 +9747,7 @@ dependencies = [
 [[package]]
 name = "holochain_zome_types"
 version = "0.7.0-dev.9"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "derive_builder",
  "derive_more 2.1.1",
@@ -9991,7 +9991,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.4.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -11469,7 +11469,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 [[package]]
 name = "kitsune2"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "bytes",
  "kitsune2_api",
@@ -11482,7 +11482,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_api"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -11498,7 +11498,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_bootstrap_client"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "base64 0.22.1",
  "kitsune2_api",
@@ -11512,7 +11512,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_bootstrap_srv"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "async-channel",
  "axum 0.8.4",
@@ -11544,7 +11544,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_core"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -11565,7 +11565,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_dht"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "bytes",
  "kitsune2_api",
@@ -11575,7 +11575,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_gossip"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "bytes",
  "futures",
@@ -11595,7 +11595,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_transport_iroh"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "bytes",
  "iroh",
@@ -11612,7 +11612,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_transport_tx5"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -13093,7 +13093,7 @@ dependencies = [
 [[package]]
 name = "mr_bundle"
 version = "0.7.0-dev.1"
-source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#40c7b838676b7e3202a176e74b664ad3e2e13e70"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.16-space-override-coasys#fc60ba6c07d8591127ef91cd7b84804d145b0ded"
 dependencies = [
  "bytes",
  "dunce",
@@ -14018,7 +14018,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 3.4.0",
+ "proc-macro-crate 2.0.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -16095,7 +16095,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -16108,7 +16108,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -21171,7 +21171,7 @@ dependencies = [
  "memchr",
  "ntapi",
  "rayon",
- "windows 0.57.0",
+ "windows 0.54.0",
 ]
 
 [[package]]
@@ -21185,7 +21185,7 @@ dependencies = [
  "memchr",
  "ntapi",
  "rayon",
- "windows 0.57.0",
+ "windows 0.54.0",
 ]
 
 [[package]]
@@ -21198,7 +21198,7 @@ dependencies = [
  "memchr",
  "ntapi",
  "objc2-core-foundation",
- "windows 0.57.0",
+ "windows 0.54.0",
 ]
 
 [[package]]
@@ -24603,16 +24603,6 @@ dependencies = [
 
 [[package]]
 name = "windows"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12342cb4d8e3b046f3d80effd474a7a02447231330ef77d71daa6fbc40681143"
-dependencies = [
- "windows-core 0.57.0",
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows"
 version = "0.58.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd04d41d93c4992d421894c18c8b43496aa748dd4c081bac0dc93eb0489272b6"
@@ -24670,18 +24660,6 @@ version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12661b9c89351d684a50a8a643ce5f608e20243b9fb84687800163429f161d65"
 dependencies = [
- "windows-result 0.1.2",
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-core"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2ed2439a290666cd67ecce2b0ffaad89c2a56b976b736e6ece670297897832d"
-dependencies = [
- "windows-implement 0.57.0",
- "windows-interface 0.57.0",
  "windows-result 0.1.2",
  "windows-targets 0.52.6",
 ]
@@ -24749,17 +24727,6 @@ dependencies = [
 
 [[package]]
 name = "windows-implement"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9107ddc059d5b6fbfbffdfa7a7fe3e22a226def0b2608f72e9d552763d3e1ad7"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "windows-implement"
 version = "0.58.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2bbd5b46c938e506ecbce286b6628a02171d56153ba733b6c741fc627ec9579b"
@@ -24774,17 +24741,6 @@ name = "windows-implement"
 version = "0.60.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "windows-interface"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29bee4b38ea3cde66011baa44dba677c432a78593e202392d1e9070cf2a7fca7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -26327,8 +26283,3 @@ dependencies = [
  "syn 2.0.117",
  "winnow 0.7.15",
 ]
-
-[[patch.unused]]
-name = "kitsune2_test_utils"
-version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
