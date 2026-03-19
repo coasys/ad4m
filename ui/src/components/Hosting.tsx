@@ -23,11 +23,11 @@ const PriceInput = ({ initialValue, placeholder, style, onCommit }: {
   style: React.CSSProperties;
   onCommit: (val: string) => void;
 }) => {
-  const [local, setLocal] = React.useState(initialValue ? String(initialValue) : "");
+  const [local, setLocal] = React.useState(initialValue !== undefined && initialValue !== null ? String(initialValue) : "");
   const focused = React.useRef(false);
   // Update local when initialValue changes externally (but not while user is editing)
   React.useEffect(() => {
-    if (!focused.current && initialValue) {
+    if (!focused.current && initialValue !== undefined && initialValue !== null) {
       setLocal(String(initialValue));
     }
   }, [initialValue]);
@@ -529,9 +529,9 @@ const Hosting = () => {
           authToken: data.authToken,
           email: hostReg.email,
         };
-        await saveHostSession(session);
         const result = await fetchHostData(session);
         if (result === "verified") {
+          await saveHostSession(session);
           setRegStep("logged-in");
           setHostRegStatus({
             type: "success",
@@ -541,6 +541,7 @@ const Hosting = () => {
             fetchMembraneProof(session);
           }
         } else if (result === "unverified") {
+          await saveHostSession(session);
           setRegStep("verify");
           setHostRegStatus({
             type: "info",
@@ -606,17 +607,21 @@ const Hosting = () => {
       const data = await res.json();
 
       if (res.ok) {
-        setHostData(data);
-        // Also persist rates to executor DB for credit deduction
+        // Persist rates to executor DB for credit deduction before reporting success
         try {
           if (client) await client.runtime.setHostRates(hostReg.rates);
+          setHostData(data);
+          setHostRegStatus({
+            type: "success",
+            message: "Host updated successfully.",
+          });
         } catch (e) {
           console.warn("Failed to sync rates to executor DB:", e);
+          setHostRegStatus({
+            type: "error",
+            message: "Host updated on server but failed to sync rates to executor. Please try again.",
+          });
         }
-        setHostRegStatus({
-          type: "success",
-          message: "Host updated successfully.",
-        });
       } else {
         if (res.status === 401) {
           await saveHostSession(null);
@@ -1762,11 +1767,13 @@ const Hosting = () => {
                         const DEFAULT_TOKEN_PRICE = 12.5;   // ~$0.005 per token, avg API pricing
 
                         // Sync rates with current model list: add missing, remove stale
+                        // Connect expects descriptions like "modelName per token" for token rates
                         const modelNames: string[] = aiModels.map((m: any) => m.name);
-                        const validKeys = new Set(["link write", ...modelNames]);
+                        const tokenDescs = modelNames.map((n) => `${n} per token`);
+                        const validKeys = new Set(["link write", ...tokenDescs]);
                         const has = (desc: string) => parsed.some((r) => r.description === desc);
 
-                        // Remove entries for deleted models or old "per token" format
+                        // Remove entries for deleted models
                         const before = parsed.length;
                         parsed = parsed.filter((r) => validKeys.has(r.description));
 
@@ -1774,7 +1781,8 @@ const Hosting = () => {
                         let changed = parsed.length !== before;
                         if (!has("link write")) { parsed.push({ description: "link write", priceInHOT: DEFAULT_LINK_PRICE }); changed = true; }
                         for (const name of modelNames) {
-                          if (!parsed.some((r) => r.description === name)) { parsed.push({ description: name, priceInHOT: DEFAULT_TOKEN_PRICE }); changed = true; }
+                          const desc = `${name} per token`;
+                          if (!has(desc)) { parsed.push({ description: desc, priceInHOT: DEFAULT_TOKEN_PRICE }); changed = true; }
                         }
                         if (changed) {
                           // Schedule state update for next tick to avoid updating during render
@@ -1790,7 +1798,7 @@ const Hosting = () => {
                         const commitPrice = (desc: string, val: string) => {
                           const num = parseFloat(val);
                           const updated = parsed.filter((r) => r.description !== desc);
-                          if (!isNaN(num) && num > 0) {
+                          if (!isNaN(num) && num >= 0) {
                             updated.push({ description: desc, priceInHOT: num });
                           } else {
                             // Reset to default if invalid
@@ -1865,10 +1873,10 @@ const Hosting = () => {
                               <div key={name} style={rowStyle}>
                                 <span style={labelStyle}>{name} <span style={{ color: "var(--j-color-ui-400)", fontSize: "12px" }}>(per token)</span></span>
                                 <PriceInput
-                                  initialValue={getPrice(name)}
-                                  placeholder={String(getDefault(name))}
+                                  initialValue={getPrice(`${name} per token`)}
+                                  placeholder={String(getDefault(`${name} per token`))}
                                   style={inputStyle}
-                                  onCommit={(val) => commitPrice(name, val)}
+                                  onCommit={(val) => commitPrice(`${name} per token`, val)}
                                 />
                               </div>
                             ))}
