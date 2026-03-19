@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';
 import { Ad4mClient } from "@coasys/ad4m";
-import { startExecutor, apolloClient, sleep, quitExecutor } from "../utils/utils";
+import { startExecutor, apolloClient, sleep, gracefulShutdown } from "../utils/utils";
 import path from "path";
 import fetch from 'node-fetch'
 import { fileURLToPath } from 'url';
@@ -35,9 +35,7 @@ describe("Integration", () => {
   })
 
   after(async () => {
-    if (executorProcess) {
-      await quitExecutor(executorProcess, gqlPort);
-    }
+    await gracefulShutdown(executorProcess, "executor");
   })
 
   it("should get agent status", async () => {

@@ -1,7 +1,7 @@
 import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions/index.js";
-import { ApolloClient, gql, InMemoryCache } from "@apollo/client/core/index.js";
+import { ApolloClient, InMemoryCache, gql } from "@apollo/client/core/index.js";
 import Websocket from "ws";
 import { createClient } from "graphql-ws";
 import path from "path";
@@ -288,12 +288,23 @@ export async function wipePerspective(
 
 /**
  * Kill any process listening on the given ports.
- * Use this in after() hooks as a safety net — even if executorProcess.kill()
- * works correctly, this ensures nothing lingers on the ports.
+ * Uses SIGTERM → wait → SIGKILL escalation for graceful shutdown.
+ * Use this in after() hooks as a safety net.
  */
 export function killByPorts(ports: number[]): void {
     for (const port of ports) {
         try {
+            // First try SIGTERM for graceful shutdown
+            execSync(`lsof -ti:${port} | xargs -r kill -TERM`, { stdio: 'ignore' });
+        } catch (e) {
+            // Port not in use — fine
+        }
+    }
+    // Give processes a moment to shut down gracefully
+    try { execSync('sleep 2', { stdio: 'ignore' }); } catch (e) { /* ignore */ }
+    for (const port of ports) {
+        try {
+            // SIGKILL anything still lingering
             execSync(`lsof -ti:${port} | xargs -r kill -9`, { stdio: 'ignore' });
         } catch (e) {
             // Port not in use — fine
@@ -302,19 +313,48 @@ export function killByPorts(ports: number[]): void {
 }
 
 /**
- * Gracefully shut down an executor via the runtimeQuit GraphQL mutation,
- * then wait for the process to exit naturally.
+ * Gracefully shut down a ChildProcess using SIGTERM → wait → SIGKILL escalation.
+ * Replaces the common pattern of `while (!process.killed) { process.kill(); await sleep(500); }`
+ * which sends repeated SIGTERM signals unnecessarily.
  *
- * The executor calls std::process::exit(0) immediately on runtimeQuit, so the
- * WebSocket connection drops mid-call — that's expected, not an error. We wait
- * for the OS-level 'exit' event to confirm the process is gone. If it doesn't
- * exit within the timeout we escalate to SIGTERM → SIGKILL → port kill.
- *
- * @param executorProcess - The ChildProcess returned by startExecutor()
- * @param gqlPort         - The GQL port the executor is listening on
- * @param adminCredential - Optional admin credential (pass if executor was
- *                          started with --admin-credential)
- * @param timeoutMs       - How long to wait for natural exit (default 8s)
+ * @param proc - The ChildProcess to shut down
+ * @param label - Label for logging
+ * @param timeoutMs - How long to wait for graceful shutdown before SIGKILL (default: 10s)
+ */
+export async function gracefulShutdown(proc: ChildProcess | null | undefined, label: string = "process", timeoutMs: number = 10000): Promise<void> {
+    if (!proc || proc.killed) return;
+
+    console.log(`Sending SIGTERM to ${label} (PID ${proc.pid})...`);
+    proc.kill('SIGTERM');
+
+    // Wait for the process to actually exit (not just signal sent)
+    const exited = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), timeoutMs);
+        proc!.on('close', () => {
+            clearTimeout(timer);
+            resolve(true);
+        });
+    });
+
+    if (!exited) {
+        console.log(`${label} did not exit after ${timeoutMs}ms, sending SIGKILL...`);
+        proc.kill('SIGKILL');
+        // Wait for SIGKILL to take effect
+        await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 5000);
+            proc!.on('close', () => {
+                clearTimeout(timer);
+                resolve();
+            });
+        });
+    }
+
+    console.log(`${label} shut down (pid=${proc.pid})`);
+}
+
+/**
+ * Gracefully quit an executor by sending the runtimeQuit GraphQL mutation,
+ * then falling back to gracefulShutdown (SIGTERM → SIGKILL) if needed.
  */
 export async function quitExecutor(
     executorProcess: ChildProcess,
@@ -322,18 +362,11 @@ export async function quitExecutor(
     adminCredential?: string,
     timeoutMs: number = 8000,
 ): Promise<void> {
-    // If already dead, nothing to do
-    if (executorProcess.exitCode !== null || executorProcess.killed) return;
-
-    // Start listening for exit before we send the mutation
-    const exitPromise = new Promise<void>((resolve) => {
-        executorProcess.once('exit', () => resolve());
-        executorProcess.once('close', () => resolve());
-    });
+    if (executorProcess.exitCode !== null) return;
 
     // Fire the runtimeQuit mutation. The executor calls process::exit(0) which
     // kills it before it can send a GraphQL response, so we'll get a WebSocket
-    // close error — that's fine, it means the quit worked.
+    // close error — that's expected.
     try {
         const client = apolloClient(gqlPort, adminCredential);
         await Promise.race([
@@ -341,26 +374,19 @@ export async function quitExecutor(
             new Promise((_, reject) => setTimeout(() => reject(new Error('runtimeQuit timeout')), 3000)),
         ]);
     } catch (_e) {
-        // Expected: either the connection dropped (executor exited) or it timed out.
-        // Either way, fall through and check whether the process actually exited.
+        // Expected: connection dropped or timed out
     }
 
-    // Wait for natural exit with timeout
-    const timedOut = await Promise.race([
-        exitPromise.then(() => false),
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(true), timeoutMs)),
-    ]);
+    // Wait for natural exit after runtimeQuit
+    const exited = await new Promise<boolean>((resolve) => {
+        if (executorProcess.exitCode !== null) { resolve(true); return; }
+        const timer = setTimeout(() => resolve(false), timeoutMs);
+        executorProcess.once('exit', () => { clearTimeout(timer); resolve(true); });
+    });
 
-    if (!timedOut) return; // Clean exit — done
-
-    // Escalate: SIGTERM
-    console.warn(`quitExecutor: executor (port ${gqlPort}) still running after ${timeoutMs}ms, sending SIGTERM`);
-    executorProcess.kill('SIGTERM');
-    await new Promise<void>((resolve) => setTimeout(resolve, 2000));
-
-    if (executorProcess.exitCode !== null || executorProcess.killed) return;
-
-    // Final escalation: SIGKILL
-    console.warn(`quitExecutor: executor (port ${gqlPort}) survived SIGTERM, sending SIGKILL`);
-    executorProcess.kill('SIGKILL');
+    if (!exited) {
+        // runtimeQuit didn't work — fall back to SIGTERM/SIGKILL escalation
+        console.warn(`quitExecutor: executor (port ${gqlPort}) still running after runtimeQuit, falling back to gracefulShutdown`);
+        await gracefulShutdown(executorProcess, `executor:${gqlPort}`);
+    }
 }
