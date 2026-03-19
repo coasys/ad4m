@@ -66,7 +66,7 @@ export function findExecutorBinary(): string | null {
 
 // Hardcoded version for auto-download.
 // TODO: Update this with each release or make it configurable via plugin config.
-const EXECUTOR_VERSION = "0.12.0-rc1";
+const EXECUTOR_VERSION = "0.12.0-rc2";
 
 /** Directory where downloaded binaries are stored */
 function getPluginBinDir(): string {
