@@ -1,5 +1,7 @@
 import path from "path";
 import fs from "fs";
+import https from "https";
+import http from "http";
 import { spawn, execFileSync } from "child_process";
 
 import type { PluginConfig } from "./types";
@@ -27,6 +29,7 @@ export function findExecutorBinary(): string | null {
   // 2. Check common locations not always in PATH
   const home = process.env.HOME || process.env.USERPROFILE || "";
   const commonPaths = [
+    path.join(home, ".ad4m-plugin", "bin"),
     "/usr/local/bin",
     "/usr/bin",
     "/opt/homebrew/bin",
@@ -46,6 +49,222 @@ export function findExecutorBinary(): string | null {
   }
 
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Auto-download of ad4m-executor and ad4m CLI binaries
+// ---------------------------------------------------------------------------
+
+// Hardcoded version for auto-download.
+// TODO: Update this with each release or make it configurable via plugin config.
+const EXECUTOR_VERSION = "0.12.0-rc1";
+
+/** Directory where downloaded binaries are stored */
+function getPluginBinDir(): string {
+  const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
+  return path.join(home, ".ad4m-plugin", "bin");
+}
+
+interface DownloadAsset {
+  /** Display name for logging */
+  label: string;
+  /** GitHub release asset filename */
+  assetName: string;
+  /** Local filename to save as */
+  localName: string;
+}
+
+/**
+ * Get the list of assets to download for the current platform.
+ * Returns null with a logged error if the platform is unsupported.
+ */
+function getDownloadAssets(logger: any): DownloadAsset[] | null {
+  const platform = process.platform;
+  const arch = process.arch;
+
+  // Map Node.js platform/arch to asset naming convention.
+  // Linux x64 binaries are available now; macOS and Windows binaries will be
+  // published in a future release (Nico will handle the CI for those).
+  // If the asset doesn't exist for the current release version, the download
+  // will fail with a clear HTTP 404 / "binary not found" message.
+
+  let osName: string;
+  let archName: string;
+  let ext = ""; // Windows binaries need .exe
+
+  switch (platform) {
+    case "linux":
+      osName = "linux";
+      break;
+    case "darwin":
+      osName = "macos";
+      break;
+    case "win32":
+      osName = "windows";
+      ext = ".exe";
+      break;
+    default:
+      logger.error(
+        `[ad4m] Auto-download is not supported on ${platform}/${arch}. ` +
+          `Please install ad4m-executor manually.`,
+      );
+      return null;
+  }
+
+  switch (arch) {
+    case "x64":
+      archName = "x64";
+      break;
+    case "arm64":
+      archName = "aarch64";
+      break;
+    default:
+      logger.error(
+        `[ad4m] Auto-download is not supported for architecture ${arch} on ${platform}. ` +
+          `Please install ad4m-executor manually.`,
+      );
+      return null;
+  }
+
+  const exeSuffix = ext; // .exe on Windows, empty otherwise
+  const localExeSuffix = platform === "win32" ? ".exe" : "";
+
+  return [
+    {
+      label: "ad4m-executor",
+      assetName: `ad4m-cli-executor-${osName}-${EXECUTOR_VERSION}-${archName}${exeSuffix}`,
+      localName: `ad4m-executor${localExeSuffix}`,
+    },
+    {
+      label: "ad4m CLI client",
+      assetName: `ad4m-cli-client-${osName}-${EXECUTOR_VERSION}-${archName}${exeSuffix}`,
+      localName: `ad4m${localExeSuffix}`,
+    },
+  ];
+}
+
+/**
+ * Download a file from a URL, following redirects (GitHub releases -> S3).
+ * Returns a promise that resolves when the file is fully written.
+ */
+function downloadFile(
+  url: string,
+  destPath: string,
+  label: string,
+  logger: any,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proto = url.startsWith("https") ? https : http;
+
+    proto
+      .get(url, { headers: { "User-Agent": "openclaw-ad4m-plugin" } }, (res) => {
+        // Follow redirects (301, 302, 307, 308)
+        if (
+          res.statusCode &&
+          res.statusCode >= 300 &&
+          res.statusCode < 400 &&
+          res.headers.location
+        ) {
+          downloadFile(res.headers.location, destPath, label, logger)
+            .then(resolve)
+            .catch(reject);
+          res.resume(); // consume response to free memory
+          return;
+        }
+
+        if (!res.statusCode || res.statusCode !== 200) {
+          res.resume();
+          reject(
+            new Error(
+              `Failed to download ${label}: HTTP ${res.statusCode ?? "unknown"}`,
+            ),
+          );
+          return;
+        }
+
+        const totalBytes = parseInt(res.headers["content-length"] || "0", 10);
+        let downloadedBytes = 0;
+        let lastLogPercent = -10; // log every 10%
+
+        const fileStream = fs.createWriteStream(destPath);
+
+        res.on("data", (chunk: Buffer) => {
+          downloadedBytes += chunk.length;
+          if (totalBytes > 0) {
+            const percent = Math.floor((downloadedBytes / totalBytes) * 100);
+            if (percent - lastLogPercent >= 10) {
+              const mb = (downloadedBytes / 1024 / 1024).toFixed(1);
+              const totalMb = (totalBytes / 1024 / 1024).toFixed(1);
+              logger.info(
+                `[ad4m] Downloading ${label}: ${mb}MB / ${totalMb}MB (${percent}%)`,
+              );
+              lastLogPercent = percent;
+            }
+          }
+        });
+
+        res.pipe(fileStream);
+
+        fileStream.on("finish", () => {
+          fileStream.close();
+          const mb = (downloadedBytes / 1024 / 1024).toFixed(1);
+          logger.info(`[ad4m] Downloaded ${label}: ${mb}MB`);
+          resolve();
+        });
+
+        fileStream.on("error", (err) => {
+          fs.unlink(destPath, () => {}); // clean up partial file
+          reject(new Error(`Failed to write ${label}: ${err.message}`));
+        });
+      })
+      .on("error", (err) => {
+        reject(new Error(`Network error downloading ${label}: ${err.message}`));
+      });
+  });
+}
+
+/**
+ * Download ad4m-executor and ad4m CLI client binaries for the current platform.
+ * Binaries are saved to ~/.ad4m-plugin/bin/ and made executable.
+ *
+ * Returns true if the executor binary was successfully downloaded.
+ */
+export async function downloadExecutor(logger: any): Promise<boolean> {
+  const assets = getDownloadAssets(logger);
+  if (!assets) return false;
+
+  const binDir = getPluginBinDir();
+
+  // Create bin directory
+  try {
+    fs.mkdirSync(binDir, { recursive: true });
+  } catch (err: any) {
+    logger.error(
+      `[ad4m] Failed to create directory ${binDir}: ${err.message}`,
+    );
+    return false;
+  }
+
+  const baseUrl = `https://github.com/coasys/ad4m/releases/download/v${EXECUTOR_VERSION}`;
+
+  for (const asset of assets) {
+    const url = `${baseUrl}/${asset.assetName}`;
+    const destPath = path.join(binDir, asset.localName);
+
+    logger.info(`[ad4m] Downloading ${asset.label} from ${url}`);
+
+    try {
+      await downloadFile(url, destPath, asset.label, logger);
+      fs.chmodSync(destPath, 0o755);
+      logger.info(`[ad4m] Installed ${asset.label} at ${destPath}`);
+    } catch (err: any) {
+      logger.error(`[ad4m] Failed to download ${asset.label}: ${err.message}`);
+      // If executor download fails, return false. Client failure is non-fatal.
+      if (asset.localName === "ad4m-executor") return false;
+    }
+  }
+
+  return true;
 }
 
 // ---------------------------------------------------------------------------

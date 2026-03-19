@@ -29,6 +29,7 @@ import {
   findExecutorBinary,
   isExecutorRunning,
   stopExecutor,
+  downloadExecutor,
 } from "./executor";
 import { ensureAgentReady } from "./agent";
 import {
@@ -61,6 +62,7 @@ export {
   isExecutorRunning,
   ensureExecutorRunning,
   stopExecutor,
+  downloadExecutor,
 } from "./executor";
 export type { ExecutorStartResult } from "./executor";
 export { ensureAgentReady } from "./agent";
@@ -857,7 +859,7 @@ Notes:
         const adminCredential = generateRandomPassphrase(24);
         authToken = adminCredential;
 
-        // Resolve executor binary path: config > discover > bare name
+        // Resolve executor binary path: config > discover > auto-download
         let binaryPath = providedConfig.ad4mBinaryPath;
         if (!binaryPath) {
           logger.info(`[ad4m] Searching for ad4m-executor binary...`);
@@ -866,9 +868,22 @@ Notes:
             logger.info(`[ad4m] Found ad4m-executor at: ${discovered}`);
             binaryPath = discovered;
           } else {
-            logger.warn(
-              `[ad4m] ad4m-executor not found in PATH or common locations. Will try bare name.`,
+            logger.info(
+              `[ad4m] ad4m-executor not found in PATH or common locations. Attempting auto-download...`,
             );
+            const downloaded = await downloadExecutor(logger);
+            if (downloaded) {
+              const retryPath = findExecutorBinary();
+              if (retryPath) {
+                logger.info(`[ad4m] Using downloaded executor at: ${retryPath}`);
+                binaryPath = retryPath;
+              }
+            }
+            if (!binaryPath) {
+              logger.warn(
+                `[ad4m] Auto-download failed or unsupported platform. Will try bare name.`,
+              );
+            }
           }
         } else {
           logger.info(`[ad4m] Using executor binary: ${binaryPath}`);
