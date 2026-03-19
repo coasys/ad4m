@@ -249,15 +249,6 @@ async fn main() -> Result<()> {
         pid_file,
     } = args.domain
     {
-        // Set PID file path as env var so the executor can write/clean it up
-        if let Some(ref pf) = pid_file {
-            // SAFETY: set_var is called during sequential startup before any concurrent
-            // tasks are spawned, so no data race is possible.
-            #[allow(deprecated)]
-            unsafe {
-                std::env::set_var("AD4M_PID_FILE", pf);
-            }
-        }
         let _ = tokio::spawn(async move {
             rust_executor::run(Ad4mConfig {
                 app_data_path,
@@ -278,6 +269,7 @@ async fn main() -> Result<()> {
                 enable_multi_user,
                 enable_mcp,
                 mcp_port,
+                pid_file,
                 localhost: None,
                 auto_permit_cap_requests: None,
                 tls: None,

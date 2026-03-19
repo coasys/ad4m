@@ -196,14 +196,6 @@ async fn main() -> Result<()> {
         pid_file,
     } = args.domain
     {
-        // Set PID file path as env var so the executor can write/clean it up
-        if let Some(ref pf) = pid_file {
-            // SAFETY: set_var is safe here because we're in single-threaded init before spawning.
-            #[allow(deprecated)]
-            unsafe {
-                std::env::set_var("AD4M_PID_FILE", pf);
-            }
-        }
         let tls = if tls_cert_file.is_some() && tls_key_file.is_some() {
             Some(TlsConfig {
                 cert_file_path: tls_cert_file.unwrap(),
@@ -242,6 +234,7 @@ async fn main() -> Result<()> {
                 smtp_config: None,
                 enable_mcp,
                 mcp_port,
+                pid_file,
             })
             .await;
         })

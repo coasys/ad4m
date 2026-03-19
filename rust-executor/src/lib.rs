@@ -237,9 +237,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                 }
             }
 
-            // 2. Write PID file removal if it exists
-            if let Ok(pid_file) = std::env::var("AD4M_PID_FILE") {
-                let _ = std::fs::remove_file(&pid_file);
+            // 2. Remove PID file if it was configured
+            let shutdown_config = crate::config::get_global_config();
+            if let Some(ref pid_file) = shutdown_config.pid_file {
+                let _ = std::fs::remove_file(pid_file);
                 info!("Removed PID file: {}", pid_file);
             }
 
@@ -253,11 +254,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     crate::logging::init_cli_logging(None);
     config.prepare();
 
-    // Write PID file if requested via environment variable or config.
-    // Test harnesses can set AD4M_PID_FILE to get a reliable PID for targeted cleanup.
-    if let Ok(pid_file) = std::env::var("AD4M_PID_FILE") {
+    // Write PID file if requested via config.
+    // Test harnesses can set pid_file to get a reliable PID for targeted cleanup.
+    if let Some(ref pid_file) = config.pid_file {
         let pid = std::process::id();
-        if let Err(e) = std::fs::write(&pid_file, pid.to_string()) {
+        if let Err(e) = std::fs::write(pid_file, pid.to_string()) {
             warn!("Failed to write PID file {}: {}", pid_file, e);
         } else {
             info!("Wrote PID {} to {}", pid, pid_file);
