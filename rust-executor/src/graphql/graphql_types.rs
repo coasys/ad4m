@@ -633,6 +633,22 @@ pub struct RuntimeInfo {
     pub is_unlocked: bool,
 }
 
+/// Readiness status returned by the `runtimeReadiness` query.
+/// Each field indicates whether a subsystem has completed initialization.
+/// Test harnesses should poll this instead of using `sleep()`.
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadinessStatus {
+    /// GraphQL server is accepting requests (always true if you can call this query)
+    pub gql_ready: bool,
+    /// Holochain conductor is running and connected
+    pub holochain_ready: bool,
+    /// Agent has been generated/unlocked
+    pub agent_initialized: bool,
+    /// Languages have been loaded into the language controller
+    pub languages_loaded: bool,
+}
+
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SentMessage {
