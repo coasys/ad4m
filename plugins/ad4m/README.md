@@ -61,7 +61,7 @@ Copy it into your `openclaw.json` under the plugin entry:
 {
   plugins: {
     entries: {
-      "ad4m-openclaw-plugin": {
+      "ad4m": {
         enabled: true,
         config: {
           // paste the snippet here

@@ -341,7 +341,7 @@ function printConfigSnippet(
   logger.info(`[ad4m-setup] ${SEPARATOR}`);
   logger.info(`[ad4m-setup] ${title}`);
   logger.info(
-    `[ad4m-setup] Add this to your openclaw.json under plugins.entries["ad4m-openclaw-plugin"].config:`,
+    `[ad4m-setup] Add this to your openclaw.json under plugins.entries["ad4m"].config:`,
   );
   logger.info(`[ad4m-setup]`);
 
