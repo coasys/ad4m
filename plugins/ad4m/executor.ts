@@ -11,18 +11,25 @@ import type { PluginConfig } from "./types";
  * Returns the absolute path if found, null otherwise.
  */
 export function findExecutorBinary(): string | null {
-  const name = "ad4m-executor";
+  const isWindows = process.platform === "win32";
+  const candidateNames = isWindows
+    ? ["ad4m-executor.exe", "ad4m-executor"]
+    : ["ad4m-executor"];
+  // Windows doesn't use the executable permission bit
+  const accessFlag = isWindows ? fs.constants.F_OK : fs.constants.X_OK;
 
   // 1. Check PATH entries
   const envPath = process.env.PATH ?? "";
   for (const dir of envPath.split(path.delimiter)) {
     if (!dir) continue;
-    const candidate = path.join(dir, name);
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      return candidate;
-    } catch {
-      // not found or not executable
+    for (const name of candidateNames) {
+      const candidate = path.join(dir, name);
+      try {
+        fs.accessSync(candidate, accessFlag);
+        return candidate;
+      } catch {
+        // not found or not executable
+      }
     }
   }
 
@@ -39,12 +46,14 @@ export function findExecutorBinary(): string | null {
   ];
 
   for (const dir of commonPaths) {
-    const candidate = path.join(dir, name);
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      return candidate;
-    } catch {
-      // not found
+    for (const name of candidateNames) {
+      const candidate = path.join(dir, name);
+      try {
+        fs.accessSync(candidate, accessFlag);
+        return candidate;
+      } catch {
+        // not found
+      }
     }
   }
 
@@ -143,6 +152,9 @@ function getDownloadAssets(logger: any): DownloadAsset[] | null {
   ];
 }
 
+const MAX_REDIRECTS = 5;
+const REQUEST_TIMEOUT_MS = 300_000; // 5 minutes — executor binaries are ~364MB
+
 /**
  * Download a file from a URL, following redirects (GitHub releases -> S3).
  * Returns a promise that resolves when the file is fully written.
@@ -152,12 +164,13 @@ function downloadFile(
   destPath: string,
   label: string,
   logger: any,
+  redirectCount: number = 0,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const proto = url.startsWith("https") ? https : http;
 
-    proto
-      .get(url, { headers: { "User-Agent": "openclaw-ad4m-plugin" } }, (res) => {
+    const req = proto
+      .get(url, { headers: { "User-Agent": "openclaw-ad4m-plugin" }, timeout: REQUEST_TIMEOUT_MS }, (res) => {
         // Follow redirects (301, 302, 307, 308)
         if (
           res.statusCode &&
@@ -165,7 +178,13 @@ function downloadFile(
           res.statusCode < 400 &&
           res.headers.location
         ) {
-          downloadFile(res.headers.location, destPath, label, logger)
+          if (redirectCount >= MAX_REDIRECTS) {
+            res.resume();
+            reject(new Error(`Too many redirects (${MAX_REDIRECTS}) downloading ${label}`));
+            return;
+          }
+          const redirectUrl = new URL(res.headers.location, url).toString();
+          downloadFile(redirectUrl, destPath, label, logger, redirectCount + 1)
             .then(resolve)
             .catch(reject);
           res.resume(); // consume response to free memory
@@ -216,10 +235,16 @@ function downloadFile(
           fs.unlink(destPath, () => {}); // clean up partial file
           reject(new Error(`Failed to write ${label}: ${err.message}`));
         });
-      })
-      .on("error", (err) => {
-        reject(new Error(`Network error downloading ${label}: ${err.message}`));
       });
+
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error(`Download of ${label} timed out after ${REQUEST_TIMEOUT_MS / 1000}s`));
+    });
+
+    req.on("error", (err) => {
+      reject(new Error(`Network error downloading ${label}: ${err.message}`));
+    });
   });
 }
 
@@ -255,12 +280,21 @@ export async function downloadExecutor(logger: any): Promise<boolean> {
 
     try {
       await downloadFile(url, destPath, asset.label, logger);
+
+      // TODO: Add SHA-256 checksum verification when release manifests are available
+      // Basic integrity check: reject zero-byte files
+      const fileSize = fs.statSync(destPath).size;
+      if (fileSize === 0) {
+        fs.unlinkSync(destPath);
+        throw new Error(`Downloaded file is empty (0 bytes)`);
+      }
+
       fs.chmodSync(destPath, 0o755);
       logger.info(`[ad4m] Installed ${asset.label} at ${destPath}`);
     } catch (err: any) {
       logger.error(`[ad4m] Failed to download ${asset.label}: ${err.message}`);
       // If executor download fails, return false. Client failure is non-fatal.
-      if (asset.localName === "ad4m-executor") return false;
+      if (asset.label === "ad4m-executor") return false;
     }
   }
 
