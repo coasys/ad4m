@@ -2894,11 +2894,21 @@ impl Mutation {
 
         let total_tokens = result.prompt_tokens + result.completion_tokens;
         // Look up rate by model name (the host_rates key is just the model name)
-        let model_name = Ad4mDb::with_global_instance(|db| db.get_model(result.model_id.clone()))
-            .ok()
-            .flatten()
-            .map(|m| m.name)
-            .unwrap_or_default();
+        let model_name =
+            match Ad4mDb::with_global_instance(|db| db.get_model(result.model_id.clone())) {
+                Ok(Some(m)) => m.name,
+                Ok(None) => {
+                    log::warn!(
+                        "Model not found in DB for model_id={}, using default rate",
+                        result.model_id
+                    );
+                    String::new()
+                }
+                Err(e) => {
+                    log::error!("DB error looking up model_id={}: {}", result.model_id, e);
+                    String::new()
+                }
+            };
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
             total_tokens as f64 * get_rate(&model_name, DEFAULT_TOKEN_RATE),
@@ -3307,6 +3317,27 @@ impl Mutation {
             ));
         }
 
+        // Validate inputs
+        let recipient = recipient.trim().to_string();
+        if recipient.is_empty() {
+            return Err(FieldError::new(
+                "recipient must not be empty",
+                Value::null(),
+            ));
+        }
+        let parsed_amount: f64 = amount.parse().map_err(|_| {
+            FieldError::new(
+                format!("amount '{}' is not a valid number", amount),
+                Value::null(),
+            )
+        })?;
+        if parsed_amount <= 0.0 {
+            return Err(FieldError::new(
+                "amount must be greater than 0",
+                Value::null(),
+            ));
+        }
+
         match crate::unyt_service::send_hot(&recipient, &amount, Some("AD4M host withdrawal")).await
         {
             Ok(commitment_hash) => Ok(PaymentRequestResult {
@@ -3375,21 +3406,28 @@ impl Mutation {
         match crate::unyt_service::set_membrane_proof(&proof) {
             Ok(()) => {
                 // Trigger DNA installation now that we have the proof
-                tokio::spawn(async {
-                    match crate::unyt_service::ensure_installed().await {
-                        Ok(()) => {
-                            log::info!("Unyt alliance DNA installed after membrane proof was set")
-                        }
-                        Err(e) => log::error!(
+                match crate::unyt_service::ensure_installed().await {
+                    Ok(()) => {
+                        log::info!("Unyt alliance DNA installed after membrane proof was set");
+                        Ok(PaymentRequestResult {
+                            success: true,
+                            message: "Membrane proof stored and DNA installed.".to_string(),
+                        })
+                    }
+                    Err(e) => {
+                        log::error!(
                             "Failed to install Unyt alliance DNA after membrane proof: {}",
                             e
-                        ),
+                        );
+                        Ok(PaymentRequestResult {
+                            success: false,
+                            message: format!(
+                                "Membrane proof stored but DNA installation failed: {}",
+                                e
+                            ),
+                        })
                     }
-                });
-                Ok(PaymentRequestResult {
-                    success: true,
-                    message: "Membrane proof stored. DNA installation started.".to_string(),
-                })
+                }
             }
             Err(e) => Ok(PaymentRequestResult {
                 success: false,

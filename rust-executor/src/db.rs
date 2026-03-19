@@ -354,6 +354,10 @@ impl Ad4mDb {
         // Add hosting columns to users table
         alter_add_column("ALTER TABLE users ADD COLUMN remaining_credits REAL DEFAULT 0")?;
         alter_add_column("ALTER TABLE users ADD COLUMN hot_wallet_address TEXT")?;
+        // Dedup before creating unique index to handle legacy duplicate rows
+        conn.execute_batch(
+            "DELETE FROM users WHERE rowid NOT IN (SELECT MIN(rowid) FROM users WHERE hot_wallet_address IS NOT NULL GROUP BY hot_wallet_address) AND hot_wallet_address IS NOT NULL",
+        )?;
         conn.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_hot_wallet_address ON users(hot_wallet_address) WHERE hot_wallet_address IS NOT NULL",
         )?;
@@ -3164,11 +3168,20 @@ impl Ad4mDb {
         amount_hot: &str,
         action_hash: &str,
     ) -> Ad4mDbResult<i64> {
-        self.conn.execute(
+        let rows = self.conn.execute(
             "INSERT OR IGNORE INTO payment_requests (user_email, amount_hot, proposal_action_hash) VALUES (?1, ?2, ?3)",
             params![email, amount_hot, action_hash],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        if rows > 0 {
+            Ok(self.conn.last_insert_rowid())
+        } else {
+            let id: i64 = self.conn.query_row(
+                "SELECT id FROM payment_requests WHERE proposal_action_hash = ?1",
+                params![action_hash],
+                |row| row.get(0),
+            )?;
+            Ok(id)
+        }
     }
 
     pub fn complete_payment_request(&self, action_hash: &str) -> Ad4mDbResult<()> {
@@ -3228,11 +3241,20 @@ impl Ad4mDb {
         amount_hot: &str,
         proposal_hash: &str,
     ) -> Ad4mDbResult<i64> {
-        self.conn.execute(
+        let rows = self.conn.execute(
             "INSERT OR IGNORE INTO pending_sends (recipient, amount_hot, proposal_action_hash) VALUES (?1, ?2, ?3)",
             params![recipient, amount_hot, proposal_hash],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        if rows > 0 {
+            Ok(self.conn.last_insert_rowid())
+        } else {
+            let id: i64 = self.conn.query_row(
+                "SELECT id FROM pending_sends WHERE proposal_action_hash = ?1",
+                params![proposal_hash],
+                |row| row.get(0),
+            )?;
+            Ok(id)
+        }
     }
 
     pub fn complete_pending_send(&self, proposal_hash: &str) -> Ad4mDbResult<()> {
@@ -3249,6 +3271,23 @@ impl Ad4mDb {
             params![proposal_hash],
         )?;
         Ok(())
+    }
+
+    pub fn get_pending_send_by_hash(
+        &self,
+        proposal_hash: &str,
+    ) -> Ad4mDbResult<Option<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT recipient, amount_hot, proposal_action_hash FROM pending_sends WHERE proposal_action_hash = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![proposal_hash], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        match rows.next() {
+            Some(Ok(row)) => Ok(Some(row)),
+            Some(Err(e)) => Err(e.into()),
+            None => Ok(None),
+        }
     }
 
     pub fn get_pending_sends(&self) -> Ad4mDbResult<Vec<(String, String, String)>> {

@@ -264,12 +264,12 @@ export class HostBrowser extends LitElement {
   }
 
   private getLinkPrice(rates: RemoteHost["rates"]): number | null {
-    const r = rates.find(r => r.description === "link write");
+    const r = rates.find(r => r.description.trim().toLowerCase() === "link write");
     return r ? r.priceInHOT : null;
   }
 
   private getAvgTokenPrice(rates: RemoteHost["rates"]): number | null {
-    const tokenRates = rates.filter(r => r.description.endsWith("per token"));
+    const tokenRates = rates.filter(r => r.description.trim().toLowerCase().endsWith("per token"));
     if (tokenRates.length === 0) return null;
     return tokenRates.reduce((sum, r) => sum + r.priceInHOT, 0) / tokenRates.length;
   }
@@ -321,11 +321,14 @@ export class HostBrowser extends LitElement {
                   <div class="host-meta">
                     ${host.aiModels.map(model => html`<span class="model-chip">${model}</span>`)}
                   </div>
-                  ${host.rates.length > 0 ? html`
+                  ${host.rates.length > 0 ? (() => {
+                    const linkPrice = this.getLinkPrice(host.rates);
+                    const avgTokenPrice = this.getAvgTokenPrice(host.rates);
+                    return html`
                     <p class="rates-preview">
-                      ${this.getLinkPrice(host.rates) != null ? html`Link: ${this.formatPrice(this.getLinkPrice(host.rates)!)} HOT` : ''}${this.getLinkPrice(host.rates) != null && this.getAvgTokenPrice(host.rates) != null ? ' · ' : ''}${this.getAvgTokenPrice(host.rates) != null ? html`Token: ~${this.formatPrice(this.getAvgTokenPrice(host.rates)!)} HOT` : ''}
+                      ${linkPrice != null ? html`Link: ${this.formatPrice(linkPrice)} HOT` : ''}${linkPrice != null && avgTokenPrice != null ? ' · ' : ''}${avgTokenPrice != null ? html`Token: ~${this.formatPrice(avgTokenPrice)} HOT` : ''}
                     </p>
-                  ` : ''}
+                  `; })() : ''}
                 </div>
               </div>
             `)}

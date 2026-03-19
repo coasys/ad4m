@@ -132,6 +132,7 @@ const Hosting = () => {
   } | null>(null);
   const [hostRegistering, setHostRegistering] = useState(false);
   const [profilePic, setProfilePic] = useState<File | null>(null);
+  const [profilePicUrl, setProfilePicUrl] = useState<string | null>(null);
   const [verificationCode, setVerificationCode] = useState("");
   const [membraneProofStatus, setMembraneProofStatus] =
     useState<MembraneProofStatus>("none");
@@ -238,14 +239,14 @@ const Hosting = () => {
           location: mine.location ?? prev.location,
           hostUrl: mine.url ?? prev.hostUrl,
           rates:
-            mine.rates && mine.rates.length > 0
+            mine.rates !== undefined
               ? JSON.stringify(mine.rates)
               : prev.rates,
           aiModels:
-            mine.aiModels && mine.aiModels.length > 0
+            mine.aiModels !== undefined
               ? JSON.stringify(mine.aiModels)
               : prev.aiModels,
-          computeSpecs: mine.computeSpecs || prev.computeSpecs,
+          computeSpecs: mine.computeSpecs !== undefined ? mine.computeSpecs : prev.computeSpecs,
         }));
         return mine.emailVerified ? "verified" : "unverified";
       }
@@ -796,6 +797,17 @@ const Hosting = () => {
   };
 
   // ---- Effects ----
+
+  // Manage profilePic object URL to avoid blob leaks
+  useEffect(() => {
+    if (!profilePic) {
+      setProfilePicUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(profilePic);
+    setProfilePicUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [profilePic]);
 
   useEffect(() => {
     if (multiUserEnabled && client) getUsers();
@@ -1482,9 +1494,9 @@ const Hosting = () => {
                             ></j-icon>
                           </div>
                         </div>
-                      ) : profilePic ? (
+                      ) : profilePicUrl ? (
                         <img
-                          src={URL.createObjectURL(profilePic)}
+                          src={profilePicUrl}
                           alt=""
                           style={{
                             width: "80px",
@@ -1970,12 +1982,13 @@ const Hosting = () => {
                           <j-input
                             type="number"
                             value={tlsConfig.tls_port?.toString() || "12001"}
-                            onInput={(e: any) =>
-                              setTlsConfig({
+                            onInput={(e: any) => {
+                              const newConfig = {
                                 ...tlsConfig,
                                 tls_port: parseInt(e.target.value) || 12001,
-                              })
-                            }
+                              };
+                              handleTlsConfigChange(newConfig);
+                            }}
                           />
                         </j-box>
                       </j-box>

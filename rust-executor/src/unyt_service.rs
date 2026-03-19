@@ -685,9 +685,10 @@ pub async fn send_hot(
     let proposal_hash = create_proposal(&neg_amount, recipient_agent_key, note).await?;
 
     // Track in DB so the poller can auto-accept when commitment arrives
-    let _ = Ad4mDb::with_global_instance(|db| {
+    Ad4mDb::with_global_instance(|db| {
         db.create_pending_send(recipient_agent_key, amount_hot, &proposal_hash)
-    });
+    })
+    .map_err(|e| anyhow::anyhow!("Failed to track pending send in DB: {}", e))?;
 
     info!(
         "Created outgoing proposal {} to send {} HOT to {}",
@@ -724,20 +725,22 @@ pub async fn accept_commitment(
 
 /// Helper: credit user and mark payment request as completed.
 fn credit_and_complete(request: &crate::db::PaymentRequest) {
-    match request.amount_hot.parse::<f64>() {
-        Ok(amount) => {
-            if let Err(e) =
-                Ad4mDb::with_global_instance(|db| db.add_user_credits(&request.user_email, amount))
-            {
-                error!("Failed to credit user {}: {}", request.user_email, e);
-            } else {
-                info!("Credited user {} with {} HOT", request.user_email, amount);
-            }
-        }
+    let amount = match request.amount_hot.parse::<f64>() {
+        Ok(amount) => amount,
         Err(e) => {
             error!("Failed to parse amount '{}': {}", request.amount_hot, e);
+            return;
         }
+    };
+
+    if let Err(e) =
+        Ad4mDb::with_global_instance(|db| db.add_user_credits(&request.user_email, amount))
+    {
+        error!("Failed to credit user {}: {}", request.user_email, e);
+        return;
     }
+
+    info!("Credited user {} with {} HOT", request.user_email, amount);
 
     if let Some(ref action_hash) = request.proposal_action_hash {
         let _ = Ad4mDb::with_global_instance(|db| db.complete_payment_request(action_hash));
@@ -780,9 +783,24 @@ pub async fn handle_signal(payload_json: &JsonValue) {
 
     let tx_id = tx.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
 
-    // Handle incoming Proposal: auto-commit (accept the offer to receive funds)
+    // Handle incoming Proposal: auto-commit only if it matches a tracked pending request
     if tx_type_str == "Proposal" {
         if let Some(ref proposal_hash) = tx_id {
+            // Verify this proposal is tracked (either as a payment_request or pending_send)
+            let is_tracked = matches!(
+                Ad4mDb::with_global_instance(|db| db.get_payment_request_by_hash(proposal_hash)),
+                Ok(Some(_))
+            ) || matches!(
+                Ad4mDb::with_global_instance(|db| db.get_pending_send_by_hash(proposal_hash)),
+                Ok(Some(_))
+            );
+            if !is_tracked {
+                info!(
+                    "Unyt signal: ignoring untracked proposal {}, not auto-committing",
+                    proposal_hash
+                );
+                return;
+            }
             info!(
                 "Unyt signal: incoming proposal {}, auto-committing...",
                 proposal_hash
@@ -819,9 +837,30 @@ pub async fn handle_signal(payload_json: &JsonValue) {
         return;
     }
 
-    // Handle incoming Commitment on our proposal: auto-accept to finalize transfer
+    // Handle incoming Commitment on our proposal: auto-accept only if tracked
     if tx_type_str == "Commitment" {
         if let Some(ref commitment_hash) = tx_id {
+            // Check that the related proposal is one we initiated
+            let related_proposal = tx
+                .get("proposal")
+                .and_then(|v| v.as_str())
+                .or_else(|| tx.get("related_proposal").and_then(|v| v.as_str()));
+            let is_tracked = related_proposal.map_or(false, |hash| {
+                matches!(
+                    Ad4mDb::with_global_instance(|db| db.get_pending_send_by_hash(hash)),
+                    Ok(Some(_))
+                ) || matches!(
+                    Ad4mDb::with_global_instance(|db| db.get_payment_request_by_hash(hash)),
+                    Ok(Some(_))
+                )
+            });
+            if !is_tracked {
+                info!(
+                    "Unyt signal: ignoring untracked commitment {}, not auto-accepting",
+                    commitment_hash
+                );
+                return;
+            }
             info!(
                 "Unyt signal: incoming commitment {}, auto-accepting...",
                 commitment_hash
@@ -930,11 +969,29 @@ pub async fn handle_signal(payload_json: &JsonValue) {
     match user_email {
         Ok(Some(email)) => match hot_amount.parse::<f64>() {
             Ok(amount_f64) => {
-                // Mark completed before crediting to prevent double-credit from concurrent signals
+                // Verify pending request matches if we have a proposal hash
                 if let Some(hash) = proposal_hash {
-                    let _ = Ad4mDb::with_global_instance(|db| db.complete_payment_request(hash));
+                    match Ad4mDb::with_global_instance(|db| db.get_payment_request_by_hash(hash)) {
+                        Ok(Some(ref req)) => {
+                            if req.user_email != email {
+                                warn!(
+                                    "Unyt signal: payment request payer mismatch for {}: expected {}, got {}",
+                                    hash, req.user_email, email
+                                );
+                                return;
+                            }
+                        }
+                        Ok(None) => {
+                            // No tracked request — could be an ad-hoc payment, proceed
+                        }
+                        Err(e) => {
+                            error!("DB error checking payment request {}: {}", hash, e);
+                            return;
+                        }
+                    }
                 }
 
+                // Credit user first, then mark completed only on success
                 if let Err(e) =
                     Ad4mDb::with_global_instance(|db| db.add_user_credits(&email, amount_f64))
                 {
@@ -947,6 +1004,10 @@ pub async fn handle_signal(payload_json: &JsonValue) {
                         "Credited user {} with {} HOT from mHOT payment",
                         email, amount_f64
                     );
+                    if let Some(hash) = proposal_hash {
+                        let _ =
+                            Ad4mDb::with_global_instance(|db| db.complete_payment_request(hash));
+                    }
                 }
             }
             Err(e) => {

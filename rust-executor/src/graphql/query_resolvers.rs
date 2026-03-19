@@ -1002,8 +1002,14 @@ impl Query {
             };
 
             let hot_wallet_address =
-                Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user.username))
-                    .unwrap_or(None);
+                Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user.username)).map_err(
+                    |e| {
+                        FieldError::new(
+                            format!("Failed to get hot wallet for user {}: {}", user.username, e),
+                            Value::null(),
+                        )
+                    },
+                )?;
 
             user_stats.push(UserStatistics {
                 email: user.username.clone(),
@@ -1146,10 +1152,11 @@ impl Query {
                 return Err(FieldError::new("page must be non-negative", Value::Null));
             }
         }
+        const MAX_PER_PAGE: i32 = 1000;
         if let Some(pp) = per_page {
-            if pp < 0 {
+            if pp < 1 || pp > MAX_PER_PAGE {
                 return Err(FieldError::new(
-                    "per_page must be non-negative",
+                    format!("per_page must be between 1 and {}", MAX_PER_PAGE),
                     Value::Null,
                 ));
             }
@@ -1165,7 +1172,7 @@ impl Query {
         .await
         {
             Ok(history) => {
-                log::info!("get_history raw result: {}", history);
+                log::debug!("get_history raw result: {}", history);
                 // get_history returns {"items": [...], "low_boundary": ..., "end_of_chain": ...}
                 let items = history
                     .get("items")
@@ -1188,10 +1195,10 @@ impl Query {
         // Fetch incoming transactions via notification links
         match crate::unyt_service::get_all_notification_links().await {
             Ok(links) => {
-                log::info!("get_all_notification_links raw result: {}", links);
+                log::debug!("get_all_notification_links raw result: {}", links);
                 match crate::unyt_service::get_actionable_transactions(links).await {
                     Ok(incoming) => {
-                        log::info!("get_actionable_transactions raw result: {}", incoming);
+                        log::debug!("get_actionable_transactions raw result: {}", incoming);
                         // Result is {"proposal_actionable":[], "commitment_actionable":[], "accept_actionable":[], "reject_actionable":[]}
                         if let Some(obj) = incoming.as_object() {
                             for (category, txs) in obj {
