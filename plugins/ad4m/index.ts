@@ -868,22 +868,10 @@ Notes:
             logger.info(`[ad4m] Found ad4m-executor at: ${discovered}`);
             binaryPath = discovered;
           } else {
-            logger.info(
-              `[ad4m] ad4m-executor not found in PATH or common locations. Attempting auto-download...`,
+            logger.warn(
+              `[ad4m] ad4m-executor not found in PATH or common locations. ` +
+              `Run 'openclaw ad4m-setup' to download and configure it automatically.`,
             );
-            const downloaded = await downloadExecutor(logger);
-            if (downloaded) {
-              const retryPath = findExecutorBinary();
-              if (retryPath) {
-                logger.info(`[ad4m] Using downloaded executor at: ${retryPath}`);
-                binaryPath = retryPath;
-              }
-            }
-            if (!binaryPath) {
-              logger.warn(
-                `[ad4m] Auto-download failed or unsupported platform. Will try bare name.`,
-              );
-            }
           }
         } else {
           logger.info(`[ad4m] Using executor binary: ${binaryPath}`);
