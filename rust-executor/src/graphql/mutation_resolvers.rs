@@ -40,11 +40,15 @@ const DEFAULT_EMBEDDING_TOKEN_RATE: f64 = 1.0; // per input token
 const DEFAULT_LINK_WRITE_RATE: f64 = 0.25; // per link write
 
 /// Look up a rate from the host_rates DB table, falling back to the given default.
-fn get_rate(description: &str, default: f64) -> f64 {
-    Ad4mDb::with_global_instance(|db| db.get_host_rate(description))
-        .ok()
-        .flatten()
-        .unwrap_or(default)
+fn get_rate(description: &str, default: f64) -> FieldResult<f64> {
+    match Ad4mDb::with_global_instance(|db| db.get_host_rate(description)) {
+        Ok(Some(rate)) => Ok(rate),
+        Ok(None) => Ok(default),
+        Err(e) => Err(FieldError::new(
+            format!("Failed to read host rate: {}", e),
+            graphql_value!(null),
+        )),
+    }
 }
 
 /// Deduct compute credits for a user after an operation completes.
@@ -59,7 +63,7 @@ fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
             .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
         if !free {
-            Ad4mDb::with_global_instance(|db| db.deduct_user_credits(email, amount))
+            Ad4mDb::with_global_instance(|db| db.deduct_user_credits_if_available(email, amount))
                 .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
         }
     }
@@ -1954,7 +1958,7 @@ impl Mutation {
 
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
-            get_rate("link write", DEFAULT_LINK_WRITE_RATE),
+            get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
         ) {
             log::warn!("Call exceeded compute credits (add_link): result returned but future calls will fail. Details: {:?}", e);
         }
@@ -1982,7 +1986,7 @@ impl Mutation {
 
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
-            get_rate("link write", DEFAULT_LINK_WRITE_RATE),
+            get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
         ) {
             log::warn!("Call exceeded compute credits (add_link_expression): result returned but future calls will fail. Details: {:?}", e);
         }
@@ -2017,7 +2021,7 @@ impl Mutation {
 
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
-            link_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE),
+            link_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
         ) {
             log::warn!("Call exceeded compute credits (add_links, count={}): result returned but future calls will fail. Details: {:?}", link_count, e);
         }
@@ -2047,7 +2051,7 @@ impl Mutation {
 
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
-            additions_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE),
+            additions_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
         ) {
             log::warn!("Call exceeded compute credits (link_mutations, additions={}): result returned but future calls will fail. Details: {:?}", additions_count, e
             );
@@ -2911,7 +2915,7 @@ impl Mutation {
             };
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
-            total_tokens as f64 * get_rate(&model_name, DEFAULT_TOKEN_RATE),
+            total_tokens as f64 * get_rate(&model_name, DEFAULT_TOKEN_RATE)?,
         ) {
             log::warn!("Call exceeded compute credits (ai_prompt, model={}, tokens={}): result returned but future calls will fail. Details: {:?}", model_name, total_tokens, e);
         }
@@ -2936,7 +2940,7 @@ impl Mutation {
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
             result.token_count as f64
-                * get_rate("embedding per token", DEFAULT_EMBEDDING_TOKEN_RATE),
+                * get_rate("embedding per token", DEFAULT_EMBEDDING_TOKEN_RATE)?,
         ) {
             log::warn!("Call exceeded compute credits (ai_embed, tokens={}): result returned but future calls will fail. Details: {:?}", result.token_count, e);
         }
@@ -3186,11 +3190,15 @@ impl Mutation {
         let note = format!("AD4M hosting top-up: {} HOT for {}", amountHOT, user_email);
         match crate::unyt_service::create_proposal(&amountHOT, &wallet_address, Some(&note)).await {
             Ok(proposal_hash) => {
-                // Record the payment request in the DB
+                // Record the payment request in the DB — fail the whole operation if this doesn't persist
                 if let Err(e) = Ad4mDb::with_global_instance(|db| {
                     db.create_payment_request(&user_email, &amountHOT, &proposal_hash)
                 }) {
                     log::error!("Failed to record payment request in DB: {}", e);
+                    return Err(FieldError::new(
+                        format!("Payment proposal created but failed to persist: {}", e),
+                        Value::null(),
+                    ));
                 }
 
                 log::info!(
@@ -3373,12 +3381,36 @@ impl Mutation {
 
         let rates: Vec<(String, f64)> = parsed
             .iter()
-            .filter_map(|item| {
-                let desc = item.get("description")?.as_str()?.to_string();
-                let price = item.get("priceInHOT")?.as_f64()?;
-                Some((desc, price))
+            .enumerate()
+            .map(|(i, item)| {
+                let desc = item
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        FieldError::new(
+                            format!("Rate entry {} missing or empty 'description'", i),
+                            Value::null(),
+                        )
+                    })?;
+                let price = item
+                    .get("priceInHOT")
+                    .and_then(|v| v.as_f64())
+                    .ok_or_else(|| {
+                        FieldError::new(
+                            format!("Rate entry {} missing 'priceInHOT'", i),
+                            Value::null(),
+                        )
+                    })?;
+                if price < 0.0 {
+                    return Err(FieldError::new(
+                        format!("Rate entry {} has negative priceInHOT", i),
+                        Value::null(),
+                    ));
+                }
+                Ok((desc.to_string(), price))
             })
-            .collect();
+            .collect::<FieldResult<Vec<_>>>()?;
 
         Ad4mDb::with_global_instance(|db| {
             db.set_host_rates(&rates).map_err(|e| {

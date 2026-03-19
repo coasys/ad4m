@@ -354,9 +354,9 @@ impl Ad4mDb {
         // Add hosting columns to users table
         alter_add_column("ALTER TABLE users ADD COLUMN remaining_credits REAL DEFAULT 0")?;
         alter_add_column("ALTER TABLE users ADD COLUMN hot_wallet_address TEXT")?;
-        // Dedup before creating unique index to handle legacy duplicate rows
+        // Clear duplicate hot_wallet_address bindings (keep account row intact)
         conn.execute_batch(
-            "DELETE FROM users WHERE rowid NOT IN (SELECT MIN(rowid) FROM users WHERE hot_wallet_address IS NOT NULL GROUP BY hot_wallet_address) AND hot_wallet_address IS NOT NULL",
+            "UPDATE users SET hot_wallet_address = NULL WHERE rowid NOT IN (SELECT MIN(rowid) FROM users WHERE hot_wallet_address IS NOT NULL GROUP BY hot_wallet_address) AND hot_wallet_address IS NOT NULL",
         )?;
         conn.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_hot_wallet_address ON users(hot_wallet_address) WHERE hot_wallet_address IS NOT NULL",
@@ -383,6 +383,10 @@ impl Ad4mDb {
                 completed_at TEXT
             )",
         )?;
+        // Dedup before creating unique index to handle legacy duplicate rows
+        conn.execute_batch(
+            "DELETE FROM payment_requests WHERE id NOT IN (SELECT MIN(id) FROM payment_requests WHERE proposal_action_hash IS NOT NULL GROUP BY proposal_action_hash) AND proposal_action_hash IS NOT NULL",
+        )?;
         // Add unique index for existing databases that already created the table without UNIQUE
         conn.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_requests_proposal_hash ON payment_requests(proposal_action_hash) WHERE proposal_action_hash IS NOT NULL",
@@ -399,6 +403,10 @@ impl Ad4mDb {
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 completed_at TEXT
             )",
+        )?;
+        // Dedup before creating unique index to handle legacy duplicate rows
+        conn.execute_batch(
+            "DELETE FROM pending_sends WHERE id NOT IN (SELECT MIN(id) FROM pending_sends WHERE proposal_action_hash IS NOT NULL GROUP BY proposal_action_hash) AND proposal_action_hash IS NOT NULL",
         )?;
         // Add unique index for existing databases that already created the table without UNIQUE
         conn.execute_batch(
@@ -3187,6 +3195,14 @@ impl Ad4mDb {
     pub fn complete_payment_request(&self, action_hash: &str) -> Ad4mDbResult<()> {
         self.conn.execute(
             "UPDATE payment_requests SET status = 'completed', completed_at = datetime('now') WHERE proposal_action_hash = ?1 AND status = 'pending'",
+            params![action_hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn reject_payment_request(&self, action_hash: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "UPDATE payment_requests SET status = 'rejected', completed_at = datetime('now') WHERE proposal_action_hash = ?1 AND status = 'pending'",
             params![action_hash],
         )?;
         Ok(())

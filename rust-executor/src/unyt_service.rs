@@ -826,11 +826,19 @@ pub async fn handle_signal(payload_json: &JsonValue) {
                     note: Some("Auto-committed".to_string()),
                     lane_definitions: vec![],
                 };
-                match call_zome("create_commitment", Some(encode_payload(&input).unwrap())).await {
-                    Ok(result) => {
-                        info!("Auto-committed to proposal {}: {:?}", proposal_hash, result)
-                    }
-                    Err(e) => warn!("Failed to auto-commit to proposal {}: {}", proposal_hash, e),
+                match encode_payload(&input) {
+                    Ok(payload) => match call_zome("create_commitment", Some(payload)).await {
+                        Ok(result) => {
+                            info!("Auto-committed to proposal {}: {:?}", proposal_hash, result)
+                        }
+                        Err(e) => {
+                            warn!("Failed to auto-commit to proposal {}: {}", proposal_hash, e)
+                        }
+                    },
+                    Err(e) => warn!(
+                        "Failed to encode commitment payload for proposal {}: {}",
+                        proposal_hash, e
+                    ),
                 }
             }
         }
@@ -893,7 +901,7 @@ pub async fn handle_signal(payload_json: &JsonValue) {
                 hash
             );
             let _ = Ad4mDb::with_global_instance(|db| db.reject_pending_send(hash));
-            let _ = Ad4mDb::with_global_instance(|db| db.complete_payment_request(hash));
+            let _ = Ad4mDb::with_global_instance(|db| db.reject_payment_request(hash));
         }
         return;
     }
