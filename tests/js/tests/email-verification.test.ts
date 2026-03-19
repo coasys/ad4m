@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor, runHcLocalServices } from "../utils/utils";
+import { apolloClient, sleep, startExecutor, runHcLocalServices, quitExecutor } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
 
@@ -74,18 +74,10 @@ describe("Email Verification with Mock Service", () => {
         }
 
         if (executorProcess) {
-            while (!executorProcess?.killed) {
-                let status = executorProcess?.kill();
-                console.log("killed executor with", status);
-                await sleep(500);
-            }
+            await quitExecutor(executorProcess, gqlPort);
         }
         if (localServicesProcess) {
-            while (!localServicesProcess?.killed) {
-                let status = localServicesProcess?.kill();
-                console.log("killed local services with", status);
-                await sleep(500);
-            }
+            localServicesProcess.kill('SIGKILL');
         }
     })
 
