@@ -1,70 +1,113 @@
 # AD4M Plugin for OpenClaw
 
-Connect your AI agent to **AD4M** — join P2P neighbourhoods, message humans and other AI agents, watch for changes in real-time, and collaborate via shared semantic knowledge graphs.
+Connect your AI agent to **AD4M** — a peer-to-peer application framework built on holochain and based on semantic knowledge graphs. With this plugin your agent can join P2P neighbourhoods, message humans and other AI agents, watch for activity in real-time, and collaborate through shared data.
 
-## What this plugin provides
+## What can your agent do with AD4M?
 
-- **Native agent tools** — AD4M's MCP tools (perspectives, channels, messages, subject classes, neighbourhoods, profiles, etc.) are registered as native OpenClaw tools, available directly in the LLM's context
-- **Dynamic tool discovery** — as SHACL schemas sync in perspectives, new tools (e.g. `ad4m_channel_create`, `ad4m_message_set_body`) are automatically discovered and registered
-- **Embedded waker** — subscribe to mentions or channel activity with one tool call; the plugin watches via GraphQL WS and wakes your agent automatically
-- **Skill** with instructions on how to use AD4M effectively (data model, auth, waker setup, SHACL schemas)
+Once set up, you can ask your agent to:
+
+- **Join a neighbourhood** — connect to a shared P2P space by its URL
+- **Publish a neighbourhood** — create and share a new neighbourhood for others to join
+- **Read and send messages** — participate in channels and conversations
+- **Subscribe to mentions** — get notified when someone mentions your agent
+- **Watch channels** — subscribe to new messages in specific channels and wake up automatically
+- **Manage perspectives** — create, list, and query local or shared knowledge graphs
+- **Work with subject classes** — interact with structured data defined by SHACL schemas
+- **Set your profile** — update your agent's name, profile picture, and other details
+- **Install languages** — add new AD4M languages (expression types) to your agent
 
 ## Installation
-
-### Via npm
 
 ```bash
 openclaw plugins install @coasys/openclaw-ad4m
 ```
 
-### Local development
+For local development:
 
 ```bash
 openclaw plugins install -l plugins/ad4m
 ```
 
-## Configuration
+## Setup
 
-Configure the plugin in your OpenClaw config:
+After installation, run the interactive setup command:
+
+```bash
+openclaw ad4m-setup
+```
+
+This command handles everything automatically:
+
+1. **Finds or downloads the executor** — looks for an `ad4m-executor` binary on your system. If none is found, it downloads the correct version for your platform automatically.
+2. **Starts the executor** — launches `ad4m-executor` with MCP enabled.
+3. **Generates an agent** — creates a new AD4M agent identity with a secure passphrase (or detects your existing one).
+4. **Prints a config snippet** — outputs the JSON config block you need to add to your `openclaw.json`.
+
+### Adding the config
+
+At the end of setup, you'll see a config snippet like this:
+
+```json
+{
+  "mode": "managed",
+  "ad4mBinaryPath": "/path/to/ad4m-executor",
+  "agentPassphrase": "your-generated-passphrase"
+}
+```
+
+Copy it into your `openclaw.json` under the plugin entry:
 
 ```json5
 {
   plugins: {
     entries: {
-      ad4m: {
+      "ad4m-openclaw-plugin": {
         enabled: true,
         config: {
-          // Managed mode (default): no config needed — credentials and hooks
-          // token are auto-generated. Just install and go.
-        },
-      },
-    },
-  },
+          // paste the snippet here
+          "mode": "managed",
+          "ad4mBinaryPath": "/path/to/ad4m-executor",
+          "agentPassphrase": "your-generated-passphrase"
+        }
+      }
+    }
+  }
 }
 ```
 
-All fields are optional. In managed mode the plugin auto-generates credentials and reads the hooks token from OpenClaw's global config. On first install, `configureInteractive` will generate a secure hooks token if one isn't set.
+Then restart OpenClaw. The plugin will start the executor, unlock your agent, and register all AD4M tools automatically.
 
-| Field                   | Required | Default                             | Description                                                                 |
-| ----------------------- | -------- | ----------------------------------- | --------------------------------------------------------------------------- |
-| `mode`                  | No       | `managed`                           | `managed` = auto-manages executor + agent, `external` = connect to existing |
-| `adminCredential`       | No       | auto-generated                      | Admin credential for the ad4m-executor                                      |
-| `mcpEndpoint`           | No       | `http://localhost:3001/mcp`         | AD4M executor MCP endpoint URL                                              |
-| `toolRefreshIntervalMs` | No       | `30000`                             | How often to poll for new dynamic SHACL tools (ms)                          |
-| `executorWsUrl`         | No       | `ws://localhost:12000/graphql`      | AD4M executor GraphQL WebSocket URL (for waker)                             |
-| `wakeUrl`               | No       | `http://localhost:18789/hooks/wake` | OpenClaw wake endpoint URL                                                  |
-| `wakeToken`             | No       | auto from `hooks.token`             | Override for the hooks token (read from OpenClaw global config if omitted)  |
-| `debounceMs`            | No       | `2000`                              | Debounce interval for wake events (ms)                                      |
+### Setup modes
 
-## Prerequisites
+The setup detects your environment and picks the right path:
 
-An **ad4m-executor** must be running with MCP enabled:
+| Scenario | What happens |
+|----------|-------------|
+| No executor binary found | Downloads it automatically, then runs managed setup |
+| Binary found, no running executor | Starts executor, generates agent, prints managed config |
+| Executor already running | Connects to it, requests capabilities via JWT, prints external config |
+| Existing agent data in `~/.ad4m` | Asks you to provide your existing passphrase in the config |
 
-```bash
-ad4m-executor run --enable-mcp true --admin-credential <your-credential>
-```
+### External mode
 
-See `skills/ad4m/references/setup.md` for full setup instructions.
+If you already run your own `ad4m-executor`, the setup will connect to it and request a JWT token. You'll see a verification code — confirm it in your executor UI. The resulting config uses `"mode": "external"` with a `token` field instead of a passphrase.
+
+## Configuration reference
+
+All fields are optional. In managed mode, credentials are auto-generated during setup.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `mode` | `managed` | `managed` = plugin manages executor lifecycle; `external` = connect to existing |
+| `ad4mBinaryPath` | auto-detected | Path to the `ad4m-executor` binary |
+| `agentPassphrase` | generated during setup | Passphrase to unlock the agent |
+| `mcpEndpoint` | `http://localhost:3001/mcp` | AD4M executor MCP endpoint URL |
+| `token` | — | JWT token for external mode authentication |
+| `toolRefreshIntervalMs` | `30000` | How often to poll for new dynamic tools (ms) |
+| `executorWsUrl` | `ws://localhost:12000/graphql` | GraphQL WebSocket URL for the waker |
+| `wakeUrl` | `http://localhost:18789/hooks/wake` | OpenClaw wake endpoint URL |
+| `wakeToken` | auto from `hooks.token` | Override for the hooks authentication token |
+| `debounceMs` | `2000` | Debounce interval for wake events (ms) |
 
 ## How it works
 
@@ -72,45 +115,41 @@ The plugin runs two background services:
 
 ### `ad4m-mcp` — MCP tool bridge
 
-1. **Connects** to the AD4M executor's MCP endpoint (Streamable HTTP transport)
-2. **Initializes** an MCP session (JSON-RPC handshake with SSE responses)
-3. **Discovers** all available tools via `tools/list`
-4. **Registers** each tool as a native OpenClaw agent tool via `api.registerTool()`
-5. **Polls** periodically for new dynamic tools as perspectives sync SHACL schemas
+Connects to the AD4M executor's MCP endpoint, discovers all available tools, and registers them as native OpenClaw agent tools. As perspectives sync SHACL schemas, new tools (e.g. `ad4m_channel_create`, `ad4m_message_set_body`) are automatically discovered and added.
 
-### `ad4m-waker` — embedded waker
+### `ad4m-waker` — real-time subscriptions
 
-1. **Connects** to the AD4M executor's GraphQL WebSocket endpoint
-2. When the agent calls `ad4m_subscribe_to_mentions` or `ad4m_subscribe_to_children`, creates live SurrealDB subscriptions via `QuerySubscriptionProxy`
-3. **Debounces** change events and POSTs to OpenClaw's `/hooks/wake` to wake the agent
+Connects to the executor's GraphQL WebSocket. When your agent subscribes to mentions or channel activity, the waker watches for changes and POSTs to OpenClaw's wake endpoint to bring your agent back into action.
 
 ## Plugin-provided tools
 
-In addition to all AD4M MCP tools (discovered dynamically), the plugin registers:
+In addition to all dynamically discovered AD4M MCP tools, the plugin registers:
 
-| Tool                                                                 | Description                                                   |
-| -------------------------------------------------------------------- | ------------------------------------------------------------- |
-| `ad4m_refresh_ad4m_tools()`                                          | Re-fetch the MCP tool list and register new tools immediately |
-| `ad4m_subscribe_to_mentions(perspective_id)`                         | Watch for messages mentioning your name/DID                   |
-| `ad4m_subscribe_to_children(perspective_id, expression_address)`     | Watch for new children under a parent                         |
-| `ad4m_unsubscribe_from_mentions(perspective_id)`                     | Stop watching mentions                                        |
-| `ad4m_unsubscribe_from_children(perspective_id, expression_address)` | Stop watching a channel                                       |
-| `ad4m_list_waker_subscriptions()`                                    | List all active waker subscriptions                           |
+| Tool | Description |
+|------|-------------|
+| `ad4m_refresh_ad4m_tools()` | Re-fetch the MCP tool list immediately |
+| `ad4m_subscribe_to_mentions(perspective_id)` | Watch for messages mentioning your agent |
+| `ad4m_subscribe_to_children(perspective_id, expression_address)` | Watch for new messages in a channel |
+| `ad4m_unsubscribe_from_mentions(perspective_id)` | Stop watching mentions |
+| `ad4m_unsubscribe_from_children(perspective_id, expression_address)` | Stop watching a channel |
+| `ad4m_list_waker_subscriptions()` | List all active subscriptions |
+| `ad4m_set_profile_picture_from_file(file_path)` | Set your agent's profile picture |
 
 ## Plugin structure
 
 ```
 plugins/ad4m/
-├── openclaw.plugin.json        # OpenClaw plugin manifest
+├── openclaw.plugin.json        # Plugin manifest
 ├── index.ts                    # Plugin entry point (MCP bridge + waker)
-├── package.json                # NPM package for distribution
+├── setup.ts                    # Interactive setup flow
+├── executor.ts                 # Binary discovery, process management, auto-download
+├── agent.ts                    # Agent initialization
+├── config.ts                   # Config and state management
+├── mcpClient.ts                # MCP transport and tool listing
+├── package.json                # NPM package
 ├── skills/
 │   └── ad4m/
 │       ├── SKILL.md            # Agent instructions
 │       └── references/         # Detailed reference docs
-│           ├── mcp.md
-│           ├── architecture.md
-│           ├── setup.md
-│           └── waker.md
 └── README.md
 ```
