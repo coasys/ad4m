@@ -1,10 +1,18 @@
 import path from "path";
 import fs from "fs";
+import os from "os";
 import https from "https";
 import http from "http";
 import { spawn, execFileSync } from "child_process";
 
 import type { PluginConfig } from "./types";
+
+/** Canonical home directory — used by both discovery and download. */
+const PLUGIN_BIN_DIR = path.join(
+  process.env.HOME || process.env.USERPROFILE || os.tmpdir(),
+  ".ad4m-plugin",
+  "bin",
+);
 
 /**
  * Search for ad4m-executor binary in PATH and common locations.
@@ -36,7 +44,7 @@ export function findExecutorBinary(): string | null {
   // 2. Check common locations not always in PATH
   const home = process.env.HOME || process.env.USERPROFILE || "";
   const commonPaths = [
-    path.join(home, ".ad4m-plugin", "bin"),
+    PLUGIN_BIN_DIR,
     "/usr/local/bin",
     "/usr/bin",
     "/opt/homebrew/bin",
@@ -70,8 +78,7 @@ const EXECUTOR_VERSION = "0.12.0-rc2";
 
 /** Directory where downloaded binaries are stored */
 function getPluginBinDir(): string {
-  const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
-  return path.join(home, ".ad4m-plugin", "bin");
+  return PLUGIN_BIN_DIR;
 }
 
 interface DownloadAsset {
@@ -205,7 +212,8 @@ function downloadFile(
         let downloadedBytes = 0;
         let lastLogPercent = -10; // log every 10%
 
-        const fileStream = fs.createWriteStream(destPath);
+        const tempPath = destPath + ".part";
+        const fileStream = fs.createWriteStream(tempPath);
 
         res.on("data", (chunk: Buffer) => {
           downloadedBytes += chunk.length;
@@ -228,21 +236,30 @@ function downloadFile(
           fileStream.close();
           const mb = (downloadedBytes / 1024 / 1024).toFixed(1);
           logger.info(`[ad4m] Downloaded ${label}: ${mb}MB`);
+          try {
+            fs.renameSync(tempPath, destPath);
+          } catch (renameErr: any) {
+            fs.unlink(tempPath, () => {});
+            reject(new Error(`Failed to finalize ${label}: ${renameErr.message}`));
+            return;
+          }
           resolve();
         });
 
         fileStream.on("error", (err) => {
-          fs.unlink(destPath, () => {}); // clean up partial file
+          fs.unlink(tempPath, () => {}); // clean up partial file
           reject(new Error(`Failed to write ${label}: ${err.message}`));
         });
       });
 
     req.on("timeout", () => {
       req.destroy();
+      fs.unlink(destPath + ".part", () => {});
       reject(new Error(`Download of ${label} timed out after ${REQUEST_TIMEOUT_MS / 1000}s`));
     });
 
     req.on("error", (err) => {
+      fs.unlink(destPath + ".part", () => {});
       reject(new Error(`Network error downloading ${label}: ${err.message}`));
     });
   });
