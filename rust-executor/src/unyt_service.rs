@@ -26,10 +26,10 @@ use crate::holochain_service::interface::{get_holochain_service, maybe_get_holoc
 pub const UNYT_APP_ID: &str = "unyt-mhot";
 const UNYT_CELL_NAME: &str = "alliance";
 const UNYT_ZOME: &str = "transactor";
-const ALLIANCE_DNA_VERSION: &str = "0.61.0";
+const ALLIANCE_DNA_VERSION: &str = "0.62.0";
 
 /// Embedded alliance DNA bytes.
-const ALLIANCE_DNA_BYTES: &[u8] = include_bytes!("resources/alliance_0.61.0.dna");
+const ALLIANCE_DNA_BYTES: &[u8] = include_bytes!("resources/alliance_0.62.0.dna");
 
 // ---------------------------------------------------------------------------
 // Global state: the DNA hash of the installed alliance cell, used for signal routing
@@ -271,9 +271,9 @@ roles:
     dna:
       path: {}
       modifiers:
-        network_seed: "Ga-FM2jL7uq3NDI9QX1Zl"
+        network_seed: "7RysrsJstXhPQcYb088dR"
         properties:
-          progenitor_pubkey: "uhCAkdeTV-5BNlhK4pC9tVpVwlUhzcOA8zqn3lEhtkN41qWGo0PWr"
+          progenitor_pubkey: "uhCAkzTjgUwMRiiKO5Gu8XHISzDKckzZ0b7QiUcf5rxg2LsVMNbQP"
           joining_server_signer: "uhCAk_Jbtn_3RR-VCLPtJdhcQvVrpM7Vw5vHGog8_CwW5tO0_Cf37"
 "#,
         dna_path.to_string_lossy()
