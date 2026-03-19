@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';
 import { Ad4mClient } from "@coasys/ad4m";
-import { startExecutor, apolloClient, sleep } from "../utils/utils";
+import { startExecutor, apolloClient, sleep, quitExecutor } from "../utils/utils";
 import path from "path";
 import fetch from 'node-fetch'
 import { fileURLToPath } from 'url';
@@ -36,11 +36,7 @@ describe("Integration", () => {
 
   after(async () => {
     if (executorProcess) {
-      while (!executorProcess?.killed) {
-        let status  = executorProcess?.kill();
-        console.log("killed executor with", status);
-        await sleep(500);
-      }
+      await quitExecutor(executorProcess, gqlPort);
     }
   })
 

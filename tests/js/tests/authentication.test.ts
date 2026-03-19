@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor } from "../utils/utils";
+import { apolloClient, sleep, startExecutor, quitExecutor } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
 import { ExceptionInfo } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
@@ -44,11 +44,7 @@ describe("Authentication integration tests", () => {
 
         after(async () => {
             if (executorProcess) {
-                while (!executorProcess?.killed) {
-                    let status  = executorProcess?.kill();
-                    console.log("killed executor with", status);
-                    await sleep(500);
-                }
+                await quitExecutor(executorProcess, gqlPort);
             }
         })
 
@@ -109,7 +105,7 @@ describe("Authentication integration tests", () => {
 
         after(async () => {
             if (executorProcess) {
-                executorProcess.kill()
+                await quitExecutor(executorProcess, gqlPort, "123");
             }
         })
 
