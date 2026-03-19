@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use holochain::conductor::api::{AppInfo, AppStatusFilter, CellInfo};
-use holochain::conductor::config::{ConductorConfig, NetworkConfig};
+use holochain::conductor::config::{ConductorConfig, NetworkConfig, SpaceNetworkOverride};
 use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::hash_type::Agent;
@@ -405,6 +405,13 @@ impl HolochainService {
                                         .map_err(|e| anyhow!("Failed to generate new signing keypair: {}", e));
                                     let _ = response_tx.send(HolochainServiceResponse::NewSignKeypair(result));
                                 }
+                                HolochainServiceRequest::SignWithKey(agent_key, data, response_tx) => {
+                                    let keystore = service.conductor.keystore();
+                                    let data_arc = Arc::from(data.into_boxed_slice());
+                                    let result = keystore.sign(agent_key, data_arc).await
+                                        .map_err(|e| anyhow!("Failed to sign with key: {}", e));
+                                    let _ = response_tx.send(HolochainServiceResponse::SignWithKey(result));
+                                }
                             };
                         };
                         error!("Holochain service receiver closed");
@@ -488,11 +495,29 @@ impl HolochainService {
                 network_config.relay_url = Url2::parse("http://bootstrap.ad4m.dev:4433/relay");
             }
 
-            network_config.bootstrap_url =
-                Url2::parse("https://dev-test-bootstrap2.holochain.org/");
-            network_config.signal_url = Url2::parse("wss://dev-test-bootstrap2.holochain.org/");
             network_config.relay_url =
                 Url2::parse("https://use1-1.relay.n0.iroh-canary.iroh.link./");
+
+            // Load unyt space override if auth material and DNA hash are stored
+            if let Ok(Some(dna_hash)) =
+                crate::db::Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_hash"))
+            {
+                if let Ok(Some(auth_material)) = crate::db::Ad4mDb::with_global_instance(|db| {
+                    db.get_setting("unyt_auth_material")
+                }) {
+                    info!("Applying unyt space override for DNA {}", dna_hash);
+                    network_config.space_overrides.insert(
+                        dna_hash,
+                        SpaceNetworkOverride {
+                            bootstrap_url: Some(Url2::parse(
+                                crate::unyt_service::UNYT_BOOTSTRAP_URL,
+                            )),
+                            signal_url: Some(Url2::parse(crate::unyt_service::UNYT_SIGNAL_URL)),
+                            base64_auth_material: Some(auth_material),
+                        },
+                    );
+                }
+            }
 
             config.network = network_config;
 

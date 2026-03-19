@@ -150,6 +150,12 @@ pub async fn ensure_installed() -> Result<(), AnyError> {
             Ok(()) => {
                 let mut installed = INSTALL_ONCE.lock().await;
                 *installed = true;
+
+                // After first successful install: obtain hc-auth bootstrap
+                // credentials and restart the conductor with the space override
+                // so the unyt DNA can reach the network.
+                setup_bootstrap_auth().await;
+
                 return Ok(());
             }
             Err(e) => {
@@ -479,7 +485,159 @@ pub async fn get_or_create_agent_key() -> Result<String, AnyError> {
     Ok(key_str)
 }
 
-/// Capture the DNA hash from the installed app for signal routing.
+// ---------------------------------------------------------------------------
+// HC Auth — bootstrap authentication for the unyt network
+// ---------------------------------------------------------------------------
+
+const HC_AUTH_URL: &str = "https://hc-auth-iroh-unyt.holochain.org";
+pub const UNYT_BOOTSTRAP_URL: &str = "https://bootstrap-iroh-unyt.holochain.org";
+pub const UNYT_SIGNAL_URL: &str = "wss://bootstrap-iroh-unyt.holochain.org";
+
+/// Fetch a challenge from the hc-auth `/now` endpoint, sign it with the unyt
+/// agent key, and return the base64-encoded auth material JSON for the
+/// bootstrap server.
+///
+/// The resulting string is suitable for `base64_auth_material` in the
+/// conductor config's space override.
+pub async fn get_or_create_auth_material() -> Result<String, AnyError> {
+    if let Some(existing) =
+        Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material")).unwrap_or(None)
+    {
+        return Ok(existing);
+    }
+
+    let auth_material = create_auth_material().await?;
+
+    Ad4mDb::with_global_instance(|db| db.set_setting("unyt_auth_material", &auth_material))?;
+    info!("Stored unyt bootstrap auth material");
+
+    Ok(auth_material)
+}
+
+/// Create fresh auth material by calling the hc-auth `/now` endpoint, signing
+/// the challenge, and packing everything into base64-encoded JSON.
+async fn create_auth_material() -> Result<String, AnyError> {
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+
+    let agent_key_str = get_or_create_agent_key().await?;
+    let agent_key = holochain::prelude::AgentPubKey::try_from(agent_key_str.as_str())
+        .map_err(|e| deno_core::anyhow::anyhow!("Invalid agent key: {}", e))?;
+
+    // Raw 32-byte Ed25519 public key is at bytes 3..35 of the 39-byte HoloHash
+    let raw_39 = agent_key.get_raw_39();
+    let raw_pubkey: Vec<u8> = raw_39[3..35].to_vec();
+
+    // GET /now — returns base64url-encoded 32-byte challenge
+    let now_url = format!("{}/now", HC_AUTH_URL);
+    let client = reqwest::Client::new();
+    let payload_b64url = client
+        .get(&now_url)
+        .send()
+        .await
+        .map_err(|e| deno_core::anyhow::anyhow!("Failed to GET {}: {}", now_url, e))?
+        .text()
+        .await
+        .map_err(|e| deno_core::anyhow::anyhow!("Failed to read /now response: {}", e))?;
+
+    let payload_b64url = payload_b64url.trim().to_string();
+    info!("Got hc-auth /now challenge: {}", payload_b64url);
+
+    // Decode the base64url payload to get the 32 raw bytes to sign
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(&payload_b64url)
+        .map_err(|e| deno_core::anyhow::anyhow!("Failed to decode /now payload: {}", e))?;
+
+    if payload_bytes.len() != 32 {
+        return Err(deno_core::anyhow::anyhow!(
+            "Expected 32-byte /now payload, got {} bytes",
+            payload_bytes.len()
+        ));
+    }
+
+    // Sign the raw 32-byte payload with the unyt agent key
+    let hc = get_holochain_service().await;
+    let signature = hc
+        .sign_with_key(agent_key, payload_bytes)
+        .await
+        .map_err(|e| deno_core::anyhow::anyhow!("Failed to sign /now payload: {}", e))?;
+
+    // Build the JSON structure with all fields as base64url-no-pad
+    let pubkey_b64url = URL_SAFE_NO_PAD.encode(&raw_pubkey);
+    let sig_b64url = URL_SAFE_NO_PAD.encode(signature.0.as_ref());
+
+    let auth_json = serde_json::json!({
+        "pubKey": pubkey_b64url,
+        "payload": payload_b64url,
+        "signature": sig_b64url,
+    });
+
+    let auth_json_str = serde_json::to_string(&auth_json)?;
+    let auth_material = STANDARD.encode(auth_json_str.as_bytes());
+
+    info!("Created hc-auth bootstrap auth material");
+    Ok(auth_material)
+}
+
+/// Obtain hc-auth bootstrap credentials and restart the conductor so the
+/// unyt DNA space has its own bootstrap/signal with auth material.
+///
+/// This is a best-effort operation — if any step fails the DNA is still
+/// installed and will simply not have network access until the next restart
+/// (at which point the auth material will be retried).
+async fn setup_bootstrap_auth() {
+    // Skip if auth material is already stored (previous run already set it up)
+    if Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material"))
+        .unwrap_or(None)
+        .is_some()
+    {
+        info!("Bootstrap auth material already exists, skipping setup");
+        return;
+    }
+
+    info!("Setting up hc-auth bootstrap credentials for unyt DNA...");
+
+    match create_auth_material().await {
+        Ok(auth_material) => {
+            if let Err(e) = Ad4mDb::with_global_instance(|db| {
+                db.set_setting("unyt_auth_material", &auth_material)
+            }) {
+                error!("Failed to store auth material: {}", e);
+                return;
+            }
+            info!("Stored unyt bootstrap auth material");
+        }
+        Err(e) => {
+            error!("Failed to create hc-auth material: {}. The unyt DNA will not have network access until this is resolved.", e);
+            return;
+        }
+    }
+
+    // Restart the conductor so the space override takes effect
+    info!("Restarting Holochain conductor to apply unyt space override...");
+    match crate::holochain_service::HolochainService::restart_service().await {
+        Ok(()) => info!("Holochain conductor restarted with unyt space override"),
+        Err(e) => error!("Failed to restart conductor after auth setup: {}", e),
+    }
+}
+
+/// Get the base64-encoded DNA hash string for the installed alliance cell.
+/// Returns the DnaHash in Holochain's native string representation (e.g. "uhC0k..."),
+/// which is the key format used for `space_overrides` in the conductor config.
+pub async fn get_alliance_dna_hash_b64() -> Option<String> {
+    let hc = maybe_get_holochain_service().await?;
+    let app_info = hc.get_app_info(UNYT_APP_ID.to_string()).await.ok()??;
+    for (_role, cells) in &app_info.cell_info {
+        for cell_info in cells {
+            if let holochain::conductor::api::CellInfo::Provisioned(cell) = cell_info {
+                return Some(cell.cell_id.dna_hash().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Capture the DNA hash from the installed app for signal routing and persist
+/// the base64 DNA hash to the DB for conductor space-override configuration.
 async fn capture_dna_hash() {
     let hc = match maybe_get_holochain_service().await {
         Some(hc) => hc,
@@ -503,6 +661,21 @@ async fn capture_dna_hash() {
                         "Captured alliance DNA hash for signal routing: {}",
                         dna_hash_hex
                     );
+
+                    // Persist the DNA hash in Holochain string format for the
+                    // conductor config space_overrides key.
+                    let dna_hash_str = cell.cell_id.dna_hash().to_string();
+                    if let Err(e) = Ad4mDb::with_global_instance(|db| {
+                        db.set_setting("unyt_dna_hash", &dna_hash_str)
+                    }) {
+                        warn!("Failed to persist unyt DNA hash: {}", e);
+                    } else {
+                        info!(
+                            "Persisted unyt DNA hash for space override: {}",
+                            dna_hash_str
+                        );
+                    }
+
                     return;
                 }
             }
