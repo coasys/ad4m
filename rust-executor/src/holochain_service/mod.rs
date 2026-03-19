@@ -466,7 +466,7 @@ impl HolochainService {
     pub async fn new(local_config: LocalConductorConfig) -> Result<HolochainService, AnyError> {
         let conductor_yaml_path =
             std::path::Path::new(&local_config.conductor_path).join("conductor_config.yaml");
-        let config = if conductor_yaml_path.exists() {
+        let mut config = if conductor_yaml_path.exists() {
             ConductorConfig::load_yaml(&conductor_yaml_path)?
         } else {
             let mut config = ConductorConfig::default();
@@ -495,34 +495,32 @@ impl HolochainService {
                 network_config.relay_url = Url2::parse("http://bootstrap.ad4m.dev:4433/relay");
             }
 
-            network_config.relay_url =
-                Url2::parse("https://use1-1.relay.n0.iroh-canary.iroh.link./");
-
-            // Load unyt space override if auth material and DNA hash are stored
-            if let Ok(Some(dna_hash)) =
-                crate::db::Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_hash"))
-            {
-                if let Ok(Some(auth_material)) = crate::db::Ad4mDb::with_global_instance(|db| {
-                    db.get_setting("unyt_auth_material")
-                }) {
-                    info!("Applying unyt space override for DNA {}", dna_hash);
-                    network_config.space_overrides.insert(
-                        dna_hash,
-                        SpaceNetworkOverride {
-                            bootstrap_url: Some(Url2::parse(
-                                crate::unyt_service::UNYT_BOOTSTRAP_URL,
-                            )),
-                            signal_url: Some(Url2::parse(crate::unyt_service::UNYT_SIGNAL_URL)),
-                            base64_auth_material: Some(auth_material),
-                        },
-                    );
-                }
-            }
+            network_config.relay_url = Url2::parse("https://hc-auth-iroh-unyt.holochain.org");
 
             config.network = network_config;
 
             config
         };
+
+        // Apply unyt space override on every start (including restarts),
+        // regardless of whether the config was loaded from YAML or constructed fresh.
+        if let Ok(Some(dna_hash)) =
+            crate::db::Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_hash"))
+        {
+            if let Ok(Some(auth_material)) =
+                crate::db::Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material"))
+            {
+                info!("Applying unyt space override for DNA {}", dna_hash);
+                config.network.space_overrides.insert(
+                    dna_hash,
+                    SpaceNetworkOverride {
+                        bootstrap_url: Some(Url2::parse(crate::unyt_service::UNYT_BOOTSTRAP_URL)),
+                        signal_url: Some(Url2::parse(crate::unyt_service::UNYT_SIGNAL_URL)),
+                        base64_auth_material: Some(auth_material),
+                    },
+                );
+            }
+        }
 
         info!("Starting holochain conductor with config: {:#?}", config);
         let passphrase_locked_array =
