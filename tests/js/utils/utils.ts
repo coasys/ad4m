@@ -1,7 +1,7 @@
 import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions/index.js";
-import { ApolloClient, InMemoryCache } from "@apollo/client/core/index.js";
+import { ApolloClient, InMemoryCache, gql } from "@apollo/client/core/index.js";
 import Websocket from "ws";
 import { createClient } from "graphql-ws";
 import path from "path";
@@ -350,4 +350,43 @@ export async function gracefulShutdown(proc: ChildProcess | null | undefined, la
     }
 
     console.log(`${label} shut down (pid=${proc.pid})`);
+}
+
+/**
+ * Gracefully quit an executor by sending the runtimeQuit GraphQL mutation,
+ * then falling back to gracefulShutdown (SIGTERM → SIGKILL) if needed.
+ */
+export async function quitExecutor(
+    executorProcess: ChildProcess,
+    gqlPort: number,
+    adminCredential?: string,
+    timeoutMs: number = 8000,
+): Promise<void> {
+    if (executorProcess.exitCode !== null) return;
+
+    // Fire the runtimeQuit mutation. The executor calls process::exit(0) which
+    // kills it before it can send a GraphQL response, so we'll get a WebSocket
+    // close error — that's expected.
+    try {
+        const client = apolloClient(gqlPort, adminCredential);
+        await Promise.race([
+            client.mutate({ mutation: gql`mutation { runtimeQuit }` }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('runtimeQuit timeout')), 3000)),
+        ]);
+    } catch (_e) {
+        // Expected: connection dropped or timed out
+    }
+
+    // Wait for natural exit after runtimeQuit
+    const exited = await new Promise<boolean>((resolve) => {
+        if (executorProcess.exitCode !== null) { resolve(true); return; }
+        const timer = setTimeout(() => resolve(false), timeoutMs);
+        executorProcess.once('exit', () => { clearTimeout(timer); resolve(true); });
+    });
+
+    if (!exited) {
+        // runtimeQuit didn't work — fall back to SIGTERM/SIGKILL escalation
+        console.warn(`quitExecutor: executor (port ${gqlPort}) still running after runtimeQuit, falling back to gracefulShutdown`);
+        await gracefulShutdown(executorProcess, `executor:${gqlPort}`);
+    }
 }
