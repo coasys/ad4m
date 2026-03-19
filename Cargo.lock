@@ -20,7 +20,7 @@ checksum = "415ed64958754dbe991900f3940677e6a7eefb4d7367afd70d642677b0c7d19d"
 
 [[package]]
 name = "ad4m"
-version = "0.12.0-rc2"
+version = "0.12.0"
 dependencies = [
  "ad4m-client",
  "ad4m-executor",
@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-client"
-version = "0.12.0-rc2"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-tungstenite",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-executor"
-version = "0.12.0-rc2"
+version = "0.12.0"
 dependencies = [
  "ad4m-client",
  "anyhow",
@@ -128,6 +128,7 @@ dependencies = [
  "multibase",
  "multihash",
  "once_cell",
+ "ort",
  "os_info",
  "percent-encoding",
  "portpicker",
@@ -171,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-launcher"
-version = "0.12.0-rc2"
+version = "0.12.0"
 dependencies = [
  "ad4m-client",
  "ad4m-executor",
@@ -14600,6 +14601,7 @@ checksum = "86d83095ae3c1258738d70ae7a06195c94d966a8e546f0d3609dc90885fb61f5"
 dependencies = [
  "half 2.7.1",
  "js-sys",
+ "libloading 0.8.9",
  "ndarray",
  "ort-sys",
  "thiserror 1.0.69",
