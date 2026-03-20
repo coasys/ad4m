@@ -2,7 +2,8 @@ use std::path::Path;
 use std::process::Command;
 
 const ALLIANCE_DNA_VERSION: &str = "0.64.0";
-const ALLIANCE_DNA_URL: &str = "https://github.com/unytco/unyt-sandbox/releases/download/v0.64.0/alliance.dna";
+const ALLIANCE_DNA_URL: &str =
+    "https://github.com/unytco/unyt-sandbox/releases/download/v0.64.0/alliance.dna";
 
 fn main() {
     // Try to detect if CUDA is installed by checking if `nvcc` is available
