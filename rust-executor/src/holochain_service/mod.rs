@@ -464,6 +464,19 @@ impl HolochainService {
                 .ok_or_else(|| anyhow!("No Holochain config stored for restart"))?
         };
 
+        // Shut down the old conductor first so it releases the port
+        if let Some(hc) = maybe_get_holochain_service().await {
+            log::info!("Shutting down old Holochain conductor...");
+            if let Err(e) = hc.shutdown().await {
+                log::warn!(
+                    "Error shutting down old conductor (continuing anyway): {}",
+                    e
+                );
+            }
+            // Give the OS time to release the port
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
         // Restart the service with the stored config
         Self::init(config).await
     }
