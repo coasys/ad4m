@@ -337,13 +337,14 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::GetNetworkMetrics(response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3),
+                                        std::time::Duration::from_secs(30),
                                         service.get_network_metrics()
                                     ).await.map_err(|_| anyhow!("Timeout error; GetNetworkMetrics")) {
                                         Ok(result) => {
                                             let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(result));
                                         },
                                         Err(err) => {
+                                            error!("GetNetworkMetrics timed out after 30s");
                                             let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(Err(err)));
                                         },
                                     }
@@ -495,15 +496,13 @@ impl HolochainService {
                 network_config.relay_url = Url2::parse("http://bootstrap.ad4m.dev:4433/relay");
             }
 
-            network_config.relay_url = Url2::parse("https://hc-auth-iroh-unyt.holochain.org");
-
             config.network = network_config;
 
             config
         };
 
-        // Apply unyt space override on every start (including restarts),
-        // regardless of whether the config was loaded from YAML or constructed fresh.
+        // Apply unyt space override: the unyt DNA gets its own bootstrap, signal,
+        // relay, and auth material. All other DNAs use the AD4M defaults above.
         if let Ok(Some(dna_hash)) =
             crate::db::Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_hash"))
         {
@@ -517,6 +516,7 @@ impl HolochainService {
                         bootstrap_url: Some(Url2::parse(crate::unyt_service::UNYT_BOOTSTRAP_URL)),
                         signal_url: Some(Url2::parse(crate::unyt_service::UNYT_SIGNAL_URL)),
                         base64_auth_material: Some(auth_material),
+                        relay_url: Some(Url2::parse(crate::unyt_service::UNYT_RELAY_URL)),
                     },
                 );
             }

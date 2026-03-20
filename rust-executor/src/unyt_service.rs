@@ -492,6 +492,7 @@ pub async fn get_or_create_agent_key() -> Result<String, AnyError> {
 const HC_AUTH_URL: &str = "https://hc-auth-iroh-unyt.holochain.org";
 pub const UNYT_BOOTSTRAP_URL: &str = "https://hc-auth-iroh-unyt.holochain.org";
 pub const UNYT_SIGNAL_URL: &str = "wss://hc-auth-iroh-unyt.holochain.org";
+pub const UNYT_RELAY_URL: &str = "https://hc-auth-iroh-unyt.holochain.org";
 
 /// Fetch a challenge from the hc-auth `/now` endpoint, sign it with the unyt
 /// agent key, and return the base64-encoded auth material JSON for the
