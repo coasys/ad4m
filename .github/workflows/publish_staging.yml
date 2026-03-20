@@ -82,7 +82,7 @@ jobs:
     - name: Generate schema.gql (required for rust-client compilation)
       # rust-client/schema.gql is a symlink to core/lib/src/schema.gql which is
       # generated (not in git). We must build it before cargo compiles rust-client.
-      run: cd core && pnpm exec tsx src/buildSchema.ts
+      run: cd core && pnpm exec tsc && pnpm exec tsx lib/src/buildSchema.js
 
     - name: Generate deno snapshot
       env:
@@ -712,7 +712,7 @@ jobs:
       - run: pnpm install --no-frozen-lockfile
       # Generate schema.gql (required for rust-client compilation)
       # build-core-executor no longer exists since Phase 7 removed the JS executor
-      - run: cd core && pnpm exec tsx src/buildSchema.ts
+      - run: cd core && pnpm exec tsc && pnpm exec tsx lib/src/buildSchema.js
       - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
       - name: Publish ad4m-client crate
         working-directory: rust-client
