@@ -256,7 +256,7 @@ export class Ad4mConnectElement extends LitElement {
         // If we have a connected host, start credit polling
         if (this.core.connectedHost) {
           this.selectedHost = this.core.connectedHost;
-          this.core.startCreditPolling();
+          this.core.startCreditSubscription();
         }
       }).catch((error) => {
         // Connection failed - show connection options
@@ -370,7 +370,7 @@ export class Ad4mConnectElement extends LitElement {
     // Called after successful remote auth when a host is selected
     if (this.selectedHost) {
       this.core.setConnectedHost(this.selectedHost);
-      this.core.startCreditPolling();
+      this.core.startCreditSubscription();
       this.currentView = "logged-in-dashboard";
     } else {
       this.modalOpen = false;
