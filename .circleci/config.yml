@@ -118,18 +118,27 @@ jobs:
     steps:
       - setup_integration_test_environment
       - run:
-          name: Kill any orphaned executors from previous runs
-          command: |
-            # Self-hosted runners reuse workdirs; previous job may have left
-            # an executor alive (exec() shell-wrap means kill() only kills
-            # the shell, not the executor grandchild). Clear ports before test.
-            for port in 15700 15701 15702; do
-              lsof -ti:$port | xargs -r kill -9 2>/dev/null || true
-            done
-      - run:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test-main
           no_output_timeout: 30m
+      - run:
+          name: Collect logs on failure
+          when: always
+          command: |
+            mkdir -p /tmp/test-artifacts
+            shopt -s nullglob
+            for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
+              agent_id="$(basename "$(dirname "$ad4m_dir")")"
+              mkdir -p "/tmp/test-artifacts/$agent_id"
+              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+              cp -r "$ad4m_dir/holochain" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+            done
+            # Capture port state for debugging
+            lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
+      - store_artifacts:
+          when: always
+          path: /tmp/test-artifacts
+          destination: test-logs
 
   integration-tests-multi-user-simple:
     machine: true
@@ -157,14 +166,6 @@ jobs:
     steps:
       - setup_integration_test_environment
       - run:
-          name: Kill any orphaned executors from previous runs
-          command: |
-            # MCP tests use ports 16000-16002 (mcp-http) and 16010-16012 (mcp-auth)
-            # plus port 3001 (MCP HTTP server). Clear all before starting.
-            for port in 16000 16001 16002 16010 16011 16012 3001; do
-              lsof -ti:$port | xargs -r kill -9 2>/dev/null || true
-            done
-      - run:
           name: Run MCP integration tests
           command: cd ./tests/js && pnpm install && pnpm run test-mcp
           no_output_timeout: 30m
@@ -174,12 +175,6 @@ jobs:
     resource_class: coasys/marvin
     steps:
       - setup_integration_test_environment
-      - run:
-          name: Kill any orphaned executors from previous runs
-          command: |
-            for port in 15700 15701 15702; do
-              lsof -ti:$port | xargs -r kill -9 2>/dev/null || true
-            done
       - run:
           name: Run Ad4mModel unit + integration tests
           command: cd ./tests/js && pnpm run test-model

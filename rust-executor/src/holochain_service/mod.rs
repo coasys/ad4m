@@ -402,9 +402,18 @@ impl HolochainService {
                                     }
                                 }
                                 HolochainServiceRequest::NewSignKeypair(response_tx) => {
-                                    let result = service.conductor.keystore().new_sign_keypair_random().await
-                                        .map_err(|e| anyhow!("Failed to generate new signing keypair: {}", e));
-                                    let _ = response_tx.send(HolochainServiceResponse::NewSignKeypair(result));
+                                    match timeout(
+                                        std::time::Duration::from_secs(10),
+                                        service.conductor.keystore().new_sign_keypair_random()
+                                    ).await.map_err(|_| anyhow!("Timeout error; NewSignKeypair")) {
+                                        Ok(result) => {
+                                            let result = result.map_err(|e| anyhow!("Failed to generate new signing keypair: {}", e));
+                                            let _ = response_tx.send(HolochainServiceResponse::NewSignKeypair(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::NewSignKeypair(Err(err)));
+                                        },
+                                    }
                                 }
                                 HolochainServiceRequest::SignWithKey(agent_key, data, response_tx) => {
                                     let keystore = service.conductor.keystore();

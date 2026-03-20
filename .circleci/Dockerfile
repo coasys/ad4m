@@ -105,4 +105,12 @@ RUN for f in /usr/include/x86_64-linux-gnu/cudnn*.h; do \
 ENV PATH="/usr/local/cuda-12.5/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/usr/local/cuda-12.5/lib64"
 
+
+# nvidia-smi is part of the NVIDIA driver, not the toolkit.
+# In a CI build container (no GPU), create a stub so build scripts that probe for it don't fail.
+# bindgen_cuda v0.1.5 calls `nvidia-smi --query-gpu=compute_cap --format=csv`
+# and expects a CSV header + value. The stub handles both plain and query modes.
+RUN printf '#!/bin/bash\nif echo "$*" | grep -q "query-gpu"; then\n  FIELDS=$(echo "$*" | sed -n "s/.*--query-gpu=\\([^ ]*\\).*/\\1/p")\n  echo "$FIELDS"\n  echo "8.0"\nelse\n  echo "NVIDIA-SMI 535.00  Driver Version: 535.00  CUDA Version: 12.5"\nfi\nexit 0\n' > /usr/local/bin/nvidia-smi && \
+    chmod +x /usr/local/bin/nvidia-smi
+
 USER circleci

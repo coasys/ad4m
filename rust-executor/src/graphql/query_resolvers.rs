@@ -860,6 +860,32 @@ impl Query {
         Ok(None)
     }
 
+    /// Returns the readiness status of executor subsystems.
+    /// Test harnesses should poll this query instead of using `sleep()`.
+    /// No capability check — readiness is safe to expose publicly.
+    async fn runtime_readiness(&self, _context: &RequestContext) -> FieldResult<ReadinessStatus> {
+        // TODO: holochain_ready only checks if the service handle exists, not actual conductor readiness.
+        // A proper fix would require an API to query conductor state, which doesn't exist yet.
+        let holochain_ready = crate::holochain_service::maybe_get_holochain_service()
+            .await
+            .is_some();
+
+        // TODO: languages_loaded currently maps to wallet unlock state, not language-controller state.
+        // The language loading happens during unlock, but there's no separate API to check if all
+        // languages have finished loading. This is a reasonable approximation for now.
+        let (agent_initialized, languages_loaded) =
+            AgentService::with_global_instance(|agent_service| {
+                (agent_service.is_initialized(), agent_service.is_unlocked())
+            });
+
+        Ok(ReadinessStatus {
+            gql_ready: true, // If this query returns, GQL is ready
+            holochain_ready,
+            agent_initialized,
+            languages_loaded,
+        })
+    }
+
     async fn runtime_known_link_language_templates(
         &self,
         context: &RequestContext,
@@ -1002,8 +1028,14 @@ impl Query {
             };
 
             let hot_wallet_address =
-                Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user.username))
-                    .unwrap_or(None);
+                Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user.username)).map_err(
+                    |e| {
+                        FieldError::new(
+                            format!("Failed to get hot wallet for user {}: {}", user.username, e),
+                            Value::null(),
+                        )
+                    },
+                )?;
 
             user_stats.push(UserStatistics {
                 email: user.username.clone(),
@@ -1033,6 +1065,7 @@ impl Query {
             &context.capabilities,
             &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
         )?;
+        let email = email.trim().to_lowercase();
         let addr =
             Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&email)).map_err(|e| {
                 FieldError::new(
@@ -1139,6 +1172,22 @@ impl Query {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
 
+        // Validate pagination parameters
+        if let Some(p) = page {
+            if p < 0 {
+                return Err(FieldError::new("page must be non-negative", Value::Null));
+            }
+        }
+        const MAX_PER_PAGE: i32 = 1000;
+        if let Some(pp) = per_page {
+            if pp < 1 || pp > MAX_PER_PAGE {
+                return Err(FieldError::new(
+                    format!("per_page must be between 1 and {}", MAX_PER_PAGE),
+                    Value::Null,
+                ));
+            }
+        }
+
         // Fetch outgoing history
         let mut all_txs: Vec<serde_json::Value> = Vec::new();
 
@@ -1149,7 +1198,7 @@ impl Query {
         .await
         {
             Ok(history) => {
-                log::info!("get_history raw result: {}", history);
+                log::debug!("get_history raw result: {}", history);
                 // get_history returns {"items": [...], "low_boundary": ..., "end_of_chain": ...}
                 let items = history
                     .get("items")
@@ -1172,10 +1221,10 @@ impl Query {
         // Fetch incoming transactions via notification links
         match crate::unyt_service::get_all_notification_links().await {
             Ok(links) => {
-                log::info!("get_all_notification_links raw result: {}", links);
+                log::debug!("get_all_notification_links raw result: {}", links);
                 match crate::unyt_service::get_actionable_transactions(links).await {
                     Ok(incoming) => {
-                        log::info!("get_actionable_transactions raw result: {}", incoming);
+                        log::debug!("get_actionable_transactions raw result: {}", incoming);
                         // Result is {"proposal_actionable":[], "commitment_actionable":[], "accept_actionable":[], "reject_actionable":[]}
                         if let Some(obj) = incoming.as_object() {
                             for (category, txs) in obj {
@@ -1260,26 +1309,9 @@ impl Query {
             }
         }
 
-        // Process any reject items to update DB status
-        for tx in &all_txs {
-            if tx.get("direction").and_then(|v| v.as_str()) == Some("rejected") {
-                // Find the original proposal hash from the history chain
-                if let Some(history_arr) = tx.get("history").and_then(|h| h.as_array()) {
-                    for hist_tx in history_arr {
-                        if let Some(hash) = hist_tx.get("id").and_then(|v| v.as_str()) {
-                            let _ = Ad4mDb::with_global_instance(|db| db.reject_pending_send(hash));
-                            let _ = Ad4mDb::with_global_instance(|db| {
-                                db.complete_payment_request(hash)
-                            });
-                        }
-                    }
-                }
-                // Also try the reject's own parent reference
-                if let Some(id) = tx.get("id").and_then(|v| v.as_str()) {
-                    let _ = Ad4mDb::with_global_instance(|db| db.reject_pending_send(id));
-                }
-            }
-        }
+        // NOTE: Rejection reconciliation (reject_pending_send, complete_payment_request)
+        // is handled by check_pending_sends() and check_pending_payments() in unyt_service.rs,
+        // which run periodically. This query resolver is intentionally read-only.
 
         // Enrich counterparty agent pubkeys with user emails from DB
         for tx in &mut all_txs {
