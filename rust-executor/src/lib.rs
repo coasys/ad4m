@@ -476,31 +476,35 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     });
 
     // Spawn credit change flush loop (every 2 seconds)
-    // When any credit mutation sets the dirty flag, this publishes
-    // the updated HostingUserInfo to the subscription topic.
+    // When any credit mutation marks a user dirty, this drains the set
+    // and publishes updated HostingUserInfo only for affected users.
     tokio::spawn(async {
         use crate::db::Ad4mDb;
-        use crate::pubsub::{get_global_pubsub, CREDITS_DIRTY, HOSTING_USER_INFO_CHANGED_TOPIC};
-        use std::sync::atomic::Ordering;
+        use crate::pubsub::{
+            get_global_pubsub, DIRTY_CREDIT_USERS, HOSTING_USER_INFO_CHANGED_TOPIC,
+        };
 
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-            if !CREDITS_DIRTY.swap(false, Ordering::Relaxed) {
+
+            // Drain dirty users
+            let dirty_emails: Vec<String> = {
+                let mut set = match DIRTY_CREDIT_USERS.lock() {
+                    Ok(set) => set,
+                    Err(e) => {
+                        error!("Credit flush: failed to lock dirty set: {}", e);
+                        continue;
+                    }
+                };
+                set.drain().collect()
+            };
+
+            if dirty_emails.is_empty() {
                 continue;
             }
 
-            // Publish updated info for all known users
-            let users = match Ad4mDb::with_global_instance(|db| db.list_users()) {
-                Ok(users) => users,
-                Err(e) => {
-                    error!("Credit flush: failed to list users: {}", e);
-                    continue;
-                }
-            };
-
             let pubsub = get_global_pubsub().await;
-            for user in users {
-                let email = &user.username;
+            for email in &dirty_emails {
                 let free_access = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
                     .unwrap_or(false);
                 let remaining_credits = if free_access {

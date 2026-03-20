@@ -134,13 +134,18 @@ lazy_static::lazy_static! {
     pub static ref HOSTING_USER_INFO_CHANGED_TOPIC: String = "hosting-user-info-changed-topic".to_owned();
 }
 
-/// Dirty flag for batched credit change notifications.
-/// Set to `true` whenever credits are mutated; a background flush loop
-/// periodically checks and publishes updated HostingUserInfo.
-pub static CREDITS_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Per-user dirty set for batched credit change notifications.
+/// When credits are mutated, the affected user's email is inserted.
+/// A background flush loop periodically drains the set and publishes
+/// updated HostingUserInfo only for the affected users.
+pub static DIRTY_CREDIT_USERS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
-pub fn mark_credits_dirty() {
-    CREDITS_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+pub fn mark_credits_dirty(email: &str) {
+    if let Ok(mut set) = DIRTY_CREDIT_USERS.lock() {
+        set.insert(email.to_owned());
+    }
 }
 
 pub async fn get_global_pubsub() -> Arc<PubSub> {

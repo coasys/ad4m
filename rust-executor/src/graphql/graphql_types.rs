@@ -1216,7 +1216,7 @@ impl GetValue for HostingUserInfo {
 
 impl GetFilter for HostingUserInfo {
     fn get_filter(&self) -> Option<String> {
-        None
+        Some(self.email.clone())
     }
 }
 

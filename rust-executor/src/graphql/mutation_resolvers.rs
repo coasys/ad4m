@@ -67,7 +67,7 @@ fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
         if !free {
             Ad4mDb::with_global_instance(|db| db.deduct_user_credits_if_available(email, amount))
                 .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
-            mark_credits_dirty();
+            mark_credits_dirty(email);
         }
     }
     Ok(())
@@ -3270,7 +3270,7 @@ impl Mutation {
             })
         })?;
 
-        mark_credits_dirty();
+        mark_credits_dirty(&email);
         Ok(true)
     }
 
@@ -3297,7 +3297,7 @@ impl Mutation {
             })
         })?;
 
-        mark_credits_dirty();
+        mark_credits_dirty(&email);
         Ok(true)
     }
 

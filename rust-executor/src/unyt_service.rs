@@ -741,7 +741,7 @@ fn credit_and_complete(request: &crate::db::PaymentRequest) {
         return;
     }
 
-    mark_credits_dirty();
+    mark_credits_dirty(&request.user_email);
     info!("Credited user {} with {} HOT", request.user_email, amount);
 
     if let Some(ref action_hash) = request.proposal_action_hash {
@@ -1010,7 +1010,7 @@ pub async fn handle_signal(payload_json: &JsonValue) {
                         email, amount_f64, e
                     );
                 } else {
-                    mark_credits_dirty();
+                    mark_credits_dirty(&email);
                     info!(
                         "Credited user {} with {} HOT from mHOT payment",
                         email, amount_f64

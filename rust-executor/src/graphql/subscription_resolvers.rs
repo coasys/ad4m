@@ -570,9 +570,10 @@ impl Subscription {
         match check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY) {
             Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
+                let filter = user_email_from_token(context.auth_token.clone());
                 let pubsub = get_global_pubsub().await;
                 let topic = &HOSTING_USER_INFO_CHANGED_TOPIC;
-                subscribe_and_process::<HostingUserInfo>(pubsub, topic.to_string(), None).await
+                subscribe_and_process::<HostingUserInfo>(pubsub, topic.to_string(), filter).await
             }
         }
     }
