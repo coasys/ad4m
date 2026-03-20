@@ -338,7 +338,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 [![Discord](https://img.shields.io/discord/887669548969517056?label=Discord&logo=discord&logoColor=white&style=for-the-badge)](https://discord.com/invite/fYGVM66jEz)
 [![X (Twitter)](https://img.shields.io/badge/Follow-@ad4m__layer-black?logo=x&logoColor=white&style=for-the-badge)](https://x.com/ad4m_layer)
-[![Blog](https://img.shields.io/badge/Blog-blog.coasys.org-orange?style=for-the-badge)](https://blog.coasys.org)
+[![Blog](https://img.shields.io/badge/Blog-Medium-orange?logo=medium&logoColor=white&style=for-the-badge)](https://medium.com/coasys)
 
 ## Ecosystem
 
