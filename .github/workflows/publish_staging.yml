@@ -84,6 +84,9 @@ jobs:
       # generated (not in git). We must build it before cargo compiles rust-client.
       run: cd core && pnpm exec tsc && pnpm exec tsx lib/src/buildSchema.js
 
+    - name: Create placeholder dapp/dist (include_dir! panics if dir missing)
+      run: mkdir -p dapp/dist
+
     - name: Generate deno snapshot
       env:
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
