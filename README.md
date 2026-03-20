@@ -368,7 +368,7 @@ AD4M is developed by [Coasys](https://coasys.org) and builds upon ideas from:
 - [Holochain](https://github.com/holochain/holochain) distributed architecture
 - [Solid](https://solidproject.org/) personal data stores
 - [Decentralized Identifiers](https://www.w3.org/TR/did-1.0/) (DIDs & VCs)
-- Immanent Metaphysics (Forrest Landry)
+- [Immanent Metaphysics](https://civilizationemerging.com/wp-content/uploads/2020/06/An-Immanent-Metaphysics-Forrest-Landry.pdf) (Forrest Landry)
 - Theory of Conscious Agents (Donald Hoffman)
 
 ---
