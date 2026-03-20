@@ -135,7 +135,7 @@ export class RemoteAuthentication extends LitElement {
 
         <div class="header">
           <h1>Login or Register</h1>
-          ${this.host ? html`<p style="font-size: 13px; color: rgba(255,255,255,0.4); margin-top: 4px;">${this.host.url}</p>` : ''}
+          ${this.host ? html`<p style="font-size: 15px; color: rgba(255,255,255,0.4); margin-top: 4px;">${this.host.url}</p>` : ''}
         </div>
 
         ${showEmailInput ?
@@ -161,7 +161,7 @@ export class RemoteAuthentication extends LitElement {
 
             <div class="login-button" style="margin-top: 10px;">
               <button class="primary" @click=${this.emailLogin} .disabled=${this.remoteAuthLoading || !this.isValidEmail()}>
-                ${this.remoteAuthLoading ? "Loading..." : "Login"}
+                ${this.remoteAuthLoading ? "Loading..." : "Continue"}
               </button>
             </div>
           `
