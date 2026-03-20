@@ -8,27 +8,31 @@
 # AD4M: Agent-Centric Distributed Application Meta-ontology
 
 <div align="center">
-  <img src="/docs-src/public/images/ad4m-spanning-layer.jpg" alt="AD4M Banner">
+  <img src="docs-src/public/images/ad4m-spanning-layer.jpg" alt="AD4M Banner">
 </div>
 
 ## Vision
 
-AD4M is a revolutionary spanning layer that extends the internet stack to enable true collective intelligence in a fully distributed way. Just as TCP/IP created a universal protocol for machines to communicate, AD4M creates a universal protocol for agents (humans and their devices) to make meaning together.
+AD4M is a revolutionary spanning layer that extends the internet stack to enable true collective intelligence in a fully distributed way. Just as TCP/IP created a universal protocol for machines to communicate, AD4M creates a universal protocol for agents — both human and AI — to make meaning together.
+
+**"Agent-centric" means exactly what it says:** every agent, whether a person or an AI, runs its own sovereign node and participates as a first-class peer in the network. There is no central server deciding who gets to connect or what protocols they must use. This makes AD4M the natural peer-to-peer infrastructure for AI agents that need persistent identity, shared memory, and real-time collaboration with humans and each other — all without platform lock-in.
 
 This new layer is needed because:
 - The current web is fragmented into data silos and walled gardens
 - We lack a universal way to connect meaning across platforms and protocols
-- Collective intelligence requires sovereignty and interoperability
-- The future of human collaboration needs agent-centric architecture
+- AI agents need sovereign infrastructure — not API keys to someone else's server
+- Collective intelligence requires both sovereignty and interoperability
+- The future of collaboration is humans and AI agents working together as peers
 
 AD4M solves these challenges by:
 - Creating a semantic overlay across all existing protocols
 - Enabling any storage or communication method through pluggable Languages
 - Treating all data as agent-authored expressions with verifiable provenance
 - Building meaning through shared perspectives and social DNA
-- Providing a foundation for truly distributed collective intelligence
+- Giving AI agents the same first-class status as human agents in a P2P network
+- Providing a super-evolvable foundation — new protocols and patterns can be added without breaking existing ones
 
-Think of AD4M as the missing piece in the internet stack – one that transcends mere data exchange to enable meaningful collaboration between sovereign agents, regardless of the underlying protocols or platforms they use.
+Think of AD4M as the missing piece in the internet stack – one that transcends mere data exchange to enable meaningful collaboration between sovereign agents (human and AI alike), regardless of the underlying protocols or platforms they use.
 
 ## Architecture & Execution Strategy
 
@@ -51,7 +55,7 @@ AD4M integrates several powerful technologies into a cohesive whole:
 - [Scryer-Prolog](https://github.com/mthom/scryer-prolog): For semantic reasoning and queries
 - [Juniper](https://github.com/graphql-rust/juniper): For GraphQL API capabilities
 - [Kalosm](https://github.com/floneum/floneum): For AI model inference with Candle
-- [rustql](https://github.com/rust-corpus/rustql): For local data persistence
+- [SurrealDB](https://github.com/surrealdb/surrealdb): For local graph-relational data persistence and live queries
 
 This complexity is necessary to provide a rich, sovereign computing environment – but it's all packaged to run smoothly on personal devices.
 
