@@ -108,8 +108,8 @@ const styles = css`
   }
 
   .modal-header .back-button svg {
-    width: 28px;
-    height: 28px;
+    width: 20px;
+    height: 20px;
   }
 
   .modal-header .back-button:hover {
@@ -236,7 +236,7 @@ export class Ad4mConnectElement extends LitElement {
         incoming.hotWalletAddress = this.userInfo.hotWalletAddress;
       }
       this.userInfo = incoming;
-      this.lowCredit = this.userInfo.remainingCredits <= 10;
+      this.lowCredit = this.userInfo.remainingCredits <= this.core.lowCreditThreshold;
       this.requestUpdate();
     });
 
