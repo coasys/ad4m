@@ -1668,7 +1668,7 @@ describe("ad4mPlugin", () => {
     }, 50);
 
     const mockApi = {
-      id: "ad4m-openclaw-plugin",
+      id: "ad4m",
       pluginConfig: {
         mode: "managed",
       },
@@ -2002,7 +2002,7 @@ describe("ad4mPlugin", () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No executor"));
 
     const mockApi = {
-      id: "ad4m-openclaw-plugin",
+      id: "ad4m",
       pluginConfig: {
         mode: "external",
         mcpEndpoint: "http://localhost:3001/mcp",
@@ -2033,7 +2033,7 @@ describe("ad4mPlugin", () => {
 
   it("logs setup hint when mode is not configured", async () => {
     const mockApi: any = {
-      id: "ad4m-openclaw-plugin",
+      id: "ad4m",
       pluginConfig: {},
       logger: makeMockLogger(),
       registerTool: vi.fn(),
@@ -2058,7 +2058,7 @@ describe("ad4mPlugin", () => {
 
   it("registers ad4m-setup CLI command", () => {
     const mockApi: any = {
-      id: "ad4m-openclaw-plugin",
+      id: "ad4m",
       pluginConfig: {},
       logger: makeMockLogger(),
       registerTool: vi.fn(),
