@@ -132,6 +132,10 @@ const Hosting = () => {
   } | null>(null);
   const [hostRegistering, setHostRegistering] = useState(false);
   const [profilePic, setProfilePic] = useState<File | null>(null);
+  const profilePicUrl = React.useMemo(() => {
+    if (profilePic) return URL.createObjectURL(profilePic);
+    return null;
+  }, [profilePic]);
   const [verificationCode, setVerificationCode] = useState("");
   const [membraneProofStatus, setMembraneProofStatus] =
     useState<MembraneProofStatus>("none");
@@ -149,7 +153,8 @@ const Hosting = () => {
     from_address: string;
   } | null>(null);
   const [smtpChanged, setSmtpChanged] = useState(false);
-  const [smtpTesting, setSmtpTesting] = useState(false);
+  const [smtpTestVisible, setSmtpTestVisible] = useState(false);
+  const [smtpTestLoading, setSmtpTestLoading] = useState(false);
   const [smtpTestStatus, setSmtpTestStatus] = useState("");
   const [smtpTestEmail, setSmtpTestEmail] = useState("");
   const [showSmtpPassword, setShowSmtpPassword] = useState(false);
@@ -326,7 +331,7 @@ const Hosting = () => {
 
         const detail = data.detail ? ` [${data.detail}]` : "";
         throw new Error(
-          data.error || `Failed to get membrane proof (${res.status})`,
+          (data.error || `Failed to get membrane proof (${res.status})`) + detail,
         );
       }
 
@@ -680,7 +685,7 @@ const Hosting = () => {
 
   const handleSmtpTest = async () => {
     if (!smtpConfig || !smtpTestEmail) return;
-    setSmtpTesting(true);
+    setSmtpTestLoading(true);
     setSmtpTestStatus("");
     try {
       await invoke<void>("test_smtp_config", {
@@ -691,7 +696,7 @@ const Hosting = () => {
     } catch (error) {
       setSmtpTestStatus("Failed: " + error);
     } finally {
-      setSmtpTesting(false);
+      setSmtpTestLoading(false);
     }
   };
 
@@ -719,7 +724,9 @@ const Hosting = () => {
       filters: [{ name: "Certificate", extensions: ["pem", "crt", "cert"] }],
     });
     if (filePath && tlsConfig) {
-      setTlsConfig({ ...tlsConfig, cert_file_path: filePath.toString() });
+      const newConfig = { ...tlsConfig, cert_file_path: filePath.toString() };
+      setTlsConfig(newConfig);
+      await handleTlsConfigChange(newConfig);
     }
   };
 
@@ -729,7 +736,9 @@ const Hosting = () => {
       filters: [{ name: "Private Key", extensions: ["pem", "key"] }],
     });
     if (filePath && tlsConfig) {
-      setTlsConfig({ ...tlsConfig, key_file_path: filePath.toString() });
+      const newConfig = { ...tlsConfig, key_file_path: filePath.toString() };
+      setTlsConfig(newConfig);
+      await handleTlsConfigChange(newConfig);
     }
   };
 
@@ -1486,9 +1495,9 @@ const Hosting = () => {
                             ></j-icon>
                           </div>
                         </div>
-                      ) : profilePic ? (
+                      ) : profilePicUrl ? (
                         <img
-                          src={URL.createObjectURL(profilePic)}
+                          src={profilePicUrl}
                           alt=""
                           style={{
                             width: "80px",
@@ -2119,14 +2128,14 @@ const Hosting = () => {
                             variant="subtle"
                             onClick={() => {
                               setSmtpTestEmail(hostSession?.email || "");
-                              setSmtpTesting(true);
+                              setSmtpTestVisible(true);
                             }}
                           >
                             Send Test
                           </j-button>
                         </j-flex>
 
-                        {smtpTesting && (
+                        {smtpTestVisible && (
                           <j-box mb="300">
                             <j-flex gap="200">
                               <j-input
@@ -2139,7 +2148,7 @@ const Hosting = () => {
                               <j-button
                                 variant="primary"
                                 onClick={handleSmtpTest}
-                                loading={smtpTesting}
+                                loading={smtpTestLoading}
                               >
                                 Send
                               </j-button>

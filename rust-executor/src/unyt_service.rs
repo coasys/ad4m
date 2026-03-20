@@ -360,6 +360,15 @@ roles:
                 "Unyt alliance DNA installed successfully: {:?}",
                 app_info.installed_app_id
             );
+            // Store the actual installed agent key so hc-auth uses the correct key
+            let installed_key_str = app_info.agent_pub_key.to_string();
+            if let Err(e) = Ad4mDb::with_global_instance(|db| {
+                db.set_setting("unyt_agent_key", &installed_key_str)
+            }) {
+                warn!("Failed to store installed agent key: {}", e);
+            } else {
+                info!("Stored installed Unyt agent key: {}", installed_key_str);
+            }
         }
         Err(e) => {
             error!("Failed to install Unyt alliance DNA: {}", e);
@@ -414,6 +423,9 @@ pub async fn reinstall() -> Result<(), AnyError> {
     };
 
     do_install(&data_path, &hc).await?;
+
+    // After reinstall: set up bootstrap auth (same as fresh install)
+    setup_bootstrap_auth().await;
 
     let mut installed = INSTALL_ONCE.lock().await;
     *installed = true;
@@ -521,13 +533,21 @@ async fn create_auth_material() -> Result<String, AnyError> {
     let agent_key = holochain::prelude::AgentPubKey::try_from(agent_key_str.as_str())
         .map_err(|e| deno_core::anyhow::anyhow!("Invalid agent key: {}", e))?;
 
-    // Raw 32-byte Ed25519 public key is at bytes 3..35 of the 39-byte HoloHash
+    // HoloHash layout: bytes 0-2 = type prefix, 3-34 = 32-byte Ed25519 pubkey, 35-38 = location
     let raw_39 = agent_key.get_raw_39();
+    assert!(
+        raw_39.len() == 39,
+        "Expected 39-byte HoloHash, got {} bytes",
+        raw_39.len()
+    );
     let raw_pubkey: Vec<u8> = raw_39[3..35].to_vec();
 
     // GET /now — returns base64url-encoded 32-byte challenge
     let now_url = format!("{}/now", HC_AUTH_URL);
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let payload_b64url = client
         .get(&now_url)
         .send()
