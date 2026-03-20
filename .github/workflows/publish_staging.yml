@@ -79,6 +79,11 @@ jobs:
     - name: pnpm Install
       run: pnpm install --no-frozen-lockfile
 
+    - name: Generate schema.gql (required for rust-client compilation)
+      # rust-client/schema.gql is a symlink to core/lib/src/schema.gql which is
+      # generated (not in git). We must build it before cargo compiles rust-client.
+      run: cd core && pnpm exec tsx src/buildSchema.ts
+
     - name: Generate deno snapshot
       env:
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
