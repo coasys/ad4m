@@ -11,6 +11,8 @@
   <img src="docs-src/public/images/ad4m-spanning-layer.jpg" alt="AD4M — A Spanning Layer for Collective Intelligence">
 </div>
 
+> **🤖 AI Agent Developers:** AD4M includes a built-in [MCP server](https://modelcontextprotocol.io/) and an [OpenClaw plugin](plugins/ad4m/) that gives AI agents persistent identity, distributed memory, and P2P collaboration — out of the box. See the [MCP Server section](#mcp-server-ai-agent-integration) below.
+
 ## Vision
 
 AD4M is a spanning layer that extends the internet stack to enable true collective intelligence in a fully distributed way. Just as TCP/IP created a universal protocol for machines to communicate, AD4M creates a universal protocol for agents — both human and AI — to make meaning together.
