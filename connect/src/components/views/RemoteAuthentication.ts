@@ -70,15 +70,6 @@ export class RemoteAuthentication extends LitElement {
     `
   ];
 
-  private back() {
-    this.dispatchEvent(new CustomEvent("back", { bubbles: true, composed: true }));
-    this.remoteAuthState = null;
-    // Clear sensitive fields when navigating back
-    this.password = "";
-    this.confirmPassword = "";
-    this.emailSecurityCode = "";
-  }
-
   private emailLogin() {
     this.dispatchEvent(new CustomEvent("email-login", { detail: { email: this.email.trim() }, bubbles: true, composed: true }));
   }
@@ -130,8 +121,8 @@ export class RemoteAuthentication extends LitElement {
     return html`
       <div class="container">
         <div class="header">
-          <h1>${showLoginPasswordInput ? 'Login' : showSignUpPasswordInput ? 'Register' : 'Login or Register'}</h1>
-          ${this.host ? html`<p style="font-size: 15px; color: rgba(255,255,255,0.4); margin-top: 4px;">${this.host.url}</p>` : ''}
+          <h1 style="font-size: 28px;">${showLoginPasswordInput ? 'Login' : showSignUpPasswordInput ? 'Register' : 'Login or Register'}</h1>
+          ${this.host ? html`<p style="font-size: 15px; color: rgba(255,255,255,0.4); margin-top: 10px;">${this.host.url}</p>` : ''}
         </div>
 
         ${showEmailInput ?
@@ -169,12 +160,6 @@ export class RemoteAuthentication extends LitElement {
             <div class="state danger">
               ${CrossIcon()}
               <p>${this.remoteAuthState.message || "Failed to process email. Please try again."}</p>
-            </div>
-
-            <div class="login-button">
-              <button class="primary" @click=${this.back}>
-                Back
-              </button>
             </div>
           `
           : ``

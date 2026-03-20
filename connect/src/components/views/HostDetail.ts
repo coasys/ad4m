@@ -1,6 +1,7 @@
 import { LitElement, html, css, TemplateResult } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { sharedStyles } from "../../styles/shared-styles";
+import { MapPinIcon } from "../icons";
 import { renderHostAvatar } from "../shared/avatar";
 import type { RemoteHost } from "../../types";
 
@@ -19,8 +20,8 @@ export class HostDetail extends LitElement {
       }
 
       .profile-pic {
-        width: 72px;
-        height: 72px;
+        width: 100px;
+        height: 100px;
         border-radius: 50%;
         object-fit: cover;
         background: rgba(128, 178, 201, 0.2);
@@ -43,14 +44,20 @@ export class HostDetail extends LitElement {
       }
 
       .profile-location {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
         font-size: 14px;
         color: rgba(255, 255, 255, 0.6);
         margin: 0;
       }
 
+      .profile-location svg {
+        opacity: 0.7;
+      }
+
       .profile-description {
         font-size: 14px;
-        color: rgba(255, 255, 255, 0.5);
         margin: 0;
         text-align: center;
         line-height: 1.4;
@@ -162,7 +169,7 @@ export class HostDetail extends LitElement {
         <div class="profile">
           ${this.renderAvatar()}
           <p class="profile-name">${this.host.name}</p>
-          <p class="profile-location">${this.host.location}</p>
+          <p class="profile-location">${MapPinIcon()}${this.host.location}</p>
           ${this.host.description ? html`<p class="profile-description">${this.host.description}</p>` : ''}
 
           ${this.host.aiModels.length > 0 ? html`
