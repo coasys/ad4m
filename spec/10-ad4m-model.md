@@ -2,9 +2,9 @@
 
 ## 10.1 Overview
 
-Ad4mModel is the **primary developer-facing API** for building applications on AD4M. It provides a decorator-based, ORM-like abstraction over the link graph, SHACL shapes, and SPARQL queries.
+Ad4mModel is the **primary developer-facing API** for building applications on AD4M. It provides a decorator-based, ORM-like abstraction over the link graph and SHACL shapes.
 
-Application developers SHOULD use Ad4mModel for all data operations. Developers SHOULD NOT interact directly with links, SHACL shapes, SPARQL, or Holochain primitives unless building framework-level tooling.
+Application developers SHOULD use Ad4mModel for all data operations. Developers SHOULD NOT interact directly with links, SHACL shapes, or Holochain primitives unless building framework-level tooling.
 
 The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
 
@@ -329,41 +329,16 @@ const results = await Message.query(perspective)
   .execute();
 ```
 
-## 10.6 Query Engine — SPARQL
+## 10.6 Query Engine
 
-Ad4mModel generates **SPARQL** queries from the Query DSL. The underlying GraphQL field is `perspectiveQuerySPARQL`.
+Ad4mModel translates the Query DSL into queries against the implementation's query engine. The queries operate over the link graph, where each link is a triple `(source, predicate, target)`.
 
-Implementations MUST support SPARQL as the query engine for Ad4mModel operations. The SPARQL queries operate over the link graph, where each link is a triple `(source, predicate, target)`.
+The reference AD4M implementation provides two query interfaces:
 
-Example generated SPARQL for `Todo.findAll(p, { where: { state: "done" } })`:
+- **`perspectiveQuerySurrealDB`** — Link graph queries using SurrealDB's query language. This is the primary query path used by Ad4mModel for filtering, ordering, pagination, and aggregation.
+- **`perspectiveInfer`** — Prolog-based inference over links and SDNA. Used for SHACL shape conformance checks, constructor/destructor action resolution, and custom inference rules.
 
-```sparql
-SELECT DISTINCT ?subject WHERE {
-  ?subject <todo://state> ?state .
-  FILTER(?state = "done")
-}
-```
-
-### Raw SPARQL Access
-
-For advanced queries beyond the Query DSL, raw SPARQL MAY be executed:
-
-```typescript
-const results = await perspective.querySPARQL(`
-  SELECT ?msg ?body WHERE {
-    ?channel <flux://has_message> ?msg .
-    ?msg <flux://has_body> ?body .
-    FILTER(?channel = <${channelUri}>)
-  }
-  ORDER BY DESC(?body)
-  LIMIT 50
-`);
-```
-
-### Deprecated Query Engines
-
-- `perspectiveQuerySurrealDB` — **DEPRECATED**. Implementations MAY translate SurrealDB queries to SPARQL internally for backward compatibility, but new applications MUST NOT depend on SurrealDB support.
-- `perspectiveInfer` (Prolog) — **DEPRECATED**. Legacy Prolog inference is not required in new implementations.
+Implementations MAY use different underlying engines provided they support equivalent query semantics over the link graph. The Ad4mModel Query DSL (§10.5) is the stable API surface — the translation to a specific query language is an implementation detail.
 
 ## 10.7 SHACL Shape Generation
 
@@ -419,11 +394,11 @@ The `x-ad4m` extension in JSON Schema properties maps to Ad4mModel decorator opt
 |---------|----------|-------|
 | Ad4mModel base class with CRUD | **SHOULD** | Primary developer API |
 | Decorator-based model declaration | **SHOULD** | `@Model`, `@Property`, `@Optional`, `@Flag`, `@HasMany`, `@HasOne`, `@BelongsToOne`, `@BelongsToMany`, `@Collection` |
-| Query DSL (where, order, limit, offset, parent) | **SHOULD** | Must translate to SPARQL |
-| SPARQL query generation | **MUST** | Required query engine |
+| Query DSL (where, order, limit, offset, parent) | **SHOULD** | Must translate to the implementation's query engine |
+| Link graph query support | **MUST** | Required for Ad4mModel query execution |
 | Fluent query builder | **MAY** | Developer convenience |
 | JSON Schema integration | **MAY** | Dynamic model creation |
 | Dirty tracking and save | **SHOULD** | Efficient link mutation |
 | Batch operations (batchId) | **MAY** | Group mutations for sync efficiency |
 
-Client-side Ad4mModel implementations (TypeScript/JavaScript) are the primary target. Server-side executors MUST support `perspectiveQuerySPARQL` to enable Ad4mModel query execution.
+Client-side Ad4mModel implementations (TypeScript/JavaScript) are the primary target. Server-side executors MUST support link graph queries to enable Ad4mModel query execution.
