@@ -59,6 +59,7 @@ temp
 
 rust-executor/CUSTOM_DENO_SNAPSHOT.bin
 rust-executor/test_data
+rust-executor/src/resources/alliance_*.dna
 
 .npmrc
 docs-src/out
