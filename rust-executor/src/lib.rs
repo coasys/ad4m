@@ -475,6 +475,86 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         }
     });
 
+    // Spawn credit change flush loop (every 2 seconds)
+    // When any credit mutation marks a user dirty, this drains the set
+    // and publishes updated HostingUserInfo only for affected users.
+    tokio::spawn(async {
+        use crate::db::Ad4mDb;
+        use crate::pubsub::{
+            get_global_pubsub, DIRTY_CREDIT_USERS, HOSTING_USER_INFO_CHANGED_TOPIC,
+        };
+
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+            // Drain dirty users
+            let dirty_emails: Vec<String> = {
+                let mut set = match DIRTY_CREDIT_USERS.lock() {
+                    Ok(set) => set,
+                    Err(e) => {
+                        error!("Credit flush: failed to lock dirty set: {}", e);
+                        continue;
+                    }
+                };
+                set.drain().collect()
+            };
+
+            if dirty_emails.is_empty() {
+                continue;
+            }
+
+            let pubsub = get_global_pubsub().await;
+            for email in &dirty_emails {
+                let free_access =
+                    match Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!(
+                                "Credit flush: get_user_free_access failed for {}: {}",
+                                email, e
+                            );
+                            continue;
+                        }
+                    };
+                let remaining_credits = if free_access {
+                    "unlimited".to_string()
+                } else {
+                    match Ad4mDb::with_global_instance(|db| db.get_user_credits(email)) {
+                        Ok(credits) => format!("{}", credits),
+                        Err(e) => {
+                            error!("Credit flush: get_user_credits failed for {}: {}", email, e);
+                            continue;
+                        }
+                    }
+                };
+                let hot_wallet_address =
+                    match Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(email)) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!(
+                                "Credit flush: get_user_hot_wallet failed for {}: {}",
+                                email, e
+                            );
+                            continue;
+                        }
+                    };
+
+                let info = crate::graphql::graphql_types::HostingUserInfo {
+                    email: email.clone(),
+                    remaining_credits,
+                    hot_wallet_address,
+                    free_access,
+                };
+
+                if let Ok(json) = serde_json::to_string(&info) {
+                    pubsub
+                        .publish(&HOSTING_USER_INFO_CHANGED_TOPIC, &json)
+                        .await;
+                }
+            }
+        }
+    });
+
     // Check if MCP mode is enabled — run MCP server alongside GraphQL
     if config.enable_mcp == Some(true) {
         info!("Starting MCP server alongside GraphQL...");
