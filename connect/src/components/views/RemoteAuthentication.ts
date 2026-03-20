@@ -76,7 +76,20 @@ export class RemoteAuthentication extends LitElement {
     this.dispatchEvent(new CustomEvent("email-login", { detail: { email: this.email.trim() }, bubbles: true, composed: true }));
   }
 
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this.clearSensitiveState();
+  }
+
+  private clearSensitiveState() {
+    this.password = "";
+    this.confirmPassword = "";
+    this.emailSecurityCode = "";
+    this.email = "";
+  }
+
   private tryAgain() {
+    this.clearSensitiveState();
     this.dispatchEvent(new CustomEvent("reset-auth-state", { bubbles: true, composed: true }));
   }
 
