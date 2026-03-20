@@ -21,6 +21,7 @@ AD4M has been demonstrated as a protocol (not just an implementation) through th
 7. **[Bootstrap & System Languages](./07-bootstrap-languages.md)** — System bootstrap and core language types
 8. **[Interoperability Requirements](./08-interoperability.md)** — MUST/SHOULD requirements for alternative implementations
 9. **[Versioning & Compatibility](./09-versioning.md)** — Protocol versioning strategy
+10. **[Ad4mModel](./10-ad4m-model.md)** — Application data model API (decorator-based ORM over links, SHACL, and SPARQL)
 
 ## Conventions
 
