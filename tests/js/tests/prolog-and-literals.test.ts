@@ -13,7 +13,7 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     PropertyOptions,
 } from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
-import { startExecutor, apolloClient } from "../utils/utils";
+import { startExecutor, apolloClient, quitExecutor } from "../utils/utils";
 import path from "path";
 import { fileURLToPath } from 'url';
 import fetch from 'node-fetch'
@@ -50,11 +50,7 @@ describe("Prolog + Literals", () => {
 
     after(async () => {
         if (executorProcess) {
-            while (!executorProcess?.killed) {
-                let status  = executorProcess?.kill();
-                console.log("killed executor with", status);
-                await sleep(500);
-            }
+            await quitExecutor(executorProcess, gqlPort);
         }
     })
 

@@ -40,11 +40,15 @@ const DEFAULT_EMBEDDING_TOKEN_RATE: f64 = 1.0; // per input token
 const DEFAULT_LINK_WRITE_RATE: f64 = 0.25; // per link write
 
 /// Look up a rate from the host_rates DB table, falling back to the given default.
-fn get_rate(description: &str, default: f64) -> f64 {
-    Ad4mDb::with_global_instance(|db| db.get_host_rate(description))
-        .ok()
-        .flatten()
-        .unwrap_or(default)
+fn get_rate(description: &str, default: f64) -> FieldResult<f64> {
+    match Ad4mDb::with_global_instance(|db| db.get_host_rate(description)) {
+        Ok(Some(rate)) => Ok(rate),
+        Ok(None) => Ok(default),
+        Err(e) => Err(FieldError::new(
+            format!("Failed to read host rate: {}", e),
+            graphql_value!(null),
+        )),
+    }
 }
 
 /// Deduct compute credits for a user after an operation completes.
@@ -59,7 +63,7 @@ fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
             .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
         if !free {
-            Ad4mDb::with_global_instance(|db| db.deduct_user_credits(email, amount))
+            Ad4mDb::with_global_instance(|db| db.deduct_user_credits_if_available(email, amount))
                 .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
         }
     }
@@ -1954,7 +1958,7 @@ impl Mutation {
 
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
-            get_rate("link write", DEFAULT_LINK_WRITE_RATE),
+            get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
         ) {
             log::warn!("Call exceeded compute credits (add_link): result returned but future calls will fail. Details: {:?}", e);
         }
@@ -1982,7 +1986,7 @@ impl Mutation {
 
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
-            get_rate("link write", DEFAULT_LINK_WRITE_RATE),
+            get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
         ) {
             log::warn!("Call exceeded compute credits (add_link_expression): result returned but future calls will fail. Details: {:?}", e);
         }
@@ -2017,7 +2021,7 @@ impl Mutation {
 
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
-            link_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE),
+            link_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
         ) {
             log::warn!("Call exceeded compute credits (add_links, count={}): result returned but future calls will fail. Details: {:?}", link_count, e);
         }
@@ -2047,7 +2051,7 @@ impl Mutation {
 
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
-            additions_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE),
+            additions_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
         ) {
             log::warn!("Call exceeded compute credits (link_mutations, additions={}): result returned but future calls will fail. Details: {:?}", additions_count, e
             );
@@ -2507,7 +2511,17 @@ impl Mutation {
 
     async fn runtime_quit(&self, context: &RequestContext) -> FieldResult<bool> {
         check_capability(&context.capabilities, &RUNTIME_QUIT_CAPABILITY)?;
-        std::process::exit(0);
+        // Trigger graceful shutdown via the global shutdown channel.
+        // The main loop will shut down Holochain conductor, flush state, and exit cleanly.
+        // If the shutdown channel is already consumed, assume shutdown is in progress and return success.
+        if let Some(tx) = crate::globals::SHUTDOWN_TX.lock().unwrap().take() {
+            log::info!("runtime_quit: sending graceful shutdown signal");
+            let _ = tx.send(());
+            Ok(true)
+        } else {
+            log::warn!("runtime_quit: shutdown channel already consumed, shutdown is in progress");
+            Ok(true)
+        }
     }
 
     async fn runtime_remove_friends(
@@ -2894,14 +2908,24 @@ impl Mutation {
 
         let total_tokens = result.prompt_tokens + result.completion_tokens;
         // Look up rate by model name (the host_rates key is just the model name)
-        let model_name = Ad4mDb::with_global_instance(|db| db.get_model(result.model_id.clone()))
-            .ok()
-            .flatten()
-            .map(|m| m.name)
-            .unwrap_or_default();
+        let model_name =
+            match Ad4mDb::with_global_instance(|db| db.get_model(result.model_id.clone())) {
+                Ok(Some(m)) => m.name,
+                Ok(None) => {
+                    log::warn!(
+                        "Model not found in DB for model_id={}, using default rate",
+                        result.model_id
+                    );
+                    String::new()
+                }
+                Err(e) => {
+                    log::error!("DB error looking up model_id={}: {}", result.model_id, e);
+                    String::new()
+                }
+            };
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
-            total_tokens as f64 * get_rate(&model_name, DEFAULT_TOKEN_RATE),
+            total_tokens as f64 * get_rate(&model_name, DEFAULT_TOKEN_RATE)?,
         ) {
             log::warn!("Call exceeded compute credits (ai_prompt, model={}, tokens={}): result returned but future calls will fail. Details: {:?}", model_name, total_tokens, e);
         }
@@ -2926,7 +2950,7 @@ impl Mutation {
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
             result.token_count as f64
-                * get_rate("embedding per token", DEFAULT_EMBEDDING_TOKEN_RATE),
+                * get_rate("embedding per token", DEFAULT_EMBEDDING_TOKEN_RATE)?,
         ) {
             log::warn!("Call exceeded compute credits (ai_embed, tokens={}): result returned but future calls will fail. Details: {:?}", result.token_count, e);
         }
@@ -3144,6 +3168,20 @@ impl Mutation {
             )
         })?;
 
+        // Validate amountHOT is a positive number
+        let parsed_amount: f64 = amountHOT.trim().parse().map_err(|_| {
+            FieldError::new(
+                format!("Invalid amountHOT '{}': must be a valid number", amountHOT),
+                Value::null(),
+            )
+        })?;
+        if parsed_amount <= 0.0 {
+            return Err(FieldError::new(
+                format!("amountHOT must be positive, got {}", parsed_amount),
+                Value::null(),
+            ));
+        }
+
         // Look up user's mHOT wallet address (= Holochain AgentPubKey)
         let wallet_address = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
             .map_err(|e| FieldError::new(format!("DB error: {}", e), Value::null()))?;
@@ -3162,11 +3200,15 @@ impl Mutation {
         let note = format!("AD4M hosting top-up: {} HOT for {}", amountHOT, user_email);
         match crate::unyt_service::create_proposal(&amountHOT, &wallet_address, Some(&note)).await {
             Ok(proposal_hash) => {
-                // Record the payment request in the DB
+                // Record the payment request in the DB — fail the whole operation if this doesn't persist
                 if let Err(e) = Ad4mDb::with_global_instance(|db| {
                     db.create_payment_request(&user_email, &amountHOT, &proposal_hash)
                 }) {
                     log::error!("Failed to record payment request in DB: {}", e);
+                    return Err(FieldError::new(
+                        format!("Payment proposal created but failed to persist: {}", e),
+                        Value::null(),
+                    ));
                 }
 
                 log::info!(
@@ -3293,6 +3335,27 @@ impl Mutation {
             ));
         }
 
+        // Validate inputs
+        let recipient = recipient.trim().to_string();
+        if recipient.is_empty() {
+            return Err(FieldError::new(
+                "recipient must not be empty",
+                Value::null(),
+            ));
+        }
+        let parsed_amount: f64 = amount.parse().map_err(|_| {
+            FieldError::new(
+                format!("amount '{}' is not a valid number", amount),
+                Value::null(),
+            )
+        })?;
+        if parsed_amount <= 0.0 {
+            return Err(FieldError::new(
+                "amount must be greater than 0",
+                Value::null(),
+            ));
+        }
+
         match crate::unyt_service::send_hot(&recipient, &amount, Some("AD4M host withdrawal")).await
         {
             Ok(commitment_hash) => Ok(PaymentRequestResult {
@@ -3328,12 +3391,36 @@ impl Mutation {
 
         let rates: Vec<(String, f64)> = parsed
             .iter()
-            .filter_map(|item| {
-                let desc = item.get("description")?.as_str()?.to_string();
-                let price = item.get("priceInHOT")?.as_f64()?;
-                Some((desc, price))
+            .enumerate()
+            .map(|(i, item)| {
+                let desc = item
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        FieldError::new(
+                            format!("Rate entry {} missing or empty 'description'", i),
+                            Value::null(),
+                        )
+                    })?;
+                let price = item
+                    .get("priceInHOT")
+                    .and_then(|v| v.as_f64())
+                    .ok_or_else(|| {
+                        FieldError::new(
+                            format!("Rate entry {} missing 'priceInHOT'", i),
+                            Value::null(),
+                        )
+                    })?;
+                if price < 0.0 {
+                    return Err(FieldError::new(
+                        format!("Rate entry {} has negative priceInHOT", i),
+                        Value::null(),
+                    ));
+                }
+                Ok((desc.to_string(), price))
             })
-            .collect();
+            .collect::<FieldResult<Vec<_>>>()?;
 
         Ad4mDb::with_global_instance(|db| {
             db.set_host_rates(&rates).map_err(|e| {
@@ -3361,21 +3448,28 @@ impl Mutation {
         match crate::unyt_service::set_membrane_proof(&proof) {
             Ok(()) => {
                 // Trigger DNA installation now that we have the proof
-                tokio::spawn(async {
-                    match crate::unyt_service::ensure_installed().await {
-                        Ok(()) => {
-                            log::info!("Unyt alliance DNA installed after membrane proof was set")
-                        }
-                        Err(e) => log::error!(
+                match crate::unyt_service::ensure_installed().await {
+                    Ok(()) => {
+                        log::info!("Unyt alliance DNA installed after membrane proof was set");
+                        Ok(PaymentRequestResult {
+                            success: true,
+                            message: "Membrane proof stored and DNA installed.".to_string(),
+                        })
+                    }
+                    Err(e) => {
+                        log::error!(
                             "Failed to install Unyt alliance DNA after membrane proof: {}",
                             e
-                        ),
+                        );
+                        Ok(PaymentRequestResult {
+                            success: false,
+                            message: format!(
+                                "Membrane proof stored but DNA installation failed: {}",
+                                e
+                            ),
+                        })
                     }
-                });
-                Ok(PaymentRequestResult {
-                    success: true,
-                    message: "Membrane proof stored. DNA installation started.".to_string(),
-                })
+                }
             }
             Err(e) => Ok(PaymentRequestResult {
                 success: false,

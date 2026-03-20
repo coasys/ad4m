@@ -23,13 +23,12 @@ const PriceInput = ({ initialValue, placeholder, style, onCommit }: {
   style: React.CSSProperties;
   onCommit: (val: string) => void;
 }) => {
-  const [local, setLocal] = React.useState(initialValue ? String(initialValue) : "");
-  const initialized = React.useRef(false);
+  const [local, setLocal] = React.useState(initialValue !== undefined && initialValue !== null ? String(initialValue) : "");
+  const focused = React.useRef(false);
   // Update local when initialValue changes externally (but not while user is editing)
   React.useEffect(() => {
-    if (!initialized.current && initialValue) {
+    if (!focused.current && initialValue !== undefined && initialValue !== null) {
       setLocal(String(initialValue));
-      initialized.current = true;
     }
   }, [initialValue]);
   return (
@@ -38,7 +37,8 @@ const PriceInput = ({ initialValue, placeholder, style, onCommit }: {
       inputMode="decimal"
       value={local}
       onChange={(e) => setLocal(e.target.value)}
-      onBlur={() => onCommit(local)}
+      onFocus={() => { focused.current = true; }}
+      onBlur={() => { focused.current = false; onCommit(local); }}
       onKeyDown={(e) => { if (e.key === "Enter") { (e.target as HTMLInputElement).blur(); } }}
       placeholder={placeholder}
       style={style}
@@ -132,6 +132,7 @@ const Hosting = () => {
   } | null>(null);
   const [hostRegistering, setHostRegistering] = useState(false);
   const [profilePic, setProfilePic] = useState<File | null>(null);
+  const [profilePicUrl, setProfilePicUrl] = useState<string | null>(null);
   const [verificationCode, setVerificationCode] = useState("");
   const [membraneProofStatus, setMembraneProofStatus] =
     useState<MembraneProofStatus>("none");
@@ -149,7 +150,8 @@ const Hosting = () => {
     from_address: string;
   } | null>(null);
   const [smtpChanged, setSmtpChanged] = useState(false);
-  const [smtpTesting, setSmtpTesting] = useState(false);
+  const [smtpTestVisible, setSmtpTestVisible] = useState(false);
+  const [smtpTestLoading, setSmtpTestLoading] = useState(false);
   const [smtpTestStatus, setSmtpTestStatus] = useState("");
   const [smtpTestEmail, setSmtpTestEmail] = useState("");
   const [showSmtpPassword, setShowSmtpPassword] = useState(false);
@@ -221,7 +223,7 @@ const Hosting = () => {
     indexUrl: string;
     hostId: string;
     authToken: string;
-  }): Promise<"verified" | "unverified" | "expired"> => {
+  }): Promise<"verified" | "unverified" | "expired" | "unavailable"> => {
     try {
       const res = await fetch(`${session.indexUrl}/hosts/me`, {
         headers: { Authorization: `Bearer ${session.authToken}` },
@@ -232,19 +234,19 @@ const Hosting = () => {
         setHostReg((prev) => ({
           ...prev,
           indexUrl: session.indexUrl,
-          name: mine.name || prev.name,
-          description: mine.description || prev.description,
-          location: mine.location || prev.location,
-          hostUrl: mine.url || prev.hostUrl,
+          name: mine.name ?? prev.name,
+          description: mine.description ?? prev.description,
+          location: mine.location ?? prev.location,
+          hostUrl: mine.url ?? prev.hostUrl,
           rates:
-            mine.rates && mine.rates.length > 0
+            mine.rates !== undefined
               ? JSON.stringify(mine.rates)
               : prev.rates,
           aiModels:
-            mine.aiModels && mine.aiModels.length > 0
+            mine.aiModels !== undefined
               ? JSON.stringify(mine.aiModels)
               : prev.aiModels,
-          computeSpecs: mine.computeSpecs || prev.computeSpecs,
+          computeSpecs: mine.computeSpecs !== undefined ? mine.computeSpecs : prev.computeSpecs,
         }));
         return mine.emailVerified ? "verified" : "unverified";
       }
@@ -254,8 +256,9 @@ const Hosting = () => {
       }
     } catch (e) {
       console.log("Failed to fetch host data:", e);
+      return "unavailable";
     }
-    return "expired";
+    return "unavailable";
   };
 
   const fetchMembraneProof = async (session: {
@@ -526,9 +529,9 @@ const Hosting = () => {
           authToken: data.authToken,
           email: hostReg.email,
         };
-        await saveHostSession(session);
         const result = await fetchHostData(session);
         if (result === "verified") {
+          await saveHostSession(session);
           setRegStep("logged-in");
           setHostRegStatus({
             type: "success",
@@ -538,18 +541,24 @@ const Hosting = () => {
             fetchMembraneProof(session);
           }
         } else if (result === "unverified") {
+          await saveHostSession(session);
           setRegStep("verify");
           setHostRegStatus({
             type: "info",
             message:
               "Email not yet verified. Check your inbox or resend the code.",
           });
-        } else {
+        } else if (result === "expired") {
           setHostRegStatus({
             type: "error",
             message: "Session expired. Please log in again.",
           });
           setRegStep("credentials");
+        } else {
+          setHostRegStatus({
+            type: "error",
+            message: "Could not reach the host service. Please try again later.",
+          });
         }
       } else {
         setHostRegStatus({
@@ -598,17 +607,21 @@ const Hosting = () => {
       const data = await res.json();
 
       if (res.ok) {
-        setHostData(data);
-        // Also persist rates to executor DB for credit deduction
+        // Persist rates to executor DB for credit deduction before reporting success
         try {
           if (client) await client.runtime.setHostRates(hostReg.rates);
+          setHostData(data);
+          setHostRegStatus({
+            type: "success",
+            message: "Host updated successfully.",
+          });
         } catch (e) {
           console.warn("Failed to sync rates to executor DB:", e);
+          setHostRegStatus({
+            type: "error",
+            message: "Host updated on server but failed to sync rates to executor. Please try again.",
+          });
         }
-        setHostRegStatus({
-          type: "success",
-          message: "Host updated successfully.",
-        });
       } else {
         if (res.status === 401) {
           await saveHostSession(null);
@@ -638,8 +651,12 @@ const Hosting = () => {
   const handleLogout = async () => {
     await saveHostSession(null);
     setHostData(null);
+    setHostSession(null);
     setRegStep("credentials");
     setHostRegStatus(null);
+    setHostReg((prev) => ({ ...prev, password: "" }));
+    setMembraneProofStatus("none");
+    membraneProofAttempted.current = false;
   };
 
   // ---- SMTP handlers ----
@@ -657,7 +674,7 @@ const Hosting = () => {
 
   const handleSmtpTest = async () => {
     if (!smtpConfig || !smtpTestEmail) return;
-    setSmtpTesting(true);
+    setSmtpTestLoading(true);
     setSmtpTestStatus("");
     try {
       await invoke<void>("test_smtp_config", {
@@ -668,7 +685,7 @@ const Hosting = () => {
     } catch (error) {
       setSmtpTestStatus("Failed: " + error);
     } finally {
-      setSmtpTesting(false);
+      setSmtpTestLoading(false);
     }
   };
 
@@ -696,7 +713,8 @@ const Hosting = () => {
       filters: [{ name: "Certificate", extensions: ["pem", "crt", "cert"] }],
     });
     if (filePath && tlsConfig) {
-      setTlsConfig({ ...tlsConfig, cert_file_path: filePath.toString() });
+      const newConfig = { ...tlsConfig, cert_file_path: filePath.toString() };
+      handleTlsConfigChange(newConfig);
     }
   };
 
@@ -706,7 +724,8 @@ const Hosting = () => {
       filters: [{ name: "Private Key", extensions: ["pem", "key"] }],
     });
     if (filePath && tlsConfig) {
-      setTlsConfig({ ...tlsConfig, key_file_path: filePath.toString() });
+      const newConfig = { ...tlsConfig, key_file_path: filePath.toString() };
+      handleTlsConfigChange(newConfig);
     }
   };
 
@@ -784,6 +803,17 @@ const Hosting = () => {
 
   // ---- Effects ----
 
+  // Manage profilePic object URL to avoid blob leaks
+  useEffect(() => {
+    if (!profilePic) {
+      setProfilePicUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(profilePic);
+    setProfilePicUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [profilePic]);
+
   useEffect(() => {
     if (multiUserEnabled && client) getUsers();
   }, [multiUserEnabled, client, getUsers]);
@@ -817,11 +847,15 @@ const Hosting = () => {
           } else if (result === "unverified") {
             setHostSession(session);
             setRegStep("verify");
-          } else {
+          } else if (result === "expired") {
             // Token expired/invalid — clear stored session, go to login
             setHostSession(null);
             saveHostSession(null);
             setRegStep("credentials");
+          } else {
+            // Transient error — keep session, let user retry
+            setHostSession(session);
+            setRegStep("logged-in");
           }
         }
       } catch (e) {
@@ -1465,9 +1499,9 @@ const Hosting = () => {
                             ></j-icon>
                           </div>
                         </div>
-                      ) : profilePic ? (
+                      ) : profilePicUrl ? (
                         <img
-                          src={URL.createObjectURL(profilePic)}
+                          src={profilePicUrl}
                           alt=""
                           style={{
                             width: "80px",
@@ -1733,11 +1767,13 @@ const Hosting = () => {
                         const DEFAULT_TOKEN_PRICE = 12.5;   // ~$0.005 per token, avg API pricing
 
                         // Sync rates with current model list: add missing, remove stale
+                        // Connect expects descriptions like "modelName per token" for token rates
                         const modelNames: string[] = aiModels.map((m: any) => m.name);
-                        const validKeys = new Set(["link write", ...modelNames]);
+                        const tokenDescs = modelNames.map((n) => `${n} per token`);
+                        const validKeys = new Set(["link write", ...tokenDescs]);
                         const has = (desc: string) => parsed.some((r) => r.description === desc);
 
-                        // Remove entries for deleted models or old "per token" format
+                        // Remove entries for deleted models
                         const before = parsed.length;
                         parsed = parsed.filter((r) => validKeys.has(r.description));
 
@@ -1745,7 +1781,8 @@ const Hosting = () => {
                         let changed = parsed.length !== before;
                         if (!has("link write")) { parsed.push({ description: "link write", priceInHOT: DEFAULT_LINK_PRICE }); changed = true; }
                         for (const name of modelNames) {
-                          if (!parsed.some((r) => r.description === name)) { parsed.push({ description: name, priceInHOT: DEFAULT_TOKEN_PRICE }); changed = true; }
+                          const desc = `${name} per token`;
+                          if (!has(desc)) { parsed.push({ description: desc, priceInHOT: DEFAULT_TOKEN_PRICE }); changed = true; }
                         }
                         if (changed) {
                           // Schedule state update for next tick to avoid updating during render
@@ -1761,7 +1798,7 @@ const Hosting = () => {
                         const commitPrice = (desc: string, val: string) => {
                           const num = parseFloat(val);
                           const updated = parsed.filter((r) => r.description !== desc);
-                          if (!isNaN(num) && num > 0) {
+                          if (!isNaN(num) && num >= 0) {
                             updated.push({ description: desc, priceInHOT: num });
                           } else {
                             // Reset to default if invalid
@@ -1836,10 +1873,10 @@ const Hosting = () => {
                               <div key={name} style={rowStyle}>
                                 <span style={labelStyle}>{name} <span style={{ color: "var(--j-color-ui-400)", fontSize: "12px" }}>(per token)</span></span>
                                 <PriceInput
-                                  initialValue={getPrice(name)}
-                                  placeholder={String(getDefault(name))}
+                                  initialValue={getPrice(`${name} per token`)}
+                                  placeholder={String(getDefault(`${name} per token`))}
                                   style={inputStyle}
-                                  onCommit={(val) => commitPrice(name, val)}
+                                  onCommit={(val) => commitPrice(`${name} per token`, val)}
                                 />
                               </div>
                             ))}
@@ -1953,12 +1990,13 @@ const Hosting = () => {
                           <j-input
                             type="number"
                             value={tlsConfig.tls_port?.toString() || "12001"}
-                            onInput={(e: any) =>
-                              setTlsConfig({
+                            onInput={(e: any) => {
+                              const newConfig = {
                                 ...tlsConfig,
                                 tls_port: parseInt(e.target.value) || 12001,
-                              })
-                            }
+                              };
+                              handleTlsConfigChange(newConfig);
+                            }}
                           />
                         </j-box>
                       </j-box>
@@ -2098,14 +2136,14 @@ const Hosting = () => {
                             variant="subtle"
                             onClick={() => {
                               setSmtpTestEmail(hostSession?.email || "");
-                              setSmtpTesting(true);
+                              setSmtpTestVisible(true);
                             }}
                           >
                             Send Test
                           </j-button>
                         </j-flex>
 
-                        {smtpTesting && (
+                        {smtpTestVisible && (
                           <j-box mb="300">
                             <j-flex gap="200">
                               <j-input
@@ -2118,7 +2156,7 @@ const Hosting = () => {
                               <j-button
                                 variant="primary"
                                 onClick={handleSmtpTest}
-                                loading={smtpTesting}
+                                loading={smtpTestLoading}
                               >
                                 Send
                               </j-button>

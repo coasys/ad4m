@@ -4,7 +4,7 @@ import { isProcessRunning, sleep } from "../utils/utils";
 import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
 import { fileURLToPath } from 'url';
 import { expect } from "chai";
-import { startExecutor, apolloClient, runHcLocalServices, killByPorts } from "../utils/utils";
+import { startExecutor, apolloClient, runHcLocalServices, quitExecutor } from "../utils/utils";
 import { ChildProcess } from 'child_process';
 import perspectiveTests from "./perspective";
 import agentTests from "./agent";
@@ -127,15 +127,11 @@ describe("Integration tests", function () {
 
     after(async () => {
       if (executorProcess) {
-        executorProcess.kill('SIGTERM');
-        await sleep(500);
-        if (!executorProcess.killed) executorProcess.kill('SIGKILL');
+        await quitExecutor(executorProcess, gqlPort);
       }
       if (localServicesProcess) {
         localServicesProcess.kill('SIGKILL');
       }
-      // Port-based kill as safety net — catches the executor even if kill() missed it
-      killByPorts([gqlPort, hcAdminPort, hcAppPort]);
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
@@ -147,10 +143,10 @@ describe("Integration tests", function () {
 
     describe('with Alice and Bob', () => {
         let bobExecutorProcess: ChildProcess | null = null
+        const bobGqlPort = 15400
         before(async () => {
           const bobAppDataPath = path.join(TEST_DIR, 'agents', 'bob')
           const bobBootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-          const bobGqlPort = 15400
           const bobHcAdminPort = 15401
           const bobHcAppPort = 15402
 
@@ -184,12 +180,8 @@ describe("Integration tests", function () {
 
         after(async () => {
           if (bobExecutorProcess) {
-            bobExecutorProcess.kill('SIGTERM');
-            await sleep(500);
-            if (!bobExecutorProcess.killed) bobExecutorProcess.kill('SIGKILL');
+            await quitExecutor(bobExecutorProcess, bobGqlPort);
           }
-          // Port-based kill as safety net (bob: 15400/15401/15402)
-          killByPorts([15400, 15401, 15402]);
         })
 
         describe('Agent Language', agentLanguageTests(testContext))
