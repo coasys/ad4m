@@ -309,8 +309,9 @@ const Hosting = () => {
         const data = await res
           .json()
           .catch(() => ({ error: `HTTP ${res.status}` }));
+        const detail = data.detail ? ` [${data.detail}]` : "";
         throw new Error(
-          data.error || `Failed to get membrane proof (${res.status})`,
+          (data.error || `Failed to get membrane proof (${res.status})`) + detail,
         );
       }
 
@@ -1060,7 +1061,7 @@ const Hosting = () => {
           </j-box>
 
           {/* ===== UNYT DNA (Expandable) ===== */}
-          {false && (
+          {regStep === "logged-in" && (
             <ExpandableSection
               title="Unyt DNA"
               expanded={unytExpanded}
@@ -1441,6 +1442,17 @@ const Hosting = () => {
                         disabled={hostRegistering}
                       >
                         Resend
+                      </j-button>
+                      <j-button
+                        variant="subtle"
+                        onClick={() => {
+                          setRegStep("credentials");
+                          setHostRegStatus(null);
+                          setVerificationCode("");
+                        }}
+                        disabled={hostRegistering}
+                      >
+                        Back
                       </j-button>
                     </j-flex>
                   </j-box>
