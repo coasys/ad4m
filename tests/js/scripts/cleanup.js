@@ -25,7 +25,10 @@ const TEST_PORTS = [
   15400, 15401, 15402,        // integration.test.ts (bob — multi-user section)
   16000, 16001, 16002,        // mcp-http.test.ts (GQL + HC ports)
   16010, 16011, 16012,        // mcp-auth.test.ts (GQL + HC ports)
-  3001,                       // MCP HTTP server (shared by mcp-http + mcp-auth)
+  16020, 16021, 16022,        // mcp-mcporter.test.ts (GQL + HC ports)
+  16003,                      // mcp-http.test.ts MCP port
+  16013,                      // mcp-auth.test.ts MCP port
+  16023,                      // mcp-mcporter.test.ts MCP port
 ];
 
 async function cleanup() {

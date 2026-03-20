@@ -25,7 +25,7 @@ const __dirname = path.dirname(__filename);
  * This ensures third-party MCP clients work with AD4M.
  */
 
-const MCP_PORT = 3001;
+const MCP_PORT = 16023;
 const MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
 
 // ============================================================================
@@ -71,6 +71,7 @@ describe("MCP mcporter Integration Tests", function() {
             undefined,
             undefined,
             true,               // enableMcp
+            MCP_PORT,           // mcpPort
         );
 
         await sleep(3000);

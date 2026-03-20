@@ -25,7 +25,7 @@ const __dirname = path.dirname(__filename);
  * Verifies: login_email, request_capability + generate_jwt, auth_status, and unauthenticated rejection.
  */
 
-const MCP_PORT = 3001;
+const MCP_PORT = 16013;
 const MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
 
 // ============================================================================
@@ -70,6 +70,7 @@ describe("MCP Authentication HTTP Tests", function() {
             undefined,
             undefined,
             true,               // enableMcp
+            MCP_PORT,           // mcpPort
         );
 
         await sleep(3000);
