@@ -134,7 +134,7 @@ export class RemoteAuthentication extends LitElement {
         </div>
 
         <div class="header">
-          <h1>Login or Register</h1>
+          <h1>${showLoginPasswordInput ? 'Login' : showSignUpPasswordInput ? 'Register' : 'Login or Register'}</h1>
           ${this.host ? html`<p style="font-size: 15px; color: rgba(255,255,255,0.4); margin-top: 4px;">${this.host.url}</p>` : ''}
         </div>
 
