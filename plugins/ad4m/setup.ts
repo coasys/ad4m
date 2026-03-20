@@ -6,6 +6,7 @@ import {
   isExecutorRunning,
   ensureExecutorRunning,
   stopExecutor,
+  downloadExecutor,
 } from "./executor";
 import { ensureAgentReady } from "./agent";
 import {
@@ -75,8 +76,8 @@ export async function runSetup(
     // Branch A: No running executor, binary found
     await setupManagedMode(logger, binaryPath, endpoint, executorWsUrl, wakeToken);
   } else {
-    // Branch C: No binary, no executor
-    setupNoExecutor(logger, wakeToken);
+    // Branch C: No binary, no executor — try to download, then set up managed mode
+    await setupWithDownload(logger, endpoint, executorWsUrl, wakeToken);
   }
 }
 
@@ -263,31 +264,52 @@ async function setupExternalMode(
 }
 
 // ---------------------------------------------------------------------------
-// Branch C: No executor, no binary
+// Branch C: No executor, no binary — auto-download then managed mode
 // ---------------------------------------------------------------------------
 
-function setupNoExecutor(logger: any, wakeToken?: string): void {
+async function setupWithDownload(
+  logger: any,
+  endpoint: string,
+  executorWsUrl: string,
+  wakeToken?: string,
+): Promise<void> {
   logger.info(
     "[ad4m-setup] No ad4m-executor binary found and no running executor detected.",
   );
   logger.info(
-    "[ad4m-setup] To use this plugin, either:",
-  );
-  logger.info(
-    "[ad4m-setup]   1. Install ad4m-executor and restart OpenClaw (managed mode)",
-  );
-  logger.info(
-    "[ad4m-setup]   2. Start an executor manually and configure external mode",
-  );
-  logger.info(
-    "[ad4m-setup]   3. Set ad4mBinaryPath in plugin config to the full path",
+    "[ad4m-setup] Attempting to download ad4m-executor for your platform...",
   );
 
-  printConfigSnippet(logger, "managed", {
-    ad4mBinaryPath: "<path-to-ad4m-executor>",
-    agentPassphrase: "<will-be-shown-after-setup>",
-    wakeToken,
-  });
+  const downloaded = await downloadExecutor(logger);
+
+  if (!downloaded) {
+    logger.error(
+      "[ad4m-setup] Auto-download failed. Please install ad4m-executor manually:",
+    );
+    logger.info(
+      "[ad4m-setup]   https://github.com/coasys/ad4m/releases",
+    );
+    printConfigSnippet(logger, "managed", {
+      ad4mBinaryPath: "<path-to-ad4m-executor>",
+      agentPassphrase: "<will-be-shown-after-setup>",
+      wakeToken,
+    });
+    return;
+  }
+
+  // After download, find the binary in the plugin bin dir
+  const binaryPath = findExecutorBinary();
+  if (!binaryPath) {
+    logger.error(
+      "[ad4m-setup] Download succeeded but binary not found. This should not happen.",
+    );
+    return;
+  }
+
+  logger.info(`[ad4m-setup] Downloaded ad4m-executor to: ${binaryPath}`);
+
+  // Continue with managed mode setup using the downloaded binary
+  await setupManagedMode(logger, binaryPath, endpoint, executorWsUrl, wakeToken);
 }
 
 // ---------------------------------------------------------------------------
@@ -319,7 +341,7 @@ function printConfigSnippet(
   logger.info(`[ad4m-setup] ${SEPARATOR}`);
   logger.info(`[ad4m-setup] ${title}`);
   logger.info(
-    `[ad4m-setup] Add this to your openclaw.json under plugins.entries["ad4m-openclaw-plugin"].config:`,
+    `[ad4m-setup] Add this to your openclaw.json under plugins.entries["ad4m"].config:`,
   );
   logger.info(`[ad4m-setup]`);
 
