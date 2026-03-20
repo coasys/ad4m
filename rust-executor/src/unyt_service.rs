@@ -183,9 +183,31 @@ pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
     };
 
     // Check if already installed with correct version
-    if let Ok(Some(_)) = hc.get_app_info(UNYT_APP_ID.to_string()).await {
+    if let Ok(Some(app_info)) = hc.get_app_info(UNYT_APP_ID.to_string()).await {
         let installed_version =
             Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_version")).unwrap_or(None);
+
+        // Check if the app is disabled (e.g. due to network join failure) and try to re-enable
+        use holochain_types::app::AppStatus;
+        if matches!(app_info.status, AppStatus::Disabled(_)) {
+            warn!(
+                "Unyt alliance DNA is installed but disabled (status={:?}). Attempting to re-enable...",
+                app_info.status
+            );
+            match hc.enable_app(UNYT_APP_ID.to_string()).await {
+                Ok(_) => {
+                    info!("Successfully re-enabled Unyt alliance DNA");
+                    capture_dna_hash().await;
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to re-enable Unyt app: {}. Will continue with current state.",
+                        e
+                    );
+                }
+            }
+        }
 
         if installed_version.as_deref() == Some(ALLIANCE_DNA_VERSION) {
             info!(
