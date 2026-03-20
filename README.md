@@ -363,13 +363,13 @@ This license ensures:
 ## Acknowledgments
 
 AD4M is developed by [Coasys](https://coasys.org) and builds upon ideas from:
-- [The Semantic Web](https://www.w3.org/standards/semanticweb/) (Tim Berners-Lee)
-- [Agent-centric computing](https://blog.holochain.org/agent-centric-computing/) (Arthur Brock)
+- The Semantic Web (Tim Berners-Lee)
+- Agent-centric computing (Arthur Brock)
 - [Holochain](https://github.com/holochain/holochain) distributed architecture
 - [Solid](https://solidproject.org/) personal data stores
-- [Decentralized Identifiers](https://www.w3.org/TR/did-core/) (DIDs & VCs)
-- [Immanent Metaphysics](https://www.integraldomain.org/) (Forrest Landry)
-- [Theory of Conscious Agents](https://doi.org/10.3389/fpsyg.2014.00577) (Donald Hoffman)
+- [Decentralized Identifiers](https://www.w3.org/TR/did-1.0/) (DIDs & VCs)
+- Immanent Metaphysics (Forrest Landry)
+- Theory of Conscious Agents (Donald Hoffman)
 
 ---
 
