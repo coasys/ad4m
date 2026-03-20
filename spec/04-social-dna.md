@@ -288,49 +288,38 @@ shape.addProperty({
 await perspective.addShacl('Recipe', shape);
 ```
 
-## 4.6 Query Engines
+## 4.6 Query Engine — SPARQL
 
-AD4M provides two query engines for working with Social DNA and perspective data:
+AD4M uses **SPARQL** as the normative query engine for working with Social DNA and perspective data. Ad4mModel (§10) generates SPARQL queries from its Query DSL.
 
-### SurrealDB (Recommended)
+### SPARQL Queries
 
-SurrealDB provides 10-100x faster performance for most queries:
+The link graph in a perspective forms an RDF-like triple store where each link is a triple `(source, predicate, target)`. SPARQL queries operate over this graph:
 
 ```typescript
 // Find all todos in "done" state
-const doneTodos = await perspective.querySurrealDB(
-  "SELECT * FROM link WHERE predicate = 'todo://state' AND target = 'todo://done'"
+const doneTodos = await perspective.querySPARQL(
+  "SELECT ?s WHERE { ?s <todo://state> ?state . FILTER(?state = 'todo://done') }"
 );
 
-// Graph traversal using indexed fields
-const alicePosts = await perspective.querySurrealDB(
-  "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'authored'"
+// Graph traversal
+const alicePosts = await perspective.querySPARQL(
+  "SELECT ?target WHERE { <user://alice> <authored> ?target }"
 );
 ```
 
-`Ad4mModel` uses SurrealDB by default for `findAll()` and query builder operations.
+Ad4mModel uses SPARQL for `findAll()`, query builder operations, and all data access (see §10.6).
 
 ### Custom SHACL Rules
 
-For complex reasoning beyond standard property constraints, SHACL's advanced features (SPARQL-based constraints, rules) can be used. Custom SHACL rules can be added via `ad4m://has_custom_sdna` links:
+For complex reasoning beyond standard property constraints, SHACL's advanced features (SPARQL-based constraints, rules) can be used. Custom SHACL rules can be added via `ad4m://has_custom_sdna` links.
 
-```typescript
-// SHACL constraint on a property
-@Property({
-  through: "todo://state",
-  shaclConstraint: `
-    sh:sparql [
-      sh:select """
-        SELECT $this WHERE {
-          $this <rdf://type> <todo://Todo> .
-        }
-      """ ;
-    ]
-  `
-})
-```
+### Deprecated Query Engines
 
-New implementations SHOULD prioritise SurrealDB query support for performance-critical operations and SHACL for schema validation and constraint checking.
+- **SurrealDB** (`perspectiveQuerySurrealDB`) — DEPRECATED. Earlier versions used SurrealDB as the primary query engine. Implementations MAY translate SurrealDB queries to SPARQL internally for backward compatibility, but new applications MUST NOT depend on SurrealDB support.
+- **Prolog** (`perspectiveInfer`) — DEPRECATED. Legacy inference engine from pre-SHACL era. Not required in new implementations.
+
+New implementations MUST support `perspectiveQuerySPARQL`. Support for `perspectiveQuerySurrealDB` is OPTIONAL (backward compatibility only).
 
 ## 4.7 Flows
 
@@ -374,7 +363,8 @@ For alternative implementations:
 | Subject class instance resolution | **MUST** | Match expressions against SHACL shapes |
 | Property get/set via link operations | **MUST** | Core CRUD operations |
 | Collection operations | **MUST** | Add/remove/set for multi-value properties |
-| SurrealDB query support | **SHOULD** | Primary query engine |
+| SurrealDB query support | **MAY** | Deprecated; backward compatibility only |
+| SPARQL query support | **MUST** | Primary query engine (see §10.6) |
 | SHACL custom rules | **MAY** | For advanced constraint checking and reasoning |
 | Flow support | **MAY** | State machine functionality |
-| `Ad4mModel` / decorator API | **MAY** | Client-side convenience; not required in the executor |
+| `Ad4mModel` / decorator API | **SHOULD** | Primary developer API; see §10 |
