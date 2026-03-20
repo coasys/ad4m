@@ -134,10 +134,6 @@ export class HostDetail extends LitElement {
     `
   ];
 
-  private back() {
-    this.dispatchEvent(new CustomEvent("back", { bubbles: true, composed: true }));
-  }
-
   private proceedToAuth() {
     this.dispatchEvent(new CustomEvent("proceed-to-auth", { detail: { host: this.host }, bubbles: true, composed: true }));
   }

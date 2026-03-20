@@ -134,24 +134,15 @@ export class HostBrowser extends LitElement {
         text-align: left;
       }
 
-      .spinner {
+      .spinner-container {
         display: flex;
         justify-content: center;
         padding: 40px 0;
       }
 
-      .spinner::after {
-        content: "";
+      .spinner-container .spinner {
         width: 32px;
         height: 32px;
-        border: 3px solid var(--ac-border-color-light);
-        border-top-color: var(--ac-primary-color);
-        border-radius: 50%;
-        animation: spin 0.8s linear infinite;
-      }
-
-      @keyframes spin {
-        to { transform: rotate(360deg); }
       }
 
       .divider {
@@ -207,10 +198,6 @@ export class HostBrowser extends LitElement {
       this.manualUrl = this.defaultUrl;
       this.defaultApplied = true;
     }
-  }
-
-  private back() {
-    this.dispatchEvent(new CustomEvent("back", { bubbles: true, composed: true }));
   }
 
   private selectHost(host: RemoteHost) {
@@ -292,7 +279,7 @@ export class HostBrowser extends LitElement {
         </div>
 
         ${this.loading ? html`
-          <div class="spinner"></div>
+          <div class="spinner-container"><div class="spinner"></div></div>
         ` : this.error ? html`
           <div class="box">
             <p style="color: var(--ac-danger-color)">${this.error}</p>

@@ -13,6 +13,7 @@ export class LocalAuthentication extends LitElement {
 
   @state() private requestSent = false;
   @state() private securityCode: string = "";
+  @state() private verifying = false;
 
   static styles = [
     sharedStyles,
@@ -81,7 +82,9 @@ export class LocalAuthentication extends LitElement {
       .security-code {
         width: 100%;
         display: flex;
+        align-items: center;
         justify-content: center;
+        gap: 12px;
         margin-bottom: 20px;
       }
 
@@ -101,9 +104,10 @@ export class LocalAuthentication extends LitElement {
     `
   ];
 
-  private back() {
-    this.dispatchEvent(new CustomEvent("back", { bubbles: true, composed: true }));
-    this.dispatchEvent(new CustomEvent("clear-verification-error", { bubbles: true, composed: true }));
+  willUpdate(changedProps: import("lit").PropertyValues) {
+    if (changedProps.has('verificationError') && this.verificationError) {
+      this.verifying = false;
+    }
   }
 
   private requestCapability() {
@@ -112,6 +116,7 @@ export class LocalAuthentication extends LitElement {
   }
 
   private verifyCode() {
+    this.verifying = true;
     this.dispatchEvent(new CustomEvent("verify-code", { detail: { code: this.securityCode }, bubbles: true, composed: true }));
   }
 
@@ -178,6 +183,7 @@ export class LocalAuthentication extends LitElement {
                 .value=${this.securityCode || ""}
                 @input=${this.onInputChange}
               />
+              ${this.verifying ? html`<div class="spinner"></div>` : ''}
             </div>
 
             ${this.verificationError

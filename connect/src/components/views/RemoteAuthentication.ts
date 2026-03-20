@@ -44,7 +44,9 @@ export class RemoteAuthentication extends LitElement {
       .security-code {
         width: 100%;
         display: flex;
+        align-items: center;
         justify-content: center;
+        gap: 12px;
         margin-bottom: 20px;
       }
 
@@ -184,6 +186,7 @@ export class RemoteAuthentication extends LitElement {
                 .value=${this.emailSecurityCode || ""}
                 @input=${this.onEmailSecurityCodeChange}
               />
+              ${this.remoteAuthLoading ? html`<div class="spinner"></div>` : ''}
             </div>
 
             ${this.emailCodeError
