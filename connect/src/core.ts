@@ -11,6 +11,7 @@ import { fetchUserInfo, requestPayment } from './services/hostIndex';
 const DEFAULT_PORT = 12000;
 const DEFAULT_INDEX_URL = "https://hosting.ad4m.dev";
 const CREDIT_POLL_INTERVAL_MS = 30000;
+const DEFAULT_LOW_CREDIT_THRESHOLD = 10;
 
 export default class Ad4mConnect extends EventTarget {
   options: Ad4mConnectOptions;
@@ -31,6 +32,7 @@ export default class Ad4mConnect extends EventTarget {
   connectedHost: RemoteHost | null = null;
   userInfo: UserInfo | null = null;
   hostIndexUrl: string;
+  lowCreditThreshold: number;
   private creditPollInterval: ReturnType<typeof setInterval> | null = null;
 
   private embeddedResolve?: (client: Ad4mClient) => void;
@@ -46,6 +48,7 @@ export default class Ad4mConnect extends EventTarget {
     this.token = getLocal("ad4m-token") || '';
     this.embedded = isEmbedded();
     this.hostIndexUrl = options.hostIndexUrl || DEFAULT_INDEX_URL;
+    this.lowCreditThreshold = options.lowCreditThreshold ?? DEFAULT_LOW_CREDIT_THRESHOLD;
 
     // Restore last connected host for UI pinning
     const lastHost = getLocal("ad4m-last-host");
@@ -286,6 +289,9 @@ export default class Ad4mConnect extends EventTarget {
         this.userInfo = info;
         this.dispatchEvent(new CustomEvent('userinfochange', { detail: info }));
 
+        if (info.remainingCredits <= this.lowCreditThreshold) {
+          this.dispatchEvent(new CustomEvent('creditlow'));
+        }
         if (info.remainingCredits <= 0) {
           this.dispatchEvent(new CustomEvent('creditdepleted'));
         }
@@ -314,7 +320,7 @@ export default class Ad4mConnect extends EventTarget {
   /** Persist selected host after successful auth */
   setConnectedHost(host: RemoteHost): void {
     this.connectedHost = host;
-    setLocal('ad4m-last-host', JSON.stringify({ id: host.id, url: host.url, name: host.name }));
+    setLocal('ad4m-last-host', JSON.stringify({ id: host.id, url: host.url, name: host.name, location: host.location }));
   }
 
   // Embedded mode

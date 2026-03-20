@@ -1,9 +1,9 @@
 import { LitElement, html, css, TemplateResult } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { sharedStyles } from "../../styles/shared-styles";
-import { ArrowLeftIcon } from "../icons";
+import { MapPinIcon } from "../icons";
 import { renderHostAvatar } from "../shared/avatar";
-import type { RemoteHost } from "../../types";
+import type { PricingItem, RemoteHost } from "../../types";
 
 @customElement("host-detail")
 export class HostDetail extends LitElement {
@@ -20,8 +20,8 @@ export class HostDetail extends LitElement {
       }
 
       .profile-pic {
-        width: 72px;
-        height: 72px;
+        width: 100px;
+        height: 100px;
         border-radius: 50%;
         object-fit: cover;
         background: rgba(128, 178, 201, 0.2);
@@ -44,14 +44,20 @@ export class HostDetail extends LitElement {
       }
 
       .profile-location {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
         font-size: 14px;
         color: rgba(255, 255, 255, 0.6);
         margin: 0;
       }
 
+      .profile-location svg {
+        opacity: 0.7;
+      }
+
       .profile-description {
         font-size: 14px;
-        color: rgba(255, 255, 255, 0.5);
         margin: 0;
         text-align: center;
         line-height: 1.4;
@@ -125,17 +131,8 @@ export class HostDetail extends LitElement {
       button.connect-button {
         width: 100%;
       }
-
-      button.back-button {
-        all: unset;
-        cursor: pointer;
-      }
     `
   ];
-
-  private back() {
-    this.dispatchEvent(new CustomEvent("back", { bubbles: true, composed: true }));
-  }
 
   private proceedToAuth() {
     this.dispatchEvent(new CustomEvent("proceed-to-auth", { detail: { host: this.host }, bubbles: true, composed: true }));
@@ -145,9 +142,14 @@ export class HostDetail extends LitElement {
     return renderHostAvatar(this.host, "profile-pic");
   }
 
+  private static OPERATION_RATES = new Set(["link write"]);
+
+  private isOperationRate(rate: PricingItem): boolean {
+    return HostDetail.OPERATION_RATES.has(rate.description);
+  }
+
   private rateLabel(description: string): string {
     if (description === "link write") return "Link write";
-    if (description === "embedding per token") return "Embedding (per token)";
     return description;
   }
 
@@ -165,14 +167,10 @@ export class HostDetail extends LitElement {
 
     return html`
       <div class="container">
-        <button class="back-button" aria-label="Go back" @click=${this.back}>
-          ${ArrowLeftIcon()}
-        </button>
-
         <div class="profile">
           ${this.renderAvatar()}
           <p class="profile-name">${this.host.name}</p>
-          <p class="profile-location">${this.host.location}</p>
+          <p class="profile-location">${MapPinIcon()}${this.host.location}</p>
           ${this.host.description ? html`<p class="profile-description">${this.host.description}</p>` : ''}
 
           ${this.host.aiModels.length > 0 ? html`
@@ -187,17 +185,17 @@ export class HostDetail extends LitElement {
             <div class="rates-section">
               <h3>Pricing</h3>
               <table class="rates-table">
-                ${this.host.rates.filter(r => !r.description.endsWith("per token")).map(rate => html`
+                ${this.host.rates.filter(r => this.isOperationRate(r)).map(rate => html`
                   <tr>
                     <td>${this.rateLabel(rate.description)}</td>
                     <td>${this.formatPrice(rate.priceInHOT)} HOT</td>
                   </tr>
                 `)}
-                ${this.host.rates.filter(r => r.description.endsWith("per token")).length > 0 ? html`
-                  <tr><td colspan="2" style="padding-top:12px;color:rgba(255,255,255,0.5);font-size:12px;text-transform:uppercase;letter-spacing:0.5px;">AI Models (per token)</td></tr>
-                  ${this.host.rates.filter(r => r.description.endsWith("per token")).map(rate => html`
+                ${this.host.rates.filter(r => !this.isOperationRate(r)).length > 0 ? html`
+                  <tr><td colspan="2" style="text-align:left;padding-top:12px;color:rgba(255,255,255,0.5);font-size:12px;text-transform:uppercase;letter-spacing:0.5px;">AI Models (cost per token)</td></tr>
+                  ${this.host.rates.filter(r => !this.isOperationRate(r)).map(rate => html`
                     <tr>
-                      <td>${rate.description.replace(" per token", "")}</td>
+                      <td>${rate.description}</td>
                       <td>${this.formatPrice(rate.priceInHOT)} HOT</td>
                     </tr>
                   `)}

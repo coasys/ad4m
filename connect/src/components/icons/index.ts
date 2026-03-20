@@ -11,3 +11,4 @@ export { default as ArrowLeftIcon } from "./ArrowLeftIcon";
 export { default as GlobeIcon } from "./GlobeIcon";
 export { default as CreditIcon } from "./CreditIcon";
 export { default as WalletIcon } from "./WalletIcon";
+export { default as MapPinIcon } from "./MapPinIcon";
