@@ -505,18 +505,39 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
             let pubsub = get_global_pubsub().await;
             for email in &dirty_emails {
-                let free_access = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
-                    .unwrap_or(false);
+                let free_access =
+                    match Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!(
+                                "Credit flush: get_user_free_access failed for {}: {}",
+                                email, e
+                            );
+                            continue;
+                        }
+                    };
                 let remaining_credits = if free_access {
                     "unlimited".to_string()
                 } else {
-                    let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
-                        .unwrap_or(0.0);
-                    format!("{}", credits)
+                    match Ad4mDb::with_global_instance(|db| db.get_user_credits(email)) {
+                        Ok(credits) => format!("{}", credits),
+                        Err(e) => {
+                            error!("Credit flush: get_user_credits failed for {}: {}", email, e);
+                            continue;
+                        }
+                    }
                 };
                 let hot_wallet_address =
-                    Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(email))
-                        .unwrap_or(None);
+                    match Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(email)) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!(
+                                "Credit flush: get_user_hot_wallet failed for {}: {}",
+                                email, e
+                            );
+                            continue;
+                        }
+                    };
 
                 let info = crate::graphql::graphql_types::HostingUserInfo {
                     email: email.clone(),
