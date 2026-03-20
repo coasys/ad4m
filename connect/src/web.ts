@@ -4,7 +4,7 @@ import autoBind from "auto-bind";
 import { VerificationRequestResult } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
 import { connectWebSocket, setLocal } from "./utils";
 import Ad4mConnect from "./core";
-import { Ad4mLogo, ArrowLeftIcon } from "./components/icons";
+import { Ad4mLogo, ArrowLeftIcon, CreditIcon } from "./components/icons";
 import { fetchHosts } from "./services/hostIndex";
 import type { RemoteHost, UserInfo } from "./types";
 
@@ -124,19 +124,52 @@ const styles = css`
     min-height: 0;
   }
 
+  .settings-bar {
+    position: fixed;
+    bottom: 10px;
+    right: 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    z-index: 99999;
+  }
+
+  .credit-badge {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--ac-background-color);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--ac-border-color-dark);
+    border-radius: 20px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--ac-primary-color);
+    white-space: nowrap;
+  }
+
+  .credit-badge svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .credit-badge.low-credit {
+    color: var(--ac-danger-color);
+    border-color: var(--ac-danger-color);
+    animation: pulse-danger 2s ease-in-out infinite;
+  }
+
   .settings-button {
     appearance: none;
     border: none;
     background: transparent;
     padding: 0;
     cursor: pointer;
-    position: fixed;
-    bottom: 10px;
-    right: 10px;
     color: var(--ac-primary-color);
     width: 34px;
     height: 34px;
-    z-index: 99999;
   }
 
   .settings-button.low-credit {
@@ -596,19 +629,26 @@ export class Ad4mConnectElement extends LitElement {
       `;
     } else if (this.core.authState === "authenticated") {
       // Show settings button when authenticated and modal is closed
+      const credits = this.userInfo?.remainingCredits;
       return html`
-        <button
-          type="button"
-          class="settings-button ${this.lowCredit ? 'low-credit' : ''}"
-          aria-label="Open settings"
-          @click=${() => {
-            // If connected to a remote host, show dashboard; otherwise show current-state
-            this.currentView = this.core.connectedHost ? "logged-in-dashboard" : "current-state";
-            this.modalOpen = true;
-          }}
-        >
-          ${Ad4mLogo()}
-        </button>
+        <div class="settings-bar">
+          ${credits != null ? html`
+            <span class="credit-badge ${this.lowCredit ? 'low-credit' : ''}">
+              ${CreditIcon()} ${credits.toFixed(2)} HOT
+            </span>
+          ` : ''}
+          <button
+            type="button"
+            class="settings-button ${this.lowCredit ? 'low-credit' : ''}"
+            aria-label="Open settings"
+            @click=${() => {
+              this.currentView = this.core.connectedHost ? "logged-in-dashboard" : "current-state";
+              this.modalOpen = true;
+            }}
+          >
+            ${Ad4mLogo()}
+          </button>
+        </div>
       `;
     }
 
