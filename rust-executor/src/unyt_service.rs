@@ -26,7 +26,7 @@ use crate::holochain_service::interface::{get_holochain_service, maybe_get_holoc
 pub const UNYT_APP_ID: &str = "unyt-mhot";
 const UNYT_CELL_NAME: &str = "alliance";
 const UNYT_ZOME: &str = "transactor";
-const ALLIANCE_DNA_VERSION: &str = "0.64.0";
+const ALLIANCE_DNA_VERSION: &str = "0.62.0";
 
 /// Embedded alliance DNA bytes (downloaded by build.rs).
 const ALLIANCE_DNA_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/alliance.dna"));
@@ -268,9 +268,9 @@ roles:
     dna:
       path: {}
       modifiers:
-        network_seed: "F7ppaoDnRX6m99UKXb4Cl"
+        network_seed: "7RysrsJstXhPQcYb088dR",
         properties:
-          progenitor_pubkey: "uhCAkkw1bfOq4T7Ub9BSQpLGU7yR_WYBDu6tFqnk8WLTpGp_dFfT7"
+          progenitor_pubkey: "uhCAkzTjgUwMRiiKO5Gu8XHISzDKckzZ0b7QiUcf5rxg2LsVMNbQP"
           joining_server_signer: "uhCAk_Jbtn_3RR-VCLPtJdhcQvVrpM7Vw5vHGog8_CwW5tO0_Cf37"
 "#,
         dna_path.to_string_lossy()
