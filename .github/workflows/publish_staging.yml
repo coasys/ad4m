@@ -710,8 +710,9 @@ jobs:
         run: rustc --version && cargo --version
 
       - run: pnpm install --no-frozen-lockfile
-      - run: pnpm build-core-executor
-      - run: ls -al executor/lib
+      # Generate schema.gql (required for rust-client compilation)
+      # build-core-executor no longer exists since Phase 7 removed the JS executor
+      - run: cd core && pnpm exec tsx src/buildSchema.ts
       - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
       - name: Publish ad4m-client crate
         working-directory: rust-client
