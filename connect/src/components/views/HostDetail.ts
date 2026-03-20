@@ -3,7 +3,7 @@ import { customElement, property } from "lit/decorators.js";
 import { sharedStyles } from "../../styles/shared-styles";
 import { MapPinIcon } from "../icons";
 import { renderHostAvatar } from "../shared/avatar";
-import type { RemoteHost } from "../../types";
+import type { PricingItem, RemoteHost } from "../../types";
 
 @customElement("host-detail")
 export class HostDetail extends LitElement {
@@ -142,9 +142,14 @@ export class HostDetail extends LitElement {
     return renderHostAvatar(this.host, "profile-pic");
   }
 
+  private static OPERATION_RATES = new Set(["link write"]);
+
+  private isOperationRate(rate: PricingItem): boolean {
+    return HostDetail.OPERATION_RATES.has(rate.description);
+  }
+
   private rateLabel(description: string): string {
     if (description === "link write") return "Link write";
-    if (description === "embedding per token") return "Embedding (per token)";
     return description;
   }
 
@@ -180,17 +185,17 @@ export class HostDetail extends LitElement {
             <div class="rates-section">
               <h3>Pricing</h3>
               <table class="rates-table">
-                ${this.host.rates.filter(r => !r.description.endsWith("per token")).map(rate => html`
+                ${this.host.rates.filter(r => this.isOperationRate(r)).map(rate => html`
                   <tr>
                     <td>${this.rateLabel(rate.description)}</td>
                     <td>${this.formatPrice(rate.priceInHOT)} HOT</td>
                   </tr>
                 `)}
-                ${this.host.rates.filter(r => r.description.endsWith("per token")).length > 0 ? html`
-                  <tr><td colspan="2" style="padding-top:12px;color:rgba(255,255,255,0.5);font-size:12px;text-transform:uppercase;letter-spacing:0.5px;">AI Models (per token)</td></tr>
-                  ${this.host.rates.filter(r => r.description.endsWith("per token")).map(rate => html`
+                ${this.host.rates.filter(r => !this.isOperationRate(r)).length > 0 ? html`
+                  <tr><td colspan="2" style="text-align:left;padding-top:12px;color:rgba(255,255,255,0.5);font-size:12px;text-transform:uppercase;letter-spacing:0.5px;">AI Models (cost per token)</td></tr>
+                  ${this.host.rates.filter(r => !this.isOperationRate(r)).map(rate => html`
                     <tr>
-                      <td>${rate.description.replace(" per token", "")}</td>
+                      <td>${rate.description}</td>
                       <td>${this.formatPrice(rate.priceInHOT)} HOT</td>
                     </tr>
                   `)}
