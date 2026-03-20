@@ -314,7 +314,7 @@ export default class Ad4mConnect extends EventTarget {
   /** Persist selected host after successful auth */
   setConnectedHost(host: RemoteHost): void {
     this.connectedHost = host;
-    setLocal('ad4m-last-host', JSON.stringify({ id: host.id, url: host.url, name: host.name }));
+    setLocal('ad4m-last-host', JSON.stringify({ id: host.id, url: host.url, name: host.name, location: host.location }));
   }
 
   // Embedded mode

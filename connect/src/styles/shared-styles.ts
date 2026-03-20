@@ -112,6 +112,22 @@ export const sharedStyles = css`
     box-shadow: 0 0 0 4px rgba(244, 54, 127, 0.2);
   }
 
+  button.danger-secondary {
+    background: #00091e5c;
+    color: var(--ac-danger-color);
+    border: 1px solid var(--ac-danger-color);
+  }
+
+  button.danger-secondary:hover:not(:disabled) {
+    background: rgba(244, 54, 127, 0.12);
+  }
+
+  button.danger-secondary:focus-visible:not(:disabled) {
+    outline: 2px solid var(--ac-danger-color);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px rgba(244, 54, 127, 0.2);
+  }
+
   button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
