@@ -40,7 +40,7 @@ describe("Multi-User Simple integration tests", () => {
     // Helper: create a test user and grant free_access so billing doesn't block tests
     async function createTestUser(email: string, password: string) {
         const result = await adminAd4mClient!.agent.createUser(email, password);
-        await adminAd4mClient!.agent.setUserFreeAccess(email, true);
+        await adminAd4mClient!.runtime.setUserFreeAccess(email, true);
         return result;
     }
 
@@ -1746,7 +1746,7 @@ describe("Multi-User Simple integration tests", () => {
             console.log("\n=== Creating users on Node 2 ===");
             // Create and login 2 users on node 2
             await node2AdminClient.agent.createUser("node2user1@example.com", "password3");
-            await node2AdminClient.agent.setUserFreeAccess("node2user1@example.com", true);
+            await node2AdminClient.runtime.setUserFreeAccess("node2user1@example.com", true);
             const node2User1Token = await node2AdminClient.agent.loginUser("node2user1@example.com", "password3");
             // @ts-ignore
             node2User1Client = new Ad4mClient(apolloClient(node2GqlPort, node2User1Token), false);
@@ -1755,7 +1755,7 @@ describe("Multi-User Simple integration tests", () => {
             console.log("Node 2 User 1 DID:", node2User1Did);
 
             await node2AdminClient.agent.createUser("node2user2@example.com", "password4");
-            await node2AdminClient.agent.setUserFreeAccess("node2user2@example.com", true);
+            await node2AdminClient.runtime.setUserFreeAccess("node2user2@example.com", true);
             const node2User2Token = await node2AdminClient.agent.loginUser("node2user2@example.com", "password4");
             // @ts-ignore
             node2User2Client = new Ad4mClient(apolloClient(node2GqlPort, node2User2Token), false);

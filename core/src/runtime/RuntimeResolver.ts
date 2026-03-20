@@ -212,6 +212,9 @@ export class UserStatistics {
 
     @Field()
     freeAccess: boolean;
+
+    @Field({nullable: true})
+    hotWalletAddress?: string;
 }
 
 @ObjectType()
@@ -640,6 +643,54 @@ export default class RuntimeResolver {
         @Arg("enabled") enabled: boolean
     ): boolean {
         return true
+    }
+
+    @Mutation(returns => PaymentRequestResult)
+    runtimeReinstallUnytDna(): PaymentRequestResult {
+        return new PaymentRequestResult(true, "")
+    }
+
+    @Mutation(returns => PaymentRequestResult)
+    runtimeSendHot(
+        @Arg("recipient") recipient: string,
+        @Arg("amount") amount: string
+    ): PaymentRequestResult {
+        return new PaymentRequestResult(true, "")
+    }
+
+    @Mutation(returns => PaymentRequestResult)
+    runtimeSetUnytMembraneProof(
+        @Arg("proof") proof: string
+    ): PaymentRequestResult {
+        return new PaymentRequestResult(true, "")
+    }
+
+    @Query(returns => String)
+    runtimeHotWalletBalance(): string {
+        return ""
+    }
+
+    @Query(returns => String)
+    runtimeHotWalletHistory(
+        @Arg("page", { nullable: true }) page?: number,
+        @Arg("perPage", { nullable: true }) perPage?: number
+    ): string {
+        return ""
+    }
+
+    @Query(returns => String)
+    runtimeHotAgentPubkey(): string {
+        return ""
+    }
+
+    @Query(returns => String)
+    runtimeUnytAgentKey(): string {
+        return ""
+    }
+
+    @Query(returns => String)
+    runtimeUnytVersionInfo(): string {
+        return ""
     }
 }
 

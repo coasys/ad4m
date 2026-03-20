@@ -552,11 +552,9 @@ pub fn get_user_default_capabilities() -> Vec<Capability> {
         RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY.clone(),
         // Note: Excluding RUNTIME_QUIT_CAPABILITY as this is an admin operation
 
-        // Hosting capabilities - allow users to view their hosting info
+        // Hosting capabilities - allow users to view and manage their hosting info
         RUNTIME_HOSTING_READ_CAPABILITY.clone(),
-        // Note: Excluding RUNTIME_HOSTING_UPDATE_CAPABILITY as wallet/payment
-        // operations should be explicitly granted per-app
-
+        RUNTIME_HOSTING_UPDATE_CAPABILITY.clone(),
         // AI capabilities - allow users to use AI (prompt, transcribe) but not manage models
         AI_READ_CAPABILITY.clone(),
         AI_PROMPT_CAPABILITY.clone(),

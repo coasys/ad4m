@@ -70,6 +70,16 @@ export class LoggedInDashboard extends LitElement {
         color: var(--ac-danger-color);
       }
 
+      .credit-display.free-access {
+        background: rgba(93, 210, 125, 0.14);
+        box-shadow: 0 0 0 1px var(--ac-success-color);
+      }
+
+      .credit-display.free-access .credit-amount {
+        color: var(--ac-success-color);
+        font-size: 20px;
+      }
+
       .depleted-banner {
         text-align: center;
         padding: 10px;
@@ -202,8 +212,12 @@ export class LoggedInDashboard extends LitElement {
     return !!this.userInfo?.hotWalletAddress;
   }
 
+  private get isFreeAccess(): boolean {
+    return !!this.userInfo?.freeAccess;
+  }
+
   private get isDepleted(): boolean {
-    return this.userInfo != null && this.userInfo.remainingCredits <= 0;
+    return this.userInfo != null && !this.userInfo.freeAccess && this.userInfo.remainingCredits <= 0;
   }
 
   updated(changed: Map<string, unknown>) {
@@ -243,73 +257,80 @@ export class LoggedInDashboard extends LitElement {
         </div>
 
         <!-- Credit balance -->
-        <div class="credit-display ${this.isDepleted ? 'depleted' : ''}">
-          ${CreditIcon()}
-          <span class="credit-amount">${credits.toFixed(2)}</span>
-          <span class="credit-label">HOT</span>
-        </div>
+        ${this.isFreeAccess ? html`
+          <div class="credit-display free-access">
+            ${CreditIcon()}
+            <span class="credit-amount">Free Access</span>
+          </div>
+        ` : html`
+          <div class="credit-display ${this.isDepleted ? 'depleted' : ''}">
+            ${CreditIcon()}
+            <span class="credit-amount">${credits.toFixed(2)}</span>
+            <span class="credit-label">HOT</span>
+          </div>
 
-        ${this.isDepleted ? html`
-          <div class="depleted-banner">Credits depleted — top up to continue using this host</div>
-        ` : ''}
+          ${this.isDepleted ? html`
+            <div class="depleted-banner">Credits depleted — top up to continue using this host</div>
+          ` : ''}
 
-        <!-- Wallet address -->
-        <div class="wallet-section">
-          <label>${WalletIcon()} mHOT Wallet Address</label>
-          ${this.hasWallet && !this.editingWallet ? html`
-            <div class="wallet-row">
-              <div class="wallet-display">${this.userInfo!.hotWalletAddress}</div>
-              <button class="secondary" @click=${() => { this.editingWallet = true; this.walletInput = this.userInfo!.hotWalletAddress || ''; }}>
-                Change
-              </button>
-            </div>
-          ` : html`
-            <div class="wallet-row">
-              <input
-                type="text"
-                placeholder="Enter your mHOT wallet address"
-                .value=${this.walletInput}
-                @input=${(e: Event) => { this.walletInput = (e.target as HTMLInputElement).value; }}
-                @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter') this.setWalletAddress(); }}
-                style="font-size: 14px;"
-              />
+          <!-- Wallet address -->
+          <div class="wallet-section">
+            <label>${WalletIcon()} mHOT Wallet Address</label>
+            ${this.hasWallet && !this.editingWallet ? html`
+              <div class="wallet-row">
+                <div class="wallet-display">${this.userInfo!.hotWalletAddress}</div>
+                <button class="secondary" @click=${() => { this.editingWallet = true; this.walletInput = this.userInfo!.hotWalletAddress || ''; }}>
+                  Change
+                </button>
+              </div>
+            ` : html`
+              <div class="wallet-row">
+                <input
+                  type="text"
+                  placeholder="Enter your mHOT wallet address"
+                  .value=${this.walletInput}
+                  @input=${(e: Event) => { this.walletInput = (e.target as HTMLInputElement).value; }}
+                  @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter') this.setWalletAddress(); }}
+                  style="font-size: 14px;"
+                />
+                <button
+                  class="primary"
+                  ?disabled=${!this.walletInput.trim()}
+                  @click=${this.setWalletAddress}
+                >
+                  Save
+                </button>
+              </div>
+            `}
+          </div>
+
+          <!-- Top-up buttons -->
+          <div class="topup-buttons">
+            ${[10, 50, 100].map(amount => html`
               <button
-                class="primary"
-                ?disabled=${!this.walletInput.trim()}
-                @click=${this.setWalletAddress}
+                class="secondary"
+                ?disabled=${!this.hasWallet || this.requestingPayment}
+                @click=${() => this.requestTopUp(amount)}
               >
-                Save
+                ${this.requestingPayment ? '...' : `${amount} HOT`}
               </button>
-            </div>
-          `}
-        </div>
+            `)}
+          </div>
 
-        <!-- Top-up buttons -->
-        <div class="topup-buttons">
-          ${[10, 50, 100].map(amount => html`
-            <button
-              class="secondary"
-              ?disabled=${!this.hasWallet || this.requestingPayment}
-              @click=${() => this.requestTopUp(amount)}
-            >
-              ${this.requestingPayment ? '...' : `${amount} HOT`}
-            </button>
-          `)}
-        </div>
+          ${!this.hasWallet ? html`
+            <p style="font-size:13px;color:rgba(255,255,255,0.4);text-align:center;">
+              Set your wallet address above to enable top-ups
+            </p>
+          ` : ''}
 
-        ${!this.hasWallet ? html`
-          <p style="font-size:13px;color:rgba(255,255,255,0.4);text-align:center;">
-            Set your wallet address above to enable top-ups
-          </p>
-        ` : ''}
+          ${this.paymentSuccess ? html`
+            <div class="success-message">Payment request sent to Unit app</div>
+          ` : ''}
 
-        ${this.paymentSuccess ? html`
-          <div class="success-message">Payment request sent to Unit app</div>
-        ` : ''}
-
-        ${this.paymentError ? html`
-          <div class="error-message">${this.paymentError}</div>
-        ` : ''}
+          ${this.paymentError ? html`
+            <div class="error-message">${this.paymentError}</div>
+          ` : ''}
+        `}
 
         <button class="danger full" @click=${this.disconnect}>
           Disconnect

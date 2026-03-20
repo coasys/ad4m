@@ -145,6 +145,12 @@ export class HostDetail extends LitElement {
     return renderHostAvatar(this.host, "profile-pic");
   }
 
+  private rateLabel(description: string): string {
+    if (description === "link write") return "Link write";
+    if (description === "embedding per token") return "Embedding (per token)";
+    return description;
+  }
+
   private formatPrice(price: number): string {
     if (price === 0) return "0.00";
     // Show enough decimal places to be meaningful
@@ -181,12 +187,21 @@ export class HostDetail extends LitElement {
             <div class="rates-section">
               <h3>Pricing</h3>
               <table class="rates-table">
-                ${this.host.rates.map(rate => html`
+                ${this.host.rates.filter(r => !r.description.endsWith("per token")).map(rate => html`
                   <tr>
-                    <td>${rate.description}</td>
+                    <td>${this.rateLabel(rate.description)}</td>
                     <td>${this.formatPrice(rate.priceInHOT)} HOT</td>
                   </tr>
                 `)}
+                ${this.host.rates.filter(r => r.description.endsWith("per token")).length > 0 ? html`
+                  <tr><td colspan="2" style="padding-top:12px;color:rgba(255,255,255,0.5);font-size:12px;text-transform:uppercase;letter-spacing:0.5px;">AI Models (per token)</td></tr>
+                  ${this.host.rates.filter(r => r.description.endsWith("per token")).map(rate => html`
+                    <tr>
+                      <td>${rate.description.replace(" per token", "")}</td>
+                      <td>${this.formatPrice(rate.priceInHOT)} HOT</td>
+                    </tr>
+                  `)}
+                ` : ''}
               </table>
             </div>
           </div>

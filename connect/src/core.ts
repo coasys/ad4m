@@ -281,7 +281,8 @@ export default class Ad4mConnect extends EventTarget {
 
     const poll = async () => {
       try {
-        const info = await fetchUserInfo(this.url, this.token);
+        if (!this.ad4mClient) return;
+        const info = await fetchUserInfo(this.ad4mClient);
         this.userInfo = info;
         this.dispatchEvent(new CustomEvent('userinfochange', { detail: info }));
 
@@ -306,7 +307,8 @@ export default class Ad4mConnect extends EventTarget {
   }
 
   async requestTopUp(amountHOT: number): Promise<{ success: boolean; message: string }> {
-    return requestPayment(this.url, this.token, amountHOT);
+    if (!this.ad4mClient) throw new Error('Not connected');
+    return requestPayment(this.ad4mClient, amountHOT);
   }
 
   /** Persist selected host after successful auth */

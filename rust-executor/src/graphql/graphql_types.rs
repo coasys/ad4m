@@ -704,6 +704,7 @@ pub struct UserStatistics {
     pub perspective_count: i32,
     pub remaining_credits: String,
     pub free_access: bool,
+    pub hot_wallet_address: Option<String>,
 }
 
 #[derive(GraphQLObject, Debug, Deserialize, Serialize, Clone)]

@@ -1027,6 +1027,16 @@ impl Query {
                 format!("{}", credits)
             };
 
+            let hot_wallet_address =
+                Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user.username)).map_err(
+                    |e| {
+                        FieldError::new(
+                            format!("Failed to get hot wallet for user {}: {}", user.username, e),
+                            Value::null(),
+                        )
+                    },
+                )?;
+
             user_stats.push(UserStatistics {
                 email: user.username.clone(),
                 did: user.did,
@@ -1039,10 +1049,31 @@ impl Query {
                 perspective_count,
                 remaining_credits,
                 free_access,
+                hot_wallet_address,
             });
         }
 
         Ok(user_stats)
+    }
+
+    async fn runtime_user_wallet_address(
+        &self,
+        context: &RequestContext,
+        email: String,
+    ) -> FieldResult<Option<String>> {
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
+        )?;
+        let email = email.trim().to_lowercase();
+        let addr =
+            Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&email)).map_err(|e| {
+                FieldError::new(
+                    format!("Failed to get wallet address: {}", e),
+                    Value::null(),
+                )
+            })?;
+        Ok(addr)
     }
 
     async fn runtime_hosting_user_info(
@@ -1092,6 +1123,262 @@ impl Query {
             hot_wallet_address,
             free_access,
         })
+    }
+
+    /// Get the host's configured rates for credit deduction.
+    async fn runtime_host_rates(&self, context: &RequestContext) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        let rates = Ad4mDb::with_global_instance(|db| {
+            db.get_host_rates().map_err(|e| {
+                FieldError::new(format!("Failed to get host rates: {}", e), Value::null())
+            })
+        })?;
+
+        let json: Vec<serde_json::Value> = rates
+            .into_iter()
+            .map(|(desc, price)| serde_json::json!({ "description": desc, "priceInHOT": price }))
+            .collect();
+
+        Ok(serde_json::to_string(&json).unwrap_or_else(|_| "[]".to_string()))
+    }
+
+    /// Get the host's mHOT wallet balance from the alliance DNA ledger.
+    async fn runtime_hot_wallet_balance(&self, context: &RequestContext) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        match crate::unyt_service::get_ledger().await {
+            Ok(ledger) => {
+                // Extract balance from ledger JSON
+                let balance = ledger
+                    .get("balance")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                Ok(serde_json::to_string(&balance).unwrap_or_else(|_| "{}".to_string()))
+            }
+            Err(e) => Err(FieldError::new(
+                format!("Failed to get mHOT wallet balance: {}", e),
+                Value::null(),
+            )),
+        }
+    }
+
+    /// Get the host's mHOT transaction history (outgoing + incoming).
+    async fn runtime_hot_wallet_history(
+        &self,
+        context: &RequestContext,
+        page: Option<i32>,
+        per_page: Option<i32>,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        // Validate pagination parameters
+        if let Some(p) = page {
+            if p < 0 {
+                return Err(FieldError::new("page must be non-negative", Value::Null));
+            }
+        }
+        const MAX_PER_PAGE: i32 = 1000;
+        if let Some(pp) = per_page {
+            if pp < 1 || pp > MAX_PER_PAGE {
+                return Err(FieldError::new(
+                    format!("per_page must be between 1 and {}", MAX_PER_PAGE),
+                    Value::Null,
+                ));
+            }
+        }
+
+        // Fetch outgoing history
+        let mut all_txs: Vec<serde_json::Value> = Vec::new();
+
+        match crate::unyt_service::get_history(
+            page.map(|p| p as u64),
+            per_page.unwrap_or(50) as u64,
+        )
+        .await
+        {
+            Ok(history) => {
+                log::debug!("get_history raw result: {}", history);
+                // get_history returns {"items": [...], "low_boundary": ..., "end_of_chain": ...}
+                let items = history
+                    .get("items")
+                    .and_then(|v| v.as_array())
+                    .or_else(|| history.as_array());
+                if let Some(arr) = items {
+                    log::info!("get_history parsed {} items", arr.len());
+                    for tx in arr {
+                        all_txs.push(tx.clone());
+                    }
+                } else {
+                    log::warn!("get_history: could not extract items array from response");
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to get outgoing history: {}", e);
+            }
+        }
+
+        // Fetch incoming transactions via notification links
+        match crate::unyt_service::get_all_notification_links().await {
+            Ok(links) => {
+                log::debug!("get_all_notification_links raw result: {}", links);
+                match crate::unyt_service::get_actionable_transactions(links).await {
+                    Ok(incoming) => {
+                        log::debug!("get_actionable_transactions raw result: {}", incoming);
+                        // Result is {"proposal_actionable":[], "commitment_actionable":[], "accept_actionable":[], "reject_actionable":[]}
+                        if let Some(obj) = incoming.as_object() {
+                            for (category, txs) in obj {
+                                if let Some(arr) = txs.as_array() {
+                                    for tx in arr {
+                                        let mut tx = tx.clone();
+                                        if let Some(tx_obj) = tx.as_object_mut() {
+                                            let direction = if category == "reject_actionable" {
+                                                "rejected"
+                                            } else {
+                                                "incoming"
+                                            };
+                                            tx_obj.insert(
+                                                "direction".to_string(),
+                                                serde_json::Value::String(direction.to_string()),
+                                            );
+                                        }
+                                        all_txs.push(tx);
+                                    }
+                                }
+                            }
+                        } else if let Some(arr) = incoming.as_array() {
+                            for tx in arr {
+                                let mut tx = tx.clone();
+                                if let Some(obj) = tx.as_object_mut() {
+                                    obj.insert(
+                                        "direction".to_string(),
+                                        serde_json::Value::String("incoming".to_string()),
+                                    );
+                                }
+                                all_txs.push(tx);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to get actionable transactions: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to get notification links: {}", e);
+            }
+        }
+
+        // Add pending sends from DB so they show immediately in the UI
+        if let Ok(pending) = Ad4mDb::with_global_instance(|db| db.get_pending_sends()) {
+            log::info!("DB pending sends: {} items", pending.len());
+            for (recipient, amount, proposal_hash) in &pending {
+                // Check if this proposal is already in all_txs (from zome history)
+                let already_present = all_txs.iter().any(|tx| {
+                    tx.get("id").and_then(|v| v.as_str()) == Some(proposal_hash.as_str())
+                        || tx
+                            .get("history")
+                            .and_then(|h| h.as_array())
+                            .map_or(false, |arr| {
+                                arr.iter().any(|h| {
+                                    h.get("id").and_then(|v| v.as_str())
+                                        == Some(proposal_hash.as_str())
+                                })
+                            })
+                });
+                if !already_present {
+                    let mut tx = serde_json::json!({
+                        "id": proposal_hash,
+                        "tx_type": "Proposal",
+                        "amount": { "0": format!("-{}", amount.trim_start_matches('-')) },
+                        "counterparty": [recipient],
+                        "status": "pending",
+                        "direction": "outgoing",
+                    });
+                    // Enrich with email
+                    if let Ok(Some(email)) = Ad4mDb::with_global_instance(|db| {
+                        db.get_user_by_hot_wallet_address(recipient)
+                    }) {
+                        tx.as_object_mut().unwrap().insert(
+                            "counterparty_email".to_string(),
+                            serde_json::Value::String(email),
+                        );
+                    }
+                    all_txs.push(tx);
+                }
+            }
+        }
+
+        // NOTE: Rejection reconciliation (reject_pending_send, complete_payment_request)
+        // is handled by check_pending_sends() and check_pending_payments() in unyt_service.rs,
+        // which run periodically. This query resolver is intentionally read-only.
+
+        // Enrich counterparty agent pubkeys with user emails from DB
+        for tx in &mut all_txs {
+            if let Some(counterparty_arr) = tx
+                .get("counterparty")
+                .and_then(|c| c.as_array())
+                .map(|a| a.to_vec())
+            {
+                if let Some(pubkey) = counterparty_arr.first().and_then(|v| v.as_str()) {
+                    if let Ok(Some(email)) =
+                        Ad4mDb::with_global_instance(|db| db.get_user_by_hot_wallet_address(pubkey))
+                    {
+                        if let Some(obj) = tx.as_object_mut() {
+                            obj.insert(
+                                "counterparty_email".to_string(),
+                                serde_json::Value::String(email),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        log::info!(
+            "Returning {} total transaction history items",
+            all_txs.len()
+        );
+        Ok(serde_json::to_string(&all_txs).unwrap_or_else(|_| "[]".to_string()))
+    }
+
+    /// Get the host's mHOT agent public key (their identity on the mHOT DHT).
+    async fn runtime_hot_agent_pubkey(&self, context: &RequestContext) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        match crate::unyt_service::whoami().await {
+            Ok(pubkey) => Ok(pubkey),
+            Err(e) => Err(FieldError::new(
+                format!("Failed to get mHOT agent pubkey: {}", e),
+                Value::null(),
+            )),
+        }
+    }
+
+    /// Get or create the Holochain agent public key for the Unyt DNA (base64).
+    /// Available even before Unyt DNA is installed — needed to request membrane proof.
+    async fn runtime_unyt_agent_key(&self, context: &RequestContext) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        match crate::unyt_service::get_or_create_agent_key().await {
+            Ok(key) => Ok(key),
+            Err(e) => Err(FieldError::new(
+                format!("Failed to get/create Unyt agent key: {}", e),
+                Value::null(),
+            )),
+        }
+    }
+
+    /// Get Unyt DNA version info (installed vs bundled).
+    async fn runtime_unyt_version_info(&self, context: &RequestContext) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+        let (installed, bundled) = crate::unyt_service::version_info();
+        Ok(serde_json::json!({
+            "installed": installed,
+            "bundled": bundled,
+            "needsUpdate": installed.as_deref() != Some(bundled.as_str()),
+        })
+        .to_string())
     }
 
     async fn ai_get_models(&self, context: &RequestContext) -> FieldResult<Vec<Model>> {

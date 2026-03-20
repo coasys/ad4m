@@ -186,6 +186,11 @@ export class Ad4mConnectElement extends LitElement {
 
     this.core.addEventListener('creditdepleted', () => {
       this.lowCredit = true;
+      // Auto-open the dashboard so the user sees the top-up options
+      if (this.core.connectedHost && !this.modalOpen) {
+        this.currentView = "logged-in-dashboard";
+        this.modalOpen = true;
+      }
       this.requestUpdate();
     });
 
@@ -333,10 +338,13 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private async handleSetWalletAddress(e: CustomEvent) {
-    // In a real implementation, this would call a core method to persist the wallet address
-    // For now, update userInfo locally
-    if (this.userInfo) {
-      this.userInfo = { ...this.userInfo, hotWalletAddress: e.detail.address };
+    try {
+      await this.core.ad4mClient!.agent.setHotWalletAddress(e.detail.address);
+      if (this.userInfo) {
+        this.userInfo = { ...this.userInfo, hotWalletAddress: e.detail.address };
+      }
+    } catch (error) {
+      console.error('[Ad4m Connect] Failed to set wallet address:', error);
     }
   }
 
@@ -467,6 +475,7 @@ export class Ad4mConnectElement extends LitElement {
     if (this.currentView === "remote-authentication") {
       return html`
         <remote-authentication
+          .host=${this.selectedHost}
           .remoteAuthLoading=${this.remoteAuthLoading}
           .remoteAuthState=${this.remoteAuthState}
           .emailCodeError=${this.emailCodeError}

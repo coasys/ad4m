@@ -12,6 +12,7 @@ pub mod mcp;
 mod prolog_service;
 pub mod runtime_service;
 mod surreal_service;
+pub mod unyt_service;
 pub mod user_management;
 pub mod utils;
 mod wallet;
@@ -120,6 +121,17 @@ async fn holochain_signal_receiver() {
                                 }
                             }
                         };
+                        // Check if this signal is from the Unyt alliance DNA
+                        if unyt_service::is_alliance_cell(&cell_id_key).await {
+                            let payload_json: serde_json::Value =
+                                serde_json::from_str(&payload_str)
+                                    .unwrap_or(serde_json::Value::Null);
+                            tokio::spawn(async move {
+                                unyt_service::handle_signal(&payload_json).await;
+                            });
+                            continue;
+                        }
+
                         let maybe_lang_address: Option<String> = {
                             let handlers = js_core::languages_extension::HOLOCHAIN_SIGNAL_HANDLERS
                                 .read()
@@ -441,6 +453,27 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     // Start holochain signal receiver as standalone task
     tokio::spawn(crate::holochain_signal_receiver());
+
+    // Eagerly install Unyt alliance DNA in the background (only if membrane proof is available).
+    tokio::spawn(async {
+        if unyt_service::get_membrane_proof().is_none() {
+            info!("No Unyt membrane proof stored — skipping eager DNA install");
+            return;
+        }
+        match unyt_service::ensure_installed().await {
+            Ok(()) => info!("Unyt alliance DNA ready"),
+            Err(e) => error!("Failed to install Unyt alliance DNA: {}", e),
+        }
+    });
+
+    // Spawn payment completion polling (every 30 seconds)
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            unyt_service::check_pending_payments().await;
+            unyt_service::check_pending_sends().await;
+        }
+    });
 
     // Check if MCP mode is enabled — run MCP server alongside GraphQL
     if config.enable_mcp == Some(true) {

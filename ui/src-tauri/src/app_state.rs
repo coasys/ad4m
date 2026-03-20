@@ -212,14 +212,14 @@ impl Serialize for HostRegistration {
     {
         use serde::ser::SerializeStruct;
 
-        let encrypted = encrypt_password(&self.auth_token).map_err(|e| {
-            serde::ser::Error::custom(format!("Failed to encrypt auth_token: {}", e))
-        })?;
+        // Note: auth_token is NOT encrypted because JWTs are already signed by the server.
+        // The signing key is server-side, so encryption provides no additional security.
+        // Encrypting breaks the token format and causes deserialization issues.
 
         let mut state = serializer.serialize_struct("HostRegistration", 4)?;
         state.serialize_field("index_url", &self.index_url)?;
         state.serialize_field("host_id", &self.host_id)?;
-        state.serialize_field("auth_token", &encrypted)?;
+        state.serialize_field("auth_token", &self.auth_token)?;
         state.serialize_field("email", &self.email)?;
         state.end()
     }
@@ -240,25 +240,13 @@ impl<'de> Deserialize<'de> for HostRegistration {
 
         let helper = HostRegistrationHelper::deserialize(deserializer)?;
 
-        // Try to decrypt the auth_token.
-        // If decryption fails, assume it's plain text (backwards compatibility).
-        let plain_token = match decrypt_password(&helper.auth_token) {
-            Ok(decrypted) => decrypted,
-            Err(e) => {
-                log::warn!(
-                    "Host registration auth_token decryption failed for host_id '{}': {}. \
-                     Treating as plaintext for backwards compatibility migration.",
-                    helper.host_id,
-                    e
-                );
-                helper.auth_token
-            }
-        };
+        // auth_token is stored in plain text (it's a JWT, not a password)
+        // No decryption needed
 
         Ok(HostRegistration {
             index_url: helper.index_url,
             host_id: helper.host_id,
-            auth_token: plain_token,
+            auth_token: helper.auth_token,
             email: helper.email,
         })
     }

@@ -39,6 +39,7 @@ pub struct PromptResult {
     pub text: String,
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
+    pub model_id: String,
 }
 
 /// Result of an embedding call, with token count for billing.
@@ -997,6 +998,7 @@ impl AIService {
             text,
             prompt_tokens,
             completion_tokens,
+            model_id,
         })
     }
 

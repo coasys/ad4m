@@ -39,6 +39,8 @@ pub enum HolochainServiceRequest {
     UnPackDna(String, oneshot::Sender<HolochainServiceResponse>),
     PackHapp(String, oneshot::Sender<HolochainServiceResponse>),
     UnPackHapp(String, oneshot::Sender<HolochainServiceResponse>),
+    NewSignKeypair(oneshot::Sender<HolochainServiceResponse>),
+    EnableApp(String, oneshot::Sender<HolochainServiceResponse>),
 }
 
 #[derive(Debug)]
@@ -59,6 +61,8 @@ pub enum HolochainServiceResponse {
     UnPackDna(Result<String, AnyError>),
     PackHapp(Result<String, AnyError>),
     UnPackHapp(Result<String, AnyError>),
+    NewSignKeypair(Result<HoloHash<Agent>, AnyError>),
+    EnableApp(Result<(), AnyError>),
 }
 
 impl HolochainServiceInterface {
@@ -114,6 +118,16 @@ impl HolochainServiceInterface {
         }
     }
 
+    pub async fn enable_app(&self, app_id: String) -> Result<(), AnyError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.sender
+            .send(HolochainServiceRequest::EnableApp(app_id, response_tx))?;
+        match response_rx.await? {
+            HolochainServiceResponse::EnableApp(result) => result,
+            _ => unreachable!(),
+        }
+    }
+
     pub async fn agent_infos(&self) -> Result<Vec<String>, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
         self.sender
@@ -162,6 +176,16 @@ impl HolochainServiceInterface {
             .send(HolochainServiceRequest::GetAgentKey(response_tx))?;
         match response_rx.await? {
             HolochainServiceResponse::GetAgentKey(result) => result,
+            _ => unreachable!(),
+        }
+    }
+
+    pub async fn new_sign_keypair_random(&self) -> Result<HoloHash<Agent>, AnyError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.sender
+            .send(HolochainServiceRequest::NewSignKeypair(response_tx))?;
+        match response_rx.await? {
+            HolochainServiceResponse::NewSignKeypair(result) => result,
             _ => unreachable!(),
         }
     }

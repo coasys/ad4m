@@ -55,4 +55,5 @@ export type UserInfo = {
   email: string;
   remainingCredits: number;  // in HOT equivalent
   hotWalletAddress: string | null;  // user's mHOT public address (null until set)
+  freeAccess: boolean;
 };
