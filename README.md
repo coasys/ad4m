@@ -1,13 +1,14 @@
 [![Project](https://img.shields.io/badge/Website-Coasys-brightgreen.svg)](http://coasys.org/)
 [![Docs](https://img.shields.io/badge/Docs-AD4M-blue.svg)](http://docs.ad4m.dev/)
 [![License: CAL 1.0](https://img.shields.io/badge/License-CAL%201.0-blue.svg)](https://github.com/holochain/cryptographic-autonomy-license)
+[![CI](https://github.com/coasys/ad4m/actions/workflows/tests.yml/badge.svg)](https://github.com/coasys/ad4m/actions)
 [![Discord](https://img.shields.io/discord/887669548969517056?label=Discord)](https://discord.com/invite/fYGVM66jEz)
 [![Twitter Follow](https://img.shields.io/twitter/follow/ad4m_layer?style=social)](https://x.com/ad4m_layer)
 
 # AD4M: Agent-Centric Distributed Application Meta-ontology
 
 <div align="center">
-  <img src="/docs/public/images/ad4m-spanning-layer.jpg" alt="AD4M Banner">
+  <img src="/docs-src/public/images/ad4m-spanning-layer.jpg" alt="AD4M Banner">
 </div>
 
 ## Vision
@@ -168,6 +169,10 @@ These concepts work together to create a new kind of internet – one where mean
   ```bash
   # Follow instructions at https://go.dev/doc/install
   ```
+- **Node.js** (18+ recommended) and **pnpm**
+  ```bash
+  npm install -g pnpm
+  ```
 
 #### Platform-Specific Dependencies
 
@@ -205,17 +210,64 @@ cd ad4m
 pnpm install
 ```
 
-3. Build all packages project:
+3. Build all packages:
 ```bash
 pnpm run build
 ```
 
-4. Create a UI bundle for the Ad4m Launcher
+4. Create a UI bundle for the AD4M Launcher:
 ```bash
 pnpm run package-ad4m
 ```
 
 Find the launcher bundle in `/target/release/bundle`.
+
+### Quick Start Examples
+
+#### Connect to AD4M from your app
+
+```typescript
+import { Ad4mClient } from "@coasys/ad4m";
+
+// Connect to a running AD4M executor
+const client = new Ad4mClient({
+  appName: "MyApp",
+  appDesc: "My first AD4M app",
+  appDomain: "https://myapp.com",
+  appIconPath: "/icon.png",
+  capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
+});
+
+await client.connect("http://localhost:12000");
+
+// Get agent info
+const me = await client.agent.me();
+console.log("Connected as:", me.did);
+```
+
+#### Create and share a perspective
+
+```typescript
+// Create a new perspective
+const perspective = await client.perspective.add("My First Perspective");
+
+// Add semantic links
+await client.perspective.addLink(perspective.uuid, {
+  source: "literal://string:Alice",
+  predicate: "knows",
+  target: "literal://string:Bob"
+});
+
+// Publish as a shared neighbourhood
+const neighbourhoodUrl = await client.neighbourhood.publishFromPerspective(
+  perspective.uuid,
+  "My Shared Space",
+  "neighbourhood-template-link-language-address"
+);
+
+// Share the URL - others can join with:
+await client.neighbourhood.joinFromUrl(neighbourhoodUrl);
+```
 
 ## Project Structure
 
@@ -230,7 +282,7 @@ ad4m/
 ├── connect/            # Library for connecting apps to AD4M
 ├── dapp/              # DApp server implementation
 ├── ui/               # Tauri-based system tray application
-├── docs/            # Documentation and guides
+├── docs-src/        # Documentation source (VitePress)
 ├── tests/           # Integration tests
 └── test-runner/    # Test automation framework
 ```
@@ -251,14 +303,20 @@ Key Components:
 - [Core Concepts](https://docs.ad4m.dev/concepts)
 - [Developer Guides](https://docs.ad4m.dev/developer-guides)
 - [API Reference](https://docs.ad4m.dev/jsdoc)
+- [Contributing Guide](CONTRIBUTING.md)
 
 ## Tools & Development
 
 ### AD4M CLI
 
-Install the command line tools:
+The `ad4m` command line tool provides direct access to AD4M functionality:
+
 ```bash
+# Install from crates.io
 cargo install ad4m
+
+# Or build locally
+cd cli && cargo build --release
 ```
 
 Basic usage:
@@ -274,11 +332,34 @@ ad4m perspectives create
 
 # Query links
 ad4m perspectives query-links <uuid>
+
+# Publish a neighbourhood
+ad4m neighbourhood publish <perspective-uuid>
 ```
 
 ### AD4M Launcher
 
-For a graphical interface, install the [AD4M Launcher](https://github.com/coasys/ad4m-launcher).
+For a graphical interface, install the [AD4M Launcher](https://github.com/coasys/ad4m-launcher) – a system tray application for managing AD4M executors.
+
+### OpenClaw Plugin
+
+For AI agent integration, check out the [OpenClaw AD4M Plugin](https://github.com/openclaw/openclaw) – enables AI agents to use AD4M for persistent distributed memory and P2P collaboration through MCP (Model Context Protocol).
+
+## Testing
+
+Run the test suite:
+
+```bash
+# Run all tests
+pnpm test
+
+# Run specific test suites
+pnpm test:unit
+pnpm test:integration
+
+# Run Rust tests
+cd rust-executor && cargo test --release -- --test-threads=1
+```
 
 ## Contributing
 
@@ -287,16 +368,29 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 ### Development Process
 
 1. Fork the repository
-2. Create a feature branch
+2. Create a feature branch from `dev`
 3. Make your changes
-4. Run tests: `npm test`
-5. Submit a pull request
+4. Run tests: `pnpm test`
+5. Submit a pull request to `dev` branch
+
+### Code of Conduct
+
+We are committed to fostering a welcoming community. Please read our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Community
 
 - [Discord](https://discord.gg/fYGVM66jEz) - Join our community chat
-- [Twitter](https://twitter.com/coasys_) - Follow us for updates
+- [Twitter](https://twitter.com/ad4m_layer) - Follow for updates
 - [Blog](https://blog.coasys.org) - Read about our vision and progress
+- [Forum](https://forum.coasys.org) - Discussions and support
+
+## Ecosystem
+
+AD4M is part of a growing ecosystem:
+- **[Flux](https://github.com/coasys/flux)** - Decentralized social network built on AD4M
+- **[We](https://github.com/coasys/we)** - Collaborative workspace application
+- **[OpenClaw](https://github.com/openclaw/openclaw)** - AI agent framework with AD4M integration
+- **[AD4M Launcher](https://github.com/coasys/ad4m-launcher)** - Desktop application for managing AD4M
 
 ## License
 
@@ -311,7 +405,12 @@ This license ensures:
 ## Acknowledgments
 
 AD4M is developed by [Coasys](https://coasys.org) and builds upon ideas from:
-- The Semantic Web
-- Agent-centric computing
-- Holochain
-- Solid
+- The Semantic Web (Tim Berners-Lee)
+- Agent-centric computing (Arthur Brock)
+- Holochain distributed architecture
+- Solid personal data stores
+- Decentralized identity (DIDs & VCs)
+
+---
+
+**Built with ❤️ by the Coasys team and contributors worldwide.**
