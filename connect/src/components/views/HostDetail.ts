@@ -1,7 +1,6 @@
 import { LitElement, html, css, TemplateResult } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { sharedStyles } from "../../styles/shared-styles";
-import { ArrowLeftIcon } from "../icons";
 import { renderHostAvatar } from "../shared/avatar";
 import type { RemoteHost } from "../../types";
 
@@ -125,11 +124,6 @@ export class HostDetail extends LitElement {
       button.connect-button {
         width: 100%;
       }
-
-      button.back-button {
-        all: unset;
-        cursor: pointer;
-      }
     `
   ];
 
@@ -165,10 +159,6 @@ export class HostDetail extends LitElement {
 
     return html`
       <div class="container">
-        <button class="back-button" aria-label="Go back" @click=${this.back}>
-          ${ArrowLeftIcon()}
-        </button>
-
         <div class="profile">
           ${this.renderAvatar()}
           <p class="profile-name">${this.host.name}</p>

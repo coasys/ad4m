@@ -2,7 +2,7 @@ import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { capSentence } from "@coasys/ad4m";
 import { sharedStyles } from "../../styles/shared-styles";
-import { Ad4mLogo, ArrowLeftIcon, ArrowLeftRightIcon, CheckIcon, CrossIcon } from "../icons";
+import { Ad4mLogo, ArrowLeftRightIcon, CheckIcon, CrossIcon } from "../icons";
 
 @customElement("local-authentication")
 export class LocalAuthentication extends LitElement {
@@ -132,10 +132,6 @@ export class LocalAuthentication extends LitElement {
   render() {
     return html`
       <div class="container">
-        <div class="back-button" @click=${this.back}>
-          ${ArrowLeftIcon()}
-        </div>
-
         <div class="header">
           <h1>${this.appname}</h1>
           <h3>wants to access your AD4M data</h3>

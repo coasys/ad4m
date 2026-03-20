@@ -4,7 +4,7 @@ import autoBind from "auto-bind";
 import { VerificationRequestResult } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
 import { connectWebSocket, setLocal } from "./utils";
 import Ad4mConnect from "./core";
-import { Ad4mLogo } from "./components/icons";
+import { Ad4mLogo, ArrowLeftIcon } from "./components/icons";
 import { fetchHosts } from "./services/hostIndex";
 import type { RemoteHost, UserInfo } from "./types";
 
@@ -81,6 +81,7 @@ const styles = css`
   }
 
   .modal-header {
+    position: relative;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -91,6 +92,28 @@ const styles = css`
   .modal-header > svg {
     width: 70px;
     height: 70px;
+  }
+
+  .modal-header .back-button {
+    all: unset;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 16px;
+    color: rgba(255, 255, 255, 0.5);
+    position: absolute;
+    left: 0;
+    top: 0;
+  }
+
+  .modal-header .back-button svg {
+    width: 28px;
+    height: 28px;
+  }
+
+  .modal-header .back-button:hover {
+    color: rgba(255, 255, 255, 0.8);
   }
 
   .modal-content {
@@ -419,6 +442,21 @@ export class Ad4mConnectElement extends LitElement {
     window.location.reload();
   }
 
+  private get backTarget(): Views | null {
+    switch (this.currentView) {
+      case "local-authentication": return "connection-options";
+      case "host-browser": return "connection-options";
+      case "host-detail": return "host-browser";
+      case "remote-authentication": return this.selectedHost ? "host-detail" : "connection-options";
+      default: return null;
+    }
+  }
+
+  private handleBack() {
+    const target = this.backTarget;
+    if (target) this.currentView = target;
+  }
+
   renderViews() {
     if (this.currentView === "connection-options") {
       return html`
@@ -528,6 +566,11 @@ export class Ad4mConnectElement extends LitElement {
         <div class="wrapper">
           <div class="modal">
             <header class="modal-header">
+              ${this.backTarget ? html`
+                <button class="back-button" aria-label="Go back" @click=${this.handleBack}>
+                  ${ArrowLeftIcon()} Back
+                </button>
+              ` : ''}
               ${Ad4mLogo()}
             </header>
             <main class="modal-content">

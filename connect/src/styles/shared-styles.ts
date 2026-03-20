@@ -121,27 +121,37 @@ export const sharedStyles = css`
     width: 100%;
   }
 
-  .back-button,
   .close-button {
     position: absolute;
     top: 20px;
+    right: 20px;
     cursor: pointer;
   }
 
-  .back-button {
-    left: 20px;
-  }
-
-  .close-button {
-    right: 20px;
-  }
-
-  .back-button svg,
   .close-button svg {
     width: 28px;
     height: 28px;
     color: white;
     opacity: 0.5;
+  }
+
+  .back-button {
+    all: unset;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    color: rgba(255, 255, 255, 0.5);
+  }
+
+  .back-button svg {
+    width: 22px;
+    height: 22px;
+  }
+
+  .back-button:hover {
+    color: rgba(255, 255, 255, 0.8);
   }
 
   /* Inputs */

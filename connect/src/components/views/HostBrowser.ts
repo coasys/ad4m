@@ -1,7 +1,6 @@
 import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { sharedStyles } from "../../styles/shared-styles";
-import { ArrowLeftIcon } from "../icons";
 import { renderHostAvatar } from "../shared/avatar";
 import type { RemoteHost } from "../../types";
 
@@ -191,11 +190,6 @@ export class HostBrowser extends LitElement {
         letter-spacing: 0.5px;
         font-weight: 600;
       }
-
-      button.back-button {
-        all: unset;
-        cursor: pointer;
-      }
     `
   ];
 
@@ -284,10 +278,6 @@ export class HostBrowser extends LitElement {
   render() {
     return html`
       <div class="container">
-        <button class="back-button" @click=${this.back} aria-label="Go back">
-          ${ArrowLeftIcon()}
-        </button>
-
         <div class="header">
           <h1>Remote Node</h1>
           <h3>Choose a host or enter a URL</h3>

@@ -2,7 +2,7 @@ import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { VerificationRequestResult } from "@coasys/ad4m";
 import { sharedStyles } from "../../styles/shared-styles";
-import { ArrowLeftIcon, CheckIcon, CrossIcon } from "../icons";
+import { CheckIcon, CrossIcon } from "../icons";
 import type { RemoteHost } from "../../types";
 
 @customElement("remote-authentication")
@@ -129,10 +129,6 @@ export class RemoteAuthentication extends LitElement {
 
     return html`
       <div class="container">
-        <div class="back-button" @click=${this.back}>
-          ${ArrowLeftIcon()}
-        </div>
-
         <div class="header">
           <h1>${showLoginPasswordInput ? 'Login' : showSignUpPasswordInput ? 'Register' : 'Login or Register'}</h1>
           ${this.host ? html`<p style="font-size: 15px; color: rgba(255,255,255,0.4); margin-top: 4px;">${this.host.url}</p>` : ''}
