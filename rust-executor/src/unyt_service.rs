@@ -148,9 +148,9 @@ pub async fn ensure_installed() -> Result<(), AnyError> {
             Ok(()) => {
                 *installed = true;
 
-                // After first successful install: obtain hc-auth bootstrap
-                // credentials and restart the conductor with the space override
-                // so the unyt DNA can reach the network.
+                // After install: obtain hc-auth bootstrap credentials and
+                // restart the conductor with the space override so the unyt
+                // DNA can reach the network.
                 setup_bootstrap_auth().await;
 
                 return Ok(());
@@ -584,28 +584,62 @@ async fn create_auth_material() -> Result<String, AnyError> {
 /// (at which point the auth material will be retried).
 async fn setup_bootstrap_auth() {
     // Skip if auth material is already stored (previous run already set it up)
-    if Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material"))
+    let has_auth = Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material"))
         .unwrap_or(None)
-        .is_some()
-    {
-        info!("Bootstrap auth material already exists, skipping setup");
+        .is_some();
+    let has_dna_hash = Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_hash"))
+        .unwrap_or(None)
+        .is_some();
+
+    if has_auth && has_dna_hash {
+        info!("Bootstrap auth material and DNA hash already exist, skipping setup");
         return;
     }
 
     info!("Setting up hc-auth bootstrap credentials for unyt DNA...");
 
-    match create_auth_material().await {
-        Ok(auth_material) => {
-            if let Err(e) = Ad4mDb::with_global_instance(|db| {
-                db.set_setting("unyt_auth_material", &auth_material)
-            }) {
-                error!("Failed to store auth material: {}", e);
-                return;
+    if !has_auth {
+        // Retry auth material creation up to 3 times (hc-auth server may be briefly unavailable)
+        let mut auth_ok = false;
+        for attempt in 1..=3 {
+            match create_auth_material().await {
+                Ok(auth_material) => {
+                    if let Err(e) = Ad4mDb::with_global_instance(|db| {
+                        db.set_setting("unyt_auth_material", &auth_material)
+                    }) {
+                        error!("Failed to store auth material: {}", e);
+                        return;
+                    }
+                    info!("Stored unyt bootstrap auth material");
+                    auth_ok = true;
+                    break;
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to create hc-auth material (attempt {}/3): {}",
+                        attempt, e
+                    );
+                    if attempt < 3 {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    }
+                }
             }
-            info!("Stored unyt bootstrap auth material");
         }
-        Err(e) => {
-            error!("Failed to create hc-auth material: {}. The unyt DNA will not have network access until this is resolved.", e);
+        if !auth_ok {
+            error!("Failed to create hc-auth material after 3 attempts. The unyt DNA will not have network access until this is resolved.");
+            return;
+        }
+    }
+
+    if !has_dna_hash {
+        // Capture the DNA hash now (it should be available since we just installed)
+        capture_dna_hash().await;
+        // Verify it was stored
+        if Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_hash"))
+            .unwrap_or(None)
+            .is_none()
+        {
+            error!("Failed to capture DNA hash after install — cannot set up space override");
             return;
         }
     }
@@ -613,7 +647,20 @@ async fn setup_bootstrap_auth() {
     // Restart the conductor so the space override takes effect
     info!("Restarting Holochain conductor to apply unyt space override...");
     match crate::holochain_service::HolochainService::restart_service().await {
-        Ok(()) => info!("Holochain conductor restarted with unyt space override"),
+        Ok(()) => {
+            info!("Holochain conductor restarted with unyt space override");
+            // Wait for holochain service to come back up
+            let mut waited = 0;
+            while maybe_get_holochain_service().await.is_none() {
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                waited += 2;
+                if waited > 60 {
+                    error!("Holochain service did not come back up within 60s after restart");
+                    return;
+                }
+            }
+            info!("Holochain service is back up after restart");
+        }
         Err(e) => error!("Failed to restart conductor after auth setup: {}", e),
     }
 }

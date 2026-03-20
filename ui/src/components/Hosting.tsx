@@ -23,12 +23,13 @@ const PriceInput = ({ initialValue, placeholder, style, onCommit }: {
   style: React.CSSProperties;
   onCommit: (val: string) => void;
 }) => {
-  const [local, setLocal] = React.useState(initialValue !== undefined && initialValue !== null ? String(initialValue) : "");
-  const focused = React.useRef(false);
+  const [local, setLocal] = React.useState(initialValue ? String(initialValue) : "");
+  const initialized = React.useRef(false);
   // Update local when initialValue changes externally (but not while user is editing)
   React.useEffect(() => {
-    if (!focused.current && initialValue !== undefined && initialValue !== null) {
+    if (!initialized.current && initialValue) {
       setLocal(String(initialValue));
+      initialized.current = true;
     }
   }, [initialValue]);
   return (
@@ -37,8 +38,7 @@ const PriceInput = ({ initialValue, placeholder, style, onCommit }: {
       inputMode="decimal"
       value={local}
       onChange={(e) => setLocal(e.target.value)}
-      onFocus={() => { focused.current = true; }}
-      onBlur={() => { focused.current = false; onCommit(local); }}
+      onBlur={() => onCommit(local)}
       onKeyDown={(e) => { if (e.key === "Enter") { (e.target as HTMLInputElement).blur(); } }}
       placeholder={placeholder}
       style={style}
@@ -132,7 +132,6 @@ const Hosting = () => {
   } | null>(null);
   const [hostRegistering, setHostRegistering] = useState(false);
   const [profilePic, setProfilePic] = useState<File | null>(null);
-  const [profilePicUrl, setProfilePicUrl] = useState<string | null>(null);
   const [verificationCode, setVerificationCode] = useState("");
   const [membraneProofStatus, setMembraneProofStatus] =
     useState<MembraneProofStatus>("none");
@@ -150,8 +149,7 @@ const Hosting = () => {
     from_address: string;
   } | null>(null);
   const [smtpChanged, setSmtpChanged] = useState(false);
-  const [smtpTestVisible, setSmtpTestVisible] = useState(false);
-  const [smtpTestLoading, setSmtpTestLoading] = useState(false);
+  const [smtpTesting, setSmtpTesting] = useState(false);
   const [smtpTestStatus, setSmtpTestStatus] = useState("");
   const [smtpTestEmail, setSmtpTestEmail] = useState("");
   const [showSmtpPassword, setShowSmtpPassword] = useState(false);
@@ -223,7 +221,7 @@ const Hosting = () => {
     indexUrl: string;
     hostId: string;
     authToken: string;
-  }): Promise<"verified" | "unverified" | "expired" | "unavailable"> => {
+  }): Promise<"verified" | "unverified" | "expired"> => {
     try {
       const res = await fetch(`${session.indexUrl}/hosts/me`, {
         headers: { Authorization: `Bearer ${session.authToken}` },
@@ -234,19 +232,19 @@ const Hosting = () => {
         setHostReg((prev) => ({
           ...prev,
           indexUrl: session.indexUrl,
-          name: mine.name ?? prev.name,
-          description: mine.description ?? prev.description,
-          location: mine.location ?? prev.location,
-          hostUrl: mine.url ?? prev.hostUrl,
+          name: mine.name || prev.name,
+          description: mine.description || prev.description,
+          location: mine.location || prev.location,
+          hostUrl: mine.url || prev.hostUrl,
           rates:
-            mine.rates !== undefined
+            mine.rates && mine.rates.length > 0
               ? JSON.stringify(mine.rates)
               : prev.rates,
           aiModels:
-            mine.aiModels !== undefined
+            mine.aiModels && mine.aiModels.length > 0
               ? JSON.stringify(mine.aiModels)
               : prev.aiModels,
-          computeSpecs: mine.computeSpecs !== undefined ? mine.computeSpecs : prev.computeSpecs,
+          computeSpecs: mine.computeSpecs || prev.computeSpecs,
         }));
         return mine.emailVerified ? "verified" : "unverified";
       }
@@ -256,10 +254,12 @@ const Hosting = () => {
       }
     } catch (e) {
       console.log("Failed to fetch host data:", e);
-      return "unavailable";
     }
-    return "unavailable";
+    return "expired";
   };
+
+  // Track whether we've already attempted a membrane proof fetch this mount
+  const membraneProofAttempted = React.useRef(false);
 
   const fetchMembraneProof = async (session: {
     indexUrl: string;
@@ -267,6 +267,7 @@ const Hosting = () => {
     authToken: string;
   }) => {
     if (!client) return;
+    membraneProofAttempted.current = true;
 
     // Skip if we already have the proof or DNA is installed
     try {
@@ -309,6 +310,21 @@ const Hosting = () => {
         const data = await res
           .json()
           .catch(() => ({ error: `HTTP ${res.status}` }));
+
+        // If the API says we need to re-verify email, switch to verify step
+        if (data.code === "reverify_required") {
+          console.log("Email verification expired, prompting re-verification");
+          setRegStep("verify");
+          setHostRegStatus({
+            type: "info",
+            message: "Email verification has expired. Please re-verify and click Resend to get a new code.",
+          });
+          setMembraneProofStatus("none");
+          membraneProofAttempted.current = false;
+          return;
+        }
+
+        const detail = data.detail ? ` [${data.detail}]` : "";
         throw new Error(
           data.error || `Failed to get membrane proof (${res.status})`,
         );
@@ -529,9 +545,9 @@ const Hosting = () => {
           authToken: data.authToken,
           email: hostReg.email,
         };
+        await saveHostSession(session);
         const result = await fetchHostData(session);
         if (result === "verified") {
-          await saveHostSession(session);
           setRegStep("logged-in");
           setHostRegStatus({
             type: "success",
@@ -541,24 +557,18 @@ const Hosting = () => {
             fetchMembraneProof(session);
           }
         } else if (result === "unverified") {
-          await saveHostSession(session);
           setRegStep("verify");
           setHostRegStatus({
             type: "info",
             message:
               "Email not yet verified. Check your inbox or resend the code.",
           });
-        } else if (result === "expired") {
+        } else {
           setHostRegStatus({
             type: "error",
             message: "Session expired. Please log in again.",
           });
           setRegStep("credentials");
-        } else {
-          setHostRegStatus({
-            type: "error",
-            message: "Could not reach the host service. Please try again later.",
-          });
         }
       } else {
         setHostRegStatus({
@@ -607,21 +617,17 @@ const Hosting = () => {
       const data = await res.json();
 
       if (res.ok) {
-        // Persist rates to executor DB for credit deduction before reporting success
+        setHostData(data);
+        // Also persist rates to executor DB for credit deduction
         try {
           if (client) await client.runtime.setHostRates(hostReg.rates);
-          setHostData(data);
-          setHostRegStatus({
-            type: "success",
-            message: "Host updated successfully.",
-          });
         } catch (e) {
           console.warn("Failed to sync rates to executor DB:", e);
-          setHostRegStatus({
-            type: "error",
-            message: "Host updated on server but failed to sync rates to executor. Please try again.",
-          });
         }
+        setHostRegStatus({
+          type: "success",
+          message: "Host updated successfully.",
+        });
       } else {
         if (res.status === 401) {
           await saveHostSession(null);
@@ -674,7 +680,7 @@ const Hosting = () => {
 
   const handleSmtpTest = async () => {
     if (!smtpConfig || !smtpTestEmail) return;
-    setSmtpTestLoading(true);
+    setSmtpTesting(true);
     setSmtpTestStatus("");
     try {
       await invoke<void>("test_smtp_config", {
@@ -685,7 +691,7 @@ const Hosting = () => {
     } catch (error) {
       setSmtpTestStatus("Failed: " + error);
     } finally {
-      setSmtpTestLoading(false);
+      setSmtpTesting(false);
     }
   };
 
@@ -713,8 +719,7 @@ const Hosting = () => {
       filters: [{ name: "Certificate", extensions: ["pem", "crt", "cert"] }],
     });
     if (filePath && tlsConfig) {
-      const newConfig = { ...tlsConfig, cert_file_path: filePath.toString() };
-      handleTlsConfigChange(newConfig);
+      setTlsConfig({ ...tlsConfig, cert_file_path: filePath.toString() });
     }
   };
 
@@ -724,8 +729,7 @@ const Hosting = () => {
       filters: [{ name: "Private Key", extensions: ["pem", "key"] }],
     });
     if (filePath && tlsConfig) {
-      const newConfig = { ...tlsConfig, key_file_path: filePath.toString() };
-      handleTlsConfigChange(newConfig);
+      setTlsConfig({ ...tlsConfig, key_file_path: filePath.toString() });
     }
   };
 
@@ -803,17 +807,6 @@ const Hosting = () => {
 
   // ---- Effects ----
 
-  // Manage profilePic object URL to avoid blob leaks
-  useEffect(() => {
-    if (!profilePic) {
-      setProfilePicUrl(null);
-      return;
-    }
-    const url = URL.createObjectURL(profilePic);
-    setProfilePicUrl(url);
-    return () => URL.revokeObjectURL(url);
-  }, [profilePic]);
-
   useEffect(() => {
     if (multiUserEnabled && client) getUsers();
   }, [multiUserEnabled, client, getUsers]);
@@ -843,19 +836,15 @@ const Hosting = () => {
           if (result === "verified") {
             setHostSession(session);
             setRegStep("logged-in");
-            fetchMembraneProof(session);
+            // membrane proof fetch is handled by the useEffect below
           } else if (result === "unverified") {
             setHostSession(session);
             setRegStep("verify");
-          } else if (result === "expired") {
+          } else {
             // Token expired/invalid — clear stored session, go to login
             setHostSession(null);
             saveHostSession(null);
             setRegStep("credentials");
-          } else {
-            // Transient error — keep session, let user retry
-            setHostSession(session);
-            setRegStep("logged-in");
           }
         }
       } catch (e) {
@@ -866,10 +855,8 @@ const Hosting = () => {
   }, []);
 
   // Auto-fetch membrane proof once when we have a session + client but no proof yet
-  const membraneProofAttempted = React.useRef(false);
   useEffect(() => {
     if (!client || !hostSession || membraneProofStatus === "done" || membraneProofStatus === "fetching" || membraneProofAttempted.current) return;
-    membraneProofAttempted.current = true;
     fetchMembraneProof(hostSession);
   }, [client, hostSession]);
 
@@ -1499,9 +1486,9 @@ const Hosting = () => {
                             ></j-icon>
                           </div>
                         </div>
-                      ) : profilePicUrl ? (
+                      ) : profilePic ? (
                         <img
-                          src={profilePicUrl}
+                          src={URL.createObjectURL(profilePic)}
                           alt=""
                           style={{
                             width: "80px",
@@ -1767,13 +1754,11 @@ const Hosting = () => {
                         const DEFAULT_TOKEN_PRICE = 12.5;   // ~$0.005 per token, avg API pricing
 
                         // Sync rates with current model list: add missing, remove stale
-                        // Connect expects descriptions like "modelName per token" for token rates
                         const modelNames: string[] = aiModels.map((m: any) => m.name);
-                        const tokenDescs = modelNames.map((n) => `${n} per token`);
-                        const validKeys = new Set(["link write", ...tokenDescs]);
+                        const validKeys = new Set(["link write", ...modelNames]);
                         const has = (desc: string) => parsed.some((r) => r.description === desc);
 
-                        // Remove entries for deleted models
+                        // Remove entries for deleted models or old "per token" format
                         const before = parsed.length;
                         parsed = parsed.filter((r) => validKeys.has(r.description));
 
@@ -1781,8 +1766,7 @@ const Hosting = () => {
                         let changed = parsed.length !== before;
                         if (!has("link write")) { parsed.push({ description: "link write", priceInHOT: DEFAULT_LINK_PRICE }); changed = true; }
                         for (const name of modelNames) {
-                          const desc = `${name} per token`;
-                          if (!has(desc)) { parsed.push({ description: desc, priceInHOT: DEFAULT_TOKEN_PRICE }); changed = true; }
+                          if (!parsed.some((r) => r.description === name)) { parsed.push({ description: name, priceInHOT: DEFAULT_TOKEN_PRICE }); changed = true; }
                         }
                         if (changed) {
                           // Schedule state update for next tick to avoid updating during render
@@ -1798,7 +1782,7 @@ const Hosting = () => {
                         const commitPrice = (desc: string, val: string) => {
                           const num = parseFloat(val);
                           const updated = parsed.filter((r) => r.description !== desc);
-                          if (!isNaN(num) && num >= 0) {
+                          if (!isNaN(num) && num > 0) {
                             updated.push({ description: desc, priceInHOT: num });
                           } else {
                             // Reset to default if invalid
@@ -1873,10 +1857,10 @@ const Hosting = () => {
                               <div key={name} style={rowStyle}>
                                 <span style={labelStyle}>{name} <span style={{ color: "var(--j-color-ui-400)", fontSize: "12px" }}>(per token)</span></span>
                                 <PriceInput
-                                  initialValue={getPrice(`${name} per token`)}
-                                  placeholder={String(getDefault(`${name} per token`))}
+                                  initialValue={getPrice(name)}
+                                  placeholder={String(getDefault(name))}
                                   style={inputStyle}
-                                  onCommit={(val) => commitPrice(`${name} per token`, val)}
+                                  onCommit={(val) => commitPrice(name, val)}
                                 />
                               </div>
                             ))}
@@ -1990,13 +1974,12 @@ const Hosting = () => {
                           <j-input
                             type="number"
                             value={tlsConfig.tls_port?.toString() || "12001"}
-                            onInput={(e: any) => {
-                              const newConfig = {
+                            onInput={(e: any) =>
+                              setTlsConfig({
                                 ...tlsConfig,
                                 tls_port: parseInt(e.target.value) || 12001,
-                              };
-                              handleTlsConfigChange(newConfig);
-                            }}
+                              })
+                            }
                           />
                         </j-box>
                       </j-box>
@@ -2136,14 +2119,14 @@ const Hosting = () => {
                             variant="subtle"
                             onClick={() => {
                               setSmtpTestEmail(hostSession?.email || "");
-                              setSmtpTestVisible(true);
+                              setSmtpTesting(true);
                             }}
                           >
                             Send Test
                           </j-button>
                         </j-flex>
 
-                        {smtpTestVisible && (
+                        {smtpTesting && (
                           <j-box mb="300">
                             <j-flex gap="200">
                               <j-input
@@ -2156,7 +2139,7 @@ const Hosting = () => {
                               <j-button
                                 variant="primary"
                                 onClick={handleSmtpTest}
-                                loading={smtpTestLoading}
+                                loading={smtpTesting}
                               >
                                 Send
                               </j-button>
