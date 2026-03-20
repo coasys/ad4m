@@ -76,6 +76,10 @@ export class RemoteAuthentication extends LitElement {
     this.dispatchEvent(new CustomEvent("email-login", { detail: { email: this.email.trim() }, bubbles: true, composed: true }));
   }
 
+  private tryAgain() {
+    this.dispatchEvent(new CustomEvent("reset-auth-state", { bubbles: true, composed: true }));
+  }
+
   private verifyEmailCode() {
     this.dispatchEvent(new CustomEvent("verify-email-code", { detail: { email: this.email.trim(), code: this.emailSecurityCode }, bubbles: true, composed: true }));
   }
@@ -162,6 +166,9 @@ export class RemoteAuthentication extends LitElement {
             <div class="state danger">
               ${CrossIcon()}
               <p>${this.remoteAuthState.message || "Failed to process email. Please try again."}</p>
+            </div>
+            <div class="login-button" style="margin-top: 10px;">
+              <button class="primary" @click=${this.tryAgain}>Try again</button>
             </div>
           `
           : ``

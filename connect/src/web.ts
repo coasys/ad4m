@@ -454,7 +454,20 @@ export class Ad4mConnectElement extends LitElement {
 
   private handleBack() {
     const target = this.backTarget;
-    if (target) this.currentView = target;
+    if (target) {
+      if (this.currentView === "remote-authentication") {
+        this.resetRemoteAuthState();
+      }
+      this.currentView = target;
+    }
+  }
+
+  private resetRemoteAuthState() {
+    this.remoteAuthState = null;
+    this.remoteAuthLoading = false;
+    this.emailCodeError = false;
+    this.passwordError = false;
+    this.accountCreationError = false;
   }
 
   renderViews() {
@@ -527,6 +540,7 @@ export class Ad4mConnectElement extends LitElement {
           @password-login=${this.passwordLogin}
           @create-account=${this.createAccount}
           @clear-email-code-error=${() => { this.emailCodeError = false; }}
+          @reset-auth-state=${() => { this.resetRemoteAuthState(); }}
         ></remote-authentication>
       `;
     }
