@@ -475,6 +475,61 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         }
     });
 
+    // Spawn credit change flush loop (every 2 seconds)
+    // When any credit mutation sets the dirty flag, this publishes
+    // the updated HostingUserInfo to the subscription topic.
+    tokio::spawn(async {
+        use crate::db::Ad4mDb;
+        use crate::pubsub::{get_global_pubsub, CREDITS_DIRTY, HOSTING_USER_INFO_CHANGED_TOPIC};
+        use std::sync::atomic::Ordering;
+
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            if !CREDITS_DIRTY.swap(false, Ordering::Relaxed) {
+                continue;
+            }
+
+            // Publish updated info for all known users
+            let users = match Ad4mDb::with_global_instance(|db| db.list_users()) {
+                Ok(users) => users,
+                Err(e) => {
+                    error!("Credit flush: failed to list users: {}", e);
+                    continue;
+                }
+            };
+
+            let pubsub = get_global_pubsub().await;
+            for user in users {
+                let email = &user.username;
+                let free_access = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+                    .unwrap_or(false);
+                let remaining_credits = if free_access {
+                    "unlimited".to_string()
+                } else {
+                    let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
+                        .unwrap_or(0.0);
+                    format!("{}", credits)
+                };
+                let hot_wallet_address =
+                    Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(email))
+                        .unwrap_or(None);
+
+                let info = crate::graphql::graphql_types::HostingUserInfo {
+                    email: email.clone(),
+                    remaining_credits,
+                    hot_wallet_address,
+                    free_access,
+                };
+
+                if let Ok(json) = serde_json::to_string(&info) {
+                    pubsub
+                        .publish(&HOSTING_USER_INFO_CHANGED_TOPIC, &json)
+                        .await;
+                }
+            }
+        }
+    });
+
     // Check if MCP mode is enabled — run MCP server alongside GraphQL
     if config.enable_mcp == Some(true) {
         info!("Starting MCP server alongside GraphQL...");

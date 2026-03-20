@@ -131,6 +131,16 @@ lazy_static::lazy_static! {
     pub static ref AI_TRANSCRIPTION_TEXT_TOPIC: String = "ai-transcription-text-topic".to_owned();
     pub static ref AI_MODEL_LOADING_STATUS: String = "ai-model-loading-status".to_owned();
     pub static ref PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC: String = "perspective-query-subscription-topic".to_owned();
+    pub static ref HOSTING_USER_INFO_CHANGED_TOPIC: String = "hosting-user-info-changed-topic".to_owned();
+}
+
+/// Dirty flag for batched credit change notifications.
+/// Set to `true` whenever credits are mutated; a background flush loop
+/// periodically checks and publishes updated HostingUserInfo.
+pub static CREDITS_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn mark_credits_dirty() {
+    CREDITS_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub async fn get_global_pubsub() -> Arc<PubSub> {

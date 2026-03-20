@@ -8,8 +8,8 @@ use crate::{
     pubsub::{
         get_global_pubsub, subscribe_and_process, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC,
         AI_MODEL_LOADING_STATUS, AI_TRANSCRIPTION_TEXT_TOPIC, APPS_CHANGED,
-        EXCEPTION_OCCURRED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC,
-        PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC,
+        EXCEPTION_OCCURRED_TOPIC, HOSTING_USER_INFO_CHANGED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC,
+        PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC,
         PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
         PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
         RUNTIME_MESSAGED_RECEIVED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
@@ -559,6 +559,20 @@ impl Subscription {
                     Some(subscription_id),
                 )
                 .await
+            }
+        }
+    }
+
+    async fn runtime_hosting_user_info_changed(
+        &self,
+        context: &RequestContext,
+    ) -> Pin<Box<dyn Stream<Item = FieldResult<HostingUserInfo>> + Send>> {
+        match check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY) {
+            Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
+            Ok(_) => {
+                let pubsub = get_global_pubsub().await;
+                let topic = &HOSTING_USER_INFO_CHANGED_TOPIC;
+                subscribe_and_process::<HostingUserInfo>(pubsub, topic.to_string(), None).await
             }
         }
     }

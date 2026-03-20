@@ -1206,6 +1206,20 @@ impl GetFilter for AIModelLoadingStatus {
     }
 }
 
+impl GetValue for HostingUserInfo {
+    type Value = HostingUserInfo;
+
+    fn get_value(&self) -> Self::Value {
+        self.clone()
+    }
+}
+
+impl GetFilter for HostingUserInfo {
+    fn get_filter(&self) -> Option<String> {
+        None
+    }
+}
+
 #[derive(GraphQLInputObject, Serialize, Deserialize, Default, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceActivityParamsInput {
