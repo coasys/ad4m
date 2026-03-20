@@ -6,8 +6,10 @@ use futures::StreamExt;
 use log::error;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::BroadcastStream;
@@ -78,8 +80,8 @@ pub(crate) async fn subscribe_and_process<
                             .expect("Could not get filter on T where we expected to filter");
                         if &data_filter != filter {
                             log::debug!(
-                                "PubSub filter mismatch on topic {}: data_filter={}, subscription_filter={}",
-                                topic, data_filter, filter
+                                "PubSub filter mismatch on topic {}: data_filter and subscription_filter differ",
+                                topic
                             );
                             return futures::future::ready(None);
                         }
@@ -138,9 +140,8 @@ lazy_static::lazy_static! {
 /// When credits are mutated, the affected user's email is inserted.
 /// A background flush loop periodically drains the set and publishes
 /// updated HostingUserInfo only for the affected users.
-pub static DIRTY_CREDIT_USERS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashSet<String>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+pub static DIRTY_CREDIT_USERS: LazyLock<std::sync::Mutex<HashSet<String>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
 
 pub fn mark_credits_dirty(email: &str) {
     if let Ok(mut set) = DIRTY_CREDIT_USERS.lock() {
