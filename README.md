@@ -11,7 +11,7 @@
   <img src="docs-src/public/images/ad4m-spanning-layer.jpg" alt="AD4M — A Spanning Layer for Collective Intelligence">
 </div>
 
-> **🤖 AI Agent Developers:** AD4M includes a built-in [MCP server](https://modelcontextprotocol.io/) and an [OpenClaw plugin](plugins/ad4m/) that gives AI agents persistent identity, distributed memory, and P2P collaboration — out of the box. See the [MCP Server section](#mcp-server-ai-agent-integration) below.
+> **🤖 AI Agent Developers:** AD4M includes a built-in [MCP server](https://modelcontextprotocol.io/) and an [OpenClaw plugin](plugins/ad4m/) ([`@coasys/openclaw-ad4m`](https://www.npmjs.com/package/@coasys/openclaw-ad4m)) that gives AI agents persistent identity, distributed memory, and P2P collaboration — out of the box. See the [MCP Server section](#mcp-server-ai-agent-integration) below.
 
 ## Vision
 
