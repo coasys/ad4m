@@ -26,7 +26,7 @@ use crate::holochain_service::interface::{get_holochain_service, maybe_get_holoc
 pub const UNYT_APP_ID: &str = "unyt-mhot";
 const UNYT_CELL_NAME: &str = "alliance";
 const UNYT_ZOME: &str = "transactor";
-const ALLIANCE_DNA_VERSION: &str = "0.62.0";
+const ALLIANCE_DNA_VERSION: &str = "0.61.0";
 
 /// Embedded alliance DNA bytes (downloaded by build.rs).
 const ALLIANCE_DNA_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/alliance.dna"));
@@ -268,9 +268,9 @@ roles:
     dna:
       path: {}
       modifiers:
-        network_seed: "7RysrsJstXhPQcYb088dR",
+        network_seed: "Ga-FM2jL7uq3NDI9QX1Zl"
         properties:
-          progenitor_pubkey: "uhCAkzTjgUwMRiiKO5Gu8XHISzDKckzZ0b7QiUcf5rxg2LsVMNbQP"
+          progenitor_pubkey: "uhCAkdeTV-5BNlhK4pC9tVpVwlUhzcOA8zqn3lEhtkN41qWGo0PWr"
           joining_server_signer: "uhCAk_Jbtn_3RR-VCLPtJdhcQvVrpM7Vw5vHGog8_CwW5tO0_Cf37"
 "#,
         dna_path.to_string_lossy()
@@ -499,9 +499,9 @@ pub async fn get_or_create_agent_key() -> Result<String, AnyError> {
 // ---------------------------------------------------------------------------
 
 const HC_AUTH_URL: &str = "https://hc-auth-iroh-unyt.holochain.org";
-pub const UNYT_BOOTSTRAP_URL: &str = "https://hc-auth-iroh-unyt.holochain.org";
-pub const UNYT_SIGNAL_URL: &str = "wss://hc-auth-iroh-unyt.holochain.org";
-pub const UNYT_RELAY_URL: &str = "https://hc-auth-iroh-unyt.holochain.org";
+pub const UNYT_BOOTSTRAP_URL: &str = "https://dev-test-bootstrap2.holochain.org/";
+pub const UNYT_SIGNAL_URL: &str = "wss://dev-test-bootstrap2.holochain.org/";
+pub const UNYT_RELAY_URL: &str = "https://use1-1.relay.n0.iroh-canary.iroh.link./";
 
 /// Fetch a challenge from the hc-auth `/now` endpoint, sign it with the unyt
 /// agent key, and return the base64-encoded auth material JSON for the
