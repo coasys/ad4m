@@ -19,6 +19,11 @@ fn main() {
         println!("cargo:rustc-cfg=feature=\"metal\"");
     }
 
+    println!(
+        "cargo:rustc-env=ALLIANCE_DNA_VERSION={}",
+        ALLIANCE_DNA_VERSION
+    );
+
     download_alliance_dna();
 }
 

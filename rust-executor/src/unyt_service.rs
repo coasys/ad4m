@@ -26,7 +26,7 @@ use crate::holochain_service::interface::{get_holochain_service, maybe_get_holoc
 pub const UNYT_APP_ID: &str = "unyt-mhot";
 const UNYT_CELL_NAME: &str = "alliance";
 const UNYT_ZOME: &str = "transactor";
-const ALLIANCE_DNA_VERSION: &str = "0.61.0";
+const ALLIANCE_DNA_VERSION: &str = env!("ALLIANCE_DNA_VERSION");
 
 /// Embedded alliance DNA bytes (downloaded by build.rs).
 const ALLIANCE_DNA_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/alliance.dna"));
