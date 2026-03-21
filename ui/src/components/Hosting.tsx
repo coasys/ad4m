@@ -60,38 +60,31 @@ const ExpandableSection = ({
   children: React.ReactNode;
   badge?: React.ReactNode;
 }) => (
-  <j-box
-    my="300"
-    style={{
-      border: "1px solid var(--j-color-ui-200)",
-      borderRadius: "8px",
-      overflow: "hidden",
-    }}
-  >
-    <j-flex
-      a="center"
-      j="between"
-      p="400"
-      style={{
-        background: "var(--j-color-ui-50)",
-        cursor: "pointer",
-        borderBottom: expanded ? "1px solid var(--j-color-ui-200)" : "none",
-      }}
+  <div style={{ margin: "16px 0" }}>
+    <div
       onClick={onToggle}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "8px",
+        cursor: "pointer",
+        padding: "8px 0",
+        userSelect: "none",
+      }}
     >
-      <j-flex a="center" gap="300">
-        <j-icon
-          name={expanded ? "chevron-down" : "chevron-right"}
-          size="sm"
-        ></j-icon>
-        <j-text size="500" weight="600">
-          {title}
-        </j-text>
-        {badge}
-      </j-flex>
-    </j-flex>
-    {expanded && <j-box p="400">{children}</j-box>}
-  </j-box>
+      <j-icon
+        name={expanded ? "chevron-down" : "chevron-right"}
+        size="sm"
+      ></j-icon>
+      <span style={{ fontSize: "16px", fontWeight: 600, flex: 1 }}>
+        {title}
+      </span>
+      {badge}
+    </div>
+    {expanded && (
+      <div style={{ padding: "12px 0 0 24px" }}>{children}</div>
+    )}
+  </div>
 );
 
 const Hosting = () => {
@@ -1019,21 +1012,10 @@ const Hosting = () => {
           ? "danger"
           : "primary";
     return (
-      <j-box px="500" my="300">
-        <j-box
-          p="400"
-          style={{
-            backgroundColor: bg,
-            borderRadius: "8px",
-            border: `1px solid ${border}`,
-          }}
-        >
-          <j-flex a="center" gap="300">
-            <j-icon name={icon} color={color}></j-icon>
-            <j-text size="500">{hostRegStatus.message}</j-text>
-          </j-flex>
-        </j-box>
-      </j-box>
+      <div style={{ display: "flex", alignItems: "center", gap: "8px", margin: "12px 0" }}>
+        <j-icon name={icon} color={color}></j-icon>
+        <span style={{ fontSize: "14px", color: border }}>{hostRegStatus.message}</span>
+      </div>
     );
   };
 
@@ -1311,7 +1293,7 @@ const Hosting = () => {
 
           {/* ===== USERS TAB ===== */}
           {activeTab === "users" && (
-            <j-box px="500" my="400">
+            <div style={{ padding: "0 var(--j-space-500)", margin: "var(--j-space-400) 0" }}>
               {usersLoading ? (
                 <j-flex gap="300" a="center">
                   <j-spinner size="sm"></j-spinner>
@@ -1472,12 +1454,12 @@ const Hosting = () => {
                   ))}
                 </div>
               )}
-            </j-box>
+            </div>
           )}
 
           {/* ===== SETTINGS TAB ===== */}
           {activeTab === "settings" && (
-            <j-box px="500" my="400">
+            <div style={{ padding: "0 var(--j-space-500)", margin: "var(--j-space-400) 0" }}>
               {/* Hosting Profile - only shown for paid hosting */}
               {!freeHostingEnabled && (
               <ExpandableSection
@@ -1631,17 +1613,19 @@ const Hosting = () => {
                     }}
                   >
                     {/* Info tooltip */}
-                    <j-tooltip
-                      title="This is your public hosting profile. Other users will see this information in AD4M Connect when choosing a host."
-                      placement="left"
-                    >
-                      <j-icon
-                        name="info-circle"
-                        color="ui-400"
-                        size="sm"
-                        style={{ position: "absolute", top: "12px", right: "12px", cursor: "help" }}
-                      ></j-icon>
-                    </j-tooltip>
+                    <div style={{ position: "absolute", top: "12px", right: "12px", zIndex: 1 }}>
+                      <j-tooltip
+                        title="This is your public hosting profile. Other users will see this information in AD4M Connect when choosing a host."
+                        placement="left"
+                      >
+                        <j-icon
+                          name="info-circle"
+                          color="ui-400"
+                          size="sm"
+                          style={{ cursor: "help" }}
+                        ></j-icon>
+                      </j-tooltip>
+                    </div>
                     {/* Profile picture */}
                     <label
                       style={{
@@ -1743,7 +1727,7 @@ const Hosting = () => {
                       }
                       placeholder="Host Name"
                       style={{
-                        fontSize: "20px",
+                        fontSize: "22px",
                         fontWeight: 700,
                         textAlign: "center",
                         background: "transparent",
@@ -1765,7 +1749,7 @@ const Hosting = () => {
                       }
                       placeholder="Location (e.g. Frankfurt, DE)"
                       style={{
-                        fontSize: "14px",
+                        fontSize: "16px",
                         textAlign: "center",
                         background: "transparent",
                         border: "none",
@@ -1787,7 +1771,7 @@ const Hosting = () => {
                       placeholder="A brief description of your host"
                       rows={2}
                       style={{
-                        fontSize: "14px",
+                        fontSize: "16px",
                         textAlign: "center",
                         lineHeight: "1.4",
                         background: "transparent",
@@ -1813,7 +1797,7 @@ const Hosting = () => {
                       }}
                     >
                       <j-text
-                        size="300"
+                        size="400"
                         weight="600"
                         color="primary-500"
                         style={{
@@ -1826,7 +1810,7 @@ const Hosting = () => {
                         Endpoint URL
                       </j-text>
                       <j-text
-                        size="300"
+                        size="400"
                         color="ui-500"
                         style={{ display: "block", marginBottom: "8px" }}
                       >
@@ -1842,7 +1826,7 @@ const Hosting = () => {
                         }
                         placeholder="wss://your-domain.com:12001/graphql"
                         style={{
-                          fontSize: "13px",
+                          fontSize: "15px",
                           width: "100%",
                           padding: "8px 12px",
                           background: "var(--j-color-ui-100)",
@@ -1859,7 +1843,7 @@ const Hosting = () => {
                     {/* Compute Specs */}
                     <div style={{ width: "100%" }}>
                       <j-text
-                        size="300"
+                        size="400"
                         weight="600"
                         color="ui-500"
                         style={{
@@ -1879,7 +1863,7 @@ const Hosting = () => {
                         }
                         placeholder="e.g. 8 CPU, 32GB RAM, RTX 4090"
                         style={{
-                          fontSize: "14px",
+                          fontSize: "16px",
                           width: "100%",
                           padding: "8px 12px",
                           background: "var(--j-color-ui-100)",
@@ -1896,7 +1880,7 @@ const Hosting = () => {
                     {/* AI Models */}
                     <div style={{ width: "100%" }}>
                       <j-text
-                        size="300"
+                        size="400"
                         weight="600"
                         color="ui-500"
                         style={{
@@ -1921,7 +1905,7 @@ const Hosting = () => {
                             <span
                               key={i}
                               style={{
-                                fontSize: "13px",
+                                fontSize: "15px",
                                 padding: "4px 12px",
                                 borderRadius: "12px",
                                 background: "rgba(33, 150, 243, 0.1)",
@@ -1934,7 +1918,7 @@ const Hosting = () => {
                         </div>
                       ) : (
                         <j-text
-                          size="300"
+                          size="400"
                           color="ui-400"
                           style={{ fontStyle: "italic" }}
                         >
@@ -1942,7 +1926,7 @@ const Hosting = () => {
                         </j-text>
                       )}
                       <j-text
-                        size="200"
+                        size="300"
                         color="ui-400"
                         style={{ display: "block", marginTop: "6px" }}
                       >
@@ -1953,7 +1937,7 @@ const Hosting = () => {
                     {/* Pricing */}
                     <div style={{ width: "100%" }}>
                       <j-text
-                        size="300"
+                        size="400"
                         weight="600"
                         color="ui-500"
                         style={{
@@ -2027,7 +2011,7 @@ const Hosting = () => {
                         };
 
                         const inputStyle: React.CSSProperties = {
-                          fontSize: "13px",
+                          fontSize: "15px",
                           width: "110px",
                           padding: "6px 10px",
                           background: "var(--j-color-ui-100)",
@@ -2048,7 +2032,7 @@ const Hosting = () => {
                         };
 
                         const labelStyle: React.CSSProperties = {
-                          fontSize: "13px",
+                          fontSize: "15px",
                           color: "var(--j-color-ui-600)",
                         };
 
@@ -2066,7 +2050,7 @@ const Hosting = () => {
                                 ...rowStyle,
                                 background: "var(--j-color-ui-50)",
                                 fontWeight: 600,
-                                fontSize: "12px",
+                                fontSize: "14px",
                                 textTransform: "uppercase",
                                 letterSpacing: "0.5px",
                                 color: "var(--j-color-ui-500)",
@@ -2090,7 +2074,7 @@ const Hosting = () => {
                             {/* Per-model token prices */}
                             {modelNames.map((name) => (
                               <div key={name} style={rowStyle}>
-                                <span style={labelStyle}>{name} <span style={{ color: "var(--j-color-ui-400)", fontSize: "12px" }}>(per token)</span></span>
+                                <span style={labelStyle}>{name} <span style={{ color: "var(--j-color-ui-400)", fontSize: "14px" }}>(per token)</span></span>
                                 <PriceInput
                                   initialValue={getPrice(name)}
                                   placeholder={String(getDefault(name))}
@@ -2161,8 +2145,8 @@ const Hosting = () => {
                     </j-toggle>
 
                     {tlsConfig.enabled && (
-                      <j-box mt="400">
-                        <j-box mb="300">
+                      <div style={{ marginTop: "16px" }}>
+                        <div style={{ marginBottom: "12px" }}>
                           <j-text size="400" weight="500" mb="200">
                             Certificate File
                           </j-text>
@@ -2183,8 +2167,8 @@ const Hosting = () => {
                               {certPathError}
                             </j-text>
                           )}
-                        </j-box>
-                        <j-box mb="300">
+                        </div>
+                        <div style={{ marginBottom: "12px" }}>
                           <j-text size="400" weight="500" mb="200">
                             Private Key File
                           </j-text>
@@ -2202,8 +2186,8 @@ const Hosting = () => {
                               {keyPathError}
                             </j-text>
                           )}
-                        </j-box>
-                        <j-box mb="300">
+                        </div>
+                        <div style={{ marginBottom: "12px" }}>
                           <j-text size="400" weight="500" mb="200">
                             TLS Port
                           </j-text>
@@ -2219,8 +2203,8 @@ const Hosting = () => {
                               handleTlsConfigChange(newConfig);
                             }}
                           />
-                        </j-box>
-                      </j-box>
+                        </div>
+                      </div>
                     )}
                   </>
                 )}
@@ -2256,8 +2240,8 @@ const Hosting = () => {
                     </j-toggle>
 
                     {smtpConfig.enabled && (
-                      <j-box mt="400">
-                        <j-box mb="300">
+                      <div style={{ marginTop: "16px" }}>
+                        <div style={{ marginBottom: "12px" }}>
                           <j-text size="400" weight="500" mb="200">
                             SMTP Host
                           </j-text>
@@ -2271,8 +2255,8 @@ const Hosting = () => {
                             }
                             placeholder="smtp.gmail.com"
                           />
-                        </j-box>
-                        <j-box mb="300">
+                        </div>
+                        <div style={{ marginBottom: "12px" }}>
                           <j-text size="400" weight="500" mb="200">
                             Port
                           </j-text>
@@ -2286,8 +2270,8 @@ const Hosting = () => {
                               })
                             }
                           />
-                        </j-box>
-                        <j-box mb="300">
+                        </div>
+                        <div style={{ marginBottom: "12px" }}>
                           <j-text size="400" weight="500" mb="200">
                             Username
                           </j-text>
@@ -2300,8 +2284,8 @@ const Hosting = () => {
                               })
                             }
                           />
-                        </j-box>
-                        <j-box mb="300">
+                        </div>
+                        <div style={{ marginBottom: "12px" }}>
                           <j-text size="400" weight="500" mb="200">
                             Password
                           </j-text>
@@ -2329,8 +2313,8 @@ const Hosting = () => {
                               ></j-icon>
                             </j-button>
                           </j-input>
-                        </j-box>
-                        <j-box mb="300">
+                        </div>
+                        <div style={{ marginBottom: "12px" }}>
                           <j-text size="400" weight="500" mb="200">
                             From Address
                           </j-text>
@@ -2344,7 +2328,7 @@ const Hosting = () => {
                             }
                             placeholder="noreply@example.com"
                           />
-                        </j-box>
+                        </div>
 
                         <j-flex gap="300" mb="400">
                           <j-button
@@ -2365,7 +2349,7 @@ const Hosting = () => {
                         </j-flex>
 
                         {smtpTestVisible && (
-                          <j-box mb="300">
+                          <div style={{ marginBottom: "12px" }}>
                             <j-flex gap="200">
                               <j-input
                                 value={smtpTestEmail}
@@ -2387,14 +2371,14 @@ const Hosting = () => {
                                 {smtpTestStatus}
                               </j-text>
                             )}
-                          </j-box>
+                          </div>
                         )}
-                      </j-box>
+                      </div>
                     )}
                   </>
                 )}
               </ExpandableSection>
-            </j-box>
+            </div>
           )}
         </>
       )}
