@@ -525,9 +525,15 @@ impl HolochainService {
 
         // Apply unyt space override: the unyt DNA gets its own bootstrap, signal,
         // relay, and auth material. All other DNAs use the AD4M defaults above.
-        if let Ok(Some(dna_hash)) =
-            crate::db::Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_hash"))
-        {
+        let dna_hash_opt = crate::db::Ad4mDb::global_instance()
+            .lock()
+            .ok()
+            .and_then(|guard| {
+                guard
+                    .as_ref()
+                    .and_then(|db| db.get_setting("unyt_dna_hash").ok().flatten())
+            });
+        if let Some(dna_hash) = dna_hash_opt {
             //if let Ok(Some(auth_material)) =
             //    crate::db::Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material"))
             //{
