@@ -32,6 +32,9 @@ const Login = () => {
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [clearAgentModalOpen, setClearAgentModalOpen] = useState(false);
+  const [showAgentPicker, setShowAgentPicker] = useState(false);
+  const [pendingSwitchAgent, setPendingSwitchAgent] = useState<any>(null);
+  const [appState, setAppState] = useState<any>(null);
   const [holochain, setHolochain] = useState(true);
   const [aiMode, setAIMode] = useState("Local");
 
@@ -49,6 +52,22 @@ const Login = () => {
   const apiKeyRef = useRef("");
 
   if (hasLoginError) setPasswordError("Invalid password");
+
+  async function loadAppState() {
+    try {
+      const result = await invoke("get_app_agent_list");
+      if (result) {
+        setAppState(JSON.parse(result as string));
+      }
+    } catch (e) {
+      console.error("Failed to load app state:", e);
+    }
+  }
+
+  async function switchAgent(agent: any) {
+    await invoke("set_selected_agent", { agent });
+    await invoke("close_application");
+  }
 
   async function clearAgent() {
     let agentStatus = await client?.agent.status();
@@ -209,6 +228,10 @@ const Login = () => {
   }
 
   useEffect(() => {
+    loadAppState();
+  }, []);
+
+  useEffect(() => {
     if (!connected && !connectedLoading) {
       navigate("/connect");
     } else if (connected && isUnlocked) {
@@ -256,6 +279,7 @@ const Login = () => {
           >
             Get Started
           </j-button>
+
         </div>
       )}
 
@@ -968,6 +992,11 @@ const Login = () => {
             <j-text size="800" nomargin color="ui-0">
               Unlock your agent
             </j-text>
+            {appState?.selected_agent && (
+              <j-text size="600" nomargin color="ui-500">
+                {appState.selected_agent.name}
+              </j-text>
+            )}
           </j-flex>
 
           <j-flex
@@ -1057,14 +1086,17 @@ const Login = () => {
               gap="400"
               style={{ textAlign: "center", width: "100%", maxWidth: 500, marginBottom: 30 }}
             >
+              {appState && appState.agent_list.length > 1 && (
+                <j-button size="xl" onClick={() => { loadAppState(); setShowAgentPicker(true); }} disabled={loading}>
+                  Switch agent
+                </j-button>
+              )}
               <j-button size="xl" onClick={() => setClearAgentModalOpen(true)} disabled={loading}>
                 Reset agent
               </j-button>
               <j-button size="xl" onClick={() => invoke("close_application")} disabled={loading}>
                 Quit
               </j-button>
-              
-              
             </j-flex>
           </j-flex>
         </div>
@@ -1098,6 +1130,63 @@ const Login = () => {
               >
                 Delete Agent
               </j-button>
+            </j-flex>
+          </j-box>
+        </j-modal>
+      )}
+
+      {showAgentPicker && !pendingSwitchAgent && (
+        <j-modal
+          open={true}
+          onToggle={(e: any) => { if (!e.target.open) setShowAgentPicker(false); }}
+        >
+          <j-box px="400" py="600">
+            <j-flex direction="column" gap="400">
+              <j-text nomargin size="600" weight="600">
+                Switch agent
+              </j-text>
+              {appState?.agent_list.map((agent: any) => (
+                <j-button
+                  key={agent.path}
+                  full
+                  variant={agent.path === appState.selected_agent?.path ? "primary" : "secondary"}
+                  onClick={() => {
+                    if (agent.path !== appState.selected_agent?.path) {
+                      setPendingSwitchAgent(agent);
+                    } else {
+                      setShowAgentPicker(false);
+                    }
+                  }}
+                >
+                  {agent.name}
+                </j-button>
+              ))}
+            </j-flex>
+          </j-box>
+        </j-modal>
+      )}
+
+      {pendingSwitchAgent && (
+        <j-modal
+          open={true}
+          onToggle={(e: any) => { if (!e.target.open) { setPendingSwitchAgent(null); setShowAgentPicker(false); } }}
+        >
+          <j-box px="400" py="600">
+            <j-flex direction="column" a="center" gap="500" style={{ textAlign: "center" }}>
+              <j-text nomargin size="800">
+                Switch to "{pendingSwitchAgent.name}"?
+              </j-text>
+              <j-text nomargin size="600" color="ui-800">
+                The app will close. Please reopen it to start with the new agent.
+              </j-text>
+              <j-flex gap="400">
+                <j-button size="xl" onClick={() => { setPendingSwitchAgent(null); }}>
+                  Cancel
+                </j-button>
+                <j-button size="xl" variant="primary" onClick={() => switchAgent(pendingSwitchAgent)}>
+                  Switch and quit
+                </j-button>
+              </j-flex>
             </j-flex>
           </j-box>
         </j-modal>
