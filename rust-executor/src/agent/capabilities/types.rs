@@ -23,15 +23,20 @@ pub struct AuthInfo {
 
 impl From<crate::graphql::graphql_types::AuthInfoInput> for AuthInfo {
     fn from(input: crate::graphql::graphql_types::AuthInfoInput) -> Self {
+        use crate::agent::capabilities::defs::ALL_CAPABILITY;
+
+        let capabilities = match input.capabilities {
+            Some(vec) => Some(vec.into_iter().map(|c| c.into()).collect()),
+            None => Some(vec![ALL_CAPABILITY.clone()]),
+        };
+
         Self {
             app_name: input.app_name,
             app_desc: input.app_desc,
             app_domain: Some(input.app_domain),
             app_url: input.app_url,
             app_icon_path: input.app_icon_path,
-            capabilities: input
-                .capabilities
-                .map(|vec| vec.into_iter().map(|c| c.into()).collect()),
+            capabilities,
             user_email: None, // Will be set by login process
         }
     }

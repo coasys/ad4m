@@ -65,13 +65,19 @@ export async function runSetup(
   }
 
   // ── Step 3: Check if executor is already running ──
-  const running = await isExecutorRunning(endpoint);
+  // Derive the GraphQL HTTP URL from the WS URL so both probes use the same port
+  const graphqlHttpUrl = executorWsUrl
+    .replace(/^ws(s?):/, "http$1:")
+    .replace(/\/$/, "");
+  const running = await isExecutorRunning(endpoint, 3000, graphqlHttpUrl);
 
   // ── Branch routing ──
 
   if (running) {
     // Branch B: Executor already running
-    await setupExternalMode(logger, endpoint, wakeToken);
+    // If detected via GraphQL (MCP disabled), pass the GraphQL URL so
+    // external-mode can use Ad4mClient instead of MCP for auth.
+    await setupExternalMode(logger, endpoint, wakeToken, running, executorWsUrl);
   } else if (binaryPath) {
     // Branch A: No running executor, binary found
     await setupManagedMode(logger, binaryPath, endpoint, executorWsUrl, wakeToken);
@@ -188,7 +194,40 @@ async function setupExternalMode(
   logger: any,
   endpoint: string,
   wakeToken?: string,
+  detectedVia: "mcp" | "graphql" = "mcp",
+  executorWsUrl: string = "ws://localhost:12000/graphql",
 ): Promise<void> {
+  if (detectedVia === "graphql") {
+    // Executor found via GraphQL (MCP is disabled / not available).
+    // Use Ad4mClient over GraphQL WS to request capabilities.
+    logger.info(
+      `[ad4m-setup] Found a running AD4M executor via GraphQL at ${executorWsUrl}. ` +
+        "MCP does not appear to be enabled.",
+    );
+    logger.info(
+      "[ad4m-setup] Attempting capability request via Ad4mClient...",
+    );
+
+    try {
+      await setupExternalModeViaGraphQL(logger, executorWsUrl, wakeToken);
+      return;
+    } catch (e: any) {
+      logger.error(
+        `[ad4m-setup] GraphQL auth flow failed: ${e.message}`,
+      );
+      if (e.stack) {
+        logger.error(`[ad4m-setup] Stack: ${e.stack}`);
+      }
+      printConfigSnippet(logger, "external", {
+        executorWsUrl,
+        token: "<paste-your-jwt-here>",
+        wakeToken,
+      });
+      return;
+    }
+  }
+
+  // ── MCP path (original logic) ──
   logger.info(
     `[ad4m-setup] Found a running AD4M executor at ${endpoint}. ` +
       "Will attempt to request capabilities.",
@@ -260,6 +299,158 @@ async function setupExternalMode(
       token: "<paste-your-jwt-here>",
       wakeToken,
     });
+  }
+}
+
+/**
+ * Prompt the user for a line of input on stdin.
+ */
+function promptUser(question: string): Promise<string> {
+  const readline = require("readline");
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  return new Promise((resolve) => {
+    rl.question(question, (answer: string) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
+
+/**
+ * External-mode auth flow using Ad4mClient over GraphQL WebSocket.
+ * Used when the executor is detected via GraphQL (MCP disabled).
+ *
+ * Flow:
+ * 1. requestCapability → returns requestId, launcher shows 6-digit code
+ * 2. User enters the 6-digit code from the launcher UI
+ * 3. generateJwt(requestId, code) → returns JWT
+ */
+async function setupExternalModeViaGraphQL(
+  logger: any,
+  executorWsUrl: string,
+  wakeToken?: string,
+): Promise<void> {
+  const { Ad4mClient } = require("@coasys/ad4m");
+  const { ApolloClient, InMemoryCache } = require("@apollo/client/core");
+  const { GraphQLWsLink } = require("@apollo/client/link/subscriptions");
+  const { createClient } = require("graphql-ws");
+  const WebSocket = require("ws");
+
+  logger.info(`[ad4m-setup] Creating GraphQL WS client for ${executorWsUrl}...`);
+  const wsClient = createClient({
+    url: executorWsUrl,
+    webSocketImpl: WebSocket,
+    on: {
+      connected: () => logger.info("[ad4m-setup] WebSocket connected"),
+      closed: (event: any) => logger.warn(`[ad4m-setup] WebSocket closed: ${JSON.stringify(event)}`),
+      error: (err: any) => logger.error(`[ad4m-setup] WebSocket error: ${err?.message ?? JSON.stringify(err)}`),
+    },
+  });
+  const link = new GraphQLWsLink(wsClient);
+  const apollo = new ApolloClient({
+    link,
+    cache: new InMemoryCache(),
+    defaultOptions: { query: { fetchPolicy: "no-cache" } },
+  });
+
+  try {
+    // Pass subscribe=false to avoid triggering GraphQL subscriptions
+    // before auth is complete (those would fail with capability errors).
+    logger.info("[ad4m-setup] Creating Ad4mClient (subscribe=false)...");
+    const client = new Ad4mClient(apollo, false);
+    logger.info("[ad4m-setup] Ad4mClient created successfully");
+
+    // Step 1: Request capability — triggers the verification popup in the launcher
+    // Use a plain object rather than `new AuthInfoInput()` — the GraphQL
+    // mutation only needs the correct field names in the variables, and
+    // constructing the class without its positional args can leave fields
+    // undefined depending on how type-graphql decorators serialise.
+    const authInfo = {
+      appName: "OpenClaw AD4M Plugin",
+      appDesc: "OpenClaw agent plugin for AD4M neighbourhoods",
+      appDomain: "",
+    };
+
+    logger.info("[ad4m-setup] Sending requestCapability mutation...");
+    logger.info(`[ad4m-setup] authInfo: ${JSON.stringify(authInfo)}`);
+    const requestId = await client.agent.requestCapability(authInfo);
+
+    logger.info(
+      `[ad4m-setup] Capability requested (id: ${requestId}).`,
+    );
+    logger.info("");
+    logger.info(
+      "[ad4m-setup] ┌─────────────────────────────────────────────────────────┐",
+    );
+    logger.info(
+      "[ad4m-setup] │  A capability request has been sent to your AD4M       │",
+    );
+    logger.info(
+      "[ad4m-setup] │  launcher. Please:                                     │",
+    );
+    logger.info(
+      "[ad4m-setup] │                                                        │",
+    );
+    logger.info(
+      "[ad4m-setup] │  1. Open your AD4M launcher                            │",
+    );
+    logger.info(
+      "[ad4m-setup] │  2. Approve the capability request from 'OpenClaw'     │",
+    );
+    logger.info(
+      "[ad4m-setup] │  3. Note the 6-digit verification code shown           │",
+    );
+    logger.info(
+      "[ad4m-setup] │  4. Come back here and enter that code below           │",
+    );
+    logger.info(
+      "[ad4m-setup] └─────────────────────────────────────────────────────────┘",
+    );
+    logger.info("");
+
+    // Step 2: Prompt the user for the 6-digit code shown in the launcher
+    const code = await promptUser(
+      "[ad4m-setup] Enter the 6-digit code from your AD4M launcher: ",
+    );
+
+    if (!code) {
+      logger.warn("[ad4m-setup] No code entered. Setup cancelled.");
+      printConfigSnippet(logger, "external", {
+        executorWsUrl,
+        token: "<paste-your-jwt-here>",
+        wakeToken,
+      });
+      return;
+    }
+
+    // Step 3: Generate JWT using requestId + user-provided code
+    logger.info(`[ad4m-setup] Sending generateJwt mutation (requestId: ${requestId}, code: ${code})...`);
+    const jwt = await client.agent.generateJwt(requestId, code);
+    logger.info(`[ad4m-setup] generateJwt returned: ${jwt ? `token (${jwt.length} chars)` : "null/empty"}`);
+
+    if (jwt) {
+      logger.info("[ad4m-setup] JWT obtained successfully via GraphQL!");
+      printConfigSnippet(logger, "external", {
+        executorWsUrl,
+        token: jwt,
+        wakeToken,
+      });
+    } else {
+      logger.warn(
+        "[ad4m-setup] Could not obtain JWT. The code may have been incorrect. " +
+          "Please try running setup again or obtain a JWT manually.",
+      );
+      printConfigSnippet(logger, "external", {
+        executorWsUrl,
+        token: "<paste-your-jwt-here>",
+        wakeToken,
+      });
+    }
+  } finally {
+    wsClient.dispose();
   }
 }
 
