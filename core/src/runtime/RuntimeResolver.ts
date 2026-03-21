@@ -206,6 +206,15 @@ export class UserStatistics {
 
     @Field(type => Int)
     perspectiveCount: number;
+
+    @Field()
+    remainingCredits: string;
+
+    @Field()
+    freeAccess: boolean;
+
+    @Field({nullable: true})
+    hotWalletAddress?: string;
 }
 
 @ObjectType()
@@ -221,6 +230,42 @@ export class VerificationRequestResult {
 
     @Field()
     isExistingUser: boolean;
+}
+
+@ObjectType()
+export class HostingUserInfo {
+    @Field()
+    email: string;
+
+    @Field()
+    remainingCredits: string;
+
+    @Field({ nullable: true })
+    hotWalletAddress?: string;
+
+    @Field()
+    freeAccess: boolean;
+
+    constructor(email: string, remainingCredits: string, hotWalletAddress?: string, freeAccess: boolean = false) {
+        this.email = email;
+        this.remainingCredits = remainingCredits;
+        this.hotWalletAddress = hotWalletAddress;
+        this.freeAccess = freeAccess;
+    }
+}
+
+@ObjectType()
+export class PaymentRequestResult {
+    @Field()
+    success: boolean;
+
+    @Field()
+    message: string;
+
+    constructor(success: boolean, message: string) {
+        this.success = success;
+        this.message = message;
+    }
 }
 
 /**
@@ -474,7 +519,9 @@ export default class RuntimeResolver {
             email: "test@example.com",
             did: "did:key:test123",
             lastSeen: new Date().toISOString(),
-            perspectiveCount: 5
+            perspectiveCount: 5,
+            remainingCredits: "0",
+            freeAccess: false
         }]
     }
 
@@ -559,6 +606,91 @@ export default class RuntimeResolver {
     ): boolean {
         // For testing: simulate setting expiry (no-op in mock)
         return true
+    }
+
+    // Hosting mutations & queries
+
+    @Query(returns => HostingUserInfo)
+    runtimeHostingUserInfo(): HostingUserInfo {
+        return new HostingUserInfo("test@example.com", "100000000", null, false)
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeSetHotWalletAddress(
+        @Arg("address") address: string
+    ): boolean {
+        return true
+    }
+
+    @Mutation(returns => PaymentRequestResult)
+    runtimeRequestPayment(
+        @Arg("amountHOT") amountHOT: string
+    ): PaymentRequestResult {
+        return new PaymentRequestResult(true, "Mock payment of " + amountHOT + " base units credited")
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeSetUserCredits(
+        @Arg("email") email: string,
+        @Arg("amount") amount: number
+    ): boolean {
+        return true
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeSetUserFreeAccess(
+        @Arg("email") email: string,
+        @Arg("enabled") enabled: boolean
+    ): boolean {
+        return true
+    }
+
+    @Mutation(returns => PaymentRequestResult)
+    runtimeReinstallUnytDna(): PaymentRequestResult {
+        return new PaymentRequestResult(true, "")
+    }
+
+    @Mutation(returns => PaymentRequestResult)
+    runtimeSendHot(
+        @Arg("recipient") recipient: string,
+        @Arg("amount") amount: string
+    ): PaymentRequestResult {
+        return new PaymentRequestResult(true, "")
+    }
+
+    @Mutation(returns => PaymentRequestResult)
+    runtimeSetUnytMembraneProof(
+        @Arg("proof") proof: string
+    ): PaymentRequestResult {
+        return new PaymentRequestResult(true, "")
+    }
+
+    @Query(returns => String)
+    runtimeHotWalletBalance(): string {
+        return ""
+    }
+
+    @Query(returns => String)
+    runtimeHotWalletHistory(
+        @Arg("page", { nullable: true }) page?: number,
+        @Arg("perPage", { nullable: true }) perPage?: number
+    ): string {
+        return ""
+    }
+
+    @Query(returns => String)
+    runtimeHotAgentPubkey(): string {
+        return ""
+    }
+
+    @Query(returns => String)
+    runtimeUnytAgentKey(): string {
+        return ""
+    }
+
+    @Query(returns => String)
+    runtimeUnytVersionInfo(): string {
+        return ""
     }
 }
 

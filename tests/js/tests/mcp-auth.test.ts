@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep, startExecutor, killByPorts } from "../utils/utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch';
 import { callMcpTool, initializeMcp } from './mcp-utils';
@@ -25,8 +26,8 @@ const __dirname = path.dirname(__filename);
  * Verifies: login_email, request_capability + generate_jwt, auth_status, and unauthenticated rejection.
  */
 
-const MCP_PORT = 3001;
-const MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
+let MCP_PORT: number;
+let MCP_BASE_URL: string;
 
 // ============================================================================
 // Test Suite
@@ -40,9 +41,9 @@ describe("MCP Authentication HTTP Tests", function() {
     const bootstrapSeedPath = path.join(__dirname + "/../bootstrapSeed.json");
     // Unique ports for mcp-auth tests — must not collide with other concurrent
     // CI jobs (integration-tests-js uses 15700-15702, mcp-http uses 16000-16002)
-    const gqlPort = 16010;
-    const hcAdminPort = 16011;
-    const hcAppPort = 16012;
+    let gqlPort: number;
+    let hcAdminPort: number;
+    let hcAppPort: number;
     const adminCredential = "mcp-auth-test-admin";
 
     let executorProcess: ChildProcess | null = null;
@@ -51,6 +52,10 @@ describe("MCP Authentication HTTP Tests", function() {
     let authedPerspectiveUuid: string = "";
 
     before(async () => {
+        [gqlPort, hcAdminPort, hcAppPort, MCP_PORT] = await getFreePorts(4);
+        MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
+        registerPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+
         // Clean up and create test directory
         if (fs.existsSync(appDataPath)) {
             fs.rmSync(appDataPath, { recursive: true });
@@ -70,6 +75,7 @@ describe("MCP Authentication HTTP Tests", function() {
             undefined,
             undefined,
             true,               // enableMcp
+            MCP_PORT,           // mcpPort
         );
 
         await sleep(3000);
@@ -91,6 +97,7 @@ describe("MCP Authentication HTTP Tests", function() {
         // Port-based kill as safety net — catches the executor even if the
         // ChildProcess handle is stale or kill() missed a grandchild process.
         killByPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
     });
 
     // ========================================================================
@@ -123,11 +130,11 @@ describe("MCP Authentication HTTP Tests", function() {
                 const result = await callMcpTool(MCP_BASE_URL, 'list_perspectives', {}, mcpSessionId);
                 // If it doesn't throw, the result must be an auth error string/object
                 const msg = typeof result === 'string' ? result : JSON.stringify(result);
-                expect(msg.toLowerCase()).to.include("auth");
+                expect(msg).to.include("Authentication required");
                 console.log("Unauthenticated list_perspectives:", msg);
             } catch (e: any) {
                 // callMcpTool throws on JSON-RPC error responses
-                expect(e.message.toLowerCase()).to.include("auth");
+                expect(e.message).to.include("Authentication required");
                 console.log("Unauthenticated list_perspectives (thrown):", e.message);
             }
         });
@@ -309,10 +316,10 @@ describe("MCP Authentication HTTP Tests", function() {
 
                 // If it doesn't throw, the result must be an auth error
                 const msg = typeof result === 'string' ? result : JSON.stringify(result);
-                expect(msg.toLowerCase()).to.include("auth");
+                expect(msg).to.include("Authentication required");
                 console.log("Unauthenticated query_links response:", msg.substring(0, 120));
             } catch (e: any) {
-                expect(e.message.toLowerCase()).to.include("auth");
+                expect(e.message).to.include("Authentication required");
                 console.log("Unauthenticated query_links (thrown):", e.message.substring(0, 120));
             }
         });
@@ -328,10 +335,10 @@ describe("MCP Authentication HTTP Tests", function() {
                 }, unauthSession);
 
                 const msg = typeof result === 'string' ? result : JSON.stringify(result);
-                expect(msg.toLowerCase()).to.include("auth");
+                expect(msg).to.include("Authentication required");
                 console.log("Unauthenticated get_models response:", msg.substring(0, 120));
             } catch (e: any) {
-                expect(e.message.toLowerCase()).to.include("auth");
+                expect(e.message).to.include("Authentication required");
                 console.log("Unauthenticated get_models (thrown):", e.message.substring(0, 120));
             }
         });
@@ -348,12 +355,86 @@ describe("MCP Authentication HTTP Tests", function() {
                 }, unauthSession);
 
                 const msg = typeof result === 'string' ? result : JSON.stringify(result);
-                expect(msg.toLowerCase()).to.include("auth");
+                expect(msg).to.include("Authentication required");
                 console.log("Unauthenticated query_subjects response:", msg.substring(0, 120));
             } catch (e: any) {
-                expect(e.message.toLowerCase()).to.include("auth");
+                expect(e.message).to.include("Authentication required");
                 console.log("Unauthenticated query_subjects (thrown):", e.message.substring(0, 120));
             }
+        });
+    });
+
+    // ========================================================================
+    // 7. Admin Credential via HTTP Authorization Header
+    //
+    // Tests that a fresh (unauthenticated) MCP session can call tools by
+    // passing the admin credential in the HTTP Authorization header.
+    // This is the auth path used when agents set "headers" in .mcp.json.
+    // ========================================================================
+
+    describe("7. Admin Credential via HTTP Authorization Header", function() {
+        it("should authenticate with Authorization: <admin-credential> (bare token)", async function() {
+            const freshSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
+
+            // Call list_perspectives with admin credential in Authorization header
+            const result = await callMcpTool(
+                MCP_BASE_URL,
+                'list_perspectives',
+                {},
+                freshSession,
+                { 'Authorization': adminCredential }
+            );
+            expect(result).to.be.an('array');
+            console.log("Admin header auth (bare) list_perspectives:", JSON.stringify(result));
+        });
+
+        it("should authenticate with Authorization: Bearer <admin-credential>", async function() {
+            const freshSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
+
+            const result = await callMcpTool(
+                MCP_BASE_URL,
+                'list_perspectives',
+                {},
+                freshSession,
+                { 'Authorization': `Bearer ${adminCredential}` }
+            );
+            expect(result).to.be.an('array');
+            console.log("Admin header auth (Bearer) list_perspectives:", JSON.stringify(result));
+        });
+
+        it("should reject wrong credential in Authorization header", async function() {
+            const freshSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
+
+            try {
+                const result = await callMcpTool(
+                    MCP_BASE_URL,
+                    'list_perspectives',
+                    {},
+                    freshSession,
+                    { 'Authorization': 'wrong-credential' }
+                );
+                const msg = typeof result === 'string' ? result : JSON.stringify(result);
+                expect(msg).to.include("Authentication required");
+                console.log("Wrong admin header response:", msg.substring(0, 120));
+            } catch (e: any) {
+                expect(e.message).to.include("Authentication required");
+                console.log("Wrong admin header (thrown):", e.message.substring(0, 120));
+            }
+        });
+
+        it("should allow add_perspective via admin header auth", async function() {
+            const freshSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
+
+            const result = await callMcpTool(
+                MCP_BASE_URL,
+                'add_perspective',
+                { name: "admin-header-test" },
+                freshSession,
+                { 'Authorization': adminCredential }
+            );
+            expect(result.success).to.be.true;
+            expect(result.uuid).to.be.a('string');
+            console.log("Admin header add_perspective:", result.uuid);
         });
     });
 });

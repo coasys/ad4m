@@ -3294,11 +3294,14 @@ impl PerspectiveInstance {
                     .await?;
                 }
                 Action::RemoveLink => {
+                    let remove_source = source.clone();
+                    let remove_predicate = predicate.clone();
+                    let remove_target = if target == "*" { None } else { Some(target) };
                     let link_expressions = self
                         .get_links(&LinkQuery {
-                            source: Some(source),
-                            predicate,
-                            target: if target == "*" { None } else { Some(target) },
+                            source: Some(remove_source.clone()),
+                            predicate: remove_predicate.clone(),
+                            target: remove_target.clone(),
                             from_date: None,
                             until_date: None,
                             limit: None,
@@ -3308,6 +3311,21 @@ impl PerspectiveInstance {
                         self.remove_link(link_expression.into(), batch_id.clone())
                             .await?;
                     }
+                    // Also prune matching links from pending batch additions
+                    if let Some(ref bid) = batch_id {
+                        let mut batches = self.batch_store.write().await;
+                        if let Some(diff) = batches.get_mut(bid) {
+                            diff.additions.retain(|link_expr| {
+                                let source_match = link_expr.data.source == remove_source;
+                                let pred_match = remove_predicate.is_none()
+                                    || link_expr.data.predicate == remove_predicate;
+                                let target_match = remove_target.is_none()
+                                    || link_expr.data.target
+                                        == remove_target.as_deref().unwrap_or("");
+                                !(source_match && pred_match && target_match)
+                            });
+                        }
+                    }
                 }
                 Action::SetSingleTarget => {
                     if predicate.is_none() {
@@ -3316,6 +3334,7 @@ impl PerspectiveInstance {
                         );
                         continue;
                     }
+                    // Remove matching persisted links
                     let link_expressions = self
                         .get_links(&LinkQuery {
                             source: Some(source.clone()),
@@ -3329,6 +3348,18 @@ impl PerspectiveInstance {
                     for link_expression in link_expressions {
                         self.remove_link(link_expression.into(), batch_id.clone())
                             .await?;
+                    }
+                    // Also prune matching links from pending batch additions so
+                    // that a previous add in the same batch doesn't survive and
+                    // create a duplicate (e.g. save+update in one transaction).
+                    if let Some(ref bid) = batch_id {
+                        let mut batches = self.batch_store.write().await;
+                        if let Some(diff) = batches.get_mut(bid) {
+                            diff.additions.retain(|link_expr| {
+                                !(link_expr.data.source == source
+                                    && link_expr.data.predicate == predicate)
+                            });
+                        }
                     }
                     self.add_link(
                         Link {
@@ -3343,6 +3374,7 @@ impl PerspectiveInstance {
                     .await?;
                 }
                 Action::CollectionSetter => {
+                    // Remove matching persisted links
                     let link_expressions = self
                         .get_links(&LinkQuery {
                             source: Some(source.clone()),
@@ -3356,6 +3388,16 @@ impl PerspectiveInstance {
                     for link_expression in link_expressions {
                         self.remove_link(link_expression.into(), batch_id.clone())
                             .await?;
+                    }
+                    // Also prune matching links from pending batch additions
+                    if let Some(ref bid) = batch_id {
+                        let mut batches = self.batch_store.write().await;
+                        if let Some(diff) = batches.get_mut(bid) {
+                            diff.additions.retain(|link_expr| {
+                                !(link_expr.data.source == source
+                                    && link_expr.data.predicate == predicate)
+                            });
+                        }
                     }
                     self.add_links(
                         parameters
@@ -3461,7 +3503,7 @@ impl PerspectiveInstance {
     }
 
     /// Get resolve language from SHACL links
-    async fn get_resolve_language_from_shacl(
+    pub async fn get_resolve_language_from_shacl(
         &self,
         class_name: &str,
         property: &str,
@@ -3506,7 +3548,7 @@ impl PerspectiveInstance {
             .await
     }
 
-    async fn resolve_property_value(
+    pub async fn resolve_property_value(
         &self,
         class_name: &str,
         property: &str,
@@ -3986,11 +4028,23 @@ impl PerspectiveInstance {
 
         let subscription_id = Uuid::new_v4().to_string();
 
+        log::debug!(
+            "subscribe_and_query_surreal: new subscription {} for query: {}",
+            subscription_id,
+            query
+        );
+
         // Execute surreal query with user context for $agentDid and $perspectiveId substitution
         let initial_result_vec = self
             .surreal_query_notification(query.clone(), user_email.clone())
             .await?;
         let result_string = serde_json::to_string(&initial_result_vec)?;
+
+        log::debug!(
+            "subscribe_and_query_surreal: {} initial result has {} items",
+            subscription_id,
+            initial_result_vec.len()
+        );
 
         let subscribed_query = SurrealSubscribedQuery {
             query,
@@ -4060,6 +4114,12 @@ impl PerspectiveInstance {
         // DON'T clone the potentially huge last_result string
         let queries = {
             let queries_guard = self.surreal_subscribed_queries.lock().await;
+            if !queries_guard.is_empty() {
+                log::debug!(
+                    "check_surreal_subscribed_queries: checking {} active subscription(s)",
+                    queries_guard.len()
+                );
+            }
             queries_guard
                 .iter()
                 .map(|(id, query)| {
@@ -4083,6 +4143,7 @@ impl PerspectiveInstance {
 
             // Spawn query check future
             let self_clone = self.clone();
+            let query_for_log = query_string.clone();
             let query_future = async move {
                 match self_clone
                     .surreal_query_notification(query_string, user_email)
@@ -4094,6 +4155,17 @@ impl PerspectiveInstance {
                             let mut queries = self_clone.surreal_subscribed_queries.lock().await;
                             if let Some(stored_query) = queries.get_mut(&id) {
                                 if result_string != stored_query.last_result {
+                                    log::debug!(
+                                        "Surreal subscription {} result changed ({} items). Query: {}",
+                                        id,
+                                        result_vec.len(),
+                                        query_for_log
+                                    );
+                                    log::debug!(
+                                        "Surreal subscription {} new result (first 500 chars): {}",
+                                        id,
+                                        &result_string[..result_string.len().min(500)]
+                                    );
                                     // Release lock before sending update
                                     drop(queries);
                                     self_clone

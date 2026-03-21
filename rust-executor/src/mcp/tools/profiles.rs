@@ -165,6 +165,24 @@ fn make_profile_link(
 // ============================================================================
 
 impl Ad4mMcpHandler {
+    /// Get the current agent's DID
+    #[tool(
+        description = "Get the DID (Decentralized Identifier) of the current agent. Use this to identify your own messages when filtering — compare the 'author' field in message data against your DID."
+    )]
+    pub async fn get_my_did(&self, _params: Parameters<GetAgentProfileParams>) -> String {
+        let token = match self.get_auth_token().await {
+            Some(t) => t,
+            None => return json!({"error": "Failed to get auth token"}).to_string(),
+        };
+
+        let agent = match get_current_agent(&token) {
+            Ok(a) => a,
+            Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
+        };
+
+        agent.did
+    }
+
     /// Get the current agent's public profile
     #[tool(
         description = "Get the current agent's public profile (username, name, bio, profile picture URLs). This is the identity that other agents and Flux users see in neighbourhoods."
@@ -335,6 +353,15 @@ impl Ad4mMcpHandler {
         //};
 
         let file_storage_addr = "QmzSYwdjqeP9D13Sfmyc5HcabM9jL3DtPyhadnF6dQXu4FjVSbQ".to_string();
+
+        // Ensure the file-storage language is loaded before trying to create an expression.
+        // language_by_ref() downloads and installs the language if it isn't already running.
+        if !controller.is_language_loaded(&file_storage_addr).await {
+            if let Err(e) = controller.language_by_ref(&file_storage_addr).await {
+                return json!({"error": format!("Failed to load file-storage language: {}", e)})
+                    .to_string();
+            }
+        }
 
         // Create expression via the language controller
         let content = json!({

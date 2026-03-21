@@ -633,6 +633,22 @@ pub struct RuntimeInfo {
     pub is_unlocked: bool,
 }
 
+/// Readiness status returned by the `runtimeReadiness` query.
+/// Each field indicates whether a subsystem has completed initialization.
+/// Test harnesses should poll this instead of using `sleep()`.
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadinessStatus {
+    /// GraphQL server is accepting requests (always true if you can call this query)
+    pub gql_ready: bool,
+    /// Holochain conductor is running and connected
+    pub holochain_ready: bool,
+    /// Agent has been generated/unlocked
+    pub agent_initialized: bool,
+    /// Languages have been loaded into the language controller
+    pub languages_loaded: bool,
+}
+
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SentMessage {
@@ -686,6 +702,9 @@ pub struct UserStatistics {
     pub did: String,
     pub last_seen: Option<DateTime>,
     pub perspective_count: i32,
+    pub remaining_credits: String,
+    pub free_access: bool,
+    pub hot_wallet_address: Option<String>,
 }
 
 #[derive(GraphQLObject, Debug, Deserialize, Serialize, Clone)]
@@ -695,6 +714,22 @@ pub struct VerificationRequestResult {
     pub message: String,
     pub requires_password: bool,
     pub is_existing_user: bool,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct HostingUserInfo {
+    pub email: String,
+    pub remaining_credits: String,
+    pub hot_wallet_address: Option<String>,
+    pub free_access: bool,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PaymentRequestResult {
+    pub success: bool,
+    pub message: String,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize)]
@@ -1171,6 +1206,20 @@ impl GetFilter for AIModelLoadingStatus {
     }
 }
 
+impl GetValue for HostingUserInfo {
+    type Value = HostingUserInfo;
+
+    fn get_value(&self) -> Self::Value {
+        self.clone()
+    }
+}
+
+impl GetFilter for HostingUserInfo {
+    fn get_filter(&self) -> Option<String> {
+        Some(self.email.clone())
+    }
+}
+
 #[derive(GraphQLInputObject, Serialize, Deserialize, Default, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceActivityParamsInput {
@@ -1215,6 +1264,7 @@ pub struct ImportResult {
     pub friends: ImportStats,
     pub trusted_agents: ImportStats,
     pub known_link_languages: ImportStats,
+    pub users: ImportStats,
 }
 
 impl Default for ImportStats {
@@ -1255,6 +1305,7 @@ impl ImportResult {
             friends: ImportStats::new(),
             trusted_agents: ImportStats::new(),
             known_link_languages: ImportStats::new(),
+            users: ImportStats::new(),
         }
     }
 }

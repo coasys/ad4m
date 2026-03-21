@@ -29,7 +29,7 @@ export function collectionToAdderName(collection: string): string {
 }
 
 export function collectionToSetterName(collection: string): string {
-  return `setCollection${capitalize(collection)}`;
+  return `set${capitalize(collection)}`;
 }
 
 export function setProperties(subject: any, properties: PropertyValueMap) {

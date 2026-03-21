@@ -17,6 +17,7 @@
   "perspectives": "Perspectives",
   "neighbourhoods": "Neighbourhoods",
   "social-dna": "Social DNA",
+  "multi-user": "Multi-User Mode",
   "--dev": {
     "type": "separator",
     "title": "Developing with AD4M"

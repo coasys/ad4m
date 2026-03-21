@@ -2,6 +2,7 @@
 *.js.map
 *.js
 !executor/scripts/*.js
+!skills/ad4m/waker/*.js
 build/*
 node_modules
 !executor/src/rollup-plugin-hc-dna.js
@@ -16,11 +17,6 @@ core/lib/*
 executor/lib/*
 coverage
 .DS_store
-docs-src/api.md
-docs-src/typedoc
-docs-src/_book
-docs-src/.next
-docs-src/pages/jsdoc
 host/dist
 host/build
 
@@ -63,9 +59,15 @@ temp
 
 rust-executor/CUSTOM_DENO_SNAPSHOT.bin
 rust-executor/test_data
+rust-executor/src/resources/alliance_*.dna
 
 .npmrc
-docs-src/
+docs-src/out
+docs-src/api.md
+docs-src/typedoc
+docs-src/_book
+docs-src/.next
+docs-src/pages/jsdoc
 .worktrees/
 CUSTOM_DENO_SNAPSHOT.bin
 waker-bridge/package-lock.json

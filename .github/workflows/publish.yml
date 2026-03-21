@@ -16,7 +16,7 @@ jobs:
       - name: setup node
         uses: actions/setup-node@v3
         with:
-          node-version: 18
+          node-version: 24
 
       - uses: pnpm/action-setup@v4
 
@@ -46,7 +46,7 @@ jobs:
       matrix:
         #platform: [GH-hosted-ubuntu, macos-latest, windows-latest]
         platform: [GH-hosted-ubuntu, macos-latest]
-        node-version: [18.x]
+        node-version: [24.x]
 
     needs:
       - create-release
@@ -380,7 +380,7 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:bffabe1dfc4ef18ca64105318d342ab61c2db946ae6ba16718dcd8d1d57c2cff
+      image: coasys/ad4m-ci-linux:latest@sha256:a0ab4b6358b7314a2ad49e232ba6c53b28a56e7f02641f226b2ed05544cc66d8
     steps:
       - uses: actions/checkout@v3
 
@@ -493,7 +493,7 @@ jobs:
   
      - uses: actions/setup-node@v3
        with:
-         node-version: '18.x'
+         node-version: '24.x'
   
      - name: Cache cargo
        id: cache-cargo

@@ -42,6 +42,16 @@ pub struct ShaclProperty {
     pub max_count: Option<u32>,
     /// Node kind (e.g., "sh://IRI", "sh://Literal")
     pub node_kind: Option<String>,
+    /// Pre-computed SurrealQL getter expression for reading this property/relation.
+    /// For relations with a target model, this encodes conformance filtering.
+    pub getter: Option<String>,
+    /// Target SHACL node shape URI (sh:class). When present, linked nodes
+    /// must conform to this shape, enabling typed construction.
+    pub class: Option<String>,
+    /// Language address for resolving property values (ad4m://resolveLanguage).
+    /// When set, values should be passed through `expression_create` on this language
+    /// instead of being encoded as raw `literal://string:` URIs.
+    pub resolve_language: Option<String>,
 }
 
 impl ShaclClass {
@@ -304,6 +314,63 @@ pub async fn load_class_properties_with_uri(
             _ => None,
         };
 
+        // Get getter expression (ad4m://getter)
+        let getter = match perspective
+            .get_links(&LinkQuery {
+                source: Some(prop_uri.clone()),
+                predicate: Some("ad4m://getter".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) if !links.is_empty() => {
+                let raw = links[0].data.target.clone();
+                Some(
+                    raw.strip_prefix("literal://string:")
+                        .unwrap_or(&raw)
+                        .to_string(),
+                )
+            }
+            _ => None,
+        };
+
+        // Get target shape class (sh://class)
+        let class_uri = match perspective
+            .get_links(&LinkQuery {
+                source: Some(prop_uri.clone()),
+                predicate: Some("sh://class".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) if !links.is_empty() => Some(links[0].data.target.clone()),
+            _ => None,
+        };
+
+        // Get resolve language (ad4m://resolveLanguage)
+        let resolve_language = match perspective
+            .get_links(&LinkQuery {
+                source: Some(prop_uri.clone()),
+                predicate: Some("ad4m://resolveLanguage".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) if !links.is_empty() => {
+                let target = &links[0].data.target;
+                let prefix = "literal://string:";
+                if target.starts_with(prefix) {
+                    let encoded_value = &target[prefix.len()..];
+                    urlencoding::decode(encoded_value)
+                        .ok()
+                        .map(|v| v.to_string())
+                } else {
+                    Some(target.clone())
+                }
+            }
+            _ => None,
+        };
+
         properties.push(ShaclProperty {
             name: prop_name,
             is_collection,
@@ -312,6 +379,9 @@ pub async fn load_class_properties_with_uri(
             min_count,
             max_count,
             node_kind,
+            getter,
+            class: class_uri,
+            resolve_language,
         });
     }
 
@@ -364,6 +434,7 @@ pub async fn find_class_name(
 
 /// Resolve a property name to its predicate URI for a given class.
 /// This is the common operation needed by MCP tools to read/write properties.
+/// Matching is case-insensitive because dynamic tool names are lowercased.
 pub async fn resolve_property_predicate(
     perspective: &PerspectiveInstance,
     class_name: &str,
@@ -373,8 +444,9 @@ pub async fn resolve_property_predicate(
     if properties.is_empty() {
         return Err(format!("No SHACL shape found for class '{}'", class_name));
     }
+    let prop_lower = property_name.to_lowercase();
     for prop in &properties {
-        if prop.name == property_name {
+        if prop.name == property_name || prop.name.to_lowercase() == prop_lower {
             return prop.predicate.clone().ok_or_else(|| {
                 format!(
                     "Property '{}' on class '{}' has no predicate URI",
@@ -389,5 +461,36 @@ pub async fn resolve_property_predicate(
         property_name,
         class_name,
         available.join(", ")
+    ))
+}
+
+/// Resolve a property's resolve_language for a given class.
+/// Returns `Ok(Some(language))` if the property has a resolve language,
+/// or `Err` if the class/property is not found.
+/// Matching is case-insensitive because dynamic tool names are lowercased.
+pub async fn resolve_property_resolve_language(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    property_name: &str,
+) -> Result<Option<String>, String> {
+    let properties = load_class_properties(perspective, class_name).await;
+    if properties.is_empty() {
+        return Err(format!("No SHACL shape found for class '{}'", class_name));
+    }
+    let prop_lower = property_name.to_lowercase();
+    for prop in &properties {
+        if prop.name == property_name || prop.name.to_lowercase() == prop_lower {
+            return Ok(prop.resolve_language.clone());
+        }
+    }
+    Err(format!(
+        "Property '{}' not found in class '{}'. Available properties: {}",
+        property_name,
+        class_name,
+        properties
+            .iter()
+            .map(|p| p.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
     ))
 }

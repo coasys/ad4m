@@ -24,6 +24,7 @@ pub mod auth;
 pub mod children;
 pub mod dynamic;
 pub mod flows;
+pub mod languages;
 pub mod neighbourhoods;
 pub mod perspectives;
 pub mod profiles;
@@ -49,6 +50,11 @@ use rmcp::{
 };
 
 use serde_json::json;
+
+// HTTP request parts injected by rmcp's streamable-HTTP transport into each request's extensions.
+// Used to extract the Authorization header for admin-credential bypass.
+use crate::utils::constant_time_eq;
+use axum::http::request::Parts as HttpRequestParts;
 
 // ============================================================================
 // MCP Handler
@@ -118,34 +124,7 @@ impl ServerHandler for Ad4mMcpHandler {
 
         // Check if tool requires authentication
         if !AUTH_TOOLS.contains(&tool_name.as_str()) {
-            // Check admin credential first
-            if let Some(ref admin_cred) = self.context.admin_credential {
-                let token = self
-                    .context
-                    .auth_token
-                    .read()
-                    .await
-                    .clone()
-                    .unwrap_or_default();
-                if token == *admin_cred {
-                    // Admin credential matches — allow access immediately
-                    return self.dispatch_tool(request, context).await;
-                }
-
-                // Admin credential is configured but token doesn't match.
-                // An empty token must NOT be allowed to fall through and act as
-                // the main agent — that would let unauthenticated clients access
-                // all main-agent perspectives in multi-user mode.
-                if token.is_empty() {
-                    return Ok(CallToolResult::error(vec![Content::text(
-                        json!({"error": "Authentication required. Use request_capability + generate_jwt, login_email, or signup to authenticate."}).to_string()
-                    )]));
-                }
-            }
-
-            // Check JWT-based auth (covers JWT tokens and single-user mode with no admin_credential)
-            let capabilities = self.get_capabilities().await;
-            if capabilities.is_err() {
+            if !self.check_auth(&tool_name, &context).await {
                 return Ok(CallToolResult::error(vec![Content::text(
                     json!({"error": "Authentication required. Use request_capability + generate_jwt, login_email, or signup to authenticate."}).to_string()
                 )]));
@@ -162,6 +141,92 @@ impl Ad4mMcpHandler {
             context,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Unified authentication check for MCP tool calls.
+    ///
+    /// Different MCP clients provide credentials in different ways:
+    /// - Some store the JWT/credential in the MCP session (via generate_jwt/login_email)
+    /// - Some send it per-request in the HTTP Authorization header (mcporter, .mcp.json headers)
+    /// - Some do both
+    ///
+    /// This method checks all sources and stores the token in the session if found
+    /// via HTTP header, so downstream helpers (get_agent_context, get_capabilities) work.
+    async fn check_auth(&self, _tool_name: &str, context: &RequestContext<RoleServer>) -> bool {
+        let session_token = self
+            .context
+            .auth_token
+            .read()
+            .await
+            .clone()
+            .unwrap_or_default();
+
+        let admin_cred = self.context.admin_credential.as_deref();
+
+        // 1. Session token matches admin credential → pass
+        if let Some(cred) = admin_cred {
+            if !session_token.is_empty() && constant_time_eq(&session_token, cred) {
+                return true;
+            }
+        }
+
+        // 2. Session token is a valid JWT → pass
+        if !session_token.is_empty() {
+            let caps = capabilities_from_token(session_token.clone(), admin_cred.map(String::from));
+            if caps.is_ok() {
+                return true;
+            }
+        }
+
+        // 3. Try HTTP Authorization header (for clients like mcporter that send
+        //    credentials per-request rather than using the MCP session)
+        let http_header_value = context
+            .extensions
+            .get::<HttpRequestParts>()
+            .and_then(|parts| parts.headers.get(axum::http::header::AUTHORIZATION))
+            .and_then(|h| h.to_str().ok())
+            .map(|h| {
+                let mut parts = h.splitn(2, char::is_whitespace);
+                let scheme = parts.next().unwrap_or_default();
+                let value = parts.next().unwrap_or_default().trim_start();
+
+                if scheme.eq_ignore_ascii_case("bearer") && !value.is_empty() {
+                    value.to_string()
+                } else {
+                    h.to_string()
+                }
+            });
+
+        if let Some(ref header_token) = http_header_value {
+            // 3a. Header matches admin credential → store & pass
+            if let Some(cred) = admin_cred {
+                if constant_time_eq(header_token, cred) {
+                    let mut guard = self.context.auth_token.write().await;
+                    *guard = Some(cred.to_string());
+                    return true;
+                }
+            }
+
+            // 3b. Header is a valid JWT → store & pass
+            if !header_token.is_empty() {
+                let caps =
+                    capabilities_from_token(header_token.clone(), admin_cred.map(String::from));
+                if caps.is_ok() {
+                    let mut guard = self.context.auth_token.write().await;
+                    *guard = Some(header_token.clone());
+                    return true;
+                }
+            }
+        }
+
+        // 4. No admin credential configured and no token → single-user local mode
+        //    (mirrors GraphQL localhost trust model)
+        if admin_cred.is_none() && session_token.is_empty() && http_header_value.is_none() {
+            return true;
+        }
+
+        // Everything else → reject
+        false
     }
 
     /// Build the tool router manually, registering all tools from domain modules.
@@ -220,6 +285,7 @@ impl Ad4mMcpHandler {
             .with_route((Self::verify_email_code_tool_attr(), Self::verify_email_code))
             .with_route((Self::auth_status_tool_attr(), Self::auth_status))
             // profiles.rs
+            .with_route((Self::get_my_did_tool_attr(), Self::get_my_did))
             .with_route((Self::get_agent_profile_tool_attr(), Self::get_agent_profile))
             .with_route((Self::set_agent_profile_tool_attr(), Self::set_agent_profile))
             .with_route((
@@ -237,6 +303,10 @@ impl Ad4mMcpHandler {
             // children.rs
             .with_route((Self::add_child_tool_attr(), Self::add_child))
             .with_route((Self::get_children_tool_attr(), Self::get_children))
+            .with_route((
+                Self::get_children_body_parsed_tool_attr(),
+                Self::get_children_body_parsed,
+            ))
             // subscriptions.rs
             .with_route((
                 Self::generate_waker_query_tool_attr(),
@@ -246,7 +316,13 @@ impl Ad4mMcpHandler {
                 Self::get_mention_waker_config_tool_attr(),
                 Self::get_mention_waker_config,
             ))
+            // languages.rs
+            .with_route((Self::language_meta_tool_attr(), Self::language_meta))
             // neighbourhoods.rs
+            .with_route((
+                Self::list_link_language_templates_tool_attr(),
+                Self::list_link_language_templates,
+            ))
             .with_route((
                 Self::neighbourhood_publish_from_perspective_tool_attr(),
                 Self::neighbourhood_publish_from_perspective,
@@ -499,5 +575,74 @@ impl Ad4mMcpHandler {
         property_name: &str,
     ) -> Result<String, String> {
         super::shacl::resolve_property_predicate(perspective, class_name, property_name).await
+    }
+
+    /// Resolve a property value through the appropriate language, respecting
+    /// the SHACL `resolve_language` setting for the property.
+    ///
+    /// If the value already has a URI scheme (e.g. `literal://...`, `did:...`),
+    /// it is returned as-is. Otherwise, the value is parsed as JSON to recover
+    /// its native type (boolean, number, etc.) and resolved through the
+    /// perspective's `resolve_property_value` method, which uses the language
+    /// controller when a `resolve_language` is set on the property.
+    ///
+    /// Handles case-insensitive property name matching: dynamic tool names are
+    /// lowercased but SHACL stores original case. We resolve to the original
+    /// case before calling into the perspective.
+    pub(crate) async fn create_property_expression(
+        perspective: &PerspectiveInstance,
+        class_name: &str,
+        property_name: &str,
+        value: &str,
+        agent_context: &crate::agent::AgentContext,
+    ) -> String {
+        // Use anchored regex to check if value is a full URI scheme (not just contains "://")
+        static URI_SCHEME_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let re = URI_SCHEME_RE
+            .get_or_init(|| regex::Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-._]*:").unwrap());
+        if re.is_match(value) {
+            return value.to_string();
+        }
+
+        // Resolve the original-cased property name from SHACL.
+        // Dynamic tools lowercase the property name (e.g. "isconversation"),
+        // but the SHACL links store the original case (e.g. "isConversation").
+        let original_property_name = {
+            let props: Vec<crate::mcp::shacl::ShaclProperty> =
+                crate::mcp::shacl::load_class_properties(perspective, class_name).await;
+            let prop_lower = property_name.to_lowercase();
+            props
+                .into_iter()
+                .find(|p| p.name == property_name || p.name.to_lowercase() == prop_lower)
+                .map(|p| p.name)
+                .unwrap_or_else(|| property_name.to_string())
+        };
+
+        // Try to parse as JSON to recover native types (bool, number).
+        // MCP tool schemas declare all values as strings, so "false" arrives
+        // as the string "false" — but the language controller needs json!(false).
+        let json_value: serde_json::Value = serde_json::from_str(value)
+            .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
+
+        match perspective
+            .resolve_property_value(
+                class_name,
+                &original_property_name,
+                &json_value,
+                agent_context,
+            )
+            .await
+        {
+            Ok(url) => url,
+            Err(e) => {
+                log::warn!(
+                    "Failed to resolve property value for {}.{}: {}, falling back to encode_literal",
+                    class_name,
+                    original_property_name,
+                    e
+                );
+                Self::encode_literal(value)
+            }
+        }
     }
 }

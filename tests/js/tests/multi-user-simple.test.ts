@@ -1,10 +1,11 @@
 import path from "path";
-import { Ad4mClient, Ad4mModel, ExpressionProof, Link, LinkExpression, LinkInput, ModelOptions, Perspective, PerspectiveUnsignedInput, Property } from "@coasys/ad4m";
+import { Ad4mClient, Ad4mModel, ExpressionProof, Link, LinkExpression, LinkInput, Model, Perspective, PerspectiveUnsignedInput, Property } from "@coasys/ad4m";
 import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor, runHcLocalServices } from "../utils/utils";
+import { apolloClient, sleep, startExecutor, runHcLocalServices, gracefulShutdown } from "../utils/utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
 import { LinkQuery } from "@coasys/ad4m";
@@ -26,9 +27,9 @@ describe("Multi-User Simple integration tests", () => {
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
     const appDataPath = path.join(TEST_DIR, "agents", "multi-user-simple");
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    const gqlPort = 15900
-    const hcAdminPort = 15901
-    const hcAppPort = 15902
+    let gqlPort: number;
+    let hcAdminPort: number;
+    let hcAppPort: number;
 
     let executorProcess: ChildProcess | null = null
     let adminAd4mClient: Ad4mClient | null = null
@@ -37,7 +38,16 @@ describe("Multi-User Simple integration tests", () => {
     let bootstrapUrl: string | null = null;
     let localServicesProcess: ChildProcess | null = null;
 
+    // Helper: create a test user and grant free_access so billing doesn't block tests
+    async function createTestUser(email: string, password: string) {
+        const result = await adminAd4mClient!.agent.createUser(email, password);
+        await adminAd4mClient!.runtime.setUserFreeAccess(email, true);
+        return result;
+    }
+
     before(async () => {
+        [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+        registerPorts([gqlPort, hcAdminPort, hcAppPort]);
         if (!fs.existsSync(appDataPath)) {
             fs.mkdirSync(appDataPath, { recursive: true });
         }
@@ -60,20 +70,9 @@ describe("Multi-User Simple integration tests", () => {
     })
 
     after(async () => {
-        if (executorProcess) {
-            while (!executorProcess?.killed) {
-                let status = executorProcess?.kill();
-                console.log("killed executor with", status);
-                await sleep(500);
-            }
-        }
-        if (localServicesProcess) {
-            while (!localServicesProcess?.killed) {
-                let status = localServicesProcess?.kill();
-                console.log("killed local services with", status);
-                await sleep(500);
-            }
-        }
+        await gracefulShutdown(executorProcess, "executor");
+        await gracefulShutdown(localServicesProcess, "local services");
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
     })
 
     describe("Multi-User Configuration", () => {
@@ -122,8 +121,8 @@ describe("Multi-User Simple integration tests", () => {
 
         it("should list users with statistics", async () => {
             // Create a few users
-            await adminAd4mClient!.agent.createUser("stats1@example.com", "password1");
-            await adminAd4mClient!.agent.createUser("stats2@example.com", "password2");
+            await createTestUser("stats1@example.com", "password1");
+            await createTestUser("stats2@example.com", "password2");
 
             // Login one user to update their last_seen
             const token1 = await adminAd4mClient!.agent.loginUser("stats1@example.com", "password1");
@@ -176,7 +175,7 @@ describe("Multi-User Simple integration tests", () => {
             await adminAd4mClient!.runtime.setMultiUserEnabled(true);
 
             // Create a user
-            await adminAd4mClient!.agent.createUser("lastseen@example.com", "password");
+            await createTestUser("lastseen@example.com", "password");
 
             // List users before login
             let users = await adminAd4mClient!.runtime.listUsers();
@@ -250,12 +249,12 @@ describe("Multi-User Simple integration tests", () => {
     describe.skip("Basic Multi-User Functionality", () => {
         it("should create and login users with unique DIDs", async () => {
             // Create first user
-            const user1Result = await adminAd4mClient!.agent.createUser("alice@example.com", "password123");
+            const user1Result = await createTestUser("alice@example.com", "password123");
             expect(user1Result.success).to.be.true;
             expect(user1Result.did).to.match(/^did:key:.+/);
 
             // Create second user
-            const user2Result = await adminAd4mClient!.agent.createUser("bob@example.com", "password456");
+            const user2Result = await createTestUser("bob@example.com", "password456");
             expect(user2Result.success).to.be.true;
             expect(user2Result.did).to.match(/^did:key:.+/);
 
@@ -280,7 +279,7 @@ describe("Multi-User Simple integration tests", () => {
 
         it("should return correct user DID in agent.me", async () => {
             // Create and login user
-            const userResult = await adminAd4mClient!.agent.createUser("charlie@example.com", "password789");
+            const userResult = await createTestUser("charlie@example.com", "password789");
             const userToken = await adminAd4mClient!.agent.loginUser("charlie@example.com", "password789");
 
             // Create authenticated client
@@ -299,7 +298,7 @@ describe("Multi-User Simple integration tests", () => {
 
         it("should handle login persistence", async () => {
             // Create user
-            const userResult = await adminAd4mClient!.agent.createUser("dave@example.com", "passwordABC");
+            const userResult = await createTestUser("dave@example.com", "passwordABC");
             
             // Login first time
             const token1 = await adminAd4mClient!.agent.loginUser("dave@example.com", "passwordABC");
@@ -320,7 +319,7 @@ describe("Multi-User Simple integration tests", () => {
 
         it("should reject wrong passwords", async () => {
             // Create user
-            await adminAd4mClient!.agent.createUser("eve@example.com", "correctpassword");
+            await createTestUser("eve@example.com", "correctpassword");
             
             // Try to login with wrong password
             const call = async () => {
@@ -342,8 +341,8 @@ describe("Multi-User Simple integration tests", () => {
     describe("Perspective Isolation", () => {
         it("should isolate perspectives between users", async () => {
             // Create two users
-            const user1Result = await adminAd4mClient!.agent.createUser("isolation1@example.com", "password1");
-            const user2Result = await adminAd4mClient!.agent.createUser("isolation2@example.com", "password2");
+            const user1Result = await createTestUser("isolation1@example.com", "password1");
+            const user2Result = await createTestUser("isolation2@example.com", "password2");
 
             // Login both users
             const token1 = await adminAd4mClient!.agent.loginUser("isolation1@example.com", "password1");
@@ -397,7 +396,7 @@ describe("Multi-User Simple integration tests", () => {
 
         it("should isolate user perspectives from main agent", async () => {
             // Create a user and their perspective
-            const userResult = await adminAd4mClient!.agent.createUser("mainisolation@example.com", "password");
+            const userResult = await createTestUser("mainisolation@example.com", "password");
             const userToken = await adminAd4mClient!.agent.loginUser("mainisolation@example.com", "password");
             // @ts-ignore - Suppress Apollo type mismatch
             const userClient = new Ad4mClient(apolloClient(gqlPort, userToken), false);
@@ -426,8 +425,8 @@ describe("Multi-User Simple integration tests", () => {
 
         it("should handle perspective access control for operations", async () => {
             // Create two users
-            const user1Result = await adminAd4mClient!.agent.createUser("accessctrl1@example.com", "password1");
-            const user2Result = await adminAd4mClient!.agent.createUser("accessctrl2@example.com", "password2");
+            const user1Result = await createTestUser("accessctrl1@example.com", "password1");
+            const user2Result = await createTestUser("accessctrl2@example.com", "password2");
 
             const token1 = await adminAd4mClient!.agent.loginUser("accessctrl1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("accessctrl2@example.com", "password2");
@@ -459,8 +458,8 @@ describe("Multi-User Simple integration tests", () => {
     describe("Link Authoring and Signatures", () => {
         it("should have correct authors and valid signatures for user links", async () => {
             // Create two users
-            const user1Result = await adminAd4mClient!.agent.createUser("linkauth1@example.com", "password1");
-            const user2Result = await adminAd4mClient!.agent.createUser("linkauth2@example.com", "password2");
+            const user1Result = await createTestUser("linkauth1@example.com", "password1");
+            const user2Result = await createTestUser("linkauth2@example.com", "password2");
 
             // Login both users
             const token1 = await adminAd4mClient!.agent.loginUser("linkauth1@example.com", "password1");
@@ -520,16 +519,15 @@ describe("Multi-User Simple integration tests", () => {
         
         before(async () => {
             // Import necessary decorators and classes
-            const { ModelOptions, Property, Optional } = await import("@coasys/ad4m");
+            const { Model, Property } = await import("@coasys/ad4m");
 
             // Define a proper subject class with decorators
-            @ModelOptions({
+            @Model({
                 name: "TestSubject"
             })
             class TestSubjectClass {
                 @Property({
                     through: "test://name",
-                    writable: true,
                     initial: "test://initial",
                     resolveLanguage: "literal"
                 })
@@ -541,8 +539,8 @@ describe("Multi-User Simple integration tests", () => {
 
         it("should have correct authors and valid signatures for subject operations", async () => {
             // Create two users
-            const user1Result = await adminAd4mClient!.agent.createUser("subject1@example.com", "password1");
-            const user2Result = await adminAd4mClient!.agent.createUser("subject2@example.com", "password2");
+            const user1Result = await createTestUser("subject1@example.com", "password1");
+            const user2Result = await createTestUser("subject2@example.com", "password2");
 
             // Login both users
             const token1 = await adminAd4mClient!.agent.loginUser("subject1@example.com", "password1");
@@ -613,8 +611,8 @@ describe("Multi-User Simple integration tests", () => {
     describe("Agent Profiles and Status", () => {
         it("should maintain separate agent profiles for different users", async () => {
             // Create two users
-            const user1Result = await adminAd4mClient!.agent.createUser("profile1@example.com", "password1");
-            const user2Result = await adminAd4mClient!.agent.createUser("profile2@example.com", "password2");
+            const user1Result = await createTestUser("profile1@example.com", "password1");
+            const user2Result = await createTestUser("profile2@example.com", "password2");
 
             // Login both users
             const token1 = await adminAd4mClient!.agent.loginUser("profile1@example.com", "password1");
@@ -653,8 +651,8 @@ describe("Multi-User Simple integration tests", () => {
 
         it("should handle agent status correctly for different users", async () => {
             // Create two users
-            const user1Result = await adminAd4mClient!.agent.createUser("status1@example.com", "password1");
-            const user2Result = await adminAd4mClient!.agent.createUser("status2@example.com", "password2");
+            const user1Result = await createTestUser("status1@example.com", "password1");
+            const user2Result = await createTestUser("status2@example.com", "password2");
 
             // Login both users
             const token1 = await adminAd4mClient!.agent.loginUser("status1@example.com", "password1");
@@ -702,8 +700,8 @@ describe("Multi-User Simple integration tests", () => {
 
         it("should allow users to update their own agent profiles independently", async () => {
             // Create two users
-            const user1Result = await adminAd4mClient!.agent.createUser("update1@example.com", "password1");
-            const user2Result = await adminAd4mClient!.agent.createUser("update2@example.com", "password2");
+            const user1Result = await createTestUser("update1@example.com", "password1");
+            const user2Result = await createTestUser("update2@example.com", "password2");
 
             // Login both users
             const token1 = await adminAd4mClient!.agent.loginUser("update1@example.com", "password1");
@@ -766,8 +764,8 @@ describe("Multi-User Simple integration tests", () => {
 
         it("should not allow users to see other users' agent profiles", async () => {
             // Create two users
-            const user1Result = await adminAd4mClient!.agent.createUser("private1@example.com", "password1");
-            const user2Result = await adminAd4mClient!.agent.createUser("private2@example.com", "password2");
+            const user1Result = await createTestUser("private1@example.com", "password1");
+            const user2Result = await createTestUser("private2@example.com", "password2");
 
             // Login both users
             const token1 = await adminAd4mClient!.agent.loginUser("private1@example.com", "password1");
@@ -798,9 +796,12 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         it("should publish managed users to the agent language", async () => {
+            // Ensure multi-user is enabled
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+
             // Create two users
-            const user1Result = await adminAd4mClient!.agent.createUser("agentlang1@example.com", "password1");
-            const user2Result = await adminAd4mClient!.agent.createUser("agentlang2@example.com", "password2");
+            const user1Result = await createTestUser("agentlang1@example.com", "password1");
+            const user2Result = await createTestUser("agentlang2@example.com", "password2");
 
             // Login both users to trigger any agent language publishing
             const token1 = await adminAd4mClient!.agent.loginUser("agentlang1@example.com", "password1");
@@ -880,8 +881,8 @@ describe("Multi-User Simple integration tests", () => {
 
         it("should publish updated public perspectives to the agent language", async () => {
             // Create two users
-            const user1Result = await adminAd4mClient!.agent.createUser("perspective1@example.com", "password1");
-            const user2Result = await adminAd4mClient!.agent.createUser("perspective2@example.com", "password2");
+            const user1Result = await createTestUser("perspective1@example.com", "password1");
+            const user2Result = await createTestUser("perspective2@example.com", "password2");
 
             // Login both users
             const token1 = await adminAd4mClient!.agent.loginUser("perspective1@example.com", "password1");
@@ -979,8 +980,8 @@ describe("Multi-User Simple integration tests", () => {
 
         it("should use correct user context for expression.create()", async () => {
             // Create two users
-            const user1Result = await adminAd4mClient!.agent.createUser("expr1@example.com", "password1");
-            const user2Result = await adminAd4mClient!.agent.createUser("expr2@example.com", "password2");
+            const user1Result = await createTestUser("expr1@example.com", "password1");
+            const user2Result = await createTestUser("expr2@example.com", "password2");
 
             // Login both users
             const token1 = await adminAd4mClient!.agent.loginUser("expr1@example.com", "password1");
@@ -1044,8 +1045,8 @@ describe("Multi-User Simple integration tests", () => {
     describe("Multi-User Neighbourhood Sharing", () => {
         it("should allow multiple local users to share the same neighbourhood", async () => {
             // Create two users
-            const user1Result = await adminAd4mClient!.agent.createUser("nh1@example.com", "password1");
-            const user2Result = await adminAd4mClient!.agent.createUser("nh2@example.com", "password2");
+            const user1Result = await createTestUser("nh1@example.com", "password1");
+            const user2Result = await createTestUser("nh2@example.com", "password2");
 
             // Login both users
             const token1 = await adminAd4mClient!.agent.loginUser("nh1@example.com", "password1");
@@ -1144,8 +1145,8 @@ describe("Multi-User Simple integration tests", () => {
 
         it("should use separate prolog pools for different users in shared neighbourhood", async () => {
             // Create two users
-            const user1Result = await adminAd4mClient!.agent.createUser("prolog1@example.com", "password1");
-            const user2Result = await adminAd4mClient!.agent.createUser("prolog2@example.com", "password2");
+            const user1Result = await createTestUser("prolog1@example.com", "password1");
+            const user2Result = await createTestUser("prolog2@example.com", "password2");
 
             // Login both users
             const token1 = await adminAd4mClient!.agent.loginUser("prolog1@example.com", "password1");
@@ -1161,13 +1162,12 @@ describe("Multi-User Simple integration tests", () => {
             // User 1 creates a perspective and shares it as a neighbourhood
             const perspective1 = await client1.perspective.add("Prolog Pool Test");
 
-            @ModelOptions({
+            @Model({
                 name: "User1Model"
             })
             class User1Model extends Ad4mModel {
                 @Property({
                     through: "test://user1-property",
-                    writable: true,
                     initial: "test://user1-initial",
                     resolveLanguage: "literal"
                 })
@@ -1206,13 +1206,12 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("User 2 joined, adding their own SDNA...");
 
-            @ModelOptions({
+            @Model({
                 name: "User2Model"
             })
             class User2Model extends Ad4mModel {
                 @Property({
                     through: "test://user2-property",
-                    writable: true,
                     initial: "test://user2-initial",
                     resolveLanguage: "literal"
                 })
@@ -1251,8 +1250,8 @@ describe("Multi-User Simple integration tests", () => {
 
         it("should route neighbourhood signals locally between users on the same node", async () => {
             // Create two users
-            const user1Result = await adminAd4mClient!.agent.createUser("signal1@example.com", "password1");
-            const user2Result = await adminAd4mClient!.agent.createUser("signal2@example.com", "password2");
+            const user1Result = await createTestUser("signal1@example.com", "password1");
+            const user2Result = await createTestUser("signal2@example.com", "password2");
 
             // Login both users
             const token1 = await adminAd4mClient!.agent.loginUser("signal1@example.com", "password1");
@@ -1410,11 +1409,11 @@ describe("Multi-User Simple integration tests", () => {
             
             // Create two managed users (simulating Flux signup flow)
             console.log("Creating first managed user...");
-            await adminAd4mClient!.agent.createUser("flux1@example.com", "password1");
+            await createTestUser("flux1@example.com", "password1");
             const token1 = await adminAd4mClient!.agent.loginUser("flux1@example.com", "password1");
             
             console.log("Creating second managed user...");
-            await adminAd4mClient!.agent.createUser("flux2@example.com", "password2");
+            await createTestUser("flux2@example.com", "password2");
             const token2 = await adminAd4mClient!.agent.loginUser("flux2@example.com", "password2");
 
             // @ts-ignore
@@ -1581,7 +1580,7 @@ describe("Multi-User Simple integration tests", () => {
             console.log("Main agent DID:", mainAgentDid);
 
             // Create and login a managed user
-            await adminAd4mClient!.agent.createUser("main_agent_signal@example.com", "password");
+            await createTestUser("main_agent_signal@example.com", "password");
             const userToken = await adminAd4mClient!.agent.loginUser("main_agent_signal@example.com", "password");
             // @ts-ignore
             const userClient = new Ad4mClient(apolloClient(gqlPort, userToken), false);
@@ -1685,9 +1684,9 @@ describe("Multi-User Simple integration tests", () => {
     describe("Multi-Node Multi-User Integration", () => {
         // Test with 2 nodes, each with 2 users (4 users total)
         const node2AppDataPath = path.join(TEST_DIR, "agents", "multi-user-node2");
-        const node2GqlPort = 16000;
-        const node2HcAdminPort = 16001;
-        const node2HcAppPort = 16002;
+        let node2GqlPort: number;
+        let node2HcAdminPort: number;
+        let node2HcAppPort: number;
 
         let node2ExecutorProcess: ChildProcess | null = null;
         let node2AdminClient: Ad4mClient | null = null;
@@ -1706,6 +1705,9 @@ describe("Multi-User Simple integration tests", () => {
 
         before(async function() {
             this.timeout(300000); // Increase timeout for setup with Holochain 0.7.0
+
+            [node2GqlPort, node2HcAdminPort, node2HcAppPort] = await getFreePorts(3);
+            registerPorts([node2GqlPort, node2HcAdminPort, node2HcAppPort]);
 
             console.log("\n=== Setting up Node 2 ===");
             if (!fs.existsSync(node2AppDataPath)) {
@@ -1732,7 +1734,7 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("\n=== Creating users on Node 1 ===");
             // Create and login 2 users on node 1
-            await adminAd4mClient!.agent.createUser("node1user1@example.com", "password1");
+            await createTestUser("node1user1@example.com", "password1");
             const node1User1Token = await adminAd4mClient!.agent.loginUser("node1user1@example.com", "password1");
             // @ts-ignore
             node1User1Client = new Ad4mClient(apolloClient(gqlPort, node1User1Token), false);
@@ -1740,7 +1742,7 @@ describe("Multi-User Simple integration tests", () => {
             node1User1Did = node1User1Agent.did;
             console.log("Node 1 User 1 DID:", node1User1Did);
 
-            await adminAd4mClient!.agent.createUser("node1user2@example.com", "password2");
+            await createTestUser("node1user2@example.com", "password2");
             const node1User2Token = await adminAd4mClient!.agent.loginUser("node1user2@example.com", "password2");
             // @ts-ignore
             node1User2Client = new Ad4mClient(apolloClient(gqlPort, node1User2Token), false);
@@ -1751,6 +1753,7 @@ describe("Multi-User Simple integration tests", () => {
             console.log("\n=== Creating users on Node 2 ===");
             // Create and login 2 users on node 2
             await node2AdminClient.agent.createUser("node2user1@example.com", "password3");
+            await node2AdminClient.runtime.setUserFreeAccess("node2user1@example.com", true);
             const node2User1Token = await node2AdminClient.agent.loginUser("node2user1@example.com", "password3");
             // @ts-ignore
             node2User1Client = new Ad4mClient(apolloClient(node2GqlPort, node2User1Token), false);
@@ -1759,6 +1762,7 @@ describe("Multi-User Simple integration tests", () => {
             console.log("Node 2 User 1 DID:", node2User1Did);
 
             await node2AdminClient.agent.createUser("node2user2@example.com", "password4");
+            await node2AdminClient.runtime.setUserFreeAccess("node2user2@example.com", true);
             const node2User2Token = await node2AdminClient.agent.loginUser("node2user2@example.com", "password4");
             // @ts-ignore
             node2User2Client = new Ad4mClient(apolloClient(node2GqlPort, node2User2Token), false);
@@ -1778,13 +1782,8 @@ describe("Multi-User Simple integration tests", () => {
 
         after(async function() {
             this.timeout(20000);
-            if (node2ExecutorProcess) {
-                while (!node2ExecutorProcess?.killed) {
-                    let status = node2ExecutorProcess?.kill();
-                    console.log("killed node 2 executor with", status);
-                    await sleep(500);
-                }
-            }
+            await gracefulShutdown(node2ExecutorProcess, "node 2 executor");
+            deregisterPorts([node2GqlPort, node2HcAdminPort, node2HcAppPort]);
         });
 
         it("should return all DIDs in 'others()' for each user", async function() {
@@ -2235,8 +2234,8 @@ describe("Multi-User Simple integration tests", () => {
             console.log("\n=== Testing perspective subscription filtering ===");
 
             // Create two users
-            await adminAd4mClient!.agent.createUser("sub1@example.com", "password1");
-            await adminAd4mClient!.agent.createUser("sub2@example.com", "password2");
+            await createTestUser("sub1@example.com", "password1");
+            await createTestUser("sub2@example.com", "password2");
 
             const token1 = await adminAd4mClient!.agent.loginUser("sub1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("sub2@example.com", "password2");
@@ -2304,8 +2303,8 @@ describe("Multi-User Simple integration tests", () => {
             console.log("\n=== Testing perspectiveUpdated subscription filtering ===");
 
             // Create two users
-            await adminAd4mClient!.agent.createUser("update1@example.com", "password1");
-            await adminAd4mClient!.agent.createUser("update2@example.com", "password2");
+            await createTestUser("update1@example.com", "password1");
+            await createTestUser("update2@example.com", "password2");
 
             const token1 = await adminAd4mClient!.agent.loginUser("update1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("update2@example.com", "password2");
@@ -2374,8 +2373,8 @@ describe("Multi-User Simple integration tests", () => {
             console.log("\n=== Testing perspective_link_added subscription filtering ===");
 
             // Create two users
-            await adminAd4mClient!.agent.createUser("linkuser1@example.com", "password1");
-            await adminAd4mClient!.agent.createUser("linkuser2@example.com", "password2");
+            await createTestUser("linkuser1@example.com", "password1");
+            await createTestUser("linkuser2@example.com", "password2");
 
             const token1 = await adminAd4mClient!.agent.loginUser("linkuser1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("linkuser2@example.com", "password2");
@@ -2465,8 +2464,8 @@ describe("Multi-User Simple integration tests", () => {
             console.log("\n=== Testing perspectiveRemoved subscription filtering ===");
 
             // Create two users
-            await adminAd4mClient!.agent.createUser("remove1@example.com", "password1");
-            await adminAd4mClient!.agent.createUser("remove2@example.com", "password2");
+            await createTestUser("remove1@example.com", "password1");
+            await createTestUser("remove2@example.com", "password2");
 
             const token1 = await adminAd4mClient!.agent.loginUser("remove1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("remove2@example.com", "password2");
@@ -2534,8 +2533,8 @@ describe("Multi-User Simple integration tests", () => {
             console.log("\n=== Testing notification isolation between users ===");
 
             // Create two users
-            await adminAd4mClient!.agent.createUser("notify1@example.com", "password1");
-            await adminAd4mClient!.agent.createUser("notify2@example.com", "password2");
+            await createTestUser("notify1@example.com", "password1");
+            await createTestUser("notify2@example.com", "password2");
 
             const token1 = await adminAd4mClient!.agent.loginUser("notify1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("notify2@example.com", "password2");
@@ -2601,8 +2600,8 @@ describe("Multi-User Simple integration tests", () => {
             console.log("\n=== Testing per-user agent DID in notification queries ===");
 
             // Create two users
-            await adminAd4mClient!.agent.createUser("did1@example.com", "password1");
-            await adminAd4mClient!.agent.createUser("did2@example.com", "password2");
+            await createTestUser("did1@example.com", "password1");
+            await createTestUser("did2@example.com", "password2");
 
             const token1 = await adminAd4mClient!.agent.loginUser("did1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("did2@example.com", "password2");
@@ -2695,8 +2694,8 @@ describe("Multi-User Simple integration tests", () => {
             console.log("\n=== Testing notification access control ===");
 
             // Create two users
-            await adminAd4mClient!.agent.createUser("access1@example.com", "password1");
-            await adminAd4mClient!.agent.createUser("access2@example.com", "password2");
+            await createTestUser("access1@example.com", "password1");
+            await createTestUser("access2@example.com", "password2");
 
             const token1 = await adminAd4mClient!.agent.loginUser("access1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("access2@example.com", "password2");
@@ -2741,7 +2740,7 @@ describe("Multi-User Simple integration tests", () => {
             console.log("\n=== Testing that managed users cannot call grantNotification ===");
 
             // Create a managed user
-            await adminAd4mClient!.agent.createUser("grant-test@example.com", "password1");
+            await createTestUser("grant-test@example.com", "password1");
             const token = await adminAd4mClient!.agent.loginUser("grant-test@example.com", "password1");
 
             // @ts-ignore
@@ -2861,13 +2860,7 @@ describe("Multi-User Simple integration tests", () => {
 
         after(async function() {
             this.timeout(20000);
-            if (node3ExecutorProcess) {
-                while (!node3ExecutorProcess?.killed) {
-                    let status = node3ExecutorProcess?.kill();
-                    console.log("killed node 3 executor with", status);
-                    await sleep(500);
-                }
-            }
+            await gracefulShutdown(node3ExecutorProcess, "node 3 executor");
         });
 
         it("should route signals between remote main agent and local managed user", async function() {
@@ -2950,7 +2943,7 @@ describe("Multi-User Simple integration tests", () => {
             // populated. The managed user is created fresh here, after the remote
             // agent is already fully synced in the neighbourhood.
             console.log("\n--- Creating managed user (late signup) ---");
-            await adminAd4mClient!.agent.createUser("flux-managed@example.com", "fluxpass");
+            await createTestUser("flux-managed@example.com", "fluxpass");
             const managedToken = await adminAd4mClient!.agent.loginUser("flux-managed@example.com", "fluxpass");
             // @ts-ignore
             localManagedUserClient = new Ad4mClient(apolloClient(gqlPort, managedToken), false);

@@ -27,12 +27,72 @@ use crate::{
     },
     holochain_service::get_holochain_service,
     languages::LanguageController,
-    pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC},
+    pubsub::{
+        get_global_pubsub, mark_credits_dirty, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC,
+    },
 };
 use base64::prelude::*;
 
 // Use the shared can_access_perspective function from query_resolvers
 use super::query_resolvers::can_access_perspective;
+
+// Default pricing in HOT (used when no rate is configured in the DB)
+const DEFAULT_TOKEN_RATE: f64 = 12.5; // per token (prompt + completion)
+const DEFAULT_EMBEDDING_TOKEN_RATE: f64 = 1.0; // per input token
+const DEFAULT_LINK_WRITE_RATE: f64 = 0.25; // per link write
+
+/// Look up a rate from the host_rates DB table, falling back to the given default.
+fn get_rate(description: &str, default: f64) -> FieldResult<f64> {
+    match Ad4mDb::with_global_instance(|db| db.get_host_rate(description)) {
+        Ok(Some(rate)) => Ok(rate),
+        Ok(None) => Ok(default),
+        Err(e) => Err(FieldError::new(
+            format!("Failed to read host rate: {}", e),
+            graphql_value!(null),
+        )),
+    }
+}
+
+/// Deduct compute credits for a user after an operation completes.
+/// Uses clamped deduction (credits go to 0, never negative) so that the
+/// pre-check in check_compute_credits will block subsequent operations.
+/// Returns Ok(()) if:
+/// - No user email in token (single-user mode, no billing)
+/// - User has free_access enabled
+/// - Credits were successfully deducted (clamped to 0)
+fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
+    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+        if !free {
+            Ad4mDb::with_global_instance(|db| db.deduct_user_credits_if_available(email, amount))
+                .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+            mark_credits_dirty(email);
+        }
+    }
+    Ok(())
+}
+
+/// Read-only credit check. Returns Ok(()) if the user can afford compute.
+/// Used as a fast pre-check before expensive operations; the actual deduction
+/// happens after the operation via reserve_compute_credits with the exact cost.
+fn check_compute_credits(auth_token: &str) -> FieldResult<()> {
+    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+        if !free {
+            let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
+                .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+            if credits <= 0.0 {
+                return Err(FieldError::new(
+                    "Insufficient compute credits",
+                    graphql_value!(null),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 // Helper function to get perspective with access control
 async fn get_perspective_with_access_control(
@@ -1887,17 +1947,25 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-
+        check_compute_credits(&context.auth_token)?;
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
-        Ok(perspective
+        let result = perspective
             .add_link(
                 link.into(),
                 link_status_from_input(status)?,
                 batch_id,
                 &agent_context,
             )
-            .await?)
+            .await?;
+
+        if let Err(e) = reserve_compute_credits(
+            &context.auth_token,
+            get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
+        ) {
+            log::warn!("Call exceeded compute credits (add_link): result returned but future calls will fail. Details: {:?}", e);
+        }
+        Ok(result)
     }
 
     async fn perspective_add_link_expression(
@@ -1912,11 +1980,20 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
+        check_compute_credits(&context.auth_token)?;
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let link = crate::types::LinkExpression::try_from(link)?;
-        Ok(perspective
+        let result = perspective
             .add_link_expression(link, link_status_from_input(status)?, batch_id)
-            .await?)
+            .await?;
+
+        if let Err(e) = reserve_compute_credits(
+            &context.auth_token,
+            get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
+        ) {
+            log::warn!("Call exceeded compute credits (add_link_expression): result returned but future calls will fail. Details: {:?}", e);
+        }
+        Ok(result)
     }
 
     async fn perspective_add_links(
@@ -1931,16 +2008,27 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
+        check_compute_credits(&context.auth_token)?;
+        let link_count = links.len();
+
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
-        Ok(perspective
+        let result = perspective
             .add_links(
                 links.into_iter().map(|l| l.into()).collect(),
                 link_status_from_input(status)?,
                 batch_id,
                 &agent_context,
             )
-            .await?)
+            .await?;
+
+        if let Err(e) = reserve_compute_credits(
+            &context.auth_token,
+            link_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
+        ) {
+            log::warn!("Call exceeded compute credits (add_links, count={}): result returned but future calls will fail. Details: {:?}", link_count, e);
+        }
+        Ok(result)
     }
 
     async fn perspective_link_mutations(
@@ -1954,11 +2042,24 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
+        check_compute_credits(&context.auth_token)?;
+        // Only charge for additions, not removals
+        let additions_count = mutations.additions.len();
+
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
-        Ok(perspective
+        let result = perspective
             .link_mutations(mutations, link_status_from_input(status)?, &agent_context)
-            .await?)
+            .await?;
+
+        if let Err(e) = reserve_compute_credits(
+            &context.auth_token,
+            additions_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
+        ) {
+            log::warn!("Call exceeded compute credits (link_mutations, additions={}): result returned but future calls will fail. Details: {:?}", additions_count, e
+            );
+        }
+        Ok(result)
     }
 
     async fn perspective_publish_snapshot(
@@ -2413,7 +2514,17 @@ impl Mutation {
 
     async fn runtime_quit(&self, context: &RequestContext) -> FieldResult<bool> {
         check_capability(&context.capabilities, &RUNTIME_QUIT_CAPABILITY)?;
-        std::process::exit(0);
+        // Trigger graceful shutdown via the global shutdown channel.
+        // The main loop will shut down Holochain conductor, flush state, and exit cleanly.
+        // If the shutdown channel is already consumed, assume shutdown is in progress and return success.
+        if let Some(tx) = crate::globals::SHUTDOWN_TX.lock().unwrap().take() {
+            log::info!("runtime_quit: sending graceful shutdown signal");
+            let _ = tx.send(());
+            Ok(true)
+        } else {
+            log::warn!("runtime_quit: shutdown channel already consumed, shutdown is in progress");
+            Ok(true)
+        }
     }
 
     async fn runtime_remove_friends(
@@ -2791,10 +2902,38 @@ impl Mutation {
         prompt: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
-        Ok(AIService::global_instance()
+        check_compute_credits(&context.auth_token)?;
+
+        let result = AIService::global_instance()
             .await?
             .prompt(task_id, prompt)
-            .await?)
+            .await?;
+
+        let total_tokens = result.prompt_tokens + result.completion_tokens;
+        // Look up rate by model name (the host_rates key is just the model name)
+        let model_name =
+            match Ad4mDb::with_global_instance(|db| db.get_model(result.model_id.clone())) {
+                Ok(Some(m)) => m.name,
+                Ok(None) => {
+                    log::warn!(
+                        "Model not found in DB for model_id={}, using default rate",
+                        result.model_id
+                    );
+                    String::new()
+                }
+                Err(e) => {
+                    log::error!("DB error looking up model_id={}: {}", result.model_id, e);
+                    String::new()
+                }
+            };
+        if let Err(e) = reserve_compute_credits(
+            &context.auth_token,
+            total_tokens as f64 * get_rate(&model_name, DEFAULT_TOKEN_RATE)?,
+        ) {
+            log::warn!("Call exceeded compute credits (ai_prompt, model={}, tokens={}): result returned but future calls will fail. Details: {:?}", model_name, total_tokens, e);
+        }
+
+        Ok(result.text)
     }
 
     async fn ai_embed(
@@ -2804,11 +2943,22 @@ impl Mutation {
         text: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
-        let vector = AIService::global_instance()
+        check_compute_credits(&context.auth_token)?;
+
+        let result = AIService::global_instance()
             .await?
             .embed(model_id, text)
             .await?;
-        let json_string = serde_json::to_string(&vector)
+
+        if let Err(e) = reserve_compute_credits(
+            &context.auth_token,
+            result.token_count as f64
+                * get_rate("embedding per token", DEFAULT_EMBEDDING_TOKEN_RATE)?,
+        ) {
+            log::warn!("Call exceeded compute credits (ai_embed, tokens={}): result returned but future calls will fail. Details: {:?}", result.token_count, e);
+        }
+
+        let json_string = serde_json::to_string(&result.embeddings)
             .map_err(|e| FieldError::from(format!("Failed to serialize vector: {}", e)))?;
 
         // Compress the JSON string using zlib compression
@@ -2827,6 +2977,7 @@ impl Mutation {
         params: Option<VoiceActivityParamsInput>,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
+        check_compute_credits(&context.auth_token)?;
         Ok(AIService::global_instance()
             .await?
             .open_transcription_stream(model_id, params.map(|p| p.into()))
@@ -2841,6 +2992,7 @@ impl Mutation {
         audio: Vec<f64>,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
+        check_compute_credits(&context.auth_token)?;
         let audio_f32: Vec<f32> = audio.into_iter().map(|x| x as f32).collect();
         let service = AIService::global_instance().await?;
 
@@ -2977,5 +3129,367 @@ impl Mutation {
         log::info!("Holochain service has been restarted successfully.");
 
         Ok(true)
+    }
+
+    async fn runtime_set_hot_wallet_address(
+        &self,
+        context: &RequestContext,
+        address: String,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_UPDATE_CAPABILITY)?;
+
+        let user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
+            FieldError::new(
+                "Setting hot wallet address requires multi-user authentication",
+                Value::null(),
+            )
+        })?;
+
+        Ad4mDb::with_global_instance(|db| {
+            db.set_user_hot_wallet(&user_email, &address).map_err(|e| {
+                FieldError::new(
+                    format!("Failed to set hot wallet address: {}", e),
+                    Value::null(),
+                )
+            })
+        })?;
+
+        Ok(true)
+    }
+
+    async fn runtime_request_payment(
+        &self,
+        context: &RequestContext,
+        #[allow(non_snake_case)] amountHOT: String,
+    ) -> FieldResult<PaymentRequestResult> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_UPDATE_CAPABILITY)?;
+
+        let user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
+            FieldError::new(
+                "Payment requests require multi-user authentication",
+                Value::null(),
+            )
+        })?;
+
+        // Validate amountHOT is a positive number
+        let parsed_amount: f64 = amountHOT.trim().parse().map_err(|_| {
+            FieldError::new(
+                format!("Invalid amountHOT '{}': must be a valid number", amountHOT),
+                Value::null(),
+            )
+        })?;
+        if parsed_amount <= 0.0 {
+            return Err(FieldError::new(
+                format!("amountHOT must be positive, got {}", parsed_amount),
+                Value::null(),
+            ));
+        }
+
+        // Look up user's mHOT wallet address (= Holochain AgentPubKey)
+        let wallet_address = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
+            .map_err(|e| FieldError::new(format!("DB error: {}", e), Value::null()))?;
+
+        let wallet_address = match wallet_address {
+            Some(addr) if !addr.is_empty() => addr,
+            _ => {
+                return Ok(PaymentRequestResult {
+                    success: false,
+                    message: "User has not set their mHOT wallet address. Call setHotWalletAddress first.".to_string(),
+                });
+            }
+        };
+
+        // Create payment proposal via Unyt alliance DNA
+        let note = format!("AD4M hosting top-up: {} HOT for {}", amountHOT, user_email);
+        match crate::unyt_service::create_proposal(&amountHOT, &wallet_address, Some(&note)).await {
+            Ok(proposal_hash) => {
+                // Record the payment request in the DB — fail the whole operation if this doesn't persist
+                if let Err(e) = Ad4mDb::with_global_instance(|db| {
+                    db.create_payment_request(&user_email, &amountHOT, &proposal_hash)
+                }) {
+                    log::error!("Failed to record payment request in DB: {}", e);
+                    return Err(FieldError::new(
+                        format!("Payment proposal created but failed to persist: {}", e),
+                        Value::null(),
+                    ));
+                }
+
+                log::info!(
+                    "Created mHOT payment proposal {} for user={} amount={}",
+                    proposal_hash,
+                    user_email,
+                    amountHOT
+                );
+
+                Ok(PaymentRequestResult {
+                    success: true,
+                    message: format!(
+                        "Payment proposal created (hash: {}). Awaiting approval in user's mHOT wallet.",
+                        proposal_hash
+                    ),
+                })
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                log::error!(
+                    "Failed to create mHOT payment proposal for user={}: {}",
+                    user_email,
+                    err_str
+                );
+                let message = if err_str.contains("No Global Definition found") {
+                    "The host is still syncing the Unyt currency network. Please try again in a few minutes."
+                        .to_string()
+                } else if err_str.contains("CellDisabled") {
+                    "The host's Unyt service is temporarily unavailable. Please try again later."
+                        .to_string()
+                } else {
+                    format!("Failed to create payment proposal: {}", err_str)
+                };
+                Ok(PaymentRequestResult {
+                    success: false,
+                    message,
+                })
+            }
+        }
+    }
+
+    async fn runtime_set_user_credits(
+        &self,
+        context: &RequestContext,
+        email: String,
+        amount: f64,
+    ) -> FieldResult<bool> {
+        // Admin-only: only the launcher's admin credential can set user credits
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can set user credits",
+                Value::null(),
+            ));
+        }
+
+        if amount < 0.0 || amount.is_nan() || amount.is_infinite() {
+            return Err(FieldError::new(
+                "Invalid credit amount: must be a finite, non-negative number",
+                Value::null(),
+            ));
+        }
+
+        Ad4mDb::with_global_instance(|db| {
+            db.set_user_credits(&email, amount).map_err(|e| {
+                FieldError::new(format!("Failed to set user credits: {}", e), Value::null())
+            })
+        })?;
+
+        mark_credits_dirty(&email);
+        Ok(true)
+    }
+
+    async fn runtime_set_user_free_access(
+        &self,
+        context: &RequestContext,
+        email: String,
+        enabled: bool,
+    ) -> FieldResult<bool> {
+        // Admin-only: only the launcher's admin credential can grant/revoke free access
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can set user free access",
+                Value::null(),
+            ));
+        }
+
+        Ad4mDb::with_global_instance(|db| {
+            db.set_user_free_access(&email, enabled).map_err(|e| {
+                FieldError::new(
+                    format!("Failed to set user free access: {}", e),
+                    Value::null(),
+                )
+            })
+        })?;
+
+        mark_credits_dirty(&email);
+        Ok(true)
+    }
+
+    /// Reinstall the Unyt alliance DNA (e.g. after version update).
+    async fn runtime_reinstall_unyt_dna(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<PaymentRequestResult> {
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can reinstall the Unyt DNA",
+                Value::null(),
+            ));
+        }
+
+        match crate::unyt_service::reinstall().await {
+            Ok(()) => Ok(PaymentRequestResult {
+                success: true,
+                message: "Unyt alliance DNA reinstalled successfully".to_string(),
+            }),
+            Err(e) => Ok(PaymentRequestResult {
+                success: false,
+                message: format!("Failed to reinstall: {}", e),
+            }),
+        }
+    }
+
+    /// Send mHOT from the host's wallet to an external address.
+    async fn runtime_send_hot(
+        &self,
+        context: &RequestContext,
+        recipient: String,
+        amount: String,
+    ) -> FieldResult<PaymentRequestResult> {
+        // Admin-only: only the host operator can send from the wallet
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can send mHOT",
+                Value::null(),
+            ));
+        }
+
+        // Validate inputs
+        let recipient = recipient.trim().to_string();
+        if recipient.is_empty() {
+            return Err(FieldError::new(
+                "recipient must not be empty",
+                Value::null(),
+            ));
+        }
+        let parsed_amount: f64 = amount.parse().map_err(|_| {
+            FieldError::new(
+                format!("amount '{}' is not a valid number", amount),
+                Value::null(),
+            )
+        })?;
+        if parsed_amount <= 0.0 {
+            return Err(FieldError::new(
+                "amount must be greater than 0",
+                Value::null(),
+            ));
+        }
+
+        match crate::unyt_service::send_hot(&recipient, &amount, Some("AD4M host withdrawal")).await
+        {
+            Ok(commitment_hash) => Ok(PaymentRequestResult {
+                success: true,
+                message: format!(
+                    "Sent {} HOT to {} (commitment: {})",
+                    amount, recipient, commitment_hash
+                ),
+            }),
+            Err(e) => Ok(PaymentRequestResult {
+                success: false,
+                message: format!("Failed to send mHOT: {}", e),
+            }),
+        }
+    }
+
+    /// Set host rates used for credit deduction.
+    /// Expects a JSON string: [{"description": "...", "priceInHOT": 0.01}, ...]
+    async fn runtime_set_host_rates(
+        &self,
+        context: &RequestContext,
+        rates_json: String,
+    ) -> FieldResult<bool> {
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can set host rates",
+                Value::null(),
+            ));
+        }
+
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&rates_json)
+            .map_err(|e| FieldError::new(format!("Invalid rates JSON: {}", e), Value::null()))?;
+
+        let rates: Vec<(String, f64)> = parsed
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let desc = item
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        FieldError::new(
+                            format!("Rate entry {} missing or empty 'description'", i),
+                            Value::null(),
+                        )
+                    })?;
+                let price = item
+                    .get("priceInHOT")
+                    .and_then(|v| v.as_f64())
+                    .ok_or_else(|| {
+                        FieldError::new(
+                            format!("Rate entry {} missing 'priceInHOT'", i),
+                            Value::null(),
+                        )
+                    })?;
+                if price < 0.0 {
+                    return Err(FieldError::new(
+                        format!("Rate entry {} has negative priceInHOT", i),
+                        Value::null(),
+                    ));
+                }
+                Ok((desc.to_string(), price))
+            })
+            .collect::<FieldResult<Vec<_>>>()?;
+
+        Ad4mDb::with_global_instance(|db| {
+            db.set_host_rates(&rates).map_err(|e| {
+                FieldError::new(format!("Failed to set host rates: {}", e), Value::null())
+            })
+        })?;
+
+        Ok(true)
+    }
+
+    /// Store a membrane proof for Unyt alliance DNA installation.
+    /// The proof should be base64-encoded bytes from the joining server.
+    async fn runtime_set_unyt_membrane_proof(
+        &self,
+        context: &RequestContext,
+        proof: String,
+    ) -> FieldResult<PaymentRequestResult> {
+        if !context.is_admin_credential {
+            return Err(FieldError::new(
+                "Only the admin (launcher) can set the membrane proof",
+                Value::null(),
+            ));
+        }
+
+        match crate::unyt_service::set_membrane_proof(&proof) {
+            Ok(()) => {
+                // Trigger DNA installation now that we have the proof
+                match crate::unyt_service::ensure_installed().await {
+                    Ok(()) => {
+                        log::info!("Unyt alliance DNA installed after membrane proof was set");
+                        Ok(PaymentRequestResult {
+                            success: true,
+                            message: "Membrane proof stored and DNA installed.".to_string(),
+                        })
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "Failed to install Unyt alliance DNA after membrane proof: {}",
+                            e
+                        );
+                        Ok(PaymentRequestResult {
+                            success: false,
+                            message: format!(
+                                "Membrane proof stored but DNA installation failed: {}",
+                                e
+                            ),
+                        })
+                    }
+                }
+            }
+            Err(e) => Ok(PaymentRequestResult {
+                success: false,
+                message: format!("Failed to store membrane proof: {}", e),
+            }),
+        }
     }
 }

@@ -91,6 +91,8 @@ pub struct Ad4mConfig {
     pub enable_mcp: Option<bool>,
     /// Port for MCP HTTP server (default: 3001)
     pub mcp_port: Option<u16>,
+    /// Path to write PID file (for test harness cleanup)
+    pub pid_file: Option<String>,
 }
 
 impl Ad4mConfig {
@@ -126,10 +128,10 @@ impl Ad4mConfig {
             self.connect_holochain = Some(false);
         }
         if self.hc_proxy_url.is_none() {
-            self.hc_proxy_url = Some("ws://relay.ad4m.dev:4433".to_string());
+            self.hc_proxy_url = Some("ws://bootstrap.ad4m.dev:4433".to_string());
         }
         if self.hc_bootstrap_url.is_none() {
-            self.hc_bootstrap_url = Some("http://relay.ad4m.dev:4433".to_string());
+            self.hc_bootstrap_url = Some("http://bootstrap.ad4m.dev:4433".to_string());
         }
         if self.hc_use_bootstrap.is_none() {
             self.hc_use_bootstrap = Some(true);
@@ -180,6 +182,7 @@ impl Default for Ad4mConfig {
             smtp_config: None,
             enable_mcp: None,
             mcp_port: None,
+            pid_file: None,
         };
         config.prepare();
         config

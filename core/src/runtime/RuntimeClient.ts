@@ -78,6 +78,15 @@ export class RuntimeClient {
         return runtimeInfo
     }
 
+    async tlsDomain(): Promise<string | null> {
+        const { runtimeTlsDomain } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeTlsDomain {
+                runtimeTlsDomain
+            }`,
+        }));
+        return runtimeTlsDomain
+    }
+
     async quit(): Promise<Boolean> {
         const result = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation runtimeQuit { runtimeQuit }`
@@ -413,10 +422,23 @@ export class RuntimeClient {
                     did
                     lastSeen
                     perspectiveCount
+                    remainingCredits
+                    freeAccess
+                    hotWalletAddress
                 }
             }`
         }))
         return runtimeListUsers
+    }
+
+    async userWalletAddress(email: string): Promise<string | null> {
+        const { runtimeUserWalletAddress } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeUserWalletAddress($email: String!) {
+                runtimeUserWalletAddress(email: $email)
+            }`,
+            variables: { email }
+        }))
+        return runtimeUserWalletAddress
     }
 
     async emailTestModeEnable(): Promise<boolean> {
@@ -464,6 +486,124 @@ export class RuntimeClient {
             variables: { email, verificationType, expiresAt }
         }))
         return runtimeEmailTestSetExpiry
+    }
+
+    // ---- Unyt / mHOT methods ----
+
+    async unytAgentKey(): Promise<string> {
+        const { runtimeUnytAgentKey } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeUnytAgentKey { runtimeUnytAgentKey }`,
+            fetchPolicy: "network-only",
+        }))
+        return runtimeUnytAgentKey
+    }
+
+    async unytHotAgentPubkey(): Promise<string> {
+        const { runtimeHotAgentPubkey } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeHotAgentPubkey { runtimeHotAgentPubkey }`,
+            fetchPolicy: "network-only",
+        }))
+        return runtimeHotAgentPubkey
+    }
+
+    async unytWalletBalance(): Promise<string> {
+        const { runtimeHotWalletBalance } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeHotWalletBalance { runtimeHotWalletBalance }`,
+            fetchPolicy: "network-only",
+        }))
+        return runtimeHotWalletBalance
+    }
+
+    async unytWalletHistory(page?: number, perPage?: number): Promise<string> {
+        const { runtimeHotWalletHistory } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeHotWalletHistory($page: Int, $perPage: Int) {
+                runtimeHotWalletHistory(page: $page, perPage: $perPage)
+            }`,
+            variables: { page, perPage },
+            fetchPolicy: "network-only",
+        }))
+        return runtimeHotWalletHistory
+    }
+
+    async unytVersionInfo(): Promise<string> {
+        const { runtimeUnytVersionInfo } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeUnytVersionInfo { runtimeUnytVersionInfo }`,
+            fetchPolicy: "network-only",
+        }))
+        return runtimeUnytVersionInfo
+    }
+
+    async unytSetMembraneProof(proof: string): Promise<{ success: boolean; message: string }> {
+        const { runtimeSetUnytMembraneProof } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeSetUnytMembraneProof($proof: String!) {
+                runtimeSetUnytMembraneProof(proof: $proof) { success message }
+            }`,
+            variables: { proof },
+        }))
+        return runtimeSetUnytMembraneProof
+    }
+
+    async unytReinstallDna(): Promise<{ success: boolean; message: string }> {
+        const { runtimeReinstallUnytDna } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeReinstallUnytDna {
+                runtimeReinstallUnytDna { success message }
+            }`,
+        }))
+        return runtimeReinstallUnytDna
+    }
+
+    async unytSendHot(recipient: string, amount: string): Promise<{ success: boolean; message: string }> {
+        const { runtimeSendHot } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeSendHot($recipient: String!, $amount: String!) {
+                runtimeSendHot(recipient: $recipient, amount: $amount) { success message }
+            }`,
+            variables: { recipient, amount },
+        }))
+        return runtimeSendHot
+    }
+
+    async setUserCredits(email: string, amount: number): Promise<boolean> {
+        const { runtimeSetUserCredits } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeSetUserCredits($email: String!, $amount: Float!) {
+                runtimeSetUserCredits(email: $email, amount: $amount)
+            }`,
+            variables: { email, amount },
+        }))
+        return runtimeSetUserCredits
+    }
+
+    async setUserFreeAccess(email: string, enabled: boolean): Promise<boolean> {
+        const { runtimeSetUserFreeAccess } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeSetUserFreeAccess($email: String!, $enabled: Boolean!) {
+                runtimeSetUserFreeAccess(email: $email, enabled: $enabled)
+            }`,
+            variables: { email, enabled },
+        }))
+        return runtimeSetUserFreeAccess
+    }
+
+    async setHostRates(ratesJson: string): Promise<boolean> {
+        const { runtimeSetHostRates } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeSetHostRates($ratesJson: String!) {
+                runtimeSetHostRates(ratesJson: $ratesJson)
+            }`,
+            variables: { ratesJson },
+        }))
+        return runtimeSetHostRates
+    }
+
+    async getHostRates(): Promise<{ description: string; priceInHOT: number }[]> {
+        const { runtimeHostRates } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeHostRates {
+                runtimeHostRates
+            }`,
+            fetchPolicy: 'network-only',
+        }))
+        try {
+            return JSON.parse(runtimeHostRates)
+        } catch {
+            return []
+        }
     }
 
     addNotificationTriggeredCallback(cb: NotificationTriggeredCallback) {

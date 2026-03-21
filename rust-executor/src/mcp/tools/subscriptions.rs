@@ -69,9 +69,15 @@ impl Ad4mMcpHandler {
 
         let query = if let Some(ref parent) = p.parent_address {
             // Scope to children of a specific parent
+            // Use the same encoding logic as add_child/message_create: leave URIs as-is
+            let parent_encoded = if parent.contains("://") {
+                parent.clone()
+            } else {
+                Self::encode_literal(parent)
+            };
             format!(
                 "SELECT * FROM link WHERE source = '{}' AND predicate = 'ad4m://has_child'",
-                Self::encode_literal(parent)
+                parent_encoded
             )
         } else if let Some(ref predicate) = p.predicate {
             // Explicit predicate filter
@@ -139,7 +145,7 @@ impl Ad4mMcpHandler {
 
     /// Generate a single waker subscription config for mention tracking
     #[tool(
-        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. Uses fn::contains(fn::parse_literal(target), term): fn::parse_literal extracts only the .data field from literal://json: Flux message bodies, so the author DID in the surrounding expression shape does not produce false-positive wakes; for literal://string: targets it returns the decoded value; for non-literal strings (raw DIDs etc.) it returns the value unchanged so explicit DID-as-target mention links still match. Both functions are already defined in SurrealDBService::new(). Returns one subscription ORing all profile names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
+        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. Watches for any link whose target contains a mention term (using fn::contains + fn::parse_literal for literal decoding). The waker plugin resolves parent channels in a second query when the subscription fires. Returns one subscription ORing all profile names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
     )]
     pub async fn get_mention_waker_config(
         &self,
@@ -211,28 +217,60 @@ impl Ad4mMcpHandler {
         //
         // Both functions are already defined in SurrealDBService::new().
         // Case-insensitive matching via string::lowercase() (SurrealDB built-in):
-        //   string::lowercase(fn::parse_literal(target)) lowercases the parsed value;
-        //   search terms are also lowercased in Rust before embedding in the query.
+        //   string::lowercase(<string> fn::parse_literal(target)) casts to string then
+        //   lowercases; the <string> cast is needed because fn::parse_literal can return
+        //   booleans/numbers for literal://boolean: and literal://number: URLs, and
+        //   string::lowercase() throws on non-string input.
+        //   Search terms are also lowercased in Rust before embedding in the query.
         //   DIDs are already lowercase so .to_lowercase() is a no-op for them.
-        //   If string::lowercase() receives a non-string (null/object), it returns null,
-        //   which fn::contains handles gracefully (returns false).
         let all_terms: Vec<String> = names
             .iter()
             .map(|n| n.to_lowercase())
-            .chain(std::iter::once(did.clone())) // DIDs already lowercase
+            .chain(std::iter::once(did.to_lowercase()))
             .collect();
 
-        let conditions: Vec<String> = all_terms
+        let mention_conditions: Vec<String> = all_terms
             .iter()
             .map(|t| {
                 format!(
-                    "fn::contains(string::lowercase(fn::parse_literal(target)), '{}')",
+                    "fn::contains(string::lowercase(<string> fn::parse_literal(target)), '{}')",
                     t
                 )
             })
             .collect();
 
-        let query = format!("SELECT * FROM link WHERE {}", conditions.join(" OR "),);
+        let mention_predicate = format!("({})", mention_conditions.join(" OR "));
+
+        // Discover the body property predicate from SHACL to scope the query.
+        // Without this, the query scans ALL links which is very slow on large perspectives.
+        let perspective = self
+            .get_readable_perspective(&params.0.perspective_id)
+            .await
+            .ok();
+        let body_predicate = if let Some(ref p) = perspective {
+            let props = shacl::load_class_properties(p, "Message").await;
+            props
+                .iter()
+                .find(|prop| prop.name.to_lowercase() == "body")
+                .and_then(|prop| prop.predicate.clone())
+        } else {
+            None
+        };
+
+        // Direct body-link query: watch for body links whose target contains a mention term.
+        // Each result has `source` = message address (the base expression).
+        // Parent resolution (finding which channel the message belongs to) is done by the
+        // waker plugin in a second query after the subscription fires.
+        let query = if let Some(ref pred) = body_predicate {
+            format!(
+                "SELECT * FROM link WHERE predicate = '{}' AND {}",
+                pred, mention_predicate
+            )
+        } else {
+            // Fallback: no SHACL body predicate found, scan all links
+            log::warn!("get_mention_waker_config: no body predicate found in SHACL for Message class, falling back to unscoped query");
+            format!("SELECT * FROM link WHERE {}", mention_predicate)
+        };
 
         let sub_id = format!("mention-{}", &did[did.len().saturating_sub(12)..]);
 
