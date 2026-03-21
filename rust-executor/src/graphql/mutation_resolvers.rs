@@ -2608,7 +2608,7 @@ impl Mutation {
             // HostingUserInfo (with the new freeAccess value) to clients.
             if let Ok(users) = db.list_users() {
                 for u in users {
-                    mark_credits_dirty(&u.email);
+                    mark_credits_dirty(&u.username);
                 }
             }
             Ok(enabled)
