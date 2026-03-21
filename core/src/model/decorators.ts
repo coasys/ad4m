@@ -268,8 +268,8 @@ function applyPropertyMetadata(opts: PropertyOptions) {
             throw new Error("SubjectProperty requires an 'initial' option if 'required' is true");
         }
 
-        if (!opts.through && !opts.prologGetter) {
-            throw new Error("SubjectProperty requires either 'through' or 'prologGetter' option")
+        if (!opts.through && !opts.prologGetter && !opts.getter) {
+            throw new Error("SubjectProperty requires either 'through' or 'prologGetter' or 'getter' option")
         }
 
         // Write to WeakMap registry (keyed by constructor)

@@ -848,6 +848,201 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   });
 });
 
+
+
+describe("Ad4mModel.queryToSPARQL()", () => {
+  const mockPerspective = {} as any;
+
+  function normalizeQuery(query: string): string {
+    return query.replace(/\s+/g, ' ').trim();
+  }
+
+  @Model({ name: "Recipe" })
+  class Recipe extends Ad4mModel {
+    @Property({ through: "recipe://name", required: true })
+    name: string = "";
+    
+    @Property({ through: "recipe://rating", required: true })
+    rating: number = 0;
+    
+    @HasMany({ through: "recipe://ingredient" })
+    ingredients: string[] = [];
+  }
+
+  it("should generate basic SPARQL query with no filters", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, {});
+    const norm = normalizeQuery(query);
+
+    // Must be a SPARQL SELECT
+    expect(norm).toContain("SELECT ?source ?predicate ?target ?author ?timestamp");
+    expect(norm).toContain("PREFIX ad4m:");
+    // Must have conformance filter for required properties
+    expect(norm).toContain("EXISTS");
+    expect(norm).toContain("recipe://name");
+  });
+
+  it("should generate query with simple property filter", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: "Pasta" } });
+    const norm = normalizeQuery(query);
+
+    expect(norm).toContain("SELECT ?source ?predicate ?target ?author ?timestamp");
+    // Should have filter for name = "Pasta" using parse_literal
+    expect(norm).toContain("recipe://name");
+    expect(norm).toContain("Pasta");
+  });
+
+  it("should generate query with NOT operator", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: { not: "Salad" } } });
+    const norm = normalizeQuery(query);
+
+    expect(norm).toContain("!=");
+    expect(norm).toContain("Salad");
+  });
+
+  it("should generate query with NOT IN operator (array)", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: { not: ["Salad", "Soup"] } } });
+    const norm = normalizeQuery(query);
+
+    expect(norm).toContain("Salad");
+    expect(norm).toContain("Soup");
+    expect(norm).toContain("IN");
+  });
+
+  it("should generate query with IN clause (array values)", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: ["Pasta", "Pizza"] } });
+    const norm = normalizeQuery(query);
+
+    expect(norm).toContain("Pasta");
+    expect(norm).toContain("Pizza");
+    expect(norm).toContain("IN");
+  });
+
+  it("should generate query with base filter", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { base: "ad4m://test123" } });
+    const norm = normalizeQuery(query);
+
+    expect(norm).toContain("?source =");
+    expect(norm).toContain("ad4m://test123");
+  });
+
+  it("should escape special characters in SPARQL strings", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: 'O\'Brien' } });
+    const norm = normalizeQuery(query);
+
+    // Should not break the query
+    expect(norm).toContain("SELECT ?source");
+  });
+
+  // =========================================================================
+  // Additional models for thorough SPARQL structure tests
+  // =========================================================================
+
+  @Model({ name: "Task" })
+  class Task extends Ad4mModel {
+    @Property({ through: "task://title", resolveLanguage: "literal", required: true })
+    title: string = "";
+
+    @Property({ through: "task://priority", resolveLanguage: "literal" })
+    priority: number = 0;
+
+    @Property({ through: "task://done", resolveLanguage: "literal" })
+    done: boolean = false;
+
+    @Optional({ through: "task://description" })
+    description: string = "";
+
+    @HasMany({ through: "task://tag" })
+    tags: string[] = [];
+
+    @HasMany({ through: "task://assignee" })
+    assignees: string[] = [];
+  }
+
+  @Model({ name: "EmptyModel" })
+  class EmptyModel extends Ad4mModel {
+    @Optional({ through: "empty://optField" })
+    optField: string = "";
+  }
+
+  // ---- Comparison operators (gt, lt, gte, lte, between, contains) ----
+  // These are handled in JS post-processing, NOT in SPARQL.
+  // The tests verify that the SPARQL still generates valid output (conformance filters)
+  // but does NOT inject FILTER clauses for these operators.
+
+  it("should not inject SPARQL FILTER for gt operator (JS post-processed)", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { gt: 3 } } });
+    const norm = normalizeQuery(query);
+    expect(norm).toContain("SELECT ?source");
+    expect(norm).toContain("EXISTS");
+    // gt is handled in JS, should NOT produce a > filter in SPARQL
+    expect(norm).not.toMatch(/\?\w+\s*>\s*"3"/);
+  });
+
+  it("should not inject SPARQL FILTER for lt operator (JS post-processed)", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { lt: 5 } } });
+    const norm = normalizeQuery(query);
+    expect(norm).toContain("SELECT ?source");
+    expect(norm).not.toMatch(/\?\w+\s*<\s*"5"/);
+  });
+
+  it("should not inject SPARQL FILTER for gte/lte combined (JS post-processed)", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { gte: 2, lte: 8 } } });
+    const norm = normalizeQuery(query);
+    expect(norm).toContain("SELECT ?source");
+    expect(norm).not.toMatch(/>=|<=/);
+  });
+
+  it("should not inject SPARQL FILTER for between operator (JS post-processed)", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { between: [1, 10] } } });
+    const norm = normalizeQuery(query);
+    expect(norm).toContain("SELECT ?source");
+    expect(norm).not.toContain("between");
+  });
+
+  it("should not inject SPARQL FILTER for contains operator (JS post-processed)", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: { contains: "pasta" } } });
+    const norm = normalizeQuery(query);
+    expect(norm).toContain("SELECT ?source");
+    expect(norm).not.toContain("CONTAINS");
+    expect(norm).not.toContain("contains");
+  });
+
+  // ---- Multiple property filters combined ----
+
+  it("should combine multiple property equality filters with &&", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, {
+      where: { name: "Pasta", rating: ["4", "5"] }
+    });
+    const norm = normalizeQuery(query);
+    // Should have EXISTS blocks for both name and rating
+    expect(norm).toContain("recipe://name");
+    expect(norm).toContain("recipe://rating");
+    expect(norm).toContain("&&");
+  });
+
+  // ---- ORDER BY, LIMIT, OFFSET are JS post-processed ----
+
+  it("should not include ORDER BY in SPARQL (JS post-processed)", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { order: { name: "ASC" } });
+    const norm = normalizeQuery(query);
+    expect(norm).toContain("SELECT ?source");
+    expect(norm).not.toContain("ORDER BY");
+  });
+
+  it("should not include LIMIT in SPARQL (JS post-processed)", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { limit: 10 });
+    const norm = normalizeQuery(query);
+    expect(norm).toContain("SELECT ?source");
+    expect(norm).not.toContain("LIMIT");
+  });
+
+  it("should not include OFFSET in SPARQL (JS post-processed)", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { offset: 5 });
+    const norm = normalizeQuery(query);
+    expect(norm).toContain("SELECT ?source");
+    expect(norm).not.toContain("OFFSET");
+  });
+});
 describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () => {
   // Test Recipe model
   @Model({ name: "Recipe" })

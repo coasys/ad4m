@@ -11,6 +11,7 @@ import { buildParentQuery, buildAuthorAndTimestampQuery, buildPropertiesQuery, b
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 import { buildSurrealQLQuery } from "./query-surreal";
+import { buildSPARQLQuery } from "./query-sparql";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
 import {
   normalizeValue, matchesCondition, hydrateFromLinks,
@@ -729,6 +730,19 @@ export class Ad4mModel {
     const metadata = this.getModelMetadata();
     const allRelMeta = getRelationsMetadata(this as any);
     return buildSurrealQLQuery(metadata, allRelMeta, query, this);
+  }
+
+  /**
+   * Generates a SPARQL query from a Query object.
+   *
+   * @param perspective - The perspective to query (used for metadata extraction)
+   * @param query - Query parameters (where, order, limit, offset, properties, relations)
+   * @returns Complete SPARQL query string ready for execution
+   */
+  public static async queryToSPARQL(perspective: PerspectiveProxy, query: Query): Promise<string> {
+    const metadata = this.getModelMetadata();
+    const allRelMeta = getRelationsMetadata(this as any);
+    return buildSPARQLQuery(metadata, allRelMeta, query, this);
   }
 
   public static async instancesFromPrologResult<T extends Ad4mModel>(

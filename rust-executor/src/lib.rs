@@ -11,6 +11,8 @@ pub mod js_core;
 pub mod mcp;
 mod prolog_service;
 pub mod runtime_service;
+#[cfg(feature = "sparql")]
+pub mod sparql_service;
 mod surreal_service;
 pub mod unyt_service;
 pub mod user_management;
@@ -37,10 +39,10 @@ use std::thread::JoinHandle;
 use log::{error, info, warn};
 use tokio::sync::oneshot;
 
+use crate::prolog_service::init_prolog_service;
 use crate::{
     agent::AgentService, ai_service::AIService, dapp_server::serve_dapp, db::Ad4mDb,
-    languages::LanguageController, prolog_service::init_prolog_service,
-    runtime_service::RuntimeService, utils::find_port,
+    languages::LanguageController, runtime_service::RuntimeService, utils::find_port,
 };
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
@@ -400,8 +402,17 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         warn!("adminCredential is not set or empty, empty token will possess admin capabilities.");
     }
 
-    info!("Initializing Prolog service...");
-    init_prolog_service().await;
+    {
+        info!("Initializing Prolog service...");
+        init_prolog_service().await;
+    }
+
+    #[cfg(feature = "sparql")]
+    {
+        info!("Initializing SPARQL service...");
+        sparql_service::init_sparql_service(config.app_data_path.as_deref())
+            .expect("Failed to initialize SPARQL service");
+    }
 
     find_and_set_port(&mut config.gql_port, 4000, "GraphQL");
     find_and_set_port(&mut config.hc_admin_port, 2000, "Holochain admin");

@@ -194,6 +194,8 @@ pub struct PerspectiveInstance {
     fallback_sync_interval: Arc<Mutex<Duration>>,
     // Each perspective has its own isolated SurrealDB instance
     surreal_service: Arc<SurrealDBService>,
+    #[cfg(feature = "sparql")]
+    sparql_service: Arc<crate::sparql_service::SparqlService>,
 }
 
 impl PerspectiveInstance {
@@ -228,6 +230,11 @@ impl PerspectiveInstance {
             fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
             // Each perspective gets its own isolated SurrealDB database
             surreal_service: Arc::new(surreal_service),
+            #[cfg(feature = "sparql")]
+            sparql_service: Arc::new(
+                crate::sparql_service::SparqlService::new(None)
+                    .expect("Failed to create per-perspective SPARQL service"),
+            ),
         }
     }
 
@@ -277,6 +284,15 @@ impl PerspectiveInstance {
 
         log::info!("💾 SURREAL SYNC: Completed in {:?}", sync_start.elapsed());
         Ok(())
+    }
+
+    /// Sync all existing links to the SPARQL (Oxigraph) store
+    #[cfg(feature = "sparql")]
+    pub fn sync_existing_links_to_sparql(
+        &self,
+        links: &[DecoratedLinkExpression],
+    ) -> Result<(), deno_core::anyhow::Error> {
+        self.sparql_service.reload(links.to_vec())
     }
 
     async fn ensure_link_language(&self) {
@@ -2463,6 +2479,12 @@ impl PerspectiveInstance {
             })
     }
 
+    /// Execute a SPARQL query against this perspective's Oxigraph store
+    #[cfg(feature = "sparql")]
+    pub fn sparql_query(&self, query: String) -> Result<String, deno_core::anyhow::Error> {
+        self.sparql_service.query(&query)
+    }
+
     /// Executes a SurrealQL query for notifications with context injection
     /// Auto-injects $agentDid and $perspectiveId variables before execution
     pub async fn surreal_query_notification(
@@ -2589,6 +2611,22 @@ impl PerspectiveInstance {
             )
             .await?;
         }
+
+        // Sync to SPARQL store if enabled
+        #[cfg(feature = "sparql")]
+        {
+            for removal in &diff.removals {
+                if let Err(e) = self.sparql_service.remove_link(removal) {
+                    log::warn!("Failed to remove link from SPARQL store: {:?}", e);
+                }
+            }
+            for addition in &diff.additions {
+                if let Err(e) = self.sparql_service.add_link(addition) {
+                    log::warn!("Failed to add link to SPARQL store: {:?}", e);
+                }
+            }
+        }
+
         Ok(())
     }
 

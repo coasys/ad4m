@@ -32,7 +32,7 @@ default = []
 metal = ["kalosm/metal"]
 cuda = ["kalosm/cuda"]
 generate_snapshot = []  # Feature flag for snapshot generation mode
-
+sparql = ["dep:oxigraph"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -143,6 +143,7 @@ portpicker = "0.1.1"
 deno_error = "0.5.6"
 thiserror = "2.0.12"
 surrealdb = { version = "2.4", default-features = false, features = ["kv-rocksdb", "kv-mem", "scripting"] }
+oxigraph = { version = "0.4", optional = true, default-features = false }
 
 [dev-dependencies]
 maplit = "1.0.2"

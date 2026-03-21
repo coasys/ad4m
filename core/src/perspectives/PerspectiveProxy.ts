@@ -1076,6 +1076,14 @@ export class PerspectiveProxy {
     }
 
     /**
+     * Adds a subject class to the perspective.
+     * Alias for addSdna() with sdnaType='subject_class'.
+     */
+    async addSubjectClass(name: string, shaclJson: string) {
+        return this.addSdna(name, '', 'subject_class', shaclJson);
+    }
+
+    /**
      * **Recommended way to add SDNA schemas.**
      * 
      * Store a SHACL shape in this Perspective using the type-safe `SHACLShape` class.
@@ -1551,6 +1559,16 @@ export class PerspectiveProxy {
      * Gets subject class metadata from SHACL links using SHACLShape.fromLinks().
      * Retrieves the SHACL shape and extracts metadata for instance queries.
      */
+    async getSubjectClassMetadata(className: string): Promise<{
+        requiredPredicates: string[],
+        requiredTriples: Array<{predicate: string, target?: string}>,
+        properties: Map<string, { predicate: string, resolveLanguage?: string }>,
+        relations: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
+    } | null> {
+        return this.getSubjectClassMetadataFromSDNA(className);
+    }
+
+    /** @deprecated Use getSubjectClassMetadata() */
     async getSubjectClassMetadataFromSDNA(className: string): Promise<{
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
@@ -2076,6 +2094,11 @@ export class PerspectiveProxy {
      * static generateSDNA() function and adds it to the perspective's SDNA.
      */
     async ensureSDNASubjectClass(jsClass: any): Promise<void> {
+        return this.ensureSubjectClass(jsClass);
+    }
+
+    /** Takes a JS class (its constructor) and ensures the SHACL subject class exists. */
+    async ensureSubjectClass(jsClass: any): Promise<void> {
         // Get the class name from the JS class
         const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
         

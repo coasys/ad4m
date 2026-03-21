@@ -4,13 +4,15 @@ use crate::agent::{capabilities::*, did_document_for_context, signatures, AgentC
 use crate::ai_service::AIService;
 use crate::config::get_global_config;
 use crate::languages::LanguageController;
+#[cfg(feature = "surreal")]
+use crate::perspectives::utils::prolog_resolution_to_string;
 use crate::types::{AITask, DecoratedExpressionProof, ModelType};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
 use crate::{
     db::Ad4mDb,
     globals::AD4M_VERSION,
     holochain_service::get_holochain_service,
-    perspectives::{all_perspectives, get_perspective, utils::prolog_resolution_to_string},
+    perspectives::{all_perspectives, get_perspective},
     runtime_service::RuntimeService,
     types::{DecoratedLinkExpression, Model, Notification},
 };
@@ -636,19 +638,30 @@ impl Query {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
-        Ok(prolog_resolution_to_string(
-            get_perspective(&uuid)
-                .ok_or(FieldError::from(format!(
-                    "No perspective found with uuid {}",
-                    uuid
-                )))?
-                .prolog_query_with_context(query, &agent_context)
-                .await?,
-        ))
+        #[cfg(feature = "surreal")]
+        {
+            let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+            Ok(prolog_resolution_to_string(
+                get_perspective(&uuid)
+                    .ok_or(FieldError::from(format!(
+                        "No perspective found with uuid {}",
+                        uuid
+                    )))?
+                    .prolog_query_with_context(query, &agent_context)
+                    .await?,
+            ))
+        }
+
+        #[cfg(not(feature = "surreal"))]
+        {
+            let _ = (query, uuid);
+            Err(FieldError::from(
+                "Prolog queries are not available. Use perspective_query_sparql or perspective_query_surreal_db instead.".to_string(),
+            ))
+        }
     }
 
-    /// Get all subject class names from SHACL links (Prolog-free implementation)
+    /// Query using SurrealDB
     async fn perspective_query_surreal_db(
         &self,
         context: &RequestContext,
@@ -669,6 +682,39 @@ impl Query {
             .await?;
 
         Ok(serde_json::to_string(&result)?)
+    }
+
+    /// Query using SPARQL (Oxigraph) — available when compiled with `sparql` feature
+    async fn perspective_query_sparql(
+        &self,
+        context: &RequestContext,
+        query: String,
+        uuid: String,
+    ) -> FieldResult<String> {
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
+
+        #[cfg(feature = "sparql")]
+        {
+            let result = get_perspective(&uuid)
+                .ok_or(FieldError::from(format!(
+                    "No perspective found with uuid {}",
+                    uuid
+                )))?
+                .sparql_query(query)?;
+
+            Ok(result)
+        }
+
+        #[cfg(not(feature = "sparql"))]
+        {
+            let _ = (query, uuid);
+            Err(FieldError::from(
+                "SPARQL support not enabled. Rebuild with --features sparql".to_string(),
+            ))
+        }
     }
 
     async fn perspective_snapshot(
