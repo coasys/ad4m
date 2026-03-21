@@ -5,6 +5,7 @@ import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "
 import { fileURLToPath } from 'url';
 import { expect } from "chai";
 import { startExecutor, apolloClient, runHcLocalServices, quitExecutor } from "../utils/utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'child_process';
 import perspectiveTests from "./perspective";
 import agentTests from "./agent";
@@ -92,9 +93,9 @@ describe("Integration tests", function () {
     this.timeout(200000)
     const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    const gqlPort = 15300
-    const hcAdminPort = 15301
-    const hcAppPort = 15302
+    let gqlPort: number;
+    let hcAdminPort: number;
+    let hcAppPort: number;
 
     let executorProcess: ChildProcess | null = null
 
@@ -103,7 +104,9 @@ describe("Integration tests", function () {
     let localServicesProcess: ChildProcess | null = null;
     let relayUrl: string | null = null;
 
-    before(async () => {    
+    before(async () => {
+        [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+        registerPorts([gqlPort, hcAdminPort, hcAppPort]);
         if(!fs.existsSync(TEST_DIR)) {
           throw Error("Please ensure that prepare-test is run before running tests!");
         }
@@ -132,6 +135,7 @@ describe("Integration tests", function () {
       if (localServicesProcess) {
         localServicesProcess.kill('SIGKILL');
       }
+      deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
@@ -143,12 +147,14 @@ describe("Integration tests", function () {
 
     describe('with Alice and Bob', () => {
         let bobExecutorProcess: ChildProcess | null = null
-        const bobGqlPort = 15400
+        let bobGqlPort: number;
+        let bobHcAdminPort: number;
+        let bobHcAppPort: number;
         before(async () => {
           const bobAppDataPath = path.join(TEST_DIR, 'agents', 'bob')
           const bobBootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-          const bobHcAdminPort = 15401
-          const bobHcAppPort = 15402
+          [bobGqlPort, bobHcAdminPort, bobHcAppPort] = await getFreePorts(3);
+          registerPorts([bobGqlPort, bobHcAdminPort, bobHcAppPort]);
 
           if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
             fs.mkdirSync(path.join(TEST_DIR, 'agents'))
@@ -182,6 +188,7 @@ describe("Integration tests", function () {
           if (bobExecutorProcess) {
             await quitExecutor(bobExecutorProcess, bobGqlPort);
           }
+          deregisterPorts([bobGqlPort, bobHcAdminPort, bobHcAppPort]);
         })
 
         describe('Agent Language', agentLanguageTests(testContext))

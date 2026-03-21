@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep, startExecutor, killByPorts } from "../utils/utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch';
 import { callMcpTool, initializeMcp } from './mcp-utils';
@@ -25,8 +26,8 @@ const __dirname = path.dirname(__filename);
  * Verifies: login_email, request_capability + generate_jwt, auth_status, and unauthenticated rejection.
  */
 
-const MCP_PORT = 16013;
-const MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
+let MCP_PORT: number;
+let MCP_BASE_URL: string;
 
 // ============================================================================
 // Test Suite
@@ -40,9 +41,9 @@ describe("MCP Authentication HTTP Tests", function() {
     const bootstrapSeedPath = path.join(__dirname + "/../bootstrapSeed.json");
     // Unique ports for mcp-auth tests — must not collide with other concurrent
     // CI jobs (integration-tests-js uses 15700-15702, mcp-http uses 16000-16002)
-    const gqlPort = 16010;
-    const hcAdminPort = 16011;
-    const hcAppPort = 16012;
+    let gqlPort: number;
+    let hcAdminPort: number;
+    let hcAppPort: number;
     const adminCredential = "mcp-auth-test-admin";
 
     let executorProcess: ChildProcess | null = null;
@@ -51,6 +52,10 @@ describe("MCP Authentication HTTP Tests", function() {
     let authedPerspectiveUuid: string = "";
 
     before(async () => {
+        [gqlPort, hcAdminPort, hcAppPort, MCP_PORT] = await getFreePorts(4);
+        MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
+        registerPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+
         // Clean up and create test directory
         if (fs.existsSync(appDataPath)) {
             fs.rmSync(appDataPath, { recursive: true });
@@ -92,6 +97,7 @@ describe("MCP Authentication HTTP Tests", function() {
         // Port-based kill as safety net — catches the executor even if the
         // ChildProcess handle is stale or kill() missed a grandchild process.
         killByPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
     });
 
     // ========================================================================

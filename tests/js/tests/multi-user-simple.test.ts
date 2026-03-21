@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep, startExecutor, runHcLocalServices, gracefulShutdown } from "../utils/utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
 import { LinkQuery } from "@coasys/ad4m";
@@ -26,9 +27,9 @@ describe("Multi-User Simple integration tests", () => {
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
     const appDataPath = path.join(TEST_DIR, "agents", "multi-user-simple");
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    const gqlPort = 15900
-    const hcAdminPort = 15901
-    const hcAppPort = 15902
+    let gqlPort: number;
+    let hcAdminPort: number;
+    let hcAppPort: number;
 
     let executorProcess: ChildProcess | null = null
     let adminAd4mClient: Ad4mClient | null = null
@@ -45,6 +46,8 @@ describe("Multi-User Simple integration tests", () => {
     }
 
     before(async () => {
+        [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+        registerPorts([gqlPort, hcAdminPort, hcAppPort]);
         if (!fs.existsSync(appDataPath)) {
             fs.mkdirSync(appDataPath, { recursive: true });
         }
@@ -69,6 +72,7 @@ describe("Multi-User Simple integration tests", () => {
     after(async () => {
         await gracefulShutdown(executorProcess, "executor");
         await gracefulShutdown(localServicesProcess, "local services");
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
     })
 
     describe("Multi-User Configuration", () => {
@@ -1680,9 +1684,9 @@ describe("Multi-User Simple integration tests", () => {
     describe("Multi-Node Multi-User Integration", () => {
         // Test with 2 nodes, each with 2 users (4 users total)
         const node2AppDataPath = path.join(TEST_DIR, "agents", "multi-user-node2");
-        const node2GqlPort = 16000;
-        const node2HcAdminPort = 16001;
-        const node2HcAppPort = 16002;
+        let node2GqlPort: number;
+        let node2HcAdminPort: number;
+        let node2HcAppPort: number;
 
         let node2ExecutorProcess: ChildProcess | null = null;
         let node2AdminClient: Ad4mClient | null = null;
@@ -1701,6 +1705,9 @@ describe("Multi-User Simple integration tests", () => {
 
         before(async function() {
             this.timeout(300000); // Increase timeout for setup with Holochain 0.7.0
+
+            [node2GqlPort, node2HcAdminPort, node2HcAppPort] = await getFreePorts(3);
+            registerPorts([node2GqlPort, node2HcAdminPort, node2HcAppPort]);
 
             console.log("\n=== Setting up Node 2 ===");
             if (!fs.existsSync(node2AppDataPath)) {
@@ -1776,6 +1783,7 @@ describe("Multi-User Simple integration tests", () => {
         after(async function() {
             this.timeout(20000);
             await gracefulShutdown(node2ExecutorProcess, "node 2 executor");
+            deregisterPorts([node2GqlPort, node2HcAdminPort, node2HcAppPort]);
         });
 
         it("should return all DIDs in 'others()' for each user", async function() {
