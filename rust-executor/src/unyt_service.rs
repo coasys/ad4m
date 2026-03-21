@@ -197,6 +197,12 @@ pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
             match hc.enable_app(UNYT_APP_ID.to_string()).await {
                 Ok(_) => {
                     info!("Successfully re-enabled Unyt alliance DNA");
+                    // Backfill agent key for setup_bootstrap_auth
+                    let agent_key = base64::engine::general_purpose::STANDARD
+                        .encode(app_info.agent_pub_key.get_raw_39());
+                    let _ = Ad4mDb::with_global_instance(|db| {
+                        db.set_setting("unyt_agent_key", &agent_key)
+                    });
                     capture_dna_hash().await;
                     return Ok(());
                 }
@@ -214,6 +220,10 @@ pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
                 "Unyt alliance DNA v{} already installed",
                 ALLIANCE_DNA_VERSION
             );
+            // Backfill agent key for setup_bootstrap_auth
+            let agent_key = base64::engine::general_purpose::STANDARD
+                .encode(app_info.agent_pub_key.get_raw_39());
+            let _ = Ad4mDb::with_global_instance(|db| db.set_setting("unyt_agent_key", &agent_key));
             capture_dna_hash().await;
             return Ok(());
         }
@@ -223,6 +233,10 @@ pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
             installed_version.as_deref().unwrap_or("unknown"),
             ALLIANCE_DNA_VERSION
         );
+        // Backfill agent key for setup_bootstrap_auth
+        let agent_key =
+            base64::engine::general_purpose::STANDARD.encode(app_info.agent_pub_key.get_raw_39());
+        let _ = Ad4mDb::with_global_instance(|db| db.set_setting("unyt_agent_key", &agent_key));
         capture_dna_hash().await;
         return Ok(());
     }
