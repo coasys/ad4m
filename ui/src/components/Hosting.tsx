@@ -841,6 +841,7 @@ const Hosting = () => {
   }, [multiUserEnabled, client, getUsers]);
 
   useEffect(() => {
+    if (freeHostingEnabled) return;
     const loadHostSession = async () => {
       try {
         const reg = await invoke<{
@@ -885,13 +886,14 @@ const Hosting = () => {
       }
     };
     loadHostSession();
-  }, []);
+  }, [freeHostingEnabled]);
 
   // Auto-fetch membrane proof once when we have a session + client but no proof yet
   useEffect(() => {
+    if (freeHostingEnabled) return;
     if (!client || !hostSession || membraneProofStatus === "done" || membraneProofStatus === "fetching" || membraneProofAttempted.current) return;
     fetchMembraneProof(hostSession);
-  }, [client, hostSession]);
+  }, [client, hostSession, freeHostingEnabled]);
 
   // Auto-populate host URL from TLS domain
   useEffect(() => {
@@ -1054,10 +1056,21 @@ const Hosting = () => {
           <j-flex a="center" gap="300">
             <span>Enable multi-user hosting</span>
             {multiUserEnabled && (
-              <j-flex
-                a="center"
-                gap="200"
-                style={{ cursor: "pointer" }}
+              <button
+                type="button"
+                aria-expanded={setupInfoExpanded}
+                aria-controls="setup-info-panel"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "4px",
+                  cursor: "pointer",
+                  background: "none",
+                  border: "none",
+                  padding: 0,
+                  font: "inherit",
+                  color: "inherit",
+                }}
                 onClick={(e: React.MouseEvent) => {
                   e.preventDefault();
                   e.stopPropagation();
@@ -1077,7 +1090,7 @@ const Hosting = () => {
                   color="ui-500"
                   size="xs"
                 ></j-icon>
-              </j-flex>
+              </button>
             )}
           </j-flex>
         </j-toggle>
@@ -1094,11 +1107,14 @@ const Hosting = () => {
       {multiUserEnabled && (
         <j-box px="500">
           <div
+            id="setup-info-panel"
             style={{
               overflow: "hidden",
               maxHeight: setupInfoExpanded ? "600px" : "0",
               opacity: setupInfoExpanded ? 1 : 0,
-              transition: "max-height 0.4s ease, opacity 0.3s ease",
+              visibility: setupInfoExpanded ? "visible" as const : "hidden" as const,
+              pointerEvents: setupInfoExpanded ? "auto" as const : "none" as const,
+              transition: "max-height 0.4s ease, opacity 0.3s ease, visibility 0.3s ease",
               marginTop: setupInfoExpanded ? "8px" : "0",
             }}
           >
@@ -1320,7 +1336,7 @@ const Hosting = () => {
                                 {user.email}
                               </j-text>
                               {getStatusBadge(user.lastSeen)}
-                              {(user as any).freeAccess && (
+                              {(freeHostingEnabled || (user as any).freeAccess) && (
                                 <j-badge variant="success">Free Access</j-badge>
                               )}
                             </j-flex>

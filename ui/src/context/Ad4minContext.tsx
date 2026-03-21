@@ -352,18 +352,24 @@ export function Ad4minProvider({ children }: any) {
   useEffect(() => {
     const loadHostingState = async () => {
       if (state.client) {
-        try {
-          const [multiUser, freeHosting] = await Promise.all([
-            state.client.runtime.multiUserEnabled(),
-            state.client.runtime.freeHostingEnabled(),
-          ]);
-          setState((prev) => ({
-            ...prev,
-            multiUserEnabled: multiUser,
-            freeHostingEnabled: freeHosting,
-          }));
-        } catch (error) {
-          console.error("Failed to load hosting state:", error);
+        const [multiUserResult, freeHostingResult] = await Promise.allSettled([
+          state.client.runtime.multiUserEnabled(),
+          state.client.runtime.freeHostingEnabled(),
+        ]);
+        setState((prev) => ({
+          ...prev,
+          ...(multiUserResult.status === "fulfilled"
+            ? { multiUserEnabled: multiUserResult.value }
+            : {}),
+          ...(freeHostingResult.status === "fulfilled"
+            ? { freeHostingEnabled: freeHostingResult.value }
+            : {}),
+        }));
+        if (multiUserResult.status === "rejected") {
+          console.error("Failed to load multi-user state:", multiUserResult.reason);
+        }
+        if (freeHostingResult.status === "rejected") {
+          console.error("Failed to load free hosting state:", freeHostingResult.reason);
         }
       }
     };

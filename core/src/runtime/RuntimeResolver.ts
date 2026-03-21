@@ -515,7 +515,7 @@ export default class RuntimeResolver {
 
     @Query(returns => Boolean)
     runtimeFreeHostingEnabled(): boolean {
-        return false
+        return true
     }
 
     @Mutation(returns => Boolean)

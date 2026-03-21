@@ -2598,7 +2598,9 @@ impl Mutation {
         context: &RequestContext,
         enabled: bool,
     ) -> FieldResult<bool> {
-        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+        if !context.is_admin_credential {
+            return Err(FieldError::new("Admin credentials required", Value::null()));
+        }
         Ad4mDb::with_global_instance(|db| {
             db.set_free_hosting_enabled(enabled)
                 .map_err(|e| FieldError::new(e.to_string(), Value::null()))?;
@@ -3186,6 +3188,17 @@ impl Mutation {
         #[allow(non_snake_case)] amountHOT: String,
     ) -> FieldResult<PaymentRequestResult> {
         check_capability(&context.capabilities, &RUNTIME_HOSTING_UPDATE_CAPABILITY)?;
+
+        // When free hosting is enabled, payments are not applicable
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(false);
+        if global_free {
+            return Ok(PaymentRequestResult {
+                success: false,
+                message: "Payments are disabled — this host is configured for free access."
+                    .to_string(),
+            });
+        }
 
         let user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
             FieldError::new(

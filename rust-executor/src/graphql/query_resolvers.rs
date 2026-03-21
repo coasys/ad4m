@@ -1002,6 +1002,8 @@ impl Query {
         // For each user, count their perspectives
         let mut user_stats = vec![];
         let all_perspectives = all_perspectives();
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(false);
 
         for user in users {
             // Count perspectives owned by this user
@@ -1015,8 +1017,6 @@ impl Query {
                 }
             }
 
-            let global_free =
-                Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(false);
             let free_access: bool = global_free
                 || Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user.username))
                     .map_err(|e| {
