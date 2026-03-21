@@ -9,6 +9,7 @@ pub mod graphql;
 pub mod holochain_service;
 pub mod js_core;
 pub mod mcp;
+pub mod rest;
 mod prolog_service;
 pub mod runtime_service;
 mod surreal_service;

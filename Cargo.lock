@@ -161,6 +161,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tokio-stream",
+ "tower-http",
  "url",
  "urlencoding",
  "uuid 1.18.1",
