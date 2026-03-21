@@ -22,7 +22,6 @@ const TEST_PORTS = [
   15900, 15901, 15902,        // multi-user-simple.test.ts
   15920, 15921, 15922,        // email-verification.test.ts
   16600, 16601, 16602,        // prolog-and-literals.test.ts
-  15400, 15401, 15402,        // integration.test.ts (bob — multi-user section)
   16000, 16001, 16002,        // mcp-http.test.ts (GQL + HC ports)
   16010, 16011, 16012,        // mcp-auth.test.ts (GQL + HC ports)
   16020, 16021, 16022,        // mcp-mcporter.test.ts (GQL + HC ports)
