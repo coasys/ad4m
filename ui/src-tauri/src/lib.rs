@@ -40,9 +40,10 @@ mod util;
 
 use crate::app_state::LauncherState;
 use crate::commands::app::{
-    add_app_agent_state, clear_state, close_application, close_main_window, get_app_agent_list,
-    get_data_path, get_host_registration, get_log_config, get_mcp_config, get_smtp_config,
-    get_tls_config, open_dapp, open_tray, open_tray_message, remove_app_agent_state,
+    add_app_agent_state, clear_state, close_application, close_main_window, delete_agent,
+    get_app_agent_list, get_data_path, get_host_registration, get_log_config, get_mcp_config,
+    get_smtp_config, get_tls_config, open_dapp, open_tray, open_tray_message,
+    remove_app_agent_state,
     set_host_registration, set_log_config, set_mcp_config, set_selected_agent, set_smtp_config,
     set_tls_config, show_main_window, test_smtp_config,
 };
@@ -247,6 +248,7 @@ pub fn run() {
             get_app_agent_list,
             set_selected_agent,
             remove_app_agent_state,
+            delete_agent,
             get_data_path,
             get_log_config,
             set_log_config,

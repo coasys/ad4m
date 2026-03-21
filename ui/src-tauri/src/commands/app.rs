@@ -76,6 +76,30 @@ pub fn remove_app_agent_state(agent: AgentConfigDir) {
 }
 
 #[tauri::command]
+pub fn delete_agent(agent: AgentConfigDir) -> Result<(), String> {
+    let mut state = LauncherState::load().map_err(|e| format!("Failed to load state: {}", e))?;
+
+    // Don't allow deleting the currently selected agent
+    if let Some(ref selected) = state.selected_agent {
+        if selected.path == agent.path {
+            return Err("Cannot delete the currently selected agent".to_string());
+        }
+    }
+
+    // Remove the data directory
+    if agent.path.exists() {
+        remove_dir_all::remove_dir_all(&agent.path)
+            .map_err(|e| format!("Failed to remove data directory: {}", e))?;
+    }
+
+    // Remove from config
+    state.remove_agent(agent);
+    state.save().map_err(|e| format!("Failed to save state: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
 pub fn set_selected_agent(agent: AgentConfigDir) {
     let mut state = LauncherState::load().unwrap();
 

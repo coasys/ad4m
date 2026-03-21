@@ -905,20 +905,46 @@ const Profile = (props: Props) => {
             </j-text>
             <j-box p="200"></j-box>
             {appState.agent_list.map((agent: any) => (
-              <>
-                <j-button
-                  full
-                  variant={agent.path === appState.selected_agent.path ? "primary" : "secondary"}
-                  onClick={() => {
-                    invoke("set_selected_agent", { agent });
-                    getAppState();
-                    setShowAgentSelection(false);
-                  }}
-                >
-                  {agent.name}
-                </j-button>
-                <j-box p="300"></j-box>
-              </>
+              <div key={agent.path} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                <div style={{ flex: 1 }}>
+                  <j-button
+                    full
+                    variant={agent.path === appState.selected_agent.path ? "primary" : "secondary"}
+                    onClick={() => {
+                      invoke("set_selected_agent", { agent });
+                      getAppState();
+                      setShowAgentSelection(false);
+                    }}
+                  >
+                    {agent.name}
+                  </j-button>
+                </div>
+                <div style={{ width: 36, flexShrink: 0 }}>
+                  {agent.path !== appState.selected_agent.path && (
+                    <j-button
+                      variant="danger"
+                      size="sm"
+                      square
+                      onClick={async () => {
+                        const confirmed = await dialogAsk(
+                          `Are you sure you want to delete agent "${agent.name}"? This will permanently remove all its data.`,
+                          { title: "Delete Agent", kind: "warning" }
+                        );
+                        if (confirmed) {
+                          try {
+                            await invoke("delete_agent", { agent });
+                            getAppState();
+                          } catch (e: any) {
+                            await dialogMessage(e, { title: "Error", kind: "error" } as MessageDialogOptions);
+                          }
+                        }
+                      }}
+                    >
+                      <j-icon name="trash" size="sm"></j-icon>
+                    </j-button>
+                  )}
+                </div>
+              </div>
             ))}
             <j-button full onCLick={() => setCreateAgent(true)} variant="secondary">
               <j-icon name="plus"></j-icon>
