@@ -3230,14 +3230,24 @@ impl Mutation {
                 })
             }
             Err(e) => {
+                let err_str = e.to_string();
                 log::error!(
                     "Failed to create mHOT payment proposal for user={}: {}",
                     user_email,
-                    e
+                    err_str
                 );
+                let message = if err_str.contains("No Global Definition found") {
+                    "The host is still syncing the Unyt currency network. Please try again in a few minutes."
+                        .to_string()
+                } else if err_str.contains("CellDisabled") {
+                    "The host's Unyt service is temporarily unavailable. Please try again later."
+                        .to_string()
+                } else {
+                    format!("Failed to create payment proposal: {}", err_str)
+                };
                 Ok(PaymentRequestResult {
                     success: false,
-                    message: format!("Failed to create payment proposal: {}", e),
+                    message,
                 })
             }
         }

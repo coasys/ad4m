@@ -40,6 +40,11 @@ pub enum HolochainServiceRequest {
     PackHapp(String, oneshot::Sender<HolochainServiceResponse>),
     UnPackHapp(String, oneshot::Sender<HolochainServiceResponse>),
     NewSignKeypair(oneshot::Sender<HolochainServiceResponse>),
+    SignWithKey(
+        HoloHash<Agent>,
+        Vec<u8>,
+        oneshot::Sender<HolochainServiceResponse>,
+    ),
     EnableApp(String, oneshot::Sender<HolochainServiceResponse>),
 }
 
@@ -62,6 +67,7 @@ pub enum HolochainServiceResponse {
     PackHapp(Result<String, AnyError>),
     UnPackHapp(Result<String, AnyError>),
     NewSignKeypair(Result<HoloHash<Agent>, AnyError>),
+    SignWithKey(Result<Signature, AnyError>),
     EnableApp(Result<(), AnyError>),
 }
 
@@ -176,6 +182,23 @@ impl HolochainServiceInterface {
             .send(HolochainServiceRequest::GetAgentKey(response_tx))?;
         match response_rx.await? {
             HolochainServiceResponse::GetAgentKey(result) => result,
+            _ => unreachable!(),
+        }
+    }
+
+    pub async fn sign_with_key(
+        &self,
+        agent_key: HoloHash<Agent>,
+        data: Vec<u8>,
+    ) -> Result<Signature, AnyError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.sender.send(HolochainServiceRequest::SignWithKey(
+            agent_key,
+            data,
+            response_tx,
+        ))?;
+        match response_rx.await? {
+            HolochainServiceResponse::SignWithKey(result) => result,
             _ => unreachable!(),
         }
     }

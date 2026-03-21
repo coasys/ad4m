@@ -27,10 +27,10 @@ use crate::pubsub::mark_credits_dirty;
 pub const UNYT_APP_ID: &str = "unyt-mhot";
 const UNYT_CELL_NAME: &str = "alliance";
 const UNYT_ZOME: &str = "transactor";
-const ALLIANCE_DNA_VERSION: &str = "0.61.0";
+const ALLIANCE_DNA_VERSION: &str = env!("ALLIANCE_DNA_VERSION");
 
-/// Embedded alliance DNA bytes.
-const ALLIANCE_DNA_BYTES: &[u8] = include_bytes!("resources/alliance_0.61.0.dna");
+/// Embedded alliance DNA bytes (downloaded by build.rs).
+const ALLIANCE_DNA_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/alliance.dna"));
 
 // ---------------------------------------------------------------------------
 // Global state: the DNA hash of the installed alliance cell, used for signal routing
@@ -148,6 +148,12 @@ pub async fn ensure_installed() -> Result<(), AnyError> {
         match install_alliance_dna(&data_path).await {
             Ok(()) => {
                 *installed = true;
+
+                // After install: obtain hc-auth bootstrap credentials and
+                // restart the conductor with the space override so the unyt
+                // DNA can reach the network.
+                setup_bootstrap_auth().await;
+
                 return Ok(());
             }
             Err(e) => {
@@ -178,15 +184,47 @@ pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
     };
 
     // Check if already installed with correct version
-    if let Ok(Some(_)) = hc.get_app_info(UNYT_APP_ID.to_string()).await {
+    if let Ok(Some(app_info)) = hc.get_app_info(UNYT_APP_ID.to_string()).await {
         let installed_version =
             Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_version")).unwrap_or(None);
+
+        // Check if the app is disabled (e.g. due to network join failure) and try to re-enable
+        use holochain_types::app::AppStatus;
+        if matches!(app_info.status, AppStatus::Disabled(_)) {
+            warn!(
+                "Unyt alliance DNA is installed but disabled (status={:?}). Attempting to re-enable...",
+                app_info.status
+            );
+            match hc.enable_app(UNYT_APP_ID.to_string()).await {
+                Ok(_) => {
+                    info!("Successfully re-enabled Unyt alliance DNA");
+                    // Backfill agent key for setup_bootstrap_auth
+                    let agent_key = base64::engine::general_purpose::STANDARD
+                        .encode(app_info.agent_pub_key.get_raw_39());
+                    let _ = Ad4mDb::with_global_instance(|db| {
+                        db.set_setting("unyt_agent_key", &agent_key)
+                    });
+                    capture_dna_hash().await;
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to re-enable Unyt app: {}. Will continue with current state.",
+                        e
+                    );
+                }
+            }
+        }
 
         if installed_version.as_deref() == Some(ALLIANCE_DNA_VERSION) {
             info!(
                 "Unyt alliance DNA v{} already installed",
                 ALLIANCE_DNA_VERSION
             );
+            // Backfill agent key for setup_bootstrap_auth
+            let agent_key = base64::engine::general_purpose::STANDARD
+                .encode(app_info.agent_pub_key.get_raw_39());
+            let _ = Ad4mDb::with_global_instance(|db| db.set_setting("unyt_agent_key", &agent_key));
             capture_dna_hash().await;
             return Ok(());
         }
@@ -196,6 +234,10 @@ pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
             installed_version.as_deref().unwrap_or("unknown"),
             ALLIANCE_DNA_VERSION
         );
+        // Backfill agent key for setup_bootstrap_auth
+        let agent_key =
+            base64::engine::general_purpose::STANDARD.encode(app_info.agent_pub_key.get_raw_39());
+        let _ = Ad4mDb::with_global_instance(|db| db.set_setting("unyt_agent_key", &agent_key));
         capture_dna_hash().await;
         return Ok(());
     }
@@ -355,6 +397,15 @@ roles:
                 "Unyt alliance DNA installed successfully: {:?}",
                 app_info.installed_app_id
             );
+            // Store the actual installed agent key so hc-auth uses the correct key
+            let installed_key_str = app_info.agent_pub_key.to_string();
+            if let Err(e) = Ad4mDb::with_global_instance(|db| {
+                db.set_setting("unyt_agent_key", &installed_key_str)
+            }) {
+                warn!("Failed to store installed agent key: {}", e);
+            } else {
+                info!("Stored installed Unyt agent key: {}", installed_key_str);
+            }
         }
         Err(e) => {
             error!("Failed to install Unyt alliance DNA: {}", e);
@@ -409,6 +460,9 @@ pub async fn reinstall() -> Result<(), AnyError> {
     };
 
     do_install(&data_path, &hc).await?;
+
+    // After reinstall: set up bootstrap auth (same as fresh install)
+    setup_bootstrap_auth().await;
 
     let mut installed = INSTALL_ONCE.lock().await;
     *installed = true;
@@ -477,7 +531,215 @@ pub async fn get_or_create_agent_key() -> Result<String, AnyError> {
     Ok(key_str)
 }
 
-/// Capture the DNA hash from the installed app for signal routing.
+// ---------------------------------------------------------------------------
+// HC Auth — bootstrap authentication for the unyt network
+// ---------------------------------------------------------------------------
+
+const HC_AUTH_URL: &str = "https://hc-auth-iroh-unyt.holochain.org";
+pub const UNYT_BOOTSTRAP_URL: &str = "https://dev-test-bootstrap2.holochain.org/";
+pub const UNYT_SIGNAL_URL: &str = "wss://dev-test-bootstrap2.holochain.org/";
+pub const UNYT_RELAY_URL: &str = "https://use1-1.relay.n0.iroh-canary.iroh.link./";
+
+/// Fetch a challenge from the hc-auth `/now` endpoint, sign it with the unyt
+/// agent key, and return the base64-encoded auth material JSON for the
+/// bootstrap server.
+///
+/// The resulting string is suitable for `base64_auth_material` in the
+/// conductor config's space override.
+pub async fn get_or_create_auth_material() -> Result<String, AnyError> {
+    if let Some(existing) =
+        Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material")).unwrap_or(None)
+    {
+        return Ok(existing);
+    }
+
+    let auth_material = create_auth_material().await?;
+
+    Ad4mDb::with_global_instance(|db| db.set_setting("unyt_auth_material", &auth_material))?;
+    info!("Stored unyt bootstrap auth material");
+
+    Ok(auth_material)
+}
+
+/// Create fresh auth material by calling the hc-auth `/now` endpoint, signing
+/// the challenge, and packing everything into base64-encoded JSON.
+async fn create_auth_material() -> Result<String, AnyError> {
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+
+    let agent_key_str = get_or_create_agent_key().await?;
+    let agent_key = holochain::prelude::AgentPubKey::try_from(agent_key_str.as_str())
+        .map_err(|e| deno_core::anyhow::anyhow!("Invalid agent key: {}", e))?;
+
+    // HoloHash layout: bytes 0-2 = type prefix, 3-34 = 32-byte Ed25519 pubkey, 35-38 = location
+    let raw_39 = agent_key.get_raw_39();
+    assert!(
+        raw_39.len() == 39,
+        "Expected 39-byte HoloHash, got {} bytes",
+        raw_39.len()
+    );
+    let raw_pubkey: Vec<u8> = raw_39[3..35].to_vec();
+
+    // GET /now — returns base64url-encoded 32-byte challenge
+    let now_url = format!("{}/now", HC_AUTH_URL);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let payload_b64url = client
+        .get(&now_url)
+        .send()
+        .await
+        .map_err(|e| deno_core::anyhow::anyhow!("Failed to GET {}: {}", now_url, e))?
+        .text()
+        .await
+        .map_err(|e| deno_core::anyhow::anyhow!("Failed to read /now response: {}", e))?;
+
+    let payload_b64url = payload_b64url.trim().to_string();
+    info!("Got hc-auth /now challenge: {}", payload_b64url);
+
+    // Decode the base64url payload to get the 32 raw bytes to sign
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(&payload_b64url)
+        .map_err(|e| deno_core::anyhow::anyhow!("Failed to decode /now payload: {}", e))?;
+
+    if payload_bytes.len() != 32 {
+        return Err(deno_core::anyhow::anyhow!(
+            "Expected 32-byte /now payload, got {} bytes",
+            payload_bytes.len()
+        ));
+    }
+
+    // Sign the raw 32-byte payload with the unyt agent key
+    let hc = get_holochain_service().await;
+    let signature = hc
+        .sign_with_key(agent_key, payload_bytes)
+        .await
+        .map_err(|e| deno_core::anyhow::anyhow!("Failed to sign /now payload: {}", e))?;
+
+    // Build the JSON structure with all fields as base64url-no-pad
+    let pubkey_b64url = URL_SAFE_NO_PAD.encode(&raw_pubkey);
+    let sig_b64url = URL_SAFE_NO_PAD.encode(signature.0.as_ref());
+
+    let auth_json = serde_json::json!({
+        "pubKey": pubkey_b64url,
+        "payload": payload_b64url,
+        "signature": sig_b64url,
+    });
+
+    let auth_json_str = serde_json::to_string(&auth_json)?;
+    let auth_material = STANDARD.encode(auth_json_str.as_bytes());
+
+    info!("Created hc-auth bootstrap auth material");
+    Ok(auth_material)
+}
+
+/// Obtain hc-auth bootstrap credentials and restart the conductor so the
+/// unyt DNA space has its own bootstrap/signal with auth material.
+///
+/// This is a best-effort operation — if any step fails the DNA is still
+/// installed and will simply not have network access until the next restart
+/// (at which point the auth material will be retried).
+async fn setup_bootstrap_auth() {
+    // Skip if auth material is already stored (previous run already set it up)
+    let has_auth = Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material"))
+        .unwrap_or(None)
+        .is_some();
+    let has_dna_hash = Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_hash"))
+        .unwrap_or(None)
+        .is_some();
+
+    if has_auth && has_dna_hash {
+        info!("Bootstrap auth material and DNA hash already exist, skipping setup");
+        return;
+    }
+
+    info!("Setting up hc-auth bootstrap credentials for unyt DNA...");
+
+    if !has_auth {
+        // Retry auth material creation up to 3 times (hc-auth server may be briefly unavailable)
+        let mut auth_ok = false;
+        for attempt in 1..=3 {
+            match create_auth_material().await {
+                Ok(auth_material) => {
+                    if let Err(e) = Ad4mDb::with_global_instance(|db| {
+                        db.set_setting("unyt_auth_material", &auth_material)
+                    }) {
+                        error!("Failed to store auth material: {}", e);
+                        return;
+                    }
+                    info!("Stored unyt bootstrap auth material");
+                    auth_ok = true;
+                    break;
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to create hc-auth material (attempt {}/3): {}",
+                        attempt, e
+                    );
+                    if attempt < 3 {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    }
+                }
+            }
+        }
+        if !auth_ok {
+            error!("Failed to create hc-auth material after 3 attempts. The unyt DNA will not have network access until this is resolved.");
+            return;
+        }
+    }
+
+    if !has_dna_hash {
+        // Capture the DNA hash now (it should be available since we just installed)
+        capture_dna_hash().await;
+        // Verify it was stored
+        if Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_hash"))
+            .unwrap_or(None)
+            .is_none()
+        {
+            error!("Failed to capture DNA hash after install — cannot set up space override");
+            return;
+        }
+    }
+
+    // Restart the conductor so the space override takes effect
+    info!("Restarting Holochain conductor to apply unyt space override...");
+    match crate::holochain_service::HolochainService::restart_service().await {
+        Ok(()) => {
+            info!("Holochain conductor restarted with unyt space override");
+            // Wait for holochain service to come back up
+            let mut waited = 0;
+            while maybe_get_holochain_service().await.is_none() {
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                waited += 2;
+                if waited > 60 {
+                    error!("Holochain service did not come back up within 60s after restart");
+                    return;
+                }
+            }
+            info!("Holochain service is back up after restart");
+        }
+        Err(e) => error!("Failed to restart conductor after auth setup: {}", e),
+    }
+}
+
+/// Get the base64-encoded DNA hash string for the installed alliance cell.
+/// Returns the DnaHash in Holochain's native string representation (e.g. "uhC0k..."),
+/// which is the key format used for `space_overrides` in the conductor config.
+pub async fn get_alliance_dna_hash_b64() -> Option<String> {
+    let hc = maybe_get_holochain_service().await?;
+    let app_info = hc.get_app_info(UNYT_APP_ID.to_string()).await.ok()??;
+    for (_role, cells) in &app_info.cell_info {
+        for cell_info in cells {
+            if let holochain::conductor::api::CellInfo::Provisioned(cell) = cell_info {
+                return Some(cell.cell_id.dna_hash().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Capture the DNA hash from the installed app for signal routing and persist
+/// the base64 DNA hash to the DB for conductor space-override configuration.
 async fn capture_dna_hash() {
     let hc = match maybe_get_holochain_service().await {
         Some(hc) => hc,
@@ -501,6 +763,21 @@ async fn capture_dna_hash() {
                         "Captured alliance DNA hash for signal routing: {}",
                         dna_hash_hex
                     );
+
+                    // Persist the DNA hash in Holochain string format for the
+                    // conductor config space_overrides key.
+                    let dna_hash_str = cell.cell_id.dna_hash().to_string();
+                    if let Err(e) = Ad4mDb::with_global_instance(|db| {
+                        db.set_setting("unyt_dna_hash", &dna_hash_str)
+                    }) {
+                        warn!("Failed to persist unyt DNA hash: {}", e);
+                    } else {
+                        info!(
+                            "Persisted unyt DNA hash for space override: {}",
+                            dna_hash_str
+                        );
+                    }
+
                     return;
                 }
             }

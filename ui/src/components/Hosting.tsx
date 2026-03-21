@@ -23,11 +23,11 @@ const PriceInput = ({ initialValue, placeholder, style, onCommit }: {
   style: React.CSSProperties;
   onCommit: (val: string) => void;
 }) => {
-  const [local, setLocal] = React.useState(initialValue !== undefined && initialValue !== null ? String(initialValue) : "");
-  const focused = React.useRef(false);
+  const [local, setLocal] = React.useState(initialValue != null ? String(initialValue) : "");
+  const isEditing = React.useRef(false);
   // Update local when initialValue changes externally (but not while user is editing)
   React.useEffect(() => {
-    if (!focused.current && initialValue !== undefined && initialValue !== null) {
+    if (!isEditing.current && initialValue != null) {
       setLocal(String(initialValue));
     }
   }, [initialValue]);
@@ -36,9 +36,9 @@ const PriceInput = ({ initialValue, placeholder, style, onCommit }: {
       type="text"
       inputMode="decimal"
       value={local}
+      onFocus={() => { isEditing.current = true; }}
       onChange={(e) => setLocal(e.target.value)}
-      onFocus={() => { focused.current = true; }}
-      onBlur={() => { focused.current = false; onCommit(local); }}
+      onBlur={() => { isEditing.current = false; onCommit(local); }}
       onKeyDown={(e) => { if (e.key === "Enter") { (e.target as HTMLInputElement).blur(); } }}
       placeholder={placeholder}
       style={style}
@@ -133,6 +133,12 @@ const Hosting = () => {
   const [hostRegistering, setHostRegistering] = useState(false);
   const [profilePic, setProfilePic] = useState<File | null>(null);
   const [profilePicUrl, setProfilePicUrl] = useState<string | null>(null);
+  React.useEffect(() => {
+    if (!profilePic) { setProfilePicUrl(null); return; }
+    const url = URL.createObjectURL(profilePic);
+    setProfilePicUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [profilePic]);
   const [verificationCode, setVerificationCode] = useState("");
   const [membraneProofStatus, setMembraneProofStatus] =
     useState<MembraneProofStatus>("none");
@@ -234,18 +240,12 @@ const Hosting = () => {
         setHostReg((prev) => ({
           ...prev,
           indexUrl: session.indexUrl,
-          name: mine.name ?? prev.name,
-          description: mine.description ?? prev.description,
-          location: mine.location ?? prev.location,
-          hostUrl: mine.url ?? prev.hostUrl,
-          rates:
-            mine.rates !== undefined
-              ? JSON.stringify(mine.rates)
-              : prev.rates,
-          aiModels:
-            mine.aiModels !== undefined
-              ? JSON.stringify(mine.aiModels)
-              : prev.aiModels,
+          name: mine.name !== undefined ? mine.name : prev.name,
+          description: mine.description !== undefined ? mine.description : prev.description,
+          location: mine.location !== undefined ? mine.location : prev.location,
+          hostUrl: mine.url !== undefined ? mine.url : prev.hostUrl,
+          rates: Array.isArray(mine.rates) ? JSON.stringify(mine.rates) : prev.rates,
+          aiModels: Array.isArray(mine.aiModels) ? JSON.stringify(mine.aiModels) : prev.aiModels,
           computeSpecs: mine.computeSpecs !== undefined ? mine.computeSpecs : prev.computeSpecs,
         }));
         return mine.emailVerified ? "verified" : "unverified";
@@ -261,12 +261,16 @@ const Hosting = () => {
     return "unavailable";
   };
 
+  // Track whether we've already attempted a membrane proof fetch this mount
+  const membraneProofAttempted = React.useRef(false);
+
   const fetchMembraneProof = async (session: {
     indexUrl: string;
     hostId: string;
     authToken: string;
   }) => {
     if (!client) return;
+    membraneProofAttempted.current = true;
 
     // Skip if we already have the proof or DNA is installed
     try {
@@ -309,8 +313,23 @@ const Hosting = () => {
         const data = await res
           .json()
           .catch(() => ({ error: `HTTP ${res.status}` }));
+
+        // If the API says we need to re-verify email, switch to verify step
+        if (data.code === "reverify_required") {
+          console.log("Email verification expired, prompting re-verification");
+          setRegStep("verify");
+          setHostRegStatus({
+            type: "info",
+            message: "Email verification has expired. Please re-verify and click Resend to get a new code.",
+          });
+          setMembraneProofStatus("none");
+          membraneProofAttempted.current = false;
+          return;
+        }
+
+        const detail = data.detail ? ` [${data.detail}]` : "";
         throw new Error(
-          data.error || `Failed to get membrane proof (${res.status})`,
+          (data.error || `Failed to get membrane proof (${res.status})`) + detail,
         );
       }
 
@@ -529,9 +548,9 @@ const Hosting = () => {
           authToken: data.authToken,
           email: hostReg.email,
         };
+        await saveHostSession(session);
         const result = await fetchHostData(session);
         if (result === "verified") {
-          await saveHostSession(session);
           setRegStep("logged-in");
           setHostRegStatus({
             type: "success",
@@ -541,24 +560,24 @@ const Hosting = () => {
             fetchMembraneProof(session);
           }
         } else if (result === "unverified") {
-          await saveHostSession(session);
           setRegStep("verify");
           setHostRegStatus({
             type: "info",
             message:
               "Email not yet verified. Check your inbox or resend the code.",
           });
-        } else if (result === "expired") {
+        } else if (result === "unavailable") {
+          setHostRegStatus({
+            type: "error",
+            message: "Could not reach the hosting service. Please try again later.",
+          });
+        } else {
+          await saveHostSession(null);
           setHostRegStatus({
             type: "error",
             message: "Session expired. Please log in again.",
           });
           setRegStep("credentials");
-        } else {
-          setHostRegStatus({
-            type: "error",
-            message: "Could not reach the host service. Please try again later.",
-          });
         }
       } else {
         setHostRegStatus({
@@ -607,19 +626,19 @@ const Hosting = () => {
       const data = await res.json();
 
       if (res.ok) {
-        // Persist rates to executor DB for credit deduction before reporting success
+        setHostData(data);
+        // Also persist rates to executor DB for credit deduction
         try {
           if (client) await client.runtime.setHostRates(hostReg.rates);
-          setHostData(data);
           setHostRegStatus({
             type: "success",
             message: "Host updated successfully.",
           });
-        } catch (e) {
+        } catch (e: any) {
           console.warn("Failed to sync rates to executor DB:", e);
           setHostRegStatus({
             type: "error",
-            message: "Host updated on server but failed to sync rates to executor. Please try again.",
+            message: `Host updated but failed to sync rates to executor: ${e.message || e}`,
           });
         }
       } else {
@@ -714,7 +733,8 @@ const Hosting = () => {
     });
     if (filePath && tlsConfig) {
       const newConfig = { ...tlsConfig, cert_file_path: filePath.toString() };
-      handleTlsConfigChange(newConfig);
+      setTlsConfig(newConfig);
+      await handleTlsConfigChange(newConfig);
     }
   };
 
@@ -725,7 +745,8 @@ const Hosting = () => {
     });
     if (filePath && tlsConfig) {
       const newConfig = { ...tlsConfig, key_file_path: filePath.toString() };
-      handleTlsConfigChange(newConfig);
+      setTlsConfig(newConfig);
+      await handleTlsConfigChange(newConfig);
     }
   };
 
@@ -803,17 +824,6 @@ const Hosting = () => {
 
   // ---- Effects ----
 
-  // Manage profilePic object URL to avoid blob leaks
-  useEffect(() => {
-    if (!profilePic) {
-      setProfilePicUrl(null);
-      return;
-    }
-    const url = URL.createObjectURL(profilePic);
-    setProfilePicUrl(url);
-    return () => URL.revokeObjectURL(url);
-  }, [profilePic]);
-
   useEffect(() => {
     if (multiUserEnabled && client) getUsers();
   }, [multiUserEnabled, client, getUsers]);
@@ -843,19 +853,19 @@ const Hosting = () => {
           if (result === "verified") {
             setHostSession(session);
             setRegStep("logged-in");
-            fetchMembraneProof(session);
+            // membrane proof fetch is handled by the useEffect below
           } else if (result === "unverified") {
             setHostSession(session);
             setRegStep("verify");
-          } else if (result === "expired") {
+          } else if (result === "unavailable") {
+            // Network/transient failure — keep session, let user retry
+            setHostSession(session);
+            setRegStep("logged-in");
+          } else {
             // Token expired/invalid — clear stored session, go to login
             setHostSession(null);
             saveHostSession(null);
             setRegStep("credentials");
-          } else {
-            // Transient error — keep session, let user retry
-            setHostSession(session);
-            setRegStep("logged-in");
           }
         }
       } catch (e) {
@@ -866,10 +876,8 @@ const Hosting = () => {
   }, []);
 
   // Auto-fetch membrane proof once when we have a session + client but no proof yet
-  const membraneProofAttempted = React.useRef(false);
   useEffect(() => {
     if (!client || !hostSession || membraneProofStatus === "done" || membraneProofStatus === "fetching" || membraneProofAttempted.current) return;
-    membraneProofAttempted.current = true;
     fetchMembraneProof(hostSession);
   }, [client, hostSession]);
 
@@ -1767,11 +1775,23 @@ const Hosting = () => {
                         const DEFAULT_TOKEN_PRICE = 12.5;   // ~$0.005 per token, avg API pricing
 
                         // Sync rates with current model list: add missing, remove stale
-                        // Connect expects descriptions like "modelName per token" for token rates
                         const modelNames: string[] = aiModels.map((m: any) => m.name);
-                        const tokenDescs = modelNames.map((n) => `${n} per token`);
-                        const validKeys = new Set(["link write", ...tokenDescs]);
+                        const validKeys = new Set(["link write", ...modelNames]);
                         const has = (desc: string) => parsed.some((r) => r.description === desc);
+
+                        // Migrate legacy "ModelName (per token)" entries to plain model names
+                        const legacyPattern = /^(.+)\s*\(per token\)$/;
+                        for (let i = parsed.length - 1; i >= 0; i--) {
+                          const m = legacyPattern.exec(parsed[i].description);
+                          if (m) {
+                            const plainName = m[1].trim();
+                            if (validKeys.has(plainName) && !has(plainName)) {
+                              parsed[i] = { description: plainName, priceInHOT: parsed[i].priceInHOT };
+                            } else {
+                              parsed.splice(i, 1);
+                            }
+                          }
+                        }
 
                         // Remove entries for deleted models
                         const before = parsed.length;
@@ -1781,8 +1801,7 @@ const Hosting = () => {
                         let changed = parsed.length !== before;
                         if (!has("link write")) { parsed.push({ description: "link write", priceInHOT: DEFAULT_LINK_PRICE }); changed = true; }
                         for (const name of modelNames) {
-                          const desc = `${name} per token`;
-                          if (!has(desc)) { parsed.push({ description: desc, priceInHOT: DEFAULT_TOKEN_PRICE }); changed = true; }
+                          if (!parsed.some((r) => r.description === name)) { parsed.push({ description: name, priceInHOT: DEFAULT_TOKEN_PRICE }); changed = true; }
                         }
                         if (changed) {
                           // Schedule state update for next tick to avoid updating during render
@@ -1798,7 +1817,7 @@ const Hosting = () => {
                         const commitPrice = (desc: string, val: string) => {
                           const num = parseFloat(val);
                           const updated = parsed.filter((r) => r.description !== desc);
-                          if (!isNaN(num) && num >= 0) {
+                          if (!isNaN(num) && num > 0) {
                             updated.push({ description: desc, priceInHOT: num });
                           } else {
                             // Reset to default if invalid
@@ -1873,10 +1892,10 @@ const Hosting = () => {
                               <div key={name} style={rowStyle}>
                                 <span style={labelStyle}>{name} <span style={{ color: "var(--j-color-ui-400)", fontSize: "12px" }}>(per token)</span></span>
                                 <PriceInput
-                                  initialValue={getPrice(`${name} per token`)}
-                                  placeholder={String(getDefault(`${name} per token`))}
+                                  initialValue={getPrice(name)}
+                                  placeholder={String(getDefault(name))}
                                   style={inputStyle}
-                                  onCommit={(val) => commitPrice(`${name} per token`, val)}
+                                  onCommit={(val) => commitPrice(name, val)}
                                 />
                               </div>
                             ))}
@@ -1995,6 +2014,7 @@ const Hosting = () => {
                                 ...tlsConfig,
                                 tls_port: parseInt(e.target.value) || 12001,
                               };
+                              setTlsConfig(newConfig);
                               handleTlsConfigChange(newConfig);
                             }}
                           />

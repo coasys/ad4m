@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use holochain::conductor::api::{AppInfo, AppStatusFilter, CellInfo};
-use holochain::conductor::config::{ConductorConfig, NetworkConfig};
+use holochain::conductor::config::{ConductorConfig, NetworkConfig, SpaceNetworkOverride};
 use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::hash_type::Agent;
@@ -337,13 +337,14 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::GetNetworkMetrics(response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3),
+                                        std::time::Duration::from_secs(30),
                                         service.get_network_metrics()
                                     ).await.map_err(|_| anyhow!("Timeout error; GetNetworkMetrics")) {
                                         Ok(result) => {
                                             let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(result));
                                         },
                                         Err(err) => {
+                                            error!("GetNetworkMetrics timed out after 30s");
                                             let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(Err(err)));
                                         },
                                     }
@@ -414,6 +415,13 @@ impl HolochainService {
                                         },
                                     }
                                 }
+                                HolochainServiceRequest::SignWithKey(agent_key, data, response_tx) => {
+                                    let keystore = service.conductor.keystore();
+                                    let data_arc = Arc::from(data.into_boxed_slice());
+                                    let result = keystore.sign(agent_key, data_arc).await
+                                        .map_err(|e| anyhow!("Failed to sign with key: {}", e));
+                                    let _ = response_tx.send(HolochainServiceResponse::SignWithKey(result));
+                                }
                             };
                         };
                         error!("Holochain service receiver closed");
@@ -456,6 +464,19 @@ impl HolochainService {
                 .ok_or_else(|| anyhow!("No Holochain config stored for restart"))?
         };
 
+        // Shut down the old conductor first so it releases the port
+        if let Some(hc) = maybe_get_holochain_service().await {
+            log::info!("Shutting down old Holochain conductor...");
+            if let Err(e) = hc.shutdown().await {
+                log::warn!(
+                    "Error shutting down old conductor (continuing anyway): {}",
+                    e
+                );
+            }
+            // Give the OS time to release the port
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
         // Restart the service with the stored config
         Self::init(config).await
     }
@@ -468,7 +489,7 @@ impl HolochainService {
     pub async fn new(local_config: LocalConductorConfig) -> Result<HolochainService, AnyError> {
         let conductor_yaml_path =
             std::path::Path::new(&local_config.conductor_path).join("conductor_config.yaml");
-        let config = if conductor_yaml_path.exists() {
+        let mut config = if conductor_yaml_path.exists() {
             ConductorConfig::load_yaml(&conductor_yaml_path)?
         } else {
             let mut config = ConductorConfig::default();
@@ -497,16 +518,37 @@ impl HolochainService {
                 network_config.relay_url = Url2::parse("http://bootstrap.ad4m.dev:4433/relay");
             }
 
-            network_config.bootstrap_url =
-                Url2::parse("https://dev-test-bootstrap2.holochain.org/");
-            network_config.signal_url = Url2::parse("wss://dev-test-bootstrap2.holochain.org/");
-            network_config.relay_url =
-                Url2::parse("https://use1-1.relay.n0.iroh-canary.iroh.link./");
-
             config.network = network_config;
 
             config
         };
+
+        // Apply unyt space override: the unyt DNA gets its own bootstrap, signal,
+        // relay, and auth material. All other DNAs use the AD4M defaults above.
+        let dna_hash_opt = crate::db::Ad4mDb::global_instance()
+            .lock()
+            .ok()
+            .and_then(|guard| {
+                guard
+                    .as_ref()
+                    .and_then(|db| db.get_setting("unyt_dna_hash").ok().flatten())
+            });
+        if let Some(dna_hash) = dna_hash_opt {
+            //if let Ok(Some(auth_material)) =
+            //    crate::db::Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material"))
+            //{
+            info!("Applying unyt space override for DNA {}", dna_hash);
+            config.network.space_overrides.insert(
+                dna_hash,
+                SpaceNetworkOverride {
+                    bootstrap_url: Some(Url2::parse(crate::unyt_service::UNYT_BOOTSTRAP_URL)),
+                    signal_url: Some(Url2::parse(crate::unyt_service::UNYT_SIGNAL_URL)),
+                    base64_auth_material: None,
+                    relay_url: Some(Url2::parse(crate::unyt_service::UNYT_RELAY_URL)),
+                },
+            );
+            //}
+        }
 
         info!("Starting holochain conductor with config: {:#?}", config);
         let passphrase_locked_array =
