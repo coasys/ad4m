@@ -4,7 +4,7 @@ import autoBind from "auto-bind";
 import { VerificationRequestResult } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
 import { connectWebSocket, setLocal } from "./utils";
 import Ad4mConnect from "./core";
-import { Ad4mLogo } from "./components/icons";
+import { Ad4mLogo, ArrowLeftIcon, CreditIcon } from "./components/icons";
 import { fetchHosts } from "./services/hostIndex";
 import type { RemoteHost, UserInfo } from "./types";
 
@@ -81,6 +81,7 @@ const styles = css`
   }
 
   .modal-header {
+    position: relative;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -93,6 +94,28 @@ const styles = css`
     height: 70px;
   }
 
+  .modal-header .back-button {
+    all: unset;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 16px;
+    color: rgba(255, 255, 255, 0.5);
+    position: absolute;
+    left: 0;
+    top: 0;
+  }
+
+  .modal-header .back-button svg {
+    width: 20px;
+    height: 20px;
+  }
+
+  .modal-header .back-button:hover {
+    color: rgba(255, 255, 255, 0.8);
+  }
+
   .modal-content {
     display: flex;
     flex-direction: column;
@@ -101,19 +124,52 @@ const styles = css`
     min-height: 0;
   }
 
+  .settings-bar {
+    position: fixed;
+    bottom: 10px;
+    right: 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    z-index: 99999;
+  }
+
+  .credit-badge {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--ac-background-color);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--ac-border-color-dark);
+    border-radius: 20px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--ac-primary-color);
+    white-space: nowrap;
+  }
+
+  .credit-badge svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .credit-badge.low-credit {
+    color: var(--ac-danger-color);
+    border-color: var(--ac-danger-color);
+    animation: pulse-danger 2s ease-in-out infinite;
+  }
+
   .settings-button {
     appearance: none;
     border: none;
     background: transparent;
     padding: 0;
     cursor: pointer;
-    position: fixed;
-    bottom: 10px;
-    right: 10px;
     color: var(--ac-primary-color);
     width: 34px;
     height: 34px;
-    z-index: 99999;
   }
 
   .settings-button.low-credit {
@@ -180,7 +236,7 @@ export class Ad4mConnectElement extends LitElement {
         incoming.hotWalletAddress = this.userInfo.hotWalletAddress;
       }
       this.userInfo = incoming;
-      this.lowCredit = this.userInfo.remainingCredits <= 10;
+      this.lowCredit = this.userInfo.remainingCredits <= this.core.lowCreditThreshold;
       this.requestUpdate();
     });
 
@@ -200,7 +256,7 @@ export class Ad4mConnectElement extends LitElement {
         // If we have a connected host, start credit polling
         if (this.core.connectedHost) {
           this.selectedHost = this.core.connectedHost;
-          this.core.startCreditPolling();
+          this.core.startCreditSubscription();
         }
       }).catch((error) => {
         // Connection failed - show connection options
@@ -314,7 +370,7 @@ export class Ad4mConnectElement extends LitElement {
     // Called after successful remote auth when a host is selected
     if (this.selectedHost) {
       this.core.setConnectedHost(this.selectedHost);
-      this.core.startCreditPolling();
+      this.core.startCreditSubscription();
       this.currentView = "logged-in-dashboard";
     } else {
       this.modalOpen = false;
@@ -419,6 +475,34 @@ export class Ad4mConnectElement extends LitElement {
     window.location.reload();
   }
 
+  private get backTarget(): Views | null {
+    switch (this.currentView) {
+      case "local-authentication": return "connection-options";
+      case "host-browser": return "connection-options";
+      case "host-detail": return "host-browser";
+      case "remote-authentication": return this.selectedHost ? "host-detail" : "connection-options";
+      default: return null;
+    }
+  }
+
+  private handleBack() {
+    const target = this.backTarget;
+    if (target) {
+      if (this.currentView === "remote-authentication") {
+        this.resetRemoteAuthState();
+      }
+      this.currentView = target;
+    }
+  }
+
+  private resetRemoteAuthState() {
+    this.remoteAuthState = null;
+    this.remoteAuthLoading = false;
+    this.emailCodeError = false;
+    this.passwordError = false;
+    this.accountCreationError = false;
+  }
+
   renderViews() {
     if (this.currentView === "connection-options") {
       return html`
@@ -489,6 +573,7 @@ export class Ad4mConnectElement extends LitElement {
           @password-login=${this.passwordLogin}
           @create-account=${this.createAccount}
           @clear-email-code-error=${() => { this.emailCodeError = false; }}
+          @reset-auth-state=${() => { this.resetRemoteAuthState(); }}
         ></remote-authentication>
       `;
     }
@@ -528,6 +613,11 @@ export class Ad4mConnectElement extends LitElement {
         <div class="wrapper">
           <div class="modal">
             <header class="modal-header">
+              ${this.backTarget ? html`
+                <button class="back-button" aria-label="Go back" @click=${this.handleBack}>
+                  ${ArrowLeftIcon()} Back
+                </button>
+              ` : ''}
               ${Ad4mLogo()}
             </header>
             <main class="modal-content">
@@ -539,19 +629,26 @@ export class Ad4mConnectElement extends LitElement {
       `;
     } else if (this.core.authState === "authenticated") {
       // Show settings button when authenticated and modal is closed
+      const credits = this.userInfo?.remainingCredits;
       return html`
-        <button
-          type="button"
-          class="settings-button ${this.lowCredit ? 'low-credit' : ''}"
-          aria-label="Open settings"
-          @click=${() => {
-            // If connected to a remote host, show dashboard; otherwise show current-state
-            this.currentView = this.core.connectedHost ? "logged-in-dashboard" : "current-state";
-            this.modalOpen = true;
-          }}
-        >
-          ${Ad4mLogo()}
-        </button>
+        <div class="settings-bar">
+          ${credits != null ? html`
+            <span class="credit-badge ${this.lowCredit ? 'low-credit' : ''}">
+              ${CreditIcon()} ${credits.toFixed(2)} HOT
+            </span>
+          ` : ''}
+          <button
+            type="button"
+            class="settings-button ${this.lowCredit ? 'low-credit' : ''}"
+            aria-label="Open settings"
+            @click=${() => {
+              this.currentView = this.core.connectedHost ? "logged-in-dashboard" : "current-state";
+              this.modalOpen = true;
+            }}
+          >
+            ${Ad4mLogo()}
+          </button>
+        </div>
       `;
     }
 

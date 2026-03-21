@@ -1,7 +1,7 @@
 import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { sharedStyles } from "../../styles/shared-styles";
-import { ArrowLeftIcon } from "../icons";
+import { MapPinIcon } from "../icons";
 import { renderHostAvatar } from "../shared/avatar";
 import type { RemoteHost } from "../../types";
 
@@ -45,7 +45,7 @@ export class HostBrowser extends LitElement {
       .host-card {
         display: flex;
         align-items: center;
-        gap: 12px;
+        gap: 16px;
         padding: 14px;
         border-radius: 8px;
         background: rgba(128, 178, 201, 0.10);
@@ -67,8 +67,8 @@ export class HostBrowser extends LitElement {
       }
 
       .host-avatar {
-        width: 40px;
-        height: 40px;
+        width: 60px;
+        height: 60px;
         border-radius: 50%;
         flex-shrink: 0;
         object-fit: cover;
@@ -98,10 +98,17 @@ export class HostBrowser extends LitElement {
       }
 
       .host-location {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
         font-size: 13px;
         color: rgba(255, 255, 255, 0.6);
         margin: 2px 0 0 0;
         text-align: left;
+      }
+
+      .host-location svg {
+        opacity: 0.7;
       }
 
       .host-meta {
@@ -112,8 +119,8 @@ export class HostBrowser extends LitElement {
       }
 
       .model-chip {
-        font-size: 11px;
-        padding: 2px 8px;
+        font-size: 12px;
+        padding: 3px 8px;
         border-radius: 10px;
         background: rgba(145, 227, 253, 0.15);
         color: var(--ac-primary-color);
@@ -123,28 +130,19 @@ export class HostBrowser extends LitElement {
       .rates-preview {
         font-size: 12px;
         color: rgba(255, 255, 255, 0.5);
-        margin-top: 4px;
+        margin-top: 6px;
         text-align: left;
       }
 
-      .spinner {
+      .spinner-container {
         display: flex;
         justify-content: center;
         padding: 40px 0;
       }
 
-      .spinner::after {
-        content: "";
+      .spinner-container .spinner {
         width: 32px;
         height: 32px;
-        border: 3px solid var(--ac-border-color-light);
-        border-top-color: var(--ac-primary-color);
-        border-radius: 50%;
-        animation: spin 0.8s linear infinite;
-      }
-
-      @keyframes spin {
-        to { transform: rotate(360deg); }
       }
 
       .divider {
@@ -191,11 +189,6 @@ export class HostBrowser extends LitElement {
         letter-spacing: 0.5px;
         font-weight: 600;
       }
-
-      button.back-button {
-        all: unset;
-        cursor: pointer;
-      }
     `
   ];
 
@@ -205,10 +198,6 @@ export class HostBrowser extends LitElement {
       this.manualUrl = this.defaultUrl;
       this.defaultApplied = true;
     }
-  }
-
-  private back() {
-    this.dispatchEvent(new CustomEvent("back", { bubbles: true, composed: true }));
   }
 
   private selectHost(host: RemoteHost) {
@@ -284,17 +273,13 @@ export class HostBrowser extends LitElement {
   render() {
     return html`
       <div class="container">
-        <button class="back-button" @click=${this.back} aria-label="Go back">
-          ${ArrowLeftIcon()}
-        </button>
-
         <div class="header">
           <h1>Remote Node</h1>
           <h3>Choose a host or enter a URL</h3>
         </div>
 
         ${this.loading ? html`
-          <div class="spinner"></div>
+          <div class="spinner-container"><div class="spinner"></div></div>
         ` : this.error ? html`
           <div class="box">
             <p style="color: var(--ac-danger-color)">${this.error}</p>
@@ -317,7 +302,7 @@ export class HostBrowser extends LitElement {
                     <p class="host-name">${host.name}</p>
                     ${host.id === this.lastHostId ? html`<span class="pinned-label">Last used</span>` : ''}
                   </div>
-                  <p class="host-location">${host.location}</p>
+                  <p class="host-location">${MapPinIcon()}${host.location}</p>
                   <div class="host-meta">
                     ${host.aiModels.map(model => html`<span class="model-chip">${model}</span>`)}
                   </div>

@@ -18,6 +18,7 @@ use tokio::sync::RwLock;
 use crate::db::Ad4mDb;
 use crate::holochain_service::holochain_service_extension::msgpack_value_to_json;
 use crate::holochain_service::interface::{get_holochain_service, maybe_get_holochain_service};
+use crate::pubsub::mark_credits_dirty;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1017,6 +1018,7 @@ fn credit_and_complete(request: &crate::db::PaymentRequest) {
         return;
     }
 
+    mark_credits_dirty(&request.user_email);
     info!("Credited user {} with {} HOT", request.user_email, amount);
 
     if let Some(ref action_hash) = request.proposal_action_hash {
@@ -1285,6 +1287,7 @@ pub async fn handle_signal(payload_json: &JsonValue) {
                         email, amount_f64, e
                     );
                 } else {
+                    mark_credits_dirty(&email);
                     info!(
                         "Credited user {} with {} HOT from mHOT payment",
                         email, amount_f64

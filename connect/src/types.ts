@@ -25,6 +25,7 @@ export type Ad4mConnectOptions = {
   allowedOrigins?: string[];
   // Hosting options
   hostIndexUrl?: string;     // URL of the central host index REST API
+  lowCreditThreshold?: number; // Credits level at which to warn the user (default: 10)
 };
 
 export type ConfigStates = "port" | "url" | "token";

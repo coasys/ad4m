@@ -2,7 +2,7 @@ import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { capSentence } from "@coasys/ad4m";
 import { sharedStyles } from "../../styles/shared-styles";
-import { Ad4mLogo, ArrowLeftIcon, ArrowLeftRightIcon, CheckIcon, CrossIcon } from "../icons";
+import { Ad4mLogo, ArrowLeftRightIcon, CheckIcon, CrossIcon } from "../icons";
 
 @customElement("local-authentication")
 export class LocalAuthentication extends LitElement {
@@ -13,6 +13,7 @@ export class LocalAuthentication extends LitElement {
 
   @state() private requestSent = false;
   @state() private securityCode: string = "";
+  @state() private verifying = false;
 
   static styles = [
     sharedStyles,
@@ -81,7 +82,9 @@ export class LocalAuthentication extends LitElement {
       .security-code {
         width: 100%;
         display: flex;
+        align-items: center;
         justify-content: center;
+        gap: 12px;
         margin-bottom: 20px;
       }
 
@@ -101,9 +104,10 @@ export class LocalAuthentication extends LitElement {
     `
   ];
 
-  private back() {
-    this.dispatchEvent(new CustomEvent("back", { bubbles: true, composed: true }));
-    this.dispatchEvent(new CustomEvent("clear-verification-error", { bubbles: true, composed: true }));
+  willUpdate(changedProps: import("lit").PropertyValues) {
+    if (changedProps.has('verificationError') && this.verificationError) {
+      this.verifying = false;
+    }
   }
 
   private requestCapability() {
@@ -112,6 +116,7 @@ export class LocalAuthentication extends LitElement {
   }
 
   private verifyCode() {
+    this.verifying = true;
     this.dispatchEvent(new CustomEvent("verify-code", { detail: { code: this.securityCode }, bubbles: true, composed: true }));
   }
 
@@ -132,10 +137,6 @@ export class LocalAuthentication extends LitElement {
   render() {
     return html`
       <div class="container">
-        <div class="back-button" @click=${this.back}>
-          ${ArrowLeftIcon()}
-        </div>
-
         <div class="header">
           <h1>${this.appname}</h1>
           <h3>wants to access your AD4M data</h3>
@@ -182,6 +183,7 @@ export class LocalAuthentication extends LitElement {
                 .value=${this.securityCode || ""}
                 @input=${this.onInputChange}
               />
+              ${this.verifying ? html`<div class="spinner"></div>` : ''}
             </div>
 
             ${this.verificationError

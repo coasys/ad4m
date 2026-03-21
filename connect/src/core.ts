@@ -10,7 +10,8 @@ import { fetchUserInfo, requestPayment } from './services/hostIndex';
 
 const DEFAULT_PORT = 12000;
 const DEFAULT_INDEX_URL = "https://hosting.ad4m.dev";
-const CREDIT_POLL_INTERVAL_MS = 30000;
+const CREDIT_POLL_INTERVAL_MS = 60000;
+const DEFAULT_LOW_CREDIT_THRESHOLD = 10;
 
 export default class Ad4mConnect extends EventTarget {
   options: Ad4mConnectOptions;
@@ -31,6 +32,7 @@ export default class Ad4mConnect extends EventTarget {
   connectedHost: RemoteHost | null = null;
   userInfo: UserInfo | null = null;
   hostIndexUrl: string;
+  lowCreditThreshold: number;
   private creditPollInterval: ReturnType<typeof setInterval> | null = null;
 
   private embeddedResolve?: (client: Ad4mClient) => void;
@@ -46,6 +48,7 @@ export default class Ad4mConnect extends EventTarget {
     this.token = getLocal("ad4m-token") || '';
     this.embedded = isEmbedded();
     this.hostIndexUrl = options.hostIndexUrl || DEFAULT_INDEX_URL;
+    this.lowCreditThreshold = options.lowCreditThreshold ?? DEFAULT_LOW_CREDIT_THRESHOLD;
 
     // Restore last connected host for UI pinning
     const lastHost = getLocal("ad4m-last-host");
@@ -274,7 +277,41 @@ export default class Ad4mConnect extends EventTarget {
     console.log('[Ad4m Connect] Disconnected successfully');
   }
 
-  // Hosting — credit polling & top-up
+  // Hosting — credit subscription & polling fallback
+
+  /**
+   * Subscribe to real-time credit updates via GraphQL subscription.
+   * Falls back to polling if the subscription is not supported by the executor.
+   */
+  startCreditSubscription(): void {
+    if (!this.ad4mClient) return;
+
+    try {
+      this.ad4mClient.agent.addHostingUserInfoChangedListener((info) => {
+        const userInfo: UserInfo = {
+          email: info.email,
+          remainingCredits: info.remainingCredits === 'unlimited' ? Infinity : (parseFloat(info.remainingCredits) || 0),
+          hotWalletAddress: info.hotWalletAddress || null,
+          freeAccess: info.freeAccess,
+        };
+        this.userInfo = userInfo;
+        this.dispatchEvent(new CustomEvent('userinfochange', { detail: userInfo }));
+
+        if (userInfo.remainingCredits <= 0) {
+          this.dispatchEvent(new CustomEvent('creditdepleted'));
+        }
+        if (userInfo.remainingCredits <= this.lowCreditThreshold) {
+          this.dispatchEvent(new CustomEvent('creditlow'));
+        }
+      });
+      this.ad4mClient.agent.subscribeHostingUserInfoChanged();
+    } catch (e) {
+      console.warn('[Ad4m Connect] Subscription not available, falling back to polling:', e);
+    }
+
+    // Always start polling as a safety-net (at a longer 60s interval)
+    this.startCreditPolling();
+  }
 
   startCreditPolling(): void {
     this.stopCreditPolling();
@@ -286,6 +323,9 @@ export default class Ad4mConnect extends EventTarget {
         this.userInfo = info;
         this.dispatchEvent(new CustomEvent('userinfochange', { detail: info }));
 
+        if (info.remainingCredits <= this.lowCreditThreshold) {
+          this.dispatchEvent(new CustomEvent('creditlow'));
+        }
         if (info.remainingCredits <= 0) {
           this.dispatchEvent(new CustomEvent('creditdepleted'));
         }
@@ -314,7 +354,7 @@ export default class Ad4mConnect extends EventTarget {
   /** Persist selected host after successful auth */
   setConnectedHost(host: RemoteHost): void {
     this.connectedHost = host;
-    setLocal('ad4m-last-host', JSON.stringify({ id: host.id, url: host.url, name: host.name }));
+    setLocal('ad4m-last-host', JSON.stringify({ id: host.id, url: host.url, name: host.name, location: host.location }));
   }
 
   // Embedded mode
