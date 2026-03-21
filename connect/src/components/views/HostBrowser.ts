@@ -182,6 +182,24 @@ export class HostBrowser extends LitElement {
         flex-shrink: 0;
       }
 
+      .trust-notice {
+        display: flex;
+        gap: 10px;
+        padding: 12px 14px;
+        border-radius: 8px;
+        background: rgba(255, 200, 50, 0.08);
+        border: 1px solid rgba(255, 200, 50, 0.25);
+        margin-bottom: 12px;
+        font-size: 13px;
+        line-height: 1.45;
+        color: rgba(255, 255, 255, 0.75);
+      }
+
+      .trust-notice svg {
+        flex-shrink: 0;
+        margin-top: 1px;
+      }
+
       .pinned-label {
         font-size: 11px;
         color: var(--ac-primary-color);
@@ -276,6 +294,15 @@ export class HostBrowser extends LitElement {
         <div class="header">
           <h1>Remote Node</h1>
           <h3>Choose a host or enter a URL</h3>
+        </div>
+
+        <div class="trust-notice">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="rgba(255, 200, 50, 0.9)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+          <span>By connecting to a remote host, you are trusting them to run AD4M on your behalf. Your data will be stored on their machine and they will have access to your agent's operations. Only connect to hosts you trust.</span>
         </div>
 
         ${this.loading ? html`
