@@ -380,10 +380,10 @@ export async function isExecutorRunning(
     probe(
       graphqlHttpUrl,
       JSON.stringify({ query: "{ agentStatus { isInitialized } }" }),
-      (json) =>
-        json != null &&
-        !json.errors?.length &&
-        json.data?.agentStatus != null,
+      // Unauthenticated requests lack AGENT_READ_CAPABILITY so the query
+      // returns errors — but any GraphQL-shaped response (data or errors key)
+      // confirms an AD4M executor is listening.
+      (json) => json != null && ("data" in json || "errors" in json),
     ),
   ]);
 
