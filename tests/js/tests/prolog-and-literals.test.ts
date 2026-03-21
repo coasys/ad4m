@@ -52,10 +52,10 @@ describe("Prolog + Literals", () => {
     })
 
     after(async () => {
-        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
         if (executorProcess) {
             await quitExecutor(executorProcess, gqlPort);
         }
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
     })
 
     it("should get agent status", async () => {

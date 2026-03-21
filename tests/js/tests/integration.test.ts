@@ -129,13 +129,13 @@ describe("Integration tests", function () {
     })
 
     after(async () => {
-      deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
       if (executorProcess) {
         await quitExecutor(executorProcess, gqlPort);
       }
       if (localServicesProcess) {
         localServicesProcess.kill('SIGKILL');
       }
+      deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
@@ -185,10 +185,10 @@ describe("Integration tests", function () {
         })
 
         after(async () => {
-          deregisterPorts([bobGqlPort, bobHcAdminPort, bobHcAppPort]);
           if (bobExecutorProcess) {
             await quitExecutor(bobExecutorProcess, bobGqlPort);
           }
+          deregisterPorts([bobGqlPort, bobHcAdminPort, bobHcAppPort]);
         })
 
         describe('Agent Language', agentLanguageTests(testContext))

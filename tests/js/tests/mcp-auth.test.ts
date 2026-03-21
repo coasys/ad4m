@@ -87,7 +87,6 @@ describe("MCP Authentication HTTP Tests", function() {
     });
 
     after(async () => {
-        deregisterPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
         if (executorProcess) {
             executorProcess.kill('SIGTERM');
             await sleep(1000);
@@ -98,6 +97,7 @@ describe("MCP Authentication HTTP Tests", function() {
         // Port-based kill as safety net — catches the executor even if the
         // ChildProcess handle is stale or kill() missed a grandchild process.
         killByPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
     });
 
     // ========================================================================

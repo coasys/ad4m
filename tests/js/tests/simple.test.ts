@@ -38,8 +38,8 @@ describe("Integration", () => {
   })
 
   after(async () => {
-    deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
     await gracefulShutdown(executorProcess, "executor");
+    deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
   })
 
   it("should get agent status", async () => {

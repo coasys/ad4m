@@ -72,7 +72,6 @@ describe("Email Verification with Mock Service", () => {
     })
 
     after(async () => {
-        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
         if (adminAd4mClient) {
             await adminAd4mClient.runtime.emailTestModeDisable()
         }
@@ -83,6 +82,7 @@ describe("Email Verification with Mock Service", () => {
         if (localServicesProcess) {
             localServicesProcess.kill('SIGKILL');
         }
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
     })
 
     beforeEach(async () => {

@@ -53,10 +53,10 @@ describe("Apps integration tests", () => {
   })
 
   after(async () => {
-    deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
     if (executorProcess) {
       await quitExecutor(executorProcess, gqlPort, "123");
     }
+    deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
   })
 
   it("once token issued user can get all authenticated apps", async () => {

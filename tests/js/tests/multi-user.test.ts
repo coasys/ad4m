@@ -47,10 +47,10 @@ describe("Multi-User integration tests", () => {
     })
 
     after(async () => {
-        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
         if (executorProcess) {
             await quitExecutor(executorProcess, gqlPort);
         }
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
     })
 
     describe("User Registration and Authentication", () => {

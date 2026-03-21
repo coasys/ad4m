@@ -46,10 +46,10 @@ describe("Authentication integration tests", () => {
         })
 
         after(async () => {
-            deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
             if (executorProcess) {
                 await quitExecutor(executorProcess, gqlPort);
             }
+            deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
         })
 
         it("unauthenticated user has all the capabilities", async () => {
@@ -110,10 +110,10 @@ describe("Authentication integration tests", () => {
         })
 
         after(async () => {
-            deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
             if (executorProcess) {
                 await quitExecutor(executorProcess, gqlPort, "123");
             }
+            deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
         })
 
         it("unauthenticated user can not query agent status", async () => {

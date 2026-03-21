@@ -70,9 +70,9 @@ describe("Multi-User Simple integration tests", () => {
     })
 
     after(async () => {
-        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
         await gracefulShutdown(executorProcess, "executor");
         await gracefulShutdown(localServicesProcess, "local services");
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
     })
 
     describe("Multi-User Configuration", () => {
@@ -1684,9 +1684,9 @@ describe("Multi-User Simple integration tests", () => {
     describe("Multi-Node Multi-User Integration", () => {
         // Test with 2 nodes, each with 2 users (4 users total)
         const node2AppDataPath = path.join(TEST_DIR, "agents", "multi-user-node2");
-        const node2GqlPort = 16000;
-        const node2HcAdminPort = 16001;
-        const node2HcAppPort = 16002;
+        let node2GqlPort: number;
+        let node2HcAdminPort: number;
+        let node2HcAppPort: number;
 
         let node2ExecutorProcess: ChildProcess | null = null;
         let node2AdminClient: Ad4mClient | null = null;
@@ -1705,6 +1705,9 @@ describe("Multi-User Simple integration tests", () => {
 
         before(async function() {
             this.timeout(300000); // Increase timeout for setup with Holochain 0.7.0
+
+            [node2GqlPort, node2HcAdminPort, node2HcAppPort] = await getFreePorts(3);
+            registerPorts([node2GqlPort, node2HcAdminPort, node2HcAppPort]);
 
             console.log("\n=== Setting up Node 2 ===");
             if (!fs.existsSync(node2AppDataPath)) {
@@ -1780,6 +1783,7 @@ describe("Multi-User Simple integration tests", () => {
         after(async function() {
             this.timeout(20000);
             await gracefulShutdown(node2ExecutorProcess, "node 2 executor");
+            deregisterPorts([node2GqlPort, node2HcAdminPort, node2HcAppPort]);
         });
 
         it("should return all DIDs in 'others()' for each user", async function() {

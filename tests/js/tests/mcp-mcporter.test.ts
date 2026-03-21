@@ -103,7 +103,6 @@ describe("MCP mcporter Integration Tests", function() {
     });
 
     after(async () => {
-        deregisterPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
         if (executorProcess) {
             executorProcess.kill('SIGTERM');
             await sleep(1000);
@@ -112,6 +111,7 @@ describe("MCP mcporter Integration Tests", function() {
             }
         }
         killByPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
     });
 
     // ========================================================================

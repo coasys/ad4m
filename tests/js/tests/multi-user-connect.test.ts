@@ -48,10 +48,10 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
     })
 
     after(async () => {
-        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
         if (executorProcess) {
             await quitExecutor(executorProcess, gqlPort);
         }
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
     })
 
     describe("Multi-User Connect Flow", () => {

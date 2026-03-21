@@ -216,7 +216,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     });
 
     after(async () => {
-        deregisterPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
         if (executorProcess) {
             executorProcess.kill('SIGTERM');
             await sleep(1000);
@@ -226,6 +225,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         }
         // Port-based kill as safety net
         killByPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
     });
 
     // ========================================================================
