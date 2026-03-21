@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep, startExecutor, killByPorts } from "../utils/utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch';
 import { McpResponse, mcpHttpRequest, callMcpTool, listMcpTools, initializeMcp } from './mcp-utils';
@@ -43,8 +44,8 @@ const __dirname = path.dirname(__filename);
 // MCP HTTP Client Helpers (imported from shared mcp-utils.ts)
 // ============================================================================
 
-const MCP_PORT = 16003;
-const MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
+let MCP_PORT: number;
+let MCP_BASE_URL: string;
 
 // ============================================================================
 // SHACL definitions for Flux models (Channel and Message)
@@ -157,9 +158,9 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     const TEST_DIR = path.join(__dirname + "/../tst-tmp");
     const appDataPath = path.join(TEST_DIR, "agents", "mcp-http-test");
     const bootstrapSeedPath = path.join(__dirname + "/../bootstrapSeed.json");
-    const gqlPort = 16000;
-    const hcAdminPort = 16001;
-    const hcAppPort = 16002;
+    let gqlPort: number;
+    let hcAdminPort: number;
+    let hcAppPort: number;
     const adminCredential = "mcp-http-test-admin";
 
     let executorProcess: ChildProcess | null = null;
@@ -175,6 +176,10 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     let msg3Addr: string = "";
 
     before(async () => {
+        [gqlPort, hcAdminPort, hcAppPort, MCP_PORT] = await getFreePorts(4);
+        MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
+        registerPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+
         console.log(bootstrapSeedPath);
         console.log(appDataPath);
 
@@ -211,6 +216,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     });
 
     after(async () => {
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
         if (executorProcess) {
             executorProcess.kill('SIGTERM');
             await sleep(1000);

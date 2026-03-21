@@ -14,6 +14,7 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
 } from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
 import { startExecutor, apolloClient, quitExecutor } from "../utils/utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import path from "path";
 import { fileURLToPath } from 'url';
 import fetch from 'node-fetch'
@@ -32,11 +33,13 @@ describe("Prolog + Literals", () => {
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
     const appDataPath = path.join(TEST_DIR, "agents", "prolog-agent");
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    const gqlPort = 16600
-    const hcAdminPort = 16601
-    const hcAppPort = 16602
+    let gqlPort: number;
+    let hcAdminPort: number;
+    let hcAppPort: number;
 
     before(async () => {
+        [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+        registerPorts([gqlPort, hcAdminPort, hcAppPort]);
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
             gqlPort, hcAdminPort, hcAppPort);
 
@@ -49,6 +52,7 @@ describe("Prolog + Literals", () => {
     })
 
     after(async () => {
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
         if (executorProcess) {
             await quitExecutor(executorProcess, gqlPort);
         }

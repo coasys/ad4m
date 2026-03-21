@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep, startExecutor, quitExecutor } from "../utils/utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
 import { ExceptionInfo } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
@@ -23,14 +24,16 @@ describe("Authentication integration tests", () => {
         const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
         const appDataPath = path.join(TEST_DIR, "agents", "unauth-agent");
         const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-        const gqlPort = 15100
-        const hcAdminPort = 15101
-        const hcAppPort = 15102
+        let gqlPort: number;
+        let hcAdminPort: number;
+        let hcAppPort: number;
 
         let executorProcess: ChildProcess | null = null
         let ad4mClient: Ad4mClient | null = null
 
         before(async () => {
+            [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+            registerPorts([gqlPort, hcAdminPort, hcAppPort]);
             if (!fs.existsSync(appDataPath)) {
                 fs.mkdirSync(appDataPath, { recursive: true });
             }
@@ -43,6 +46,7 @@ describe("Authentication integration tests", () => {
         })
 
         after(async () => {
+            deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
             if (executorProcess) {
                 await quitExecutor(executorProcess, gqlPort);
             }
@@ -81,15 +85,17 @@ describe("Authentication integration tests", () => {
         const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
         const appDataPath = path.join(TEST_DIR, "agents", "auth-agent");
         const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-        const gqlPort = 15200
-        const hcAdminPort = 15202
-        const hcAppPort = 15203
+        let gqlPort: number;
+        let hcAdminPort: number;
+        let hcAppPort: number;
 
         let executorProcess: ChildProcess | null = null
         let adminAd4mClient: Ad4mClient | null = null
         let unAuthenticatedAppAd4mClient: Ad4mClient | null = null
 
         before(async () => {
+            [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+            registerPorts([gqlPort, hcAdminPort, hcAppPort]);
             if (!fs.existsSync(appDataPath)) {
                 fs.mkdirSync(appDataPath, { recursive: true });
             }
@@ -104,6 +110,7 @@ describe("Authentication integration tests", () => {
         })
 
         after(async () => {
+            deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
             if (executorProcess) {
                 await quitExecutor(executorProcess, gqlPort, "123");
             }

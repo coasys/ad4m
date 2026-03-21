@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep, startExecutor, runHcLocalServices, gracefulShutdown } from "../utils/utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
 import { LinkQuery } from "@coasys/ad4m";
@@ -26,9 +27,9 @@ describe("Multi-User Simple integration tests", () => {
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
     const appDataPath = path.join(TEST_DIR, "agents", "multi-user-simple");
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    const gqlPort = 15900
-    const hcAdminPort = 15901
-    const hcAppPort = 15902
+    let gqlPort: number;
+    let hcAdminPort: number;
+    let hcAppPort: number;
 
     let executorProcess: ChildProcess | null = null
     let adminAd4mClient: Ad4mClient | null = null
@@ -45,6 +46,8 @@ describe("Multi-User Simple integration tests", () => {
     }
 
     before(async () => {
+        [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+        registerPorts([gqlPort, hcAdminPort, hcAppPort]);
         if (!fs.existsSync(appDataPath)) {
             fs.mkdirSync(appDataPath, { recursive: true });
         }
@@ -67,6 +70,7 @@ describe("Multi-User Simple integration tests", () => {
     })
 
     after(async () => {
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
         await gracefulShutdown(executorProcess, "executor");
         await gracefulShutdown(localServicesProcess, "local services");
     })
