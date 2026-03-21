@@ -124,6 +124,13 @@ const Hosting = () => {
     message: string;
   } | null>(null);
   const [hostRegistering, setHostRegistering] = useState(false);
+
+  // Auto-clear status messages after 5 seconds
+  useEffect(() => {
+    if (!hostRegStatus) return;
+    const timer = setTimeout(() => setHostRegStatus(null), 5000);
+    return () => clearTimeout(timer);
+  }, [hostRegStatus]);
   const [profilePic, setProfilePic] = useState<File | null>(null);
   const [profilePicUrl, setProfilePicUrl] = useState<string | null>(null);
   React.useEffect(() => {
