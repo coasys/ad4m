@@ -66,6 +66,7 @@ const Profile = (props: Props) => {
 
   const [clearAgentModalOpen, setClearAgentModalOpen] = useState(false);
   const [showAgentSelection, setShowAgentSelection] = useState(false);
+  const [pendingSwitchAgent, setPendingSwitchAgent] = useState<any>(null);
   const [createAgent, setCreateAgent] = useState(false);
   const [newAgentName, setNewAgentName] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -905,25 +906,83 @@ const Profile = (props: Props) => {
             </j-text>
             <j-box p="200"></j-box>
             {appState.agent_list.map((agent: any) => (
-              <>
-                <j-button
-                  full
-                  variant={agent.path === appState.selected_agent.path ? "primary" : "secondary"}
-                  onClick={() => {
-                    invoke("set_selected_agent", { agent });
-                    getAppState();
-                    setShowAgentSelection(false);
-                  }}
-                >
-                  {agent.name}
-                </j-button>
-                <j-box p="300"></j-box>
-              </>
+              <div key={agent.path} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                <div style={{ flex: 1 }}>
+                  <j-button
+                    full
+                    variant={agent.path === appState.selected_agent.path ? "primary" : "secondary"}
+                    onClick={() => {
+                      if (agent.path !== appState.selected_agent.path) {
+                        setShowAgentSelection(false);
+                        setPendingSwitchAgent(agent);
+                      } else {
+                        setShowAgentSelection(false);
+                      }
+                    }}
+                  >
+                    {agent.name}
+                  </j-button>
+                </div>
+                <div style={{ width: 36, flexShrink: 0 }}>
+                  {agent.path !== appState.selected_agent.path && (
+                    <j-button
+                      variant="danger"
+                      size="sm"
+                      square
+                      onClick={async () => {
+                        const confirmed = await dialogAsk(
+                          `Are you sure you want to delete agent "${agent.name}"? This will permanently remove all its data.`,
+                          { title: "Delete Agent", kind: "warning" }
+                        );
+                        if (confirmed) {
+                          try {
+                            await invoke("delete_agent", { agent });
+                            getAppState();
+                          } catch (e: any) {
+                            await dialogMessage(e, { title: "Error", kind: "error" } as MessageDialogOptions);
+                          }
+                        }
+                      }}
+                    >
+                      <j-icon name="trash" size="sm"></j-icon>
+                    </j-button>
+                  )}
+                </div>
+              </div>
             ))}
             <j-button full onCLick={() => setCreateAgent(true)} variant="secondary">
               <j-icon name="plus"></j-icon>
               Add new agent
             </j-button>
+          </j-box>
+        </j-modal>
+      )}
+
+      {pendingSwitchAgent && (
+        <j-modal
+          open={true}
+          onToggle={(e: any) => { if (!e.target.open) setPendingSwitchAgent(null); }}
+        >
+          <j-box px="400" py="600">
+            <j-flex direction="column" a="center" gap="500" style={{ textAlign: "center" }}>
+              <j-text nomargin size="800">
+                Switch to "{pendingSwitchAgent.name}"?
+              </j-text>
+              <j-text nomargin size="600" color="ui-800">
+                The app will close. Please reopen it to start with the new agent.
+              </j-text>
+              <j-flex gap="400">
+                <j-button size="xl" onClick={() => setPendingSwitchAgent(null)}>
+                  Cancel
+                </j-button>
+                <j-button size="xl" variant="primary" onClick={async () => {
+                  await invoke("set_selected_agent", { agent: pendingSwitchAgent });
+                  await invoke("close_application");
+                }}>
+                  Switch and quit
+                </j-button>
+              </j-flex>
+            </j-flex>
           </j-box>
         </j-modal>
       )}
