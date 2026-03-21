@@ -1164,14 +1164,14 @@ const Hosting = () => {
             }}
           >
             <span style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
-              Paid hosting via <HotLogo size={20} /> HOT
+              Paid hosting via <HotLogo size={20} /> wHOT
             </span>
           </j-toggle>
           <j-box mt="200">
             <j-text size="400" color="ui-500">
               {freeHostingEnabled
                 ? "All users have free access. No payment or wallet setup required."
-                : "Users pay with HOT credits to use this node. Configure your wallet below."}
+                : "Users pay with wHOT credits to use this node. Configure your wallet below."}
             </j-text>
           </j-box>
         </j-box>
@@ -1211,7 +1211,7 @@ const Hosting = () => {
             >
               <j-box mb="300">
                 <j-text size="400" color="ui-500">
-                  Required for receiving mHOT payments. The Unyt DNA enables
+                  Required for receiving wHOT payments. The Unyt DNA enables
                   your AD4M instance to join the payment network.
                 </j-text>
               </j-box>
@@ -1476,7 +1476,7 @@ const Hosting = () => {
                   >
                     <j-box mb="400">
                       <j-text size="400" color="ui-500">
-                        Register to appear in ad4m-connect and receive mHOT
+                        Register to appear in ad4m-connect and receive wHOT
                         payments.
                       </j-text>
                     </j-box>
@@ -1903,7 +1903,7 @@ const Hosting = () => {
                         try { parsed = JSON.parse(hostReg.rates); } catch {}
                         if (!Array.isArray(parsed)) parsed = [];
 
-                        // Defaults in HOT (at ~$0.0004/HOT)
+                        // Defaults in wHOT (at ~$0.0004/wHOT)
                         const DEFAULT_LINK_PRICE = 0.25;    // ~$0.0001 per link
                         const DEFAULT_TOKEN_PRICE = 12.5;   // ~$0.005 per token, avg API pricing
 
@@ -2006,7 +2006,7 @@ const Hosting = () => {
                               }}
                             >
                               <span>Item</span>
-                              <span>Price (HOT)</span>
+                              <span>Price (wHOT)</span>
                             </div>
 
                             {/* Base link price */}

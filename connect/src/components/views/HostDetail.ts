@@ -188,7 +188,7 @@ export class HostDetail extends LitElement {
                 ${this.host.rates.filter(r => this.isOperationRate(r)).map(rate => html`
                   <tr>
                     <td>${this.rateLabel(rate.description)}</td>
-                    <td>${this.formatPrice(rate.priceInHOT)} HOT</td>
+                    <td>${this.formatPrice(rate.priceInHOT)} wHOT</td>
                   </tr>
                 `)}
                 ${this.host.rates.filter(r => !this.isOperationRate(r)).length > 0 ? html`
@@ -196,7 +196,7 @@ export class HostDetail extends LitElement {
                   ${this.host.rates.filter(r => !this.isOperationRate(r)).map(rate => html`
                     <tr>
                       <td>${rate.description}</td>
-                      <td>${this.formatPrice(rate.priceInHOT)} HOT</td>
+                      <td>${this.formatPrice(rate.priceInHOT)} wHOT</td>
                     </tr>
                   `)}
                 ` : ''}

@@ -311,7 +311,7 @@ export class HostBrowser extends LitElement {
                     const avgTokenPrice = this.getAvgTokenPrice(host.rates);
                     return html`
                     <p class="rates-preview">
-                      ${linkPrice != null ? html`Link: ${this.formatPrice(linkPrice)} HOT` : ''}${linkPrice != null && avgTokenPrice != null ? ' · ' : ''}${avgTokenPrice != null ? html`Token: ~${this.formatPrice(avgTokenPrice)} HOT` : ''}
+                      ${linkPrice != null ? html`Link: ${this.formatPrice(linkPrice)} wHOT` : ''}${linkPrice != null && avgTokenPrice != null ? ' · ' : ''}${avgTokenPrice != null ? html`Token: ~${this.formatPrice(avgTokenPrice)} wHOT` : ''}
                     </p>
                   `; })() : ''}
                 </div>

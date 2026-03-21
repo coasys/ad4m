@@ -130,7 +130,7 @@ const Wallet = () => {
           try {
             setBalance(JSON.parse(balStr));
           } catch {
-            setBalance({ HOT: balStr });
+            setBalance({ wHOT: balStr });
           }
         }
       } catch (e: any) {
@@ -341,7 +341,7 @@ const Wallet = () => {
                     {amount}
                   </j-text>
                   <span style={{ display: "inline-flex", alignItems: "baseline", gap: "3px", fontSize: "14px" }}>
-                    <span style={{ opacity: 0.6 }}>mirrored</span> <HotLogo size={22} />
+                    <span style={{ opacity: 0.6 }}>w</span> <HotLogo size={22} />
                   </span>
                 </span>
               ))
@@ -373,7 +373,7 @@ const Wallet = () => {
           <div style={{ marginTop: "12px" }}>
             <div style={{ marginBottom: "8px" }}>
               <j-text size="400" weight="500">
-                Amount (HOT)
+                Amount (wHOT)
               </j-text>
             </div>
             <j-flex a="center" gap="200">
@@ -542,7 +542,7 @@ const Wallet = () => {
             {confirmSend && (
               <div style={{ marginTop: "12px", padding: "12px 16px", background: "var(--j-color-ui-50)", borderRadius: "8px", border: "1px solid var(--j-color-warning-300)" }}>
                 <j-text size="400" weight="500">
-                  Confirm: Send {sendAmount} <span style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}><span style={{ fontSize: "0.75em", opacity: 0.6 }}>mirrored</span> <HotLogo size={16} /></span> to {sendRecipient.includes("@") ? sendRecipient : sendRecipient.substring(0, 12) + "..."}?
+                  Confirm: Send {sendAmount} <span style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}><span style={{ fontSize: "0.75em", opacity: 0.6 }}>w</span> <HotLogo size={16} /></span> to {sendRecipient.includes("@") ? sendRecipient : sendRecipient.substring(0, 12) + "..."}?
                 </j-text>
                 <j-flex gap="200" mt="200">
                   <j-button
@@ -734,7 +734,7 @@ const Wallet = () => {
                       </j-flex>
                       {amountStr && (
                         <j-text size="400" weight="500" color={amountColor}>
-                          {isIncoming && !isRejected ? "+" : isSend ? "-" : ""}{amountStr} <span style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}><span style={{ fontSize: "0.75em", opacity: 0.6 }}>m</span><HotLogo size={14} /></span>
+                          {isIncoming && !isRejected ? "+" : isSend ? "-" : ""}{amountStr} <span style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}><span style={{ fontSize: "0.75em", opacity: 0.6 }}>w</span><HotLogo size={14} /></span>
                         </j-text>
                       )}
                     </j-flex>

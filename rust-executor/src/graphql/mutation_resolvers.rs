@@ -3208,7 +3208,7 @@ impl Mutation {
             ));
         }
 
-        // Look up user's mHOT wallet address (= Holochain AgentPubKey)
+        // Look up user's wHOT wallet address (= Holochain AgentPubKey)
         let wallet_address = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
             .map_err(|e| FieldError::new(format!("DB error: {}", e), Value::null()))?;
 
@@ -3217,13 +3217,13 @@ impl Mutation {
             _ => {
                 return Ok(PaymentRequestResult {
                     success: false,
-                    message: "User has not set their mHOT wallet address. Call setHotWalletAddress first.".to_string(),
+                    message: "User has not set their wHOT wallet address. Call setHotWalletAddress first.".to_string(),
                 });
             }
         };
 
         // Create payment proposal via Unyt alliance DNA
-        let note = format!("AD4M hosting top-up: {} HOT for {}", amountHOT, user_email);
+        let note = format!("AD4M hosting top-up: {} wHOT for {}", amountHOT, user_email);
         match crate::unyt_service::create_proposal(&amountHOT, &wallet_address, Some(&note)).await {
             Ok(proposal_hash) => {
                 // Record the payment request in the DB — fail the whole operation if this doesn't persist
@@ -3238,7 +3238,7 @@ impl Mutation {
                 }
 
                 log::info!(
-                    "Created mHOT payment proposal {} for user={} amount={}",
+                    "Created wHOT payment proposal {} for user={} amount={}",
                     proposal_hash,
                     user_email,
                     amountHOT
@@ -3247,7 +3247,7 @@ impl Mutation {
                 Ok(PaymentRequestResult {
                     success: true,
                     message: format!(
-                        "Payment proposal created (hash: {}). Awaiting approval in user's mHOT wallet.",
+                        "Payment proposal created (hash: {}). Awaiting approval in user's wHOT wallet.",
                         proposal_hash
                     ),
                 })
@@ -3255,7 +3255,7 @@ impl Mutation {
             Err(e) => {
                 let err_str = e.to_string();
                 log::error!(
-                    "Failed to create mHOT payment proposal for user={}: {}",
+                    "Failed to create wHOT payment proposal for user={}: {}",
                     user_email,
                     err_str
                 );
@@ -3358,7 +3358,7 @@ impl Mutation {
         }
     }
 
-    /// Send mHOT from the host's wallet to an external address.
+    /// Send wHOT from the host's wallet to an external address.
     async fn runtime_send_hot(
         &self,
         context: &RequestContext,
@@ -3368,7 +3368,7 @@ impl Mutation {
         // Admin-only: only the host operator can send from the wallet
         if !context.is_admin_credential {
             return Err(FieldError::new(
-                "Only the admin (launcher) can send mHOT",
+                "Only the admin (launcher) can send wHOT",
                 Value::null(),
             ));
         }
@@ -3399,13 +3399,13 @@ impl Mutation {
             Ok(commitment_hash) => Ok(PaymentRequestResult {
                 success: true,
                 message: format!(
-                    "Sent {} HOT to {} (commitment: {})",
+                    "Sent {} wHOT to {} (commitment: {})",
                     amount, recipient, commitment_hash
                 ),
             }),
             Err(e) => Ok(PaymentRequestResult {
                 success: false,
-                message: format!("Failed to send mHOT: {}", e),
+                message: format!("Failed to send wHOT: {}", e),
             }),
         }
     }

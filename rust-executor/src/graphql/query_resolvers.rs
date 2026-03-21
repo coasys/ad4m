@@ -1160,7 +1160,7 @@ impl Query {
         Ok(serde_json::to_string(&json).unwrap_or_else(|_| "[]".to_string()))
     }
 
-    /// Get the host's mHOT wallet balance from the alliance DNA ledger.
+    /// Get the host's wHOT wallet balance from the alliance DNA ledger.
     async fn runtime_hot_wallet_balance(&self, context: &RequestContext) -> FieldResult<String> {
         check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
 
@@ -1174,13 +1174,13 @@ impl Query {
                 Ok(serde_json::to_string(&balance).unwrap_or_else(|_| "{}".to_string()))
             }
             Err(e) => Err(FieldError::new(
-                format!("Failed to get mHOT wallet balance: {}", e),
+                format!("Failed to get wHOT wallet balance: {}", e),
                 Value::null(),
             )),
         }
     }
 
-    /// Get the host's mHOT transaction history (outgoing + incoming).
+    /// Get the host's wHOT transaction history (outgoing + incoming).
     async fn runtime_hot_wallet_history(
         &self,
         context: &RequestContext,
@@ -1359,14 +1359,14 @@ impl Query {
         Ok(serde_json::to_string(&all_txs).unwrap_or_else(|_| "[]".to_string()))
     }
 
-    /// Get the host's mHOT agent public key (their identity on the mHOT DHT).
+    /// Get the host's wHOT agent public key (their identity on the wHOT DHT).
     async fn runtime_hot_agent_pubkey(&self, context: &RequestContext) -> FieldResult<String> {
         check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
 
         match crate::unyt_service::whoami().await {
             Ok(pubkey) => Ok(pubkey),
             Err(e) => Err(FieldError::new(
-                format!("Failed to get mHOT agent pubkey: {}", e),
+                format!("Failed to get wHOT agent pubkey: {}", e),
                 Value::null(),
             )),
         }

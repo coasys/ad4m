@@ -373,7 +373,7 @@ export class LoggedInDashboard extends LitElement {
 
           <!-- Wallet address -->
           <div class="wallet-section">
-            <label>${WalletIcon()} mHOT Wallet Address</label>
+            <label>${WalletIcon()} wHOT Wallet Address</label>
             ${this.hasWallet && !this.editingWallet ? html`
               <div class="wallet-row">
                 <div class="wallet-display" title=${this.userInfo!.hotWalletAddress}>${this.truncateMiddle(this.userInfo!.hotWalletAddress || '')}</div>
@@ -390,7 +390,7 @@ export class LoggedInDashboard extends LitElement {
               <div class="wallet-row">
                 <input
                   type="text"
-                  placeholder="Enter your mHOT wallet address"
+                  placeholder="Enter your wHOT wallet address"
                   .value=${this.walletInput}
                   @input=${(e: Event) => { this.walletInput = (e.target as HTMLInputElement).value; }}
                   @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter') this.setWalletAddress(); }}
@@ -414,7 +414,7 @@ export class LoggedInDashboard extends LitElement {
               <input
                 type="number"
                 min="1"
-                placeholder="Amount in HOT"
+                placeholder="Amount in wHOT"
                 .value=${this.topUpAmount}
                 @input=${(e: Event) => { this.topUpAmount = (e.target as HTMLInputElement).value; }}
                 @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter' && this.topUpAmount && Number(this.topUpAmount) > 0) this.requestTopUp(Number(this.topUpAmount)); }}
@@ -435,7 +435,7 @@ export class LoggedInDashboard extends LitElement {
                   ?disabled=${this.topUpDisabled}
                   @click=${() => { this.topUpAmount = String(amount); this.requestTopUp(amount); }}
                 >
-                  ${amount} HOT
+                  ${amount} wHOT
                 </button>
               `)}
             </div>
