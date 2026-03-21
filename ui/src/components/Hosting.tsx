@@ -23,13 +23,12 @@ const PriceInput = ({ initialValue, placeholder, style, onCommit }: {
   style: React.CSSProperties;
   onCommit: (val: string) => void;
 }) => {
-  const [local, setLocal] = React.useState(initialValue ? String(initialValue) : "");
-  const initialized = React.useRef(false);
+  const [local, setLocal] = React.useState(initialValue != null ? String(initialValue) : "");
+  const isEditing = React.useRef(false);
   // Update local when initialValue changes externally (but not while user is editing)
   React.useEffect(() => {
-    if (!initialized.current && initialValue) {
+    if (!isEditing.current && initialValue != null) {
       setLocal(String(initialValue));
-      initialized.current = true;
     }
   }, [initialValue]);
   return (
@@ -37,8 +36,9 @@ const PriceInput = ({ initialValue, placeholder, style, onCommit }: {
       type="text"
       inputMode="decimal"
       value={local}
+      onFocus={() => { isEditing.current = true; }}
       onChange={(e) => setLocal(e.target.value)}
-      onBlur={() => onCommit(local)}
+      onBlur={() => { isEditing.current = false; onCommit(local); }}
       onKeyDown={(e) => { if (e.key === "Enter") { (e.target as HTMLInputElement).blur(); } }}
       placeholder={placeholder}
       style={style}
@@ -132,9 +132,12 @@ const Hosting = () => {
   } | null>(null);
   const [hostRegistering, setHostRegistering] = useState(false);
   const [profilePic, setProfilePic] = useState<File | null>(null);
-  const profilePicUrl = React.useMemo(() => {
-    if (profilePic) return URL.createObjectURL(profilePic);
-    return null;
+  const [profilePicUrl, setProfilePicUrl] = useState<string | null>(null);
+  React.useEffect(() => {
+    if (!profilePic) { setProfilePicUrl(null); return; }
+    const url = URL.createObjectURL(profilePic);
+    setProfilePicUrl(url);
+    return () => URL.revokeObjectURL(url);
   }, [profilePic]);
   const [verificationCode, setVerificationCode] = useState("");
   const [membraneProofStatus, setMembraneProofStatus] =
@@ -226,7 +229,7 @@ const Hosting = () => {
     indexUrl: string;
     hostId: string;
     authToken: string;
-  }): Promise<"verified" | "unverified" | "expired"> => {
+  }): Promise<"verified" | "unverified" | "expired" | "unavailable"> => {
     try {
       const res = await fetch(`${session.indexUrl}/hosts/me`, {
         headers: { Authorization: `Bearer ${session.authToken}` },
@@ -237,19 +240,13 @@ const Hosting = () => {
         setHostReg((prev) => ({
           ...prev,
           indexUrl: session.indexUrl,
-          name: mine.name || prev.name,
-          description: mine.description || prev.description,
-          location: mine.location || prev.location,
-          hostUrl: mine.url || prev.hostUrl,
-          rates:
-            mine.rates && mine.rates.length > 0
-              ? JSON.stringify(mine.rates)
-              : prev.rates,
-          aiModels:
-            mine.aiModels && mine.aiModels.length > 0
-              ? JSON.stringify(mine.aiModels)
-              : prev.aiModels,
-          computeSpecs: mine.computeSpecs || prev.computeSpecs,
+          name: mine.name !== undefined ? mine.name : prev.name,
+          description: mine.description !== undefined ? mine.description : prev.description,
+          location: mine.location !== undefined ? mine.location : prev.location,
+          hostUrl: mine.url !== undefined ? mine.url : prev.hostUrl,
+          rates: Array.isArray(mine.rates) ? JSON.stringify(mine.rates) : prev.rates,
+          aiModels: Array.isArray(mine.aiModels) ? JSON.stringify(mine.aiModels) : prev.aiModels,
+          computeSpecs: mine.computeSpecs !== undefined ? mine.computeSpecs : prev.computeSpecs,
         }));
         return mine.emailVerified ? "verified" : "unverified";
       }
@@ -259,8 +256,9 @@ const Hosting = () => {
       }
     } catch (e) {
       console.log("Failed to fetch host data:", e);
+      return "unavailable";
     }
-    return "expired";
+    return "unavailable";
   };
 
   // Track whether we've already attempted a membrane proof fetch this mount
@@ -568,6 +566,11 @@ const Hosting = () => {
             message:
               "Email not yet verified. Check your inbox or resend the code.",
           });
+        } else if (result === "unavailable") {
+          setHostRegStatus({
+            type: "error",
+            message: "Could not reach the hosting service. Please try again later.",
+          });
         } else {
           setHostRegStatus({
             type: "error",
@@ -626,13 +629,17 @@ const Hosting = () => {
         // Also persist rates to executor DB for credit deduction
         try {
           if (client) await client.runtime.setHostRates(hostReg.rates);
-        } catch (e) {
+          setHostRegStatus({
+            type: "success",
+            message: "Host updated successfully.",
+          });
+        } catch (e: any) {
           console.warn("Failed to sync rates to executor DB:", e);
+          setHostRegStatus({
+            type: "error",
+            message: `Host updated but failed to sync rates to executor: ${e.message || e}`,
+          });
         }
-        setHostRegStatus({
-          type: "success",
-          message: "Host updated successfully.",
-        });
       } else {
         if (res.status === 401) {
           await saveHostSession(null);
@@ -849,6 +856,10 @@ const Hosting = () => {
           } else if (result === "unverified") {
             setHostSession(session);
             setRegStep("verify");
+          } else if (result === "unavailable") {
+            // Network/transient failure — keep session, let user retry
+            setHostSession(session);
+            setRegStep("logged-in");
           } else {
             // Token expired/invalid — clear stored session, go to login
             setHostSession(null);
@@ -1767,7 +1778,21 @@ const Hosting = () => {
                         const validKeys = new Set(["link write", ...modelNames]);
                         const has = (desc: string) => parsed.some((r) => r.description === desc);
 
-                        // Remove entries for deleted models or old "per token" format
+                        // Migrate legacy "ModelName (per token)" entries to plain model names
+                        const legacyPattern = /^(.+)\s*\(per token\)$/;
+                        for (let i = parsed.length - 1; i >= 0; i--) {
+                          const m = legacyPattern.exec(parsed[i].description);
+                          if (m) {
+                            const plainName = m[1].trim();
+                            if (validKeys.has(plainName) && !has(plainName)) {
+                              parsed[i] = { description: plainName, priceInHOT: parsed[i].priceInHOT };
+                            } else {
+                              parsed.splice(i, 1);
+                            }
+                          }
+                        }
+
+                        // Remove entries for deleted models
                         const before = parsed.length;
                         parsed = parsed.filter((r) => validKeys.has(r.description));
 
@@ -1983,12 +2008,14 @@ const Hosting = () => {
                           <j-input
                             type="number"
                             value={tlsConfig.tls_port?.toString() || "12001"}
-                            onInput={(e: any) =>
-                              setTlsConfig({
+                            onInput={(e: any) => {
+                              const newConfig = {
                                 ...tlsConfig,
                                 tls_port: parseInt(e.target.value) || 12001,
-                              })
-                            }
+                              };
+                              setTlsConfig(newConfig);
+                              handleTlsConfigChange(newConfig);
+                            }}
                           />
                         </j-box>
                       </j-box>
