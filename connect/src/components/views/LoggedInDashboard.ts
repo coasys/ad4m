@@ -358,7 +358,7 @@ export class LoggedInDashboard extends LitElement {
           <div class="credit-display">
             ${CreditIcon()}
             <span class="credit-amount">${credits.toFixed(2)}</span>
-            <span class="credit-label">HOT</span>
+            <span class="credit-label">wHOT</span>
           </div>
 
           ${this.isDepleted ? html`

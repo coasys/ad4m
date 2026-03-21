@@ -63,7 +63,7 @@ fn get_rate(description: &str, default: f64) -> FieldResult<f64> {
 fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
         let global_free =
-            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(false);
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
         if global_free {
             return Ok(());
         }
@@ -84,7 +84,7 @@ fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
 fn check_compute_credits(auth_token: &str) -> FieldResult<()> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
         let global_free =
-            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(false);
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
         if global_free {
             return Ok(());
         }
@@ -2604,6 +2604,13 @@ impl Mutation {
         Ad4mDb::with_global_instance(|db| {
             db.set_free_hosting_enabled(enabled)
                 .map_err(|e| FieldError::new(e.to_string(), Value::null()))?;
+            // Mark all users dirty so the credit flush loop pushes updated
+            // HostingUserInfo (with the new freeAccess value) to clients.
+            if let Ok(users) = db.list_users() {
+                for u in users {
+                    mark_credits_dirty(&u.email);
+                }
+            }
             Ok(enabled)
         })
     }
@@ -3191,7 +3198,7 @@ impl Mutation {
 
         // When free hosting is enabled, payments are not applicable
         let global_free =
-            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(false);
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
         if global_free {
             return Ok(PaymentRequestResult {
                 success: false,
