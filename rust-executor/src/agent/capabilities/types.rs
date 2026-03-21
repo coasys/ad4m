@@ -21,16 +21,16 @@ pub struct AuthInfo {
     pub user_email: Option<String>, // Email field for multi-user tokens
 }
 
-impl From<crate::graphql::graphql_types::AuthInfoInput> for AuthInfo {
-    fn from(input: crate::graphql::graphql_types::AuthInfoInput) -> Self {
-        use crate::agent::capabilities::defs::ALL_CAPABILITY;
+impl TryFrom<crate::graphql::graphql_types::AuthInfoInput> for AuthInfo {
+    type Error = String;
 
+    fn try_from(input: crate::graphql::graphql_types::AuthInfoInput) -> Result<Self, Self::Error> {
         let capabilities = match input.capabilities {
-            Some(vec) => Some(vec.into_iter().map(|c| c.into()).collect()),
-            None => Some(vec![ALL_CAPABILITY.clone()]),
+            Some(vec) if !vec.is_empty() => Some(vec.into_iter().map(|c| c.into()).collect()),
+            _ => return Err("Capability request must include explicit capabilities".to_string()),
         };
 
-        Self {
+        Ok(Self {
             app_name: input.app_name,
             app_desc: input.app_desc,
             app_domain: Some(input.app_domain),
@@ -38,7 +38,7 @@ impl From<crate::graphql::graphql_types::AuthInfoInput> for AuthInfo {
             app_icon_path: input.app_icon_path,
             capabilities,
             user_email: None, // Will be set by login process
-        }
+        })
     }
 }
 

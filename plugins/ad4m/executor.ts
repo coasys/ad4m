@@ -340,7 +340,7 @@ export async function isExecutorRunning(
   timeoutMs: number = 3000,
   graphqlHttpUrl: string = "http://localhost:12000/graphql",
 ): Promise<"mcp" | "graphql" | false> {
-  const probe = (url: string, body: string): Promise<boolean> =>
+  const probe = (url: string, body: string, validate?: (json: any) => boolean): Promise<boolean> =>
     new Promise((resolve) => {
       const controller = new AbortController();
       const timeout = setTimeout(() => {
@@ -354,9 +354,16 @@ export async function isExecutorRunning(
         body,
         signal: controller.signal,
       })
-        .then((res) => {
+        .then(async (res) => {
           clearTimeout(timeout);
-          resolve(res.ok);
+          if (!res.ok) return resolve(false);
+          if (!validate) return resolve(true);
+          try {
+            const json = await res.json();
+            resolve(validate(json));
+          } catch {
+            resolve(false);
+          }
         })
         .catch(() => {
           clearTimeout(timeout);
@@ -373,6 +380,10 @@ export async function isExecutorRunning(
     probe(
       graphqlHttpUrl,
       JSON.stringify({ query: "{ agentStatus { isInitialized } }" }),
+      (json) =>
+        json != null &&
+        !json.errors?.length &&
+        json.data?.agentStatus != null,
     ),
   ]);
 

@@ -276,10 +276,19 @@ describe("isExecutorRunning", () => {
   });
 
   it("returns 'mcp' when MCP endpoint responds", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      fakeJsonResponse({ jsonrpc: "2.0", id: 0, result: {} }),
+    vi.spyOn(globalThis, "fetch").mockImplementation((url: any) => {
+      if (String(url).includes("/mcp")) {
+        return Promise.resolve(
+          fakeJsonResponse({ jsonrpc: "2.0", id: 0, result: {} }),
+        );
+      }
+      return Promise.reject(new Error("ECONNREFUSED"));
+    });
+    const result = await isExecutorRunning(
+      "http://localhost:3001/mcp",
+      1000,
+      "http://localhost:12000/graphql",
     );
-    const result = await isExecutorRunning("http://localhost:3001/mcp", 1000);
     expect(result).toBe("mcp");
   });
 
@@ -299,6 +308,24 @@ describe("isExecutorRunning", () => {
       "http://localhost:12000/graphql",
     );
     expect(result).toBe("graphql");
+  });
+
+  it("returns false when GraphQL returns 200 with errors", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation((url: any) => {
+      if (String(url).includes("/mcp")) {
+        return Promise.reject(new Error("ECONNREFUSED"));
+      }
+      // GraphQL 200 but with errors array
+      return Promise.resolve(
+        fakeJsonResponse({ errors: [{ message: "not ready" }], data: null }),
+      );
+    });
+    const result = await isExecutorRunning(
+      "http://localhost:3001/mcp",
+      1000,
+      "http://localhost:12000/graphql",
+    );
+    expect(result).toBe(false);
   });
 
   it("returns false when both endpoints fail", async () => {

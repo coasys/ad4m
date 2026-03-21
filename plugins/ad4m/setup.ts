@@ -372,6 +372,9 @@ async function setupExternalModeViaGraphQL(
       appName: "OpenClaw AD4M Plugin",
       appDesc: "OpenClaw agent plugin for AD4M neighbourhoods",
       appDomain: "",
+      capabilities: [
+        { with: { domain: "*", pointers: ["*"] }, can: ["*"] },
+      ],
     };
 
     logger.info("[ad4m-setup] Sending requestCapability mutation...");
@@ -379,7 +382,7 @@ async function setupExternalModeViaGraphQL(
     const requestId = await client.agent.requestCapability(authInfo);
 
     logger.info(
-      `[ad4m-setup] Capability requested (id: ${requestId}).`,
+      `[ad4m-setup] Capability requested successfully.`,
     );
     logger.info("");
     logger.info(
@@ -427,7 +430,7 @@ async function setupExternalModeViaGraphQL(
     }
 
     // Step 3: Generate JWT using requestId + user-provided code
-    logger.info(`[ad4m-setup] Sending generateJwt mutation (requestId: ${requestId}, code: ${code})...`);
+    logger.info(`[ad4m-setup] Sending generateJwt mutation...`);
     const jwt = await client.agent.generateJwt(requestId, code);
     logger.info(`[ad4m-setup] generateJwt returned: ${jwt ? `token (${jwt.length} chars)` : "null/empty"}`);
 
@@ -519,6 +522,7 @@ function printConfigSnippet(
     if (values.agentPassphrase) config.agentPassphrase = values.agentPassphrase;
   } else {
     if (values.mcpEndpoint) config.mcpEndpoint = values.mcpEndpoint;
+    if (values.executorWsUrl) config.executorWsUrl = values.executorWsUrl;
     if (values.token) config.token = values.token;
   }
 
