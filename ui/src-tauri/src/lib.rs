@@ -43,9 +43,8 @@ use crate::commands::app::{
     add_app_agent_state, clear_state, close_application, close_main_window, delete_agent,
     get_app_agent_list, get_data_path, get_host_registration, get_log_config, get_mcp_config,
     get_smtp_config, get_tls_config, open_dapp, open_tray, open_tray_message,
-    remove_app_agent_state,
-    set_host_registration, set_log_config, set_mcp_config, set_selected_agent, set_smtp_config,
-    set_tls_config, show_main_window, test_smtp_config,
+    remove_app_agent_state, set_host_registration, set_log_config, set_mcp_config,
+    set_selected_agent, set_smtp_config, set_tls_config, show_main_window, test_smtp_config,
 };
 use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};

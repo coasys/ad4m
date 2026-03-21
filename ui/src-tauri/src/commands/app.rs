@@ -94,7 +94,9 @@ pub fn delete_agent(agent: AgentConfigDir) -> Result<(), String> {
 
     // Remove from config
     state.remove_agent(agent);
-    state.save().map_err(|e| format!("Failed to save state: {}", e))?;
+    state
+        .save()
+        .map_err(|e| format!("Failed to save state: {}", e))?;
 
     Ok(())
 }
