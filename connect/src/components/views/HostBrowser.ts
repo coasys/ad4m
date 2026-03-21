@@ -276,7 +276,7 @@ export class HostBrowser extends LitElement {
   }
 
   private getAvgTokenPrice(rates: RemoteHost["rates"]): number | null {
-    const tokenRates = rates.filter(r => r.description.trim().toLowerCase().endsWith("per token"));
+    const tokenRates = rates.filter(r => r.description.trim().toLowerCase() !== "link write");
     if (tokenRates.length === 0) return null;
     return tokenRates.reduce((sum, r) => sum + r.priceInHOT, 0) / tokenRates.length;
   }
