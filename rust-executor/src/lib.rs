@@ -505,7 +505,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
             let pubsub = get_global_pubsub().await;
             for email in &dirty_emails {
-                let free_access =
+                let global_free = Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())
+                    .unwrap_or(false);
+                let free_access = if global_free {
+                    true
+                } else {
                     match Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)) {
                         Ok(v) => v,
                         Err(e) => {
@@ -515,7 +519,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                             );
                             continue;
                         }
-                    };
+                    }
+                };
                 let remaining_credits = if free_access {
                     "unlimited".to_string()
                 } else {

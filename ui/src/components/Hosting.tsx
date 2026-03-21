@@ -1,9 +1,9 @@
-import React, { useCallback, useContext, useEffect, useState } from "react";
+import React, { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { cardStyle, listStyle } from "./styles";
-import Wallet from "./Wallet";
+import Wallet, { HotLogo } from "./Wallet";
 import type { UserStatistics } from "@coasys/ad4m";
 
 type HostSession = {
@@ -96,8 +96,8 @@ const ExpandableSection = ({
 
 const Hosting = () => {
   const {
-    state: { client, multiUserEnabled },
-    methods: { setMultiUserEnabled },
+    state: { client, multiUserEnabled, freeHostingEnabled },
+    methods: { setMultiUserEnabled, setFreeHostingEnabled },
   } = useContext(Ad4minContext);
 
   // ---- Users state ----
@@ -182,6 +182,18 @@ const Hosting = () => {
   const [hostingProfileExpanded, setHostingProfileExpanded] = useState(true);
   const [tlsExpanded, setTlsExpanded] = useState(false);
   const [smtpExpanded, setSmtpExpanded] = useState(false);
+  const [setupInfoExpanded, setSetupInfoExpanded] = useState(false);
+  const prevMultiUserEnabled = useRef(multiUserEnabled);
+
+  // Auto-expand setup info when multi-user is first enabled, then auto-collapse
+  useEffect(() => {
+    if (multiUserEnabled && !prevMultiUserEnabled.current) {
+      setSetupInfoExpanded(true);
+      const timer = setTimeout(() => setSetupInfoExpanded(false), 10000);
+      return () => clearTimeout(timer);
+    }
+    prevMultiUserEnabled.current = multiUserEnabled;
+  }, [multiUserEnabled]);
 
   // ---- Helpers ----
 
@@ -1039,33 +1051,149 @@ const Hosting = () => {
             }
           }}
         >
-          Multi-user mode
+          <j-flex a="center" gap="300">
+            <span>Enable multi-user hosting</span>
+            {multiUserEnabled && (
+              <j-flex
+                a="center"
+                gap="200"
+                style={{ cursor: "pointer" }}
+                onClick={(e: React.MouseEvent) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setSetupInfoExpanded(!setupInfoExpanded);
+                }}
+              >
+                <j-icon
+                  name={setupInfoExpanded ? "info-circle-fill" : "info-circle"}
+                  color="ui-500"
+                  size="sm"
+                ></j-icon>
+                <j-text size="300" color="ui-500" weight="500" nomargin>
+                  Setup instructions
+                </j-text>
+                <j-icon
+                  name={setupInfoExpanded ? "chevron-up" : "chevron-down"}
+                  color="ui-500"
+                  size="xs"
+                ></j-icon>
+              </j-flex>
+            )}
+          </j-flex>
         </j-toggle>
       </j-box>
 
       {!multiUserEnabled && (
         <j-box px="500" my="300">
           <j-text size="500" color="ui-500">
-            Enable multi-user mode to host this AD4M instance for other users.
+            Enable this to host your AD4M node for other users.
           </j-text>
         </j-box>
       )}
 
       {multiUserEnabled && (
-        <>
-          {/* ===== WALLET (Simple Framed) ===== */}
-          <j-box px="500" my="100">
+        <j-box px="500">
+          <div
+            style={{
+              overflow: "hidden",
+              maxHeight: setupInfoExpanded ? "600px" : "0",
+              opacity: setupInfoExpanded ? 1 : 0,
+              transition: "max-height 0.4s ease, opacity 0.3s ease",
+              marginTop: setupInfoExpanded ? "8px" : "0",
+            }}
+          >
             <div
               style={{
-                border: "1px solid var(--j-color-ui-200)",
-                borderRadius: "12px",
-                padding: "10px",
+                padding: "12px 16px",
                 background: "var(--j-color-ui-50)",
+                borderRadius: "8px",
+                border: "1px solid var(--j-color-ui-200)",
               }}
             >
-              <Wallet key="wallet" />
+              <j-text size="400" color="ui-500">
+                Allows remote users to sign up and log in via email and password.
+              </j-text>
+              <j-box mt="300">
+                <j-text size="400" color="ui-500">
+                  <strong>Email verification (optional):</strong> Configure an SMTP email service
+                  in the Settings tab below to enable verification codes.
+                  Without SMTP, users will sign in with just email and password.
+                </j-text>
+              </j-box>
+              <j-box mt="300">
+                <j-text size="400" color="ui-500">
+                  <strong>TLS certificate (required for security):</strong> You should obtain a TLS
+                  certificate for your domain, e.g. from{" "}
+                  <a
+                    href="https://letsencrypt.org"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ color: "var(--j-color-primary-500)" }}
+                  >
+                    Let's Encrypt
+                  </a>
+                  . Then point to your certificate and key files in the{" "}
+                  <strong>TLS Configuration</strong> section in the Settings tab.
+                  TLS runs on a separate port which you can configure there.
+                </j-text>
+              </j-box>
+              <j-box mt="300">
+                <j-text size="400" color="ui-500">
+                  <strong>Network access:</strong> Make sure the AD4M executor's TLS port is
+                  publicly accessible — you may need to configure port forwarding on your
+                  router or firewall so that remote users can connect.
+                </j-text>
+              </j-box>
             </div>
+          </div>
+        </j-box>
+      )}
+
+      {multiUserEnabled && (
+        <j-box px="500" my="300">
+          <j-toggle
+            full=""
+            checked={!freeHostingEnabled}
+            onChange={async (e: any) => {
+              try {
+                await setFreeHostingEnabled(!e.target.checked);
+              } catch (error) {
+                console.error("Failed to toggle hosting mode:", error);
+                e.target.checked = !e.target.checked;
+              }
+            }}
+          >
+            <span style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
+              Paid hosting via <HotLogo size={20} /> HOT
+            </span>
+          </j-toggle>
+          <j-box mt="200">
+            <j-text size="400" color="ui-500">
+              {freeHostingEnabled
+                ? "All users have free access. No payment or wallet setup required."
+                : "Users pay with HOT credits to use this node. Configure your wallet below."}
+            </j-text>
           </j-box>
+        </j-box>
+      )}
+
+      {multiUserEnabled && (
+        <>
+          {/* ===== WALLET (Simple Framed) - only shown for paid hosting ===== */}
+          {!freeHostingEnabled && (
+            <j-box px="500" my="100">
+              <div
+                style={{
+                  border: "1px solid var(--j-color-ui-200)",
+                  borderRadius: "12px",
+                  padding: "10px",
+                  background: "var(--j-color-ui-50)",
+                }}
+              >
+                <Wallet key="wallet" />
+              </div>
+            </j-box>
+          )}
 
           {/* ===== UNYT DNA (Expandable) ===== */}
           {false && (
@@ -1237,23 +1365,26 @@ const Hosting = () => {
                               {user.perspectiveCount}
                             </j-text>
                           </j-flex>
-                          <j-flex direction="column" gap="100">
-                            <j-text
-                              nomargin
-                              size="300"
-                              color="ui-500"
-                              weight="500"
-                            >
-                              CREDITS
-                            </j-text>
-                            <j-text nomargin size="400" weight="600">
-                              {(user as any).remainingCredits === "unlimited"
-                                ? "Unlimited"
-                                : (user as any).remainingCredits || "0"}
-                            </j-text>
-                          </j-flex>
+                          {!freeHostingEnabled && (
+                            <j-flex direction="column" gap="100">
+                              <j-text
+                                nomargin
+                                size="300"
+                                color="ui-500"
+                                weight="500"
+                              >
+                                CREDITS
+                              </j-text>
+                              <j-text nomargin size="400" weight="600">
+                                {(user as any).remainingCredits === "unlimited"
+                                  ? "Unlimited"
+                                  : (user as any).remainingCredits || "0"}
+                              </j-text>
+                            </j-flex>
+                          )}
                         </j-flex>
 
+                        {!freeHostingEnabled && (
                         <j-box
                           style={{
                             borderTop: "1px solid var(--j-color-ui-200)",
@@ -1305,6 +1436,7 @@ const Hosting = () => {
                             )}
                           </j-flex>
                         </j-box>
+                        )}
                       </j-flex>
                     </div>
                   ))}
@@ -1316,7 +1448,8 @@ const Hosting = () => {
           {/* ===== SETTINGS TAB ===== */}
           {activeTab === "settings" && (
             <j-box px="500" my="400">
-              {/* Hosting Profile */}
+              {/* Hosting Profile - only shown for paid hosting */}
+              {!freeHostingEnabled && (
               <ExpandableSection
                 title="Hosting Profile"
                 expanded={hostingProfileExpanded}
@@ -1929,6 +2062,7 @@ const Hosting = () => {
                   </div>
                 )}
               </ExpandableSection>
+              )}
 
               {/* TLS Settings */}
               <ExpandableSection

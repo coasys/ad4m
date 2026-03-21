@@ -62,6 +62,11 @@ fn get_rate(description: &str, default: f64) -> FieldResult<f64> {
 /// - Credits were successfully deducted (clamped to 0)
 fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(false);
+        if global_free {
+            return Ok(());
+        }
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
             .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
         if !free {
@@ -78,6 +83,11 @@ fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
 /// happens after the operation via reserve_compute_credits with the exact cost.
 fn check_compute_credits(auth_token: &str) -> FieldResult<()> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(false);
+        if global_free {
+            return Ok(());
+        }
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
             .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
         if !free {
@@ -2578,6 +2588,19 @@ impl Mutation {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
         Ad4mDb::with_global_instance(|db| {
             db.set_multi_user_enabled(enabled)
+                .map_err(|e| FieldError::new(e.to_string(), Value::null()))?;
+            Ok(enabled)
+        })
+    }
+
+    async fn runtime_set_free_hosting_enabled(
+        &self,
+        context: &RequestContext,
+        enabled: bool,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+        Ad4mDb::with_global_instance(|db| {
+            db.set_free_hosting_enabled(enabled)
                 .map_err(|e| FieldError::new(e.to_string(), Value::null()))?;
             Ok(enabled)
         })

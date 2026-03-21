@@ -2,7 +2,7 @@ import React, { useContext, useEffect, useState, useCallback } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { cardStyle } from "./styles";
 
-const HotLogo = ({ size = 14 }: { size?: number }) => (
+export const HotLogo = ({ size = 14 }: { size?: number }) => (
   <svg
     xmlns="http://www.w3.org/2000/svg"
     viewBox="0 0 1175.48 847.82"
