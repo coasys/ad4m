@@ -86,17 +86,31 @@ pub fn delete_agent(agent: AgentConfigDir) -> Result<(), String> {
         }
     }
 
-    // Remove the data directory
-    if agent.path.exists() {
-        remove_dir_all::remove_dir_all(&agent.path)
-            .map_err(|e| format!("Failed to remove data directory: {}", e))?;
-    }
+    // Resolve the agent from persisted state by matching against agent_list
+    let persisted_agent = state
+        .agent_list
+        .iter()
+        .find(|a| a.name == agent.name && a.path == agent.path)
+        .cloned()
+        .ok_or_else(|| "Agent not found in configuration".to_string())?;
 
-    // Remove from config
-    state.remove_agent(agent);
+    let persisted_path = persisted_agent.path.clone();
+
+    // Persist state change first so we don't end up with deleted data but stale config
+    state.remove_agent(persisted_agent);
     state
         .save()
         .map_err(|e| format!("Failed to save state: {}", e))?;
+
+    // Then remove the data directory
+    if persisted_path.exists() {
+        if let Err(e) = remove_dir_all::remove_dir_all(&persisted_path) {
+            log::warn!(
+                "Agent removed from config but failed to delete data directory: {}",
+                e
+            );
+        }
+    }
 
     Ok(())
 }

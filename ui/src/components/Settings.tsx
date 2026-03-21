@@ -913,6 +913,7 @@ const Profile = (props: Props) => {
                     variant={agent.path === appState.selected_agent.path ? "primary" : "secondary"}
                     onClick={() => {
                       if (agent.path !== appState.selected_agent.path) {
+                        setShowAgentSelection(false);
                         setPendingSwitchAgent(agent);
                       } else {
                         setShowAgentSelection(false);
