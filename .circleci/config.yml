@@ -52,6 +52,9 @@ commands:
           name: Install core dependencies
           command: cd ./core && pnpm install --no-frozen-lockfile
       - run:
+          name: Build core package
+          command: cd ./core && pnpm run build
+      - run:
           name: Build bootstrap languages
           command: pnpm run build-languages
 
