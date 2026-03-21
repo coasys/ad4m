@@ -895,15 +895,17 @@ const Hosting = () => {
     fetchMembraneProof(hostSession);
   }, [client, hostSession, freeHostingEnabled]);
 
-  // Auto-populate host URL from TLS domain
+  // Auto-populate host URL from TLS domain + port
   useEffect(() => {
     if (!client) return;
     const fetchTlsDomain = async () => {
       try {
         const domain = await client.runtime.tlsDomain();
         if (domain) {
+          const port = tlsConfig?.tls_port || 12001;
+          const url = `wss://${domain}:${port}/graphql`;
           setHostReg((prev) =>
-            prev.hostUrl ? prev : { ...prev, hostUrl: `wss://${domain}` },
+            prev.hostUrl ? prev : { ...prev, hostUrl: url },
           );
         }
       } catch (e) {
@@ -911,7 +913,7 @@ const Hosting = () => {
       }
     };
     fetchTlsDomain();
-  }, [client]);
+  }, [client, tlsConfig]);
 
   useEffect(() => {
     if (!client) return;
@@ -1039,6 +1041,18 @@ const Hosting = () => {
 
   return (
     <div>
+      <style>{`
+        .hosting-input::placeholder {
+          color: var(--j-color-ui-300) !important;
+          font-weight: 400 !important;
+          opacity: 1;
+        }
+        textarea.hosting-input::placeholder {
+          color: var(--j-color-ui-300) !important;
+          font-weight: 400 !important;
+          opacity: 1;
+        }
+      `}</style>
       {/* Multi-user toggle */}
       <j-box px="500" my="500">
         <j-toggle
@@ -1613,8 +1627,21 @@ const Hosting = () => {
                       background: "var(--j-color-ui-50)",
                       borderRadius: "12px",
                       border: "1px solid var(--j-color-ui-200)",
+                      position: "relative" as const,
                     }}
                   >
+                    {/* Info tooltip */}
+                    <j-tooltip
+                      title="This is your public hosting profile. Other users will see this information in AD4M Connect when choosing a host."
+                      placement="left"
+                    >
+                      <j-icon
+                        name="info-circle"
+                        color="ui-400"
+                        size="sm"
+                        style={{ position: "absolute", top: "12px", right: "12px", cursor: "help" }}
+                      ></j-icon>
+                    </j-tooltip>
                     {/* Profile picture */}
                     <label
                       style={{
@@ -1709,6 +1736,7 @@ const Hosting = () => {
 
                     {/* Name */}
                     <input
+                      className="hosting-input"
                       value={hostReg.name}
                       onChange={(e) =>
                         handleHostRegChange("name", e.target.value)
@@ -1730,6 +1758,7 @@ const Hosting = () => {
 
                     {/* Location */}
                     <input
+                      className="hosting-input"
                       value={hostReg.location}
                       onChange={(e) =>
                         handleHostRegChange("location", e.target.value)
@@ -1741,7 +1770,7 @@ const Hosting = () => {
                         background: "transparent",
                         border: "none",
                         borderBottom: "1px dashed var(--j-color-ui-300)",
-                        color: "var(--j-color-ui-500)",
+                        color: "var(--j-color-black)",
                         width: "100%",
                         padding: "2px 0",
                         outline: "none",
@@ -1750,6 +1779,7 @@ const Hosting = () => {
 
                     {/* Description */}
                     <textarea
+                      className="hosting-input"
                       value={hostReg.description}
                       onChange={(e) =>
                         handleHostRegChange("description", e.target.value)
@@ -1763,7 +1793,7 @@ const Hosting = () => {
                         background: "transparent",
                         border: "none",
                         borderBottom: "1px dashed var(--j-color-ui-300)",
-                        color: "var(--j-color-ui-400)",
+                        color: "var(--j-color-black)",
                         width: "100%",
                         padding: "2px 0",
                         outline: "none",
@@ -1773,26 +1803,44 @@ const Hosting = () => {
                     />
 
                     {/* Endpoint URL */}
-                    <div style={{ width: "100%" }}>
+                    <div
+                      style={{
+                        width: "100%",
+                        padding: "12px 16px",
+                        background: "var(--j-color-primary-50, rgba(33,150,243,0.05))",
+                        borderRadius: "8px",
+                        border: "1px solid var(--j-color-primary-200, rgba(33,150,243,0.2))",
+                      }}
+                    >
                       <j-text
                         size="300"
                         weight="600"
-                        color="ui-500"
+                        color="primary-500"
                         style={{
                           textTransform: "uppercase",
                           letterSpacing: "0.5px",
                           display: "block",
-                          marginBottom: "6px",
+                          marginBottom: "4px",
                         }}
                       >
                         Endpoint URL
                       </j-text>
+                      <j-text
+                        size="300"
+                        color="ui-500"
+                        style={{ display: "block", marginBottom: "8px" }}
+                      >
+                        This is how remote users reach your node. It is auto-populated
+                        from your TLS domain and port configuration. Make sure this
+                        address is publicly reachable (check your router / firewall settings).
+                      </j-text>
                       <input
+                        className="hosting-input"
                         value={hostReg.hostUrl}
                         onChange={(e) =>
                           handleHostRegChange("hostUrl", e.target.value)
                         }
-                        placeholder="wss://your-host-domain.com"
+                        placeholder="wss://your-domain.com:12001/graphql"
                         style={{
                           fontSize: "13px",
                           width: "100%",
@@ -1800,7 +1848,8 @@ const Hosting = () => {
                           background: "var(--j-color-ui-100)",
                           border: "1px solid var(--j-color-ui-200)",
                           borderRadius: "6px",
-                          color: "var(--j-color-ui-600)",
+                          color: "var(--j-color-black)",
+                          fontWeight: 500,
                           outline: "none",
                           fontFamily: "monospace",
                         }}
@@ -1823,6 +1872,7 @@ const Hosting = () => {
                         Compute
                       </j-text>
                       <input
+                        className="hosting-input"
                         value={hostReg.computeSpecs}
                         onChange={(e) =>
                           handleHostRegChange("computeSpecs", e.target.value)
@@ -1835,7 +1885,8 @@ const Hosting = () => {
                           background: "var(--j-color-ui-100)",
                           border: "1px solid var(--j-color-ui-200)",
                           borderRadius: "6px",
-                          color: "var(--j-color-ui-600)",
+                          color: "var(--j-color-black)",
+                          fontWeight: 500,
                           outline: "none",
                           fontFamily: "inherit",
                         }}
