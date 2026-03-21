@@ -362,6 +362,22 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
             port
         );
 
+        // Start REST API server on port + 1 (transitional: separate port)
+        let rest_port = port + 1;
+        let rest_admin_credential = config.admin_credential.clone();
+        let rest_auto_permit = config.auto_permit_cap_requests.unwrap_or(false);
+        tokio::spawn(async move {
+            if let Err(e) = crate::rest::start_rest_server(
+                rest_port,
+                rest_admin_credential,
+                rest_auto_permit,
+            )
+            .await
+            {
+                log::error!("REST API server error: {}", e);
+            }
+        });
+
         warp::serve(routes_with_cors).run((address, port)).await;
     }
 

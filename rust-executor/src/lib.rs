@@ -10,6 +10,7 @@ pub mod holochain_service;
 pub mod js_core;
 pub mod mcp;
 pub mod perspectives;
+pub mod rest;
 mod prolog_service;
 pub mod runtime_service;
 pub mod unyt_service;
