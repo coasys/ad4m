@@ -572,6 +572,7 @@ const Hosting = () => {
             message: "Could not reach the hosting service. Please try again later.",
           });
         } else {
+          await saveHostSession(null);
           setHostRegStatus({
             type: "error",
             message: "Session expired. Please log in again.",
