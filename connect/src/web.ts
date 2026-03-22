@@ -2,7 +2,7 @@ import { css, html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import autoBind from "auto-bind";
 import { VerificationRequestResult } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
-import { connectWebSocket, setLocal } from "./utils";
+import { checkConnection, setLocal, wsUrlToHttpBase } from "./utils";
 import Ad4mConnect from "./core";
 import { Ad4mLogo, ArrowLeftIcon, CreditIcon } from "./components/icons";
 import { fetchHosts } from "./services/hostIndex";
@@ -340,8 +340,8 @@ export class Ad4mConnectElement extends LitElement {
     const candidateUrl = host.url;
 
     try {
-      // Verify WS reachability before committing URL
-      await connectWebSocket(candidateUrl);
+      // Verify HTTP reachability before committing URL
+      await checkConnection(wsUrlToHttpBase(candidateUrl));
       console.log('[Ad4m Connect UI] Host connection successful:', host.name);
 
       // Verify it's an AD4M API
@@ -412,7 +412,7 @@ export class Ad4mConnectElement extends LitElement {
     setLocal("ad4m-url", this.core.url);
 
     try {
-      await connectWebSocket(e.detail.remoteUrl);
+      await checkConnection(wsUrlToHttpBase(e.detail.remoteUrl));
       const isValidAd4mApi = await this.core.isValidAd4mAPI();
       if (!isValidAd4mApi) throw new Error("Server is reachable but doesn't appear to be an AD4M executor");
 

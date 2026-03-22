@@ -28,44 +28,26 @@ export function removeLocal(key: string): void {
   if (localStorageSupported()) localStorage.removeItem(`${version}/${key}`);
 }
 
-export async function connectWebSocket(url, timeout = 10000) {
-  return Promise.race([
-    new Promise((resolve, reject) => {
-      let websocket;
-      try {
-        // Use the same subprotocol that graphql-ws uses
-        websocket = new WebSocket(url, "graphql-transport-ws");
+/** Convert a WebSocket URL to an HTTP base URL. */
+export function wsUrlToHttpBase(wsUrl: string): string {
+  let url = wsUrl.replace(/^ws(s?):\/\//, (_, s) => `http${s}://`);
+  url = url.replace(/\/graphql\/?$/, '');
+  return url;
+}
 
-        websocket.onopen = () => {
-          // Connection successful - close it immediately since we're just checking
-          websocket.close();
-          resolve(websocket);
-        };
-
-        websocket.onerror = (error) => {
-          reject(error);
-        };
-
-        websocket.onclose = (event) => {
-          // If we get a close event before onopen fired, the connection failed
-          // onopen will have already resolved if connection was successful
-          if (event.code !== 1000) {
-            reject(new Error(`WebSocket closed with code ${event.code}: ${event.reason}`));
-          }
-        };
-      } catch (e) {
-        if (websocket) {
-          websocket.close();
-        }
-        reject(e);
-      }
-    }),
-    new Promise((resolve, reject) => {
-      setTimeout(() => {
-        reject(new Error("WebSocket connection timed out"));
-      }, timeout);
-    }),
-  ]);
+/** Check that the AD4M executor is reachable at the given HTTP base URL. */
+export async function checkConnection(baseUrl: string, timeout = 10000): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    const res = await fetch(`${baseUrl}/health`, { signal: controller.signal });
+    if (!res.ok) throw new Error(`Health check returned ${res.status}`);
+  } catch (e: any) {
+    if (e.name === 'AbortError') throw new Error('Connection timed out');
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Extract up to 2 initials from a name (first letter of first two words) */
