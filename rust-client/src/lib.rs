@@ -8,17 +8,11 @@ use perspectives::PerspectivesClient;
 use runtime::RuntimeClient;
 
 extern crate anyhow;
-extern crate async_tungstenite;
-extern crate chrono;
-extern crate clap;
-extern crate dirs;
-extern crate graphql_client;
-extern crate maplit;
-extern crate rand;
-extern crate regex;
 extern crate reqwest;
-extern crate rustyline;
+extern crate serde;
+extern crate serde_json;
 extern crate tokio;
+extern crate urlencoding;
 
 pub mod agent;
 pub mod expressions;

@@ -168,6 +168,14 @@ export class RuntimeClient {
         return this.#restClient.put<boolean>('/api/v1/runtime/multi-user-enabled', { enabled })
     }
 
+    async freeHostingEnabled(): Promise<boolean> {
+        return this.#restClient.get<boolean>('/api/v1/runtime/free-hosting-enabled')
+    }
+
+    async setFreeHostingEnabled(enabled: boolean): Promise<boolean> {
+        return this.#restClient.put<boolean>('/api/v1/runtime/free-hosting-enabled', { enabled })
+    }
+
     async listUsers(): Promise<UserStatistics[]> {
         return this.#restClient.get<UserStatistics[]>('/api/v1/runtime/users')
     }

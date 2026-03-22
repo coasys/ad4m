@@ -551,3 +551,31 @@ pub async fn get_network_metrics(
 
     Ok(Json(metrics))
 }
+
+pub async fn get_free_hosting_enabled(
+    State(_state): State<AppState>,
+    _auth: AuthContext,
+) -> Result<Json<bool>, ApiError> {
+    let enabled = Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(enabled))
+}
+
+pub async fn set_free_hosting_enabled(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<bool>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &RUNTIME_QUIT_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    let enabled = body["enabled"]
+        .as_bool()
+        .ok_or_else(|| ApiError::BadRequest("'enabled' boolean required".into()))?;
+
+    Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(enabled))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(enabled))
+}

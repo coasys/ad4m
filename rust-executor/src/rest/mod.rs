@@ -239,6 +239,10 @@ pub fn rest_router(state: AppState) -> Router {
                 "/runtime/network-metrics",
                 get(runtime::get_network_metrics),
             )
+            .route(
+                "/runtime/free-hosting-enabled",
+                get(runtime::get_free_hosting_enabled).put(runtime::set_free_hosting_enabled),
+            )
             // ── Users (7 endpoints + dev email test) ──
             .route(
                 "/users/multi-user-enabled",
