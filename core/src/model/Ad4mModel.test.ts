@@ -985,26 +985,27 @@ describe("Ad4mModel.queryToSPARQL()", () => {
     expect(norm).not.toMatch(/\?\w+\s*<\s*"5"/);
   });
 
-  it("should not inject SPARQL FILTER for gte/lte combined (JS post-processed)", async () => {
+  it("should inject SPARQL FILTER for gte/lte combined", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { gte: 2, lte: 8 } } });
     const norm = normalizeQuery(query);
     expect(norm).toContain("SELECT ?source");
-    expect(norm).not.toMatch(/>=|<=/);
+    expect(norm).toMatch(/>=/);
+    expect(norm).toMatch(/<=/);
   });
 
-  it("should not inject SPARQL FILTER for between operator (JS post-processed)", async () => {
+  it("should inject SPARQL FILTER for between operator", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { between: [1, 10] } } });
     const norm = normalizeQuery(query);
     expect(norm).toContain("SELECT ?source");
-    expect(norm).not.toContain("between");
+    expect(norm).toMatch(/>=/);
+    expect(norm).toMatch(/<=/);
   });
 
-  it("should not inject SPARQL FILTER for contains operator (JS post-processed)", async () => {
+  it("should inject SPARQL FILTER for contains operator", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: { contains: "pasta" } } });
     const norm = normalizeQuery(query);
     expect(norm).toContain("SELECT ?source");
-    expect(norm).not.toContain("CONTAINS");
-    expect(norm).not.toContain("contains");
+    expect(norm).toContain("CONTAINS");
   });
 
   // ---- Multiple property filters combined ----
@@ -1659,3 +1660,101 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
   });
 });
 
+
+// ──────────────────────────────────────────────────────────
+// Batch SPARQL query builder tests
+// ──────────────────────────────────────────────────────────
+
+import { buildBatchSPARQLQuery } from "./query-sparql-batch";
+
+describe("buildBatchSPARQLQuery", () => {
+  @Model({ name: "Author" })
+  class Author extends Ad4mModel {
+    @Property({ through: "author://name", required: true })
+    name!: string;
+  }
+
+  @Model({ name: "Book" })
+  class Book extends Ad4mModel {
+    @Property({ through: "book://title", required: true })
+    title!: string;
+
+    @HasMany(() => Author, { through: "book://author" })
+    authors!: Author[];
+  }
+
+  it("should generate UNION branches for depth 0 and depth 1 includes", () => {
+    const metadata = Book.getModelMetadata();
+    const query = { include: { authors: true } };
+    const sparql = buildBatchSPARQLQuery(metadata, query, Book);
+
+    expect(sparql).toContain("?depth");
+    expect(sparql).toContain("?parentBase");
+    expect(sparql).toContain("?relationName");
+    expect(sparql).toContain("UNION");
+    expect(sparql).toContain("BIND(\"0\" AS ?depth)");
+    expect(sparql).toContain("BIND(\"1\" AS ?depth)");
+    expect(sparql).toContain("book://author");
+  });
+
+  it("should include parent filter when query.parent is specified", () => {
+    const metadata = Book.getModelMetadata();
+    const query = {
+      parent: { id: "flux://library1", predicate: "library://books" },
+      include: { authors: true },
+    };
+    const sparql = buildBatchSPARQLQuery(metadata, query, Book);
+
+    expect(sparql).toContain("flux://library1");
+    expect(sparql).toContain("library://books");
+  });
+
+  it("should include where filter for simple equality", () => {
+    const metadata = Book.getModelMetadata();
+    const query = {
+      where: { title: "My Book" },
+      include: { authors: true },
+    };
+    const sparql = buildBatchSPARQLQuery(metadata, query, Book);
+
+    expect(sparql).toContain("\"My Book\"");
+    expect(sparql).toContain("book://title");
+  });
+
+  it("should throw when include is empty", () => {
+    const metadata = Book.getModelMetadata();
+    expect(() => buildBatchSPARQLQuery(metadata, {}, Book)).toThrow("requires query.include");
+  });
+});
+
+describe("SPARQL comparison filters", () => {
+  @Model({ name: "Item" })
+  class Item extends Ad4mModel {
+    @Property({ through: "item://price", required: true })
+    price!: string;
+
+    @Property({ through: "item://name", required: true })
+    name!: string;
+  }
+
+  it("should generate gt filter", async () => {
+    const mockPersp = { getLinks: jest.fn().mockResolvedValue([]) } as any;
+    const query = await (Item as any).queryToSPARQL(mockPersp, { where: { price: { gt: 10 } } });
+    expect(query).toContain(">");
+    expect(query).toContain("item://price");
+  });
+
+  it("should generate between filter", async () => {
+    const mockPersp = { getLinks: jest.fn().mockResolvedValue([]) } as any;
+    const query = await (Item as any).queryToSPARQL(mockPersp, { where: { price: { between: [5, 20] } } });
+    expect(query).toContain(">=");
+    expect(query).toContain("<=");
+  });
+
+  it("should generate contains filter", async () => {
+    const mockPersp = { getLinks: jest.fn().mockResolvedValue([]) } as any;
+    const query = await (Item as any).queryToSPARQL(mockPersp, { where: { name: { contains: "widget" } } });
+    expect(query).toContain("CONTAINS");
+    expect(query).toContain("widget");
+  });
+});
