@@ -28,11 +28,12 @@ path = "src/bin/generate_snapshot.rs"
 
 [features]
 # Pass metal and cuda features (set through build.rs) through to kalosm
-default = []
+default = ["sparql"]
 metal = ["kalosm/metal"]
 cuda = ["kalosm/cuda"]
 generate_snapshot = []  # Feature flag for snapshot generation mode
 sparql = ["dep:oxigraph"]
+surreal = []  # Enable SurrealDB query resolvers (prolog/surreal always compiled for link storage)
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

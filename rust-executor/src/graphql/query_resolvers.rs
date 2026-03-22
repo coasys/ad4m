@@ -661,7 +661,7 @@ impl Query {
         }
     }
 
-    /// Query using SurrealDB
+    /// Query using SurrealDB — available when compiled with `surreal` feature
     async fn perspective_query_surreal_db(
         &self,
         context: &RequestContext,
@@ -673,15 +673,26 @@ impl Query {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        let result = get_perspective(&uuid)
-            .ok_or(FieldError::from(format!(
-                "No perspective found with uuid {}",
-                uuid
-            )))?
-            .surreal_query(query)
-            .await?;
+        #[cfg(feature = "surreal")]
+        {
+            let result = get_perspective(&uuid)
+                .ok_or(FieldError::from(format!(
+                    "No perspective found with uuid {}",
+                    uuid
+                )))?
+                .surreal_query(query)
+                .await?;
 
-        Ok(serde_json::to_string(&result)?)
+            Ok(serde_json::to_string(&result)?)
+        }
+
+        #[cfg(not(feature = "surreal"))]
+        {
+            let _ = (query, uuid);
+            Err(FieldError::from(
+                "SurrealDB queries are not available. Rebuild with --features surreal".to_string(),
+            ))
+        }
     }
 
     /// Query using SPARQL (Oxigraph) — available when compiled with `sparql` feature
