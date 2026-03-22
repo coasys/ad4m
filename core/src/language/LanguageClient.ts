@@ -1,160 +1,48 @@
-import { ApolloClient, gql } from "@apollo/client/core"
-import unwrapApolloResult from "../unwrapApolloResult"
+import { RestClient } from "../restClient"
 import { LanguageHandle } from "./LanguageHandle"
 import { LanguageMeta, LanguageMetaInput } from "./LanguageMeta"
 import { LanguageRef } from "./LanguageRef"
 
-const LANGUAGE_COMPLETE = `
-    name
-    address
-    settings
-    icon { code }
-    constructorIcon { code }
-    settingsIcon { code }
-`
-
-const LANGUAGE_META = `
-    name
-    address
-    description
-    author
-    templated
-    templateSourceLanguageAddress
-    templateAppliedParams
-    possibleTemplateParams
-    sourceCodeLink
-`
-
 export class LanguageClient {
-    #apolloClient: ApolloClient<any>
+    #restClient: RestClient
 
-    constructor(apolloClient: ApolloClient<any>) {
-        this.#apolloClient = apolloClient
+    constructor(baseUrl: string, token?: string) {
+        this.#restClient = new RestClient(baseUrl, token)
     }
 
     async byAddress(address: string): Promise<LanguageHandle> {
-        const { language } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query byAddress($address: String!) {
-                language(address: $address) {
-                    ${LANGUAGE_COMPLETE}
-                }
-            }`,
-            variables: { address }
-        }))
-        return language
+        return this.#restClient.get<LanguageHandle>(`/api/v1/languages/${encodeURIComponent(address)}`)
     }
 
     async byFilter(filter: string): Promise<LanguageHandle[]> {
-        const { languages } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query byFilter($filter: String!) {
-                languages(filter: $filter) {
-                    ${LANGUAGE_COMPLETE}
-                }
-            }`,
-            variables: { filter }
-        }))
-        return languages
+        return this.#restClient.get<LanguageHandle[]>(`/api/v1/languages?filter=${encodeURIComponent(filter)}`)
     }
 
     async all(): Promise<LanguageHandle[]> {
         return this.byFilter('')
     }
 
-    async writeSettings(
-        languageAddress: string,
-        settings: string
-    ): Promise<Boolean> {
-        const { languageWriteSettings } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation writeSettings($languageAddress: String!, $settings: String!) {
-                languageWriteSettings(languageAddress: $languageAddress, settings: $settings)
-            }`,
-            variables: { languageAddress, settings }
-        }))
-        return languageWriteSettings
+    async writeSettings(languageAddress: string, settings: string): Promise<Boolean> {
+        return this.#restClient.put<Boolean>(`/api/v1/languages/${encodeURIComponent(languageAddress)}/settings`, { settings })
     }
 
-    async applyTemplateAndPublish(
-        sourceLanguageHash: string,
-        templateData: string
-    ): Promise<LanguageRef> {
-        const { languageApplyTemplateAndPublish } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation languageApplyTemplateAndPublish(
-                $sourceLanguageHash: String!,
-                $templateData: String!,
-            ) {
-                languageApplyTemplateAndPublish(sourceLanguageHash: $sourceLanguageHash, templateData: $templateData) {
-                    name, address
-                }
-            }`,
-            variables: { sourceLanguageHash, templateData }
-        }))
-
-        return languageApplyTemplateAndPublish
+    async applyTemplateAndPublish(sourceLanguageHash: string, templateData: string): Promise<LanguageRef> {
+        return this.#restClient.post<LanguageRef>('/api/v1/languages/apply-template', { sourceLanguageHash, templateData })
     }
 
-    async publish(
-        languagePath: string,
-        languageMeta: LanguageMetaInput
-    ): Promise<LanguageMeta> {
-        const { languagePublish } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation languagePublish(
-                $languagePath: String!,
-                $languageMeta: LanguageMetaInput!,
-            ) {
-                languagePublish(languagePath: $languagePath, languageMeta: $languageMeta) {
-                    ${LANGUAGE_META}
-                }
-            }`,
-            variables: { languagePath, languageMeta }
-        }))
-
-        return languagePublish
+    async publish(languagePath: string, languageMeta: LanguageMetaInput): Promise<LanguageMeta> {
+        return this.#restClient.post<LanguageMeta>('/api/v1/languages/publish', { languagePath, languageMeta })
     }
 
-    async meta(
-        address: string,
-    ): Promise<LanguageMeta> {
-        const { languageMeta } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query languageMeta(
-                $address: String!,
-            ) {
-                languageMeta(address: $address) {
-                    ${LANGUAGE_META}
-                }
-            }`,
-            variables: { address }
-        }))
-
-        return languageMeta
+    async meta(address: string): Promise<LanguageMeta> {
+        return this.#restClient.get<LanguageMeta>(`/api/v1/languages/${encodeURIComponent(address)}/meta`)
     }
 
-    async source(
-        address: string,
-    ): Promise<string> {
-        const { languageSource } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query languageSource(
-                $address: String!,
-            ) {
-                languageSource(address: $address)
-            }`,
-            variables: { address }
-        }))
-
-        return languageSource
+    async source(address: string): Promise<string> {
+        return this.#restClient.get<string>(`/api/v1/languages/${encodeURIComponent(address)}/source`)
     }
 
-    async remove(
-        address: string
-    ): Promise<Boolean> {
-        const { languageRemove } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation languageRemove(
-                $address: String!,
-            ) {
-                languageRemove(address: $address)
-            }`,
-            variables: { address }
-        }))
-
-        return languageRemove
+    async remove(address: string): Promise<Boolean> {
+        return this.#restClient.delete<Boolean>(`/api/v1/languages/${encodeURIComponent(address)}`)
     }
 }

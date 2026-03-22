@@ -1,4 +1,3 @@
-import { ApolloClient } from '@apollo/client/core'
 import { AgentClient } from './agent/AgentClient'
 import { LanguageClient } from './language/LanguageClient'
 import { NeighbourhoodClient } from './neighbourhood/NeighbourhoodClient'
@@ -8,7 +7,7 @@ import { ExpressionClient } from './expression/ExpressionClient'
 import { AIClient } from './ai/AIClient'
 
 /**
- * Client for the Ad4m interface wrapping GraphQL queryies
+ * Client for the Ad4m interface wrapping REST API calls
  * for convenient use in user facing code.
  * 
  * Aggregates the six sub-clients:
@@ -17,7 +16,8 @@ import { AIClient } from './ai/AIClient'
  * for the respective functionality.
  */
 export class Ad4mClient {
-    #apolloClient: ApolloClient<any>
+    #baseUrl: string
+    #token?: string
     #agentClient: AgentClient
     #expressionClient: ExpressionClient
     #languageClient: LanguageClient
@@ -26,20 +26,19 @@ export class Ad4mClient {
     #runtimeClient: RuntimeClient
     #aiClient: AIClient
 
-
-    constructor(client: ApolloClient<any>, subscribe: boolean = true) {
-        this.#apolloClient = client
-        this.#agentClient = new AgentClient(this.#apolloClient, subscribe)
-        this.#expressionClient = new ExpressionClient(this.#apolloClient)
-        this.#languageClient = new LanguageClient(this.#apolloClient)
-        this.#neighbourhoodClient = new NeighbourhoodClient(this.#apolloClient)
-        this.#aiClient = new AIClient(this.#apolloClient, subscribe)
-        this.#perspectiveClient = new PerspectiveClient(this.#apolloClient, subscribe)
+    constructor(baseUrl: string, token?: string, subscribe: boolean = true) {
+        this.#baseUrl = baseUrl
+        this.#token = token
+        this.#agentClient = new AgentClient(baseUrl, token, subscribe)
+        this.#expressionClient = new ExpressionClient(baseUrl, token)
+        this.#languageClient = new LanguageClient(baseUrl, token)
+        this.#neighbourhoodClient = new NeighbourhoodClient(baseUrl, token)
+        this.#aiClient = new AIClient(baseUrl, token, subscribe)
+        this.#perspectiveClient = new PerspectiveClient(baseUrl, token, subscribe)
         this.#perspectiveClient.setExpressionClient(this.#expressionClient)
         this.#perspectiveClient.setNeighbourhoodClient(this.#neighbourhoodClient)
         this.#perspectiveClient.setAIClient(this.#aiClient)
-        this.#runtimeClient = new RuntimeClient(this.#apolloClient, subscribe)
-        
+        this.#runtimeClient = new RuntimeClient(baseUrl, token, subscribe)
     }
 
     get agent(): AgentClient {
