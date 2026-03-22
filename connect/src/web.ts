@@ -634,7 +634,7 @@ export class Ad4mConnectElement extends LitElement {
         <div class="settings-bar">
           ${credits != null ? html`
             <span class="credit-badge ${this.lowCredit ? 'low-credit' : ''}">
-              ${CreditIcon()} ${credits.toFixed(2)} HOT
+              ${CreditIcon()} ${credits.toFixed(2)} wHOT
             </span>
           ` : ''}
           <button

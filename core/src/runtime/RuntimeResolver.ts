@@ -513,6 +513,16 @@ export default class RuntimeResolver {
         return enabled
     }
 
+    @Query(returns => Boolean)
+    runtimeFreeHostingEnabled(): boolean {
+        return true
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeSetFreeHostingEnabled(@Arg("enabled") enabled: boolean): boolean {
+        return enabled
+    }
+
     @Query(returns => [UserStatistics])
     runtimeListUsers(): UserStatistics[] {
         return [{

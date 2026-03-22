@@ -62,6 +62,11 @@ fn get_rate(description: &str, default: f64) -> FieldResult<f64> {
 /// - Credits were successfully deducted (clamped to 0)
 fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+        if global_free {
+            return Ok(());
+        }
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
             .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
         if !free {
@@ -78,6 +83,11 @@ fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
 /// happens after the operation via reserve_compute_credits with the exact cost.
 fn check_compute_credits(auth_token: &str) -> FieldResult<()> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+        if global_free {
+            return Ok(());
+        }
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
             .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
         if !free {
@@ -2583,6 +2593,28 @@ impl Mutation {
         })
     }
 
+    async fn runtime_set_free_hosting_enabled(
+        &self,
+        context: &RequestContext,
+        enabled: bool,
+    ) -> FieldResult<bool> {
+        if !context.is_admin_credential {
+            return Err(FieldError::new("Admin credentials required", Value::null()));
+        }
+        Ad4mDb::with_global_instance(|db| {
+            db.set_free_hosting_enabled(enabled)
+                .map_err(|e| FieldError::new(e.to_string(), Value::null()))?;
+            // Mark all users dirty so the credit flush loop pushes updated
+            // HostingUserInfo (with the new freeAccess value) to clients.
+            if let Ok(users) = db.list_users() {
+                for u in users {
+                    mark_credits_dirty(&u.username);
+                }
+            }
+            Ok(enabled)
+        })
+    }
+
     async fn runtime_request_install_notification(
         &self,
         context: &RequestContext,
@@ -3164,6 +3196,17 @@ impl Mutation {
     ) -> FieldResult<PaymentRequestResult> {
         check_capability(&context.capabilities, &RUNTIME_HOSTING_UPDATE_CAPABILITY)?;
 
+        // When free hosting is enabled, payments are not applicable
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+        if global_free {
+            return Ok(PaymentRequestResult {
+                success: false,
+                message: "Payments are disabled — this host is configured for free access."
+                    .to_string(),
+            });
+        }
+
         let user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
             FieldError::new(
                 "Payment requests require multi-user authentication",
@@ -3185,7 +3228,7 @@ impl Mutation {
             ));
         }
 
-        // Look up user's mHOT wallet address (= Holochain AgentPubKey)
+        // Look up user's wHOT wallet address (= Holochain AgentPubKey)
         let wallet_address = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
             .map_err(|e| FieldError::new(format!("DB error: {}", e), Value::null()))?;
 
@@ -3194,13 +3237,13 @@ impl Mutation {
             _ => {
                 return Ok(PaymentRequestResult {
                     success: false,
-                    message: "User has not set their mHOT wallet address. Call setHotWalletAddress first.".to_string(),
+                    message: "User has not set their wHOT wallet address. Call setHotWalletAddress first.".to_string(),
                 });
             }
         };
 
         // Create payment proposal via Unyt alliance DNA
-        let note = format!("AD4M hosting top-up: {} HOT for {}", amountHOT, user_email);
+        let note = format!("AD4M hosting top-up: {} wHOT for {}", amountHOT, user_email);
         match crate::unyt_service::create_proposal(&amountHOT, &wallet_address, Some(&note)).await {
             Ok(proposal_hash) => {
                 // Record the payment request in the DB — fail the whole operation if this doesn't persist
@@ -3215,7 +3258,7 @@ impl Mutation {
                 }
 
                 log::info!(
-                    "Created mHOT payment proposal {} for user={} amount={}",
+                    "Created wHOT payment proposal {} for user={} amount={}",
                     proposal_hash,
                     user_email,
                     amountHOT
@@ -3224,7 +3267,7 @@ impl Mutation {
                 Ok(PaymentRequestResult {
                     success: true,
                     message: format!(
-                        "Payment proposal created (hash: {}). Awaiting approval in user's mHOT wallet.",
+                        "Payment proposal created (hash: {}). Awaiting approval in user's wHOT wallet.",
                         proposal_hash
                     ),
                 })
@@ -3232,7 +3275,7 @@ impl Mutation {
             Err(e) => {
                 let err_str = e.to_string();
                 log::error!(
-                    "Failed to create mHOT payment proposal for user={}: {}",
+                    "Failed to create wHOT payment proposal for user={}: {}",
                     user_email,
                     err_str
                 );
@@ -3335,7 +3378,7 @@ impl Mutation {
         }
     }
 
-    /// Send mHOT from the host's wallet to an external address.
+    /// Send wHOT from the host's wallet to an external address.
     async fn runtime_send_hot(
         &self,
         context: &RequestContext,
@@ -3345,7 +3388,7 @@ impl Mutation {
         // Admin-only: only the host operator can send from the wallet
         if !context.is_admin_credential {
             return Err(FieldError::new(
-                "Only the admin (launcher) can send mHOT",
+                "Only the admin (launcher) can send wHOT",
                 Value::null(),
             ));
         }
@@ -3376,13 +3419,13 @@ impl Mutation {
             Ok(commitment_hash) => Ok(PaymentRequestResult {
                 success: true,
                 message: format!(
-                    "Sent {} HOT to {} (commitment: {})",
+                    "Sent {} wHOT to {} (commitment: {})",
                     amount, recipient, commitment_hash
                 ),
             }),
             Err(e) => Ok(PaymentRequestResult {
                 success: false,
-                message: format!("Failed to send mHOT: {}", e),
+                message: format!("Failed to send wHOT: {}", e),
             }),
         }
     }

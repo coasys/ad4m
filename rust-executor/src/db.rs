@@ -3385,6 +3385,20 @@ impl Ad4mDb {
         self.set_setting("multi_user_enabled", if enabled { "true" } else { "false" })
     }
 
+    pub fn get_free_hosting_enabled(&self) -> Ad4mDbResult<bool> {
+        match self.get_setting("free_hosting_enabled")? {
+            Some(value) => Ok(value == "true"),
+            None => Ok(true), // Default to free hosting
+        }
+    }
+
+    pub fn set_free_hosting_enabled(&self, enabled: bool) -> Ad4mDbResult<()> {
+        self.set_setting(
+            "free_hosting_enabled",
+            if enabled { "true" } else { "false" },
+        )
+    }
+
     // Email verification functions
 
     /// Generates a 6-digit verification code, stores its SHA-256 hash, and returns the plaintext code
