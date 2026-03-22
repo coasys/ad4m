@@ -54,7 +54,7 @@ pub fn rest_router(state: AppState) -> Router {
         get(|| async {
             Json(json!({
                 "name": "AD4M Executor",
-                "version": crate::globals::AD4M_VERSION,
+                "version": *crate::globals::AD4M_VERSION,
                 "api": "/api/v1",
                 "endpoints": [
                     "/api/v1/agent", "/api/v1/languages", "/api/v1/perspectives",

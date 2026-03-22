@@ -12,6 +12,7 @@ use crate::ai_service::AIService;
 use crate::db::Ad4mDb;
 use crate::pubsub::mark_credits_dirty;
 use crate::types::{AITask, AITaskInput, Model, ModelInput, ModelType};
+use base64::Engine;
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
@@ -68,7 +69,7 @@ pub async fn list_models(
 ) -> Result<Json<Vec<Model>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AI_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let models = Ad4mDb::with_global_instance(|db| db.get_models())
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -84,7 +85,7 @@ pub async fn add_model(
 ) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let id = AIService::global_instance()
         .await
@@ -105,7 +106,7 @@ pub async fn update_model(
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     AIService::global_instance()
         .await
@@ -125,7 +126,7 @@ pub async fn remove_model(
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     AIService::global_instance()
         .await
@@ -146,7 +147,7 @@ pub async fn set_default_model(
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     // Verify model exists
     let maybe_model = Ad4mDb::with_global_instance(|db| db.get_model(id.clone()))
@@ -172,7 +173,7 @@ pub async fn list_tasks(
 ) -> Result<Json<Vec<AITask>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AI_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let tasks = AIService::get_tasks().map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -187,7 +188,7 @@ pub async fn add_task(
 ) -> Result<Json<AITask>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let task = AIService::global_instance()
         .await
@@ -208,7 +209,7 @@ pub async fn update_task(
 ) -> Result<Json<AITask>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AI_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let mut task: AITask = body.into();
     task.task_id = id;
@@ -230,7 +231,7 @@ pub async fn remove_task(
 ) -> Result<Json<AITask>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AI_DELETE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let task = AIService::get_tasks()
         .map_err(|e| ApiError::Internal(e.to_string()))?
@@ -256,7 +257,7 @@ pub async fn ai_prompt(
 ) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     check_compute_credits(&context.auth_token)?;
 
@@ -296,7 +297,7 @@ pub async fn ai_embed(
 ) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     check_compute_credits(&context.auth_token)?;
 

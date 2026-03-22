@@ -15,6 +15,7 @@ use crate::types::*;
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
+use super::types::*;
 
 /// GET /expressions/:url — get expression
 pub async fn get_expression(
@@ -24,7 +25,7 @@ pub async fn get_expression(
 ) -> Result<Json<Option<serde_json::Value>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let decoded_url = urlencoding::decode(&url)
         .map(|s| s.into_owned())
@@ -67,7 +68,7 @@ pub async fn get_interactions(
 ) -> Result<Json<Vec<InteractionMeta>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let decoded_url = urlencoding::decode(&url)
         .map(|s| s.into_owned())
@@ -100,7 +101,7 @@ pub async fn create_expression(
 ) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &EXPRESSION_CREATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let controller = LanguageController::global_instance();
     let content_json: serde_json::Value =
@@ -128,7 +129,7 @@ pub async fn get_many_expressions(
 ) -> Result<Json<Vec<Option<serde_json::Value>>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let controller = LanguageController::global_instance();
     let mut results = Vec::new();
@@ -166,7 +167,7 @@ pub async fn interact_expression(
 ) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &EXPRESSION_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let decoded_url = urlencoding::decode(&url)
         .map(|s| s.into_owned())
