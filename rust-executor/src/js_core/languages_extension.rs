@@ -5,8 +5,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::{
-    types::{PerspectiveExpression, PerspectiveState},
     types::PerspectiveDiff,
+    types::{PerspectiveExpression, PerspectiveState},
 };
 
 lazy_static::lazy_static! {

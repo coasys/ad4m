@@ -1,11 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    Agent, AgentStatus, Apps, PerspectiveHandle, Perspective,
-    DecoratedLinkExpression, Link, LinkExpression, LinkMutations,
-    LinkQuery, LinkStatus, Notification, TriggeredNotification,
-    AITask, Model, ModelType, OnlineAgent,
-    InteractionCall, InteractionMeta, LanguageMeta, LanguageRef,
+    AITask, Agent, AgentStatus, Apps, DecoratedLinkExpression, InteractionCall, InteractionMeta,
+    LanguageMeta, LanguageRef, Link, LinkExpression, LinkMutations, LinkQuery, LinkStatus, Model,
+    ModelType, Notification, OnlineAgent, Perspective, PerspectiveHandle, TriggeredNotification,
 };
 
 // Re-export for use in handler files

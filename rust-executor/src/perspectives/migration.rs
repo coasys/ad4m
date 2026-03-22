@@ -197,9 +197,8 @@ mod tests {
     async fn test_delete_all_links_for_perspective() {
         setup();
 
-        let handle = crate::types::PerspectiveHandle::new_from_name(
-            "Test Delete Links".to_string(),
-        );
+        let handle =
+            crate::types::PerspectiveHandle::new_from_name("Test Delete Links".to_string());
 
         // Add some links directly to Rusqlite (simulating old data)
         let test_link_1 = LinkExpression {
@@ -397,9 +396,8 @@ mod tests {
     async fn test_migration_with_no_links() {
         setup();
 
-        let handle = crate::types::PerspectiveHandle::new_from_name(
-            "Test Empty Migration".to_string(),
-        );
+        let handle =
+            crate::types::PerspectiveHandle::new_from_name("Test Empty Migration".to_string());
 
         // Create SurrealDB service with unique database name for isolation
         let db_name = format!(

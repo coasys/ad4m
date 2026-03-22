@@ -80,7 +80,9 @@ pub async fn send_broadcast(
             .map_err(|e| ApiError::Internal(e.to_string()))?
     } else {
         // Unsigned: sign each link individually
-        let links: Vec<DecoratedLinkExpression> = body.payload.links
+        let links: Vec<DecoratedLinkExpression> = body
+            .payload
+            .links
             .into_iter()
             .map(|l| Link::from(l).normalize())
             .map(|l| create_signed_expression(l, &agent_context))
@@ -121,7 +123,9 @@ pub async fn send_signal(
         create_signed_expression(perspective, &agent_context)
             .map_err(|e| ApiError::Internal(e.to_string()))?
     } else {
-        let links: Vec<DecoratedLinkExpression> = body.payload.links
+        let links: Vec<DecoratedLinkExpression> = body
+            .payload
+            .links
             .into_iter()
             .map(|l| Link::from(l).normalize())
             .map(|l| create_signed_expression(l, &agent_context))
@@ -162,7 +166,9 @@ pub async fn set_online_status(
         create_signed_expression(perspective, &agent_context)
             .map_err(|e| ApiError::Internal(e.to_string()))?
     } else {
-        let links: Vec<DecoratedLinkExpression> = body.status.links
+        let links: Vec<DecoratedLinkExpression> = body
+            .status
+            .links
             .into_iter()
             .map(|l| Link::from(l).normalize())
             .map(|l| create_signed_expression(l, &agent_context))

@@ -63,7 +63,6 @@ impl From<std::io::Error> for ApiError {
     }
 }
 
-
 /// Convert a capability check Result into an ApiError.
 /// The capabilities system returns Result<Vec<Capability>, String> and
 /// check_capability returns FieldResult which we convert above.

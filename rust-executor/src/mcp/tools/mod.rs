@@ -36,9 +36,9 @@ use crate::agent::capabilities::{
     capabilities_from_token, check_capability, defs::PERSPECTIVE_CREATE_CAPABILITY, Capability,
 };
 use crate::agent::AgentContext;
-use crate::types::PerspectiveHandle;
 use crate::perspectives::get_perspective;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::types::PerspectiveHandle;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext},
     model::{

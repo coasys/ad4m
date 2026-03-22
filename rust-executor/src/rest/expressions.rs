@@ -38,7 +38,10 @@ pub async fn get_expression(
         let is_loaded = is_literal || controller.is_language_loaded(&lang_address).await;
 
         if is_loaded {
-            match controller.get_expression(&lang_address, &expression_address).await {
+            match controller
+                .get_expression(&lang_address, &expression_address)
+                .await
+            {
                 Ok(Some(expr_json)) => {
                     return Ok(Json(Some(expr_json)));
                 }
@@ -136,7 +139,10 @@ pub async fn get_many_expressions(
             let is_loaded = is_literal || controller.is_language_loaded(&lang_address).await;
 
             if is_loaded {
-                match controller.get_expression(&lang_address, &expression_address).await {
+                match controller
+                    .get_expression(&lang_address, &expression_address)
+                    .await
+                {
                     Ok(expr) => results.push(expr),
                     Err(_) => results.push(None),
                 }

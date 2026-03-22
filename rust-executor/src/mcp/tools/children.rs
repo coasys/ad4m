@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 
-use crate::types::{Agent, LinkQuery, LinkStatus};
 use crate::languages::LanguageController;
 use crate::types::Link;
+use crate::types::{Agent, LinkQuery, LinkStatus};
 
 const HAS_CHILD_PREDICATE: &str = "ad4m://has_child";
 

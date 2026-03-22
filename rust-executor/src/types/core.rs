@@ -4,10 +4,10 @@ use std::fmt::Display;
 use std::str::FromStr;
 use url::Url;
 
-use crate::agent::signatures::verify;
 use super::domain::{
     LinkExpressionInput, LinkInput, LinkStatus, NotificationInput, PerspectiveInput,
 };
+use crate::agent::signatures::verify;
 use regex::Regex;
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -450,9 +450,7 @@ pub struct AIPromptExamples {
     pub output: String,
 }
 
-#[derive(
-    Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord,
-)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub struct AITask {
     pub name: String,

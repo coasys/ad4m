@@ -12,10 +12,10 @@ use crate::agent::capabilities::*;
 use crate::agent::AgentService;
 use crate::db::Ad4mDb;
 use crate::globals::AD4M_VERSION;
-use crate::types::*;
 use crate::holochain_service::get_holochain_service;
 use crate::runtime_service::RuntimeService;
 use crate::types::Notification;
+use crate::types::*;
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
@@ -105,13 +105,19 @@ pub async fn export_data(
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
         }
         "perspective" => {
-            let uuid = body.perspective_uuid.as_ref()
-                .ok_or_else(|| ApiError::BadRequest("perspectiveUuid required for perspective export".into()))?;
+            let uuid = body.perspective_uuid.as_ref().ok_or_else(|| {
+                ApiError::BadRequest("perspectiveUuid required for perspective export".into())
+            })?;
             crate::perspectives::export_perspective(uuid, &body.file_path)
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
         }
-        other => return Err(ApiError::BadRequest(format!("Unknown export type: {}", other))),
+        other => {
+            return Err(ApiError::BadRequest(format!(
+                "Unknown export type: {}",
+                other
+            )))
+        }
     }
 
     Ok(Json(true))
@@ -131,8 +137,8 @@ pub async fn import_data(
         "db" => {
             let data = std::fs::read_to_string(&body.file_path)
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-            let json_data: serde_json::Value = serde_json::from_str(&data)
-                .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+            let json_data: serde_json::Value =
+                serde_json::from_str(&data).map_err(|e| ApiError::BadRequest(e.to_string()))?;
             Ad4mDb::with_global_instance(|db| db.import_all_from_json(json_data))
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
         }
@@ -141,7 +147,12 @@ pub async fn import_data(
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
         }
-        other => return Err(ApiError::BadRequest(format!("Unknown import type: {}", other))),
+        other => {
+            return Err(ApiError::BadRequest(format!(
+                "Unknown import type: {}",
+                other
+            )))
+        }
     }
 
     Ok(Json(true))
@@ -173,8 +184,12 @@ pub async fn verify_signature(
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let result = crate::agent::signatures::verify_string_signed_by_did(&body.did, &body.data, &body.signed_data)
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let result = crate::agent::signatures::verify_string_signed_by_did(
+        &body.did,
+        &body.data,
+        &body.signed_data,
+    )
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(result))
 }
 
@@ -202,13 +217,14 @@ pub async fn get_friend_status(
     Path(did): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let context = auth.to_request_context();
-    check_capability(&context.capabilities, &RUNTIME_FRIEND_STATUS_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_FRIEND_STATUS_READ_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let status = RuntimeService::with_global_instance(|runtime| {
-        runtime.friend_status(&did)
-    })
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let status = RuntimeService::with_global_instance(|runtime| runtime.friend_status(&did))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(serde_json::to_value(status).unwrap_or_default()))
 }
@@ -273,10 +289,8 @@ pub async fn get_inbox(
     check_capability(&context.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let inbox = RuntimeService::with_global_instance(|runtime| {
-        runtime.message_inbox()
-    })
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let inbox = RuntimeService::with_global_instance(|runtime| runtime.message_inbox())
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(serde_json::to_value(inbox).unwrap_or_default()))
 }
@@ -290,10 +304,8 @@ pub async fn get_outbox(
     check_capability(&context.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let outbox = RuntimeService::with_global_instance(|runtime| {
-        runtime.message_outbox()
-    })
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let outbox = RuntimeService::with_global_instance(|runtime| runtime.message_outbox())
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(serde_json::to_value(outbox).unwrap_or_default()))
 }
@@ -403,8 +415,11 @@ pub async fn get_link_language_templates(
     auth: AuthContext,
 ) -> Result<Json<Vec<String>>, ApiError> {
     let context = auth.to_request_context();
-    check_capability(&context.capabilities, &RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
     let templates = RuntimeService::with_global_instance(|runtime| {
         Ok::<Vec<String>, ApiError>(runtime.get_known_link_language_templates())
@@ -419,8 +434,11 @@ pub async fn add_link_language_templates(
     Json(body): Json<LinkLanguageTemplatesRequest>,
 ) -> Result<Json<Vec<String>>, ApiError> {
     let context = auth.to_request_context();
-    check_capability(&context.capabilities, &RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
     let templates = RuntimeService::with_global_instance(|runtime| {
         Ok::<Vec<String>, ApiError>(runtime.add_known_link_language_templates(body.addresses))
@@ -435,8 +453,11 @@ pub async fn remove_link_language_templates(
     Json(body): Json<LinkLanguageTemplatesRequest>,
 ) -> Result<Json<Vec<String>>, ApiError> {
     let context = auth.to_request_context();
-    check_capability(&context.capabilities, &RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
     let templates = RuntimeService::with_global_instance(|runtime| {
         Ok::<Vec<String>, ApiError>(runtime.remove_known_link_language_templates(body.addresses))
@@ -452,13 +473,18 @@ pub async fn get_hc_agent_infos(
     auth: AuthContext,
 ) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
-    check_capability(&context.capabilities, &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let hc = get_holochain_service().await
+    let hc = get_holochain_service()
+        .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let infos = hc.agent_infos()
+    let infos = hc
+        .agent_infos()
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -472,10 +498,14 @@ pub async fn add_hc_agent_infos(
     Json(infos): Json<String>,
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
-    check_capability(&context.capabilities, &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let hc = get_holochain_service().await
+    let hc = get_holochain_service()
+        .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     hc.add_agent_infos(&infos)
@@ -491,13 +521,18 @@ pub async fn get_network_metrics(
     auth: AuthContext,
 ) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
-    check_capability(&context.capabilities, &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let hc = get_holochain_service().await
+    let hc = get_holochain_service()
+        .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let metrics = hc.network_metrics()
+    let metrics = hc
+        .network_metrics()
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
