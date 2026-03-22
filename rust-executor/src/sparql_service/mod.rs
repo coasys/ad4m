@@ -8,7 +8,6 @@ use oxigraph::store::Store;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 const LINK_PREFIX: &str = "ad4m://link/";
 
