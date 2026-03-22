@@ -352,7 +352,7 @@ export class HostBrowser extends LitElement {
         <div class="manual-entry">
           <input
             type="text"
-            placeholder="wss://your-host.example/graphql"
+            placeholder="https://your-host.example"
             .value=${this.manualUrl}
             @input=${(e: Event) => { this.manualUrl = (e.target as HTMLInputElement).value; this.manualUrlError = null; }}
             @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter') this.connectManualUrl(); }}
