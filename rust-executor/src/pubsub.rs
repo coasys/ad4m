@@ -1,6 +1,6 @@
 use crate::types::GetFilter;
 use crate::types::GetValue;
-use coasys_juniper::{graphql_value, FieldError, FieldResult};
+use std::fmt;
 use futures::Stream;
 use futures::StreamExt;
 use log::error;
@@ -66,7 +66,7 @@ pub(crate) async fn subscribe_and_process<
     pubsub: Arc<PubSub>,
     topic: Topic,
     filter: Option<String>,
-) -> Pin<Box<dyn Stream<Item = FieldResult<T::Value>> + Send>> {
+) -> Pin<Box<dyn Stream<Item = Result<T::Value, Box<dyn std::error::Error + Send>>> + Send>> {
     let receiver = pubsub.subscribe(&topic).await;
     let receiver_stream = BroadcastStream::new(receiver);
 
@@ -95,10 +95,10 @@ pub(crate) async fn subscribe_and_process<
                     error!("Type: {}", type_name);
                     error!("Message: {:?}", msg);
 
-                    let field_error = FieldError::new(
-                        e,
-                        graphql_value!({ "type": "INTERNAL_ERROR_COULD_NOT_SERIALIZE" }),
-                    );
+                    let field_error: Box<dyn std::error::Error + Send> = Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Failed to deserialize: {}", e),
+                    ));
                     futures::future::ready(Some(Err(field_error)))
                 }
             },

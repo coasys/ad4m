@@ -10,7 +10,7 @@ use axum::{
 use crate::agent::capabilities::*;
 use crate::agent::{AgentContext, AgentService};
 use crate::db::Ad4mDb;
-use crate::graphql::query_resolvers::can_access_perspective;
+use crate::helpers::can_access_perspective;
 use crate::perspectives::{
     add_perspective, get_perspective, remove_perspective, update_perspective,
     perspective_instance::{PerspectiveInstance, SdnaType},

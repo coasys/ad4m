@@ -63,20 +63,6 @@ impl From<std::io::Error> for ApiError {
     }
 }
 
-impl From<coasys_juniper::FieldError> for ApiError {
-    fn from(e: coasys_juniper::FieldError) -> Self {
-        let msg = e.message().to_string();
-        if msg.contains("not found") || msg.contains("Not found") {
-            ApiError::NotFound(msg)
-        } else if msg.contains("Permission denied") || msg.contains("Capability") {
-            ApiError::Forbidden(msg)
-        } else if msg.contains("Insufficient") {
-            ApiError::Forbidden(msg)
-        } else {
-            ApiError::Internal(msg)
-        }
-    }
-}
 
 /// Convert a capability check Result into an ApiError.
 /// The capabilities system returns Result<Vec<Capability>, String> and

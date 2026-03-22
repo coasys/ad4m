@@ -1,7 +1,6 @@
 //! REST API module — `/api/v1/*`
 //!
-//! Axum-based REST API running alongside the existing warp GraphQL server.
-//! This is the harmonised REST surface that will eventually replace GraphQL.
+//! Axum-based REST API that replaces the former warp/GraphQL server.
 
 pub mod agent;
 pub mod ai;
@@ -19,18 +18,21 @@ pub mod users;
 
 use auth::AppState;
 use axum::{
-    http::{HeaderValue, Method},
+    http::Method,
+    response::Json,
     routing::{delete, get, patch, post, put},
     Router,
 };
+use crate::Ad4mConfig;
 use deno_core::error::AnyError;
+use serde_json::json;
 use std::net::SocketAddr;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 /// Build the full REST API router.
 pub fn rest_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(AllowOrigin::any())
         .allow_methods([
             Method::GET,
             Method::POST,
@@ -39,9 +41,28 @@ pub fn rest_router(state: AppState) -> Router {
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers(Any);
+        .allow_headers(tower_http::cors::Any)
+        .expose_headers([
+            "Cross-Origin-Embedder-Policy".parse().unwrap(),
+            "Cross-Origin-Resource-Policy".parse().unwrap(),
+            "Cross-Origin-Opener-Policy".parse().unwrap(),
+        ]);
 
-    Router::new()
+    // Root info endpoint
+    let root = Router::new().route("/", get(|| async {
+        Json(json!({
+            "name": "AD4M Executor",
+            "version": crate::globals::AD4M_VERSION,
+            "api": "/api/v1",
+            "endpoints": [
+                "/api/v1/agent", "/api/v1/languages", "/api/v1/perspectives",
+                "/api/v1/neighbourhoods", "/api/v1/expressions", "/api/v1/runtime",
+                "/api/v1/users", "/api/v1/hosting", "/api/v1/ai", "/api/v1/events"
+            ]
+        }))
+    }));
+
+    root.nest("/api/v1", Router::new()
         // ── Agent (19 endpoints) ──
         .route("/agent", get(agent::get_agent))
         .route("/agent/status", get(agent::get_agent_status))
@@ -151,29 +172,70 @@ pub fn rest_router(state: AppState) -> Router {
         .route("/events/neighbourhoods/{uuid}/signals", get(events::neighbourhood_signal_events))
         .route("/events/runtime", get(events::runtime_events))
         .route("/events/ai", get(events::ai_events))
+        )
         // ── State + Middleware ──
         .with_state(state)
         .layer(cors)
 }
 
-/// Start the REST API server on gql_port + 1 (transitional: separate port).
-pub async fn start_rest_server(
-    port: u16,
-    admin_credential: Option<String>,
-    auto_permit_cap_requests: bool,
-) -> Result<(), AnyError> {
+/// Start the REST API server (replaces the old warp/GraphQL server).
+pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
+    // Set global SMTP config for email verification
+    crate::config::set_smtp_config(config.smtp_config.clone())?;
+
+    let port = config.gql_port.expect("Did not get port");
+    let admin_credential = config.admin_credential.clone();
+    let auto_permit = config.auto_permit_cap_requests.unwrap_or(false);
+
     let state = AppState {
-        admin_credential,
-        auto_permit_cap_requests,
+        admin_credential: admin_credential.clone(),
+        auto_permit_cap_requests: auto_permit,
     };
 
-    let app = rest_router(state).into_make_service();
+    let app = rest_router(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    log::info!("REST API server starting on http://{}/api/v1", addr);
+    if let Some(tls_config) = &config.tls {
+        let tls_port = tls_config.tls_port;
+        let cert_path = tls_config.cert_file_path.clone();
+        let key_path = tls_config.key_file_path.clone();
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+        log::info!("Starting REST API (HTTP) on 127.0.0.1:{}", port);
+        log::info!("Starting REST API (HTTPS) on 0.0.0.0:{}", tls_port);
+
+        // TLS server on 0.0.0.0
+        let tls_state = AppState {
+            admin_credential: admin_credential.clone(),
+            auto_permit_cap_requests: auto_permit,
+        };
+        let tls_app = rest_router(tls_state);
+
+        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
+            .await
+            .map_err(|e| deno_core::anyhow::anyhow!("TLS config error: {}", e))?;
+
+        tokio::spawn(async move {
+            axum_server::bind_rustls(SocketAddr::from(([0, 0, 0, 0], tls_port)), rustls_config)
+                .serve(tls_app.into_make_service())
+                .await
+                .unwrap();
+        });
+
+        // Plain HTTP on localhost
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
+        axum::serve(listener, app.into_make_service()).await?;
+    } else {
+        let address: [u8; 4] = if config.localhost.unwrap_or(true) {
+            [127, 0, 0, 1]
+        } else {
+            [0, 0, 0, 0]
+        };
+
+        let addr = SocketAddr::from((address, port));
+        log::info!("REST API server starting on http://{}/api/v1", addr);
+
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        axum::serve(listener, app.into_make_service()).await?;
+    }
 
     Ok(())
 }

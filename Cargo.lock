@@ -78,6 +78,7 @@ dependencies = [
  "argon2",
  "aws-lc-sys 0.35.0",
  "axum 0.8.4",
+ "axum-server",
  "base64 0.21.7",
  "candle-core",
  "chat-gpt-lib-rs",

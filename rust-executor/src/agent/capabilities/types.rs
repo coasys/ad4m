@@ -1,4 +1,4 @@
-use coasys_juniper::GraphQLObject;
+
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,7 +9,7 @@ pub struct AuthInfoExtended {
     pub auth: AuthInfo,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthInfo {
     pub app_name: String,
@@ -42,7 +42,7 @@ impl TryFrom<crate::types::AuthInfoInput> for AuthInfo {
     }
 }
 
-#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Capability {
     pub with: Resource,
@@ -58,7 +58,7 @@ impl From<crate::types::CapabilityInput> for Capability {
     }
 }
 
-#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Resource {
     pub domain: String,
