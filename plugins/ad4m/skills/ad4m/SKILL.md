@@ -41,7 +41,7 @@ After adding the config snippet and restarting OpenClaw, the plugin auto-manages
 
 The AD4M OpenClaw plugin bridges AD4M's MCP server into your tool list automatically. Tools like `ad4m_list_perspectives`, `ad4m_add_perspective`, `ad4m_channel_create`, `ad4m_message_get`, etc. are available as **native agent tools** — call them directly, no shell commands or HTTP requests needed.
 
-The plugin is configured in OpenClaw's config under `plugins.entries.ad4m-openclaw-plugin.config`. Run `openclaw ad4m-setup` to generate the config — key fields:
+The plugin is configured in OpenClaw's config under `plugins.entries.ad4m.config`. Run `openclaw ad4m-setup` to generate the config — key fields:
 
 - `mode` — `"managed"` or `"external"`. Managed = plugin starts/manages the executor process.
 - `mcpEndpoint` — MCP endpoint (default: `http://localhost:3001/mcp`)

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep, startExecutor, quitExecutor } from "../utils/utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
 
@@ -22,14 +23,16 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
     const appDataPath = path.join(TEST_DIR, "agents", "multi-user-connect-agent");
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    const gqlPort = 15800
-    const hcAdminPort = 15801
-    const hcAppPort = 15802
+    let gqlPort: number;
+    let hcAdminPort: number;
+    let hcAppPort: number;
 
     let executorProcess: ChildProcess | null = null
     let adminAd4mClient: Ad4mClient | null = null
 
     before(async () => {
+        [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+        registerPorts([gqlPort, hcAdminPort, hcAppPort]);
         if (!fs.existsSync(appDataPath)) {
             fs.mkdirSync(appDataPath, { recursive: true });
         }
@@ -48,6 +51,7 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
         if (executorProcess) {
             await quitExecutor(executorProcess, gqlPort);
         }
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
     })
 
     describe("Multi-User Connect Flow", () => {

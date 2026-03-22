@@ -2,6 +2,7 @@
 use super::graphql_types::*;
 use crate::agent::{capabilities::*, did_document_for_context, signatures, AgentContext};
 use crate::ai_service::AIService;
+use crate::config::get_global_config;
 use crate::languages::LanguageController;
 use crate::types::{AITask, DecoratedExpressionProof, ModelType};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
@@ -806,6 +807,85 @@ impl Query {
         })
     }
 
+    /// Returns the domain name(s) from the TLS certificate's Subject Alternative Names,
+    /// or None if TLS is not configured.
+    async fn runtime_tls_domain(&self, context: &RequestContext) -> FieldResult<Option<String>> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        let config = get_global_config();
+        let tls = match config.tls {
+            Some(tls) => tls,
+            None => return Ok(None),
+        };
+
+        let cert_pem = std::fs::read(&tls.cert_file_path).map_err(|e| {
+            FieldError::new(
+                format!("Failed to read TLS certificate: {}", e),
+                Value::null(),
+            )
+        })?;
+
+        use x509_parser::prelude::*;
+        // Parse PEM to get the first certificate
+        let (_, pem) = parse_x509_pem(&cert_pem)
+            .map_err(|e| FieldError::new(format!("Failed to parse PEM: {}", e), Value::null()))?;
+        let (_, cert) = X509Certificate::from_der(&pem.contents).map_err(|e| {
+            FieldError::new(format!("Failed to parse certificate: {}", e), Value::null())
+        })?;
+
+        // Try SAN extension first, skipping wildcard entries
+        if let Ok(Some(san)) = cert.subject_alternative_name() {
+            for name in &san.value.general_names {
+                if let GeneralName::DNSName(dns) = name {
+                    if !dns.contains('*') {
+                        return Ok(Some(dns.to_string()));
+                    }
+                }
+            }
+        }
+
+        // Fall back to CN, skipping wildcard entries
+        for rdn in cert.subject().iter() {
+            for attr in rdn.iter() {
+                if attr.attr_type() == &oid_registry::OID_X509_COMMON_NAME {
+                    if let Ok(cn) = attr.as_str() {
+                        if !cn.contains('*') {
+                            return Ok(Some(cn.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Returns the readiness status of executor subsystems.
+    /// Test harnesses should poll this query instead of using `sleep()`.
+    /// No capability check — readiness is safe to expose publicly.
+    async fn runtime_readiness(&self, _context: &RequestContext) -> FieldResult<ReadinessStatus> {
+        // TODO: holochain_ready only checks if the service handle exists, not actual conductor readiness.
+        // A proper fix would require an API to query conductor state, which doesn't exist yet.
+        let holochain_ready = crate::holochain_service::maybe_get_holochain_service()
+            .await
+            .is_some();
+
+        // TODO: languages_loaded currently maps to wallet unlock state, not language-controller state.
+        // The language loading happens during unlock, but there's no separate API to check if all
+        // languages have finished loading. This is a reasonable approximation for now.
+        let (agent_initialized, languages_loaded) =
+            AgentService::with_global_instance(|agent_service| {
+                (agent_service.is_initialized(), agent_service.is_unlocked())
+            });
+
+        Ok(ReadinessStatus {
+            gql_ready: true, // If this query returns, GQL is ready
+            holochain_ready,
+            agent_initialized,
+            languages_loaded,
+        })
+    }
+
     async fn runtime_known_link_language_templates(
         &self,
         context: &RequestContext,
@@ -887,6 +967,17 @@ impl Query {
         })
     }
 
+    async fn runtime_free_hosting_enabled(&self, context: &RequestContext) -> FieldResult<bool> {
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY,
+        )?;
+        Ad4mDb::with_global_instance(|db| {
+            db.get_free_hosting_enabled()
+                .map_err(|e| FieldError::new(e.to_string(), Value::null()))
+        })
+    }
+
     async fn runtime_list_users(
         &self,
         context: &RequestContext,
@@ -911,6 +1002,8 @@ impl Query {
         // For each user, count their perspectives
         let mut user_stats = vec![];
         let all_perspectives = all_perspectives();
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(false);
 
         for user in users {
             // Count perspectives owned by this user
@@ -924,8 +1017,41 @@ impl Query {
                 }
             }
 
+            let free_access: bool = global_free
+                || Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user.username))
+                    .map_err(|e| {
+                        FieldError::new(
+                            format!("Failed to get user free access: {}", e),
+                            Value::null(),
+                        )
+                    })?;
+
+            let remaining_credits = if free_access {
+                "unlimited".to_string()
+            } else {
+                let credits =
+                    Ad4mDb::with_global_instance(|db| db.get_user_credits(&user.username))
+                        .map_err(|e| {
+                            FieldError::new(
+                                format!("Failed to get user credits: {}", e),
+                                Value::null(),
+                            )
+                        })?;
+                format!("{}", credits)
+            };
+
+            let hot_wallet_address =
+                Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user.username)).map_err(
+                    |e| {
+                        FieldError::new(
+                            format!("Failed to get hot wallet for user {}: {}", user.username, e),
+                            Value::null(),
+                        )
+                    },
+                )?;
+
             user_stats.push(UserStatistics {
-                email: user.username,
+                email: user.username.clone(),
                 did: user.did,
                 last_seen: user.last_seen.map(|ts| {
                     DateTime::from(
@@ -934,22 +1060,342 @@ impl Query {
                     )
                 }),
                 perspective_count,
+                remaining_credits,
+                free_access,
+                hot_wallet_address,
             });
         }
 
         Ok(user_stats)
     }
 
+    async fn runtime_user_wallet_address(
+        &self,
+        context: &RequestContext,
+        email: String,
+    ) -> FieldResult<Option<String>> {
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
+        )?;
+        let email = email.trim().to_lowercase();
+        let addr =
+            Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&email)).map_err(|e| {
+                FieldError::new(
+                    format!("Failed to get wallet address: {}", e),
+                    Value::null(),
+                )
+            })?;
+        Ok(addr)
+    }
+
     async fn runtime_hosting_user_info(
         &self,
         context: &RequestContext,
     ) -> FieldResult<HostingUserInfo> {
-        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        // TODO: implement actual hosting user info lookup
-        Err(FieldError::new(
-            "Hosting user info not yet implemented",
-            Value::null(),
-        ))
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        let user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
+            FieldError::new(
+                "Hosting user info requires multi-user authentication",
+                Value::null(),
+            )
+        })?;
+
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(false);
+        let free_access = global_free
+            || Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user_email)).map_err(
+                |e| {
+                    FieldError::new(
+                        format!("Failed to get free access status: {}", e),
+                        Value::null(),
+                    )
+                },
+            )?;
+
+        let remaining_credits = if free_access {
+            "unlimited".to_string()
+        } else {
+            let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(&user_email))
+                .map_err(|e| {
+                    FieldError::new(format!("Failed to get user credits: {}", e), Value::null())
+                })?;
+            credits.to_string()
+        };
+
+        let hot_wallet_address =
+            Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email)).map_err(
+                |e| {
+                    FieldError::new(
+                        format!("Failed to get hot wallet address: {}", e),
+                        Value::null(),
+                    )
+                },
+            )?;
+
+        Ok(HostingUserInfo {
+            email: user_email,
+            remaining_credits,
+            hot_wallet_address,
+            free_access,
+        })
+    }
+
+    /// Get the host's configured rates for credit deduction.
+    async fn runtime_host_rates(&self, context: &RequestContext) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        let rates = Ad4mDb::with_global_instance(|db| {
+            db.get_host_rates().map_err(|e| {
+                FieldError::new(format!("Failed to get host rates: {}", e), Value::null())
+            })
+        })?;
+
+        let json: Vec<serde_json::Value> = rates
+            .into_iter()
+            .map(|(desc, price)| serde_json::json!({ "description": desc, "priceInHOT": price }))
+            .collect();
+
+        Ok(serde_json::to_string(&json).unwrap_or_else(|_| "[]".to_string()))
+    }
+
+    /// Get the host's wHOT wallet balance from the alliance DNA ledger.
+    async fn runtime_hot_wallet_balance(&self, context: &RequestContext) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        match crate::unyt_service::get_ledger().await {
+            Ok(ledger) => {
+                // Extract balance from ledger JSON
+                let balance = ledger
+                    .get("balance")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                Ok(serde_json::to_string(&balance).unwrap_or_else(|_| "{}".to_string()))
+            }
+            Err(e) => Err(FieldError::new(
+                format!("Failed to get wHOT wallet balance: {}", e),
+                Value::null(),
+            )),
+        }
+    }
+
+    /// Get the host's wHOT transaction history (outgoing + incoming).
+    async fn runtime_hot_wallet_history(
+        &self,
+        context: &RequestContext,
+        page: Option<i32>,
+        per_page: Option<i32>,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        // Validate pagination parameters
+        if let Some(p) = page {
+            if p < 0 {
+                return Err(FieldError::new("page must be non-negative", Value::Null));
+            }
+        }
+        const MAX_PER_PAGE: i32 = 1000;
+        if let Some(pp) = per_page {
+            if pp < 1 || pp > MAX_PER_PAGE {
+                return Err(FieldError::new(
+                    format!("per_page must be between 1 and {}", MAX_PER_PAGE),
+                    Value::Null,
+                ));
+            }
+        }
+
+        // Fetch outgoing history
+        let mut all_txs: Vec<serde_json::Value> = Vec::new();
+
+        match crate::unyt_service::get_history(
+            page.map(|p| p as u64),
+            per_page.unwrap_or(50) as u64,
+        )
+        .await
+        {
+            Ok(history) => {
+                log::debug!("get_history raw result: {}", history);
+                // get_history returns {"items": [...], "low_boundary": ..., "end_of_chain": ...}
+                let items = history
+                    .get("items")
+                    .and_then(|v| v.as_array())
+                    .or_else(|| history.as_array());
+                if let Some(arr) = items {
+                    log::info!("get_history parsed {} items", arr.len());
+                    for tx in arr {
+                        all_txs.push(tx.clone());
+                    }
+                } else {
+                    log::warn!("get_history: could not extract items array from response");
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to get outgoing history: {}", e);
+            }
+        }
+
+        // Fetch incoming transactions via notification links
+        match crate::unyt_service::get_all_notification_links().await {
+            Ok(links) => {
+                log::debug!("get_all_notification_links raw result: {}", links);
+                match crate::unyt_service::get_actionable_transactions(links).await {
+                    Ok(incoming) => {
+                        log::debug!("get_actionable_transactions raw result: {}", incoming);
+                        // Result is {"proposal_actionable":[], "commitment_actionable":[], "accept_actionable":[], "reject_actionable":[]}
+                        if let Some(obj) = incoming.as_object() {
+                            for (category, txs) in obj {
+                                if let Some(arr) = txs.as_array() {
+                                    for tx in arr {
+                                        let mut tx = tx.clone();
+                                        if let Some(tx_obj) = tx.as_object_mut() {
+                                            let direction = if category == "reject_actionable" {
+                                                "rejected"
+                                            } else {
+                                                "incoming"
+                                            };
+                                            tx_obj.insert(
+                                                "direction".to_string(),
+                                                serde_json::Value::String(direction.to_string()),
+                                            );
+                                        }
+                                        all_txs.push(tx);
+                                    }
+                                }
+                            }
+                        } else if let Some(arr) = incoming.as_array() {
+                            for tx in arr {
+                                let mut tx = tx.clone();
+                                if let Some(obj) = tx.as_object_mut() {
+                                    obj.insert(
+                                        "direction".to_string(),
+                                        serde_json::Value::String("incoming".to_string()),
+                                    );
+                                }
+                                all_txs.push(tx);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to get actionable transactions: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to get notification links: {}", e);
+            }
+        }
+
+        // Add pending sends from DB so they show immediately in the UI
+        if let Ok(pending) = Ad4mDb::with_global_instance(|db| db.get_pending_sends()) {
+            log::info!("DB pending sends: {} items", pending.len());
+            for (recipient, amount, proposal_hash) in &pending {
+                // Check if this proposal is already in all_txs (from zome history)
+                let already_present = all_txs.iter().any(|tx| {
+                    tx.get("id").and_then(|v| v.as_str()) == Some(proposal_hash.as_str())
+                        || tx
+                            .get("history")
+                            .and_then(|h| h.as_array())
+                            .map_or(false, |arr| {
+                                arr.iter().any(|h| {
+                                    h.get("id").and_then(|v| v.as_str())
+                                        == Some(proposal_hash.as_str())
+                                })
+                            })
+                });
+                if !already_present {
+                    let mut tx = serde_json::json!({
+                        "id": proposal_hash,
+                        "tx_type": "Proposal",
+                        "amount": { "0": format!("-{}", amount.trim_start_matches('-')) },
+                        "counterparty": [recipient],
+                        "status": "pending",
+                        "direction": "outgoing",
+                    });
+                    // Enrich with email
+                    if let Ok(Some(email)) = Ad4mDb::with_global_instance(|db| {
+                        db.get_user_by_hot_wallet_address(recipient)
+                    }) {
+                        tx.as_object_mut().unwrap().insert(
+                            "counterparty_email".to_string(),
+                            serde_json::Value::String(email),
+                        );
+                    }
+                    all_txs.push(tx);
+                }
+            }
+        }
+
+        // NOTE: Rejection reconciliation (reject_pending_send, complete_payment_request)
+        // is handled by check_pending_sends() and check_pending_payments() in unyt_service.rs,
+        // which run periodically. This query resolver is intentionally read-only.
+
+        // Enrich counterparty agent pubkeys with user emails from DB
+        for tx in &mut all_txs {
+            if let Some(counterparty_arr) = tx
+                .get("counterparty")
+                .and_then(|c| c.as_array())
+                .map(|a| a.to_vec())
+            {
+                if let Some(pubkey) = counterparty_arr.first().and_then(|v| v.as_str()) {
+                    if let Ok(Some(email)) =
+                        Ad4mDb::with_global_instance(|db| db.get_user_by_hot_wallet_address(pubkey))
+                    {
+                        if let Some(obj) = tx.as_object_mut() {
+                            obj.insert(
+                                "counterparty_email".to_string(),
+                                serde_json::Value::String(email),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        log::info!(
+            "Returning {} total transaction history items",
+            all_txs.len()
+        );
+        Ok(serde_json::to_string(&all_txs).unwrap_or_else(|_| "[]".to_string()))
+    }
+
+    /// Get the host's wHOT agent public key (their identity on the wHOT DHT).
+    async fn runtime_hot_agent_pubkey(&self, context: &RequestContext) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        match crate::unyt_service::whoami().await {
+            Ok(pubkey) => Ok(pubkey),
+            Err(e) => Err(FieldError::new(
+                format!("Failed to get wHOT agent pubkey: {}", e),
+                Value::null(),
+            )),
+        }
+    }
+
+    /// Get or create the Holochain agent public key for the Unyt DNA (base64).
+    /// Available even before Unyt DNA is installed — needed to request membrane proof.
+    async fn runtime_unyt_agent_key(&self, context: &RequestContext) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        match crate::unyt_service::get_or_create_agent_key().await {
+            Ok(key) => Ok(key),
+            Err(e) => Err(FieldError::new(
+                format!("Failed to get/create Unyt agent key: {}", e),
+                Value::null(),
+            )),
+        }
+    }
+
+    /// Get Unyt DNA version info (installed vs bundled).
+    async fn runtime_unyt_version_info(&self, context: &RequestContext) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+        let (installed, bundled) = crate::unyt_service::version_info();
+        Ok(serde_json::json!({
+            "installed": installed,
+            "bundled": bundled,
+            "needsUpdate": installed.as_deref() != Some(bundled.as_str()),
+        })
+        .to_string())
     }
 
     async fn ai_get_models(&self, context: &RequestContext) -> FieldResult<Vec<Model>> {

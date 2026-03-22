@@ -28,6 +28,7 @@ type State = {
   connectedLoading: boolean;
   expertMode: boolean;
   multiUserEnabled: boolean;
+  freeHostingEnabled: boolean;
   notifications: NotificationType[];
 };
 
@@ -40,6 +41,7 @@ type ContextProps = {
     handleLogin: (client: Ad4mClient, login: Boolean, did: string) => void;
     toggleExpertMode: () => void;
     setMultiUserEnabled: (enabled: boolean) => void;
+    setFreeHostingEnabled: (enabled: boolean) => void;
     handleNotification: (notification: NotificationType) => void;
   };
 };
@@ -58,6 +60,7 @@ const initialState: ContextProps = {
     connectedLoading: true,
     expertMode: getForVersion("expertMode") === "true",
     multiUserEnabled: false,
+    freeHostingEnabled: true,
     notifications: [],
   },
   methods: {
@@ -67,6 +70,7 @@ const initialState: ContextProps = {
     handleLogin: () => null,
     toggleExpertMode: () => null,
     setMultiUserEnabled: () => null,
+    setFreeHostingEnabled: () => null,
     handleNotification: () => null,
   },
 };
@@ -97,6 +101,21 @@ export function Ad4minProvider({ children }: any) {
         }));
       } catch (error) {
         console.error("Failed to set multi-user mode:", error);
+        throw error;
+      }
+    }
+  };
+
+  const setFreeHostingEnabled = async (enabled: boolean) => {
+    if (state.client) {
+      try {
+        await state.client.runtime.setFreeHostingEnabled(enabled);
+        setState((prevState) => ({
+          ...prevState,
+          freeHostingEnabled: enabled,
+        }));
+      } catch (error) {
+        console.error("Failed to set free hosting mode:", error);
         throw error;
       }
     }
@@ -329,22 +348,32 @@ export function Ad4minProvider({ children }: any) {
     }
   }, [state.url]);
 
-  // Load multi-user state when client is available
+  // Load multi-user and free hosting state when client is available
   useEffect(() => {
-    const loadMultiUserState = async () => {
+    const loadHostingState = async () => {
       if (state.client) {
-        try {
-          const enabled = await state.client.runtime.multiUserEnabled();
-          setState((prev) => ({
-            ...prev,
-            multiUserEnabled: enabled,
-          }));
-        } catch (error) {
-          console.error("Failed to load multi-user state:", error);
+        const [multiUserResult, freeHostingResult] = await Promise.allSettled([
+          state.client.runtime.multiUserEnabled(),
+          state.client.runtime.freeHostingEnabled(),
+        ]);
+        setState((prev) => ({
+          ...prev,
+          ...(multiUserResult.status === "fulfilled"
+            ? { multiUserEnabled: multiUserResult.value }
+            : {}),
+          ...(freeHostingResult.status === "fulfilled"
+            ? { freeHostingEnabled: freeHostingResult.value }
+            : {}),
+        }));
+        if (multiUserResult.status === "rejected") {
+          console.error("Failed to load multi-user state:", multiUserResult.reason);
+        }
+        if (freeHostingResult.status === "rejected") {
+          console.error("Failed to load free hosting state:", freeHostingResult.reason);
         }
       }
     };
-    loadMultiUserState();
+    loadHostingState();
   }, [state.client]);
 
   return (
@@ -358,6 +387,7 @@ export function Ad4minProvider({ children }: any) {
           handleLogin,
           toggleExpertMode,
           setMultiUserEnabled,
+          setFreeHostingEnabled,
           handleNotification,
         },
       }}

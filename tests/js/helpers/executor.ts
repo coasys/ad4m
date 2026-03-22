@@ -1,7 +1,7 @@
 import { ChildProcess } from "node:child_process";
 import { Ad4mClient } from "@coasys/ad4m";
 import { startExecutor, apolloClient } from "../utils/utils.js";
-import { getFreePorts } from "./ports.js";
+import { getFreePorts, registerPorts, deregisterPorts } from "./ports.js";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -72,6 +72,9 @@ export async function startAgent(
 ): Promise<AgentHandle> {
   const [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
 
+  // Register so cleanup.js can kill stray executors if mocha is force-killed
+  registerPorts([gqlPort, hcAdminPort, hcAppPort]);
+
   const appDataPath = path.join(TEST_DIR, "agents", agentName);
   const bootstrapSeedPath = opts.bootstrapSeedPath ?? BOOTSTRAP_SEED;
 
@@ -92,6 +95,7 @@ export async function startAgent(
 
   async function stop(): Promise<void> {
     _activeExecutors.delete(executorProcess);
+    deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
     await new Promise<void>((resolve) => {
       // Already exited?
       if (executorProcess.exitCode !== null) {

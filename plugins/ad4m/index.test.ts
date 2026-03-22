@@ -54,7 +54,7 @@ import {
   type AgentResult,
 } from "./index";
 
-import ad4mPlugin from "./index";
+import ad4mPlugin, { _resetModuleState } from "./index";
 import { WakerSubscriptionManager } from "./wakerSubscriptionManager";
 
 // ---------------------------------------------------------------------------
@@ -275,15 +275,60 @@ describe("isExecutorRunning", () => {
     vi.restoreAllMocks();
   });
 
-  it("returns true when endpoint responds", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      fakeJsonResponse({ jsonrpc: "2.0", id: 0, result: {} }),
+  it("returns 'mcp' when MCP endpoint responds", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation((url: any) => {
+      if (String(url).includes("/mcp")) {
+        return Promise.resolve(
+          fakeJsonResponse({ jsonrpc: "2.0", id: 0, result: {} }),
+        );
+      }
+      return Promise.reject(new Error("ECONNREFUSED"));
+    });
+    const result = await isExecutorRunning(
+      "http://localhost:3001/mcp",
+      1000,
+      "http://localhost:12000/graphql",
     );
-    const result = await isExecutorRunning("http://localhost:3001/mcp", 1000);
-    expect(result).toBe(true);
+    expect(result).toBe("mcp");
   });
 
-  it("returns false when endpoint times out or errors", async () => {
+  it("returns 'graphql' when only GraphQL endpoint responds", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation((url: any) => {
+      if (String(url).includes("/mcp")) {
+        return Promise.reject(new Error("ECONNREFUSED"));
+      }
+      // GraphQL endpoint responds
+      return Promise.resolve(
+        fakeJsonResponse({ data: { agentStatus: { isInitialized: true } } }),
+      );
+    });
+    const result = await isExecutorRunning(
+      "http://localhost:3001/mcp",
+      1000,
+      "http://localhost:12000/graphql",
+    );
+    expect(result).toBe("graphql");
+  });
+
+  it("returns false when GraphQL returns 200 with errors", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation((url: any) => {
+      if (String(url).includes("/mcp")) {
+        return Promise.reject(new Error("ECONNREFUSED"));
+      }
+      // GraphQL 200 but with errors array
+      return Promise.resolve(
+        fakeJsonResponse({ errors: [{ message: "not ready" }], data: null }),
+      );
+    });
+    const result = await isExecutorRunning(
+      "http://localhost:3001/mcp",
+      1000,
+      "http://localhost:12000/graphql",
+    );
+    expect(result).toBe("graphql");
+  });
+
+  it("returns false when both endpoints fail", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
     const result = await isExecutorRunning("http://localhost:3001/mcp", 500);
     expect(result).toBe(false);
@@ -1441,6 +1486,7 @@ describe("postWake", () => {
 describe("ad4mPlugin", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    _resetModuleState();
   });
 
   it("registers expected tools and services", async () => {
@@ -1668,7 +1714,7 @@ describe("ad4mPlugin", () => {
     }, 50);
 
     const mockApi = {
-      id: "ad4m-openclaw-plugin",
+      id: "ad4m",
       pluginConfig: {
         mode: "managed",
       },
@@ -2002,7 +2048,7 @@ describe("ad4mPlugin", () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No executor"));
 
     const mockApi = {
-      id: "ad4m-openclaw-plugin",
+      id: "ad4m",
       pluginConfig: {
         mode: "external",
         mcpEndpoint: "http://localhost:3001/mcp",
@@ -2033,7 +2079,7 @@ describe("ad4mPlugin", () => {
 
   it("logs setup hint when mode is not configured", async () => {
     const mockApi: any = {
-      id: "ad4m-openclaw-plugin",
+      id: "ad4m",
       pluginConfig: {},
       logger: makeMockLogger(),
       registerTool: vi.fn(),
@@ -2058,7 +2104,7 @@ describe("ad4mPlugin", () => {
 
   it("registers ad4m-setup CLI command", () => {
     const mockApi: any = {
-      id: "ad4m-openclaw-plugin",
+      id: "ad4m",
       pluginConfig: {},
       logger: makeMockLogger(),
       registerTool: vi.fn(),

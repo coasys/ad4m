@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use holochain::conductor::api::{AppInfo, AppStatusFilter, CellInfo};
-use holochain::conductor::config::{ConductorConfig, NetworkConfig};
+use holochain::conductor::config::{ConductorConfig, NetworkConfig, SpaceNetworkOverride};
 use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::hash_type::Agent;
@@ -226,6 +226,23 @@ impl HolochainService {
                                         },
                                     }
                                 }
+                                HolochainServiceRequest::EnableApp(app_id, response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(10),
+                                        async {
+                                            service.conductor.clone().enable_app(app_id).await
+                                                .map(|_| ())
+                                                .map_err(|e| anyhow!("Could not enable app: {:?}", e))
+                                        }
+                                    ).await.map_err(|_| anyhow!("Timeout error; Enable App")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::EnableApp(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::EnableApp(Err(err)));
+                                        },
+                                    }
+                                }
                                 HolochainServiceRequest::AgentInfos(response_tx) => {
                                     match timeout(
                                         std::time::Duration::from_secs(30),
@@ -320,13 +337,14 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::GetNetworkMetrics(response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3),
+                                        std::time::Duration::from_secs(30),
                                         service.get_network_metrics()
                                     ).await.map_err(|_| anyhow!("Timeout error; GetNetworkMetrics")) {
                                         Ok(result) => {
                                             let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(result));
                                         },
                                         Err(err) => {
+                                            error!("GetNetworkMetrics timed out after 30s");
                                             let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(Err(err)));
                                         },
                                     }
@@ -383,6 +401,27 @@ impl HolochainService {
                                         },
                                     }
                                 }
+                                HolochainServiceRequest::NewSignKeypair(response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(10),
+                                        service.conductor.keystore().new_sign_keypair_random()
+                                    ).await.map_err(|_| anyhow!("Timeout error; NewSignKeypair")) {
+                                        Ok(result) => {
+                                            let result = result.map_err(|e| anyhow!("Failed to generate new signing keypair: {}", e));
+                                            let _ = response_tx.send(HolochainServiceResponse::NewSignKeypair(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::NewSignKeypair(Err(err)));
+                                        },
+                                    }
+                                }
+                                HolochainServiceRequest::SignWithKey(agent_key, data, response_tx) => {
+                                    let keystore = service.conductor.keystore();
+                                    let data_arc = Arc::from(data.into_boxed_slice());
+                                    let result = keystore.sign(agent_key, data_arc).await
+                                        .map_err(|e| anyhow!("Failed to sign with key: {}", e));
+                                    let _ = response_tx.send(HolochainServiceResponse::SignWithKey(result));
+                                }
                             };
                         };
                         error!("Holochain service receiver closed");
@@ -425,6 +464,19 @@ impl HolochainService {
                 .ok_or_else(|| anyhow!("No Holochain config stored for restart"))?
         };
 
+        // Shut down the old conductor first so it releases the port
+        if let Some(hc) = maybe_get_holochain_service().await {
+            log::info!("Shutting down old Holochain conductor...");
+            if let Err(e) = hc.shutdown().await {
+                log::warn!(
+                    "Error shutting down old conductor (continuing anyway): {}",
+                    e
+                );
+            }
+            // Give the OS time to release the port
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
         // Restart the service with the stored config
         Self::init(config).await
     }
@@ -437,7 +489,7 @@ impl HolochainService {
     pub async fn new(local_config: LocalConductorConfig) -> Result<HolochainService, AnyError> {
         let conductor_yaml_path =
             std::path::Path::new(&local_config.conductor_path).join("conductor_config.yaml");
-        let config = if conductor_yaml_path.exists() {
+        let mut config = if conductor_yaml_path.exists() {
             ConductorConfig::load_yaml(&conductor_yaml_path)?
         } else {
             let mut config = ConductorConfig::default();
@@ -470,6 +522,33 @@ impl HolochainService {
 
             config
         };
+
+        // Apply unyt space override: the unyt DNA gets its own bootstrap, signal,
+        // relay, and auth material. All other DNAs use the AD4M defaults above.
+        let dna_hash_opt = crate::db::Ad4mDb::global_instance()
+            .lock()
+            .ok()
+            .and_then(|guard| {
+                guard
+                    .as_ref()
+                    .and_then(|db| db.get_setting("unyt_dna_hash").ok().flatten())
+            });
+        if let Some(dna_hash) = dna_hash_opt {
+            //if let Ok(Some(auth_material)) =
+            //    crate::db::Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material"))
+            //{
+            info!("Applying unyt space override for DNA {}", dna_hash);
+            config.network.space_overrides.insert(
+                dna_hash,
+                SpaceNetworkOverride {
+                    bootstrap_url: Some(Url2::parse(crate::unyt_service::UNYT_BOOTSTRAP_URL)),
+                    signal_url: Some(Url2::parse(crate::unyt_service::UNYT_SIGNAL_URL)),
+                    base64_auth_material: None,
+                    relay_url: Some(Url2::parse(crate::unyt_service::UNYT_RELAY_URL)),
+                },
+            );
+            //}
+        }
 
         info!("Starting holochain conductor with config: {:#?}", config);
         let passphrase_locked_array =
@@ -951,6 +1030,181 @@ pub async fn run_local_hc_services() -> Result<(), AnyError> {
 #[cfg(test)]
 mod tests {
     use tokio::time::{Duration, Instant};
+
+    /// Integration test: start a real Holochain conductor and generate signing keypairs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_new_sign_keypair_random() {
+        use super::*;
+
+        // Init V8 / Deno platform (once) — required by Holochain
+        {
+            use std::sync::Once;
+            static V8_INIT: Once = Once::new();
+            V8_INIT.call_once(|| {
+                deno_core::v8::V8::set_flags_from_string("--no-opt");
+                deno_core::JsRuntime::init_platform(None, false);
+            });
+        }
+
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        let tmp = std::env::temp_dir().join(format!("ad4m_test_keypair_{}", std::process::id()));
+        let conductor_path = tmp.join("conductor");
+        std::fs::create_dir_all(&conductor_path).unwrap();
+
+        // Cleanup on drop
+        struct CleanupDir(std::path::PathBuf);
+        impl Drop for CleanupDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = CleanupDir(tmp.clone());
+
+        let config = LocalConductorConfig {
+            passphrase: "test-passphrase".into(),
+            conductor_path: conductor_path.to_string_lossy().into(),
+            data_path: tmp.to_string_lossy().into(),
+            use_bootstrap: false,
+            use_proxy: false,
+            use_local_proxy: false,
+            use_mdns: false,
+            proxy_url: "ws://localhost:4444".into(),
+            bootstrap_url: "http://localhost:4445".into(),
+            relay_url: None,
+            app_port: 0,
+        };
+
+        let service = HolochainService::new(config)
+            .await
+            .expect("Failed to start conductor");
+
+        // Generate first keypair
+        let key1 = service
+            .conductor
+            .keystore()
+            .new_sign_keypair_random()
+            .await
+            .expect("Failed to generate first keypair");
+        let raw1 = key1.get_raw_39();
+        assert_eq!(raw1.len(), 39, "Agent key should be 39 bytes");
+
+        // Generate second keypair — must be different
+        let key2 = service
+            .conductor
+            .keystore()
+            .new_sign_keypair_random()
+            .await
+            .expect("Failed to generate second keypair");
+        let raw2 = key2.get_raw_39();
+        assert_eq!(raw2.len(), 39);
+        assert_ne!(raw1, raw2, "Two generated keys must be distinct");
+
+        // Both keys should be in the keystore now
+        let all_keys = service
+            .conductor
+            .keystore()
+            .list_public_keys()
+            .await
+            .expect("Failed to list keys");
+        assert!(
+            all_keys.len() >= 2,
+            "Keystore should have at least 2 keys, got {}",
+            all_keys.len()
+        );
+        assert!(all_keys.contains(&key1), "Key1 should be in keystore");
+        assert!(all_keys.contains(&key2), "Key2 should be in keystore");
+
+        // Verify round-trip: base64 encode then decode back
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(raw1);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .expect("base64 decode failed");
+        let reconstructed = holochain::prelude::AgentPubKey::from_raw_39(decoded);
+        assert_eq!(
+            key1, reconstructed,
+            "Round-trip base64 encode/decode should produce the same key"
+        );
+
+        service.shutdown().await.expect("Failed to shut down");
+    }
+
+    /// Integration test: generate keypairs via the HolochainServiceInterface message-passing path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_new_sign_keypair_via_interface() {
+        use super::*;
+
+        {
+            use std::sync::Once;
+            static V8_INIT2: Once = Once::new();
+            V8_INIT2.call_once(|| {
+                // V8 may already be initialized by the other test
+            });
+        }
+
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        let tmp =
+            std::env::temp_dir().join(format!("ad4m_test_keypair_iface_{}", std::process::id()));
+        let conductor_path = tmp.join("conductor");
+        std::fs::create_dir_all(&conductor_path).unwrap();
+
+        struct CleanupDir(std::path::PathBuf);
+        impl Drop for CleanupDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = CleanupDir(tmp.clone());
+
+        let config = LocalConductorConfig {
+            passphrase: "test-passphrase-iface".into(),
+            conductor_path: conductor_path.to_string_lossy().into(),
+            data_path: tmp.to_string_lossy().into(),
+            use_bootstrap: false,
+            use_proxy: false,
+            use_local_proxy: false,
+            use_mdns: false,
+            proxy_url: "ws://localhost:4444".into(),
+            bootstrap_url: "http://localhost:4445".into(),
+            relay_url: None,
+            app_port: 0,
+        };
+
+        // Use HolochainService::init which sets up the full message-passing loop
+        HolochainService::init(config)
+            .await
+            .expect("Failed to init holochain service");
+
+        // Get the interface
+        let iface = get_holochain_service().await;
+
+        // Generate keypair via interface
+        let key1 = iface
+            .new_sign_keypair_random()
+            .await
+            .expect("Failed to generate keypair via interface");
+        assert_eq!(key1.get_raw_39().len(), 39);
+
+        let key2 = iface
+            .new_sign_keypair_random()
+            .await
+            .expect("Failed to generate second keypair via interface");
+        assert_ne!(
+            key1, key2,
+            "Two generated keys via interface must be distinct"
+        );
+
+        // Also verify get_agent_key still works
+        let existing_key = iface
+            .get_agent_key()
+            .await
+            .expect("Failed to get existing agent key");
+        assert_eq!(existing_key.get_raw_39().len(), 39);
+
+        iface.shutdown().await.expect("Failed to shutdown");
+    }
 
     #[tokio::test]
     async fn test_signal_loop_performance() {

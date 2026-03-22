@@ -1,6 +1,7 @@
 extern crate remove_dir_all;
 use crate::app_state::{
-    AgentConfigDir, LauncherState, MultiUserConfig, SmtpConfig, SmtpConfigDto, TlsConfig,
+    AgentConfigDir, HostRegistration, LauncherState, MultiUserConfig, SmtpConfig, SmtpConfigDto,
+    TlsConfig,
 };
 use crate::util::create_tray_message_windows;
 use crate::{config::data_path, get_main_window};
@@ -72,6 +73,46 @@ pub fn remove_app_agent_state(agent: AgentConfigDir) {
     state.remove_agent(agent.clone());
 
     state.save().unwrap();
+}
+
+#[tauri::command]
+pub fn delete_agent(agent: AgentConfigDir) -> Result<(), String> {
+    let mut state = LauncherState::load().map_err(|e| format!("Failed to load state: {}", e))?;
+
+    // Don't allow deleting the currently selected agent
+    if let Some(ref selected) = state.selected_agent {
+        if selected.path == agent.path {
+            return Err("Cannot delete the currently selected agent".to_string());
+        }
+    }
+
+    // Resolve the agent from persisted state by matching against agent_list
+    let persisted_agent = state
+        .agent_list
+        .iter()
+        .find(|a| a.name == agent.name && a.path == agent.path)
+        .cloned()
+        .ok_or_else(|| "Agent not found in configuration".to_string())?;
+
+    let persisted_path = persisted_agent.path.clone();
+
+    // Persist state change first so we don't end up with deleted data but stale config
+    state.remove_agent(persisted_agent);
+    state
+        .save()
+        .map_err(|e| format!("Failed to save state: {}", e))?;
+
+    // Then remove the data directory
+    if persisted_path.exists() {
+        if let Err(e) = remove_dir_all::remove_dir_all(&persisted_path) {
+            log::warn!(
+                "Agent removed from config but failed to delete data directory: {}",
+                e
+            );
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -195,16 +236,31 @@ pub fn get_tls_config() -> Option<TlsConfig> {
 
 #[tauri::command]
 pub fn set_tls_config(config: TlsConfig) -> Result<(), String> {
-    // Validate file paths exist if TLS is enabled
+    // Validate file paths exist and are readable if TLS is enabled
     if config.enabled {
-        if !std::path::Path::new(&config.cert_file_path).exists() {
+        let cert_path = std::path::Path::new(&config.cert_file_path);
+        if !cert_path.exists() {
             return Err(format!(
                 "Certificate file not found: {}",
                 config.cert_file_path
             ));
         }
-        if !std::path::Path::new(&config.key_file_path).exists() {
+        if std::fs::File::open(cert_path).is_err() {
+            return Err(format!(
+                "Certificate file is not readable (check permissions): {}",
+                config.cert_file_path
+            ));
+        }
+
+        let key_path = std::path::Path::new(&config.key_file_path);
+        if !key_path.exists() {
             return Err(format!("Key file not found: {}", config.key_file_path));
+        }
+        if std::fs::File::open(key_path).is_err() {
+            return Err(format!(
+                "Key file is not readable (check permissions): {}",
+                config.key_file_path
+            ));
         }
     }
 
@@ -237,6 +293,50 @@ pub fn set_tls_config(config: TlsConfig) -> Result<(), String> {
         .map_err(|e| format!("Failed to save launcher state: {}", e))?;
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn validate_tls_config() -> Result<Vec<String>, String> {
+    let state =
+        LauncherState::load().map_err(|e| format!("Failed to load launcher state: {}", e))?;
+
+    let tls_cfg = state
+        .multi_user_config
+        .as_ref()
+        .and_then(|m| m.tls_config.as_ref())
+        .or(state.tls_config.as_ref());
+
+    let config = match tls_cfg {
+        Some(c) if c.enabled => c,
+        _ => return Ok(vec![]),
+    };
+
+    let mut errors = Vec::new();
+
+    let cert_path = std::path::Path::new(&config.cert_file_path);
+    if !cert_path.exists() {
+        errors.push(format!(
+            "Certificate file not found: {}",
+            config.cert_file_path
+        ));
+    } else if std::fs::File::open(cert_path).is_err() {
+        errors.push(format!(
+            "Certificate file is not readable (permission denied): {}",
+            config.cert_file_path
+        ));
+    }
+
+    let key_path = std::path::Path::new(&config.key_file_path);
+    if !key_path.exists() {
+        errors.push(format!("Key file not found: {}", config.key_file_path));
+    } else if std::fs::File::open(key_path).is_err() {
+        errors.push(format!(
+            "Key file is not readable (permission denied): {}",
+            config.key_file_path
+        ));
+    }
+
+    Ok(errors)
 }
 
 #[tauri::command]
@@ -382,5 +482,21 @@ pub fn set_mcp_config(enabled: bool, port: u16) -> Result<(), String> {
         .save()
         .map_err(|e| format!("Failed to save launcher state: {}", e))?;
 
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_host_registration() -> Option<HostRegistration> {
+    LauncherState::load().ok()?.host_registration
+}
+
+#[tauri::command]
+pub fn set_host_registration(registration: Option<HostRegistration>) -> Result<(), String> {
+    let mut state =
+        LauncherState::load().map_err(|e| format!("Failed to load launcher state: {}", e))?;
+    state.host_registration = registration;
+    state
+        .save()
+        .map_err(|e| format!("Failed to save launcher state: {}", e))?;
     Ok(())
 }

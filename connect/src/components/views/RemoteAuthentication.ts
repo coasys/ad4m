@@ -2,7 +2,8 @@ import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { VerificationRequestResult } from "@coasys/ad4m";
 import { sharedStyles } from "../../styles/shared-styles";
-import { ArrowLeftIcon, CheckIcon, CrossIcon } from "../icons";
+import { CheckIcon, CrossIcon } from "../icons";
+import type { RemoteHost } from "../../types";
 
 @customElement("remote-authentication")
 export class RemoteAuthentication extends LitElement {
@@ -11,10 +12,12 @@ export class RemoteAuthentication extends LitElement {
   @property({ type: Boolean }) emailCodeError: boolean = false;
   @property({ type: Boolean }) passwordError: boolean = false;
   @property({ type: Boolean }) accountCreationError: boolean = false;
+  @property({ type: Object }) host: RemoteHost | null = null;
 
   @state() private email = "";
   @state() private password = "";
   @state() private emailSecurityCode: string = "";
+  @state() private confirmPassword: string = "";
 
   static styles = [
     sharedStyles,
@@ -41,7 +44,9 @@ export class RemoteAuthentication extends LitElement {
       .security-code {
         width: 100%;
         display: flex;
+        align-items: center;
         justify-content: center;
+        gap: 12px;
         margin-bottom: 20px;
       }
 
@@ -67,16 +72,25 @@ export class RemoteAuthentication extends LitElement {
     `
   ];
 
-  private back() {
-    this.dispatchEvent(new CustomEvent("back", { bubbles: true, composed: true }));
-    this.remoteAuthState = null;
-    // Clear sensitive fields when navigating back
-    this.password = "";
-    this.emailSecurityCode = "";
-  }
-
   private emailLogin() {
     this.dispatchEvent(new CustomEvent("email-login", { detail: { email: this.email.trim() }, bubbles: true, composed: true }));
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this.clearSensitiveState();
+  }
+
+  private clearSensitiveState() {
+    this.password = "";
+    this.confirmPassword = "";
+    this.emailSecurityCode = "";
+    this.email = "";
+  }
+
+  private tryAgain() {
+    this.clearSensitiveState();
+    this.dispatchEvent(new CustomEvent("reset-auth-state", { bubbles: true, composed: true }));
   }
 
   private verifyEmailCode() {
@@ -107,6 +121,10 @@ export class RemoteAuthentication extends LitElement {
     }
   }
 
+  private get passwordsMatch(): boolean {
+    return this.password.length > 0 && this.password === this.confirmPassword;
+  }
+
   private isValidEmail(): boolean {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     return emailRegex.test(this.email.trim());
@@ -121,17 +139,14 @@ export class RemoteAuthentication extends LitElement {
 
     return html`
       <div class="container">
-        <div class="back-button" @click=${this.back}>
-          ${ArrowLeftIcon()}
-        </div>
-
         <div class="header">
-          <h1>Login</h1>
+          <h1 style="font-size: 28px;">${showLoginPasswordInput ? 'Login' : showSignUpPasswordInput ? 'Register' : 'Login or Register'}</h1>
+          ${this.host ? html`<p style="font-size: 15px; color: rgba(255,255,255,0.4); margin-top: 10px;">${this.host.url}</p>` : ''}
         </div>
 
-        ${showEmailInput ? 
+        ${showEmailInput ?
           html`
-            <h3>Enter your email to login to the remote node</h3>
+            <h3>Enter your email to login to ${this.host ? html`<strong>${this.host.name}</strong>` : 'the remote node'}</h3>
 
             <div class="input-row">
               <input
@@ -152,7 +167,7 @@ export class RemoteAuthentication extends LitElement {
 
             <div class="login-button" style="margin-top: 10px;">
               <button class="primary" @click=${this.emailLogin} .disabled=${this.remoteAuthLoading || !this.isValidEmail()}>
-                ${this.remoteAuthLoading ? "Loading..." : "Login"}
+                ${this.remoteAuthLoading ? "Loading..." : "Continue"}
               </button>
             </div>
           `
@@ -165,11 +180,8 @@ export class RemoteAuthentication extends LitElement {
               ${CrossIcon()}
               <p>${this.remoteAuthState.message || "Failed to process email. Please try again."}</p>
             </div>
-
-            <div class="login-button">
-              <button class="primary" @click=${this.back}>
-                Back
-              </button>
+            <div class="login-button" style="margin-top: 10px;">
+              <button class="primary" @click=${this.tryAgain}>Try again</button>
             </div>
           `
           : ``
@@ -194,6 +206,7 @@ export class RemoteAuthentication extends LitElement {
                 .value=${this.emailSecurityCode || ""}
                 @input=${this.onEmailSecurityCodeChange}
               />
+              ${this.remoteAuthLoading ? html`<div class="spinner"></div>` : ''}
             </div>
 
             ${this.emailCodeError
@@ -254,14 +267,14 @@ export class RemoteAuthentication extends LitElement {
           : ``
         }
 
-        ${showSignUpPasswordInput ? 
+        ${showSignUpPasswordInput ?
           html`
-            <div class="state danger">
-              ${CrossIcon()}
-              <p>Email not found</p>
+            <div class="state success">
+              ${CheckIcon()}
+              <p>Creating a new account for <strong>${this.email}</strong></p>
             </div>
 
-            <h3>Enter a password to create a new account</h3>
+            <h3>Choose a password</h3>
 
             <div class="input-row">
               <input
@@ -272,16 +285,33 @@ export class RemoteAuthentication extends LitElement {
                   const input = e.target as HTMLInputElement;
                   this.password = input.value;
                 }}
+              />
+            </div>
+
+            <div class="input-row" style="margin-top: 8px;">
+              <input
+                type="password"
+                placeholder="Confirm password..."
+                .value=${this.confirmPassword || ""}
+                @input=${(e: Event) => {
+                  const input = e.target as HTMLInputElement;
+                  this.confirmPassword = input.value;
+                }}
                 @keydown=${(e: KeyboardEvent) => {
-                  if (e.key === 'Enter' && !this.remoteAuthLoading && this.password.length) {
+                  if (e.key === 'Enter' && !this.remoteAuthLoading && this.passwordsMatch) {
                     this.createAccount();
                   }
                 }}
               />
             </div>
 
+            ${this.confirmPassword.length > 0 && !this.passwordsMatch
+              ? html`<p style="font-size: 13px; color: var(--ac-danger-color); text-align: center;">Passwords do not match</p>`
+              : ''
+            }
+
             <div class="login-button">
-              <button class="primary" @click=${this.createAccount} .disabled=${this.remoteAuthLoading || !this.password.length}>
+              <button class="primary" @click=${this.createAccount} .disabled=${this.remoteAuthLoading || !this.passwordsMatch}>
                 ${this.remoteAuthLoading ? "Loading..." : "Create Account"}
               </button>
             </div>

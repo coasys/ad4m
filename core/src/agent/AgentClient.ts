@@ -82,6 +82,7 @@ export interface InitializeArgs {
 export type AgentUpdatedCallback = (agent: Agent) => null;
 export type AgentStatusChangedCallback = (agent: Agent) => null;
 export type AgentAppsUpdatedCallback = () => null;
+export type HostingUserInfoChangedCallback = (info: HostingUserInfo) => void;
 /**
  * Provides access to all functions regarding the local agent,
  * such as generating, locking, unlocking, importing the DID keystore,
@@ -92,12 +93,14 @@ export class AgentClient {
   #appsChangedCallback: AgentAppsUpdatedCallback[];
   #updatedCallbacks: AgentUpdatedCallback[];
   #agentStatusChangedCallbacks: AgentStatusChangedCallback[];
+  #hostingUserInfoChangedCallbacks: HostingUserInfoChangedCallback[];
 
   constructor(client: ApolloClient<any>, subscribe: boolean = true) {
     this.#apolloClient = client;
     this.#updatedCallbacks = [];
     this.#agentStatusChangedCallbacks = [];
     this.#appsChangedCallback = [];
+    this.#hostingUserInfoChangedCallbacks = [];
 
     if (subscribe) {
       this.subscribeAgentUpdated();
@@ -422,6 +425,31 @@ export class AgentClient {
       });
   }
 
+  addHostingUserInfoChangedListener(listener: HostingUserInfoChangedCallback) {
+    this.#hostingUserInfoChangedCallbacks.push(listener);
+  }
+
+  subscribeHostingUserInfoChanged() {
+    this.#apolloClient
+      .subscribe({
+        query: gql`subscription {
+          runtimeHostingUserInfoChanged {
+            email
+            remainingCredits
+            hotWalletAddress
+            freeAccess
+          }
+        }`,
+      })
+      .subscribe({
+        next: (result) => {
+          const info = result.data.runtimeHostingUserInfoChanged;
+          this.#hostingUserInfoChangedCallbacks.forEach((cb) => cb(info));
+        },
+        error: (e) => console.error(e),
+      });
+  }
+
   async requestCapability(authInfo: AuthInfoInput): Promise<string> {
     const { agentRequestCapability } = unwrapApolloResult(
       await this.#apolloClient.mutate({
@@ -600,6 +628,7 @@ export class AgentClient {
             email
             remainingCredits
             hotWalletAddress
+            freeAccess
           }
         }`,
       })
@@ -633,4 +662,5 @@ export class AgentClient {
     );
     return runtimeRequestPayment;
   }
+
 }

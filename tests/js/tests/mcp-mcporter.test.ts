@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep, startExecutor, killByPorts } from "../utils/utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
 import fetch from "node-fetch";
@@ -25,8 +26,8 @@ const __dirname = path.dirname(__filename);
  * This ensures third-party MCP clients work with AD4M.
  */
 
-const MCP_PORT = 3001;
-const MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
+let MCP_PORT: number;
+let MCP_BASE_URL: string;
 
 // ============================================================================
 // Test Suite
@@ -39,18 +40,18 @@ describe("MCP mcporter Integration Tests", function() {
     const appDataPath = path.join(TEST_DIR, "agents", "mcp-mcporter-test");
     const bootstrapSeedPath = path.join(__dirname + "/../bootstrapSeed.json");
     // Unique ports for mcporter tests
-    const gqlPort = 16020;
-    const hcAdminPort = 16021;
-    const hcAppPort = 16022;
+    let gqlPort: number;
+    let hcAdminPort: number;
+    let hcAppPort: number;
     const adminCredential = "mcporter-test-admin-credential-12345";
 
     let executorProcess: ChildProcess | null = null;
     let mcporterConfigPath: string;
 
     before(async () => {
-        // Kill any lingering executors to avoid port conflicts
-        killByPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
-        await sleep(1000);
+        [gqlPort, hcAdminPort, hcAppPort, MCP_PORT] = await getFreePorts(4);
+        MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
+        registerPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
 
         // Clean up and create test directory
         if (fs.existsSync(appDataPath)) {
@@ -71,6 +72,7 @@ describe("MCP mcporter Integration Tests", function() {
             undefined,
             undefined,
             true,               // enableMcp
+            MCP_PORT,           // mcpPort
         );
 
         await sleep(3000);
@@ -109,6 +111,7 @@ describe("MCP mcporter Integration Tests", function() {
             }
         }
         killByPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        deregisterPorts([gqlPort, hcAdminPort, hcAppPort, MCP_PORT]);
     });
 
     // ========================================================================

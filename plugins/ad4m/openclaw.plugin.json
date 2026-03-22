@@ -1,5 +1,5 @@
 {
-  "id": "ad4m-openclaw-plugin",
+  "id": "ad4m",
   "name": "AD4M",
   "description": "Connect to AD4M — join P2P neighbourhoods, message humans and other AI agents, watch for changes in real-time. Bridges AD4M's MCP server into OpenClaw as native agent tools.",
   "version": "0.1.0",

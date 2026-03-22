@@ -91,6 +91,8 @@ pub struct Ad4mConfig {
     pub enable_mcp: Option<bool>,
     /// Port for MCP HTTP server (default: 3001)
     pub mcp_port: Option<u16>,
+    /// Path to write PID file (for test harness cleanup)
+    pub pid_file: Option<String>,
 }
 
 impl Ad4mConfig {
@@ -180,6 +182,7 @@ impl Default for Ad4mConfig {
             smtp_config: None,
             enable_mcp: None,
             mcp_port: None,
+            pid_file: None,
         };
         config.prepare();
         config
