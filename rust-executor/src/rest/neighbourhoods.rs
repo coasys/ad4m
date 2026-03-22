@@ -11,8 +11,8 @@ use crate::agent::capabilities::*;
 use crate::agent::{create_signed_expression, AgentContext};
 use crate::neighbourhoods::{self, install_neighbourhood_with_context};
 use crate::perspectives::get_perspective;
-use crate::types::*;
 use crate::types::domain::Perspective as DomainPerspective;
+use crate::types::*;
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
@@ -20,8 +20,10 @@ use super::types::*;
 
 /// Convert REST PerspectiveInput to core Perspective (for neighbourhood meta)
 fn perspective_input_to_core(input: super::types::PerspectiveInput) -> Perspective {
-    let links: Vec<LinkExpression> = input.links.into_iter().map(|l| {
-        LinkExpression {
+    let links: Vec<LinkExpression> = input
+        .links
+        .into_iter()
+        .map(|l| LinkExpression {
             author: String::new(),
             timestamp: String::new(),
             data: Link {
@@ -34,15 +36,17 @@ fn perspective_input_to_core(input: super::types::PerspectiveInput) -> Perspecti
                 signature: String::new(),
             },
             status: None,
-        }
-    }).collect();
+        })
+        .collect();
     Perspective { links }
 }
 
 /// Convert REST PerspectiveInput to domain Perspective
 fn perspective_input_to_domain(input: super::types::PerspectiveInput) -> DomainPerspective {
-    let links: Vec<DecoratedLinkExpression> = input.links.into_iter().map(|l| {
-        DecoratedLinkExpression {
+    let links: Vec<DecoratedLinkExpression> = input
+        .links
+        .into_iter()
+        .map(|l| DecoratedLinkExpression {
             author: String::new(),
             timestamp: String::new(),
             data: Link {
@@ -57,8 +61,8 @@ fn perspective_input_to_domain(input: super::types::PerspectiveInput) -> DomainP
                 invalid: None,
             },
             status: None,
-        }
-    }).collect();
+        })
+        .collect();
     DomainPerspective { links }
 }
 

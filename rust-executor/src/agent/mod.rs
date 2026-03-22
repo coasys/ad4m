@@ -5,8 +5,8 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Agent, AgentStatus};
 use crate::types::domain::Perspective;
+use crate::types::{Agent, AgentStatus};
 use crate::types::{Expression, ExpressionProof};
 use crate::wallet::Wallet;
 

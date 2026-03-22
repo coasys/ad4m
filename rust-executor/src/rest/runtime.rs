@@ -73,7 +73,9 @@ pub async fn set_status(
 
     // Runtime status setting is not currently supported
     let _ = body;
-    Err(ApiError::Internal("Runtime status update not implemented".into()))
+    Err(ApiError::Internal(
+        "Runtime status update not implemented".into(),
+    ))
 }
 
 /// POST /runtime/open-link — open URL in system browser
@@ -83,13 +85,19 @@ pub async fn open_link(
     Json(body): Json<OpenLinkRequest>,
 ) -> Result<Json<bool>, ApiError> {
     #[cfg(target_os = "macos")]
-    std::process::Command::new("open").arg(&body.url).spawn()
+    std::process::Command::new("open")
+        .arg(&body.url)
+        .spawn()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     #[cfg(target_os = "linux")]
-    std::process::Command::new("xdg-open").arg(&body.url).spawn()
+    std::process::Command::new("xdg-open")
+        .arg(&body.url)
+        .spawn()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     #[cfg(target_os = "windows")]
-    std::process::Command::new("cmd").args(["/C", "start", &body.url]).spawn()
+    std::process::Command::new("cmd")
+        .args(["/C", "start", &body.url])
+        .spawn()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(true))
 }
@@ -336,10 +344,8 @@ pub async fn list_notifications(
     check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let notifications = Ad4mDb::with_global_instance(|db| {
-        db.get_notifications()
-    })
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let notifications = Ad4mDb::with_global_instance(|db| db.get_notifications())
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(notifications))
 }

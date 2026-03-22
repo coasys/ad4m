@@ -159,8 +159,7 @@ pub async fn email_test(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let context = auth.to_request_context();
     // Require ALL capability (admin only)
-    check_capability(&context.capabilities, &ALL_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
+    check_capability(&context.capabilities, &ALL_CAPABILITY).map_err(|e| ApiError::Forbidden(e))?;
 
     match body.action.as_str() {
         "send" => {
@@ -168,7 +167,9 @@ pub async fn email_test(
             let _to = body
                 .to
                 .ok_or_else(|| ApiError::BadRequest("'to' required".into()))?;
-            Err(ApiError::Internal("send_test_email not available as standalone function".into()))
+            Err(ApiError::Internal(
+                "send_test_email not available as standalone function".into(),
+            ))
         }
         "enable" => {
             crate::email_service::enable_test_mode();

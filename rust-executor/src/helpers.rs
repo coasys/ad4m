@@ -1,10 +1,8 @@
 //! Shared helper functions used across REST handlers, MCP tools, and perspective instances.
 
 use crate::agent::AgentService;
-use crate::types::{
-    DecoratedExpressionProof, ExpressionRendered, Icon, PerspectiveHandle,
-};
 use crate::types::domain::LanguageRef;
+use crate::types::{DecoratedExpressionProof, ExpressionRendered, Icon, PerspectiveHandle};
 
 /// Check if a user (identified by email) or the main agent can access a perspective.
 pub fn can_access_perspective(
