@@ -54,7 +54,7 @@ import {
   type AgentResult,
 } from "./index";
 
-import ad4mPlugin from "./index";
+import ad4mPlugin, { _resetModuleState } from "./index";
 import { WakerSubscriptionManager } from "./wakerSubscriptionManager";
 
 // ---------------------------------------------------------------------------
@@ -1486,6 +1486,7 @@ describe("postWake", () => {
 describe("ad4mPlugin", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    _resetModuleState();
   });
 
   it("registers expected tools and services", async () => {
