@@ -175,6 +175,7 @@ const Hosting = () => {
   const [tlsChanged, setTlsChanged] = useState(false);
   const [certPathError, setCertPathError] = useState("");
   const [keyPathError, setKeyPathError] = useState("");
+  const [tlsValidationErrors, setTlsValidationErrors] = useState<string[]>([]);
 
   // ---- UI state ----
   const [activeTab, setActiveTab] = useState<"users" | "settings">("settings");
@@ -730,6 +731,13 @@ const Hosting = () => {
       setTlsChanged(true);
       setCertPathError("");
       setKeyPathError("");
+      // Re-validate after saving
+      try {
+        const errors = await invoke<string[]>("validate_tls_config");
+        setTlsValidationErrors(errors);
+      } catch (_) {
+        // validation not available
+      }
     } catch (error) {
       const errorMsg = String(error);
       if (errorMsg.includes("Certificate")) setCertPathError(errorMsg);
@@ -961,6 +969,13 @@ const Hosting = () => {
             tls_port: 12001,
           },
         );
+        // Validate TLS files after loading config
+        try {
+          const errors = await invoke<string[]>("validate_tls_config");
+          setTlsValidationErrors(errors);
+        } catch (_) {
+          // validation command not available
+        }
       } catch (e) {
         console.error("Failed to load TLS config:", e);
       }
@@ -2129,7 +2144,11 @@ const Hosting = () => {
                 onToggle={() => setTlsExpanded(!tlsExpanded)}
                 badge={
                   tlsConfig?.enabled ? (
-                    <j-badge variant="success">Enabled</j-badge>
+                    tlsValidationErrors.length > 0 ? (
+                      <j-badge variant="danger">Error</j-badge>
+                    ) : (
+                      <j-badge variant="success">Enabled</j-badge>
+                    )
                   ) : (
                     <j-badge variant="gray">Disabled</j-badge>
                   )
@@ -2211,6 +2230,41 @@ const Hosting = () => {
                             }}
                           />
                         </div>
+                        {tlsValidationErrors.length > 0 && (
+                          <div
+                            style={{
+                              marginTop: "12px",
+                              padding: "12px",
+                              backgroundColor: "var(--j-color-danger-50, #fef2f2)",
+                              border: "1px solid var(--j-color-danger-200, #fecaca)",
+                              borderRadius: "8px",
+                            }}
+                          >
+                            <j-text size="400" weight="600" color="danger-500">
+                              TLS Configuration Issues
+                            </j-text>
+                            {tlsValidationErrors.map((err, i) => (
+                              <j-text key={i} size="300" color="danger-500" style={{ display: "block", marginTop: "4px" }}>
+                                {err}
+                              </j-text>
+                            ))}
+                          </div>
+                        )}
+                        {tlsValidationErrors.length === 0 && tlsConfig.cert_file_path && tlsConfig.key_file_path && (
+                          <div
+                            style={{
+                              marginTop: "12px",
+                              padding: "12px",
+                              backgroundColor: "var(--j-color-success-50, #f0fdf4)",
+                              border: "1px solid var(--j-color-success-200, #bbf7d0)",
+                              borderRadius: "8px",
+                            }}
+                          >
+                            <j-text size="400" color="success-500">
+                              TLS files are valid and readable.
+                            </j-text>
+                          </div>
+                        )}
                       </div>
                     )}
                   </>
