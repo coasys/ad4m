@@ -90,7 +90,39 @@ The setup detects your environment and picks the right path:
 
 ### External mode
 
-If you already run your own `ad4m-executor`, the setup will connect to it and request a JWT token. You'll see a verification code — confirm it in your executor UI. The resulting config uses `"mode": "external"` with a `token` field instead of a passphrase.
+Use external mode when you already have an `ad4m-executor` running — for example via the AD4M Launcher or a manually started instance.
+
+#### Setup flow
+
+1. Run `openclaw ad4m-setup`. The setup detects that an executor is already running and enters external mode automatically.
+2. The plugin connects to the executor's MCP endpoint and calls `request_capability`, requesting all capabilities on behalf of the OpenClaw agent.
+3. The executor prompts you to approve the request. Depending on your executor configuration:
+   - **AD4M Launcher**: A capability request dialog appears in the launcher UI. Approve it and note the 6-digit verification code shown.
+   - **CLI executor with `--auto-permit-cap-requests`**: The code is logged to stdout and auto-approved.
+4. Enter the verification code back into the setup prompt. The plugin exchanges it for a JWT token via `generate_jwt`.
+5. Setup prints a config snippet containing the JWT. Copy it into your `openclaw.json`.
+
+#### Example external config
+
+```json5
+{
+  plugins: {
+    entries: {
+      "ad4m": {
+        enabled: true,
+        config: {
+          "mode": "external",
+          "token": "eyJhbGciOi...",        // JWT from setup
+          "executorWsUrl": "ws://localhost:12000/graphql",
+          "wakeToken": "your-hooks-token"   // optional, for waker
+        }
+      }
+    }
+  }
+}
+```
+
+The JWT grants the plugin full access to the executor. If the executor is restarted with new agent keys, the token becomes invalid and you'll need to re-run `openclaw ad4m-setup`.
 
 ## Configuration reference
 
