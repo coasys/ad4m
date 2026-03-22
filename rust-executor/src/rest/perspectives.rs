@@ -95,16 +95,19 @@ pub async fn list_perspectives(
         &context.capabilities,
         &perspective_query_capability(vec![WILD_CARD.to_string()]),
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
     let user_email = user_email_from_token(context.auth_token.clone());
-    let all = crate::perspectives::all_perspectives().await;
+    let all: Vec<PerspectiveInstance> = crate::perspectives::all_perspectives();
 
     // Filter perspectives based on access
-    let filtered: Vec<PerspectiveHandle> = all
-        .into_iter()
-        .filter(|p| can_access_perspective(&user_email, p))
-        .collect();
+    let mut filtered: Vec<PerspectiveHandle> = Vec::new();
+    for p in all {
+        let handle = p.persisted.lock().await.clone();
+        if crate::helpers::can_access_perspective(&user_email, &handle) {
+            filtered.push(handle);
+        }
+    }
 
     Ok(Json(filtered))
 }
@@ -120,7 +123,7 @@ pub async fn get_perspective_handler(
         &context.capabilities,
         &perspective_query_capability(vec![uuid.clone()]),
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
     let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     let handle = perspective.persisted.lock().await.clone();
@@ -132,20 +135,27 @@ pub async fn get_snapshot(
     State(_state): State<AppState>,
     auth: AuthContext,
     Path(uuid): Path<String>,
-) -> Result<Json<Perspective>, ApiError> {
+) -> Result<Json<crate::types::domain::Perspective>, ApiError> {
     let context = auth.to_request_context();
     check_capability(
         &context.capabilities,
         &perspective_query_capability(vec![uuid.clone()]),
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
     let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
-    let snapshot = perspective
-        .snapshot()
+    let links = perspective
+        .get_links(&LinkQuery {
+            source: None,
+            target: None,
+            predicate: None,
+            from_date: None,
+            until_date: None,
+            limit: None,
+        })
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(Json(snapshot))
+    Ok(Json(crate::types::domain::Perspective { links }))
 }
 
 /// GET /perspectives/:uuid/links — query links
@@ -160,7 +170,7 @@ pub async fn query_links(
         &context.capabilities,
         &perspective_query_capability(vec![uuid.clone()]),
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
     let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     let links = perspective
@@ -178,7 +188,7 @@ pub async fn create_perspective(
 ) -> Result<Json<PerspectiveHandle>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &PERSPECTIVE_CREATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     // Determine owner DID based on user context
     let user_email_opt = user_email_from_token(context.auth_token.clone());
@@ -217,7 +227,7 @@ pub async fn update_perspective_handler(
         &context.capabilities,
         &perspective_update_capability(vec![uuid.clone()]),
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
     let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     let mut handle = perspective.persisted.lock().await.clone();
@@ -240,11 +250,9 @@ pub async fn delete_perspective(
         &context.capabilities,
         &perspective_delete_capability(vec![uuid.clone()]),
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
-    remove_perspective(&uuid)
-        .await
-        .map_err(|e| ApiError::Internal(e))?;
+    remove_perspective(&uuid).await;
     Ok(Json(true))
 }
 
@@ -260,7 +268,7 @@ pub async fn mutate_links(
         &context.capabilities,
         &perspective_update_capability(vec![uuid.clone()]),
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
     // Check compute credits (pre-check)
     check_compute_credits(&context.auth_token)?;
@@ -290,7 +298,20 @@ pub async fn mutate_links(
     if has_additions || has_removals {
         let mutations = LinkMutations {
             additions: body.additions.unwrap_or_default(),
-            removals: body.removals.unwrap_or_default(),
+            removals: body.removals.unwrap_or_default().into_iter().map(|l| {
+                LinkExpressionInput {
+                    author: String::new(),
+                    data: l,
+                    proof: ExpressionProofInput {
+                        key: None,
+                        signature: None,
+                        valid: None,
+                        invalid: None,
+                    },
+                    timestamp: String::new(),
+                    status: None,
+                }
+            }).collect(),
         };
 
         let diff = perspective
@@ -305,10 +326,24 @@ pub async fn mutate_links(
     // Handle updates separately
     if let Some(updates) = body.updates {
         for update in updates {
-            let result = perspective
+            let old = LinkExpressionInput {
+                    author: String::new(),
+                    data: update.old_link,
+                    proof: ExpressionProofInput { key: None, signature: None, valid: None, invalid: None },
+                    timestamp: String::new(),
+                    status: None,
+                };
+                let new = LinkExpressionInput {
+                    author: String::new(),
+                    data: update.new_link,
+                    proof: ExpressionProofInput { key: None, signature: None, valid: None, invalid: None },
+                    timestamp: String::new(),
+                    status: None,
+                };
+                let result = perspective
                 .update_link(
-                    LinkExpression::from_input_without_proof(update.old_link),
-                    update.new_link.into(),
+                    LinkExpression::from_input_without_proof(old),
+                    Link::from(new.data),
                     body.batch_id.clone(),
                     &agent_context,
                 )
@@ -339,7 +374,7 @@ pub async fn query_perspective(
         &context.capabilities,
         &perspective_query_capability(vec![uuid.clone()]),
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
     let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
@@ -382,7 +417,7 @@ pub async fn add_sdna(
         &context.capabilities,
         &perspective_update_capability(vec![uuid.clone()]),
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
     let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
@@ -416,14 +451,23 @@ pub async fn execute_commands(
         &context.capabilities,
         &perspective_update_capability(vec![uuid.clone()]),
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
-    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+    let commands: Vec<crate::perspectives::perspective_instance::Command> =
+        serde_json::from_value(serde_json::Value::Array(body.commands))
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let expression = serde_json::to_string(&body.expression).unwrap_or_default();
 
     let result = perspective
         .execute_commands(
-            serde_json::to_string(&body.commands).unwrap_or_default(),
-            serde_json::to_string(&body.expression).unwrap_or_default(),
+            commands,
+            expression,
+            vec![],
+            None,
+            &agent_context,
         )
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;

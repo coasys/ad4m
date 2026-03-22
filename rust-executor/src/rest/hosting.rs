@@ -18,7 +18,7 @@ pub async fn get_hosting_info(
 ) -> Result<Json<HostingInfoResponse>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     // User info for the current user
     let user_info = if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
@@ -39,7 +39,7 @@ pub async fn get_hosting_info(
     // Host rates
     let rates = Ad4mDb::with_global_instance(|db| db.get_host_rates())
         .ok()
-        .and_then(|v| serde_json::from_str(&v).ok());
+        .and_then(|v| serde_json::to_value(v).ok());
 
     // Version info
     let (dna_hash, build_version) = crate::unyt_service::version_info();
@@ -62,7 +62,7 @@ pub async fn get_hosting_wallet(
 ) -> Result<Json<HostingWalletResponse>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let balance = match crate::unyt_service::get_ledger().await {
         Ok(ledger) => Some(ledger),
@@ -84,7 +84,7 @@ pub async fn get_hosting_wallet_history(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let history = crate::unyt_service::get_history(None, 50)
         .await

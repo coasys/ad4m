@@ -89,7 +89,7 @@ impl From<chrono::DateTime<chrono::Utc>> for DateTime {
     }
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct EntanglementProof {
     pub device_key: String,

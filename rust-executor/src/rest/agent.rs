@@ -17,10 +17,30 @@ use crate::entanglement_service::{
 use crate::languages::LanguageController;
 use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC};
 use crate::types::*;
+use crate::types::domain::Perspective as DomainPerspective;
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
 use super::types::*;
+
+fn link_input_to_decorated(link_input: &LinkInput) -> DecoratedLinkExpression {
+    DecoratedLinkExpression {
+        author: String::new(),
+        timestamp: String::new(),
+        data: Link {
+            source: link_input.source.clone(),
+            target: link_input.target.clone(),
+            predicate: link_input.predicate.clone(),
+        },
+        proof: DecoratedExpressionProof {
+            key: String::new(),
+            signature: String::new(),
+            valid: None,
+            invalid: None,
+        },
+        status: None,
+    }
+}
 
 /// GET /agent — current agent info + status + lock state
 pub async fn get_agent(
@@ -29,7 +49,7 @@ pub async fn get_agent(
 ) -> Result<Json<Agent>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     // Multi-user mode: extract user DID from JWT token if present
     if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
@@ -43,7 +63,7 @@ pub async fn get_agent(
             Ok(None) | Err(_) => Agent {
                 did: agent_data.did,
                 direct_message_language: None,
-                perspective: Some(Perspective { links: vec![] }),
+                perspective: Some(DomainPerspective { links: vec![] }),
             },
         };
         return Ok(Json(agent));
@@ -58,7 +78,7 @@ pub async fn get_agent(
         if agent.perspective.is_some() {
             agent.perspective.as_mut().unwrap().verify_link_signatures();
         }
-        Ok(agent)
+        Ok::<Agent, ApiError>(agent)
     })?;
 
     Ok(Json(agent))
@@ -71,7 +91,7 @@ pub async fn get_apps(
 ) -> Result<Json<Vec<Apps>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     Ok(Json(apps_map::get_apps()))
 }
@@ -84,7 +104,7 @@ pub async fn get_agent_by_did(
 ) -> Result<Json<Option<Agent>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     // Check if DID matches main agent
     let did_match = {
@@ -146,7 +166,7 @@ pub async fn update_profile(
 ) -> Result<Json<Agent>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     // If dm_language provided, update it
     if let Some(dm_lang) = body.dm_language {
@@ -178,14 +198,13 @@ pub async fn update_profile(
             let decorated_links: Vec<DecoratedLinkExpression> = pub_persp
                 .links
                 .iter()
-                .map(|link_input| DecoratedLinkExpression::try_from(link_input.clone()))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+                .map(|link_input| link_input_to_decorated(link_input))
+                .collect();
 
             let agent = Agent {
                 did: agent_data.did,
                 direct_message_language: None,
-                perspective: Some(Perspective {
+                perspective: Some(DomainPerspective {
                     links: decorated_links,
                 }),
             };
@@ -211,13 +230,12 @@ pub async fn update_profile(
             let decorated_links: Vec<DecoratedLinkExpression> = pub_persp
                 .links
                 .iter()
-                .map(|link_input| DecoratedLinkExpression::try_from(link_input.clone()))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+                .map(|link_input| link_input_to_decorated(link_input))
+                .collect();
 
             AgentService::with_mutable_global_instance(|agent_service| {
                 if let Some(ref mut agent) = agent_service.agent {
-                    agent.perspective = Some(Perspective {
+                    agent.perspective = Some(DomainPerspective {
                         links: decorated_links,
                     });
                     if let Some(ref passphrase) = agent_service.passphrase {
@@ -265,7 +283,7 @@ pub async fn generate_agent(
 ) -> Result<Json<AgentStatus>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_CREATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let mut agent = AgentService::with_mutable_global_instance(|agent_service| {
         agent_service.create_new_keys();
@@ -365,7 +383,7 @@ pub async fn unlock_agent(
 ) -> Result<Json<AgentStatus>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_SIGN_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let agent_instance = AgentService::global_instance();
     {
@@ -459,7 +477,7 @@ pub async fn sign_message(
 ) -> Result<Json<AgentSignature>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_SIGN_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let sig = InternalAgentSignature::from_message(body.message)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -475,7 +493,7 @@ pub async fn remove_app(
 ) -> Result<Json<Vec<Apps>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     apps_map::remove_app(&request_id).map_err(|e| ApiError::Internal(e))?;
     Ok(Json(apps_map::get_apps()))
@@ -491,7 +509,7 @@ pub async fn request_capability(
 ) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let auth_info: AuthInfo = body.auth_info.into();
     let request_id = crate::agent::capabilities::request_capability(auth_info.clone()).await;
@@ -521,7 +539,7 @@ pub async fn permit_capability(
 ) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_PERMIT_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let auth: AuthInfoExtended = serde_json::from_str(&body.auth)
         .map_err(|e| ApiError::BadRequest(format!("Invalid auth info: {}", e)))?;
@@ -538,7 +556,7 @@ pub async fn generate_jwt(
 ) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let cap_token = generate_capability_token(body.request_id, body.rand)
         .await
@@ -554,7 +572,7 @@ pub async fn revoke_token(
 ) -> Result<Json<Vec<Apps>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     apps_map::revoke_app(&request_id).map_err(|e| ApiError::Internal(e))?;
     Ok(Json(apps_map::get_apps()))
@@ -569,7 +587,7 @@ pub async fn get_agent_status(
 ) -> Result<Json<AgentStatus>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     // Multi-user mode
     if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
@@ -607,7 +625,7 @@ pub async fn is_locked(
             .agent
             .clone()
             .ok_or_else(|| ApiError::NotFound("Agent not found".into()))?;
-        Ok(!agent_service.is_unlocked())
+        Ok::<bool, ApiError>(!agent_service.is_unlocked())
     })?;
     Ok(Json(locked))
 }
@@ -624,7 +642,7 @@ pub async fn get_trusted_agents(
         &context.capabilities,
         &RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY,
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
     let agents = crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
         runtime.get_trusted_agents()
@@ -643,10 +661,10 @@ pub async fn add_trusted_agents(
         &context.capabilities,
         &RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY,
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
     crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
-        runtime.add_trusted_agents(agents);
+        runtime.add_trusted_agent(agents);
     });
 
     let result = crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
@@ -666,7 +684,7 @@ pub async fn delete_trusted_agents(
         &context.capabilities,
         &RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY,
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
     crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
         runtime.remove_trusted_agent(agents);
@@ -709,33 +727,35 @@ pub async fn add_entanglement(
     if preflight {
         // Pre-flight: just validate
         let signed = sign_device_key(
-            &body
+            body
                 .first()
                 .map(|b| b.device_key.clone())
                 .unwrap_or_default(),
-            &body
+            body
                 .first()
                 .map(|b| b.device_key_type.clone())
                 .unwrap_or_default(),
-        )
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        );
         return Ok(Json(vec![serde_json::to_value(signed).unwrap_or_default()]));
     }
 
-    let proofs = add_entanglement_proofs(
-        body.into_iter()
-            .map(|p| crate::entanglement_service::EntanglementProof {
-                device_key: p.device_key,
-                device_key_type: p.device_key_type,
-                device_key_signed_by_did: p.device_key_signed_by_did,
-                did_signed_by_device_key: p.did_signed_by_device_key.unwrap_or_default(),
-            })
-            .collect(),
-    )
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    // add_entanglement_proofs returns () not Result, and takes domain EntanglementProof
+    let agent_did = AgentService::with_global_instance(|a| a.did.clone().unwrap_or_default());
+    let agent_key_id = AgentService::with_global_instance(|a| a.signing_key_id.clone().unwrap_or_default());
+    let domain_proofs: Vec<EntanglementProof> = body.into_iter()
+        .map(|p| EntanglementProof {
+            device_key: p.device_key,
+            device_key_type: p.device_key_type,
+            device_key_signed_by_did: p.device_key_signed_by_did,
+            did_signed_by_device_key: p.did_signed_by_device_key,
+            did: agent_did.clone(),
+            did_signing_key_id: agent_key_id.clone(),
+        })
+        .collect();
+    add_entanglement_proofs(domain_proofs.clone());
 
     Ok(Json(
-        proofs
+        domain_proofs
             .into_iter()
             .map(|p| serde_json::to_value(p).unwrap_or_default())
             .collect(),
@@ -748,20 +768,22 @@ pub async fn delete_entanglement(
     _auth: AuthContext,
     Json(body): Json<Vec<EntanglementProofInput>>,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
-    let proofs = delete_entanglement_proof(
-        body.into_iter()
-            .map(|p| crate::entanglement_service::EntanglementProof {
-                device_key: p.device_key,
-                device_key_type: p.device_key_type,
-                device_key_signed_by_did: p.device_key_signed_by_did,
-                did_signed_by_device_key: p.did_signed_by_device_key.unwrap_or_default(),
-            })
-            .collect(),
-    )
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let agent_did = AgentService::with_global_instance(|a| a.did.clone().unwrap_or_default());
+    let agent_key_id = AgentService::with_global_instance(|a| a.signing_key_id.clone().unwrap_or_default());
+    let domain_proofs: Vec<EntanglementProof> = body.into_iter()
+        .map(|p| EntanglementProof {
+            device_key: p.device_key,
+            device_key_type: p.device_key_type,
+            device_key_signed_by_did: p.device_key_signed_by_did,
+            did_signed_by_device_key: p.did_signed_by_device_key,
+            did: agent_did.clone(),
+            did_signing_key_id: agent_key_id.clone(),
+        })
+        .collect();
+    delete_entanglement_proof(domain_proofs.clone());
 
     Ok(Json(
-        proofs
+        domain_proofs
             .into_iter()
             .map(|p| serde_json::to_value(p).unwrap_or_default())
             .collect(),

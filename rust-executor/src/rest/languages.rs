@@ -24,7 +24,7 @@ pub async fn list_languages(
 ) -> Result<Json<Vec<LanguageHandle>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let filter = params.get("filter").cloned();
     let controller = LanguageController::global_instance();
@@ -59,7 +59,7 @@ pub async fn get_language(
 ) -> Result<Json<LanguageHandle>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let controller = LanguageController::global_instance();
 
@@ -117,7 +117,7 @@ pub async fn get_language_meta(
 ) -> Result<Json<LanguageMeta>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let controller = LanguageController::global_instance();
     let meta = controller
@@ -141,7 +141,7 @@ pub async fn get_language_source(
 ) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let controller = LanguageController::global_instance();
     let source = controller
@@ -165,7 +165,7 @@ pub async fn publish_language(
 ) -> Result<Json<LanguageMeta>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &LANGUAGE_CREATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let controller = LanguageController::global_instance();
 
@@ -236,7 +236,7 @@ pub async fn apply_template_and_publish(
 ) -> Result<Json<LanguageRef>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &LANGUAGE_CREATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let controller = LanguageController::global_instance();
 
@@ -312,7 +312,7 @@ pub async fn remove_language(
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &LANGUAGE_DELETE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let mut controller = LanguageController::global_instance();
     controller
@@ -332,7 +332,7 @@ pub async fn write_settings(
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &LANGUAGE_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let controller = LanguageController::global_instance();
     if !controller.is_language_loaded(&address).await {

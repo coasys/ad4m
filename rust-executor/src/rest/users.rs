@@ -24,7 +24,7 @@ pub async fn get_multi_user_enabled(
         &context.capabilities,
         &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY,
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
     let enabled = Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled())
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -58,7 +58,7 @@ pub async fn list_users(
         &context.capabilities,
         &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
     let users = Ad4mDb::with_global_instance(|db| db.list_users())
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -77,9 +77,9 @@ pub async fn get_user_wallet(
         &context.capabilities,
         &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
-    let wallet = Ad4mDb::with_global_instance(|db| db.get_user_wallet_address(&email))
+    let wallet = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&email))
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or_else(|| ApiError::NotFound("Wallet not found".into()))?;
 
@@ -97,7 +97,7 @@ pub async fn create_user(
         &context.capabilities,
         &RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY,
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
     let did = crate::user_management::create_user(&body.email, &body.password)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -116,7 +116,7 @@ pub async fn login_user(
         &context.capabilities,
         &RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY,
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
     let app_name = body.app_name.as_deref().unwrap_or("ad4m");
     let jwt = crate::user_management::login_user(&body.email, &body.password, app_name)
@@ -136,7 +136,7 @@ pub async fn verify_email(
         &context.capabilities,
         &RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY,
     )
-    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    .map_err(|e| ApiError::Forbidden(e))?;
 
     let verification_type = body.verification_type.as_deref().unwrap_or("signup");
     let app_name = body.app_name.as_deref().unwrap_or("ad4m");
@@ -160,48 +160,38 @@ pub async fn email_test(
     let context = auth.to_request_context();
     // Require ALL capability (admin only)
     check_capability(&context.capabilities, &ALL_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     match body.action.as_str() {
         "send" => {
-            let to = body
+            // send_test_email requires an EmailService instance; not available as free fn
+            let _to = body
                 .to
                 .ok_or_else(|| ApiError::BadRequest("'to' required".into()))?;
-            crate::email_service::send_test_email(&to)
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            Ok(Json(serde_json::json!(true)))
+            Err(ApiError::Internal("send_test_email not available as standalone function".into()))
         }
         "enable" => {
-            crate::email_service::enable_test_mode()
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            crate::email_service::enable_test_mode();
             Ok(Json(serde_json::json!(true)))
         }
         "disable" => {
-            crate::email_service::disable_test_mode()
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            crate::email_service::disable_test_mode();
             Ok(Json(serde_json::json!(true)))
         }
         "get-code" => {
             let email = body
                 .email
                 .ok_or_else(|| ApiError::BadRequest("'email' required".into()))?;
-            let code = crate::email_service::get_test_code(&email)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            let code = crate::email_service::get_test_code(&email);
             Ok(Json(serde_json::to_value(code).unwrap_or_default()))
         }
         "clear" => {
-            crate::email_service::clear_test_codes()
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            crate::email_service::clear_test_codes();
             Ok(Json(serde_json::json!(true)))
         }
         "set-expiry" => {
-            let secs = body
-                .expiry_seconds
-                .ok_or_else(|| ApiError::BadRequest("'expirySeconds' required".into()))?;
-            crate::email_service::set_test_expiry(secs)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            Ok(Json(serde_json::json!(true)))
+            // set_test_expiry is not implemented
+            Err(ApiError::Internal("set_test_expiry not implemented".into()))
         }
         other => Err(ApiError::BadRequest(format!("Unknown action: {}", other))),
     }

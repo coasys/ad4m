@@ -12,10 +12,55 @@ use crate::agent::{create_signed_expression, AgentContext};
 use crate::neighbourhoods::{self, install_neighbourhood_with_context};
 use crate::perspectives::get_perspective;
 use crate::types::*;
+use crate::types::domain::Perspective as DomainPerspective;
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
 use super::types::*;
+
+/// Convert REST PerspectiveInput to core Perspective (for neighbourhood meta)
+fn perspective_input_to_core(input: super::types::PerspectiveInput) -> Perspective {
+    let links: Vec<LinkExpression> = input.links.into_iter().map(|l| {
+        LinkExpression {
+            author: String::new(),
+            timestamp: String::new(),
+            data: Link {
+                source: l.source,
+                target: l.target,
+                predicate: l.predicate,
+            },
+            proof: ExpressionProof {
+                key: String::new(),
+                signature: String::new(),
+            },
+            status: None,
+        }
+    }).collect();
+    Perspective { links }
+}
+
+/// Convert REST PerspectiveInput to domain Perspective
+fn perspective_input_to_domain(input: super::types::PerspectiveInput) -> DomainPerspective {
+    let links: Vec<DecoratedLinkExpression> = input.links.into_iter().map(|l| {
+        DecoratedLinkExpression {
+            author: String::new(),
+            timestamp: String::new(),
+            data: Link {
+                source: l.source,
+                target: l.target,
+                predicate: l.predicate,
+            },
+            proof: DecoratedExpressionProof {
+                key: String::new(),
+                signature: String::new(),
+                valid: None,
+                invalid: None,
+            },
+            status: None,
+        }
+    }).collect();
+    DomainPerspective { links }
+}
 
 /// POST /neighbourhoods/join — join a neighbourhood by URL
 pub async fn join_neighbourhood(
@@ -25,7 +70,7 @@ pub async fn join_neighbourhood(
 ) -> Result<Json<PerspectiveHandle>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
     let handle = install_neighbourhood_with_context(body.url, &agent_context)
@@ -43,13 +88,13 @@ pub async fn publish_neighbourhood(
 ) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &NEIGHBOURHOOD_CREATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
     let url = neighbourhoods::neighbourhood_publish_from_perspective_with_context(
         &body.perspective_uuid,
         body.link_language,
-        body.meta.into(),
+        perspective_input_to_core(body.meta),
         &agent_context,
     )
     .await
@@ -67,7 +112,7 @@ pub async fn send_broadcast(
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
     let perspective_instance = get_perspective(&uuid)
@@ -75,7 +120,7 @@ pub async fn send_broadcast(
 
     let signed_perspective = if body.signed.unwrap_or(true) {
         // Pre-signed payload
-        let perspective = Perspective::from(body.payload);
+        let perspective = perspective_input_to_domain(body.payload);
         create_signed_expression(perspective, &agent_context)
             .map_err(|e| ApiError::Internal(e.to_string()))?
     } else {
@@ -90,7 +135,7 @@ pub async fn send_broadcast(
             .map(LinkExpression::from)
             .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
             .collect();
-        let perspective = Perspective { links };
+        let perspective = DomainPerspective { links };
         create_signed_expression(perspective, &agent_context)
             .map_err(|e| ApiError::Internal(e.to_string()))?
     };
@@ -112,14 +157,14 @@ pub async fn send_signal(
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
     let perspective_instance = get_perspective(&uuid)
         .ok_or_else(|| ApiError::NotFound(format!("No perspective found with uuid {}", uuid)))?;
 
     let signed_perspective = if body.signed.unwrap_or(true) {
-        let perspective = Perspective::from(body.payload);
+        let perspective = perspective_input_to_domain(body.payload);
         create_signed_expression(perspective, &agent_context)
             .map_err(|e| ApiError::Internal(e.to_string()))?
     } else {
@@ -133,7 +178,7 @@ pub async fn send_signal(
             .map(LinkExpression::from)
             .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
             .collect();
-        let perspective = Perspective { links };
+        let perspective = DomainPerspective { links };
         create_signed_expression(perspective, &agent_context)
             .map_err(|e| ApiError::Internal(e.to_string()))?
     };
@@ -155,14 +200,14 @@ pub async fn set_online_status(
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
     let perspective_instance = get_perspective(&uuid)
         .ok_or_else(|| ApiError::NotFound(format!("No perspective found with uuid {}", uuid)))?;
 
     let signed_perspective = if body.signed.unwrap_or(true) {
-        let perspective = Perspective::from(body.status);
+        let perspective = perspective_input_to_domain(body.status);
         create_signed_expression(perspective, &agent_context)
             .map_err(|e| ApiError::Internal(e.to_string()))?
     } else {
@@ -176,7 +221,7 @@ pub async fn set_online_status(
             .map(LinkExpression::from)
             .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
             .collect();
-        let perspective = Perspective { links };
+        let perspective = DomainPerspective { links };
         create_signed_expression(perspective, &agent_context)
             .map_err(|e| ApiError::Internal(e.to_string()))?
     };
@@ -197,7 +242,7 @@ pub async fn has_telepresence(
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let perspective = get_perspective(&uuid)
         .ok_or_else(|| ApiError::NotFound(format!("No perspective found with uuid {}", uuid)))?;
@@ -213,7 +258,7 @@ pub async fn online_agents(
 ) -> Result<Json<Vec<OnlineAgent>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let perspective = get_perspective(&uuid)
         .ok_or_else(|| ApiError::NotFound(format!("No perspective found with uuid {}", uuid)))?;
@@ -234,7 +279,7 @@ pub async fn other_agents(
 ) -> Result<Json<Vec<String>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+        .map_err(|e| ApiError::Forbidden(e))?;
 
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
     let current_user_did = crate::agent::did_for_context(&agent_context)

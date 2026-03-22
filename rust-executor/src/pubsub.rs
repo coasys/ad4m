@@ -1,5 +1,5 @@
-use crate::types::GetFilter;
-use crate::types::GetValue;
+use crate::types::domain::GetFilter;
+use crate::types::domain::GetValue;
 use futures::Stream;
 use futures::StreamExt;
 use log::error;
