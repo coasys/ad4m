@@ -2,16 +2,21 @@
 //!
 //! 19 harmonised endpoints covering agent info, auth, trust, entanglement, and profile.
 
-use axum::{extract::{Path, State}, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 
 use crate::agent::capabilities::*;
-use crate::agent::{AgentService, did_document_for_context, AgentContext, AgentSignature as InternalAgentSignature};
+use crate::agent::{
+    did_document_for_context, AgentContext, AgentService, AgentSignature as InternalAgentSignature,
+};
 use crate::entanglement_service::{
     add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs, sign_device_key,
 };
 use crate::languages::LanguageController;
-use crate::types::*;
 use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC};
+use crate::types::*;
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
@@ -128,9 +133,7 @@ pub async fn get_agent_by_did(
             Ok(Json(None))
         }
     } else {
-        let agent = AgentService::with_global_instance(|agent_service| {
-            agent_service.agent.clone()
-        });
+        let agent = AgentService::with_global_instance(|agent_service| agent_service.agent.clone());
         Ok(Json(agent))
     }
 }
@@ -158,7 +161,10 @@ pub async fn update_profile(
 
         // Publish updated agent to agent language
         if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
-            log::warn!("Failed to publish agent expression after DM language update: {}", e);
+            log::warn!(
+                "Failed to publish agent expression after DM language update: {}",
+                e
+            );
         }
     }
 
@@ -179,7 +185,9 @@ pub async fn update_profile(
             let agent = Agent {
                 did: agent_data.did,
                 direct_message_language: None,
-                perspective: Some(Perspective { links: decorated_links }),
+                perspective: Some(Perspective {
+                    links: decorated_links,
+                }),
             };
 
             AgentService::with_global_instance(|agent_service| {
@@ -187,10 +195,14 @@ pub async fn update_profile(
             })
             .map_err(|e| ApiError::Internal(format!("Failed to store user profile: {}", e)))?;
 
-            if let Err(e) = AgentService::publish_agent_to_language(
-                &AgentContext::for_user_email(user_email),
-            ).await {
-                log::warn!("Failed to publish updated user profile to agent language: {}", e);
+            if let Err(e) =
+                AgentService::publish_agent_to_language(&AgentContext::for_user_email(user_email))
+                    .await
+            {
+                log::warn!(
+                    "Failed to publish updated user profile to agent language: {}",
+                    e
+                );
             }
 
             return Ok(Json(agent));
@@ -205,15 +217,22 @@ pub async fn update_profile(
 
             AgentService::with_mutable_global_instance(|agent_service| {
                 if let Some(ref mut agent) = agent_service.agent {
-                    agent.perspective = Some(Perspective { links: decorated_links });
+                    agent.perspective = Some(Perspective {
+                        links: decorated_links,
+                    });
                     if let Some(ref passphrase) = agent_service.passphrase {
                         agent_service.save(passphrase.clone());
                     }
                 }
             });
 
-            if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
-                log::warn!("Failed to publish agent expression after profile update: {}", e);
+            if let Err(e) =
+                AgentService::publish_agent_to_language(&AgentContext::main_agent()).await
+            {
+                log::warn!(
+                    "Failed to publish agent expression after profile update: {}",
+                    e
+                );
             }
         }
     }
@@ -252,8 +271,9 @@ pub async fn generate_agent(
         agent_service.create_new_keys();
 
         // Set the direct message language from bootstrap seed
-        let dm_language =
-            crate::runtime_service::RuntimeService::with_global_instance(|rt| rt.get_direct_message_language());
+        let dm_language = crate::runtime_service::RuntimeService::with_global_instance(|rt| {
+            rt.get_direct_message_language()
+        });
         if let Some(ref mut agent) = agent_service.agent {
             agent.direct_message_language = Some(dm_language);
         }
@@ -283,7 +303,10 @@ pub async fn generate_agent(
     // Load system languages
     let language_language_only = config.language_language_only.unwrap_or(false);
     let controller = LanguageController::global_instance();
-    if let Err(e) = controller.load_system_languages(language_language_only).await {
+    if let Err(e) = controller
+        .load_system_languages(language_language_only)
+        .await
+    {
         log::error!("Error loading system languages: {:?}", e);
         init_errors.push(format!("Failed to load system languages: {}", e));
     } else {
@@ -348,7 +371,8 @@ pub async fn unlock_agent(
     {
         let mut agent_service = agent_instance.lock().expect("agent lock");
         let agent_ref = agent_service.as_mut().expect("agent instance");
-        agent_ref.unlock(body.passphrase.clone())
+        agent_ref
+            .unlock(body.passphrase.clone())
             .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
 
@@ -386,7 +410,10 @@ pub async fn unlock_agent(
         let config = crate::config::get_global_config();
         let language_language_only = config.language_language_only.unwrap_or(false);
         let controller = LanguageController::global_instance();
-        if let Err(e) = controller.load_system_languages(language_language_only).await {
+        if let Err(e) = controller
+            .load_system_languages(language_language_only)
+            .await
+        {
             log::error!("Error loading system languages: {:?}", e);
             init_errors.push(format!("Failed to load system languages: {}", e));
         } else {
@@ -450,8 +477,7 @@ pub async fn remove_app(
     check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    apps_map::remove_app(&request_id)
-        .map_err(|e| ApiError::Internal(e))?;
+    apps_map::remove_app(&request_id).map_err(|e| ApiError::Internal(e))?;
     Ok(Json(apps_map::get_apps()))
 }
 
@@ -473,10 +499,12 @@ pub async fn request_capability(
     if context.auto_permit_cap_requests {
         println!("======================================");
         println!("Got capability request: \n{:?}", auth_info);
-        let random_number_challenge = crate::agent::capabilities::permit_capability(AuthInfoExtended {
-            request_id: request_id.clone(),
-            auth: auth_info,
-        }).map_err(|e| ApiError::Internal(e))?;
+        let random_number_challenge =
+            crate::agent::capabilities::permit_capability(AuthInfoExtended {
+                request_id: request_id.clone(),
+                auth: auth_info,
+            })
+            .map_err(|e| ApiError::Internal(e))?;
         println!("--------------------------------------");
         println!("Random number challenge: {}", random_number_challenge);
         println!("======================================");
@@ -497,8 +525,8 @@ pub async fn permit_capability(
 
     let auth: AuthInfoExtended = serde_json::from_str(&body.auth)
         .map_err(|e| ApiError::BadRequest(format!("Invalid auth info: {}", e)))?;
-    let random_number_challenge = crate::agent::capabilities::permit_capability(auth)
-        .map_err(|e| ApiError::Internal(e))?;
+    let random_number_challenge =
+        crate::agent::capabilities::permit_capability(auth).map_err(|e| ApiError::Internal(e))?;
     Ok(Json(random_number_challenge))
 }
 
@@ -528,8 +556,7 @@ pub async fn revoke_token(
     check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    apps_map::revoke_app(&request_id)
-        .map_err(|e| ApiError::Internal(e))?;
+    apps_map::revoke_app(&request_id).map_err(|e| ApiError::Internal(e))?;
     Ok(Json(apps_map::get_apps()))
 }
 
@@ -550,13 +577,15 @@ pub async fn get_agent_status(
             .map_err(|e| ApiError::Internal(format!("User agent not available: {}", e)))?;
 
         let agent_context = AgentContext::for_user_email(user_email);
-        let did_document = did_document_for_context(&agent_context)
-            .map_err(|e| ApiError::Internal(format!("Failed to get DID document for user: {}", e)))?;
+        let did_document = did_document_for_context(&agent_context).map_err(|e| {
+            ApiError::Internal(format!("Failed to get DID document for user: {}", e))
+        })?;
 
         return Ok(Json(AgentStatus {
             did: Some(agent_data.did),
-            did_document: Some(serde_json::to_string(&did_document)
-                .map_err(|e| ApiError::Internal(format!("Failed to serialize DID document: {}", e)))?),
+            did_document: Some(serde_json::to_string(&did_document).map_err(|e| {
+                ApiError::Internal(format!("Failed to serialize DID document: {}", e))
+            })?),
             error: None,
             is_initialized: true,
             is_unlocked: true,
@@ -591,8 +620,11 @@ pub async fn get_trusted_agents(
     auth: AuthContext,
 ) -> Result<Json<Vec<String>>, ApiError> {
     let context = auth.to_request_context();
-    check_capability(&context.capabilities, &RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
     let agents = crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
         runtime.get_trusted_agents()
@@ -607,8 +639,11 @@ pub async fn add_trusted_agents(
     Json(agents): Json<Vec<String>>,
 ) -> Result<Json<Vec<String>>, ApiError> {
     let context = auth.to_request_context();
-    check_capability(&context.capabilities, &RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
     crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
         runtime.add_trusted_agents(agents);
@@ -627,8 +662,11 @@ pub async fn delete_trusted_agents(
     Json(agents): Json<Vec<String>>,
 ) -> Result<Json<Vec<String>>, ApiError> {
     let context = auth.to_request_context();
-    check_capability(&context.capabilities, &RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
     crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
         runtime.remove_trusted_agent(agents);
@@ -648,7 +686,12 @@ pub async fn get_entanglement(
     _auth: AuthContext,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     let proofs = get_entanglement_proofs();
-    Ok(Json(proofs.into_iter().map(|p| serde_json::to_value(p).unwrap_or_default()).collect()))
+    Ok(Json(
+        proofs
+            .into_iter()
+            .map(|p| serde_json::to_value(p).unwrap_or_default())
+            .collect(),
+    ))
 }
 
 /// POST /agent/entanglement-proofs — add (with ?preflight=true option)
@@ -658,13 +701,22 @@ pub async fn add_entanglement(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     Json(body): Json<Vec<EntanglementProofInput>>,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
-    let preflight = params.get("preflight").map(|v| v == "true").unwrap_or(false);
+    let preflight = params
+        .get("preflight")
+        .map(|v| v == "true")
+        .unwrap_or(false);
 
     if preflight {
         // Pre-flight: just validate
         let signed = sign_device_key(
-            &body.first().map(|b| b.device_key.clone()).unwrap_or_default(),
-            &body.first().map(|b| b.device_key_type.clone()).unwrap_or_default(),
+            &body
+                .first()
+                .map(|b| b.device_key.clone())
+                .unwrap_or_default(),
+            &body
+                .first()
+                .map(|b| b.device_key_type.clone())
+                .unwrap_or_default(),
         )
         .map_err(|e| ApiError::Internal(e.to_string()))?;
         return Ok(Json(vec![serde_json::to_value(signed).unwrap_or_default()]));
@@ -682,7 +734,12 @@ pub async fn add_entanglement(
     )
     .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    Ok(Json(proofs.into_iter().map(|p| serde_json::to_value(p).unwrap_or_default()).collect()))
+    Ok(Json(
+        proofs
+            .into_iter()
+            .map(|p| serde_json::to_value(p).unwrap_or_default())
+            .collect(),
+    ))
 }
 
 /// DELETE /agent/entanglement-proofs — delete
@@ -703,5 +760,10 @@ pub async fn delete_entanglement(
     )
     .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    Ok(Json(proofs.into_iter().map(|p| serde_json::to_value(p).unwrap_or_default()).collect()))
+    Ok(Json(
+        proofs
+            .into_iter()
+            .map(|p| serde_json::to_value(p).unwrap_or_default())
+            .collect(),
+    ))
 }

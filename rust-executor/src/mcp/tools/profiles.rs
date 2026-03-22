@@ -6,8 +6,8 @@
 use super::Ad4mMcpHandler;
 use crate::agent::capabilities::user_email_from_token;
 use crate::agent::{create_signed_expression, AgentContext, AgentService};
-use crate::types::{Agent, Perspective};
 use crate::languages::LanguageController;
+use crate::types::{Agent, Perspective};
 use crate::types::{DecoratedLinkExpression, Link, VerifiedExpression};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;

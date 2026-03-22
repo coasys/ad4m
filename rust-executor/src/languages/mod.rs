@@ -12,14 +12,14 @@ use deno_core::error::AnyError;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use crate::types::{
-    DecoratedNeighbourhoodExpression, ExceptionInfo, ExceptionType, InteractionCall,
-    InteractionMeta, LanguageLanguageInput, LanguageMeta, LanguageRef, Neighbourhood,
-};
 use crate::holochain_service::maybe_get_holochain_service;
 use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
 use crate::runtime_service::RuntimeService;
 use crate::types::Address;
+use crate::types::{
+    DecoratedNeighbourhoodExpression, ExceptionInfo, ExceptionType, InteractionCall,
+    InteractionMeta, LanguageLanguageInput, LanguageMeta, LanguageRef, Neighbourhood,
+};
 use crate::{
     agent::{did, did_for_context, signing_key_id_for_context, AgentContext},
     utils::{language_storage_directory, languages_directory},

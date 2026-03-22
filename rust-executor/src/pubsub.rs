@@ -1,12 +1,12 @@
 use crate::types::GetFilter;
 use crate::types::GetValue;
-use std::fmt;
 use futures::Stream;
 use futures::StreamExt;
 use log::error;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::LazyLock;

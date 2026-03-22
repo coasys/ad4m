@@ -1,9 +1,9 @@
-use crate::agent::capabilities::{AuthInfo, Capability};
-use crate::agent::signatures::verify;
 use super::core::{
     AIPromptExamples, AITask, DecoratedExpressionProof, DecoratedLinkExpression, Expression,
     ExpressionProof, Link, ModelType, Notification, TriggeredNotification,
 };
+use crate::agent::capabilities::{AuthInfo, Capability};
+use crate::agent::signatures::verify;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};

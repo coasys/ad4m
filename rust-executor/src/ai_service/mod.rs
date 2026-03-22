@@ -1,10 +1,10 @@
 use self::{audio_stream::AudioStream, error::AIServiceError};
-use crate::types::ModelInput;
-#[allow(unused_imports)]
-use crate::types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
 use crate::pubsub::AI_MODEL_LOADING_STATUS;
 #[allow(unused_imports)]
 use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
+use crate::types::ModelInput;
+#[allow(unused_imports)]
+use crate::types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
 use crate::types::{AITask, LocalModel, Model, ModelType};
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;

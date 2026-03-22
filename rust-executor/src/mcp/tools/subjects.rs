@@ -3,9 +3,9 @@
 //! Tools for working with typed subject instances (model objects) in perspectives.
 
 use super::Ad4mMcpHandler;
-use crate::types::{LinkQuery, LinkStatus};
 use crate::perspectives::perspective_instance::{Command, Parameter, SubjectClassOption};
 use crate::types::Link;
+use crate::types::{LinkQuery, LinkStatus};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

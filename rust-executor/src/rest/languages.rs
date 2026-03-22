@@ -67,7 +67,9 @@ pub async fn get_language(
     if !controller.is_language_loaded(&address).await {
         controller.language_by_ref(&address).await.map_err(|e| {
             let msg = match &e {
-                crate::languages::error::LanguageError::LoadError { message, .. } => message.clone(),
+                crate::languages::error::LanguageError::LoadError { message, .. } => {
+                    message.clone()
+                }
                 other => other.to_string(),
             };
             ApiError::Internal(msg)
@@ -89,8 +91,7 @@ pub async fn get_language(
         let constructor_icon =
             constructor_icon_json.and_then(|j| serde_json::from_str::<Icon>(&j).ok());
         let icon = icon_json.and_then(|j| serde_json::from_str::<Icon>(&j).ok());
-        let settings_icon =
-            settings_icon_json.and_then(|j| serde_json::from_str::<Icon>(&j).ok());
+        let settings_icon = settings_icon_json.and_then(|j| serde_json::from_str::<Icon>(&j).ok());
 
         return Ok(Json(LanguageHandle {
             address,
@@ -102,7 +103,10 @@ pub async fn get_language(
         }));
     }
 
-    Err(ApiError::NotFound(format!("Language not loaded: {}", address)))
+    Err(ApiError::NotFound(format!(
+        "Language not loaded: {}",
+        address
+    )))
 }
 
 /// GET /languages/:address/meta — get language meta expression
@@ -119,7 +123,12 @@ pub async fn get_language_meta(
     let meta = controller
         .get_language_expression(&address)
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to get language meta for {}: {}", address, e)))?;
+        .map_err(|e| {
+            ApiError::Internal(format!(
+                "Failed to get language meta for {}: {}",
+                address, e
+            ))
+        })?;
 
     Ok(Json(meta))
 }
@@ -138,7 +147,12 @@ pub async fn get_language_source(
     let source = controller
         .get_language_source(&address)
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to get language source for {}: {}", address, e)))?;
+        .map_err(|e| {
+            ApiError::Internal(format!(
+                "Failed to get language source for {}: {}",
+                address, e
+            ))
+        })?;
 
     Ok(Json(source))
 }
@@ -322,7 +336,10 @@ pub async fn write_settings(
 
     let controller = LanguageController::global_instance();
     if !controller.is_language_loaded(&address).await {
-        return Err(ApiError::NotFound(format!("Language not loaded: {}", address)));
+        return Err(ApiError::NotFound(format!(
+            "Language not loaded: {}",
+            address
+        )));
     }
 
     let settings_json: serde_json::Value = body;
@@ -331,10 +348,12 @@ pub async fn write_settings(
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to write settings: {}", e)))?;
 
-    controller
-        .reload_language(&address)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to reload language after settings change: {}", e)))?;
+    controller.reload_language(&address).await.map_err(|e| {
+        ApiError::Internal(format!(
+            "Failed to reload language after settings change: {}",
+            e
+        ))
+    })?;
 
     Ok(Json(true))
 }

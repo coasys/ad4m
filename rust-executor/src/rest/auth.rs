@@ -1,11 +1,8 @@
-use axum::{
-    extract::FromRequestParts,
-    http::request::Parts,
-};
+use axum::{extract::FromRequestParts, http::request::Parts};
 
+use super::errors::ApiError;
 use crate::agent::capabilities::{capabilities_from_token, is_admin_credential_token, Capability};
 use crate::types::RequestContext;
-use super::errors::ApiError;
 
 /// Auth context extracted from the Authorization header.
 /// Mirrors the GraphQL RequestContext construction.
@@ -55,10 +52,8 @@ where
         // Track last_seen for multi-user mode
         crate::agent::capabilities::track_last_seen_from_token(auth_header.clone()).await;
 
-        let capabilities = capabilities_from_token(
-            auth_header.clone(),
-            app_state.admin_credential.clone(),
-        );
+        let capabilities =
+            capabilities_from_token(auth_header.clone(), app_state.admin_credential.clone());
         let is_admin_credential =
             is_admin_credential_token(&auth_header, &app_state.admin_credential);
 

@@ -54,7 +54,10 @@ fn get_rate(description: &str, default: f64) -> Result<f64, ApiError> {
     match Ad4mDb::with_global_instance(|db| db.get_host_rate(description)) {
         Ok(Some(rate)) => Ok(rate),
         Ok(None) => Ok(default),
-        Err(e) => Err(ApiError::Internal(format!("Failed to read host rate: {}", e))),
+        Err(e) => Err(ApiError::Internal(format!(
+            "Failed to read host rate: {}",
+            e
+        ))),
     }
 }
 
@@ -171,8 +174,7 @@ pub async fn list_tasks(
     check_capability(&context.capabilities, &AI_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let tasks = AIService::get_tasks()
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let tasks = AIService::get_tasks().map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(tasks))
 }
@@ -266,7 +268,8 @@ pub async fn ai_prompt(
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let total_tokens = result.prompt_tokens + result.completion_tokens;
-    let model_name = match Ad4mDb::with_global_instance(|db| db.get_model(result.model_id.clone())) {
+    let model_name = match Ad4mDb::with_global_instance(|db| db.get_model(result.model_id.clone()))
+    {
         Ok(Some(m)) => m.name,
         _ => String::new(),
     };
@@ -274,7 +277,12 @@ pub async fn ai_prompt(
         &context.auth_token,
         total_tokens as f64 * get_rate(&model_name, DEFAULT_TOKEN_RATE)?,
     ) {
-        log::warn!("Call exceeded compute credits (ai_prompt, model={}, tokens={}): {:?}", model_name, total_tokens, e);
+        log::warn!(
+            "Call exceeded compute credits (ai_prompt, model={}, tokens={}): {:?}",
+            model_name,
+            total_tokens,
+            e
+        );
     }
 
     Ok(Json(result.text))
@@ -303,7 +311,11 @@ pub async fn ai_embed(
         &context.auth_token,
         result.token_count as f64 * get_rate("embedding per token", DEFAULT_EMBEDDING_TOKEN_RATE)?,
     ) {
-        log::warn!("Call exceeded compute credits (ai_embed, tokens={}): {:?}", result.token_count, e);
+        log::warn!(
+            "Call exceeded compute credits (ai_embed, tokens={}): {:?}",
+            result.token_count,
+            e
+        );
     }
 
     let json_string = serde_json::to_string(&result.embeddings)
@@ -311,5 +323,7 @@ pub async fn ai_embed(
 
     // Compress with zlib like GraphQL does
     let compressed_bytes = deflate::deflate_bytes_zlib(json_string.as_bytes());
-    Ok(Json(base64::prelude::BASE64_STANDARD.encode(&compressed_bytes)))
+    Ok(Json(
+        base64::prelude::BASE64_STANDARD.encode(&compressed_bytes),
+    ))
 }

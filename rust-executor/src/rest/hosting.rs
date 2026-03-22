@@ -22,11 +22,11 @@ pub async fn get_hosting_info(
 
     // User info for the current user
     let user_info = if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
-        let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(&user_email))
-            .ok();
-        let hot_wallet_address = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
-            .ok()
-            .flatten();
+        let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(&user_email)).ok();
+        let hot_wallet_address =
+            Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
+                .ok()
+                .flatten();
         Some(serde_json::json!({
             "email": user_email,
             "credits": credits,

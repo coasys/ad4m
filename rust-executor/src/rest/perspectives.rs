@@ -12,8 +12,9 @@ use crate::agent::{AgentContext, AgentService};
 use crate::db::Ad4mDb;
 use crate::helpers::can_access_perspective;
 use crate::perspectives::{
-    add_perspective, get_perspective, remove_perspective, update_perspective,
+    add_perspective, get_perspective,
     perspective_instance::{PerspectiveInstance, SdnaType},
+    remove_perspective, update_perspective,
     utils::prolog_resolution_to_string,
 };
 use crate::pubsub::mark_credits_dirty;
@@ -320,10 +321,7 @@ pub async fn mutate_links(
     // Deduct compute credits
     let total_ops = response.additions.len() + response.removals.len() + response.updates.len();
     if total_ops > 0 {
-        let _ = reserve_compute_credits(
-            &context.auth_token,
-            total_ops as f64 * DEFAULT_LINK_WRITE,
-        );
+        let _ = reserve_compute_credits(&context.auth_token, total_ops as f64 * DEFAULT_LINK_WRITE);
     }
 
     Ok(Json(response))

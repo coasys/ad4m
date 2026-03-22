@@ -4,12 +4,6 @@ use super::update_perspective;
 use super::utils::{prolog_get_all_string_bindings, prolog_resolution_to_string};
 use crate::agent::AgentContext;
 use crate::agent::{create_signed_expression, did_for_context};
-use crate::types::{
-    DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter,
-    OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
-    PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter, PerspectiveState,
-    PerspectiveStateFilter,
-};
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
@@ -26,6 +20,7 @@ use crate::pubsub::{
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
     RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
+
 use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
 use chrono::DateTime;
@@ -2410,9 +2405,7 @@ impl PerspectiveInstance {
 
         // Initialize user pool with correct neighbourhood author for SDNA governance
         // This ensures users can see SDNA from both themselves and the neighbourhood creator
-        let links = self
-            .get_links(&crate::types::LinkQuery::default())
-            .await?;
+        let links = self.get_links(&crate::types::LinkQuery::default()).await?;
 
         service
             .update_perspective_links(
@@ -3717,7 +3710,10 @@ impl PerspectiveInstance {
                                     .await
                                 {
                                     Ok(Some(expr_json)) => {
-                                        let rendered = crate::helpers::build_expression_rendered(&expr_json, &lang_address);
+                                        let rendered = crate::helpers::build_expression_rendered(
+                                            &expr_json,
+                                            &lang_address,
+                                        );
                                         rendered.data
                                     }
                                     _ => prolog_value_to_json_string(property_value.clone()),
@@ -4336,10 +4332,10 @@ mod tests {
     use super::*;
     use crate::agent::AgentService;
     use crate::db::Ad4mDb;
-    use crate::types::PerspectiveState;
     use crate::perspectives::perspective_instance::PerspectiveHandle;
     use crate::prolog_service::init_prolog_service;
     use crate::test_utils::setup_wallet;
+    use crate::types::PerspectiveState;
     use fake::{Fake, Faker};
     use uuid::Uuid;
 

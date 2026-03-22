@@ -3878,8 +3878,8 @@ mod tests {
     use super::*;
     use crate::types::{PerspectiveHandle, PerspectiveState};
     use crate::{
-        types::{LocalModelInput, ModelApiInput, TokenizerSourceInput},
         types::{ExpressionProof, Link, LinkExpression, ModelApiType, ModelType},
+        types::{LocalModelInput, ModelApiInput, TokenizerSourceInput},
     };
     use chrono::Utc;
     use fake::{Fake, Faker};
@@ -3904,10 +3904,10 @@ mod tests {
 
     #[test]
     fn test_export_import_all_tables() {
+        use crate::types::DecoratedExpressionProof;
         use crate::types::{
             DecoratedNeighbourhoodExpression, Neighbourhood, Perspective, PerspectiveState,
         };
-        use crate::types::DecoratedExpressionProof;
 
         // Initialize test database
         let db = Ad4mDb::new(":memory:").unwrap();

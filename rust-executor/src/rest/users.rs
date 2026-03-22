@@ -20,8 +20,11 @@ pub async fn get_multi_user_enabled(
     auth: AuthContext,
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
-    check_capability(&context.capabilities, &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
     let enabled = Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled())
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -51,8 +54,11 @@ pub async fn list_users(
     auth: AuthContext,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let context = auth.to_request_context();
-    check_capability(&context.capabilities, &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
     let users = Ad4mDb::with_global_instance(|db| db.list_users())
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -67,8 +73,11 @@ pub async fn get_user_wallet(
     Path(email): Path<String>,
 ) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
-    check_capability(&context.capabilities, &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
     let wallet = Ad4mDb::with_global_instance(|db| db.get_user_wallet_address(&email))
         .map_err(|e| ApiError::Internal(e.to_string()))?
@@ -84,8 +93,11 @@ pub async fn create_user(
     Json(body): Json<CreateUserRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let context = auth.to_request_context();
-    check_capability(&context.capabilities, &RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
     let did = crate::user_management::create_user(&body.email, &body.password)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -100,8 +112,11 @@ pub async fn login_user(
     Json(body): Json<LoginUserRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let context = auth.to_request_context();
-    check_capability(&context.capabilities, &RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
     let app_name = body.app_name.as_deref().unwrap_or("ad4m");
     let jwt = crate::user_management::login_user(&body.email, &body.password, app_name)
@@ -117,13 +132,21 @@ pub async fn verify_email(
     Json(body): Json<VerifyEmailRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let context = auth.to_request_context();
-    check_capability(&context.capabilities, &RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
     let verification_type = body.verification_type.as_deref().unwrap_or("signup");
     let app_name = body.app_name.as_deref().unwrap_or("ad4m");
-    let jwt = crate::user_management::verify_and_login(&body.email, &body.code, verification_type, app_name)
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let jwt = crate::user_management::verify_and_login(
+        &body.email,
+        &body.code,
+        verification_type,
+        app_name,
+    )
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(serde_json::json!({ "jwt": jwt })))
 }
@@ -141,7 +164,9 @@ pub async fn email_test(
 
     match body.action.as_str() {
         "send" => {
-            let to = body.to.ok_or_else(|| ApiError::BadRequest("'to' required".into()))?;
+            let to = body
+                .to
+                .ok_or_else(|| ApiError::BadRequest("'to' required".into()))?;
             crate::email_service::send_test_email(&to)
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -158,7 +183,9 @@ pub async fn email_test(
             Ok(Json(serde_json::json!(true)))
         }
         "get-code" => {
-            let email = body.email.ok_or_else(|| ApiError::BadRequest("'email' required".into()))?;
+            let email = body
+                .email
+                .ok_or_else(|| ApiError::BadRequest("'email' required".into()))?;
             let code = crate::email_service::get_test_code(&email)
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             Ok(Json(serde_json::to_value(code).unwrap_or_default()))
@@ -169,7 +196,9 @@ pub async fn email_test(
             Ok(Json(serde_json::json!(true)))
         }
         "set-expiry" => {
-            let secs = body.expiry_seconds.ok_or_else(|| ApiError::BadRequest("'expirySeconds' required".into()))?;
+            let secs = body
+                .expiry_seconds
+                .ok_or_else(|| ApiError::BadRequest("'expirySeconds' required".into()))?;
             crate::email_service::set_test_expiry(secs)
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             Ok(Json(serde_json::json!(true)))
