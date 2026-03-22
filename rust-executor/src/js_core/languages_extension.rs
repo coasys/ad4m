@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::{
-    graphql::graphql_types::{PerspectiveExpression, PerspectiveState},
+    types::{PerspectiveExpression, PerspectiveState},
     types::PerspectiveDiff,
 };
 

@@ -11,7 +11,7 @@ use crate::agent::capabilities::{
         RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
     },
 };
-use crate::graphql::graphql_types::Perspective;
+use crate::types::Perspective;
 use crate::languages::LanguageController;
 use crate::neighbourhoods;
 use crate::runtime_service::RuntimeService;

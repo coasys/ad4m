@@ -554,7 +554,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                         }
                     };
 
-                let info = crate::graphql::graphql_types::HostingUserInfo {
+                let info = crate::types::HostingUserInfo {
                     email: email.clone(),
                     remaining_credits,
                     hot_wallet_address,

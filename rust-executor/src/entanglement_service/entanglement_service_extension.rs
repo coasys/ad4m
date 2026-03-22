@@ -1,6 +1,6 @@
 use deno_core::op2;
 
-use crate::graphql::graphql_types::EntanglementProof;
+use crate::types::EntanglementProof;
 use crate::js_core::error::AnyhowWrapperError;
 
 use super::{

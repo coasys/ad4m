@@ -10,7 +10,7 @@ use crate::agent::{AgentService, did_document_for_context, signatures, AgentCont
 use crate::entanglement_service::{
     add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs, sign_device_key,
 };
-use crate::graphql::graphql_types::*;
+use crate::types::*;
 use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC};
 
 use super::auth::{AppState, AuthContext};

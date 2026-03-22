@@ -36,7 +36,7 @@ use crate::agent::capabilities::{
     capabilities_from_token, check_capability, defs::PERSPECTIVE_CREATE_CAPABILITY, Capability,
 };
 use crate::agent::AgentContext;
-use crate::graphql::graphql_types::PerspectiveHandle;
+use crate::types::PerspectiveHandle;
 use crate::perspectives::get_perspective;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use rmcp::{
@@ -536,7 +536,7 @@ impl Ad4mMcpHandler {
     ) -> Vec<crate::types::DecoratedLinkExpression> {
         let (encoded, raw) = Self::shacl_name_variants(class_name);
         let links = perspective
-            .get_links(&crate::graphql::graphql_types::LinkQuery {
+            .get_links(&crate::types::LinkQuery {
                 source: Some(encoded),
                 predicate: Some("ad4m://shacl_shape_uri".to_string()),
                 ..Default::default()
@@ -547,7 +547,7 @@ impl Ad4mMcpHandler {
             return links;
         }
         perspective
-            .get_links(&crate::graphql::graphql_types::LinkQuery {
+            .get_links(&crate::types::LinkQuery {
                 source: Some(raw),
                 predicate: Some("ad4m://shacl_shape_uri".to_string()),
                 ..Default::default()

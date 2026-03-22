@@ -9,7 +9,7 @@ use axum::{
 use std::collections::HashMap;
 
 use crate::agent::capabilities::*;
-use crate::graphql::graphql_types::*;
+use crate::types::*;
 use crate::graphql::query_resolvers::can_access_perspective;
 use crate::perspectives::{
     self, add_perspective, get_perspective, remove_perspective, update_perspective,

@@ -23,9 +23,9 @@ pub struct BootstrapSeed {
 
 use serde::{Deserialize, Serialize};
 
-use crate::graphql::graphql_types::{ExceptionInfo, ExceptionType, NotificationInput};
+use crate::types::{ExceptionInfo, ExceptionType, NotificationInput};
 use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
-use crate::{agent::did, db::Ad4mDb, graphql::graphql_types::SentMessage};
+use crate::{agent::did, db::Ad4mDb, types::SentMessage};
 
 lazy_static! {
     static ref RUNTIME_INSTANCE: Arc<Mutex<Option<RuntimeService>>> = Arc::new(Mutex::new(None));

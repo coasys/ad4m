@@ -1,7 +1,7 @@
 use self::{audio_stream::AudioStream, error::AIServiceError};
-use crate::graphql::graphql_types::ModelInput;
+use crate::types::ModelInput;
 #[allow(unused_imports)]
-use crate::graphql::graphql_types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
+use crate::types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
 use crate::pubsub::AI_MODEL_LOADING_STATUS;
 #[allow(unused_imports)]
 use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
@@ -1608,7 +1608,7 @@ impl AIService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graphql::graphql_types::{AIPromptExamplesInput, LocalModelInput};
+    use crate::types::{AIPromptExamplesInput, LocalModelInput};
     use tokio::time::{sleep, Duration};
 
     #[tokio::test]

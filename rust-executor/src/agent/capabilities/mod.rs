@@ -9,7 +9,7 @@ use requests_map::{get_request, insert_request, remove_request};
 pub use token::*;
 pub use types::*;
 
-use crate::graphql::graphql_types::*;
+use crate::types::*;
 use crate::pubsub::{get_global_pubsub, APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC};
 use crate::utils::constant_time_eq;
 

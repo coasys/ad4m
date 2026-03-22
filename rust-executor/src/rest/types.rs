@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::graphql::graphql_types::{
+use crate::types::{
     Agent, AgentStatus, Apps, PerspectiveHandle, Perspective,
 };
 use crate::types::{

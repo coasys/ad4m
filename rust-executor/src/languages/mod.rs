@@ -12,7 +12,7 @@ use deno_core::error::AnyError;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use crate::graphql::graphql_types::{
+use crate::types::{
     DecoratedNeighbourhoodExpression, ExceptionInfo, ExceptionType, InteractionCall,
     InteractionMeta, LanguageLanguageInput, LanguageMeta, LanguageRef, Neighbourhood,
 };

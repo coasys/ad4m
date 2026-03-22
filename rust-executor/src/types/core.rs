@@ -1,15 +1,12 @@
-use coasys_juniper::{GraphQLEnum, GraphQLObject, GraphQLValue};
 use deno_core::{anyhow::anyhow, error::AnyError};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt::Display;
 use std::str::FromStr;
 use url::Url;
 
-use crate::{
-    agent::signatures::verify,
-    graphql::graphql_types::{
-        LinkExpressionInput, LinkInput, LinkStatus, NotificationInput, PerspectiveInput,
-    },
+use crate::agent::signatures::verify;
+use super::domain::{
+    LinkExpressionInput, LinkInput, LinkStatus, NotificationInput, PerspectiveInput,
 };
 use regex::Regex;
 
@@ -22,21 +19,21 @@ pub struct Expression<T: Serialize> {
     pub proof: ExpressionProof,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ExpressionProof {
     pub key: String,
     pub signature: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-pub struct VerifiedExpression<T: GraphQLValue + Serialize> {
+pub struct VerifiedExpression<T: Serialize> {
     pub author: String,
     pub timestamp: String,
     pub data: T,
     pub proof: DecoratedExpressionProof,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 
 pub struct DecoratedExpressionProof {
     pub key: String,
@@ -45,7 +42,7 @@ pub struct DecoratedExpressionProof {
     pub invalid: Option<bool>,
 }
 
-impl<T: GraphQLValue + Serialize> From<Expression<T>> for VerifiedExpression<T> {
+impl<T: Serialize> From<Expression<T>> for VerifiedExpression<T> {
     fn from(expr: Expression<T>) -> Self {
         let valid = verify(&expr).unwrap_or(false);
         let invalid = !valid;
@@ -74,7 +71,7 @@ where
     Ok(opt.unwrap_or_default())
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Link {
     pub predicate: Option<String>,
@@ -154,7 +151,7 @@ impl Link {
     }
 }
 
-#[derive(GraphQLObject, Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct LinkExpression {
     pub author: String,
     pub timestamp: String,
@@ -226,7 +223,7 @@ impl From<Expression<Link>> for LinkExpression {
     }
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DecoratedLinkExpression {
     pub author: String,
@@ -283,7 +280,7 @@ impl From<DecoratedLinkExpression> for LinkExpression {
     }
 }
 
-#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct Perspective {
     pub links: Vec<LinkExpression>,
 }
@@ -300,13 +297,13 @@ impl From<PerspectiveInput> for Perspective {
     }
 }
 
-#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Neighbourhood {
     pub link_language: String,
     pub meta: Perspective,
 }
 
-#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NeighbourhoodExpression {
     pub author: String,
     pub data: Neighbourhood,
@@ -437,7 +434,7 @@ impl PerspectiveDiff {
     }
 }
 
-#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub struct Notification {
     pub id: String,
@@ -453,7 +450,7 @@ pub struct Notification {
     pub user_email: Option<String>, // NULL for main agent, Some(email) for managed users
 }
 
-#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub struct AIPromptExamples {
     pub input: String,
@@ -461,7 +458,7 @@ pub struct AIPromptExamples {
 }
 
 #[derive(
-    GraphQLObject, Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord,
+    Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct AITask {
@@ -497,7 +494,7 @@ impl Notification {
     }
 }
 
-#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TriggeredNotification {
     pub notification: Notification,
@@ -505,7 +502,7 @@ pub struct TriggeredNotification {
     pub trigger_match: String,
 }
 
-#[derive(GraphQLEnum, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum ModelApiType {
     OpenAi,
@@ -535,7 +532,7 @@ impl ToString for ModelApiType {
     }
 }
 
-#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelApi {
     pub base_url: Url,
@@ -544,7 +541,7 @@ pub struct ModelApi {
     pub api_type: ModelApiType,
 }
 
-#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalModel {
     pub file_name: String,
@@ -553,7 +550,7 @@ pub struct LocalModel {
     pub revision: Option<String>,
 }
 
-#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenizerSource {
     pub repo: String,
@@ -561,7 +558,7 @@ pub struct TokenizerSource {
     pub file_name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, GraphQLEnum, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelType {
     #[default]
@@ -580,7 +577,7 @@ impl Display for ModelType {
     }
 }
 
-#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub id: String,

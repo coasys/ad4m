@@ -4,7 +4,7 @@ use super::update_perspective;
 use super::utils::{prolog_get_all_string_bindings, prolog_resolution_to_string};
 use crate::agent::AgentContext;
 use crate::agent::{create_signed_expression, did_for_context};
-use crate::graphql::graphql_types::{
+use crate::types::{
     DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter,
     OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
     PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter, PerspectiveState,
@@ -2411,7 +2411,7 @@ impl PerspectiveInstance {
         // Initialize user pool with correct neighbourhood author for SDNA governance
         // This ensures users can see SDNA from both themselves and the neighbourhood creator
         let links = self
-            .get_links(&crate::graphql::graphql_types::LinkQuery::default())
+            .get_links(&crate::types::LinkQuery::default())
             .await?;
 
         service
@@ -4336,7 +4336,7 @@ mod tests {
     use super::*;
     use crate::agent::AgentService;
     use crate::db::Ad4mDb;
-    use crate::graphql::graphql_types::PerspectiveState;
+    use crate::types::PerspectiveState;
     use crate::perspectives::perspective_instance::PerspectiveHandle;
     use crate::prolog_service::init_prolog_service;
     use crate::test_utils::setup_wallet;

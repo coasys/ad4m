@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 
-use crate::graphql::graphql_types::{Agent, LinkQuery, LinkStatus};
+use crate::types::{Agent, LinkQuery, LinkStatus};
 use crate::languages::LanguageController;
 use crate::types::Link;
 

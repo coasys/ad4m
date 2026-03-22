@@ -3,7 +3,7 @@
 //! Extracts subject class definitions from SHACL links in perspectives,
 //! providing typed structures for generating dynamic MCP tools.
 
-use crate::graphql::graphql_types::LinkQuery;
+use crate::types::LinkQuery;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 
 /// A SHACL subject class with its properties and metadata.

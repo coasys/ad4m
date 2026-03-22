@@ -4,7 +4,7 @@ use axum::{
 };
 
 use crate::agent::capabilities::{capabilities_from_token, is_admin_credential_token, Capability};
-use crate::graphql::graphql_types::RequestContext;
+use crate::types::RequestContext;
 use super::errors::ApiError;
 
 /// Auth context extracted from the Authorization header.
