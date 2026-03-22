@@ -298,8 +298,11 @@ pub async fn mutate_links(
     if has_additions || has_removals {
         let mutations = LinkMutations {
             additions: body.additions.unwrap_or_default(),
-            removals: body.removals.unwrap_or_default().into_iter().map(|l| {
-                LinkExpressionInput {
+            removals: body
+                .removals
+                .unwrap_or_default()
+                .into_iter()
+                .map(|l| LinkExpressionInput {
                     author: String::new(),
                     data: l,
                     proof: ExpressionProofInput {
@@ -310,8 +313,8 @@ pub async fn mutate_links(
                     },
                     timestamp: String::new(),
                     status: None,
-                }
-            }).collect(),
+                })
+                .collect(),
         };
 
         let diff = perspective
@@ -327,20 +330,30 @@ pub async fn mutate_links(
     if let Some(updates) = body.updates {
         for update in updates {
             let old = LinkExpressionInput {
-                    author: String::new(),
-                    data: update.old_link,
-                    proof: ExpressionProofInput { key: None, signature: None, valid: None, invalid: None },
-                    timestamp: String::new(),
-                    status: None,
-                };
-                let new = LinkExpressionInput {
-                    author: String::new(),
-                    data: update.new_link,
-                    proof: ExpressionProofInput { key: None, signature: None, valid: None, invalid: None },
-                    timestamp: String::new(),
-                    status: None,
-                };
-                let result = perspective
+                author: String::new(),
+                data: update.old_link,
+                proof: ExpressionProofInput {
+                    key: None,
+                    signature: None,
+                    valid: None,
+                    invalid: None,
+                },
+                timestamp: String::new(),
+                status: None,
+            };
+            let new = LinkExpressionInput {
+                author: String::new(),
+                data: update.new_link,
+                proof: ExpressionProofInput {
+                    key: None,
+                    signature: None,
+                    valid: None,
+                    invalid: None,
+                },
+                timestamp: String::new(),
+                status: None,
+            };
+            let result = perspective
                 .update_link(
                     LinkExpression::from_input_without_proof(old),
                     Link::from(new.data),
@@ -462,13 +475,7 @@ pub async fn execute_commands(
     let expression = serde_json::to_string(&body.expression).unwrap_or_default();
 
     let result = perspective
-        .execute_commands(
-            commands,
-            expression,
-            vec![],
-            None,
-            &agent_context,
-        )
+        .execute_commands(commands, expression, vec![], None, &agent_context)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 

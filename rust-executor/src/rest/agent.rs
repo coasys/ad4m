@@ -16,8 +16,8 @@ use crate::entanglement_service::{
 };
 use crate::languages::LanguageController;
 use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC};
-use crate::types::*;
 use crate::types::domain::Perspective as DomainPerspective;
+use crate::types::*;
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
@@ -727,12 +727,10 @@ pub async fn add_entanglement(
     if preflight {
         // Pre-flight: just validate
         let signed = sign_device_key(
-            body
-                .first()
+            body.first()
                 .map(|b| b.device_key.clone())
                 .unwrap_or_default(),
-            body
-                .first()
+            body.first()
                 .map(|b| b.device_key_type.clone())
                 .unwrap_or_default(),
         );
@@ -741,8 +739,10 @@ pub async fn add_entanglement(
 
     // add_entanglement_proofs returns () not Result, and takes domain EntanglementProof
     let agent_did = AgentService::with_global_instance(|a| a.did.clone().unwrap_or_default());
-    let agent_key_id = AgentService::with_global_instance(|a| a.signing_key_id.clone().unwrap_or_default());
-    let domain_proofs: Vec<EntanglementProof> = body.into_iter()
+    let agent_key_id =
+        AgentService::with_global_instance(|a| a.signing_key_id.clone().unwrap_or_default());
+    let domain_proofs: Vec<EntanglementProof> = body
+        .into_iter()
         .map(|p| EntanglementProof {
             device_key: p.device_key,
             device_key_type: p.device_key_type,
@@ -769,8 +769,10 @@ pub async fn delete_entanglement(
     Json(body): Json<Vec<EntanglementProofInput>>,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     let agent_did = AgentService::with_global_instance(|a| a.did.clone().unwrap_or_default());
-    let agent_key_id = AgentService::with_global_instance(|a| a.signing_key_id.clone().unwrap_or_default());
-    let domain_proofs: Vec<EntanglementProof> = body.into_iter()
+    let agent_key_id =
+        AgentService::with_global_instance(|a| a.signing_key_id.clone().unwrap_or_default());
+    let domain_proofs: Vec<EntanglementProof> = body
+        .into_iter()
         .map(|p| EntanglementProof {
             device_key: p.device_key,
             device_key_type: p.device_key_type,
