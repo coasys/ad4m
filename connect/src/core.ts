@@ -1,7 +1,4 @@
-import { ApolloClient, InMemoryCache, NormalizedCacheObject } from "@apollo/client/core";
-import { createClient, Client as WSClient } from "graphql-ws";
-import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
-import { isEmbedded, setLocal, getLocal, removeLocal, connectWebSocket } from './utils';
+import { isEmbedded, setLocal, getLocal, removeLocal, checkConnection, wsUrlToHttpBase } from './utils';
 import { Ad4mClient, VerificationRequestResult } from "@coasys/ad4m";
 import autoBind from "auto-bind";
 
@@ -22,9 +19,11 @@ export default class Ad4mConnect extends EventTarget {
   connectionState: ConnectionStates = "not-connected";
   authState: AuthStates = "unauthenticated";
   ad4mClient?: Ad4mClient;
-  wsClient?: WSClient;
-  apolloClient?: ApolloClient<NormalizedCacheObject>;
-  activeSocket: WebSocket | null = null;
+  /** HTTP base URL derived from the WebSocket URL */
+  get baseUrl(): string {
+    return wsUrlToHttpBase(this.url);
+  }
+
   requestId?: string;
   requestedRestart: boolean = false;
 
@@ -113,9 +112,9 @@ export default class Ad4mConnect extends EventTarget {
 
     // Standalone mode - connect directly
     try {
-      await connectWebSocket(this.url);
+      await checkConnection(this.baseUrl);
       setLocal("ad4m-url", this.url);
-      this.ad4mClient = await this.buildClient();
+      this.ad4mClient = this.buildClient();
       await this.checkAuth();
       return this.ad4mClient;
     } catch (error) {
@@ -125,81 +124,19 @@ export default class Ad4mConnect extends EventTarget {
     }
   }
 
-  private async buildClient(): Promise<Ad4mClient> {
+  private buildClient(): Ad4mClient {
     this.notifyConnectionChange("connecting");
 
-    if (this.apolloClient && this.wsClient) {
-      this.requestedRestart = true;
-      this.wsClient.dispose();
-      this.apolloClient.stop();
-      this.wsClient = null;
-      this.apolloClient = null;
-    }
-
-    this.wsClient = createClient({
-      url: this.url,
-      connectionParams: async () => ({ headers: { authorization: this.token } }),
-      on: {
-        opened: (socket: WebSocket) => {
-          this.activeSocket = socket;
-        },
-        error: (e) => {
-          this.notifyConnectionChange("error");
-        },
-        connected: () => {
-          this.notifyConnectionChange("connected");
-        },
-        closed: async (event: CloseEvent) => {
-          // If the connection was closed cleanly, which happens on every first connection, don't treat this as a disconnect
-          if (event.wasClean || this.requestedRestart) return;
-
-          if (!this.token) {
-            this.notifyConnectionChange("error");
-          } else {
-            try {
-              // Force a fresh connection by rebuilding the client
-              // instead of potentially reusing a dead embedded client
-              this.ad4mClient = await this.buildClient();
-              await this.checkAuth();
-            } catch (error) {
-              console.error('[Ad4m Connect] Reconnection failed:', error);
-              this.notifyConnectionChange("error");
-            }
-          }
-        },
-      },
-    });
-
-    this.apolloClient = this.createApolloClient(this.wsClient);
-    this.ad4mClient = new Ad4mClient(this.apolloClient);
-    this.requestedRestart = false;
+    this.ad4mClient = new Ad4mClient(this.baseUrl, this.token);
+    this.notifyConnectionChange("connected");
 
     return this.ad4mClient;
   }
 
-  private createApolloClient(wsClient: WSClient): ApolloClient<NormalizedCacheObject> {
-    return new ApolloClient({
-      link: new GraphQLWsLink(wsClient),
-      cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
-      defaultOptions: {
-        watchQuery: { fetchPolicy: "no-cache" as const },
-        query: { fetchPolicy: "no-cache" as const },
-        mutate: { fetchPolicy: "no-cache" as const },
-      },
-    });
-  }
-
-  private async withTempClient<T>(url: string, callback: (client: Ad4mClient) => Promise<T>): Promise<T> {
-    // Create a temporary client for the duration of the callback
-    const wsClient = createClient({ url, connectionParams: async () => ({ headers: { authorization: "" } }) });
-    const apolloClient = this.createApolloClient(wsClient);
-    const client = new Ad4mClient(apolloClient);
-
-    try {
-      return await callback(client);
-    } finally {
-      wsClient.dispose();
-    }
+  private withTempClient<T>(wsUrl: string, callback: (client: Ad4mClient) => Promise<T>): Promise<T> {
+    const baseUrl = wsUrlToHttpBase(wsUrl);
+    const client = new Ad4mClient(baseUrl);
+    return callback(client);
   }
 
   async checkAuth(): Promise<boolean> {
@@ -243,18 +180,6 @@ export default class Ad4mConnect extends EventTarget {
   async disconnect(): Promise<void> {
     console.log('[Ad4m Connect] Disconnecting...');
     
-    // Dispose WebSocket client
-    if (this.wsClient) {
-      this.wsClient.dispose();
-      this.wsClient = null;
-    }
-    
-    // Stop Apollo client
-    if (this.apolloClient) {
-      this.apolloClient.stop();
-      this.apolloClient = null;
-    }
-    
     // Clear client reference
     this.ad4mClient = undefined;
     
@@ -280,7 +205,7 @@ export default class Ad4mConnect extends EventTarget {
   // Hosting — credit subscription & polling fallback
 
   /**
-   * Subscribe to real-time credit updates via GraphQL subscription.
+   * Subscribe to real-time credit updates.
    * Falls back to polling if the subscription is not supported by the executor.
    */
   startCreditSubscription(): void {
@@ -437,7 +362,7 @@ export default class Ad4mConnect extends EventTarget {
           setLocal('ad4m-url', this.url);
           
           // Build the client with received credentials
-          this.ad4mClient = await this.buildClient();
+          this.ad4mClient = this.buildClient();
           await this.checkAuth();
         } catch (error) {
           console.error('[Ad4m Connect] Failed to initialize from AD4M_CONFIG:', error);
