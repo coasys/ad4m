@@ -175,7 +175,26 @@ export function buildSPARQLQuery(
             ad4m:timestamp ?timestamp .
       ${filterClause}
     }
+    ${buildSPARQLOrderLimitOffset(metadata, query)}
   `.trim();
+}
+
+/**
+ * Build ORDER BY / LIMIT / OFFSET clauses for the SPARQL query.
+ *
+ * Since the query returns flat link rows (multiple per instance),
+ * we can't directly LIMIT/OFFSET. Instead we add ordering hints
+ * that the JS-level post-processing uses. True server-side limiting
+ * requires a subquery approach.
+ *
+ * For now, we generate no-op — the JS layer handles ordering/pagination.
+ * This function is a placeholder for future server-side optimization.
+ */
+function buildSPARQLOrderLimitOffset(_metadata: ModelMetadata, _query: Query): string {
+  // ORDER BY, LIMIT, OFFSET are handled in JS post-processing
+  // because each instance spans multiple flat link rows.
+  // A future optimization could use SPARQL subqueries to pre-filter sources.
+  return "";
 }
 
 /**
@@ -348,7 +367,36 @@ function buildSPARQLWhereFilters(
           }
         }
       }
-      // Comparison operators (gt, gte, lt, lte, between, contains) are handled in JS
+      // Comparison operators: gt, gte, lt, lte, between, contains
+      // Generate SPARQL FILTER clauses for these
+      const targetVar = `?wTarget_cmp_${propertyName}`;
+      const valueExpr = propMeta.resolveLanguage === "literal"
+        ? `<ad4m://fn/parse_literal>(${targetVar})`
+        : targetVar;
+
+      const compFilters: string[] = [];
+      if (ops.gt !== undefined) compFilters.push(`${valueExpr} > ${formatSPARQLValue(ops.gt)}`);
+      if (ops.gte !== undefined) compFilters.push(`${valueExpr} >= ${formatSPARQLValue(ops.gte)}`);
+      if (ops.lt !== undefined) compFilters.push(`${valueExpr} < ${formatSPARQLValue(ops.lt)}`);
+      if (ops.lte !== undefined) compFilters.push(`${valueExpr} <= ${formatSPARQLValue(ops.lte)}`);
+      if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
+        compFilters.push(`${valueExpr} >= ${formatSPARQLValue(ops.between[0])} && ${valueExpr} <= ${formatSPARQLValue(ops.between[1])}`);
+      }
+      if (ops.contains !== undefined) {
+        compFilters.push(`CONTAINS(STR(${valueExpr}), ${formatSPARQLValue(ops.contains)})`);
+      }
+
+      if (compFilters.length > 0) {
+        filters.push(`
+          EXISTS {
+            ?wLink_cmp_${propertyName} a <${ONT}Link> ;
+              <${ONT}source> ?source ;
+              <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
+              <${ONT}target> ${targetVar} .
+            FILTER(${compFilters.join(" && ")})
+          }
+        `);
+      }
     } else {
       // Simple equality
       const formatted = formatSPARQLValue(condition);
