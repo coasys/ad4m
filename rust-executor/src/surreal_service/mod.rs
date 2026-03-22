@@ -999,6 +999,110 @@ impl SurrealDBService {
         Ok(vec![])
     }
 
+    /// Get all links matching a specific source and predicate (uses compound index)
+    pub async fn get_links_by_source_and_predicate(
+        &self,
+        _perspective_uuid: &str,
+        source: &str,
+        predicate: &str,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        let query = "SELECT * FROM link WHERE source = $source AND predicate = $predicate";
+        let results = self
+            .db
+            .query(query)
+            .bind(("source", source.to_string()))
+            .bind(("predicate", predicate.to_string()))
+            .await?;
+
+        let mut response = results;
+        let result: SurrealValue = response.take(0)?;
+        let json_string = serde_json::to_string(&result)?;
+        let json_value: Value = serde_json::from_str(&json_string)?;
+        let unwrapped = unwrap_surreal_json(json_value);
+
+        if let Value::Array(arr) = unwrapped {
+            let mut links: Vec<DecoratedLinkExpression> = Vec::new();
+            for value in arr {
+                match serde_json::from_value::<SurrealLink>(value.clone()) {
+                    Ok(surreal_link) => links.push(surreal_link.into()),
+                    Err(e) => warn!("Failed to deserialize SurrealLink in get_links_by_source_and_predicate: {}. Offending value: {}", e, value),
+                }
+            }
+            return Ok(links);
+        }
+        Ok(vec![])
+    }
+
+    /// Get all links matching a specific target and predicate (uses compound index)
+    pub async fn get_links_by_target_and_predicate(
+        &self,
+        _perspective_uuid: &str,
+        target: &str,
+        predicate: &str,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        let query = "SELECT * FROM link WHERE target = $target AND predicate = $predicate";
+        let results = self
+            .db
+            .query(query)
+            .bind(("target", target.to_string()))
+            .bind(("predicate", predicate.to_string()))
+            .await?;
+
+        let mut response = results;
+        let result: SurrealValue = response.take(0)?;
+        let json_string = serde_json::to_string(&result)?;
+        let json_value: Value = serde_json::from_str(&json_string)?;
+        let unwrapped = unwrap_surreal_json(json_value);
+
+        if let Value::Array(arr) = unwrapped {
+            let mut links: Vec<DecoratedLinkExpression> = Vec::new();
+            for value in arr {
+                match serde_json::from_value::<SurrealLink>(value.clone()) {
+                    Ok(surreal_link) => links.push(surreal_link.into()),
+                    Err(e) => warn!("Failed to deserialize SurrealLink in get_links_by_target_and_predicate: {}. Offending value: {}", e, value),
+                }
+            }
+            return Ok(links);
+        }
+        Ok(vec![])
+    }
+
+    /// Get all links matching source, predicate, and target
+    pub async fn get_links_by_source_predicate_target(
+        &self,
+        _perspective_uuid: &str,
+        source: &str,
+        predicate: &str,
+        target: &str,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        let query = "SELECT * FROM link WHERE source = $source AND predicate = $predicate AND target = $target";
+        let results = self
+            .db
+            .query(query)
+            .bind(("source", source.to_string()))
+            .bind(("predicate", predicate.to_string()))
+            .bind(("target", target.to_string()))
+            .await?;
+
+        let mut response = results;
+        let result: SurrealValue = response.take(0)?;
+        let json_string = serde_json::to_string(&result)?;
+        let json_value: Value = serde_json::from_str(&json_string)?;
+        let unwrapped = unwrap_surreal_json(json_value);
+
+        if let Value::Array(arr) = unwrapped {
+            let mut links: Vec<DecoratedLinkExpression> = Vec::new();
+            for value in arr {
+                match serde_json::from_value::<SurrealLink>(value.clone()) {
+                    Ok(surreal_link) => links.push(surreal_link.into()),
+                    Err(e) => warn!("Failed to deserialize SurrealLink in get_links_by_source_predicate_target: {}. Offending value: {}", e, value),
+                }
+            }
+            return Ok(links);
+        }
+        Ok(vec![])
+    }
+
     /// Get all links matching a specific predicate where source ends with the given suffix
     ///
     /// # Arguments

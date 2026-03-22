@@ -1195,7 +1195,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     expect(result.totalCount).toBe(0);
   });
 
-  it("should use SurrealDB by default in findAll()", async () => {
+  it("should use SurrealDB when engine is 'surreal' in findAll()", async () => {
     const surrealResults = [
       {
         source: "node:abc123",
@@ -1210,7 +1210,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
 
     mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
 
-    const results = await Recipe.findAll(mockPerspective, {});
+    const results = await Recipe.findAll(mockPerspective, {}, 'surreal');
 
     expect(mockPerspective.querySurrealDB).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
@@ -1235,7 +1235,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     expect(results).toHaveLength(1);
   });
 
-  it("should use SurrealDB by default in findAllAndCount()", async () => {
+  it("should use SurrealDB when engine is 'surreal' in findAllAndCount()", async () => {
     const surrealResults = [
       {
         source: "node:abc123",
@@ -1250,7 +1250,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
 
     mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
 
-    const { results, totalCount } = await Recipe.findAllAndCount(mockPerspective, {});
+    const { results, totalCount } = await Recipe.findAllAndCount(mockPerspective, {}, 'surreal');
 
     expect(mockPerspective.querySurrealDB).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
@@ -1258,7 +1258,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     expect(totalCount).toBe(1);
   });
 
-  it("should use SurrealDB by default in paginate()", async () => {
+  it("should use SurrealDB when engine is 'surreal' in paginate()", async () => {
     const surrealResults = [
       {
         source: "node:abc123",
@@ -1282,7 +1282,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     expect(page.pageNumber).toBe(1);
   });
 
-  it("should use SurrealDB by default in count()", async () => {
+  it("should use SurrealDB when engine is 'surreal' in count()", async () => {
     // Since count() uses result.length and GROUP BY returns one row per source,
     // mock 5 recipe sources
     const surrealResults = Array.from({ length: 5 }, (_, i) => ({
@@ -1314,7 +1314,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     expect(count).toBe(10);
   });
 
-  it("should use SurrealDB by default in ModelQueryBuilder.get()", async () => {
+  it("should use SurrealDB when engine is 'surreal' in ModelQueryBuilder.get()", async () => {
     const surrealResults = [
       {
         source: "node:abc123",
@@ -1359,7 +1359,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     expect(results).toHaveLength(1);
   });
 
-  it("should use SurrealDB by default in ModelQueryBuilder.count()", async () => {
+  it("should use SurrealDB when engine is 'surreal' in ModelQueryBuilder.count()", async () => {
     // count() counts the number of rows returned by the query (one row per source)
     const surrealResults = Array.from({ length: 3 }, (_, i) => ({
       source: `node:abc${i+1}`,
@@ -1380,7 +1380,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     expect(count).toBe(3);
   });
 
-  it("should use SurrealDB by default in ModelQueryBuilder.paginate()", async () => {
+  it("should use SurrealDB when engine is 'surreal' in ModelQueryBuilder.paginate()", async () => {
     const surrealResults = [
       {
         source: "node:abc123",

@@ -1476,25 +1476,42 @@ impl PerspectiveInstance {
     ) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
         let uuid = self.persisted.lock().await.uuid.clone();
 
-        // Query SurrealDB instead of Rusqlite
-        let decorated_links =
-            if query.source.is_none() && query.predicate.is_none() && query.target.is_none() {
+        // Query SurrealDB using the most specific index available
+        let decorated_links = match (&query.source, &query.predicate, &query.target) {
+            (None, None, None) => {
                 self.surreal_service.get_all_links(&uuid).await?
-            } else if let Some(source) = &query.source {
+            }
+            (Some(source), Some(predicate), Some(target)) => {
+                self.surreal_service
+                    .get_links_by_source_predicate_target(&uuid, source, predicate, target)
+                    .await?
+            }
+            (Some(source), Some(predicate), None) => {
+                self.surreal_service
+                    .get_links_by_source_and_predicate(&uuid, source, predicate)
+                    .await?
+            }
+            (None, Some(predicate), Some(target)) => {
+                self.surreal_service
+                    .get_links_by_target_and_predicate(&uuid, target, predicate)
+                    .await?
+            }
+            (Some(source), None, _) => {
                 self.surreal_service
                     .get_links_by_source(&uuid, source)
                     .await?
-            } else if let Some(target) = &query.target {
+            }
+            (None, None, Some(target)) => {
                 self.surreal_service
                     .get_links_by_target(&uuid, target)
                     .await?
-            } else if let Some(predicate) = &query.predicate {
+            }
+            (None, Some(predicate), None) => {
                 self.surreal_service
                     .get_links_by_predicate(&uuid, predicate)
                     .await?
-            } else {
-                vec![]
-            };
+            }
+        };
 
         // Convert DecoratedLinkExpression to (LinkExpression, LinkStatus)
         let mut result: Vec<(LinkExpression, LinkStatus)> = decorated_links

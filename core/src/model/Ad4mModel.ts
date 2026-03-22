@@ -11,7 +11,7 @@ import { buildParentQuery, buildAuthorAndTimestampQuery, buildPropertiesQuery, b
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 import { buildSurrealQLQuery } from "./query-surreal";
-import { buildSPARQLQuery } from "./query-sparql";
+import { buildSPARQLQuery, groupSPARQLResults } from "./query-sparql";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
 import {
   normalizeValue, matchesCondition, hydrateFromLinks,
@@ -1048,12 +1048,24 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy, 
     query: Query = {},
-    useSurrealDB: boolean = true
+    engine: 'sparql' | 'surreal' | 'prolog' | boolean = 'sparql'
   ): Promise<T[]> {
     if (query.properties && query.properties.length === 0) {
       throw new Error("properties[] must not be empty — omit the field to return all properties, or specify at least one field name");
     }
-    if (useSurrealDB) {
+
+    // Backward compatibility: boolean maps to surreal (true) or prolog (false)
+    const resolvedEngine = typeof engine === 'boolean'
+      ? (engine ? 'surreal' : 'prolog')
+      : engine;
+
+    if (resolvedEngine === 'sparql') {
+      const sparqlQuery = await this.queryToSPARQL(perspective, query);
+      const rawResult = await perspective.querySparql(sparqlQuery);
+      const grouped = groupSPARQLResults(rawResult);
+      const { results } = await this.instancesFromSurrealResult(perspective, query, grouped);
+      return results;
+    } else if (resolvedEngine === 'surreal') {
       const surrealQuery = await this.queryToSurrealQL(perspective, query);
       const result = await perspective.querySurrealDB(surrealQuery);
       const { results } = await this.instancesFromSurrealResult(perspective, query, result);
@@ -1090,10 +1102,10 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query: Query = {},
-    useSurrealDB: boolean = true,
+    engine: 'sparql' | 'surreal' | 'prolog' | boolean = 'sparql',
   ): Promise<T | null> {
     const limitedQuery = { ...query, limit: 1 };
-    const results = await this.findAll(perspective, limitedQuery, useSurrealDB);
+    const results = await this.findAll(perspective, limitedQuery, engine);
     return results[0] ?? null;
   }
 
@@ -1121,9 +1133,18 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy, 
     query: Query = {},
-    useSurrealDB: boolean = true
+    engine: 'sparql' | 'surreal' | 'prolog' | boolean = 'sparql'
   ): Promise<ResultsWithTotalCount<T>> {
-    if (useSurrealDB) {
+    const resolvedEngine = typeof engine === 'boolean'
+      ? (engine ? 'surreal' : 'prolog')
+      : engine;
+
+    if (resolvedEngine === 'sparql') {
+      const sparqlQuery = await this.queryToSPARQL(perspective, query);
+      const rawResult = await perspective.querySparql(sparqlQuery);
+      const grouped = groupSPARQLResults(rawResult);
+      return await this.instancesFromSurrealResult(perspective, query, grouped);
+    } else if (resolvedEngine === 'surreal') {
       const surrealQuery = await this.queryToSurrealQL(perspective, query);
       const result = await perspective.querySurrealDB(surrealQuery);
       return await this.instancesFromSurrealResult(perspective, query, result);
@@ -1161,10 +1182,20 @@ export class Ad4mModel {
     pageSize: number, 
     pageNumber: number, 
     query?: Query,
-    useSurrealDB: boolean = true
+    engine: 'sparql' | 'surreal' | 'prolog' | boolean = 'sparql'
   ): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(query || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    if (useSurrealDB) {
+    const resolvedEngine = typeof engine === 'boolean'
+      ? (engine ? 'surreal' : 'prolog')
+      : engine;
+
+    if (resolvedEngine === 'sparql') {
+      const sparqlQuery = await this.queryToSPARQL(perspective, paginationQuery);
+      const rawResult = await perspective.querySparql(sparqlQuery);
+      const grouped = groupSPARQLResults(rawResult);
+      const { results, totalCount } = await this.instancesFromSurrealResult(perspective, paginationQuery, grouped);
+      return { results, totalCount, pageSize, pageNumber };
+    } else if (resolvedEngine === 'surreal') {
       const surrealQuery = await this.queryToSurrealQL(perspective, paginationQuery);
       const result = await perspective.querySurrealDB(surrealQuery);
       const { results, totalCount } = await this.instancesFromSurrealResult(perspective, paginationQuery, result);
@@ -1235,8 +1266,18 @@ export class Ad4mModel {
    * const countProlog = await Recipe.count(perspective, {}, false);
    * ```
    */
-  static async count(perspective: PerspectiveProxy, query: Query = {}, useSurrealDB: boolean = true) {
-    if (useSurrealDB) {
+  static async count(perspective: PerspectiveProxy, query: Query = {}, engine: 'sparql' | 'surreal' | 'prolog' | boolean = 'sparql') {
+    const resolvedEngine = typeof engine === 'boolean'
+      ? (engine ? 'surreal' : 'prolog')
+      : engine;
+
+    if (resolvedEngine === 'sparql') {
+      const sparqlQuery = await this.queryToSPARQL(perspective, query);
+      const rawResult = await perspective.querySparql(sparqlQuery);
+      const grouped = groupSPARQLResults(rawResult);
+      const { totalCount } = await this.instancesFromSurrealResult(perspective, query, grouped);
+      return totalCount;
+    } else if (resolvedEngine === 'surreal') {
       const surrealQuery = await this.queryToSurrealQL(perspective, query);
       const result = await perspective.querySurrealDB(surrealQuery);
       // Use instancesFromSurrealResult to apply JS-level filtering for advanced where conditions
