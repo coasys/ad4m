@@ -1273,7 +1273,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
 
     mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
 
-    const page = await Recipe.paginate(mockPerspective, 10, 1, {});
+    const page = await Recipe.paginate(mockPerspective, 10, 1, {}, 'surreal');
 
     expect(mockPerspective.querySurrealDB).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
@@ -1296,7 +1296,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
 
     mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
 
-    const count = await Recipe.count(mockPerspective, {});
+    const count = await Recipe.count(mockPerspective, {}, 'surreal');
 
     expect(mockPerspective.querySurrealDB).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
@@ -1331,6 +1331,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
 
     const results = await Recipe.query(mockPerspective)
       .where({ name: "Pasta" })
+      .engine('surreal')
       .get();
 
     expect(mockPerspective.querySurrealDB).toHaveBeenCalledTimes(1);
@@ -1373,6 +1374,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
 
     const count = await Recipe.query(mockPerspective)
       .where({ rating: { gt: 4 } })
+      .engine('surreal')
       .count();
 
     expect(mockPerspective.querySurrealDB).toHaveBeenCalledTimes(1);
@@ -1397,6 +1399,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
 
     const page = await Recipe.query(mockPerspective)
       .where({ rating: { gt: 3 } })
+      .engine('surreal')
       .paginate(10, 1);
 
     expect(mockPerspective.querySurrealDB).toHaveBeenCalledTimes(1);
@@ -1447,10 +1450,10 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
 
     // Count recipes with rating > 3 (should match 2 recipes: rating 4 and 5)
-    const count = await Recipe.count(mockPerspective, { where: { rating: { gt: 3 } } });
+    const count = await Recipe.count(mockPerspective, { where: { rating: { gt: 3 } } }, 'surreal');
     
     // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { where: { rating: { gt: 3 } } });
+    const findAllResults = await Recipe.findAll(mockPerspective, { where: { rating: { gt: 3 } } }, 'surreal');
     
     expect(count).toBe(2);
     expect(count).toBe(findAllResults.length);
@@ -1470,10 +1473,10 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
 
     // Count recipes with rating between 2 and 4 (should match 3 recipes: rating 2, 3, 4)
-    const count = await Recipe.count(mockPerspective, { where: { rating: { between: [2, 4] } } });
+    const count = await Recipe.count(mockPerspective, { where: { rating: { between: [2, 4] } } }, 'surreal');
     
     // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { where: { rating: { between: [2, 4] } } });
+    const findAllResults = await Recipe.findAll(mockPerspective, { where: { rating: { between: [2, 4] } } }, 'surreal');
     
     expect(count).toBe(3);
     expect(count).toBe(findAllResults.length);
@@ -1494,10 +1497,10 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
 
     // Count recipes with timestamp > 2023-01-03 (should match 2 recipes: 2023-01-04 and 2023-01-05)
     const targetTimestamp = new Date("2023-01-03T00:00:00Z").getTime();
-    const count = await Recipe.count(mockPerspective, { where: { timestamp: { gt: targetTimestamp } } });
+    const count = await Recipe.count(mockPerspective, { where: { timestamp: { gt: targetTimestamp } } }, 'surreal');
     
     // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { where: { timestamp: { gt: targetTimestamp } } });
+    const findAllResults = await Recipe.findAll(mockPerspective, { where: { timestamp: { gt: targetTimestamp } } }, 'surreal');
     
     expect(count).toBe(2);
     expect(count).toBe(findAllResults.length);
@@ -1521,12 +1524,12 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     const endTimestamp = new Date("2023-01-04T00:00:00Z").getTime();
     const count = await Recipe.count(mockPerspective, { 
       where: { timestamp: { between: [startTimestamp, endTimestamp] } } 
-    });
+    }, 'surreal');
     
     // Verify count matches the number of instances that would be returned by findAll
     const findAllResults = await Recipe.findAll(mockPerspective, { 
       where: { timestamp: { between: [startTimestamp, endTimestamp] } } 
-    });
+    }, 'surreal');
     
     expect(count).toBe(3);
     expect(count).toBe(findAllResults.length);
@@ -1556,10 +1559,10 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
 
     // Count recipes by Alice (should match 3 recipes)
-    const count = await Recipe.count(mockPerspective, { where: { author: "did:key:alice" } });
+    const count = await Recipe.count(mockPerspective, { where: { author: "did:key:alice" } }, 'surreal');
     
     // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { where: { author: "did:key:alice" } });
+    const findAllResults = await Recipe.findAll(mockPerspective, { where: { author: "did:key:alice" } }, 'surreal');
     
     expect(count).toBe(3);
     expect(count).toBe(findAllResults.length);
@@ -1581,11 +1584,13 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     // Count recipes with rating > 3 using ModelQueryBuilder
     const count = await Recipe.query(mockPerspective)
       .where({ rating: { gt: 3 } })
+      .engine('surreal')
       .count();
     
     // Verify count matches the number of instances that would be returned by get()
     const getResults = await Recipe.query(mockPerspective)
       .where({ rating: { gt: 3 } })
+      .engine('surreal')
       .get();
     
     expect(count).toBe(2);
@@ -1611,11 +1616,13 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     // Count using ModelQueryBuilder
     const count = await Recipe.query(mockPerspective)
       .where({ timestamp: { between: [startTimestamp, endTimestamp] } })
+      .engine('surreal')
       .count();
     
     // Verify count matches the number of instances that would be returned by get()
     const getResults = await Recipe.query(mockPerspective)
       .where({ timestamp: { between: [startTimestamp, endTimestamp] } })
+      .engine('surreal')
       .get();
     
     expect(count).toBe(3);

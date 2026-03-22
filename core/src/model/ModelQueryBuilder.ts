@@ -11,6 +11,7 @@ import type {
   Where, Order, IncludeMap, Query,
   AllInstancesResult, ResultsWithTotalCount, PaginationResult,
 } from "./types";
+import { groupSPARQLResults } from "./query-sparql";
 
 /** Query builder for Ad4mModel queries.
  * Allows building queries with a fluent interface and either running them once
@@ -38,7 +39,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   private modelClassName: string | null = null;
   private ctor: typeof Ad4mModel;
   private currentSubscription?: any;
-  private useSurrealDBFlag: boolean = true;
+  private engineFlag: 'sparql' | 'surreal' | 'prolog' = 'sparql';
 
   constructor(perspective: PerspectiveProxy, ctor: typeof Ad4mModel, query?: Query) {
     this.perspective = perspective;
@@ -286,7 +287,15 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * if useSurrealDB(true) is set (default).
    */
   useSurrealDB(enabled: boolean = true): ModelQueryBuilder<T> {
-    this.useSurrealDBFlag = enabled;
+    this.engineFlag = enabled ? 'surreal' : 'prolog';
+    return this;
+  }
+
+  /**
+   * Sets the query engine to use.
+   */
+  engine(eng: 'sparql' | 'surreal' | 'prolog'): ModelQueryBuilder<T> {
+    this.engineFlag = eng;
     return this;
   }
 
@@ -304,7 +313,12 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async get(): Promise<T[]> {
     let results: T[];
-    if (this.useSurrealDBFlag) {
+    if (this.engineFlag === 'sparql') {
+      const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
+      const rawResult = await this.perspective.querySparql(sparqlQuery);
+      const grouped = groupSPARQLResults(rawResult);
+      ({ results } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, grouped) as { results: T[] });
+    } else if (this.engineFlag === 'surreal') {
       const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
       const result = await this.perspective.querySurrealDB(surrealQuery);
       ({ results } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result) as { results: T[] });
@@ -322,8 +336,9 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async getSparql(): Promise<T[]> {
     const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
-    const result = await this.perspective.querySurrealDB(sparqlQuery);
-    const { results } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result) as { results: T[] };
+    const rawResult = await this.perspective.querySparql(sparqlQuery);
+    const grouped = groupSPARQLResults(rawResult);
+    const { results } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, grouped) as { results: T[] };
     return results;
   }
 
@@ -384,7 +399,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
     const ctor = this.ctor;
 
-    if (this.useSurrealDBFlag) {
+    if (this.engineFlag === 'sparql' || this.engineFlag === 'surreal') {
         const surrealQuery = await ctor.queryToSurrealQL(this.perspective, this.queryParams);
         this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
 
@@ -463,7 +478,13 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async count(): Promise<number> {
-    if (this.useSurrealDBFlag) {
+    if (this.engineFlag === 'sparql') {
+      const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
+      const rawResult = await this.perspective.querySparql(sparqlQuery);
+      const grouped = groupSPARQLResults(rawResult);
+      const { totalCount } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, grouped);
+      return totalCount;
+    } else if (this.engineFlag === 'surreal') {
       const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
       const result = await this.perspective.querySurrealDB(surrealQuery);
       // Use instancesFromSurrealResult to apply JS-level filtering for advanced where conditions
@@ -483,8 +504,9 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async countSparql(): Promise<number> {
     const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
-    const result = await this.perspective.querySurrealDB(sparqlQuery);
-    const { totalCount } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
+    const rawResult = await this.perspective.querySparql(sparqlQuery);
+    const grouped = groupSPARQLResults(rawResult);
+    const { totalCount } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, grouped);
     return totalCount;
   }
 
@@ -523,7 +545,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     // Clean up any existing subscription
     this.dispose();
 
-    if (this.useSurrealDBFlag) {
+    if (this.engineFlag === 'sparql' || this.engineFlag === 'surreal') {
       const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
       this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
 
@@ -597,7 +619,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async paginate(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    if (this.useSurrealDBFlag) {
+    if (this.engineFlag === 'sparql' || this.engineFlag === 'surreal') {
       const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, paginationQuery);
       const result = await this.perspective.querySurrealDB(surrealQuery);
       const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, result)) as ResultsWithTotalCount<T>;
@@ -616,8 +638,9 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   async paginateSparql(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, paginationQuery);
-    const result = await this.perspective.querySurrealDB(sparqlQuery);
-    const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, result)) as ResultsWithTotalCount<T>;
+    const rawResult = await this.perspective.querySparql(sparqlQuery);
+    const grouped = groupSPARQLResults(rawResult);
+    const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, grouped)) as ResultsWithTotalCount<T>;
     return { results, totalCount, pageSize, pageNumber };
   }
 
@@ -664,7 +687,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
 
-    if (this.useSurrealDBFlag) {
+    if (this.engineFlag === 'sparql' || this.engineFlag === 'surreal') {
       const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, paginationQuery);
       this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
 
