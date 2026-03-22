@@ -4,7 +4,7 @@ pub mod sdna;
 pub mod shacl_parser;
 pub mod shacl_to_prolog;
 pub mod utils; // TODO: Remove this module after all users have migrated to SurrealDB
-use crate::graphql::graphql_types::{
+use crate::types::{
     LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveExpression, PerspectiveHandle,
     PerspectiveRemovedWithOwner, PerspectiveState, PerspectiveWithOwner,
 };
@@ -640,7 +640,7 @@ pub async fn import_perspective(
         })
         .collect();
 
-    let diff = crate::graphql::graphql_types::DecoratedPerspectiveDiff {
+    let diff = crate::types::DecoratedPerspectiveDiff {
         additions: decorated_links,
         removals: vec![],
     };

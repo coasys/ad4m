@@ -3,7 +3,7 @@ use deno_core::error::AnyError;
 use uuid::Uuid;
 
 use crate::agent::{did_for_context, AgentContext};
-use crate::graphql::graphql_types::{
+use crate::types::{
     Neighbourhood, Perspective, PerspectiveHandle, PerspectiveState,
 };
 use crate::languages::LanguageController;

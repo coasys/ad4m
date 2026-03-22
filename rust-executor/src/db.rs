@@ -1,4 +1,4 @@
-use crate::graphql::graphql_types::{
+use crate::types::{
     AIModelLoadingStatus, EntanglementProof, ImportResult, LinkStatus, ModelInput,
     NotificationInput, PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage,
 };
@@ -3686,9 +3686,9 @@ impl Ad4mDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graphql::graphql_types::{PerspectiveHandle, PerspectiveState};
+    use crate::types::{PerspectiveHandle, PerspectiveState};
     use crate::{
-        graphql::graphql_types::{LocalModelInput, ModelApiInput, TokenizerSourceInput},
+        types::{LocalModelInput, ModelApiInput, TokenizerSourceInput},
         types::{ExpressionProof, Link, LinkExpression, ModelApiType, ModelType},
     };
     use chrono::Utc;
@@ -3714,7 +3714,7 @@ mod tests {
 
     #[test]
     fn test_export_import_all_tables() {
-        use crate::graphql::graphql_types::{
+        use crate::types::{
             DecoratedNeighbourhoodExpression, Neighbourhood, Perspective, PerspectiveState,
         };
         use crate::types::DecoratedExpressionProof;

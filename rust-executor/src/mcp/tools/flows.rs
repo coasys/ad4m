@@ -3,7 +3,7 @@
 //! Tools for managing flows — finite state machines that track expression state transitions.
 
 use super::Ad4mMcpHandler;
-use crate::graphql::graphql_types::LinkQuery;
+use crate::types::LinkQuery;
 use crate::perspectives::perspective_instance::SdnaType;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;

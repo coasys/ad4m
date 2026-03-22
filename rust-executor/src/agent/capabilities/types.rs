@@ -21,8 +21,8 @@ pub struct AuthInfo {
     pub user_email: Option<String>, // Email field for multi-user tokens
 }
 
-impl From<crate::graphql::graphql_types::AuthInfoInput> for AuthInfo {
-    fn from(input: crate::graphql::graphql_types::AuthInfoInput) -> Self {
+impl From<crate::types::AuthInfoInput> for AuthInfo {
+    fn from(input: crate::types::AuthInfoInput) -> Self {
         Self {
             app_name: input.app_name,
             app_desc: input.app_desc,
@@ -44,8 +44,8 @@ pub struct Capability {
     pub can: Vec<String>,
 }
 
-impl From<crate::graphql::graphql_types::CapabilityInput> for Capability {
-    fn from(input: crate::graphql::graphql_types::CapabilityInput) -> Self {
+impl From<crate::types::CapabilityInput> for Capability {
+    fn from(input: crate::types::CapabilityInput) -> Self {
         Self {
             with: input.with.into(),
             can: input.can,
@@ -60,8 +60,8 @@ pub struct Resource {
     pub pointers: Vec<String>,
 }
 
-impl From<crate::graphql::graphql_types::ResourceInput> for Resource {
-    fn from(input: crate::graphql::graphql_types::ResourceInput) -> Self {
+impl From<crate::types::ResourceInput> for Resource {
+    fn from(input: crate::types::ResourceInput) -> Self {
         Self {
             domain: input.domain,
             pointers: input.pointers,

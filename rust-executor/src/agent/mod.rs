@@ -5,7 +5,7 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use serde::{Deserialize, Serialize};
 
-use crate::graphql::graphql_types::{Agent, AgentStatus, Perspective};
+use crate::types::{Agent, AgentStatus, Perspective};
 use crate::types::{Expression, ExpressionProof};
 use crate::wallet::Wallet;
 
@@ -250,9 +250,9 @@ impl AgentSignature {
     }
 }
 
-impl From<AgentSignature> for crate::graphql::graphql_types::AgentSignature {
+impl From<AgentSignature> for crate::types::AgentSignature {
     fn from(val: AgentSignature) -> Self {
-        crate::graphql::graphql_types::AgentSignature {
+        crate::types::AgentSignature {
             signature: val.signature,
             public_key: val.public_key,
         }

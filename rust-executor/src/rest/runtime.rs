@@ -11,7 +11,7 @@ use axum::{
 use crate::agent::capabilities::*;
 use crate::db::Ad4mDb;
 use crate::globals::AD4M_VERSION;
-use crate::graphql::graphql_types::*;
+use crate::types::*;
 use crate::holochain_service::get_holochain_service;
 use crate::runtime_service::RuntimeService;
 use crate::types::Notification;

@@ -146,7 +146,7 @@ pub async fn migrate_links_from_rusqlite_to_surrealdb(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graphql::graphql_types::LinkStatus;
+    use crate::types::LinkStatus;
     use crate::types::{ExpressionProof, Link, LinkExpression};
     use chrono::Utc;
 
@@ -197,7 +197,7 @@ mod tests {
     async fn test_delete_all_links_for_perspective() {
         setup();
 
-        let handle = crate::graphql::graphql_types::PerspectiveHandle::new_from_name(
+        let handle = crate::types::PerspectiveHandle::new_from_name(
             "Test Delete Links".to_string(),
         );
 
@@ -265,7 +265,7 @@ mod tests {
 
         // Use a unique UUID to avoid conflicts with other tests
         let unique_name = format!("Test Full Migration {}", uuid::Uuid::new_v4());
-        let handle = crate::graphql::graphql_types::PerspectiveHandle::new_from_name(unique_name);
+        let handle = crate::types::PerspectiveHandle::new_from_name(unique_name);
 
         // Add some links to Rusqlite (simulating old data)
         let test_link = LinkExpression {
@@ -397,7 +397,7 @@ mod tests {
     async fn test_migration_with_no_links() {
         setup();
 
-        let handle = crate::graphql::graphql_types::PerspectiveHandle::new_from_name(
+        let handle = crate::types::PerspectiveHandle::new_from_name(
             "Test Empty Migration".to_string(),
         );
 

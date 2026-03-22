@@ -1,5 +1,5 @@
-use crate::graphql::graphql_types::GetFilter;
-use crate::graphql::graphql_types::GetValue;
+use crate::types::GetFilter;
+use crate::types::GetValue;
 use coasys_juniper::{graphql_value, FieldError, FieldResult};
 use futures::Stream;
 use futures::StreamExt;

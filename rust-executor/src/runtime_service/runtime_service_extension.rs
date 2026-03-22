@@ -1,5 +1,5 @@
 use super::RuntimeService;
-use crate::graphql::graphql_types::{PerspectiveExpression, SentMessage};
+use crate::types::{PerspectiveExpression, SentMessage};
 use crate::js_core::error::AnyhowWrapperError;
 use deno_core::op2;
 

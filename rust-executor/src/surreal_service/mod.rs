@@ -1,4 +1,4 @@
-use crate::graphql::graphql_types::LinkStatus;
+use crate::types::LinkStatus;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
 use deno_core::anyhow::Error;
 use log::warn;
@@ -545,8 +545,8 @@ impl SurrealDBService {
         );
 
         let status_str = link.status.as_ref().map(|s| match s {
-            crate::graphql::graphql_types::LinkStatus::Shared => "Shared",
-            crate::graphql::graphql_types::LinkStatus::Local => "Local",
+            crate::types::LinkStatus::Shared => "Shared",
+            crate::types::LinkStatus::Local => "Local",
         });
 
         let result = self
