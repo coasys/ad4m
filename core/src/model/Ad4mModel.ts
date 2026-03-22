@@ -12,6 +12,8 @@ import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSON
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 import { buildSurrealQLQuery } from "./query-surreal";
 import { buildSPARQLQuery, groupSPARQLResults } from "./query-sparql";
+import { buildBatchSPARQLQuery } from "./query-sparql-batch";
+import { hydrateBatchResult } from "./hydration-batch";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
 import {
   normalizeValue, matchesCondition, hydrateFromLinks,
@@ -1060,6 +1062,13 @@ export class Ad4mModel {
       : engine;
 
     if (resolvedEngine === 'sparql') {
+      // Use batch SPARQL for queries with includes (eager-loading)
+      if (query.include && Object.keys(query.include).length > 0) {
+        const sparqlQuery = buildBatchSPARQLQuery(this.getModelMetadata(), query, this);
+        const rawResult = await perspective.querySparql(sparqlQuery);
+        return hydrateBatchResult<T>(rawResult, this, query.include, perspective);
+      }
+
       const sparqlQuery = await this.queryToSPARQL(perspective, query);
       const rawResult = await perspective.querySparql(sparqlQuery);
       const grouped = groupSPARQLResults(rawResult);
