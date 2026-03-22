@@ -994,6 +994,9 @@ Notes:
   api.registerService({
     id: "ad4m-waker",
     async start(ctx: any) {
+      logger.info("[ad4m-waker] ── Waker service start() ──");
+      logger.info(`[ad4m-waker] stateDir from ctx: ${ctx?.stateDir ?? "N/A"}, existing stateDir: ${stateDir || "N/A"}`);
+
       // Capture stateDir from service context (in case mcp service didn't set it)
       if (ctx?.stateDir && !stateDir) {
         stateDir = ctx.stateDir;
@@ -1005,12 +1008,21 @@ Notes:
         return;
       }
 
+      logger.info(`[ad4m-waker] config.wakeToken: ${config.wakeToken ? `set (${config.wakeToken.length} chars)` : "NOT SET"}`);
+      logger.info(`[ad4m-waker] config.wakeUrl: ${config.wakeUrl ?? "default"}`);
+      logger.info(`[ad4m-waker] config.executorWsUrl: ${config.executorWsUrl ?? "default"}`);
+      logger.info(`[ad4m-waker] config.mode: ${config.mode}`);
+      logger.info(`[ad4m-waker] config.debounceMs: ${config.debounceMs}`);
+
       if (!config.wakeToken) {
         logger.info(
           "[ad4m-waker] wakeToken not configured. Set wakeToken in plugin config to enable the waker. Skipping.",
         );
         return;
       }
+
+      const tokenType = authToken.startsWith("eyJ") ? "JWT" : authToken.length <= 32 ? "admin-credential" : "unknown";
+      logger.info(`[ad4m-waker] authToken: ${authToken ? `${authToken.substring(0, 16)}...${authToken.substring(authToken.length - 8)} [${authToken.length} chars, type=${tokenType}]` : "EMPTY"}`);
 
       if (!authToken) {
         logger.warn(
@@ -1023,20 +1035,24 @@ Notes:
 
       try {
         // Dynamic imports to avoid load-time issues with @holochain/client transitive deps
+        logger.info("[ad4m-waker] Loading dependencies...");
         const { Ad4mClient, QuerySubscriptionProxy } = require("@coasys/ad4m");
         const { ApolloClient, InMemoryCache } = require("@apollo/client/core");
         const { GraphQLWsLink } = require("@apollo/client/link/subscriptions");
         const { createClient } = require("graphql-ws");
         const WebSocket = require("ws");
+        logger.info("[ad4m-waker] Dependencies loaded OK");
 
-        logger.info(`[ad4m-waker] Connecting to ${wsUrl}`);
+        const connParams = authToken
+          ? { headers: { authorization: authToken } }
+          : {};
+        logger.info(`[ad4m-waker] connectionParams: ${JSON.stringify({ headers: { authorization: authToken ? `${tokenType}[${authToken.length}]` : "EMPTY" } })}`);
+        logger.info(`[ad4m-waker] Connecting WebSocket to ${wsUrl}...`);
 
         const wsClient = createClient({
           url: wsUrl,
           webSocketImpl: WebSocket,
-          connectionParams: authToken
-            ? { headers: { authorization: authToken } }
-            : {},
+          connectionParams: connParams,
           retryAttempts: Infinity,
           retryWait: async (retries: number) => {
             const delay = Math.min(1000 * Math.pow(2, retries), 30000);
@@ -1046,9 +1062,17 @@ Notes:
             await new Promise((r: any) => setTimeout(r, delay));
           },
           on: {
-            connected: () => logger.info("[ad4m-waker] WebSocket connected"),
-            closed: (event: any) => logger.warn(`[ad4m-waker] WebSocket closed: ${JSON.stringify(event)}`),
-            error: (error: any) => logger.error(`[ad4m-waker] WebSocket error: ${error?.message ?? error}`),
+            connected: (socket: any) => {
+              logger.info(`[ad4m-waker] WebSocket connected (protocol: ${socket?.protocol ?? "unknown"})`);
+            },
+            closed: (event: any) => {
+              logger.warn(`[ad4m-waker] WebSocket closed — code: ${event?.code ?? "N/A"}, reason: "${event?.reason ?? "N/A"}", wasClean: ${event?.wasClean ?? "N/A"}`);
+              logger.warn(`[ad4m-waker] WebSocket closed — full event: ${JSON.stringify(event)}`);
+            },
+            error: (error: any) => {
+              logger.error(`[ad4m-waker] WebSocket error: ${error?.message ?? error}`);
+              if (error?.stack) logger.error(`[ad4m-waker] WebSocket error stack: ${error.stack}`);
+            },
           },
         });
 
@@ -1064,9 +1088,11 @@ Notes:
         });
 
         wakerClient = new Ad4mClient(apolloClient, false);
+        logger.info("[ad4m-waker] Ad4mClient created, calling agent.status()...");
 
         // Load persisted state (subscriptions + seen messages) before creating manager
         const savedState = stateDir ? loadWakerState(stateDir) : { subscriptions: [], seenMessages: {} };
+        logger.info(`[ad4m-waker] Loaded persisted state: ${savedState.subscriptions.length} subscription(s), ${Object.keys(savedState.seenMessages).length} seen-message set(s)`);
 
         // Create subscription manager wired to the Ad4mClient and wake callback
         subscriptionManager = new WakerSubscriptionManager({
@@ -1085,7 +1111,26 @@ Notes:
 
         // Verify connection and get agent DID (agent should already be
         // initialized/unlocked by ensureAgentReady during mcp service start)
-        const status = await wakerClient.agent.status();
+        let status: any;
+        try {
+          status = await wakerClient.agent.status();
+          logger.info(`[ad4m-waker] agent.status() returned: initialized=${status.isInitialized}, unlocked=${status.isUnlocked}, did=${status.did?.substring(0, 30) ?? "N/A"}`);
+        } catch (statusErr: any) {
+          logger.error(`[ad4m-waker] agent.status() FAILED: ${statusErr.message}`);
+          if (statusErr.graphQLErrors) {
+            for (const gqlErr of statusErr.graphQLErrors) {
+              logger.error(`[ad4m-waker]   GraphQL error: ${gqlErr.message}`);
+            }
+          }
+          if (statusErr.networkError) {
+            logger.error(`[ad4m-waker]   Network error: ${statusErr.networkError.message}`);
+            if (statusErr.networkError.result) {
+              logger.error(`[ad4m-waker]   Network error result: ${JSON.stringify(statusErr.networkError.result)}`);
+            }
+          }
+          throw statusErr;
+        }
+
         if (!status.isInitialized || status.isUnlocked === false) {
           logger.error(
             `[ad4m-waker] Agent is not ready (initialized=${status.isInitialized}, unlocked=${status.isUnlocked}). Agent management should have run during mcp service start.`,
@@ -1119,6 +1164,7 @@ Notes:
         }
       } catch (err: any) {
         logger.error(`[ad4m-waker] Failed to connect: ${err.message}`);
+        if (err.stack) logger.error(`[ad4m-waker] Stack: ${err.stack}`);
         logger.error(
           `[ad4m-waker] Make sure @coasys/ad4m and dependencies are installed (npm install in the plugin directory).`,
         );
