@@ -1052,7 +1052,9 @@ Notes:
         const wsClient = createClient({
           url: wsUrl,
           webSocketImpl: WebSocket,
-          connectionParams: connParams,
+          connectionParams: () => connParams,
+          lazy: false,
+          keepAlive: 10_000,
           retryAttempts: Infinity,
           retryWait: async (retries: number) => {
             const delay = Math.min(1000 * Math.pow(2, retries), 30000);
@@ -1087,7 +1089,7 @@ Notes:
           },
         });
 
-        wakerClient = new Ad4mClient(apolloClient, false);
+        wakerClient = new Ad4mClient(apolloClient);
         logger.info("[ad4m-waker] Ad4mClient created, calling agent.status()...");
 
         // Load persisted state (subscriptions + seen messages) before creating manager
