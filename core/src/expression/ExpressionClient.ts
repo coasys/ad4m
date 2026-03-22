@@ -1,14 +1,13 @@
-import { ApolloClient, gql } from "@apollo/client/core";
+import { RestClient } from "../restClient";
 import { InteractionCall, InteractionMeta } from "../language/Language";
-import unwrapApolloResult from "../unwrapApolloResult";
 import { ExpressionRendered } from "./Expression";
 import { Literal } from "../Literal";
 
 export class ExpressionClient {
-    #apolloClient: ApolloClient<any>
+    #restClient: RestClient
 
-    constructor(client: ApolloClient<any>) {
-        this.#apolloClient = client
+    constructor(baseUrl: string, token?: string) {
+        this.#restClient = new RestClient(baseUrl, token)
     }
 
     async get(url: string, alwaysGet: boolean = false): Promise<ExpressionRendered> {
@@ -22,91 +21,29 @@ export class ExpressionClient {
                 }
             } catch(e) {}
         }
-        
 
-        const { expression } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query expression($url: String!) {
-                expression(url: $url) {
-                    author
-                    timestamp
-                    data
-                    language {
-                        address
-                    }
-                    proof {
-                        valid
-                        invalid
-                    }
-                }
-            }`,
-            variables: { url }
-        }))
-        return expression
+        return this.#restClient.get<ExpressionRendered>(`/api/v1/expressions?url=${encodeURIComponent(url)}`)
     }
 
     async getMany(urls: string[]): Promise<ExpressionRendered[]> {
-        const { expressionMany } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query expressionMany($urls: [String!]!) {
-                expressionMany(urls: $urls) {
-                    author
-                    timestamp
-                    data
-                    language {
-                        address
-                    }
-                    proof {
-                        valid
-                        invalid
-                    }
-                }
-            }`,
-            variables: { urls }
-        }))
-        return expressionMany
+        const params = urls.map(u => `urls=${encodeURIComponent(u)}`).join('&')
+        return this.#restClient.get<ExpressionRendered[]>(`/api/v1/expressions/many?${params}`)
     }
 
     async getRaw(url: string): Promise<string> {
-        const { expressionRaw } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query expressionRaw($url: String!) {
-                expressionRaw(url: $url)
-            }`,
-            variables: { url }
-        }))
-        return expressionRaw
+        return this.#restClient.get<string>(`/api/v1/expressions/raw?url=${encodeURIComponent(url)}`)
     }
 
     async create(content: any, languageAddress: string): Promise<string> {
         content = JSON.stringify(content)
-        const { expressionCreate } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation expressionCreate($content: String!, $languageAddress: String!){
-                expressionCreate(content: $content, languageAddress: $languageAddress)
-            }`,
-            variables: { content, languageAddress }
-        }))
-        return expressionCreate
+        return this.#restClient.post<string>('/api/v1/expressions', { content, languageAddress })
     }
 
     async interactions(url: string): Promise<InteractionMeta[]> {
-        const { expressionInteractions } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query expressionInteractions($url: String!) {
-                expressionInteractions(url: $url) { 
-                    label
-                    name
-                    parameters { name, type }
-                }
-            }`,
-            variables: { url }
-        }))
-        return expressionInteractions
+        return this.#restClient.get<InteractionMeta[]>(`/api/v1/expressions/interactions?url=${encodeURIComponent(url)}`)
     }
 
     async interact(url: string, interactionCall: InteractionCall): Promise<string|null> {
-        const { expressionInteract } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation expressionInteract($url: String!, $interactionCall: InteractionCall!){
-                expressionInteract(url: $url, interactionCall: $interactionCall)
-            }`,
-            variables: { url, interactionCall }
-        }))
-        return expressionInteract
+        return this.#restClient.post<string|null>(`/api/v1/expressions/interact`, { url, interactionCall })
     }
 }

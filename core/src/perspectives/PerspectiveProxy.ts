@@ -9,8 +9,7 @@ import { ExpressionRendered } from "../expression/Expression";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 import { AIClient } from "../ai/AIClient";
-import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
-import { gql } from "@apollo/client/core";
+
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
 import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
