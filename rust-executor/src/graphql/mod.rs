@@ -207,21 +207,37 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
         let cert_path = tls_config.cert_file_path.clone();
         let key_path = tls_config.key_file_path.clone();
 
-        // Box the routes to make them Send + 'static
-        let routes_boxed = routes_with_cors.boxed();
+        // Validate TLS files are readable before attempting to start the server
+        if let Err(e) = std::fs::File::open(&cert_path) {
+            log::error!(
+                "TLS certificate file '{}' is not readable: {}. TLS server will NOT start.",
+                cert_path,
+                e
+            );
+        } else if let Err(e) = std::fs::File::open(&key_path) {
+            log::error!(
+                "TLS key file '{}' is not readable: {}. TLS server will NOT start.",
+                key_path,
+                e
+            );
+        } else {
+            // Box the routes to make them Send + 'static
+            let routes_boxed = routes_with_cors.boxed();
 
-        // Spawn TLS listener on 0.0.0.0 in background
-        tokio::spawn(async move {
-            warp::serve(routes_boxed)
-                .tls()
-                .cert_path(cert_path)
-                .key_path(key_path)
-                .run(([0, 0, 0, 0], tls_port))
-                .await;
-        });
+            // Spawn TLS listener on 0.0.0.0 in background
+            tokio::spawn(async move {
+                log::info!("TLS server starting on 0.0.0.0:{}", tls_port);
+                warp::serve(routes_boxed)
+                    .tls()
+                    .cert_path(cert_path)
+                    .key_path(key_path)
+                    .run(([0, 0, 0, 0], tls_port))
+                    .await;
+            });
 
-        // Give the TLS server a moment to start
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            // Give the TLS server a moment to start
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
 
         // Run plain HTTP listener on localhost - this one will handle local connections
         // We need to rebuild the same routes for the second server
