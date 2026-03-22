@@ -386,9 +386,27 @@ impl SparqlService {
                 Ok(serde_json::to_string(&rows)?)
             }
             QueryResults::Boolean(b) => Ok(serde_json::to_string(&b)?),
-            QueryResults::Graph(_) => Err(anyhow!(
-                "CONSTRUCT/DESCRIBE graph results are not yet supported; use SELECT or ASK queries"
-            )),
+            QueryResults::Graph(triples) => {
+                let mut rows: Vec<serde_json::Map<String, Value>> = Vec::new();
+                for triple_result in triples {
+                    let triple = triple_result?;
+                    let mut row = serde_json::Map::new();
+                    row.insert(
+                        "subject".to_string(),
+                        Value::String(triple.subject.to_string()),
+                    );
+                    row.insert(
+                        "predicate".to_string(),
+                        Value::String(triple.predicate.to_string()),
+                    );
+                    row.insert(
+                        "object".to_string(),
+                        Value::String(triple.object.to_string()),
+                    );
+                    rows.push(row);
+                }
+                Ok(serde_json::to_string(&rows)?)
+            }
         }
     }
 

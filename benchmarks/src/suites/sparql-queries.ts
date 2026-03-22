@@ -113,10 +113,11 @@ export async function run(
     )
     const surrealJoin = await benchSparqlQuery(
       surrealClient, surrealUuid,
-      `SELECT *
+      `SELECT msg.target AS msg,
+              (SELECT target FROM links WHERE source = msg.target AND predicate = 'ad4m://has-author' LIMIT 1)[0].target AS author,
+              (SELECT target FROM links WHERE source = msg.target AND predicate = 'ad4m://has-content' LIMIT 1)[0].target AS content
        FROM links AS msg
-       WHERE source = 'ad4m://channel-0-0' AND predicate = 'ad4m://has-message'
-       FETCH (SELECT * FROM links WHERE source = msg.target AND predicate IN ['ad4m://has-author', 'ad4m://has-content'])`,
+       WHERE source = 'ad4m://channel-0-0' AND predicate = 'ad4m://has-message'`,
       iterations, warmup,
     )
     console.log('done')
