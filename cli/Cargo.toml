@@ -25,6 +25,9 @@ path = "src/ad4m_executor.rs"
 # Pass metal and cuda features through to ad4m-executor
 metal = ["ad4m-executor/metal"]
 cuda = ["ad4m-executor/cuda"]
+sparql = ["ad4m-executor/sparql"]
+surreal = ["ad4m-executor/surreal"]
+default = ["sparql"]
 
 [dependencies]
 ad4m-client = { path = "../rust-client", version="0.13.0-test-1" }

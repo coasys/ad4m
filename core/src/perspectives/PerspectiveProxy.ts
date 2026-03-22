@@ -576,6 +576,16 @@ export class PerspectiveProxy {
     }
 
     /**
+     * Executes a SPARQL query against the perspective's RDF (Oxigraph) store.
+     *
+     * @param query - SPARQL query string
+     * @returns Query results as parsed JSON
+     */
+    async querySparql(query: string): Promise<any> {
+        return await this.#client.querySparql(this.#handle.uuid, query)
+    }
+
+    /**
      * Adds a new link to the perspective.
      * 
      * @param link - The link to add
