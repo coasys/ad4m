@@ -185,3 +185,17 @@ plugins/ad4m/
 │       └── references/         # Detailed reference docs
 └── README.md
 ```
+
+## Changelog
+
+### 0.0.2
+
+- **Fixed external mode setup flow** — the JWT capability request and code verification now works correctly with running executors
+- **Fixed waker WebSocket staying connected** — the waker now uses `lazy: false` and `keepAlive` to maintain a persistent connection instead of disconnecting after the first query
+- **Fixed waker surviving plugin hot-reloads** — shared state (auth token, subscription manager, session) is now module-level so it persists when the OpenClaw framework re-evaluates the plugin on config changes
+
+
+### 0.0.1
+
+- Initial release with managed and external modes, MCP tool bridge, waker subscriptions, auto-download of `ad4m-executor`
+- **Renamed plugin** — package is now `@coasys/openclaw-ad4m`, plugin ID is `ad4m` (config goes under `plugins.entries["ad4m"]`)
