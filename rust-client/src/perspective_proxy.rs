@@ -3,8 +3,7 @@ use std::collections::BTreeMap;
 use crate::{
     literal::{Literal, LiteralValue},
     perspectives::{
-        add_link::AddLinkPerspectiveAddLink, query_links::QueryLinksPerspectiveQueryLinks,
-        PerspectivesClient,
+        AddLinkPerspectiveAddLink, PerspectivesClient, QueryLinksPerspectiveQueryLinks,
     },
     subject_proxy::SubjectProxy,
     types::LinkExpression,
@@ -523,7 +522,7 @@ impl PerspectiveProxy {
         }
     }
 
-    pub async fn get_subject(&self, class: &String, base: &String) -> Result<SubjectProxy> {
+    pub async fn get_subject(&self, class: &String, base: &String) -> Result<SubjectProxy<'_>> {
         if self.is_subject_instance(class, base).await? {
             Ok(SubjectProxy::new(self, class.clone(), base.clone()))
         } else {

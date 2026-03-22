@@ -1,17 +1,17 @@
 import { useAgent } from "./useAgent";
 import { useMe } from "./useMe";
-import { useClient } from "./useClient";
 import { toCustomElement } from "./register";
 import { usePerspective } from "./usePerspective";
 import { usePerspectives } from "./usePerspectives";
-import { useModel } from "./useModel";
+import { useLiveQuery } from "./useLiveQuery";
 
 export {
   toCustomElement,
   useAgent,
   useMe,
-  useClient,
   usePerspective,
   usePerspectives,
-  useModel,
+  useLiveQuery,
 };
+
+export type { LiveCollectionResult, LiveInstanceResult } from "./useLiveQuery";

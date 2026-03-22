@@ -1,0 +1,35 @@
+[package]
+name = "direct_message_tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[test]]
+name = "integration"
+path = "src/integration_tests.rs"
+
+[dependencies]
+# Holochain dependencies - matching the zome's versions
+holochain = { version = "0.7.0-dev.14", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.13-kitsune-0.4.0-dev3-coasys", features = ["sweettest", "test_utils"] }
+hdk = { version = "0.7.0-dev.8", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.13-kitsune-0.4.0-dev3-coasys" }
+hdi = { version = "0.8.0-dev.5", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.13-kitsune-0.4.0-dev3-coasys" }
+holochain_types = { version = "0.7.0-dev.13", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.13-kitsune-0.4.0-dev3-coasys" }
+holochain_serialized_bytes = "=0.0.56"
+holochain_zome_types = { version = "0.7.0-dev.7", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.13-kitsune-0.4.0-dev3-coasys" }
+
+# Shared types from the integrity zome
+direct-message-integrity = { path = "../../zomes/direct-message-integrity" }
+
+# Standard dependencies
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+uuid = { version = "1.0", features = ["v4"] }
+
+[dev-dependencies]
+pretty_assertions = "1.4"

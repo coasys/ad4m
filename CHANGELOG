@@ -6,8 +6,68 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Fixed
+- Multi-user agent publishing after language controller refactor [#711](https://github.com/coasys/ad4m/pull/711)
+- Broadcast signal for managed user [#722](https://github.com/coasys/ad4m/pull/722)
+- Waker-bridge: use QuerySubscriptionProxy for SurrealDB subscriptions [#720](https://github.com/coasys/ad4m/pull/720)
+- Ad4mModel don't parse every Literal in properties (only when resolve language) [#695](https://github.com/coasys/ad4m/pull/695)
+- OpenClaw plugin UX fixes for Flux [#738](https://github.com/coasys/ad4m/pull/738)
+- MCP auth flow - test with mcporter [#736](https://github.com/coasys/ad4m/pull/736)
+- Admin credential bypasses MCP session-level auth [#725](https://github.com/coasys/ad4m/pull/725)
+- Test runner fixes: kill executor by port on shutdown, prevent orphaned processes [#699](https://github.com/coasys/ad4m/pull/699)
+- Test runner: kill executor by port, not by name - safe for concurrent CI runners [#698](https://github.com/coasys/ad4m/pull/698)
+- Build warnings [#715](https://github.com/coasys/ad4m/pull/715)
+- Route neighbourhood signals to main agent when co-located with managed users on the same node [#680](https://github.com/coasys/ad4m/pull/680)
+- Reject links with invalid or empty source/target/predicate URIs [#676](https://github.com/coasys/ad4m/pull/676)
+- Gate perspectives admin-overview on launcher credential instead of ALL_CAPABILITY, so a main agent only sees perspectives it owns or has joined [#675](https://github.com/coasys/ad4m/pull/675)
+- P-Diff chunking fixes and link deserialization fix [#674](https://github.com/coasys/ad4m/pull/674)
+- Deadlock fixes in perspective and link language handling [#673](https://github.com/coasys/ad4m/pull/673)
+- Panic in p-diff-sync after diff chunking feature was introduced [#669](https://github.com/coasys/ad4m/pull/669)
+- Multi-user test fixes [#668](https://github.com/coasys/ad4m/pull/668)
+- Notification fixes for multi-user mode [#649](https://github.com/coasys/ad4m/pull/649)
+- Hotfix for blocked messages caused by Holochain issue [#642](https://github.com/coasys/ad4m/pull/642)
+- Re-attempt SurrealDB link additions up to 5 times on read-write conflicts [#640](https://github.com/coasys/ad4m/pull/640)
+- Duplicate agent fix [#641](https://github.com/coasys/ad4m/pull/641)
+
 ### Added
+- Add hosting GraphQL contract (HostingUserInfo, PaymentRequestResult) [#743](https://github.com/coasys/ad4m/pull/743)
+- OpenClaw plugin managed mode [#739](https://github.com/coasys/ad4m/pull/739)
+- Wrap OpenClaw skill in plugin [#737](https://github.com/coasys/ad4m/pull/737)
+- More skill improvements: auth-flow and NH memory [#734](https://github.com/coasys/ad4m/pull/734)
+- Feature/skill improvements [#733](https://github.com/coasys/ad4m/pull/733)
+- Skill: move waker into ad4m skill and improve documentation [#732](https://github.com/coasys/ad4m/pull/732)
+- Unflaking agent -> works across remote agents test [#731](https://github.com/coasys/ad4m/pull/731)
+- MCP: improve neighbourhood publishing with auto-cloning [#730](https://github.com/coasys/ad4m/pull/730)
+- Waker improvements: actionable wake messages, batch set_property fix, skill docs [#728](https://github.com/coasys/ad4m/pull/728)
+- Skill: add pre-flight check and improved setup sequence [#721](https://github.com/coasys/ad4m/pull/721)
+- Auto-transform CJS bundles to ESM for Deno runtime [#670](https://github.com/coasys/ad4m/pull/670)
+- Multi-user / multi-agent support for single AD4M nodes: managed email users with isolated perspectives, scoped agent DIDs and JWT-based capability tokens [#629](https://github.com/coasys/ad4m/pull/629)
+- Email verification system for multi-user authentication [#643](https://github.com/coasys/ad4m/pull/643)
+- SMTP configuration toggle for email-based multi-user auth [#647](https://github.com/coasys/ad4m/pull/647)
+- Chunk large p-diff-sync diffs to avoid Holochain entry size limit [#655](https://github.com/coasys/ad4m/pull/655)
+- Collection instance filtering and SurrealDB graph traversal improvements [#650](https://github.com/coasys/ad4m/pull/650)
+
 ### Changed
+- Ad4m model API changes [#717](https://github.com/coasys/ad4m/pull/717)
+- Decompose Ad4mModel into focused single-responsibility modules [#747](https://github.com/coasys/ad4m/pull/747)
+- Port LanguageController from JS to Rust & remove JS executor [#693](https://github.com/coasys/ad4m/pull/693)
+- Holochain update to 0.7.0 dev.14 [#716](https://github.com/coasys/ad4m/pull/716)
+- Use new bootstrap and relay URL [#746](https://github.com/coasys/ad4m/pull/746)
+- Use batching for SHACL/Flow link operations [#685](https://github.com/coasys/ad4m/pull/685)
+- CI: Update Linux CI image to Ubuntu 24.04 for webkit2gtk-4.1 support [#684](https://github.com/coasys/ad4m/pull/684)
+- CI: webkit2gtk-4.1 in Docker + macOS V8 cache bust + Windows build re-enabled [#697](https://github.com/coasys/ad4m/pull/697)
+- CI: CUDA Docker image + staging build workflow [#690](https://github.com/coasys/ad4m/pull/690)
+- Build: .cargo/config.toml — RUSTY_V8_MIRROR + git-fetch-with-cli for all builds [#701](https://github.com/coasys/ad4m/pull/701)
+- Docs: update Social DNA and Model Classes for SHACL migration [#696](https://github.com/coasys/ad4m/pull/696)
+- Docs/ad4m model api refactor [#740](https://github.com/coasys/ad4m/pull/740)
+- Tryorama -> sweettest for agent, dm, and file-store language [#681](https://github.com/coasys/ad4m/pull/681)
+- Migrate notification system from Prolog to SurrealDB for better performance and multi-user support [#648](https://github.com/coasys/ad4m/pull/648)
+- Switch SurrealDB storage from in-memory to file-based RocksDB for persistence across restarts [#652](https://github.com/coasys/ad4m/pull/652)
+- Memory optimizations across executor [#644](https://github.com/coasys/ad4m/pull/644)
+- Ad4m-connect updates [#646](https://github.com/coasys/ad4m/pull/646)
+- Update Holochain to 0.7.0-dev.10-coasys [#645](https://github.com/coasys/ad4m/pull/645)
+
+### Removed
+- Test-runner: remove stale process kills and perspect3vism refs [#686](https://github.com/coasys/ad4m/pull/686)
 
 ## [0.11.1] - 02/12/2025
 

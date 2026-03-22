@@ -7,7 +7,7 @@ on:
 
 jobs:
   create-release:
-    runs-on: GH-hosted-ubuntu
+    runs-on: ubuntu-latest
     outputs:
       upload_url: ${{ steps.create-release.outputs.upload_url }}
 
@@ -16,7 +16,7 @@ jobs:
       - name: setup node
         uses: actions/setup-node@v3
         with:
-          node-version: 18
+          node-version: 24
 
       - uses: pnpm/action-setup@v4
 
@@ -24,6 +24,17 @@ jobs:
         uses: denoland/setup-deno@v1
         with:
           deno-version: v1.32.4
+
+      - name: Delete existing tag (idempotent re-runs)
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+          echo "Deleting tag $TAG if it exists..."
+          curl -s -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$TAG" || true
+          echo "Tag cleanup done"
 
       - name: Create Tags From
         id: create_tag
@@ -40,43 +51,275 @@ jobs:
           draft: true
           prerelease: true
 
-  build-launcher-binary:
-    strategy:
-      fail-fast: false
-      matrix:
-        #platform: [GH-hosted-ubuntu, macos-latest, windows-latest]
-        platform: [GH-hosted-ubuntu, macos-latest]
-        node-version: [18.x]
+  # ============================================================================
+  # Generate V8 Deno Snapshot — runs on Linux, artifact shared to Windows
+  # Windows cannot build generate_snapshot.exe due to irreconcilable CRT
+  # mismatch (surrealdb-librocksdb-sys mt_static /MT vs V8/deno /MD).
+  # The snapshot is architecture-specific (x86_64) but OS-independent.
+  # ============================================================================
+  generate-deno-snapshot:
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:a0ab4b6358b7314a2ad49e232ba6c53b28a56e7f02641f226b2ed05544cc66d8
 
     needs:
       - create-release
 
-    runs-on: ${{ matrix.platform }}
+    steps:
+    - name: Fetch source code
+      uses: actions/checkout@v3
+
+    - name: Use Node.js 24.x
+      uses: actions/setup-node@v3
+      with:
+        node-version: 24.x
+
+    - uses: pnpm/action-setup@v4
+
+    - name: pnpm Install
+      run: pnpm install --no-frozen-lockfile
+
+    - name: Generate deno snapshot
+      env:
+        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      run: |
+        cd rust-executor && pnpm run build-deno-snapshot && cd ..
+
+    - name: Upload snapshot artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: deno-snapshot
+        path: rust-executor/CUSTOM_DENO_SNAPSHOT.bin
+        retention-days: 1
+
+  # Linux Binary Build - Uses Docker container (all deps pre-installed)
+  # ============================================================================
+  build-launcher-binary-linux:
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:a0ab4b6358b7314a2ad49e232ba6c53b28a56e7f02641f226b2ed05544cc66d8
+
+    needs:
+      - create-release
 
     steps:
     - name: Fetch source code
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
 
-    - name: Install Rust stable
-      uses: actions-rs/toolchain@v1
+    - name: Extract version
+      id: extract_version
+      uses: Saionaro/extract-package-version@v1.1.1
       with:
-        override: true
-        toolchain: 1.86.0
-    - run: rustup target add wasm32-unknown-unknown
+        path: ui
 
-    - name: Install Rust targets for macOS
-      if: matrix.platform == 'macos-latest'
+    # Rust toolchain configured via rust-toolchain.toml (auto-detected by rustup)
+    # The toml file specifies stable channel with wasm32-unknown-unknown target
+    - name: Verify Rust toolchain
+      run: rustc --version && cargo --version && rustup target list --installed | grep wasm
+
+    - name: pnpm Install
+      run: pnpm install --no-frozen-lockfile
+
+    - name: Build AD4M-CLI
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
+      run: pnpm build-libs
+
+    - name: Build Launcher binary
+      run: pnpm run package-ad4m
+      env:
+        # GitHub Actions container jobs don't always inherit the full system
+        # PKG_CONFIG_PATH. Set it explicitly so soup3-sys/webkit can find .pc files.
+        PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
+
+    - name: Upload Release Deb Asset
+      id: upload-release-deb-asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: target/release/bundle/deb/ADAM Launcher_${{ steps.extract_version.outputs.version }}_amd64.deb
+        asset_name: ADAM Launcher_${{ steps.extract_version.outputs.version }}_amd64.deb
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release AppImage Asset
+      id: upload-release-appimage-asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: target/release/bundle/appimage/ADAM Launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
+        asset_name: ADAM Launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
+        asset_content_type: application/octet-stream
+
+    #- name: Upload Release AppImage Update Asset
+    #  id: upload-release-appimage-asset-update
+    #  uses: actions/upload-release-asset@v1
+    #  env:
+    #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #  with:
+    #    upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+    #    asset_path: target/release/bundle/appimage/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage.tar.gz
+    #    asset_name: ADAM-Launcher_${{ steps.extract_version.outputs.version }}_amd64.deb.tar.gz
+    #    asset_content_type: application/octet-stream
+
+    #- name: Upload Release AppImage update sig Asset
+    #  id: upload-release-appimage-asset-update-sig
+    #  uses: actions/upload-release-asset@v1
+    #  env:
+    #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #  with:
+    #    upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+    #    asset_path: target/release/bundle/appimage/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage.tar.gz.sig
+    #    asset_name: ADAM-Launcher_${{ steps.extract_version.outputs.version }}_amd64.deb.tar.gz.sig
+    #    asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M CLI client Linux Binary
+      id: upload-release-linux-ad4m-cli-client-binary
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: target/release/ad4m
+        asset_name: ad4m-cli-client-linux-${{ steps.extract_version.outputs.version }}-x64
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M CLI executor Linux Binary
+      id: upload-release-linux-ad4m-cli-executor-binary
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: target/release/ad4m-executor
+        asset_name: ad4m-cli-executor-linux-${{ steps.extract_version.outputs.version }}-x64
+        asset_content_type: application/octet-stream
+
+  # ============================================================================
+  # Linux CUDA Binary Build - Uses CUDA Docker container
+  # ============================================================================
+  build-launcher-binary-linux-cuda:
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:a0ab4b6358b7314a2ad49e232ba6c53b28a56e7f02641f226b2ed05544cc66d8
+
+    needs:
+      - create-release
+
+    steps:
+    - name: Fetch source code
+      uses: actions/checkout@v3
+
+    - name: Extract version
+      id: extract_version
+      uses: Saionaro/extract-package-version@v1.1.1
+      with:
+        path: ui
+
+    - name: Verify Rust toolchain
+      run: rustc --version && cargo --version && rustup target list --installed | grep wasm
+
+    - name: Verify CUDA
+      run: nvcc --version
+
+    - name: pnpm Install
+      run: pnpm install --no-frozen-lockfile
+
+    - name: Build AD4M-CLI
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
+      run: pnpm build-libs
+
+    - name: Build Launcher binary with CUDA
+      run: pnpm run package-ad4m:cuda
+      env:
+        PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
+        CUDA_COMPUTE_CAP: "80"
+
+    - name: Upload Release AppImage CUDA Asset
+      id: upload-release-appimage-cuda-asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: target/release/bundle/appimage/ADAM Launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
+        asset_name: ADAM.Launcher_${{ steps.extract_version.outputs.version }}_amd64_CUDA.AppImage
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M CLI executor Linux CUDA Binary
+      id: upload-release-linux-ad4m-cli-executor-cuda-binary
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: target/release/ad4m-executor
+        asset_name: ad4m-cli-executor-linux-${{ steps.extract_version.outputs.version }}-x64-CUDA
+        asset_content_type: application/octet-stream
+
+  # ============================================================================
+  # macOS Binary Build - Uses aggressive caching (Docker not available on macOS)
+  # ============================================================================
+  build-launcher-binary-macos:
+    runs-on: macos-14
+
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      # ARM64 B/BL range fix: -ld_classic is set in .cargo/config.toml
+      # via [target.aarch64-apple-darwin] rustflags to ensure it reaches
+      # cargo through turbo. ld_classic generates branch island stubs.
+
+    needs:
+      - create-release
+
+    steps:
+    - name: Fetch source code
+      uses: actions/checkout@v3
+
+    - name: Select Xcode 15.4 (has ld-classic for branch islands)
       run: |
-        rustup target add x86_64-apple-darwin
-        rustup target add aarch64-apple-darwin
+        sudo xcode-select -s /Applications/Xcode_15.4.app
+        xcodebuild -version
+        # Verify ld-classic binary exists at the path used in .cargo/config.toml
+        ls -la "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld-classic"
+
+    # Rust toolchain configured via rust-toolchain.toml
+    - name: Select Xcode 15.4 (has ld_classic for branch islands)
+      run: |
+        sudo xcode-select -s /Applications/Xcode_15.4.app
+        xcodebuild -version
+        xcrun ld -v 2>&1 | head -1 || true
+        # Verify ld_classic exists
+        ls -la /Applications/Xcode_15.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld-classic || true
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+    # Aggressive Rust caching - biggest time saver for macOS
+    # shared-key includes package.json version so cache busts on version changes
+    # (env!("CARGO_PKG_VERSION") is baked in at compile time and won't update from stale cache)
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: |
+          rust-executor
+          ui/src-tauri
+        cache-targets: true
+        cache-all-crates: true
+        shared-key: "staging-v12-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
 
     - name: Install GO
       uses: actions/setup-go@v4
       with:
         go-version: '1.24.6'
-  
-    - name: Install/update node-gyp
-      run: npm install -g node-gyp
+        cache: true
 
     - name: Install Deno
       uses: denoland/setup-deno@v1
@@ -90,23 +333,29 @@ jobs:
 
     - uses: pnpm/action-setup@v4
 
+    - name: Use Node.js 24.x
+      uses: actions/setup-node@v3
+      with:
+        node-version: 24.x
+        cache: 'pnpm'
 
-    - name: install dependencies (ubuntu only)
-      if: matrix.platform == 'GH-hosted-ubuntu'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake fuse libfuse2 mesa-utils mesa-vulkan-drivers libsoup-3.0-dev javascriptcoregtk-4.1-dev webkit2gtk-4.1-dev librust-alsa-sys-dev
+    # Cache Homebrew packages
+    - name: Cache Homebrew
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/Library/Caches/Homebrew
+          /usr/local/Cellar
+          /opt/homebrew/Cellar
+        key: ${{ runner.os }}-brew-${{ hashFiles('.github/workflows/publish_staging.yml') }}
+        restore-keys: |
+          ${{ runner.os }}-brew-
 
-    - name: install dependencies (macos only)
-      if: matrix.platform == 'macos-latest'
+    - name: Install dependencies (macOS)
       run: brew install protobuf cmake
 
-    - name: install dependencies (windows only)
-      if: matrix.platform == 'windows-latest'
-      run: choco install strawberryperl protoc cmake curl cygwin gnuwin32-m4 msys2 make mingw
-
-    - name: get version
-      run: echo "PACKAGE_VERSION=$(node -p "require('./ui/package.json').version")" >> $GITHUB_ENV
+    - name: Install/update node-gyp
+      run: npm install -g node-gyp
 
     - name: Extract version
       id: extract_version
@@ -114,30 +363,10 @@ jobs:
       with:
         path: ui
 
-    - name: Change package UI version
-      id: changed_version
-      if: matrix.platform == 'windows-latest'
-      run: cd ui && pnpm change-ui-version
-
-    - name: Extract changed version
-      id: changed_extract_version
-      uses: Saionaro/extract-package-version@v1.1.1
-      with:
-        path: ui
-
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v1
-      with:
-        node-version: ${{ matrix.node-version }}
-
     - name: pnpm Install
-      run: pnpm install --no-cache
-
-    - name: Install core dependencies
-      run: cd ./core && pnpm install --no-cache
+      run: pnpm install --no-frozen-lockfile
 
     #- name: Decrypt and install certificates
-    #  if: matrix.platform == 'macos-latest'
     #  env:
     #    APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
     #    APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -151,10 +380,15 @@ jobs:
     #    security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "actions" build.keychain
 
     - name: Build AD4M-CLI
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
+        # Use system git instead of libgit2 so cargo does NOT auto-fetch git submodules.
+        # coasys/deno.git has heavy chromium submodules (wpt, buildtools, abseil-cpp)
+        # that cause SecureTransport/network errors on macOS runners.
+        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       run: pnpm build-libs
-      
-    - name: Build AD4M-CLI & build Launcher binary #(macos/linux-latest)
-      #if: matrix.platform != 'windows-latest'
+
+    - name: Build Launcher binary
       #env:
         #TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
         #TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
@@ -166,100 +400,19 @@ jobs:
         #APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
       run: pnpm run package-ad4m
 
-    #- name:  Build AD4M-CLI & build Launcher binary (windows-latest)
-    #  if: matrix.platform == 'windows-latest'
-      #env:
-        #TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-        #TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
-    #  run: pnpm run package-ad4m
-
-    - name: Upload Release Deb Asset
-      id: upload-release-deb-asset
-      if: matrix.platform == 'GH-hosted-ubuntu'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/ADAM Launcher_${{ steps.extract_version.outputs.version }}_amd64.deb
-        asset_name: ADAM/ Launcher_${{ steps.extract_version.outputs.version }}_amd64.deb
-        asset_content_type: application/octet-stream
-
-    - name: Upload Release AppImage Asset
-      id: upload-release-appimage-asset
-      if: matrix.platform == 'GH-hosted-ubuntu'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/appimage/ADAM Launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
-        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
-        asset_content_type: application/octet-stream
-
-    #- name: Upload Release AppImage Update Asset
-    #  id: upload-release-appimage-asset-update
-    #  if: matrix.platform == 'GH-hosted-ubuntu'
-    #  uses: actions/upload-release-asset@v1
-    #  env:
-    #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    #  with:
-    #    upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-    #    asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/appimage/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage.tar.gz
-    #    asset_name: ADAM-Launcher_${{ steps.extract_version.outputs.version }}_amd64.deb.tar.gz
-    #    asset_content_type: application/octet-stream
-
-    #- name: Upload Release AppImage update sig Asset
-    #  id: upload-release-appimage-asset-update-sig
-    #  if: matrix.platform == 'GH-hosted-ubuntu'
-    #  uses: actions/upload-release-asset@v1
-    #  env:
-    #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    #  with:
-    #    upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-    #    asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/appimage/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage.tar.gz.sig
-    #    asset_name: ADAM-Launcher_${{ steps.extract_version.outputs.version }}_amd64.deb.tar.gz.sig
-    #    asset_content_type: application/octet-stream
-
-    - name: Upload Release AD4M CLI client Linux Binary
-      id: upload-release-linux-ad4m-cli-client-binary
-      if: matrix.platform == 'GH-hosted-ubuntu'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/ad4m
-        asset_name: ad4m-cli-client-linux-${{ steps.extract_version.outputs.version }}-x64
-        asset_content_type: application/octet-stream
-
-    - name: Upload Release AD4M CLI executor Linux Binary
-      id: upload-release-linux-ad4m-cli-executor-binary
-      if: matrix.platform == 'GH-hosted-ubuntu'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/ad4m-executor
-        asset_name: ad4m-cli-executor-linux-${{ steps.extract_version.outputs.version }}-x64
-        asset_content_type: application/octet-stream
-
-    - name: Upload Release Macos Asset
+    - name: Upload Release macOS DMG Asset
       id: upload-release-macos-asset
-      if: matrix.platform == 'macos-latest'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path:  "/Users/runner/work/ad4m/ad4m/target/release/bundle/dmg/ADAM Launcher_${{ steps.extract_version.outputs.version }}_aarch64.dmg"
-        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_aarch64.dmg
+        asset_path: "/Users/runner/work/ad4m/ad4m/target/release/bundle/dmg/ADAM Launcher_${{ steps.extract_version.outputs.version }}_aarch64.dmg"
+        asset_name: ADAM Launcher_${{ steps.extract_version.outputs.version }}_aarch64.dmg
         asset_content_type: application/octet-stream
 
     #- name: Upload Release Macos update Asset
     #  id: upload-release-macos-asset-update
-    #  if: matrix.platform == 'macos-latest'
     #  uses: actions/upload-release-asset@v1
     #  env:
     #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -271,7 +424,6 @@ jobs:
 
     #- name: Upload Release Macos update sig Asset
     #  id: upload-release-macos-asset-update-sig
-    #  if: matrix.platform == 'macos-latest'
     #  uses: actions/upload-release-asset@v1
     #  env:
     #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -283,7 +435,6 @@ jobs:
 
     - name: Upload Release AD4M CLI client macOS Binary
       id: upload-release-macos-ad4m-cli-client-binary
-      if: matrix.platform == 'macos-latest'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -295,7 +446,6 @@ jobs:
 
     - name: Upload Release AD4M CLI executor macOS Binary
       id: upload-release-macos-ad4m-cli-executor-binary
-      if: matrix.platform == 'macos-latest'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -305,89 +455,189 @@ jobs:
         asset_name: ad4m-cli-executor-macos-${{ steps.extract_version.outputs.version }}-aarch64
         asset_content_type: application/octet-stream
 
+  # ============================================================================
+  # Windows Binary Build - Re-enabled now that V8 uses pre-built binaries
+  # ============================================================================
+  build-launcher-binary-windows:
+    runs-on: windows-latest
+
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+    needs:
+      - create-release
+      - generate-deno-snapshot
+
+    steps:
+    - name: Fetch source code
+      uses: actions/checkout@v3
+
+    - name: Enable long paths (Windows MAX_PATH workaround for deno git dep)
+      shell: powershell
+      run: |
+        git config --global core.longpaths true
+        reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
+
+    # NOTE: Do NOT install NASM here! aws-lc-sys 0.35.0 detects NASM via
+    # test_nasm_command() and tries to use it through cmake, which fails.
+    # Without NASM, it falls back to prebuilt .obj files (controlled by
+    # AWS_LC_SYS_PREBUILT_NASM=1 in .cargo/config.toml).
+
+    # Rust toolchain configured via rust-toolchain.toml
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: x86_64-pc-windows-msvc
+
+    # Cache Rust deps - biggest time saver
+    # shared-key includes Cargo.toml hash so cache busts on version changes
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: |
+          rust-executor
+          ui/src-tauri
+        cache-targets: true
+        cache-all-crates: true
+        shared-key: "staging-windows-v11-${{ hashFiles('rust-executor/Cargo.toml', 'cli/Cargo.toml') }}"
+
+    - name: Install GO
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.24.6'
+        cache: true
+
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v2.x
+
+    - name: Use Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - uses: pnpm/action-setup@v4
+
+    - name: Use Node.js 24.x
+      uses: actions/setup-node@v3
+      with:
+        node-version: 24.x
+        cache: 'pnpm'
+
+    - name: Install protobuf compiler
+      run: choco install protoc -y
+
+    - name: Extract version
+      id: extract_version
+      uses: Saionaro/extract-package-version@v1.1.1
+      with:
+        path: ui
+
+    - name: pnpm Install
+      run: pnpm install --no-frozen-lockfile
+
+    - name: Hide ALL NASM executables (force aws-lc-sys prebuilt-nasm)
+      run: |
+        # aws-lc-sys runs "nasm -version" to detect NASM. If found, it skips
+        # prebuilt-nasm and relies on cmake to use NASM — which fails silently.
+        # Hide ALL nasm.exe to force the prebuilt .obj mechanism.
+        $nasms = @(Get-Command nasm -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)
+        foreach ($n in $nasms) {
+          Write-Host "Hiding: $n"
+          Rename-Item $n "$n.hidden" -ErrorAction SilentlyContinue
+        }
+        @("C:\Strawberry\c\bin\nasm.exe", "C:\Program Files\NASM\nasm.exe") | ForEach-Object {
+          if (Test-Path $_) { Rename-Item $_ "$_.hidden"; Write-Host "Hid: $_" }
+        }
+        $check = Get-Command nasm -ErrorAction SilentlyContinue
+        if ($check) { Write-Host "WARNING: nasm still found at $($check.Source)!" }
+        else { Write-Host "OK: nasm not found on PATH" }
+
+    - name: Build JS dependencies
+      run: |
+        # Build JS deps in turbo dependency order (turbo itself breaks
+        # aws-lc-sys prebuilt-nasm, so we bypass it for cargo).
+        cd core && pnpm run build && cd ..
+        cd connect && pnpm run build && cd ..
+        cd dapp && pnpm run build && cd ..
+
+    - name: Download deno snapshot from Linux build
+      uses: actions/download-artifact@v4
+      with:
+        name: deno-snapshot
+        path: rust-executor/
+
+    - name: Build AD4M-CLI
+      env:
+        RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
+        RUSTFLAGS: -C target-feature=+crt-static
+        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      run: cargo build --release
+
+    - name: Build Launcher binary
+      run: pnpm run package-ad4m
+
     - name: Upload Release MSI Asset
       id: upload-release-msi-asset
-      if: matrix.platform == 'windows-latest'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: 'D:\a\ad4m\ad4m\target\release\bundle\msi\ADAM Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi'
-        asset_name: ADAM\ Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: 'target\release\bundle\msi\ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64_en-US.msi'
+        asset_name: ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64_en-US.msi
         asset_content_type: application/octet-stream
 
-    #- name: Upload Release MSI update Asset
-    #  id: upload-release-msi-asset-update
-    #  if: matrix.platform == 'windows-latest'
-    #  uses: actions/upload-release-asset@v1
-    #  env:
-    #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    #  with:
-    #    upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-    #    asset_path: 'D:\a\ad4m\ad4m\target\release\bundle\msi\ADAM Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi.zip'
-    #    asset_name: ADAM\ Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi.zip
-    #    asset_content_type: application/octet-stream
-
-    #- name: Upload Release MSI update sig Asset
-    #  id: upload-release-msi-asset-update-sig
-    #  if: matrix.platform == 'windows-latest'
-    #  uses: actions/upload-release-asset@v1
-    #  env:
-    #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    #  with:
-    #    upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-    #    asset_path: 'D:\a\ad4m\ad4m\target\release\bundle\msi\ADAM Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi.zip.sig'
-    #    asset_name: ADAM\ Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi.zip.sig
-    #    asset_content_type: application/octet-stream
-
-    # - name: Upload Release AD4M CLI Windows Binary
-    #   id: upload-release-windows-ad4m-cli-binary
-    #   if: matrix.platform == 'windows-latest'
-    #   uses: actions/upload-release-asset@v1
-    #   env:
-    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    #   with:
-    #     upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-    #     asset_path: D:\a\ad4m\ad4m\target\release\ad4m-x64.exe
-    #     asset_name: ad4m-windows-${{ steps.extract_version.outputs.version }}-x64.exe
-    #     asset_content_type: application/octet-stream
+    - name: Upload Release NSIS Asset
+      id: upload-release-nsis-asset
+      uses: actions/upload-release-asset@v1
+      continue-on-error: true  # NSIS might not be produced depending on tauri config
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: 'target\release\bundle\nsis\ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64-setup.exe'
+        asset_name: ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64-setup.exe
+        asset_content_type: application/octet-stream
 
     - name: Upload Release AD4M CLI client Windows Binary
       id: upload-release-windows-ad4m-cli-client-binary
-      if: matrix.platform == 'windows-latest'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: D:\a\ad4m\ad4m\target\release\ad4m-x64.exe
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: target\release\ad4m.exe
         asset_name: ad4m-cli-client-windows-${{ steps.extract_version.outputs.version }}-x64.exe
         asset_content_type: application/octet-stream
 
     - name: Upload Release AD4M CLI executor Windows Binary
       id: upload-release-windows-ad4m-cli-executor-binary
-      if: matrix.platform == 'windows-latest'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: D:\a\ad4m\ad4m\target\release\ad4m-executor-x64.exe
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: target\release\ad4m-executor.exe
         asset_name: ad4m-cli-executor-windows-${{ steps.extract_version.outputs.version }}-x64.exe
         asset_content_type: application/octet-stream
 
+  # ============================================================================
+  # NPM Publish - Plain ubuntu runner (no Docker needed, just TS build + publish)
+  # ============================================================================
   npm-publish:
-    runs-on: GH-hosted-ubuntu
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      # Setup .npmrc file to publish to npm
-      - name: Use Node.js 18.x
-        uses: actions/setup-node@v1
-        with:
-          node-version: 18.x
 
       - uses: pnpm/action-setup@v4
+
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@v3
+        with:
+          node-version: 24.x
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Extract version
         id: extract_version
@@ -398,43 +648,17 @@ jobs:
       - name: Check if string contains prerelease
         run: |
           STRING="${{ steps.extract_version.outputs.version }}"
-          if [[ $STRING == *"prerelease"* ]]; then
-            echo "CONTAINS_PRERELEASE=true" >> $GITHUB_ENV
-          else
-            echo "CONTAINS_PRERELEASE=false" >> $GITHUB_ENV
-          fi
-
-      - name: Install GO
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.22'
-
-      - name: Install Linux Deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake fuse libfuse2 mesa-utils mesa-vulkan-drivers 
-
-      - name: Install deps
-        run: pnpm install
-
-      - name: Install core dependencies
-        run: cd ./core && pnpm install
-
-      - name: Install Deno
-        uses: denoland/setup-deno@v1
-        with:
-          deno-version: v1.32.4
-
-      - name: Build modules
-        run: pnpm run build-npm-packages
-
-      - name: Set NPM tag
-        run: |
-          if [ "$CONTAINS_PRERELEASE" = "true" ]; then
+          if [[ $STRING == *-* ]]; then
             echo "NPM_TAG=next" >> $GITHUB_ENV
           else
             echo "NPM_TAG=latest" >> $GITHUB_ENV
           fi
+
+      - name: Install deps
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build modules
+        run: pnpm run build-npm-packages
 
       - name: Change Package Visibility to Public
         run: |
@@ -442,107 +666,56 @@ jobs:
           sed -i 's/"private": true/"private": false/' package.json
 
       - name: Publish core
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: core/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd core && npm publish --access public --tag ${{ env.NPM_TAG }}
 
       - name: Publish connect
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: connect/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
-          
+        run: cd connect && npm publish --access public --tag ${{ env.NPM_TAG }}
+
       - name: Publish ad4m hook helpers
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: ad4m-hooks/helpers/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd ad4m-hooks/helpers && npm publish --access public --tag ${{ env.NPM_TAG }}
 
       - name: Publish ad4m react hooks
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: ad4m-hooks/react/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd ad4m-hooks/react && npm publish --access public --tag ${{ env.NPM_TAG }}
+
 
       - name: Publish ad4m vue hooks
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: ad4m-hooks/vue/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd ad4m-hooks/vue && npm publish --access public --tag ${{ env.NPM_TAG }}
 
       - name: Publish executor
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: executor/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd executor && npm publish --access public --tag ${{ env.NPM_TAG }}
+
 
       - name: Publish Test runner
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: test-runner/package.json
-          tag: ${{ env.NPM_TAG }}
-          access: public
+        run: cd test-runner && npm publish --access public --tag ${{ env.NPM_TAG }}
 
 
+
+  # ============================================================================
+  # Crates Publish - Uses Docker container
+  # ============================================================================
   crates-publish:
-   runs-on: GH-hosted-ubuntu
-   steps:
-     - uses: actions/checkout@v2
-     - uses: actions-rs/toolchain@v1
-       with:
-         toolchain: 1.81.0
-         override: true
-  
-     - name: Install GO
-       uses: actions/setup-go@v4
-       with:
-         go-version: '1.22'
-  
-     - uses: pnpm/action-setup@v4
-  
-     - name: Install Linux Deps
-       run: |
-         sudo apt-get update
-         sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake fuse libfuse2 mesa-utils mesa-vulkan-drivers 
-  
-     - uses: actions/setup-node@v3
-       with:
-         node-version: '18.x'
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:a0ab4b6358b7314a2ad49e232ba6c53b28a56e7f02641f226b2ed05544cc66d8
+    steps:
+      - uses: actions/checkout@v3
 
-     - name: Install Deno
-       uses: denoland/setup-deno@v1
-       with:
-        deno-version: v1.32.4
-  
-     - name: Cache cargo
-       id: cache-cargo
-       uses: actions/cache@v3
-       with:
-         path: |
-           ~/.cargo/bin/
-           ~/.cargo/registry/index/
-           ~/.cargo/registry/cache/
-           ~/.cargo/git/db/
-         key: ${{ runner.os }}-cargo
-         restore-keys: ${{ runner.os }}-cargo
-     - run: rustup target add wasm32-unknown-unknown
-     - run: pnpm install
-     - run: pnpm build-core-executor
-     - run: ls -al executor/lib
-     - run: cargo install cargo-workspaces || echo "cargo-workspaces already installed"
-     - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
-     - run: cargo workspaces publish --from-git
+      # Rust toolchain configured via rust-toolchain.toml (auto-detected by rustup)
+      - name: Verify Rust toolchain
+        run: rustc --version && cargo --version
+
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm build-core-executor
+      - run: ls -al executor/lib
+      - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish ad4m-client crate
+        working-directory: rust-client
+        run: |
+          set +e
+          OUTPUT=$(cargo publish --allow-dirty 2>&1)
+          EXIT=$?
+          set -e
+          echo "$OUTPUT"
+          if [ $EXIT -ne 0 ]; then
+            echo "$OUTPUT" | grep -q "already exists" && echo "Already published — OK" || exit $EXIT
+          fi

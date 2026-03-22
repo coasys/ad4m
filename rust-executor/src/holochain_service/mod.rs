@@ -46,7 +46,7 @@ lazy_static! {
         Arc::new(RwLock::new(None));
 }
 
-const COASYS_BOOTSTRAP_AGENT_INFO: &str = r#" ["g6VhZ2VudMQkeWyy+u7ziOZEejqRGCHVSjWuNDGCkHSFWpkp/DsXJFVDyWYdqXNpZ25hdHVyZcRAlYaUoegA0DB+U8F2cONLcoORjqz7WqW4dBSfvWyQ4AixLLB3h0jsvqGUo0UfowjUP1ntBhMjA8xo/oQateooDaphZ2VudF9pbmZvxPuGpXNwYWNlxCReuo1fprVD9jjsQWRglwEzVlWFiYB+4BEA7BQIwOpYgUgezPGlYWdlbnTEJHlssvru84jmRHo6kRgh1Uo1rjQxgpB0hVqZKfw7FyRVQ8lmHaR1cmxzkdlJd3NzOi8vc2lnbmFsLmhvbG8uaG9zdC90eDUtd3MvNEFNaGNWNHhpdFdPMHI2YUR1NjFwcW5jMW5LNjBmdkRfYTRyZUJmUFdTMKxzaWduZWRfYXRfbXPPAAABk/NOnPewZXhwaXJlc19hZnRlcl9tc84AEk+AqW1ldGFfaW5mb8QZgahhcnFfc2l6ZYKlcG93ZXIRpWNvdW50CA=="]"#;
+//const COASYS_BOOTSTRAP_AGENT_INFO: &str = r#" ["g6VhZ2VudMQkeWyy+u7ziOZEejqRGCHVSjWuNDGCkHSFWpkp/DsXJFVDyWYdqXNpZ25hdHVyZcRAlYaUoegA0DB+U8F2cONLcoORjqz7WqW4dBSfvWyQ4AixLLB3h0jsvqGUo0UfowjUP1ntBhMjA8xo/oQateooDaphZ2VudF9pbmZvxPuGpXNwYWNlxCReuo1fprVD9jjsQWRglwEzVlWFiYB+4BEA7BQIwOpYgUgezPGlYWdlbnTEJHlssvru84jmRHo6kRgh1Uo1rjQxgpB0hVqZKfw7FyRVQ8lmHaR1cmxzkdlJd3NzOi8vc2lnbmFsLmhvbG8uaG9zdC90eDUtd3MvNEFNaGNWNHhpdFdPMHI2YUR1NjFwcW5jMW5LNjBmdkRfYTRyZUJmUFdTMKxzaWduZWRfYXRfbXPPAAABk/NOnPewZXhwaXJlc19hZnRlcl9tc84AEk+AqW1ldGFfaW5mb8QZgahhcnFfc2l6ZYKlcG93ZXIRpWNvdW50CA=="]"#;
 #[derive(Clone)]
 pub struct HolochainService {
     pub conductor: ConductorHandle,
@@ -64,10 +64,49 @@ pub struct LocalConductorConfig {
     pub use_mdns: bool,
     pub proxy_url: String,
     pub bootstrap_url: String,
+    pub relay_url: Option<String>,
     pub app_port: u16,
 }
 
+impl LocalConductorConfig {
+    /// Create a LocalConductorConfig from the global Ad4mConfig and a passphrase.
+    pub fn from_ad4m_config(config: &crate::config::Ad4mConfig, passphrase: String) -> Self {
+        let app_data_path = config
+            .app_data_path
+            .as_ref()
+            .expect("app_data_path not set");
+        let base = std::path::Path::new(app_data_path).join("ad4m");
+        Self {
+            passphrase,
+            conductor_path: base.join("h").join("c").to_string_lossy().into_owned(),
+            data_path: base.join("h").join("d").to_string_lossy().into_owned(),
+            use_bootstrap: config.hc_use_bootstrap.unwrap_or(true),
+            use_proxy: config.hc_use_proxy.unwrap_or(true),
+            use_local_proxy: config.hc_use_local_proxy.unwrap_or(false),
+            use_mdns: config.hc_use_mdns.unwrap_or(false),
+            proxy_url: config.hc_proxy_url.clone().unwrap_or_default(),
+            bootstrap_url: config.hc_bootstrap_url.clone().unwrap_or_default(),
+            relay_url: config.hc_relay_url.clone(),
+            app_port: config.hc_app_port.unwrap_or(1337),
+        }
+    }
+}
+
 impl HolochainService {
+    /// Formats an error with proper stacktrace formatting for readability
+    fn format_error_with_stacktrace(err: &dyn std::fmt::Debug) -> String {
+        let err_str = format!("{:?}", err);
+
+        // Check if the error contains a stacktrace pattern
+        if err_str.contains("RuntimeError:") && err_str.contains("\\n    at ") {
+            // Replace escaped newlines with actual newlines throughout the error string
+            // This will make the stacktrace readable line by line
+            return err_str.replace("\\n", "\n");
+        }
+
+        err_str
+    }
+
     pub async fn init(local_config: LocalConductorConfig) -> Result<(), AnyError> {
         // Store the config for potential restarts
         {
@@ -189,7 +228,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::AgentInfos(response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3),
+                                        std::time::Duration::from_secs(30),
                                         service.agent_infos()
                                     ).await.map_err(|_| anyhow!("Timeout error; AgentInfos")) {
                                         Ok(result) => {
@@ -202,7 +241,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::AddAgentInfos(agent_infos, response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3),
+                                        std::time::Duration::from_secs(30),
                                         service.add_agent_infos(agent_infos)
                                     ).await.map_err(|_| anyhow!("Timeout error; AddAgentInfos")) {
                                         Ok(result) => {
@@ -364,11 +403,11 @@ impl HolochainService {
             _ => unreachable!(),
         };
 
-        let agent_infos: Vec<String> = serde_json::from_str(COASYS_BOOTSTRAP_AGENT_INFO)?;
-        info!("Adding agent infos: {:?}", agent_infos);
-        if let Err(e) = inteface.add_agent_infos(agent_infos).await {
-            error!("Error adding agent infos: {:?}", e);
-        }
+        //let agent_infos: Vec<String> = serde_json::from_str(COASYS_BOOTSTRAP_AGENT_INFO)?;
+        //info!("Adding agent infos: {:?}", agent_infos);
+        //if let Err(e) = inteface.add_agent_infos(agent_infos).await {
+        //    error!("Error adding agent infos: {:?}", e);
+        //}
 
         set_holochain_service(inteface).await;
 
@@ -412,36 +451,20 @@ impl HolochainService {
             if local_config.use_bootstrap {
                 network_config.bootstrap_url = Url2::parse(local_config.bootstrap_url.as_str());
             } else {
-                network_config.bootstrap_url = Url2::parse("http://relay.ad4m.dev:4433");
+                network_config.bootstrap_url = Url2::parse("http://bootstrap.ad4m.dev:4433");
             }
 
             if local_config.use_proxy {
                 network_config.signal_url = Url2::parse(local_config.proxy_url.as_str());
             } else {
-                network_config.signal_url = Url2::parse("ws://relay.ad4m.dev:4433");
+                network_config.signal_url = Url2::parse("ws://bootstrap.ad4m.dev:4433");
             }
 
-            //if local_config.use_local_proxy {
-            network_config.advanced = Some(serde_json::json!({
-                "tx5Transport": {
-                    "signalAllowPlainText": true,
-                }
-            }));
-            //}
-
-            network_config.webrtc_config = Some(serde_json::json!({
-                "iceServers": [
-                    {"urls": ["stun:stun.cloudflare.com:3478"]},
-                    {"urls": ["stun:stun.l.google.com:19302"]},
-                    {
-                        "urls": [
-                            "stun:relay.ad4m.dev:3478",
-                        ],
-                        "username": "openrelay",
-                        "credential": "openrelay",
-                    }
-                ]
-            }));
+            if let Some(relay_url) = local_config.relay_url {
+                network_config.relay_url = Url2::parse(relay_url.as_str());
+            } else {
+                network_config.relay_url = Url2::parse("http://bootstrap.ad4m.dev:4433/relay");
+            }
 
             config.network = network_config;
 
@@ -504,21 +527,63 @@ impl HolochainService {
                     .install_app_bundle(install_app_payload)
                     .await
                     .map_err(|e| anyhow!("Could not install app: {:?}", e))?;
-
-                self.conductor
-                    .clone()
-                    .enable_app(app_id.clone())
-                    .await
-                    .map_err(|e| anyhow!("Could not activate app: {:?}", e))?;
-
-                let app_info = self.conductor.get_app_info(&app_id).await?;
-                Ok(app_info.unwrap())
             }
-            Some(app_info) => {
+            Some(_) => {
                 info!("App already installed with id: {:?}", app_id);
-                Ok(app_info)
             }
         }
+
+        // Always ensure the app is enabled, even if already installed.
+        // This is necessary because enable_app creates the K2 network space
+        // via the join operation. If we don't call enable_app for already-installed
+        // apps, their K2 spaces won't exist and p2p calls will fail with
+        // "The K2 Space does not exist" error.
+        self.conductor
+            .clone()
+            .enable_app(app_id.clone())
+            .await
+            .map_err(|e| anyhow!("Could not enable app: {:?}", e))?;
+
+        // Get app info to extract cell IDs
+        let app_info = self.conductor.get_app_info(&app_id).await?;
+        let app_info =
+            app_info.ok_or_else(|| anyhow!("App not found after enabling: {}", app_id))?;
+
+        // Extract all cell IDs from the app
+        let mut app_cell_ids = Vec::new();
+        for (_role_name, cell_infos) in &app_info.cell_info {
+            for cell_info in cell_infos {
+                match cell_info {
+                    CellInfo::Provisioned(cell) => app_cell_ids.push(cell.cell_id.clone()),
+                    CellInfo::Cloned(cell) => {
+                        if cell.enabled {
+                            app_cell_ids.push(cell.cell_id.clone())
+                        }
+                    }
+                    CellInfo::Stem(_) => {} // Stem cells are not yet instantiated
+                }
+            }
+        }
+
+        // Wait for all cells to complete their network join.
+        // This uses Holochain's event-driven readiness signaling instead of
+        // retry loops or arbitrary timeouts.
+        for cell_id in &app_cell_ids {
+            if let Err(e) = self
+                .conductor
+                .await_cell_network_join_complete(cell_id, std::time::Duration::from_secs(10))
+                .await
+            {
+                error!(
+                    "Cell {:?} in app {} failed to join network: {:?}",
+                    cell_id, app_id, e
+                );
+            }
+        }
+
+        let app_info = self.conductor.get_app_info(&app_id).await?;
+        let app_info = app_info.ok_or_else(|| anyhow!("App not found: {}", app_id))?;
+        Ok(app_info)
     }
 
     pub async fn call_zome_function(
@@ -536,6 +601,7 @@ impl HolochainService {
         let app_info = self.conductor.get_app_info(&app_id).await?;
 
         if app_info.is_none() {
+            error!("App not installed with id: {:?}", app_id);
             return Err(anyhow!("App not installed with id: {:?}", app_id));
         }
 
@@ -544,6 +610,10 @@ impl HolochainService {
         let cell_entry = app_info.cell_info.get(&cell_name);
 
         if cell_entry.is_none() {
+            error!(
+                "Cell not installed with name: {:?} in app: {:?}",
+                cell_name, app_id
+            );
             return Err(anyhow!(
                 "Cell not installed with name: {:?} in app: {:?}",
                 cell_name,
@@ -552,6 +622,10 @@ impl HolochainService {
         }
 
         if cell_entry.unwrap().is_empty() {
+            error!(
+                "No cells for cell name: {:?} in app: {:?}",
+                cell_name, app_id
+            );
             return Err(anyhow!(
                 "No cells for cell name: {:?} in app: {:?}",
                 cell_name,
@@ -563,7 +637,10 @@ impl HolochainService {
         let cell_id = match cell_info {
             CellInfo::Provisioned(cell) => cell.cell_id,
             CellInfo::Cloned(cell) => cell.cell_id,
-            CellInfo::Stem(_cell) => return Err(anyhow!("Cell is not provisioned or cloned",)),
+            CellInfo::Stem(_cell) => {
+                error!("Cell is not provisioned or cloned");
+                return Err(anyhow!("Cell is not provisioned or cloned"));
+            }
         };
 
         let agent_pub_key = app_info.agent_pub_key;
@@ -600,9 +677,22 @@ impl HolochainService {
         //    .await
         //    .map_err(|err| anyhow!("Could not sign zome call: {:?}", err))?;
 
-        let result = self.conductor.call_zome(zome_call_params).await??;
-
-        Ok(result)
+        let conductor_api_result = self.conductor.call_zome(zome_call_params).await;
+        match conductor_api_result {
+            Ok(result) => match result {
+                Ok(result) => Ok(result.into()),
+                Err(err) => {
+                    let formatted_err = Self::format_error_with_stacktrace(&err);
+                    error!("Error calling zome function:\n{}", formatted_err);
+                    Err(anyhow!("Error calling zome function: {:?}", err))
+                }
+            },
+            Err(err) => {
+                let formatted_err = Self::format_error_with_stacktrace(&err);
+                error!("Conductor API error:\n{}", formatted_err);
+                Err(anyhow!("Conductor API error: {:?}", err))
+            }
+        }
     }
 
     pub async fn remove_app(&self, app_id: String) -> Result<(), AnyError> {
@@ -624,17 +714,93 @@ impl HolochainService {
     }
 
     pub async fn agent_infos(&self) -> Result<Vec<String>, AnyError> {
-        Ok(self
-            .conductor
-            .get_agent_infos(None)
-            .await?
-            .into_iter()
-            .map(|arc| (*arc).encode())
-            .collect::<Result<Vec<_>, _>>()?)
+        // Get agent infos for running cells.
+        // K2 spaces should already be available since install_app awaits
+        // cell network join completion before returning.
+        let running_cell_ids = self.conductor.running_cell_ids();
+        let running_dna_hashes: std::collections::HashSet<_> = running_cell_ids
+            .iter()
+            .map(|cell_id| cell_id.dna_hash().clone())
+            .collect();
+
+        if running_dna_hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut all_agent_infos = Vec::new();
+        let mut failed_dnas = Vec::new();
+
+        for dna_hash in running_dna_hashes {
+            match self
+                .conductor
+                .get_agent_infos(Some(vec![dna_hash.clone()]))
+                .await
+            {
+                Ok(infos) => {
+                    for info in infos {
+                        if let Ok(encoded) = (*info).encode() {
+                            all_agent_infos.push(encoded);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to get agent infos for DNA {:?}: {:?}", dna_hash, e);
+                    failed_dnas.push(dna_hash.clone());
+                }
+            }
+        }
+
+        if !failed_dnas.is_empty() {
+            info!(
+                "Got agent infos for {} DNAs, {} DNAs failed",
+                all_agent_infos.len(),
+                failed_dnas.len()
+            );
+        }
+
+        Ok(all_agent_infos)
     }
 
     pub async fn add_agent_infos(&self, agent_infos: Vec<String>) -> Result<(), AnyError> {
-        Ok(self.conductor.add_agent_infos(agent_infos).await?)
+        // Add agent infos individually. K2 spaces should already be available
+        // since install_app awaits cell network join completion.
+        // If an agent info is for a space we haven't joined (e.g., another
+        // agent's unique DNA), it will be skipped.
+        let mut success_count = 0;
+        let mut skipped_count = 0;
+
+        for agent_info in agent_infos {
+            match self
+                .conductor
+                .add_agent_infos(vec![agent_info.clone()])
+                .await
+            {
+                Ok(()) => {
+                    success_count += 1;
+                }
+                Err(e) => {
+                    let error_str = format!("{:?}", e);
+                    if error_str.contains("K2SpaceNotFound")
+                        || (error_str.contains("K2 Space") && error_str.contains("does not exist"))
+                    {
+                        // Space we haven't joined - expected for other agent's unique DNAs
+                        skipped_count += 1;
+                    } else {
+                        error!("Failed to add agent info: {:?}", e);
+                        skipped_count += 1;
+                    }
+                }
+            }
+        }
+
+        if skipped_count > 0 {
+            info!(
+                "Added {} agent infos, skipped {} (spaces not available)",
+                success_count, skipped_count
+            );
+        }
+
+        Ok(())
     }
 
     pub async fn sign(&self, data: String) -> Result<Signature, AnyError> {
@@ -653,7 +819,7 @@ impl HolochainService {
     }
 
     pub async fn shutdown(&self) -> Result<(), AnyError> {
-        self.conductor.shutdown().await??;
+        self.conductor.clone().shutdown().await??;
         Ok(())
     }
 
@@ -704,9 +870,30 @@ impl HolochainService {
             .map(|(k, v)| (k.to_string(), v))
             .collect();
 
+        // Convert stats to JSON-safe structure. The blocked_message_counts field
+        // has HashMap<Url, HashMap<SpaceId, _>> where SpaceId doesn't serialize
+        // as a JSON string key, so we convert all map keys to strings.
+        let blocked_counts_safe: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, _>,
+        > = stats
+            .blocked_message_counts
+            .into_iter()
+            .map(|(url, inner)| {
+                let inner_safe: std::collections::HashMap<String, _> = inner
+                    .into_iter()
+                    .map(|(space_id, count)| (format!("{:?}", space_id), count))
+                    .collect();
+                (url.to_string(), inner_safe)
+            })
+            .collect();
+
         let combined_metrics = serde_json::json!({
             "metrics": metrics_with_string_keys,
-            "stats": stats
+            "stats": {
+                "transport_stats": stats.transport_stats,
+                "blocked_message_counts": blocked_counts_safe
+            }
         });
 
         Ok(serde_json::to_string(&combined_metrics)?)

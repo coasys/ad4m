@@ -4,7 +4,7 @@ import { isProcessRunning, sleep } from "../utils/utils";
 import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
 import { fileURLToPath } from 'url';
 import { expect } from "chai";
-import { startExecutor, apolloClient, runHcLocalServices } from "../utils/utils";
+import { startExecutor, apolloClient, runHcLocalServices, quitExecutor } from "../utils/utils";
 import { ChildProcess } from 'child_process';
 import perspectiveTests from "./perspective";
 import agentTests from "./agent";
@@ -67,10 +67,22 @@ export class TestContext {
     }
 
     async makeAllNodesKnown() {
-      const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
-      const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
-      await this.#alice!.runtime.hcAddAgentInfos(bobAgentInfo);
-      await this.#bob!.runtime.hcAddAgentInfos(aliceAgentInfo);
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        try {
+          const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
+          const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
+
+          await this.#alice!.runtime.hcAddAgentInfos(bobAgentInfo);
+          await this.#bob!.runtime.hcAddAgentInfos(aliceAgentInfo);
+          console.log(`Agent info exchange attempt ${attempt} successful`);
+          break;
+        } catch (error) {
+          console.log(`Agent info exchange attempt ${attempt} failed:`, error);
+          if (attempt < 5) {
+            await sleep(3000);
+          }
+        }
+      }
     }
 }
 let testContext: TestContext = new TestContext()
@@ -89,6 +101,7 @@ describe("Integration tests", function () {
     let proxyUrl: string | null = null;
     let bootstrapUrl: string | null = null;
     let localServicesProcess: ChildProcess | null = null;
+    let relayUrl: string | null = null;
 
     before(async () => {    
         if(!fs.existsSync(TEST_DIR)) {
@@ -103,9 +116,10 @@ describe("Integration tests", function () {
         proxyUrl = localServices.proxyUrl;
         bootstrapUrl = localServices.bootstrapUrl;
         localServicesProcess = localServices.process;
+        relayUrl = localServices.relayUrl;
 
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-          gqlPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl!, bootstrapUrl!);
+          gqlPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl!, bootstrapUrl!, relayUrl!);
 
         testContext.alice = new Ad4mClient(apolloClient(gqlPort))
         testContext.aliceCore = executorProcess
@@ -113,18 +127,10 @@ describe("Integration tests", function () {
 
     after(async () => {
       if (executorProcess) {
-        while (!executorProcess?.killed) {
-          let status  = executorProcess?.kill();
-          console.log("killed executor with", status);
-          await sleep(500);
-        }
+        await quitExecutor(executorProcess, gqlPort);
       }
       if (localServicesProcess) {
-        while (!localServicesProcess?.killed) {
-          let status  = localServicesProcess?.kill();
-          console.log("killed local services with", status);
-          await sleep(500);
-        }
+        localServicesProcess.kill('SIGKILL');
       }
     })
 
@@ -150,7 +156,7 @@ describe("Integration tests", function () {
             fs.mkdirSync(bobAppDataPath)
 
           bobExecutorProcess = await startExecutor(bobAppDataPath, bobBootstrapSeedPath,
-            bobGqlPort, bobHcAdminPort, bobHcAppPort, false, undefined, proxyUrl!, bootstrapUrl!);
+            bobGqlPort, bobHcAdminPort, bobHcAppPort, false, undefined, proxyUrl!, bootstrapUrl!, relayUrl!);
 
           testContext.bob = new Ad4mClient(apolloClient(bobGqlPort))
           testContext.bobCore = bobExecutorProcess
@@ -164,7 +170,7 @@ describe("Integration tests", function () {
           let link = new LinkExpression();
           link.author = "did:test";
           link.timestamp = new Date().toISOString();
-          link.data = new Link({source: "src", target: "target", predicate: "pred"});
+          link.data = new Link({source: "ad4m://src", target: "test://target", predicate: "ad4m://pred"});
           link.proof = new ExpressionProof("sig", "key")
 
           await testContext.bob.agent.updatePublicPerspective(new Perspective([link]))
@@ -173,12 +179,8 @@ describe("Integration tests", function () {
         })
 
         after(async () => {
-          if (executorProcess) {
-            while (!bobExecutorProcess?.killed) {
-              let status  = bobExecutorProcess?.kill();
-              console.log("killed bobs executor with", status);
-              await sleep(500);
-            }
+          if (bobExecutorProcess) {
+            await quitExecutor(bobExecutorProcess, bobGqlPort);
           }
         })
 

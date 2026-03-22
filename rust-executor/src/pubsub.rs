@@ -17,20 +17,27 @@ type Message = String;
 
 pub struct PubSub {
     subscribers: Mutex<HashMap<Topic, broadcast::Sender<Message>>>,
+    subscribers_sync: std::sync::Mutex<HashMap<Topic, broadcast::Sender<Message>>>,
 }
 
 impl PubSub {
     pub fn new() -> Self {
         Self {
             subscribers: Mutex::new(HashMap::new()),
+            subscribers_sync: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
     pub async fn subscribe(&self, topic: &Topic) -> broadcast::Receiver<Message> {
         let mut subscribers = self.subscribers.lock().await;
+        let mut subscribers_sync = self.subscribers_sync.lock().unwrap();
         let sender = subscribers
             .entry(topic.to_owned())
-            .or_insert_with(|| broadcast::channel(100).0); // 100 message buffer
+            .or_insert_with(|| broadcast::channel(10000).0);
+        // Keep sync map in sync
+        subscribers_sync
+            .entry(topic.to_owned())
+            .or_insert_with(|| sender.clone());
         sender.subscribe()
     }
 
@@ -38,6 +45,15 @@ impl PubSub {
         let subscribers = self.subscribers.lock().await;
         if let Some(sender) = subscribers.get(topic) {
             let _ = sender.send(message.clone()); // Ignore if no receivers
+        }
+    }
+
+    /// Synchronous publish that doesn't require tokio runtime.
+    /// Uses a separate std::sync::Mutex to avoid blocking the async runtime.
+    pub fn publish_sync(&self, topic: &Topic, message: &Message) {
+        let subscribers = self.subscribers_sync.lock().unwrap();
+        if let Some(sender) = subscribers.get(topic) {
+            let _ = sender.send(message.clone());
         }
     }
 }
@@ -57,11 +73,14 @@ pub(crate) async fn subscribe_and_process<
             Ok(msg) => match serde_json::from_str::<T>(&msg) {
                 Ok(data) => {
                     if let Some(filter) = &filter {
-                        if &data
+                        let data_filter = data
                             .get_filter()
-                            .expect("Could not get filter on T where we expected to filter")
-                            != filter
-                        {
+                            .expect("Could not get filter on T where we expected to filter");
+                        if &data_filter != filter {
+                            log::debug!(
+                                "PubSub filter mismatch on topic {}: data_filter={}, subscription_filter={}",
+                                topic, data_filter, filter
+                            );
                             return futures::future::ready(None);
                         }
                     }
@@ -115,5 +134,9 @@ lazy_static::lazy_static! {
 }
 
 pub async fn get_global_pubsub() -> Arc<PubSub> {
+    GLOBAL_PUB_SUB.clone()
+}
+
+pub fn get_global_pubsub_sync() -> Arc<PubSub> {
     GLOBAL_PUB_SUB.clone()
 }

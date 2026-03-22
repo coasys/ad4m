@@ -390,8 +390,7 @@
       "ad4m-hooks/helpers": {
         "packageJson": {
           "dependencies": [
-            "npm:@coasys/ad4m-connect@*",
-            "npm:@coasys/ad4m@*",
+            "npm:@types/uuid@9",
             "npm:uuid@*"
           ]
         }
@@ -399,17 +398,8 @@
       "ad4m-hooks/react": {
         "packageJson": {
           "dependencies": [
-            "npm:@coasys/ad4m-connect@*",
-            "npm:@coasys/hooks-helpers@*",
             "npm:@types/react-dom@^18.2.19",
             "npm:@types/react@^18.2.55"
-          ]
-        }
-      },
-      "ad4m-hooks/vue": {
-        "packageJson": {
-          "dependencies": [
-            "npm:@coasys/hooks-helpers@*"
           ]
         }
       },
@@ -614,13 +604,6 @@
           ]
         }
       },
-      "cli": {
-        "packageJson": {
-          "dependencies": [
-            "npm:@coasys/ad4m-executor@*"
-          ]
-        }
-      },
       "connect": {
         "packageJson": {
           "dependencies": [
@@ -651,7 +634,7 @@
             "npm:@rollup/plugin-alias@^3.1.5",
             "npm:@rollup/plugin-commonjs@20",
             "npm:@rollup/plugin-node-resolve@^13.0.4",
-            "npm:@types/jest@^26.0.14",
+            "npm:@types/jest@29",
             "npm:@types/node@*",
             "npm:@types/yargs@*",
             "npm:base64-js@*",
@@ -662,14 +645,15 @@
             "npm:graphql-ws@5.12.0",
             "npm:graphql@15.7.2",
             "npm:honkit@4",
-            "npm:jest@^26.6.0",
+            "npm:jest@29",
             "npm:pako@*",
             "npm:patch-package@8",
             "npm:react-dom@*",
             "npm:react@*",
             "npm:reflect-metadata@~0.1.13",
             "npm:rollup@^2.56.3",
-            "npm:ts-jest@^26.5.6",
+            "npm:ts-jest@29",
+            "npm:tsx@^4.21.0",
             "npm:type-graphql@1.1.1",
             "npm:typescript@^4.6.2",
             "npm:ws@8.13.0"
@@ -696,56 +680,18 @@
           ]
         }
       },
-      "docs": {
+      "docs-src": {
         "packageJson": {
           "dependencies": [
             "npm:@types/node@18.11.10",
             "npm:next@^13.0.6",
-            "npm:nextra-theme-docs@latest",
-            "npm:nextra@latest",
+            "npm:nextra-theme-docs@^2.13.4",
+            "npm:nextra@^2.13.4",
             "npm:react-dom@^18.2.0",
             "npm:react@^18.2.0",
             "npm:typedoc-plugin-markdown@^3.15.2",
             "npm:typedoc@~0.24.4",
             "npm:typescript@^4.9.3"
-          ]
-        }
-      },
-      "executor": {
-        "packageJson": {
-          "dependencies": [
-            "npm:@msgpack/msgpack@3.0.0-beta2",
-            "npm:@noble/secp256k1@^1.7.0",
-            "npm:@transmute/did-key.js@~0.2.1-unstable.29",
-            "npm:@types/chai@*",
-            "npm:@types/faker@^5.5.7",
-            "npm:@types/js-yaml@^4.0.2",
-            "npm:@types/json-stable-stringify@^1.0.33",
-            "npm:@types/lodash@*",
-            "npm:@types/mocha@*",
-            "npm:@types/mocha@10",
-            "npm:@types/node@18",
-            "npm:@types/secp256k1@^4.0.3",
-            "npm:@types/sha256@0.2",
-            "npm:@types/sinon@*",
-            "npm:@types/uuid@^8.3.1",
-            "npm:aloedb-node@^1.1.1",
-            "npm:async-mutex@~0.3.2",
-            "npm:chai@*",
-            "npm:faker@^5.1.0",
-            "npm:get-port@5.1.1",
-            "npm:js-yaml@^4.1.0",
-            "npm:json-stable-stringify@^1.0.1",
-            "npm:linkedom@~0.14.26",
-            "npm:lodash@^4.17.21",
-            "npm:mocha@*",
-            "npm:patch-package@8",
-            "npm:sha256@0.2",
-            "npm:sinon@*",
-            "npm:tmp@~0.2.1",
-            "npm:ts-mocha@*",
-            "npm:ts-node@^10.8.0",
-            "npm:uuid@*"
           ]
         }
       },
@@ -759,7 +705,6 @@
             "npm:@types/glob@8.1.0",
             "npm:@types/node-fetch@^2.6.1",
             "npm:@types/node@18",
-            "npm:@types/unzipper@~0.10.5",
             "npm:@types/uuid@^8.3.2",
             "npm:@types/ws@8.5.4",
             "npm:@types/yargs@^17.0.8",
@@ -768,19 +713,16 @@
             "npm:esm@^3.2.25",
             "npm:esmify@^2.1.1",
             "npm:express@4.18.2",
-            "npm:find-process@^1.4.7",
             "npm:fs-extra@^10.0.1",
-            "npm:get-port@5.1.1",
+            "npm:get-port@^5.1.1",
             "npm:glob@^7.2.0",
             "npm:graphql-ws@5.12.0",
             "npm:graphql@15.7.2",
             "npm:node-fetch@2",
-            "npm:node-wget-js@^1.0.1",
             "npm:subscriptions-transport-ws@0.11",
             "npm:tree-kill@^1.2.2",
             "npm:ts-node@^10.5.0",
             "npm:typescript@^4.6.2",
-            "npm:unzipper@~0.10.11",
             "npm:uuid@^8.3.2",
             "npm:wget-improved@^3.3.0",
             "npm:ws@8.13.0",
@@ -818,6 +760,7 @@
             "npm:http@0.0.1-security",
             "npm:json-stable-stringify@^1.1.0",
             "npm:kill-process-by-name@^1.0.5",
+            "npm:mcporter@~0.7.3",
             "npm:mocha@*",
             "npm:node-fetch@^3.3.0",
             "npm:node-wget-js@^1.0.1",

@@ -7,19 +7,6 @@ export function propertyNameToSetterName(property: string): string {
     return `set${capitalize(property)}`
 }
 
-// e.g. "setName" -> "name"
-export function setterNameToPropertyName(setter: string): string {
-    return setter.replace("set", "").replace(/^[A-Z]/, (m) => m.toLowerCase())
-}
-
-export function singularToPlural(singular: string): string {
-    if(singular.endsWith("y")) {
-        return singular.slice(0, -1) + "ies"
-    } else {
-        return singular + "s"
-    }
-}
-
 export function pluralToSingular(plural: string): string {
     if(plural.endsWith("ies")) {
         return plural.slice(0, -3) + "y"
@@ -31,40 +18,33 @@ export function pluralToSingular(plural: string): string {
 }
 
 // e.g. "comments" -> "addComment"
-export function collectionToAdderName(collection: string): string {
-    return `add${capitalize(pluralToSingular(collection))}`
-}
-
-// e.g. "addEntry" -> "entries"
-export function collectionAdderToName(adderName: string): string {
-    let singular = adderName.substring(3)
-    let plural = singularToPlural(singular)
-    return plural.charAt(0).toLowerCase() + plural.slice(1)
+export function relationToAdderName(relation: string): string {
+    return `add${capitalize(pluralToSingular(relation))}`
 }
 
 // e.g. "comments" -> "removeComment"
-export function collectionToRemoverName(collection: string): string {
-    return `remove${capitalize(pluralToSingular(collection))}`
+export function relationToRemoverName(relation: string): string {
+    return `remove${capitalize(pluralToSingular(relation))}`
 }
 
-// e.g. "removeEntry" -> "entries"
-export function collectionRemoverToName(removerName: string): string {
-    let singular = removerName.substring(6)
-    let plural = singularToPlural(singular)
-    return plural.charAt(0).toLowerCase() + plural.slice(1)
+// e.g. "comments" -> "setComments"
+export function relationToSetterName(relation: string): string {
+    return `set${capitalize(relation)}`
 }
 
-export function collectionSetterToName(adderName: string): string {
-    let singular = adderName.substring(13)
-    let plural = singularToPlural(singular)
-    return plural.charAt(0).toLowerCase() + plural.slice(1)
-}
 
-// e.g. "comments" -> "addComment"
-export function collectionToSetterName(collection: string): string {
-    return `setCollection${capitalize(pluralToSingular(collection))}`
+/**
+ * Generate a random identifier string of the given length (lowercase alpha).
+ */
+export function makeRandomId(length: number): string {
+    let result = '';
+    const characters = 'abcdefghijklmnopqrstuvwxyz';
+    const charactersLength = characters.length;
+    for (let i = 0; i < length; i++) {
+        result += characters.charAt(Math.floor(Math.random() * charactersLength));
+    }
+    return result;
 }
-
 
 export function stringifyObjectLiteral(obj) {
     if(Array.isArray(obj)) {

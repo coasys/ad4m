@@ -2,21 +2,24 @@
 extern crate lazy_static;
 
 pub mod config;
+pub mod email_service;
 pub mod entanglement_service;
 mod globals;
 pub mod graphql;
 pub mod holochain_service;
 pub mod js_core;
+pub mod mcp;
 mod prolog_service;
 pub mod runtime_service;
 mod surreal_service;
+pub mod user_management;
 pub mod utils;
 mod wallet;
 
 pub mod agent;
 pub mod ai_service;
 mod dapp_server;
-mod db;
+pub mod db;
 pub mod init;
 pub mod languages;
 pub mod logging;
@@ -32,18 +35,19 @@ use std::thread::JoinHandle;
 
 use log::{error, info, warn};
 
-use js_core::JsCore;
-
 use crate::{
     agent::AgentService, ai_service::AIService, dapp_server::serve_dapp, db::Ad4mDb,
     languages::LanguageController, prolog_service::init_prolog_service,
-    runtime_service::RuntimeService, surreal_service::init_surreal_service, utils::find_port,
+    runtime_service::RuntimeService, utils::find_port,
 };
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
+#[cfg(unix)]
 use libc::{sigaction, sigemptyset, sighandler_t, SA_ONSTACK, SIGURG};
+#[cfg(unix)]
 use std::ptr;
 
+#[cfg(unix)]
 extern "C" fn handle_sigurg(_: libc::c_int) {
     //println!("Received SIGURG signal, but ignoring it.");
 }
@@ -61,8 +65,120 @@ fn find_and_set_port(config_port: &mut Option<u16>, start_port: u16, service_nam
     }
 }
 
+/// Standalone holochain signal receiver task.
+/// Routes signals from Holochain to per-language runtimes.
+async fn holochain_signal_receiver() {
+    use holochain::prelude::Signal;
+
+    loop {
+        if let Some(holochain_service) = holochain_service::maybe_get_holochain_service().await {
+            let mut stream_receiver = holochain_service.stream_receiver.lock().await;
+            if let Some(signal) = stream_receiver.recv().await {
+                match signal.clone() {
+                    Signal::App {
+                        cell_id,
+                        zome_name,
+                        signal: payload,
+                    } => {
+                        let dna_hash_raw = cell_id.dna_hash().get_raw_39().to_vec();
+                        let agent_pubkey_raw = cell_id.agent_pubkey().get_raw_39().to_vec();
+                        let cell_id_key = format!(
+                            "{}:{}",
+                            dna_hash_raw
+                                .iter()
+                                .map(|b| format!("{:02x}", b))
+                                .collect::<String>(),
+                            agent_pubkey_raw
+                                .iter()
+                                .map(|b| format!("{:02x}", b))
+                                .collect::<String>()
+                        );
+
+                        // Decode the signal payload from msgpack to JSON using rmpv
+                        // for proper Binary type handling
+                        let payload_bytes = payload.into_inner().as_bytes().to_vec();
+                        let payload_str = {
+                            let mut cursor = std::io::Cursor::new(&payload_bytes);
+                            match rmpv::decode::read_value(&mut cursor) {
+                                Ok(msgpack_val) => {
+                                    let json_val = holochain_service::holochain_service_extension::msgpack_value_to_json(msgpack_val);
+                                    serde_json::to_string(&json_val)
+                                        .unwrap_or_else(|_| "null".to_string())
+                                }
+                                Err(e) => {
+                                    log::warn!(
+                                        "Failed to decode signal payload from msgpack: {}",
+                                        e
+                                    );
+                                    format!(
+                                        "{}",
+                                        js_core::ExternWrapper(holochain::prelude::ExternIO::from(
+                                            payload_bytes
+                                        ))
+                                    )
+                                }
+                            }
+                        };
+                        let maybe_lang_address: Option<String> = {
+                            let handlers = js_core::languages_extension::HOLOCHAIN_SIGNAL_HANDLERS
+                                .read()
+                                .await;
+                            handlers.get(&cell_id_key).cloned()
+                        };
+                        if let Some(lang_address) = maybe_lang_address {
+                            // Build the signal argument as a JSON value so no raw
+                            // data is interpolated directly into executable JS.
+                            let payload_json: serde_json::Value =
+                                serde_json::from_str(&payload_str)
+                                    .unwrap_or(serde_json::Value::Null);
+                            let args = serde_json::json!({
+                                "cell_id": [dna_hash_raw, agent_pubkey_raw],
+                                "zome_name": zome_name.to_string(),
+                                "payload": payload_json,
+                            });
+                            let args_json =
+                                serde_json::to_string(&args).unwrap_or_else(|_| "null".to_string());
+                            let signal_script = format!(
+                                "await globalThis.__handleHolochainSignal__({})",
+                                args_json
+                            );
+                            let lang_addr = lang_address.clone();
+                            tokio::spawn(async move {
+                                let controller = languages::LanguageController::global_instance();
+                                if let Err(e) = controller
+                                    .execute_on_language(&lang_addr, &signal_script)
+                                    .await
+                                {
+                                    log::warn!(
+                                        "Failed to route Holochain signal to language {}: {}",
+                                        lang_addr,
+                                        e
+                                    );
+                                }
+                            });
+                        } else {
+                            log::debug!(
+                                "No per-language runtime registered for Holochain signal from cell {}",
+                                cell_id_key
+                            );
+                        }
+                    }
+                    Signal::System(_) => {
+                        info!("Received system signal");
+                    }
+                }
+            } else {
+                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+            }
+        } else {
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    }
+}
+
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
+    #[cfg(unix)]
     unsafe {
         let mut action: sigaction = std::mem::zeroed();
         action.sa_flags = SA_ONSTACK;
@@ -78,6 +194,37 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     // Respects RUST_LOG environment variable if set
     crate::logging::init_cli_logging(None);
     config.prepare();
+
+    // Store config globally so services (e.g. agent mutation resolvers) can access it
+    crate::config::set_global_config(config.clone());
+
+    // Create data directories that were previously created by the JS executor's Config.init().
+    // These must exist before any service tries to write to them.
+    {
+        let app_data_path = config
+            .app_data_path
+            .as_ref()
+            .expect("App data path not set in Ad4mConfig");
+        let base = std::path::Path::new(app_data_path).join("ad4m");
+        let dirs = [
+            base.clone(),
+            base.join("data"),
+            base.join("languages"),
+            base.join("languages").join("temp"),
+            base.join("h"),
+            base.join("h").join("d"),
+            base.join("h").join("c"),
+        ];
+        for dir in &dirs {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                error!("Failed to create data directory {:?}: {}", dir, e);
+                panic!(
+                    "Cannot continue without required data directory {:?}: {}",
+                    dir, e
+                );
+            }
+        }
+    }
 
     aws_lc_rs::default_provider()
         .install_default()
@@ -100,6 +247,15 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     )
     .expect("Failed to initialize Ad4mDb");
 
+    // Set multi-user mode before starting services to avoid race condition
+    if let Some(enable_multi_user) = config.enable_multi_user {
+        if enable_multi_user {
+            info!("Enabling multi-user mode...");
+            Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(true))
+                .expect("Failed to enable multi-user mode");
+        }
+    }
+
     info!("Initializing AI service...");
     AIService::init_global_instance()
         .await
@@ -107,6 +263,29 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     info!("Initializing Agent service...");
     AgentService::init_global_instance(config.app_data_path.clone().unwrap());
+
+    // Load agent data from disk (wallet cipher, DID, etc.) if previously initialized.
+    // On the old JS-based executor this was done by the JS AgentService calling AGENT.load().
+    AgentService::with_mutable_global_instance(|agent_service| {
+        if agent_service.is_initialized() {
+            agent_service.load();
+            info!("Agent loaded from disk");
+        } else {
+            info!("Agent not yet initialized (first run)");
+        }
+    });
+
+    // Spawn background task to clean up expired verification codes every 5 minutes
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+            if let Err(e) = Ad4mDb::with_global_instance(|db| db.cleanup_expired_codes()) {
+                error!("Failed to cleanup expired verification codes: {}", e);
+            } else {
+                info!("Cleaned up expired verification codes");
+            }
+        }
+    });
 
     info!("Initializing Runtime service...");
     RuntimeService::init_global_instance(
@@ -142,23 +321,31 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     info!("Initializing Prolog service...");
     init_prolog_service().await;
 
-    info!("Initializing SurrealDB service...");
-    if let Err(e) = init_surreal_service().await {
-        error!("Failed to initialize SurrealDB service: {}", e);
-        // Don't panic - SurrealDB is optional for now
-        warn!("Continuing without SurrealDB support");
-    }
-
     find_and_set_port(&mut config.gql_port, 4000, "GraphQL");
     find_and_set_port(&mut config.hc_admin_port, 2000, "Holochain admin");
     find_and_set_port(&mut config.hc_app_port, 1337, "Holochain app");
 
-    info!("Starting js_core...");
-    let mut js_core_handle = JsCore::start(config.clone()).await;
-    js_core_handle.initialized().await;
-    info!("js_core initialized.");
+    // Initialize V8 platform for multi-threaded use (must happen before any Deno workers)
+    {
+        use std::sync::Once;
+        static V8_FLAGS_INIT: Once = Once::new();
+        V8_FLAGS_INIT.call_once(|| {
+            deno_core::v8::V8::set_flags_from_string("--no-opt");
+            deno_core::JsRuntime::init_platform(None, false);
+        });
+    }
 
-    LanguageController::init_global_instance(js_core_handle.clone());
+    // Set languages directory based on app data path (must be before LanguageController)
+    crate::utils::set_languages_directory(config.app_data_path.as_ref().unwrap());
+
+    LanguageController::init_global_instance();
+
+    // NOTE: load_system_languages() is called directly from Rust in
+    // agent_generate/agent_unlock mutation resolvers.
+
+    // Set app data path for perspectives module (needed for file-based SurrealDB)
+    perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
+
     perspectives::initialize_from_db();
 
     let app_dir = config
@@ -182,6 +369,34 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         });
     };
 
+    // Start holochain signal receiver as standalone task
+    tokio::spawn(crate::holochain_signal_receiver());
+
+    // Check if MCP mode is enabled — run MCP server alongside GraphQL
+    if config.enable_mcp == Some(true) {
+        info!("Starting MCP server alongside GraphQL...");
+        let admin_credential = config.admin_credential.clone();
+
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .thread_name(String::from("mcp_server"))
+                .enable_all()
+                .build()
+                .unwrap();
+            let mcp_config = mcp::server::McpServerConfig {
+                port: config.mcp_port.unwrap_or(3001),
+                ..Default::default()
+            };
+            if let Err(e) = runtime.block_on(mcp::start_mcp_server(
+                admin_credential,
+                None, // No pre-set auth token
+                mcp_config,
+            )) {
+                error!("MCP server error: {:?}", e);
+            }
+        });
+    }
+
     info!("Starting GraphQL...");
 
     std::thread::spawn(move || {
@@ -190,8 +405,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             .enable_all()
             .build()
             .unwrap();
-        runtime
-            .block_on(graphql::start_server(js_core_handle, config))
-            .unwrap();
+        runtime.block_on(graphql::start_server(config)).unwrap();
     })
 }

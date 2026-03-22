@@ -1,7 +1,7 @@
-import { ChildProcess, exec, ExecException, execSync } from "node:child_process";
+import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions/index.js";
-import { ApolloClient, InMemoryCache } from "@apollo/client/core/index.js";
+import { ApolloClient, gql, InMemoryCache } from "@apollo/client/core/index.js";
 import Websocket from "ws";
 import { createClient } from "graphql-ws";
 import path from "path";
@@ -33,34 +33,113 @@ export async function isProcessRunning(processName: string): Promise<boolean> {
     })
 }
 
-export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bootstrapUrl: string | null, process: ChildProcess}> {
+export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bootstrapUrl: string | null, relayUrl: string | null, process: ChildProcess}> {
     let servicesProcess = exec(`kitsune2-bootstrap-srv`);
 
     let proxyUrl: string | null = null;
     let bootstrapUrl: string | null = null;
+    let relayUrl: string | null = null;
+    let bootstrapPort: string | null = null;
+    let relayPort: string | null = null;
 
     let servicesReady = new Promise<void>((resolve, reject) => {
-        servicesProcess.stdout!.on('data', (data) => {
-            if (data.includes("#kitsune2_bootstrap_srv#listening#")) {
-                const lines = data.split("\n")
+        const SERVICES_READY_TIMEOUT_MS = 60000; // 60 seconds timeout
+        const stdoutBuffer: string[] = [];
+        const stderrBuffer: string[] = [];
+        let timeoutId: NodeJS.Timeout | null = null;
+        let resolved = false;
+
+        const cleanup = () => {
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+                timeoutId = null;
+            }
+            servicesProcess.stdout!.removeListener('data', stdoutHandler);
+            servicesProcess.stderr!.removeListener('data', stderrHandler);
+        };
+
+        const stdoutHandler = (data: Buffer) => {
+            const dataStr = data.toString();
+            stdoutBuffer.push(dataStr);
+            console.log("Bootstrap server output: ", dataStr);
+
+            // Look for the bootstrap server listening message
+            if (dataStr.includes("#kitsune2_bootstrap_srv#listening#")) {
+                const lines = dataStr.split("\n");
                 //@ts-ignore
                 const portLine = lines.find(line => line.includes("#kitsune2_bootstrap_srv#listening#"));
-                const parts = portLine!.split('#');
-                const portPart = parts[3]; // "127.0.0.1:36353"
-                const port = portPart.split(':')[1]; // "36353"
-                console.log("Port: ", port);
-                bootstrapUrl = `http://127.0.0.1:${port}`;
-                proxyUrl = `ws://127.0.0.1:${port}`;
-                console.log("Kitsune2 Bootstrap Server Data: ", data);
-                console.log("Bootstrap URL: ", bootstrapUrl);
-                console.log("Proxy URL: ", proxyUrl);
+                if (portLine) {
+                    const parts = portLine.split('#');
+                    const portPart = parts[3]; // "127.0.0.1:36353"
+                    bootstrapPort = portPart.split(':')[1];
+                    console.log("Bootstrap Port: ", bootstrapPort);
+                    bootstrapUrl = `https://127.0.0.1:${bootstrapPort}`;
+                    proxyUrl = `wss://127.0.0.1:${bootstrapPort}`;
+                    console.log("Bootstrap URL: ", bootstrapUrl);
+                    console.log("Proxy URL: ", proxyUrl);
+                }
+            }
+
+            // Look for the iroh relay server message
+            if (dataStr.includes("Internal iroh relay server started at")) {
+                const match = dataStr.match(/Internal iroh relay server started at ([\d.]+:\d+)/);
+                if (match) {
+                    const address = match[1];
+                    relayPort = address.split(':')[1];
+                    console.log("Iroh Relay Port: ", relayPort);
+                    relayUrl = `http://127.0.0.1:${relayPort}`;
+                    console.log("Relay URL: ", relayUrl);
+                }
+            }
+
+            // Resolve when we have bootstrap port (relay is now internal to bootstrap server)
+            // The new kitsune2-bootstrap-srv (0.4.0+) doesn't output a separate relay port
+            if (bootstrapPort && !resolved) {
+                resolved = true;
+                cleanup();
                 resolve();
             }
-        });
+        };
+
+        const stderrHandler = (data: Buffer) => {
+            const dataStr = data.toString();
+            stderrBuffer.push(dataStr);
+            console.log("Bootstrap server stderr: ", dataStr);
+        };
+
+        servicesProcess.stdout!.on('data', stdoutHandler);
+        servicesProcess.stderr!.on('data', stderrHandler);
+
+        // Set up timeout to prevent hanging forever
+        timeoutId = setTimeout(() => {
+            if (!resolved) {
+                resolved = true;
+                cleanup();
+
+                console.error("=== Services startup timeout ===");
+                console.error(`Timeout after ${SERVICES_READY_TIMEOUT_MS}ms waiting for bootstrap and relay services`);
+                console.error(`Bootstrap port found: ${bootstrapPort ?? 'NO'}`);
+                console.error(`Relay port found: ${relayPort ?? 'NO'}`);
+                console.error("--- Collected stdout ---");
+                console.error(stdoutBuffer.join(''));
+                console.error("--- Collected stderr ---");
+                console.error(stderrBuffer.join(''));
+                console.error("========================");
+
+                // Kill the services process
+                try {
+                    servicesProcess.kill('SIGKILL');
+                } catch (killErr) {
+                    console.error("Error killing services process:", killErr);
+                }
+
+                reject(new Error(`Services startup timeout: bootstrapPort=${bootstrapPort}, relayPort=${relayPort}`));
+            }
+        }, SERVICES_READY_TIMEOUT_MS);
     });
 
     await servicesReady;
-    return {proxyUrl, bootstrapUrl, process: servicesProcess};
+    return {proxyUrl, bootstrapUrl, relayUrl, process: servicesProcess};
 }
 
 export async function startExecutor(dataPath: string,
@@ -72,6 +151,9 @@ export async function startExecutor(dataPath: string,
     adminCredential?: string,
     proxyUrl: string = "wss://dev-test-bootstrap2.holochain.org",
     bootstrapUrl: string = "https://dev-test-bootstrap2.holochain.org",
+    relayUrl?: string,
+    enableMcp: boolean = false,
+    mcpPort?: number,
 ): Promise<ChildProcess> {
     const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
 
@@ -84,27 +166,54 @@ export async function startExecutor(dataPath: string,
     console.log("Starting executor")
 
     console.log("USING LOCAL BOOTSTRAP & PROXY URL: ", bootstrapUrl, proxyUrl);
-
-    const execOptions = {
-        maxBuffer: 100 * 1024 * 1024, // 100MB instead of 1MB
+    if (relayUrl) {
+        console.log("USING RELAY URL: ", relayUrl);
     }
 
-    if (!adminCredential) {
-        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --run-dapp-server false`, execOptions)
-    } else {
-        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${adminCredential} --run-dapp-server false`, execOptions)
-    }
+    // Build args array explicitly so spawn() can run the executor directly
+    // (no shell wrapper). This is critical: exec() spawns `sh -c "..."` and
+    // kill() only kills the shell, leaving the actual executor running.
+    // spawn() runs the binary directly, so kill() / SIGKILL actually reach it.
+    const args = [
+        'run',
+        '--app-data-path', dataPath,
+        '--gql-port', String(gqlPort),
+        '--hc-admin-port', String(hcAdminPort),
+        '--hc-app-port', String(hcAppPort),
+        '--hc-proxy-url', proxyUrl,
+        '--hc-bootstrap-url', bootstrapUrl,
+        '--hc-use-bootstrap', 'true',
+        '--hc-use-proxy', 'true',
+        '--hc-use-local-proxy', 'true',
+        '--hc-use-mdns', 'true',
+        '--language-language-only', String(languageLanguageOnly),
+        '--run-dapp-server', 'false',
+    ];
+    if (relayUrl) { args.push('--hc-relay-url', relayUrl); }
+    if (enableMcp) { args.push('--enable-mcp', 'true'); }
+    if (mcpPort) { args.push('--mcp-port', String(mcpPort)); }
+    if (adminCredential) { args.push('--admin-credential', adminCredential); }
+
+    executorProcess = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let executorReady = new Promise<void>((resolve, reject) => {
-        executorProcess!.stdout!.on('data', (data) => {
-            if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
-                resolve()
+        const waitFor = enableMcp
+            ? [`listening on http://127.0.0.1:${gqlPort}`, 'MCP HTTP server listening']
+            : [`listening on http://127.0.0.1:${gqlPort}`];
+        const found = new Set<string>();
+
+        const checkReady = (data: string) => {
+            for (const marker of waitFor) {
+                if (data.includes(marker)) {
+                    found.add(marker);
+                }
             }
-        });
-        executorProcess!.stderr!.on('data', (data) => {
-            if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
-                resolve()
+            if (found.size === waitFor.length) {
+                resolve();
             }
-        });
+        };
+
+        executorProcess!.stdout!.on('data', (data: any) => checkReady(data.toString()));
+        executorProcess!.stderr!.on('data', (data: any) => checkReady(data.toString()));
     })
 
     executorProcess!.stdout!.on('data', (data) => {
@@ -161,4 +270,97 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
 
 export function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Clears all links in a perspective in a single removeLinks() batch call.
+ * Import from here or from helpers/assertions to get a clean slate before each test.
+ */
+export async function wipePerspective(
+  perspective: import("@coasys/ad4m").PerspectiveProxy,
+): Promise<void> {
+  const { LinkQuery } = await import("@coasys/ad4m");
+  const links = await perspective.get(new LinkQuery({}));
+  if (links.length > 0) {
+    await perspective.removeLinks(links);
+  }
+}
+
+/**
+ * Kill any process listening on the given ports.
+ * Use this in after() hooks as a safety net — even if executorProcess.kill()
+ * works correctly, this ensures nothing lingers on the ports.
+ */
+export function killByPorts(ports: number[]): void {
+    for (const port of ports) {
+        try {
+            execSync(`lsof -ti:${port} | xargs -r kill -9`, { stdio: 'ignore' });
+        } catch (e) {
+            // Port not in use — fine
+        }
+    }
+}
+
+/**
+ * Gracefully shut down an executor via the runtimeQuit GraphQL mutation,
+ * then wait for the process to exit naturally.
+ *
+ * The executor calls std::process::exit(0) immediately on runtimeQuit, so the
+ * WebSocket connection drops mid-call — that's expected, not an error. We wait
+ * for the OS-level 'exit' event to confirm the process is gone. If it doesn't
+ * exit within the timeout we escalate to SIGTERM → SIGKILL → port kill.
+ *
+ * @param executorProcess - The ChildProcess returned by startExecutor()
+ * @param gqlPort         - The GQL port the executor is listening on
+ * @param adminCredential - Optional admin credential (pass if executor was
+ *                          started with --admin-credential)
+ * @param timeoutMs       - How long to wait for natural exit (default 8s)
+ */
+export async function quitExecutor(
+    executorProcess: ChildProcess,
+    gqlPort: number,
+    adminCredential?: string,
+    timeoutMs: number = 8000,
+): Promise<void> {
+    // If already dead, nothing to do
+    if (executorProcess.exitCode !== null || executorProcess.killed) return;
+
+    // Start listening for exit before we send the mutation
+    const exitPromise = new Promise<void>((resolve) => {
+        executorProcess.once('exit', () => resolve());
+        executorProcess.once('close', () => resolve());
+    });
+
+    // Fire the runtimeQuit mutation. The executor calls process::exit(0) which
+    // kills it before it can send a GraphQL response, so we'll get a WebSocket
+    // close error — that's fine, it means the quit worked.
+    try {
+        const client = apolloClient(gqlPort, adminCredential);
+        await Promise.race([
+            client.mutate({ mutation: gql`mutation { runtimeQuit }` }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('runtimeQuit timeout')), 3000)),
+        ]);
+    } catch (_e) {
+        // Expected: either the connection dropped (executor exited) or it timed out.
+        // Either way, fall through and check whether the process actually exited.
+    }
+
+    // Wait for natural exit with timeout
+    const timedOut = await Promise.race([
+        exitPromise.then(() => false),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(true), timeoutMs)),
+    ]);
+
+    if (!timedOut) return; // Clean exit — done
+
+    // Escalate: SIGTERM
+    console.warn(`quitExecutor: executor (port ${gqlPort}) still running after ${timeoutMs}ms, sending SIGTERM`);
+    executorProcess.kill('SIGTERM');
+    await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+
+    if (executorProcess.exitCode !== null || executorProcess.killed) return;
+
+    // Final escalation: SIGKILL
+    console.warn(`quitExecutor: executor (port ${gqlPort}) survived SIGTERM, sending SIGKILL`);
+    executorProcess.kill('SIGKILL');
 }

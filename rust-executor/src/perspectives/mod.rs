@@ -1,8 +1,12 @@
+pub mod migration;
 pub mod perspective_instance;
 pub mod sdna;
-pub mod utils;
+pub mod shacl_parser;
+pub mod shacl_to_prolog;
+pub mod utils; // TODO: Remove this module after all users have migrated to SurrealDB
 use crate::graphql::graphql_types::{
-    LinkQuery, LinkStatus, PerspectiveExpression, PerspectiveHandle, PerspectiveState,
+    LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveExpression, PerspectiveHandle,
+    PerspectiveRemovedWithOwner, PerspectiveState, PerspectiveWithOwner,
 };
 use lazy_static::lazy_static;
 use perspective_instance::PerspectiveInstance;
@@ -12,14 +16,39 @@ use std::sync::RwLock;
 
 use crate::db::Ad4mDb;
 use crate::pubsub::{
-    get_global_pubsub, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_REMOVED_TOPIC,
-    PERSPECTIVE_UPDATED_TOPIC,
+    get_global_pubsub, get_global_pubsub_sync, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC,
+    PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
 };
 use crate::types::{LinkExpression, PerspectiveDiff};
 
 lazy_static! {
     static ref PERSPECTIVES: RwLock<HashMap<String, RwLock<PerspectiveInstance>>> =
         RwLock::new(HashMap::new());
+    static ref APP_DATA_PATH: RwLock<Option<String>> = RwLock::new(None);
+    /// Cache mapping link_language address → PerspectiveHandle for fast signal routing
+    static ref LINK_LANG_TO_PERSPECTIVE_HANDLE: RwLock<HashMap<String, PerspectiveHandle>> =
+        RwLock::new(HashMap::new());
+}
+
+/// Set the application data path for file-based SurrealDB storage
+///
+/// This must be called before creating perspectives to enable file-based storage.
+/// Each perspective will create its own SurrealDB database in `{app_data_path}/surrealdb_perspectives/{uuid}/`
+///
+/// # Arguments
+/// * `path` - The base application data directory path
+pub fn set_app_data_path(path: String) {
+    let mut data_path = APP_DATA_PATH.write().unwrap();
+    *data_path = Some(path);
+}
+
+/// Get the configured application data path
+///
+/// # Returns
+/// * `Some(String)` - The configured app data path if set
+/// * `None` - No app data path configured (will use in-memory storage)
+fn get_app_data_path() -> Option<String> {
+    APP_DATA_PATH.read().unwrap().clone()
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -41,34 +70,78 @@ pub fn initialize_from_db() {
     for handle in handles {
         let handle_clone = handle.clone();
 
+        // Check if perspective already exists (initial quick check)
+        {
+            let perspectives = PERSPECTIVES.read().unwrap();
+            if perspectives.contains_key(&handle_clone.uuid) {
+                log::debug!(
+                    "Perspective {} already initialized, skipping",
+                    handle_clone.uuid
+                );
+                continue;
+            }
+        }
+
         // Spawn async task to create service and initialize perspective
         tokio::spawn(async move {
-            // Create a per-perspective SurrealDB instance
-            let surreal_service =
-                crate::surreal_service::SurrealDBService::new("ad4m", &handle_clone.uuid)
-                    .await
-                    .expect("Failed to create SurrealDB service for perspective");
-
-            let p = PerspectiveInstance::new(handle_clone.clone(), None, surreal_service);
-
-            // Store the perspective
+            // Create a per-perspective SurrealDB instance with file-based storage
+            let data_path = get_app_data_path();
+            let surreal_service = match crate::surreal_service::SurrealDBService::new(
+                "ad4m",
+                &handle_clone.uuid,
+                data_path.as_deref(),
+            )
+            .await
             {
-                let mut perspectives = PERSPECTIVES.write().unwrap();
-                perspectives.insert(handle_clone.uuid.clone(), RwLock::new(p.clone()));
-            }
+                Ok(service) => service,
+                Err(e) => {
+                    log::error!(
+                        "Failed to create SurrealDB service for perspective {}: {}, skipping initialization",
+                        handle_clone.uuid,
+                        e
+                    );
+                    return;
+                }
+            };
 
-            // Sync existing links to SurrealDB before starting background tasks
-            // This must complete before background tasks start to avoid race conditions
-            if let Err(e) = p.sync_existing_links_to_surreal().await {
-                log::warn!(
-                    "Failed to sync existing links to SurrealDB for perspective {}: {:?}",
+            // Migrate links from Rusqlite to SurrealDB (one-time migration)
+            // TODO: Remove this migration call after all users have migrated
+            if let Err(e) = migration::migrate_links_from_rusqlite_to_surrealdb(
+                &handle_clone.uuid,
+                &surreal_service,
+            )
+            .await
+            {
+                log::error!(
+                    "Failed to migrate links for perspective {}: {}, skipping initialization",
                     handle_clone.uuid,
                     e
                 );
+                return;
             }
 
-            // Only start background tasks after sync completes
-            tokio::spawn(p.start_background_tasks());
+            let p = PerspectiveInstance::new(handle_clone.clone(), None, surreal_service);
+
+            // Atomically check-and-insert to prevent race condition
+            // (In case multiple initializations were spawned before any completed)
+            let should_start_tasks = {
+                let mut perspectives = PERSPECTIVES.write().unwrap();
+                if perspectives.contains_key(&handle_clone.uuid) {
+                    log::warn!(
+                        "Perspective {} was initialized by another task, discarding duplicate",
+                        handle_clone.uuid
+                    );
+                    false
+                } else {
+                    perspectives.insert(handle_clone.uuid.clone(), RwLock::new(p.clone()));
+                    true
+                }
+            };
+
+            if should_start_tasks {
+                // Start background tasks (no sync needed - SurrealDB is file-based and persistent)
+                tokio::spawn(p.start_background_tasks());
+            }
         });
     }
 }
@@ -92,10 +165,28 @@ pub async fn add_perspective(
         .add_perspective(&handle)
         .map_err(|e| e.to_string())?;
 
-    // Create a per-perspective SurrealDB instance
-    let surreal_service = crate::surreal_service::SurrealDBService::new("ad4m", &handle.uuid)
+    // Create a per-perspective SurrealDB instance with file-based storage
+    let data_path = get_app_data_path();
+    let surreal_service =
+        crate::surreal_service::SurrealDBService::new("ad4m", &handle.uuid, data_path.as_deref())
+            .await
+            .map_err(|e| {
+                format!(
+                    "Failed to create SurrealDB service for perspective {}: {}",
+                    handle.uuid, e
+                )
+            })?;
+
+    // Migrate links from Rusqlite to SurrealDB (one-time migration)
+    // TODO: Remove this migration call after all users have migrated
+    migration::migrate_links_from_rusqlite_to_surrealdb(&handle.uuid, &surreal_service)
         .await
-        .expect("Failed to create SurrealDB service for perspective");
+        .map_err(|e| {
+            format!(
+                "Failed to migrate links for perspective {}: {}",
+                handle.uuid, e
+            )
+        })?;
 
     let p = PerspectiveInstance::new(handle.clone(), created_from_join, surreal_service);
     tokio::spawn(p.clone().start_background_tasks());
@@ -105,13 +196,37 @@ pub async fn add_perspective(
         perspectives.insert(handle.uuid.clone(), RwLock::new(p));
     }
 
-    get_global_pubsub()
-        .await
-        .publish(
-            &PERSPECTIVE_ADDED_TOPIC,
-            &serde_json::to_string(&handle).unwrap(),
-        )
-        .await;
+    // Publish one event per owner so each user gets their own notification
+    let pubsub = get_global_pubsub().await;
+    let owners_list = handle.owners.as_ref().filter(|o| !o.is_empty());
+
+    if let Some(owners) = owners_list {
+        for owner in owners {
+            let perspective_with_owner = PerspectiveWithOwner {
+                perspective: handle.clone(),
+                owner: owner.clone(),
+            };
+            pubsub
+                .publish(
+                    &PERSPECTIVE_ADDED_TOPIC,
+                    &serde_json::to_string(&perspective_with_owner).unwrap(),
+                )
+                .await;
+        }
+    } else {
+        // For perspectives without explicit owners (main agent), publish with main agent DID
+        let main_agent_did = crate::agent::did();
+        let perspective_with_owner = PerspectiveWithOwner {
+            perspective: handle.clone(),
+            owner: main_agent_did,
+        };
+        pubsub
+            .publish(
+                &PERSPECTIVE_ADDED_TOPIC,
+                &serde_json::to_string(&perspective_with_owner).unwrap(),
+            )
+            .await;
+    }
     Ok(())
 }
 
@@ -160,15 +275,48 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
         Ad4mDb::with_global_instance(|db| {
             db.update_perspective(handle).map_err(|e| e.to_string())
         })?;
+
+        // Update the signal routing cache if this perspective has a link language.
+        // Without this, the cached PerspectiveHandle retains a stale owners list,
+        // causing signals (especially broadcasts) to not be delivered to owners
+        // added after the cache was first populated (e.g. managed users joining
+        // an existing neighbourhood).
+        if let Some(nh) = &handle.neighbourhood {
+            register_link_language_perspective(nh.data.link_language.clone(), handle.clone());
+        }
     }
 
-    get_global_pubsub()
-        .await
-        .publish(
-            &PERSPECTIVE_UPDATED_TOPIC,
-            &serde_json::to_string(&handle).unwrap(),
-        )
-        .await;
+    // Publish one event per owner so each user gets their own notification
+    let pubsub = get_global_pubsub().await;
+    let owners_list = handle.owners.as_ref().filter(|o| !o.is_empty());
+
+    if let Some(owners) = owners_list {
+        for owner in owners {
+            let perspective_with_owner = PerspectiveWithOwner {
+                perspective: handle.clone(),
+                owner: owner.clone(),
+            };
+            pubsub
+                .publish(
+                    &PERSPECTIVE_UPDATED_TOPIC,
+                    &serde_json::to_string(&perspective_with_owner).unwrap(),
+                )
+                .await;
+        }
+    } else {
+        // For perspectives without explicit owners (main agent), publish with main agent DID
+        let main_agent_did = crate::agent::did();
+        let perspective_with_owner = PerspectiveWithOwner {
+            perspective: handle.clone(),
+            owner: main_agent_did,
+        };
+        pubsub
+            .publish(
+                &PERSPECTIVE_UPDATED_TOPIC,
+                &serde_json::to_string(&perspective_with_owner).unwrap(),
+            )
+            .await;
+    }
     Ok(())
 }
 
@@ -192,12 +340,43 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
 
     if let Some(ref instance) = removed_instance {
         instance.teardown_background_tasks().await;
+
+        // Clean up RocksDB directory for this perspective
+        if let Some(data_path) = get_app_data_path() {
+            let db_path =
+                std::path::Path::new(&data_path).join(format!("surrealdb_perspectives/{}", uuid));
+            if db_path.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&db_path) {
+                    log::warn!(
+                        "Failed to remove SurrealDB directory for perspective {}: {}",
+                        uuid,
+                        e
+                    );
+                } else {
+                    log::debug!("Cleaned up SurrealDB directory for perspective {}", uuid);
+                }
+            }
+        }
+
+        // Publish one removal event per owner so each user gets their own notification
+        let handle = instance.persisted.lock().await.clone();
+        let pubsub = get_global_pubsub().await;
+        if let Some(owners) = &handle.owners {
+            for owner in owners {
+                let removed_with_owner = PerspectiveRemovedWithOwner {
+                    uuid: uuid.to_string(),
+                    owner: owner.clone(),
+                };
+                pubsub
+                    .publish(
+                        &PERSPECTIVE_REMOVED_TOPIC,
+                        &serde_json::to_string(&removed_with_owner).unwrap(),
+                    )
+                    .await;
+            }
+        }
     }
 
-    get_global_pubsub()
-        .await
-        .publish(&PERSPECTIVE_REMOVED_TOPIC, &String::from(uuid))
-        .await;
     removed_instance
 }
 
@@ -208,7 +387,32 @@ pub fn handle_perspective_diff_from_link_language(diff: PerspectiveDiff, languag
     ));
 }
 
+/// Register a mapping from link_language address to PerspectiveHandle for fast signal routing
+pub fn register_link_language_perspective(language_address: String, handle: PerspectiveHandle) {
+    LINK_LANG_TO_PERSPECTIVE_HANDLE
+        .write()
+        .unwrap()
+        .insert(language_address, handle);
+}
+
+/// Look up PerspectiveHandle by link language address from cache
+fn cached_perspective_handle(language_address: &str) -> Option<PerspectiveHandle> {
+    LINK_LANG_TO_PERSPECTIVE_HANDLE
+        .read()
+        .unwrap()
+        .get(language_address)
+        .cloned()
+}
+
 async fn perspective_by_link_language(language_address: String) -> Option<PerspectiveInstance> {
+    // Fast path: check cache first
+    if let Some(handle) = cached_perspective_handle(&language_address) {
+        if let Some(perspective) = get_perspective(&handle.uuid) {
+            return Some(perspective);
+        }
+    }
+
+    // Slow path: iterate all perspectives (and populate cache)
     let perspectives = PERSPECTIVES
         .read()
         .unwrap()
@@ -218,8 +422,10 @@ async fn perspective_by_link_language(language_address: String) -> Option<Perspe
     for perspective in perspectives.into_iter() {
         let handle = perspective.persisted.lock().await.clone();
 
-        if let Some(nh) = handle.neighbourhood {
+        if let Some(nh) = &handle.neighbourhood {
             if nh.data.link_language == language_address {
+                // Populate cache for future lookups
+                register_link_language_perspective(language_address, handle);
                 return Some(perspective);
             }
         }
@@ -232,7 +438,13 @@ pub async fn handle_perspective_diff_from_link_language_impl(
     language_address: String,
 ) {
     if let Some(perspective) = perspective_by_link_language(language_address.clone()).await {
-        perspective.diff_from_link_language(diff).await;
+        if let Err(e) = perspective.diff_from_link_language(diff).await {
+            log::error!(
+                "Failed to persist diff from link language ({}): {:?}",
+                language_address,
+                e
+            );
+        }
     }
 }
 
@@ -259,22 +471,128 @@ pub async fn handle_sync_state_changed_from_link_language_impl(
 }
 
 pub fn handle_telepresence_signal_from_link_language(
-    signal: PerspectiveExpression,
+    mut signal: PerspectiveExpression,
     language_address: String,
+    recipient_did: Option<String>,
 ) {
-    tokio::spawn(handle_telepresence_signal_from_link_language_impl(
-        signal,
-        language_address,
-    ));
+    // Fast path: if we have a cached PerspectiveHandle, publish directly to PubSub
+    // without going through the expensive perspective_by_link_language async lookup.
+    // Uses synchronous publish to avoid Tokio task scheduling contention that can
+    // delay spawned tasks by seconds when the executor is busy with Deno operations.
+    if let Some(handle) = cached_perspective_handle(&language_address) {
+        signal.verify_signatures();
+        publish_telepresence_signal_sync(handle, signal, recipient_did);
+    } else {
+        // Slow path: need to look up perspective by language address
+        tokio::spawn(handle_telepresence_signal_from_link_language_impl(
+            signal,
+            language_address,
+            recipient_did,
+        ));
+    }
+}
+
+/// Publish a telepresence signal to PubSub for delivery to GraphQL subscribers
+pub(crate) async fn publish_telepresence_signal(
+    handle: PerspectiveHandle,
+    signal: PerspectiveExpression,
+    recipient_did: Option<String>,
+) {
+    if let Some(recipient) = recipient_did {
+        get_global_pubsub()
+            .await
+            .publish(
+                &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                &serde_json::to_string(&NeighbourhoodSignalFilter {
+                    perspective: handle,
+                    signal,
+                    recipient: Some(recipient),
+                })
+                .unwrap(),
+            )
+            .await;
+    } else if let Some(owners) = handle.owners.as_ref().filter(|o| !o.is_empty()) {
+        for owner_did in owners {
+            get_global_pubsub()
+                .await
+                .publish(
+                    &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                    &serde_json::to_string(&NeighbourhoodSignalFilter {
+                        perspective: handle.clone(),
+                        signal: signal.clone(),
+                        recipient: Some(owner_did.clone()),
+                    })
+                    .unwrap(),
+                )
+                .await;
+        }
+    } else {
+        get_global_pubsub()
+            .await
+            .publish(
+                &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                &serde_json::to_string(&NeighbourhoodSignalFilter {
+                    perspective: handle,
+                    signal,
+                    recipient: None,
+                })
+                .unwrap(),
+            )
+            .await;
+    }
+}
+
+/// Synchronous version of publish_telepresence_signal for use in Deno op context
+/// where tokio::spawn tasks get delayed by Tokio scheduler contention.
+fn publish_telepresence_signal_sync(
+    handle: PerspectiveHandle,
+    signal: PerspectiveExpression,
+    recipient_did: Option<String>,
+) {
+    let pubsub = get_global_pubsub_sync();
+    if let Some(recipient) = recipient_did {
+        pubsub.publish_sync(
+            &NEIGHBOURHOOD_SIGNAL_TOPIC,
+            &serde_json::to_string(&NeighbourhoodSignalFilter {
+                perspective: handle,
+                signal,
+                recipient: Some(recipient),
+            })
+            .unwrap(),
+        );
+    } else if let Some(owners) = &handle.owners {
+        for owner_did in owners {
+            pubsub.publish_sync(
+                &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                &serde_json::to_string(&NeighbourhoodSignalFilter {
+                    perspective: handle.clone(),
+                    signal: signal.clone(),
+                    recipient: Some(owner_did.clone()),
+                })
+                .unwrap(),
+            );
+        }
+    } else {
+        pubsub.publish_sync(
+            &NEIGHBOURHOOD_SIGNAL_TOPIC,
+            &serde_json::to_string(&NeighbourhoodSignalFilter {
+                perspective: handle,
+                signal,
+                recipient: None,
+            })
+            .unwrap(),
+        );
+    }
 }
 
 pub async fn handle_telepresence_signal_from_link_language_impl(
     signal: PerspectiveExpression,
     language_address: String,
+    recipient_did: Option<String>,
 ) {
     if let Some(perspective) = perspective_by_link_language(language_address.clone()).await {
         perspective
-            .telepresence_signal_from_link_language(signal)
+            .telepresence_signal_from_link_language(signal, recipient_did)
             .await;
     }
 }
@@ -309,11 +627,29 @@ pub async fn import_perspective(
             .map_err(|e| format!("Failed to create perspective: {}", e))?;
     }
 
-    // Add all links directly to DB to preserve original authorship
-    Ad4mDb::with_global_instance(|db| {
-        db.add_many_links(&instance.handle.uuid, instance.links, &LinkStatus::Local)
-            .map_err(|e| e.to_string())
-    })?;
+    // Add all links directly to SurrealDB to preserve original authorship
+    let perspective = get_perspective(&instance.handle.uuid)
+        .ok_or_else(|| "Perspective not found after creation".to_string())?;
+
+    let decorated_links: Vec<crate::types::DecoratedLinkExpression> = instance
+        .links
+        .into_iter()
+        .map(|link| {
+            let status = link.status.clone().unwrap_or(LinkStatus::Local);
+            crate::types::DecoratedLinkExpression::from((link, status))
+        })
+        .collect();
+
+    let diff = crate::graphql::graphql_types::DecoratedPerspectiveDiff {
+        additions: decorated_links,
+        removals: vec![],
+    };
+
+    // Write to SurrealDB
+    perspective
+        .persist_link_diff(&diff)
+        .await
+        .map_err(|e| format!("Failed to persist link diff to SurrealDB: {}", e))?;
 
     Ok(instance.handle)
 }
@@ -483,6 +819,8 @@ mod tests {
 
         remove_perspective(&handle.uuid).await;
     }
+
+    // Migration tests have been moved to src/perspectives/migration.rs
 
     // Additional tests for other functions can be added here
 }

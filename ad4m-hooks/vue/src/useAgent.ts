@@ -1,6 +1,5 @@
 import { computed, ref, shallowRef, watch } from "vue";
-import { Agent, LinkExpression } from "@coasys/ad4m";
-import { AgentClient } from "@coasys/ad4m";
+import { Agent, LinkExpression, AgentClient } from "@coasys/ad4m";
 
 
 

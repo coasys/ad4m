@@ -8,10 +8,13 @@ import {
   AuthInfoInput,
   EntanglementProof,
   EntanglementProofInput,
+  UserCreationResult,
 } from "./Agent";
+import { HostingUserInfo, PaymentRequestResult } from "../runtime/RuntimeResolver";
 import { AgentStatus } from "./AgentStatus";
 import { LinkMutations } from "../links/Links";
 import { PerspectiveClient } from "../perspectives/PerspectiveClient";
+import { VerificationRequestResult } from "../runtime/RuntimeResolver";
 
 const AGENT_SUBITEMS = `
     did
@@ -527,5 +530,107 @@ export class AgentClient {
       })
     );
     return agentSignMessage;
+  }
+
+  // Multi-user methods
+  async createUser(email: string, password: string, appInfo?: AuthInfoInput): Promise<UserCreationResult> {
+    const { runtimeCreateUser } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation runtimeCreateUser($email: String!, $password: String!, $appInfo: AuthInfoInput) {
+          runtimeCreateUser(email: $email, password: $password, appInfo: $appInfo) {
+            did
+            success
+            error
+          }
+        }`,
+        variables: { email, password, appInfo },
+      })
+    );
+    return runtimeCreateUser;
+  }
+
+  async loginUser(email: string, password: string): Promise<string> {
+    const { runtimeLoginUser } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation runtimeLoginUser($email: String!, $password: String!) {
+          runtimeLoginUser(email: $email, password: $password)
+        }`,
+        variables: { email, password },
+      })
+    );
+    return runtimeLoginUser;
+  }
+
+  async requestLoginVerification(email: string, appInfo?: AuthInfoInput): Promise<VerificationRequestResult> {
+    const { runtimeRequestLoginVerification } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation runtimeRequestLoginVerification($email: String!, $appInfo: AuthInfoInput) {
+          runtimeRequestLoginVerification(email: $email, appInfo: $appInfo) {
+            success
+            message
+            requiresPassword
+            isExistingUser
+          }
+        }`,
+        variables: { email, appInfo },
+      })
+    );
+    return runtimeRequestLoginVerification;
+  }
+
+  async verifyEmailCode(email: string, code: string, verificationType: string): Promise<string> {
+    const { runtimeVerifyEmailCode } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation runtimeVerifyEmailCode($email: String!, $code: String!, $verificationType: String!) {
+          runtimeVerifyEmailCode(email: $email, code: $code, verificationType: $verificationType)
+        }`,
+        variables: { email, code, verificationType },
+      })
+    );
+    return runtimeVerifyEmailCode;
+  }
+
+  // Hosting methods
+
+  async hostingUserInfo(): Promise<HostingUserInfo> {
+    const { runtimeHostingUserInfo } = unwrapApolloResult(
+      await this.#apolloClient.query({
+        query: gql`query runtimeHostingUserInfo {
+          runtimeHostingUserInfo {
+            email
+            remainingCredits
+            hotWalletAddress
+          }
+        }`,
+      })
+    );
+    return runtimeHostingUserInfo;
+  }
+
+  async setHotWalletAddress(address: string): Promise<boolean> {
+    const { runtimeSetHotWalletAddress } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation runtimeSetHotWalletAddress($address: String!) {
+          runtimeSetHotWalletAddress(address: $address)
+        }`,
+        variables: { address },
+      })
+    );
+    return runtimeSetHotWalletAddress;
+  }
+
+  async requestPayment(amountHOT: string): Promise<PaymentRequestResult> {
+    const { runtimeRequestPayment } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation runtimeRequestPayment($amountHOT: String!) {
+          runtimeRequestPayment(amountHOT: $amountHOT) {
+            success
+            message
+          }
+        }`,
+        variables: { amountHOT },
+      })
+    );
+    return runtimeRequestPayment;
   }
 }

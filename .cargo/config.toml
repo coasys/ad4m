@@ -1,0 +1,41 @@
+# Cargo project configuration for coasys/ad4m
+# This file applies to all `cargo` invocations in this workspace,
+# including local developer builds — not just CI.
+
+[env]
+# Use pre-built rusty_v8 static libraries from our coasys fork releases
+# instead of building V8 from source (which takes 2-3 hours).
+# Anyone cloning this repo gets the right binaries automatically.
+RUSTY_V8_MIRROR = "https://github.com/coasys/rusty_v8/releases/download"
+
+# aws-lc-sys: use pre-built NASM .obj files on Windows instead of running NASM.
+# cmake's FindNASM silently fails on GitHub Actions Windows runners,
+# so prebuilt objects are the only reliable approach.
+# Set here (not in CI env vars) because turborepo strips env vars.
+AWS_LC_SYS_PREBUILT_NASM = "1"
+
+# Force cmake builder path for aws-lc-sys. Without this, aws-lc-sys tries
+# the cc_builder first (which fails for MSVC targets), then falls through to
+# cmake. Explicit CMAKE_BUILDER=1 ensures the cmake path is taken directly.
+AWS_LC_SYS_CMAKE_BUILDER = "1"
+
+# CUDA compute capability for candle-kernels (A100 = sm_80).
+# Without this, bindgen_cuda panics when nvidia-smi isn't available.
+CUDA_COMPUTE_CAP = "80"
+
+[net]
+# Use system git instead of cargo's built-in libgit2.
+# Required because coasys/deno.git has heavy chromium submodules
+# (wpt, buildtools, abseil-cpp from chromium.googlesource.com) that
+# libgit2 auto-fetches but are not needed for building.
+git-fetch-with-cli = true
+
+# macOS ARM64: use ld_classic linker to generate branch island stubs.
+# The binary exceeds ARM64's ±128MB B/BL limit (V8 + ONNX = ~140MB).
+# -fuse-ld= with explicit binary path because -ld_classic flag is
+# silently ignored on some Xcode/ld-prime versions.
+# CI must select Xcode 15.4 (has ld-classic binary).
+[target.aarch64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-fuse-ld=/Applications/Xcode_15.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld-classic",
+]
