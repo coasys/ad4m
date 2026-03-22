@@ -43,7 +43,7 @@ export default class Ad4mConnect extends EventTarget {
   
     this.options = options;
     this.port = options.port || parseInt(getLocal("ad4m-port")) || DEFAULT_PORT
-    this.url = options.url || getLocal("ad4m-url") || `ws://localhost:${this.port}/graphql`;
+    this.url = options.url || getLocal("ad4m-url") || `http://localhost:${this.port}`;
     this.token = getLocal("ad4m-token") || '';
     this.embedded = isEmbedded();
     this.hostIndexUrl = options.hostIndexUrl || DEFAULT_INDEX_URL;
@@ -333,7 +333,7 @@ export default class Ad4mConnect extends EventTarget {
           // Set connection details from parent (after successful validation)
           this.port = parsedPort;
           this.token = normalizedToken;
-          this.url = `ws://localhost:${parsedPort}/graphql`;
+          this.url = `http://localhost:${parsedPort}`;
           
           // Store in localStorage for persistence (avoid storing undefined or stale credentials)
           setLocal('ad4m-port', parsedPort.toString());

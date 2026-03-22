@@ -279,7 +279,7 @@ export class Ad4mConnectElement extends LitElement {
 
   private async connectLocalNode() {
     // Update URL to local and persist
-    this.core.url = `ws://localhost:${this.core.port}/graphql`;
+    this.core.url = `http://localhost:${this.core.port}`;
     setLocal("ad4m-url", this.core.url);
     
     try {
