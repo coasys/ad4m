@@ -3,13 +3,13 @@
 //! 19 harmonised endpoints covering agent info, auth, trust, entanglement, and profile.
 
 use axum::{extract::{Path, State}, Json};
-use coasys_juniper::{FieldError, Value};
 
 use crate::agent::capabilities::*;
-use crate::agent::{AgentService, did_document_for_context, signatures, AgentContext};
+use crate::agent::{AgentService, did_document_for_context, AgentContext, AgentSignature as InternalAgentSignature};
 use crate::entanglement_service::{
     add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs, sign_device_key,
 };
+use crate::languages::LanguageController;
 use crate::types::*;
 use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC};
 
@@ -26,6 +26,7 @@ pub async fn get_agent(
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
+    // Multi-user mode: extract user DID from JWT token if present
     if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
         let agent_data = AgentService::get_user_agent_data(&user_email)
             .map_err(|e| ApiError::Internal(format!("User agent not available: {}", e)))?;
@@ -43,6 +44,7 @@ pub async fn get_agent(
         return Ok(Json(agent));
     }
 
+    // Fallback to main agent for admin/legacy mode
     let agent = AgentService::with_global_instance(|agent_service| {
         let mut agent = agent_service
             .agent
@@ -66,10 +68,7 @@ pub async fn get_apps(
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let apps = AgentService::with_global_instance(|agent_service| {
-        Ok::<Vec<Apps>, ApiError>(agent_service.get_apps())
-    })?;
-    Ok(Json(apps))
+    Ok(Json(apps_map::get_apps()))
 }
 
 /// GET /agent/by-did/:did — get agent by DID
@@ -77,17 +76,63 @@ pub async fn get_agent_by_did(
     State(_state): State<AppState>,
     auth: AuthContext,
     Path(did): Path<String>,
-) -> Result<Json<Agent>, ApiError> {
+) -> Result<Json<Option<Agent>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let agent = AgentService::with_global_instance(|agent_service| {
-        agent_service
-            .agent_by_did(&did)
-            .ok_or_else(|| ApiError::NotFound(format!("Agent with DID {} not found", did)))
-    })?;
-    Ok(Json(agent))
+    // Check if DID matches main agent
+    let did_match = {
+        let agent_instance = AgentService::global_instance();
+        let agent_service = agent_instance.lock().expect("agent lock");
+        let agent_ref = agent_service.as_ref().expect("agent instance");
+        match &agent_ref.did {
+            Some(existing) => &did == existing,
+            None => false,
+        }
+    };
+
+    if !did_match {
+        // Look up the agent expression via the agent language
+        let controller = LanguageController::global_instance();
+        let agent_lang = controller.get_agent_language().await;
+        if let Ok(lang) = agent_lang {
+            let lang_address = lang.address().to_string();
+            match controller.get_expression(&lang_address, &did).await {
+                Ok(Some(expr_json)) => {
+                    let agent: Option<Agent> = serde_json::from_value(
+                        expr_json
+                            .get("data")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                    )
+                    .ok();
+                    let agent = agent.map(|mut a| {
+                        if a.perspective.is_some() {
+                            a.perspective.as_mut().unwrap().verify_link_signatures();
+                        }
+                        a
+                    });
+                    Ok(Json(agent))
+                }
+                Ok(None) => Ok(Json(None)),
+                Err(e) => {
+                    log::warn!("agentByDID: failed to get expression for {}: {}", did, e);
+                    Err(ApiError::Internal(format!(
+                        "agentByDID: failed to get expression for {}: {}",
+                        did, e
+                    )))
+                }
+            }
+        } else {
+            Ok(Json(None))
+        }
+    } else {
+        let agent = AgentService::with_global_instance(|agent_service| {
+            agent_service.agent.clone()
+        });
+        Ok(Json(agent))
+    }
 }
 
 /// PATCH /agent/profile — update DM language and/or public perspective
@@ -101,14 +146,76 @@ pub async fn update_profile(
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
     // If dm_language provided, update it
-    if let Some(_dm_lang) = &body.dm_language {
-        // Delegate to the existing mutation logic via the RequestContext
-        // This calls into AgentService to update the DM language
+    if let Some(dm_lang) = body.dm_language {
+        AgentService::with_mutable_global_instance(|agent_service| {
+            if let Some(ref mut agent) = agent_service.agent {
+                agent.direct_message_language = Some(dm_lang.clone());
+                if let Some(ref passphrase) = agent_service.passphrase {
+                    agent_service.save(passphrase.clone());
+                }
+            }
+        });
+
+        // Publish updated agent to agent language
+        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
+            log::warn!("Failed to publish agent expression after DM language update: {}", e);
+        }
     }
 
     // If public_perspective provided, update it
-    if let Some(_pub_persp) = &body.public_perspective {
-        // Delegate to existing mutation logic
+    if let Some(pub_persp) = body.public_perspective {
+        // For multi-user mode
+        if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
+            let agent_data = AgentService::get_user_agent_data(&user_email)
+                .map_err(|e| ApiError::Internal(format!("User agent not available: {}", e)))?;
+
+            let decorated_links: Vec<DecoratedLinkExpression> = pub_persp
+                .links
+                .iter()
+                .map(|link_input| DecoratedLinkExpression::try_from(link_input.clone()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+            let agent = Agent {
+                did: agent_data.did,
+                direct_message_language: None,
+                perspective: Some(Perspective { links: decorated_links }),
+            };
+
+            AgentService::with_global_instance(|agent_service| {
+                agent_service.store_user_agent_profile(&user_email, &agent)
+            })
+            .map_err(|e| ApiError::Internal(format!("Failed to store user profile: {}", e)))?;
+
+            if let Err(e) = AgentService::publish_agent_to_language(
+                &AgentContext::for_user_email(user_email),
+            ).await {
+                log::warn!("Failed to publish updated user profile to agent language: {}", e);
+            }
+
+            return Ok(Json(agent));
+        } else {
+            // Main agent path
+            let decorated_links: Vec<DecoratedLinkExpression> = pub_persp
+                .links
+                .iter()
+                .map(|link_input| DecoratedLinkExpression::try_from(link_input.clone()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+            AgentService::with_mutable_global_instance(|agent_service| {
+                if let Some(ref mut agent) = agent_service.agent {
+                    agent.perspective = Some(Perspective { links: decorated_links });
+                    if let Some(ref passphrase) = agent_service.passphrase {
+                        agent_service.save(passphrase.clone());
+                    }
+                }
+            });
+
+            if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
+                log::warn!("Failed to publish agent expression after profile update: {}", e);
+            }
+        }
     }
 
     // Return updated agent
@@ -118,6 +225,16 @@ pub async fn update_profile(
             .clone()
             .ok_or_else(|| ApiError::NotFound("Agent not found".into()))
     })?;
+
+    // Notify subscribers
+    get_global_pubsub()
+        .await
+        .publish(
+            &AGENT_UPDATED_TOPIC,
+            &serde_json::to_string(&agent).unwrap(),
+        )
+        .await;
+
     Ok(Json(agent))
 }
 
@@ -131,35 +248,90 @@ pub async fn generate_agent(
     check_capability(&context.capabilities, &AGENT_CREATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let status = AgentService::with_global_instance(|agent_service| {
-        agent_service.create_new_keys()
-    })
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut agent = AgentService::with_mutable_global_instance(|agent_service| {
+        agent_service.create_new_keys();
 
-    AgentService::with_global_instance(|agent_service| {
-        agent_service.save(&body.passphrase)
-    })
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+        // Set the direct message language from bootstrap seed
+        let dm_language =
+            crate::runtime_service::RuntimeService::with_global_instance(|rt| rt.get_direct_message_language());
+        if let Some(ref mut agent) = agent_service.agent {
+            agent.direct_message_language = Some(dm_language);
+        }
 
-    Ok(Json(status))
+        agent_service.save(body.passphrase.clone());
+        agent_service.passphrase = Some(body.passphrase.clone());
+
+        agent_service.dump().clone()
+    });
+
+    // Start Holochain conductor
+    let config = crate::config::get_global_config();
+    let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
+        &config,
+        body.passphrase.clone(),
+    );
+
+    let mut init_errors: Vec<String> = Vec::new();
+
+    if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
+        log::error!("Error initializing Holochain: {:?}", e);
+        init_errors.push(format!("Holochain init failed: {}", e));
+    } else {
+        log::info!("Holochain init complete");
+    }
+
+    // Load system languages
+    let language_language_only = config.language_language_only.unwrap_or(false);
+    let controller = LanguageController::global_instance();
+    if let Err(e) = controller.load_system_languages(language_language_only).await {
+        log::error!("Error loading system languages: {:?}", e);
+        init_errors.push(format!("Failed to load system languages: {}", e));
+    } else {
+        log::info!("System languages loaded");
+    }
+
+    // Publish agent expression
+    if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
+        log::warn!("Error publishing agent expression: {}", e);
+    }
+
+    if !init_errors.is_empty() {
+        agent.error = Some(init_errors.join("; "));
+    }
+
+    get_global_pubsub()
+        .await
+        .publish(
+            &AGENT_STATUS_CHANGED_TOPIC,
+            &serde_json::to_string(&agent).unwrap(),
+        )
+        .await;
+
+    log::info!("AD4M init complete");
+    Ok(Json(agent))
 }
 
 /// POST /agent/lock — lock agent
 pub async fn lock_agent(
     State(_state): State<AppState>,
-    auth: AuthContext,
+    _auth: AuthContext,
     Json(body): Json<LockAgentRequest>,
 ) -> Result<Json<AgentStatus>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    // GraphQL resolver has no capability check for lock
+    let agent = AgentService::with_mutable_global_instance(|agent_service| {
+        agent_service.lock(body.passphrase.clone());
+        agent_service.dump().clone()
+    });
 
-    let status = AgentService::with_global_instance(|agent_service| {
-        agent_service.lock(&body.passphrase)
-    })
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    get_global_pubsub()
+        .await
+        .publish(
+            &AGENT_STATUS_CHANGED_TOPIC,
+            &serde_json::to_string(&agent).unwrap(),
+        )
+        .await;
 
-    Ok(Json(status))
+    Ok(Json(agent))
 }
 
 /// POST /agent/unlock — unlock agent
@@ -172,16 +344,84 @@ pub async fn unlock_agent(
     check_capability(&context.capabilities, &AGENT_SIGN_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let status = AgentService::with_global_instance(|agent_service| {
-        agent_service.unlock(&body.passphrase)
-    })
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    if body.holochain.unwrap_or(true) {
-        let _ = crate::holochain_service::get_holochain_service().await;
+    let agent_instance = AgentService::global_instance();
+    {
+        let mut agent_service = agent_instance.lock().expect("agent lock");
+        let agent_ref = agent_service.as_mut().expect("agent instance");
+        agent_ref.unlock(body.passphrase.clone())
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
 
-    Ok(Json(status))
+    let mut init_errors: Vec<String> = Vec::new();
+
+    let is_unlocked = agent_instance
+        .lock()
+        .expect("agent lock")
+        .as_ref()
+        .expect("agent instance")
+        .is_unlocked();
+
+    if is_unlocked {
+        // Start Holochain conductor if not already running
+        if crate::holochain_service::maybe_get_holochain_service()
+            .await
+            .is_none()
+        {
+            log::info!("Holochain service not initialized. Initializing...");
+            let config = crate::config::get_global_config();
+            let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
+                &config,
+                body.passphrase.clone(),
+            );
+
+            if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
+                log::error!("Error initializing Holochain: {:?}", e);
+                init_errors.push(format!("Holochain init failed: {}", e));
+            } else {
+                log::info!("Holochain init complete");
+            }
+        }
+
+        // Load system languages
+        let config = crate::config::get_global_config();
+        let language_language_only = config.language_language_only.unwrap_or(false);
+        let controller = LanguageController::global_instance();
+        if let Err(e) = controller.load_system_languages(language_language_only).await {
+            log::error!("Error loading system languages: {:?}", e);
+            init_errors.push(format!("Failed to load system languages: {}", e));
+        } else {
+            log::info!("System languages loaded");
+        }
+
+        log::info!("AD4M init complete");
+
+        // Publish agent expression
+        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
+            log::warn!("Error publishing agent expression: {}", e);
+        }
+    }
+
+    let mut agent = {
+        let agent_service = agent_instance.lock().expect("agent lock");
+        let agent_ref = agent_service.as_ref().expect("agent instance");
+        agent_ref.dump().clone()
+    };
+
+    if !is_unlocked {
+        agent.error = Some("Failed to unlock agent".to_string());
+    } else if !init_errors.is_empty() {
+        agent.error = Some(init_errors.join("; "));
+    }
+
+    get_global_pubsub()
+        .await
+        .publish(
+            &AGENT_STATUS_CHANGED_TOPIC,
+            &serde_json::to_string(&agent).unwrap(),
+        )
+        .await;
+
+    Ok(Json(agent))
 }
 
 /// POST /agent/sign — sign a message
@@ -194,10 +434,10 @@ pub async fn sign_message(
     check_capability(&context.capabilities, &AGENT_SIGN_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let sig = signatures::sign(&body.message)
+    let sig = InternalAgentSignature::from_message(body.message)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    Ok(Json(sig))
+    Ok(Json(sig.into()))
 }
 
 /// DELETE /agent/apps/:id — remove app
@@ -210,12 +450,9 @@ pub async fn remove_app(
     check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let apps = AgentService::with_global_instance(|agent_service| {
-        agent_service.remove_app(&request_id)
-    })
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(apps))
+    apps_map::remove_app(&request_id)
+        .map_err(|e| ApiError::Internal(e))?;
+    Ok(Json(apps_map::get_apps()))
 }
 
 // ── Auth ──
@@ -230,10 +467,20 @@ pub async fn request_capability(
     check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let request_id = AgentService::with_global_instance(|agent_service| {
-        agent_service.request_capability(&serde_json::to_string(&body.auth_info).unwrap_or_default())
-    })
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let auth_info: AuthInfo = body.auth_info.into();
+    let request_id = crate::agent::capabilities::request_capability(auth_info.clone()).await;
+
+    if context.auto_permit_cap_requests {
+        println!("======================================");
+        println!("Got capability request: \n{:?}", auth_info);
+        let random_number_challenge = crate::agent::capabilities::permit_capability(AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth: auth_info,
+        }).map_err(|e| ApiError::Internal(e))?;
+        println!("--------------------------------------");
+        println!("Random number challenge: {}", random_number_challenge);
+        println!("======================================");
+    }
 
     Ok(Json(request_id))
 }
@@ -248,12 +495,11 @@ pub async fn permit_capability(
     check_capability(&context.capabilities, &AGENT_PERMIT_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let jwt = AgentService::with_global_instance(|agent_service| {
-        agent_service.permit_capability(&body.auth)
-    })
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(jwt))
+    let auth: AuthInfoExtended = serde_json::from_str(&body.auth)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid auth info: {}", e)))?;
+    let random_number_challenge = crate::agent::capabilities::permit_capability(auth)
+        .map_err(|e| ApiError::Internal(e))?;
+    Ok(Json(random_number_challenge))
 }
 
 /// POST /agent/auth/jwt — generate JWT
@@ -266,30 +512,75 @@ pub async fn generate_jwt(
     check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let jwt = AgentService::with_global_instance(|agent_service| {
-        agent_service.generate_jwt(&body.request_id, &body.rand)
-    })
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(jwt))
+    let cap_token = generate_capability_token(body.request_id, body.rand)
+        .await
+        .map_err(|e| ApiError::Internal(e))?;
+    Ok(Json(cap_token))
 }
 
 /// DELETE /agent/auth/token/:token — revoke token
 pub async fn revoke_token(
     State(_state): State<AppState>,
     auth: AuthContext,
-    Path(token): Path<String>,
+    Path(request_id): Path<String>,
 ) -> Result<Json<Vec<Apps>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let apps = AgentService::with_global_instance(|agent_service| {
-        agent_service.revoke_token(&token)
-    })
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    apps_map::revoke_app(&request_id)
+        .map_err(|e| ApiError::Internal(e))?;
+    Ok(Json(apps_map::get_apps()))
+}
 
-    Ok(Json(apps))
+// ── Status ──
+
+/// GET /agent/status — agent status
+pub async fn get_agent_status(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+) -> Result<Json<AgentStatus>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+
+    // Multi-user mode
+    if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
+        let agent_data = AgentService::get_user_agent_data(&user_email)
+            .map_err(|e| ApiError::Internal(format!("User agent not available: {}", e)))?;
+
+        let agent_context = AgentContext::for_user_email(user_email);
+        let did_document = did_document_for_context(&agent_context)
+            .map_err(|e| ApiError::Internal(format!("Failed to get DID document for user: {}", e)))?;
+
+        return Ok(Json(AgentStatus {
+            did: Some(agent_data.did),
+            did_document: Some(serde_json::to_string(&did_document)
+                .map_err(|e| ApiError::Internal(format!("Failed to serialize DID document: {}", e)))?),
+            error: None,
+            is_initialized: true,
+            is_unlocked: true,
+        }));
+    }
+
+    // Fallback to main agent status
+    let status = AgentService::with_global_instance(|agent_service| agent_service.dump());
+    Ok(Json(status))
+}
+
+/// GET /agent/is-locked — check if agent is locked
+pub async fn is_locked(
+    State(_state): State<AppState>,
+    _auth: AuthContext,
+) -> Result<Json<bool>, ApiError> {
+    let locked = AgentService::with_global_instance(|agent_service| {
+        agent_service
+            .agent
+            .clone()
+            .ok_or_else(|| ApiError::NotFound("Agent not found".into()))?;
+        Ok(!agent_service.is_unlocked())
+    })?;
+    Ok(Json(locked))
 }
 
 // ── Trust ──
@@ -304,8 +595,8 @@ pub async fn get_trusted_agents(
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
     let agents = crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
-        Ok::<Vec<String>, ApiError>(runtime.get_trusted_agents())
-    })?;
+        runtime.get_trusted_agents()
+    });
     Ok(Json(agents))
 }
 
@@ -319,9 +610,13 @@ pub async fn add_trusted_agents(
     check_capability(&context.capabilities, &RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
+    crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
+        runtime.add_trusted_agents(agents);
+    });
+
     let result = crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
-        Ok::<Vec<String>, ApiError>(runtime.add_trusted_agents(agents))
-    })?;
+        runtime.get_trusted_agents()
+    });
     Ok(Json(result))
 }
 
@@ -335,9 +630,13 @@ pub async fn delete_trusted_agents(
     check_capability(&context.capabilities, &RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
+    crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
+        runtime.remove_trusted_agent(agents);
+    });
+
     let result = crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
-        Ok::<Vec<String>, ApiError>(runtime.remove_trusted_agents(agents))
-    })?;
+        runtime.get_trusted_agents()
+    });
     Ok(Json(result))
 }
 
@@ -348,8 +647,7 @@ pub async fn get_entanglement(
     State(_state): State<AppState>,
     _auth: AuthContext,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
-    let proofs = get_entanglement_proofs()
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let proofs = get_entanglement_proofs();
     Ok(Json(proofs.into_iter().map(|p| serde_json::to_value(p).unwrap_or_default()).collect()))
 }
 

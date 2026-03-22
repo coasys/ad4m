@@ -1,117 +1,148 @@
 //! Neighbourhood REST endpoints: /api/v1/neighbourhoods/*
 //!
-//! 7 harmonised endpoints. No `*U` variants — use `signed: bool` in body.
+//! Harmonised endpoints with signed/unsigned unified via `signed: bool` field.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     Json,
 };
-use std::collections::HashMap;
 
 use crate::agent::capabilities::*;
-use crate::neighbourhoods;
+use crate::agent::{create_signed_expression, AgentContext};
+use crate::neighbourhoods::{self, install_neighbourhood_with_context};
 use crate::perspectives::get_perspective;
+use crate::types::*;
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
 use super::types::*;
 
-/// POST /neighbourhoods/join — join from URL
+/// POST /neighbourhoods/join — join a neighbourhood by URL
 pub async fn join_neighbourhood(
     State(_state): State<AppState>,
     auth: AuthContext,
     Json(body): Json<JoinNeighbourhoodRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<PerspectiveHandle>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let handle = neighbourhoods::install_neighbourhood_with_context(&body.url, &context.auth_token)
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+    let handle = install_neighbourhood_with_context(body.url, &agent_context)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    Ok(Json(serde_json::to_value(handle).unwrap_or_default()))
+    Ok(Json(handle))
 }
 
-/// POST /neighbourhoods/publish — publish from perspective
+/// POST /neighbourhoods/publish — publish perspective as neighbourhood
 pub async fn publish_neighbourhood(
     State(_state): State<AppState>,
     auth: AuthContext,
     Json(body): Json<PublishNeighbourhoodRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &NEIGHBOURHOOD_CREATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let meta_str = body
-        .meta
-        .map(|m| serde_json::to_string(&m).unwrap_or_default());
-
-    let result = neighbourhoods::publish_from_perspective(
-        &body.uuid,
-        &body.link_language,
-        meta_str.as_deref(),
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+    let url = neighbourhoods::neighbourhood_publish_from_perspective_with_context(
+        &body.perspective_uuid,
+        body.link_language,
+        body.meta.into(),
+        &agent_context,
     )
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    Ok(Json(serde_json::to_value(result).unwrap_or_default()))
+    Ok(Json(url))
 }
 
-/// POST /neighbourhoods/:uuid/broadcast — send broadcast (signed: true|false in body)
+/// POST /neighbourhoods/:uuid/broadcast — send broadcast (signed or unsigned)
 pub async fn send_broadcast(
     State(_state): State<AppState>,
     auth: AuthContext,
     Path(uuid): Path<String>,
-    Json(body): Json<SendBroadcastRequest>,
+    Json(body): Json<BroadcastRequest>,
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let perspective = get_perspective(&uuid)
-        .ok_or_else(|| ApiError::NotFound(format!("Perspective {} not found", uuid)))?;
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+    let perspective_instance = get_perspective(&uuid)
+        .ok_or_else(|| ApiError::NotFound(format!("No perspective found with uuid {}", uuid)))?;
 
-    let signed = body.signed.unwrap_or(true);
-    perspective
-        .send_broadcast(
-            serde_json::to_string(&body.perspective).unwrap_or_default(),
-            signed,
-        )
+    let signed_perspective = if body.signed.unwrap_or(true) {
+        // Pre-signed payload
+        let perspective = Perspective::from(body.payload);
+        create_signed_expression(perspective, &agent_context)
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+    } else {
+        // Unsigned: sign each link individually
+        let links: Vec<DecoratedLinkExpression> = body.payload.links
+            .into_iter()
+            .map(|l| Link::from(l).normalize())
+            .map(|l| create_signed_expression(l, &agent_context))
+            .filter_map(Result::ok)
+            .map(LinkExpression::from)
+            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
+            .collect();
+        let perspective = Perspective { links };
+        create_signed_expression(perspective, &agent_context)
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+    };
+
+    perspective_instance
+        .send_broadcast(signed_perspective.into(), body.loopback.unwrap_or(false))
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(true))
 }
 
-/// POST /neighbourhoods/:uuid/signal — send signal (signed: true|false in body)
+/// POST /neighbourhoods/:uuid/signal — send signal to remote agent (signed or unsigned)
 pub async fn send_signal(
     State(_state): State<AppState>,
     auth: AuthContext,
     Path(uuid): Path<String>,
-    Json(body): Json<SendSignalRequest>,
+    Json(body): Json<SignalRequest>,
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let perspective = get_perspective(&uuid)
-        .ok_or_else(|| ApiError::NotFound(format!("Perspective {} not found", uuid)))?;
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+    let perspective_instance = get_perspective(&uuid)
+        .ok_or_else(|| ApiError::NotFound(format!("No perspective found with uuid {}", uuid)))?;
 
-    let signed = body.signed.unwrap_or(true);
-    perspective
-        .send_signal(
-            &body.recipient,
-            serde_json::to_string(&body.payload).unwrap_or_default(),
-            signed,
-        )
+    let signed_perspective = if body.signed.unwrap_or(true) {
+        let perspective = Perspective::from(body.payload);
+        create_signed_expression(perspective, &agent_context)
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+    } else {
+        let links: Vec<DecoratedLinkExpression> = body.payload.links
+            .into_iter()
+            .map(|l| Link::from(l).normalize())
+            .map(|l| create_signed_expression(l, &agent_context))
+            .filter_map(Result::ok)
+            .map(LinkExpression::from)
+            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
+            .collect();
+        let perspective = Perspective { links };
+        create_signed_expression(perspective, &agent_context)
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+    };
+
+    perspective_instance
+        .send_signal(body.remote_agent_did, signed_perspective.into())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(true))
 }
 
-/// PUT /neighbourhoods/:uuid/online-status — set online status (signed: true|false)
+/// PUT /neighbourhoods/:uuid/online-status — set online status (signed or unsigned)
 pub async fn set_online_status(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -122,53 +153,37 @@ pub async fn set_online_status(
     check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let perspective = get_perspective(&uuid)
-        .ok_or_else(|| ApiError::NotFound(format!("Perspective {} not found", uuid)))?;
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+    let perspective_instance = get_perspective(&uuid)
+        .ok_or_else(|| ApiError::NotFound(format!("No perspective found with uuid {}", uuid)))?;
 
-    let signed = body.signed.unwrap_or(true);
-    perspective
-        .set_online_status(
-            serde_json::to_string(&body.perspective).unwrap_or_default(),
-            signed,
-        )
+    let signed_perspective = if body.signed.unwrap_or(true) {
+        let perspective = Perspective::from(body.status);
+        create_signed_expression(perspective, &agent_context)
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+    } else {
+        let links: Vec<DecoratedLinkExpression> = body.status.links
+            .into_iter()
+            .map(|l| Link::from(l).normalize())
+            .map(|l| create_signed_expression(l, &agent_context))
+            .filter_map(Result::ok)
+            .map(LinkExpression::from)
+            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
+            .collect();
+        let perspective = Perspective { links };
+        create_signed_expression(perspective, &agent_context)
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+    };
+
+    perspective_instance
+        .set_online_status(signed_perspective.into())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(true))
 }
 
-/// GET /neighbourhoods/:uuid/agents — list agents (?online=true for online only)
-pub async fn list_agents(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Path(uuid): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
-
-    let perspective = get_perspective(&uuid)
-        .ok_or_else(|| ApiError::NotFound(format!("Perspective {} not found", uuid)))?;
-
-    let online_only = params.get("online").map(|v| v == "true").unwrap_or(false);
-
-    let agents = if online_only {
-        perspective
-            .online_agents()
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
-    } else {
-        perspective
-            .other_agents()
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
-    };
-
-    Ok(Json(serde_json::to_value(agents).unwrap_or_default()))
-}
-
-/// GET /neighbourhoods/:uuid/telepresence — has telepresence adapter
+/// GET /neighbourhoods/:uuid/has-telepresence — check if neighbourhood has telepresence adapter
 pub async fn has_telepresence(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -179,12 +194,69 @@ pub async fn has_telepresence(
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
     let perspective = get_perspective(&uuid)
-        .ok_or_else(|| ApiError::NotFound(format!("Perspective {} not found", uuid)))?;
+        .ok_or_else(|| ApiError::NotFound(format!("No perspective found with uuid {}", uuid)))?;
 
-    let has = perspective
-        .has_telepresence_adapter()
+    Ok(Json(perspective.has_telepresence_adapter().await))
+}
+
+/// GET /neighbourhoods/:uuid/online-agents — list online agents
+pub async fn online_agents(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+) -> Result<Json<Vec<OnlineAgent>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+
+    let perspective = get_perspective(&uuid)
+        .ok_or_else(|| ApiError::NotFound(format!("No perspective found with uuid {}", uuid)))?;
+
+    let agents = perspective
+        .online_agents()
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    Ok(Json(has))
+    Ok(Json(agents))
+}
+
+/// GET /neighbourhoods/:uuid/other-agents — list other agents (excluding current user)
+pub async fn other_agents(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+    let current_user_did = crate::agent::did_for_context(&agent_context)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let perspective = get_perspective(&uuid)
+        .ok_or_else(|| ApiError::NotFound(format!("No perspective found with uuid {}", uuid)))?;
+
+    let handle = perspective.persisted.lock().await.clone();
+
+    // Check ownership
+    if let Some(owners) = &handle.owners {
+        if !owners.contains(&current_user_did) {
+            return Err(ApiError::Forbidden(
+                "Access denied: You are not an owner of this neighbourhood perspective".into(),
+            ));
+        }
+    }
+
+    let all_dids = perspective
+        .others()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let others: Vec<String> = all_dids
+        .into_iter()
+        .filter(|did| did != &current_user_did)
+        .collect();
+
+    Ok(Json(others))
 }

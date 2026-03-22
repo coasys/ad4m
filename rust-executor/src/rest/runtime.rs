@@ -9,6 +9,7 @@ use axum::{
 };
 
 use crate::agent::capabilities::*;
+use crate::agent::AgentService;
 use crate::db::Ad4mDb;
 use crate::globals::AD4M_VERSION;
 use crate::types::*;
@@ -24,11 +25,19 @@ use super::types::*;
 pub async fn get_runtime_info(
     State(_state): State<AppState>,
     _auth: AuthContext,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let info = serde_json::json!({
-        "ad4mExecutorVersion": AD4M_VERSION,
-        "isReady": crate::init::check_readiness().await,
-    });
+) -> Result<Json<RuntimeInfo>, ApiError> {
+    let info = AgentService::with_global_instance(|agent_service| {
+        agent_service
+            .agent
+            .clone()
+            .ok_or(ApiError::NotFound("Agent not found".into()))?;
+
+        Ok(RuntimeInfo {
+            is_initialized: agent_service.is_initialized(),
+            is_unlocked: agent_service.is_unlocked(),
+            ad4m_executor_version: AD4M_VERSION.clone(),
+        })
+    })?;
     Ok(Json(info))
 }
 
@@ -157,10 +166,14 @@ pub async fn restart_holochain(
 /// GET /runtime/verify-signature — verify signed string
 pub async fn verify_signature(
     State(_state): State<AppState>,
-    _auth: AuthContext,
+    auth: AuthContext,
     Json(body): Json<VerifySignatureRequest>,
 ) -> Result<Json<bool>, ApiError> {
-    let result = crate::agent::signatures::verify(&body.did, &body.data, &body.signed_data)
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+
+    let result = crate::agent::signatures::verify_string_signed_by_did(&body.did, &body.data, &body.signed_data)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(result))
 }

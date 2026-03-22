@@ -87,12 +87,10 @@ pub async fn create_user(
     check_capability(&context.capabilities, &RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    // Delegate to the same user creation logic as GraphQL mutation
-    let result = crate::user_management::create_user(&body.email, body.password.as_deref())
-        .await
+    let did = crate::user_management::create_user(&body.email, &body.password)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    Ok(Json(serde_json::to_value(result).unwrap_or_default()))
+    Ok(Json(serde_json::json!({ "did": did, "success": true })))
 }
 
 /// POST /users/login — login user
@@ -105,11 +103,11 @@ pub async fn login_user(
     check_capability(&context.capabilities, &RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let result = crate::user_management::login_user(&body.email, &body.password)
-        .await
+    let app_name = body.app_name.as_deref().unwrap_or("ad4m");
+    let jwt = crate::user_management::login_user(&body.email, &body.password, app_name)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    Ok(Json(serde_json::to_value(result).unwrap_or_default()))
+    Ok(Json(serde_json::json!({ "jwt": jwt })))
 }
 
 /// POST /users/verify-email — verify email code
@@ -122,11 +120,12 @@ pub async fn verify_email(
     check_capability(&context.capabilities, &RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let result = crate::user_management::verify_email(&body.email, &body.code)
-        .await
+    let verification_type = body.verification_type.as_deref().unwrap_or("signup");
+    let app_name = body.app_name.as_deref().unwrap_or("ad4m");
+    let jwt = crate::user_management::verify_and_login(&body.email, &body.code, verification_type, app_name)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    Ok(Json(serde_json::to_value(result).unwrap_or_default()))
+    Ok(Json(serde_json::json!({ "jwt": jwt })))
 }
 
 /// POST /dev/email-test — all email test operations (dev-only)

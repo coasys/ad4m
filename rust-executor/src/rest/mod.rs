@@ -44,6 +44,8 @@ pub fn rest_router(state: AppState) -> Router {
     Router::new()
         // ── Agent (19 endpoints) ──
         .route("/agent", get(agent::get_agent))
+        .route("/agent/status", get(agent::get_agent_status))
+        .route("/agent/is-locked", get(agent::is_locked))
         .route("/agent/apps", get(agent::get_apps))
         .route("/agent/by-did/{did}", get(agent::get_agent_by_did))
         .route("/agent/profile", patch(agent::update_profile))
@@ -73,6 +75,8 @@ pub fn rest_router(state: AppState) -> Router {
         .route("/languages/publish", post(languages::publish_language))
         .route("/languages/apply-template", post(languages::apply_template_and_publish))
         .route("/languages/{address}", get(languages::get_language).delete(languages::remove_language))
+        .route("/languages/{address}/meta", get(languages::get_language_meta))
+        .route("/languages/{address}/source", get(languages::get_language_source))
         .route("/languages/{address}/settings", put(languages::write_settings))
         // ── Perspectives (10 endpoints) ──
         .route("/perspectives", get(perspectives::list_perspectives).post(perspectives::create_perspective))
@@ -82,7 +86,8 @@ pub fn rest_router(state: AppState) -> Router {
                 .put(perspectives::update_perspective_handler)
                 .delete(perspectives::delete_perspective),
         )
-        .route("/perspectives/{uuid}/links", post(perspectives::mutate_links))
+        .route("/perspectives/{uuid}/snapshot", get(perspectives::get_snapshot))
+        .route("/perspectives/{uuid}/links", get(perspectives::query_links).post(perspectives::mutate_links))
         .route("/perspectives/{uuid}/query", post(perspectives::query_perspective))
         .route("/perspectives/{uuid}/sdna", post(perspectives::add_sdna))
         .route("/perspectives/{uuid}/commands", post(perspectives::execute_commands))
@@ -92,8 +97,9 @@ pub fn rest_router(state: AppState) -> Router {
         .route("/neighbourhoods/{uuid}/broadcast", post(neighbourhoods::send_broadcast))
         .route("/neighbourhoods/{uuid}/signal", post(neighbourhoods::send_signal))
         .route("/neighbourhoods/{uuid}/online-status", put(neighbourhoods::set_online_status))
-        .route("/neighbourhoods/{uuid}/agents", get(neighbourhoods::list_agents))
-        .route("/neighbourhoods/{uuid}/telepresence", get(neighbourhoods::has_telepresence))
+        .route("/neighbourhoods/{uuid}/online-agents", get(neighbourhoods::online_agents))
+        .route("/neighbourhoods/{uuid}/other-agents", get(neighbourhoods::other_agents))
+        .route("/neighbourhoods/{uuid}/has-telepresence", get(neighbourhoods::has_telepresence))
         // ── Expressions (5 endpoints) ──
         .route("/expressions", post(expressions::create_expression))
         .route("/expressions/many", post(expressions::get_many_expressions))
@@ -133,7 +139,9 @@ pub fn rest_router(state: AppState) -> Router {
         // ── AI (8 endpoints) ──
         .route("/ai/models", get(ai::list_models).post(ai::add_model))
         .route("/ai/models/{id}", put(ai::update_model).delete(ai::remove_model))
-        .route("/ai/tasks", get(ai::list_tasks).post(ai::manage_task))
+        .route("/ai/models/{id}/default", put(ai::set_default_model))
+        .route("/ai/tasks", get(ai::list_tasks).post(ai::add_task))
+        .route("/ai/tasks/{id}", put(ai::update_task).delete(ai::remove_task))
         .route("/ai/prompt", post(ai::ai_prompt))
         .route("/ai/embed", post(ai::ai_embed))
         // ── SSE Events (6 endpoints) ──
