@@ -5,7 +5,7 @@ pub mod config;
 pub mod email_service;
 pub mod entanglement_service;
 mod globals;
-pub mod graphql;
+pub mod helpers;
 pub mod holochain_service;
 pub mod js_core;
 pub mod mcp;
@@ -581,14 +581,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         });
     }
 
-    info!("Starting GraphQL...");
+    info!("Starting REST API server...");
 
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
-            .thread_name(String::from("graphql_server"))
+            .thread_name(String::from("rest_server"))
             .enable_all()
             .build()
             .unwrap();
-        runtime.block_on(graphql::start_server(config)).unwrap();
+        runtime.block_on(rest::start_server(config)).unwrap();
     })
 }

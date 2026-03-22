@@ -3793,7 +3793,7 @@ impl PerspectiveInstance {
                                     .await
                                 {
                                     Ok(Some(expr_json)) => {
-                                        let rendered = crate::graphql::query_resolvers::build_expression_rendered(&expr_json, &lang_address);
+                                        let rendered = crate::helpers::build_expression_rendered(&expr_json, &lang_address);
                                         rendered.data
                                     }
                                     _ => prolog_value_to_json_string(property_value.clone()),

@@ -408,7 +408,7 @@ impl Ad4mMcpHandler {
     /// In single-user mode, all perspectives are accessible.
     pub(crate) async fn can_access_perspective(&self, perspective: &PerspectiveHandle) -> bool {
         let user_email = self.get_user_email().await;
-        crate::graphql::query_resolvers::can_access_perspective(&user_email, perspective)
+        crate::helpers::can_access_perspective(&user_email, perspective)
     }
 
     /// Get a perspective by ID, verifying the agent is authenticated, has the required capability,
