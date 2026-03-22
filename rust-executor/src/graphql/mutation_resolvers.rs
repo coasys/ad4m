@@ -340,7 +340,9 @@ impl Mutation {
         auth_info: AuthInfoInput,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)?;
-        let auth_info: AuthInfo = auth_info.into();
+        let auth_info: AuthInfo = auth_info.try_into().map_err(|e: String| {
+            coasys_juniper::FieldError::new(e, coasys_juniper::Value::null())
+        })?;
         let request_id = request_capability(auth_info.clone()).await;
         if context.auto_permit_cap_requests {
             println!("======================================");

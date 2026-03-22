@@ -325,37 +325,71 @@ export async function downloadExecutor(logger: any): Promise<boolean> {
 let executorProcess: ReturnType<typeof spawn> | null = null;
 let executorLogStream: fs.WriteStream | null = null;
 
-export function isExecutorRunning(
+/**
+ * Check whether an executor is reachable.
+ *
+ * Tries the MCP endpoint first, then falls back to a lightweight GraphQL
+ * query on the default HTTP port (12000).  This ensures we detect executors
+ * launched via ad4m-launcher where MCP is typically disabled.
+ *
+ * Returns `"mcp"` or `"graphql"` to indicate which interface responded,
+ * or `false` if neither is reachable.
+ */
+export async function isExecutorRunning(
   endpoint: string,
   timeoutMs: number = 3000,
-): Promise<boolean> {
-  return new Promise((resolve) => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => {
-      controller.abort();
-      resolve(false);
-    }, timeoutMs);
-
-    fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 0,
-        method: "tools/list",
-        params: {},
-      }),
-      signal: controller.signal,
-    })
-      .then(() => {
-        clearTimeout(timeout);
-        resolve(true);
-      })
-      .catch(() => {
-        clearTimeout(timeout);
+  graphqlHttpUrl: string = "http://localhost:12000/graphql",
+): Promise<"mcp" | "graphql" | false> {
+  const probe = (url: string, body: string, validate?: (json: any) => boolean): Promise<boolean> =>
+    new Promise((resolve) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => {
+        controller.abort();
         resolve(false);
-      });
-  });
+      }, timeoutMs);
+
+      fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        signal: controller.signal,
+      })
+        .then(async (res) => {
+          clearTimeout(timeout);
+          if (!res.ok) return resolve(false);
+          if (!validate) return resolve(true);
+          try {
+            const json = await res.json();
+            resolve(validate(json));
+          } catch {
+            resolve(false);
+          }
+        })
+        .catch(() => {
+          clearTimeout(timeout);
+          resolve(false);
+        });
+    });
+
+  // Try MCP and GraphQL in parallel — return the first that succeeds
+  const [mcp, gql] = await Promise.all([
+    probe(
+      endpoint,
+      JSON.stringify({ jsonrpc: "2.0", id: 0, method: "tools/list", params: {} }),
+    ),
+    probe(
+      graphqlHttpUrl,
+      JSON.stringify({ query: "{ agentStatus { isInitialized } }" }),
+      // Unauthenticated requests lack AGENT_READ_CAPABILITY so the query
+      // returns errors — but any GraphQL-shaped response (data or errors key)
+      // confirms an AD4M executor is listening.
+      (json) => json != null && ("data" in json || "errors" in json),
+    ),
+  ]);
+
+  if (mcp) return "mcp";
+  if (gql) return "graphql";
+  return false;
 }
 
 /**

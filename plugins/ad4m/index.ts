@@ -88,6 +88,35 @@ export { runSetup } from "./setup";
 let requestIdCounter = 0;
 
 // ---------------------------------------------------------------------------
+// Module-level mutable state — survives plugin hot-reloads.
+// The OpenClaw framework may re-invoke ad4mPlugin() on config changes,
+// creating new tool closures. Services (MCP, waker) are only started once,
+// so state they set must live at module scope to remain visible to the
+// new tool closures.
+// ---------------------------------------------------------------------------
+let _authToken: string = "";
+let _pluginAgentDid: string = "";
+let _stateDir: string = "";
+let _wakerClient: any = null;
+let _subscriptionManager: WakerSubscriptionManager | null = null;
+let _sessionId = "";
+let _registeredTools = new Set<string>();
+let _refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+/** @internal Reset module-level state between tests. */
+export function _resetModuleState(): void {
+  _authToken = "";
+  _pluginAgentDid = "";
+  _stateDir = "";
+  _wakerClient = null;
+  _subscriptionManager = null;
+  _sessionId = "";
+  _registeredTools = new Set<string>();
+  if (_refreshTimer) clearInterval(_refreshTimer);
+  _refreshTimer = null;
+}
+
+// ---------------------------------------------------------------------------
 // Plugin Export
 // ---------------------------------------------------------------------------
 
@@ -104,12 +133,10 @@ export default function ad4mPlugin(api: any) {
   const executorWsUrl =
     providedConfig.executorWsUrl ?? "ws://localhost:12000/graphql";
 
-  // Mutable state set during service start() — shared across tools and services
-  let authToken: string = providedConfig.token || "";
-  let pluginAgentDid: string = "";
-
-  // State directory for waker subscription persistence (set by service ctx)
-  let stateDir: string = "";
+  // On reload, pick up token from config if module-level state is empty
+  if (!_authToken && providedConfig.token) {
+    _authToken = providedConfig.token;
+  }
 
   // Resolve wakeToken: plugin config override > OpenClaw global hooks config
   let resolvedWakeToken = providedConfig.wakeToken;
@@ -129,7 +156,7 @@ export default function ad4mPlugin(api: any) {
     ...providedConfig,
     mode: mode || "managed",
     mcpEndpoint: endpoint,
-    token: authToken || undefined,
+    token: _authToken || undefined,
     executorWsUrl,
     wakeUrl: providedConfig.wakeUrl ?? "http://localhost:18789/hooks/wake",
     wakeToken: resolvedWakeToken,
@@ -153,33 +180,29 @@ export default function ad4mPlugin(api: any) {
     })}`,
   );
 
-  // -- MCP bridge state --
-  let sessionId = "";
-  let registeredTools = new Set<string>();
-  let refreshTimer: ReturnType<typeof setInterval> | null = null;
+  // -- MCP bridge state (aliases to module-level vars) --
+  // These are module-level so they survive plugin hot-reloads.
 
-  // -- Waker state --
-  let wakerClient: any = null;
-  let subscriptionManager: WakerSubscriptionManager | null = null;
+  // -- Waker state (aliases to module-level vars) --
 
   /**
    * (Re-)initialize the MCP session. Called on first connect and when the
    * session becomes invalid (e.g. executor restart, session expiry -> 422).
    */
   async function ensureSession(): Promise<string> {
-    if (sessionId) return sessionId;
+    if (_sessionId) return _sessionId;
     logger.info(`[ad4m] Initializing MCP session at ${endpoint}`);
-    const init = await mcpInitialize(endpoint, authToken);
-    sessionId = init.sessionId;
-    logger.info(`[ad4m] MCP session established (id: ${sessionId})`);
-    return sessionId;
+    const init = await mcpInitialize(endpoint, _authToken);
+    _sessionId = init.sessionId;
+    logger.info(`[ad4m] MCP session established (id: ${_sessionId})`);
+    return _sessionId;
   }
 
   /**
    * Drop the current session so the next ensureSession() re-initializes.
    */
   function invalidateSession(): void {
-    sessionId = "";
+    _sessionId = "";
   }
 
   /**
@@ -193,7 +216,7 @@ export default function ad4mPlugin(api: any) {
   ): Promise<any> {
     await ensureSession();
     try {
-      return await mcpCallTool(endpoint, toolName, args, sessionId, authToken);
+      return await mcpCallTool(endpoint, toolName, args, _sessionId, _authToken);
     } catch (err: any) {
       if (err.message && /MCP HTTP 4\d\d/.test(err.message)) {
         logger.info(
@@ -205,8 +228,8 @@ export default function ad4mPlugin(api: any) {
           endpoint,
           toolName,
           args,
-          sessionId,
-          authToken,
+          _sessionId,
+          _authToken,
         );
       }
       throw err;
@@ -260,7 +283,7 @@ export default function ad4mPlugin(api: any) {
   }
 
   function registerMcpTool(tool: McpTool) {
-    if (registeredTools.has(tool.name)) return;
+    if (_registeredTools.has(tool.name)) return;
 
     const isNeighbourhoodTool = NEIGHBOURHOOD_TOOLS.has(tool.name);
     const prefixedName = `ad4m_${tool.name}`;
@@ -290,7 +313,7 @@ export default function ad4mPlugin(api: any) {
       },
     });
 
-    registeredTools.add(tool.name);
+    _registeredTools.add(tool.name);
   }
 
   /**
@@ -301,17 +324,17 @@ export default function ad4mPlugin(api: any) {
     try {
       await ensureSession();
       try {
-        const tools = await mcpListTools(endpoint, sessionId, authToken);
+        const tools = await mcpListTools(endpoint, _sessionId, _authToken);
         let newCount = 0;
         for (const tool of tools) {
-          if (!registeredTools.has(tool.name)) {
+          if (!_registeredTools.has(tool.name)) {
             registerMcpTool(tool);
             newCount++;
           }
         }
         if (newCount > 0) {
           logger.info(
-            `[ad4m] Registered ${newCount} new tool(s), total: ${registeredTools.size}`,
+            `[ad4m] Registered ${newCount} new tool(s), total: ${_registeredTools.size}`,
           );
         }
         return newCount;
@@ -323,17 +346,17 @@ export default function ad4mPlugin(api: any) {
           );
           invalidateSession();
           await ensureSession();
-          const tools = await mcpListTools(endpoint, sessionId, authToken);
+          const tools = await mcpListTools(endpoint, _sessionId, _authToken);
           let newCount = 0;
           for (const tool of tools) {
-            if (!registeredTools.has(tool.name)) {
+            if (!_registeredTools.has(tool.name)) {
               registerMcpTool(tool);
               newCount++;
             }
           }
           if (newCount > 0) {
             logger.info(
-              `[ad4m] Registered ${newCount} new tool(s), total: ${registeredTools.size}`,
+              `[ad4m] Registered ${newCount} new tool(s), total: ${_registeredTools.size}`,
             );
           }
           return newCount;
@@ -348,15 +371,15 @@ export default function ad4mPlugin(api: any) {
 
   /**
    * Create a live waker subscription from a WakerSubscription config.
-   * Requires the waker service to be running (wakerClient set).
+   * Requires the waker service to be running (_wakerClient set).
    */
   async function createLiveSubscription(sub: WakerSubscription): Promise<void> {
-    if (!subscriptionManager) {
+    if (!_subscriptionManager) {
       throw new Error(
         "Waker service not connected. Ensure ad4m-executor is running and wakerEnabled is true.",
       );
     }
-    await subscriptionManager.subscribe(sub);
+    await _subscriptionManager.subscribe(sub);
   }
 
   /**
@@ -365,8 +388,8 @@ export default function ad4mPlugin(api: any) {
    *   so saved subscriptions survive for restore on next start).
    */
   function disposeLiveSubscription(id: string, persist = true): void {
-    if (subscriptionManager) {
-      subscriptionManager.dispose(id, persist);
+    if (_subscriptionManager) {
+      _subscriptionManager.dispose(id, persist);
     }
   }
 
@@ -459,8 +482,8 @@ Notes:
       const newCount = await refreshTools();
       const msg =
         newCount > 0
-          ? `Discovered and registered ${newCount} new tool(s). Total tools: ${registeredTools.size}.`
-          : `No new tools found. Total tools: ${registeredTools.size}.`;
+          ? `Discovered and registered ${newCount} new tool(s). Total tools: ${_registeredTools.size}.`
+          : `No new tools found. Total tools: ${_registeredTools.size}.`;
       return { content: [{ type: "text", text: msg }] };
     },
   });
@@ -477,7 +500,7 @@ Notes:
   ): Promise<string> {
     // Skip if already subscribed
     const existingId = `mention-${perspectiveId.substring(0, 8)}`;
-    if (subscriptionManager?.has(existingId)) {
+    if (_subscriptionManager?.has(existingId)) {
       return `Already subscribed to mentions in perspective ${perspectiveId}.`;
     }
 
@@ -519,7 +542,7 @@ Notes:
    * Best-effort: logs errors but never throws.
    */
   async function autoSubscribeMentions(perspectiveId: string): Promise<void> {
-    if (!wakerClient) {
+    if (!_wakerClient) {
       logger.info(
         `[ad4m-waker] Skipping auto-subscribe for ${perspectiveId} — waker not connected`,
       );
@@ -580,7 +603,7 @@ Notes:
     async execute(_id: string, params: { perspective_id: string }) {
       // Find subscription by perspective
       let found = false;
-      for (const sub of (subscriptionManager?.getActive() ?? [])) {
+      for (const sub of (_subscriptionManager?.getActive() ?? [])) {
         if (
           sub.perspective === params.perspective_id &&
           sub.type === "mention"
@@ -702,7 +725,7 @@ Notes:
       params: { perspective_id: string; expression_address: string },
     ) {
       let found = false;
-      for (const sub of (subscriptionManager?.getActive() ?? [])) {
+      for (const sub of (_subscriptionManager?.getActive() ?? [])) {
         if (
           sub.perspective === params.perspective_id &&
           sub.channel === params.expression_address &&
@@ -731,7 +754,7 @@ Notes:
     description: "List all active waker subscriptions.",
     parameters: { type: "object", properties: {}, required: [] },
     async execute() {
-      const subs = subscriptionManager?.getActive() ?? [];
+      const subs = _subscriptionManager?.getActive() ?? [];
       if (subs.length === 0) {
         return {
           content: [{ type: "text", text: "No active waker subscriptions." }],
@@ -827,9 +850,9 @@ Notes:
   api.registerService({
     id: "ad4m-mcp",
     async start(ctx: any) {
-      // Capture stateDir from service context
-      if (ctx?.stateDir) {
-        stateDir = ctx.stateDir;
+      // Capture _stateDir from service context
+      if (ctx?._stateDir) {
+        _stateDir = ctx.stateDir;
       }
 
       // If mode is not configured, the user hasn't run setup yet
@@ -846,18 +869,18 @@ Notes:
 
       if (mode === "external") {
         // External mode: use token from config, or obtain JWT
-        if (!authToken) {
+        if (!_authToken) {
           logger.info("[ad4m] No token found, attempting JWT auth via MCP...");
           const jwt = await obtainJwtFromExecutor();
           if (jwt) {
-            authToken = jwt;
+            _authToken = jwt;
             logger.info("[ad4m] JWT obtained");
           }
         }
       } else {
         // Managed mode: generate ephemeral admin credential (not persisted)
         const adminCredential = generateRandomPassphrase(24);
-        authToken = adminCredential;
+        _authToken = adminCredential;
 
         // Resolve executor binary path: config > discover > auto-download
         let binaryPath = providedConfig.ad4mBinaryPath;
@@ -902,22 +925,22 @@ Notes:
           );
           const jwt = await obtainJwtFromExecutor();
           if (jwt) {
-            authToken = jwt;
+            _authToken = jwt;
             logger.info("[ad4m] JWT obtained for pre-existing executor");
           } else {
             logger.warn("[ad4m] JWT auth failed for pre-existing executor");
-            authToken = "";
+            _authToken = "";
           }
 
-          if (authToken) {
+          if (_authToken) {
             const agentResult = await ensureAgentReady(
               executorWsUrl,
-              authToken,
+              _authToken,
               logger,
               agentPassphrase,
             );
             if (agentResult) {
-              pluginAgentDid = agentResult.did;
+              _pluginAgentDid = agentResult.did;
             } else {
               logger.warn(
                 "[ad4m] Could not verify agent on pre-existing executor.",
@@ -933,7 +956,7 @@ Notes:
             agentPassphrase,
           );
           if (agentResult) {
-            pluginAgentDid = agentResult.did;
+            _pluginAgentDid = agentResult.did;
           } else {
             logger.error(
               `[ad4m] Agent management failed. MCP tools and waker will not work correctly.`,
@@ -944,8 +967,8 @@ Notes:
 
       // ── MCP session + tool discovery ──
 
-      if (authToken) {
-        logger.info(`[ad4m] Auth token ready (length: ${authToken.length})`);
+      if (_authToken) {
+        logger.info(`[ad4m] Auth token ready (length: ${_authToken.length})`);
       } else {
         logger.warn(
           `[ad4m] No auth token. Tools may not work until authenticated.`,
@@ -953,7 +976,7 @@ Notes:
       }
 
       // Update config with resolved token
-      config.token = authToken || undefined;
+      config.token = _authToken || undefined;
 
       try {
         await ensureSession();
@@ -961,12 +984,12 @@ Notes:
         // Initial tool discovery
         await refreshTools();
         logger.info(
-          `[ad4m] Registered ${registeredTools.size} initial tool(s)`,
+          `[ad4m] Registered ${_registeredTools.size} initial tool(s)`,
         );
 
         // Start periodic polling for dynamic SHACL tools
         const refreshInterval = config.toolRefreshIntervalMs ?? 30000;
-        refreshTimer = setInterval(() => {
+        _refreshTimer = setInterval(() => {
           refreshTools();
         }, refreshInterval);
         logger.info(`[ad4m] Dynamic tool polling every ${refreshInterval}ms`);
@@ -978,9 +1001,9 @@ Notes:
       }
     },
     stop() {
-      if (refreshTimer) {
-        clearInterval(refreshTimer);
-        refreshTimer = null;
+      if (_refreshTimer) {
+        clearInterval(_refreshTimer);
+        _refreshTimer = null;
       }
       stopExecutor(logger);
       logger.info("[ad4m] AD4M MCP service stopped");
@@ -988,15 +1011,18 @@ Notes:
   });
 
   // -- Waker service (registered second — starts after ad4m-mcp) --
-  // By the time this starts, authToken and pluginAgentDid are set by
+  // By the time this starts, _authToken and _pluginAgentDid are set by
   // the mcp service above (OpenClaw starts services sequentially).
 
   api.registerService({
     id: "ad4m-waker",
     async start(ctx: any) {
-      // Capture stateDir from service context (in case mcp service didn't set it)
-      if (ctx?.stateDir && !stateDir) {
-        stateDir = ctx.stateDir;
+      logger.info("[ad4m-waker] ── Waker service start() ──");
+      logger.info(`[ad4m-waker] stateDir from ctx: ${ctx?.stateDir ?? "N/A"}, existing stateDir: ${_stateDir || "N/A"}`);
+
+      // Capture _stateDir from service context (in case mcp service didn't set it)
+      if (ctx?._stateDir && !_stateDir) {
+        _stateDir = ctx.stateDir;
       }
 
       const wakerEnabled = config.wakerEnabled ?? true;
@@ -1005,6 +1031,12 @@ Notes:
         return;
       }
 
+      logger.info(`[ad4m-waker] config.wakeToken: ${config.wakeToken ? `set (${config.wakeToken.length} chars)` : "NOT SET"}`);
+      logger.info(`[ad4m-waker] config.wakeUrl: ${config.wakeUrl ?? "default"}`);
+      logger.info(`[ad4m-waker] config.executorWsUrl: ${config.executorWsUrl ?? "default"}`);
+      logger.info(`[ad4m-waker] config.mode: ${config.mode}`);
+      logger.info(`[ad4m-waker] config.debounceMs: ${config.debounceMs}`);
+
       if (!config.wakeToken) {
         logger.info(
           "[ad4m-waker] wakeToken not configured. Set wakeToken in plugin config to enable the waker. Skipping.",
@@ -1012,7 +1044,10 @@ Notes:
         return;
       }
 
-      if (!authToken) {
+      const tokenType = _authToken.startsWith("eyJ") ? "JWT" : _authToken.length <= 32 ? "admin-credential" : "unknown";
+      logger.info(`[ad4m-waker] _authToken: ${_authToken ? `${_authToken.substring(0, 16)}...${_authToken.substring(_authToken.length - 8)} [${_authToken.length} chars, type=${tokenType}]` : "EMPTY"}`);
+
+      if (!_authToken) {
         logger.warn(
           "[ad4m-waker] No auth token available — cannot connect to executor. Skipping.",
         );
@@ -1023,20 +1058,26 @@ Notes:
 
       try {
         // Dynamic imports to avoid load-time issues with @holochain/client transitive deps
+        logger.info("[ad4m-waker] Loading dependencies...");
         const { Ad4mClient, QuerySubscriptionProxy } = require("@coasys/ad4m");
         const { ApolloClient, InMemoryCache } = require("@apollo/client/core");
         const { GraphQLWsLink } = require("@apollo/client/link/subscriptions");
         const { createClient } = require("graphql-ws");
         const WebSocket = require("ws");
+        logger.info("[ad4m-waker] Dependencies loaded OK");
 
-        logger.info(`[ad4m-waker] Connecting to ${wsUrl}`);
+        const connParams = _authToken
+          ? { headers: { authorization: _authToken } }
+          : {};
+        logger.info(`[ad4m-waker] connectionParams: ${JSON.stringify({ headers: { authorization: _authToken ? `${tokenType}[${_authToken.length}]` : "EMPTY" } })}`);
+        logger.info(`[ad4m-waker] Connecting WebSocket to ${wsUrl}...`);
 
         const wsClient = createClient({
           url: wsUrl,
           webSocketImpl: WebSocket,
-          connectionParams: authToken
-            ? { headers: { authorization: authToken } }
-            : {},
+          connectionParams: () => connParams,
+          lazy: false,
+          keepAlive: 10_000,
           retryAttempts: Infinity,
           retryWait: async (retries: number) => {
             const delay = Math.min(1000 * Math.pow(2, retries), 30000);
@@ -1046,9 +1087,17 @@ Notes:
             await new Promise((r: any) => setTimeout(r, delay));
           },
           on: {
-            connected: () => logger.info("[ad4m-waker] WebSocket connected"),
-            closed: (event: any) => logger.warn(`[ad4m-waker] WebSocket closed: ${JSON.stringify(event)}`),
-            error: (error: any) => logger.error(`[ad4m-waker] WebSocket error: ${error?.message ?? error}`),
+            connected: (socket: any) => {
+              logger.info(`[ad4m-waker] WebSocket connected (protocol: ${socket?.protocol ?? "unknown"})`);
+            },
+            closed: (event: any) => {
+              logger.warn(`[ad4m-waker] WebSocket closed — code: ${event?.code ?? "N/A"}, reason: "${event?.reason ?? "N/A"}", wasClean: ${event?.wasClean ?? "N/A"}`);
+              logger.warn(`[ad4m-waker] WebSocket closed — full event: ${JSON.stringify(event)}`);
+            },
+            error: (error: any) => {
+              logger.error(`[ad4m-waker] WebSocket error: ${error?.message ?? error}`);
+              if (error?.stack) logger.error(`[ad4m-waker] WebSocket error stack: ${error.stack}`);
+            },
           },
         });
 
@@ -1063,37 +1112,58 @@ Notes:
           },
         });
 
-        wakerClient = new Ad4mClient(apolloClient, false);
+        _wakerClient = new Ad4mClient(apolloClient);
+        logger.info("[ad4m-waker] Ad4mClient created, calling agent.status()...");
 
         // Load persisted state (subscriptions + seen messages) before creating manager
-        const savedState = stateDir ? loadWakerState(stateDir) : { subscriptions: [], seenMessages: {} };
+        const savedState = _stateDir ? loadWakerState(_stateDir) : { subscriptions: [], seenMessages: {} };
+        logger.info(`[ad4m-waker] Loaded persisted state: ${savedState.subscriptions.length} subscription(s), ${Object.keys(savedState.seenMessages).length} seen-message set(s)`);
 
         // Create subscription manager wired to the Ad4mClient and wake callback
-        subscriptionManager = new WakerSubscriptionManager({
-          perspectiveClient: wakerClient.perspective,
+        _subscriptionManager = new WakerSubscriptionManager({
+          perspectiveClient: _wakerClient.perspective,
           logger,
           QuerySubscriptionProxy,
           debounceMs: config.debounceMs,
           previousSeenMessages: savedState.seenMessages,
           onWake: (sub, _result, mentions) => {
-            postWake(config, sub, pluginAgentDid, logger, mentions);
+            postWake(config, sub, _pluginAgentDid, logger, mentions);
           },
           onPersist: (subs, seenMessages) => {
-            if (stateDir) saveWakerState(stateDir, subs, seenMessages);
+            if (_stateDir) saveWakerState(_stateDir, subs, seenMessages);
           },
         });
 
         // Verify connection and get agent DID (agent should already be
         // initialized/unlocked by ensureAgentReady during mcp service start)
-        const status = await wakerClient.agent.status();
+        let status: any;
+        try {
+          status = await _wakerClient.agent.status();
+          logger.info(`[ad4m-waker] agent.status() returned: initialized=${status.isInitialized}, unlocked=${status.isUnlocked}, did=${status.did?.substring(0, 30) ?? "N/A"}`);
+        } catch (statusErr: any) {
+          logger.error(`[ad4m-waker] agent.status() FAILED: ${statusErr.message}`);
+          if (statusErr.graphQLErrors) {
+            for (const gqlErr of statusErr.graphQLErrors) {
+              logger.error(`[ad4m-waker]   GraphQL error: ${gqlErr.message}`);
+            }
+          }
+          if (statusErr.networkError) {
+            logger.error(`[ad4m-waker]   Network error: ${statusErr.networkError.message}`);
+            if (statusErr.networkError.result) {
+              logger.error(`[ad4m-waker]   Network error result: ${JSON.stringify(statusErr.networkError.result)}`);
+            }
+          }
+          throw statusErr;
+        }
+
         if (!status.isInitialized || status.isUnlocked === false) {
           logger.error(
             `[ad4m-waker] Agent is not ready (initialized=${status.isInitialized}, unlocked=${status.isUnlocked}). Agent management should have run during mcp service start.`,
           );
-          wakerClient = null;
+          _wakerClient = null;
           return;
         }
-        pluginAgentDid = status.did;
+        _pluginAgentDid = status.did;
         logger.info(
           `[ad4m-waker] Connected — agent: ${status.did.substring(0, 40)}...`,
         );
@@ -1119,18 +1189,19 @@ Notes:
         }
       } catch (err: any) {
         logger.error(`[ad4m-waker] Failed to connect: ${err.message}`);
+        if (err.stack) logger.error(`[ad4m-waker] Stack: ${err.stack}`);
         logger.error(
           `[ad4m-waker] Make sure @coasys/ad4m and dependencies are installed (npm install in the plugin directory).`,
         );
-        wakerClient = null;
+        _wakerClient = null;
       }
     },
     stop() {
-      if (subscriptionManager) {
-        subscriptionManager.disposeAll();
-        subscriptionManager = null;
+      if (_subscriptionManager) {
+        _subscriptionManager.disposeAll();
+        _subscriptionManager = null;
       }
-      wakerClient = null;
+      _wakerClient = null;
       logger.info("[ad4m-waker] Waker service stopped");
     },
   });
