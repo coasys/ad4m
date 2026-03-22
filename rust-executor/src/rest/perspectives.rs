@@ -3,33 +3,103 @@
 //! 10 harmonised endpoints including unified link mutations and query.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     Json,
 };
-use std::collections::HashMap;
 
 use crate::agent::capabilities::*;
-use crate::types::*;
+use crate::agent::{AgentContext, AgentService};
+use crate::db::Ad4mDb;
 use crate::graphql::query_resolvers::can_access_perspective;
 use crate::perspectives::{
-    self, add_perspective, get_perspective, remove_perspective, update_perspective,
+    add_perspective, get_perspective, remove_perspective, update_perspective,
+    perspective_instance::{PerspectiveInstance, SdnaType},
+    utils::prolog_resolution_to_string,
 };
+use crate::pubsub::mark_credits_dirty;
+use crate::types::*;
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
 use super::types::*;
 
-/// GET /perspectives — list all
+// ── Helpers ──
+
+/// Get a perspective, returning ApiError::NotFound if missing
+fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, ApiError> {
+    get_perspective(uuid)
+        .ok_or_else(|| ApiError::NotFound(format!("Perspective {} not found", uuid)))
+}
+
+/// Get a perspective with access control check (multi-user aware)
+async fn get_perspective_with_access_control(
+    uuid: &str,
+    auth_token: &str,
+) -> Result<PerspectiveInstance, ApiError> {
+    let perspective = get_perspective_or_404(uuid)?;
+    let user_email = user_email_from_token(auth_token.to_string());
+
+    let handle = perspective.persisted.lock().await.clone();
+    if !can_access_perspective(&user_email, &handle) {
+        return Err(ApiError::Forbidden(
+            "Access denied: You don't have permission to access this perspective".into(),
+        ));
+    }
+
+    Ok(perspective)
+}
+
+/// Read-only credit check. Returns Ok(()) if user can afford compute.
+fn check_compute_credits(auth_token: &str) -> Result<(), ApiError> {
+    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        if !free {
+            let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            if credits <= 0.0 {
+                return Err(ApiError::Forbidden("Insufficient compute credits".into()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Deduct compute credits after an operation.
+fn reserve_compute_credits(auth_token: &str, amount: f64) -> Result<(), ApiError> {
+    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        if !free {
+            Ad4mDb::with_global_instance(|db| db.deduct_user_credits_if_available(email, amount))
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            mark_credits_dirty(email);
+        }
+    }
+    Ok(())
+}
+
+// Default pricing (matches GraphQL)
+const DEFAULT_LINK_WRITE: f64 = 0.25;
+
+// ── Endpoints ──
+
+/// GET /perspectives — list all perspectives
 pub async fn list_perspectives(
     State(_state): State<AppState>,
     auth: AuthContext,
 ) -> Result<Json<Vec<PerspectiveHandle>>, ApiError> {
     let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_query_capability(vec![WILD_CARD.to_string()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+
     let user_email = user_email_from_token(context.auth_token.clone());
+    let all = crate::perspectives::all_perspectives().await;
 
-    let all = perspectives::all_perspectives()
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
+    // Filter perspectives based on access
     let filtered: Vec<PerspectiveHandle> = all
         .into_iter()
         .filter(|p| can_access_perspective(&user_email, p))
@@ -38,38 +108,68 @@ pub async fn list_perspectives(
     Ok(Json(filtered))
 }
 
-/// GET /perspectives/:uuid — get one (with ?include=snapshot)
+/// GET /perspectives/:uuid — get single perspective
 pub async fn get_perspective_handler(
     State(_state): State<AppState>,
     auth: AuthContext,
     Path(uuid): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<PerspectiveHandle>, ApiError> {
     let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let perspective = get_perspective(&uuid)
-        .ok_or_else(|| ApiError::NotFound(format!("Perspective {} not found", uuid)))?;
-
-    let user_email = user_email_from_token(context.auth_token.clone());
-    let handle = perspective.persisted
-        .ok_or_else(|| ApiError::Internal("Perspective has no persisted handle".into()))?;
-
-    if !can_access_perspective(&user_email, &handle) {
-        return Err(ApiError::Forbidden("Access denied to perspective".into()));
-    }
-
-    let include = params.get("include").cloned().unwrap_or_default();
-    if include.contains("snapshot") {
-        let snapshot = perspective.snapshot()
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-        return Ok(Json(serde_json::to_value(snapshot).unwrap_or_default()));
-    }
-
-    Ok(Json(serde_json::to_value(handle).unwrap_or_default()))
+    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let handle = perspective.persisted.lock().await.clone();
+    Ok(Json(handle))
 }
 
-/// POST /perspectives — create
+/// GET /perspectives/:uuid/snapshot — get perspective snapshot (all links)
+pub async fn get_snapshot(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+) -> Result<Json<Perspective>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+
+    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let snapshot = perspective
+        .snapshot()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(snapshot))
+}
+
+/// GET /perspectives/:uuid/links — query links
+pub async fn query_links(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+    Json(query): Json<LinkQuery>,
+) -> Result<Json<Vec<DecoratedLinkExpression>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+
+    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let links = perspective
+        .get_links(&query)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(links))
+}
+
+/// POST /perspectives — create a new perspective
 pub async fn create_perspective(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -79,14 +179,32 @@ pub async fn create_perspective(
     check_capability(&context.capabilities, &PERSPECTIVE_CREATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let handle = add_perspective(body.name, None)
+    // Determine owner DID based on user context
+    let user_email_opt = user_email_from_token(context.auth_token.clone());
+
+    let owner_did = if let Some(user_email) = user_email_opt {
+        Some(
+            AgentService::get_user_did_by_email(&user_email)
+                .map_err(|e| ApiError::Internal(format!("Failed to get user DID: {}", e)))?,
+        )
+    } else {
+        None
+    };
+
+    let handle = if let Some(owner) = &owner_did {
+        PerspectiveHandle::new_with_owner(body.name.clone(), owner.clone())
+    } else {
+        PerspectiveHandle::new_from_name(body.name.clone())
+    };
+
+    add_perspective(handle.clone(), None)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| ApiError::Internal(e))?;
 
     Ok(Json(handle))
 }
 
-/// PUT /perspectives/:uuid — update metadata
+/// PUT /perspectives/:uuid — update perspective name
 pub async fn update_perspective_handler(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -94,148 +212,124 @@ pub async fn update_perspective_handler(
     Json(body): Json<UpdatePerspectiveRequest>,
 ) -> Result<Json<PerspectiveHandle>, ApiError> {
     let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let perspective = get_perspective(&uuid)
-        .ok_or_else(|| ApiError::NotFound(format!("Perspective {} not found", uuid)))?;
-
-    let handle = update_perspective(&uuid, body.name)
+    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let mut handle = perspective.persisted.lock().await.clone();
+    handle.name = Some(body.name);
+    update_perspective(&handle)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| ApiError::Internal(e))?;
 
     Ok(Json(handle))
 }
 
-/// DELETE /perspectives/:uuid — delete
+/// DELETE /perspectives/:uuid — delete perspective
 pub async fn delete_perspective(
     State(_state): State<AppState>,
     auth: AuthContext,
     Path(uuid): Path<String>,
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
-    check_capability(&context.capabilities, &PERSPECTIVE_DELETE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
+    check_capability(
+        &context.capabilities,
+        &perspective_delete_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
     remove_perspective(&uuid)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
+        .map_err(|e| ApiError::Internal(e))?;
     Ok(Json(true))
 }
 
-/// POST /perspectives/:uuid/links — unified link mutations (add/remove/update)
+/// POST /perspectives/:uuid/links — unified link mutations (add, remove, update, set status)
 pub async fn mutate_links(
     State(_state): State<AppState>,
     auth: AuthContext,
     Path(uuid): Path<String>,
     Json(body): Json<LinkMutationRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<LinkMutationResponse>, ApiError> {
     let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let perspective = get_perspective(&uuid)
-        .ok_or_else(|| ApiError::NotFound(format!("Perspective {} not found", uuid)))?;
+    // Check compute credits (pre-check)
+    check_compute_credits(&context.auth_token)?;
 
-    // Delegate to the perspective's link_mutations method
-    // which handles additions, removals, and updates in one call.
-    // The GraphQL `perspectiveLinkMutations` already does this.
+    let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
-    let additions = body.additions.unwrap_or_default();
-    let removals = body.removals.unwrap_or_default();
-    let updates = body.updates.unwrap_or_default();
+    let mut response = LinkMutationResponse {
+        additions: vec![],
+        removals: vec![],
+        updates: vec![],
+    };
 
-    // Convert to internal types and call perspective methods
-    let mut results = serde_json::Map::new();
+    let status = body
+        .status
+        .as_deref()
+        .map(|s| match s {
+            "shared" => LinkStatus::Shared,
+            _ => LinkStatus::Local,
+        })
+        .unwrap_or(LinkStatus::Local);
 
-    if !additions.is_empty() {
-        let links: Vec<crate::types::Link> = additions
-            .into_iter()
-            .map(|l| crate::types::Link {
-                source: l.source,
-                target: l.target,
-                predicate: l.predicate,
-            })
-            .collect();
+    // Handle additions and removals via link_mutations
+    let has_additions = body.additions.as_ref().map_or(false, |a| !a.is_empty());
+    let has_removals = body.removals.as_ref().map_or(false, |r| !r.is_empty());
 
-        let added = perspective
-            .add_links(links, &context.auth_token)
+    if has_additions || has_removals {
+        let mutations = LinkMutations {
+            additions: body.additions.unwrap_or_default(),
+            removals: body.removals.unwrap_or_default(),
+        };
+
+        let diff = perspective
+            .link_mutations(mutations, status.clone(), &agent_context)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
-        results.insert(
-            "additions".to_string(),
-            serde_json::to_value(added).unwrap_or_default(),
+
+        response.additions = diff.additions;
+        response.removals = diff.removals;
+    }
+
+    // Handle updates separately
+    if let Some(updates) = body.updates {
+        for update in updates {
+            let result = perspective
+                .update_link(
+                    LinkExpression::from_input_without_proof(update.old_link),
+                    update.new_link.into(),
+                    body.batch_id.clone(),
+                    &agent_context,
+                )
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            response.updates.push(result);
+        }
+    }
+
+    // Deduct compute credits
+    let total_ops = response.additions.len() + response.removals.len() + response.updates.len();
+    if total_ops > 0 {
+        let _ = reserve_compute_credits(
+            &context.auth_token,
+            total_ops as f64 * DEFAULT_LINK_WRITE,
         );
     }
 
-    if !removals.is_empty() {
-        let link_expressions: Vec<crate::types::DecoratedLinkExpression> = removals
-            .into_iter()
-            .map(|le| crate::types::DecoratedLinkExpression {
-                author: le.author,
-                timestamp: le.timestamp,
-                data: crate::types::Link {
-                    source: le.data.source,
-                    target: le.data.target,
-                    predicate: le.data.predicate,
-                },
-                proof: crate::types::DecoratedExpressionProof {
-                    key: le.proof.as_ref().and_then(|p| p.key.clone()).unwrap_or_default(),
-                    signature: le.proof.as_ref().and_then(|p| p.signature.clone()).unwrap_or_default(),
-                    valid: le.proof.as_ref().and_then(|p| p.valid),
-                    invalid: le.proof.as_ref().and_then(|p| p.invalid),
-                },
-                status: le.status.map(|s| match s.as_str() {
-                    "shared" => crate::types::LinkStatus::Shared,
-                    _ => crate::types::LinkStatus::Local,
-                }),
-            })
-            .collect();
-
-        for le in &link_expressions {
-            perspective
-                .remove_link(le.clone())
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-        }
-        results.insert("removals".to_string(), serde_json::json!(true));
-    }
-
-    if !updates.is_empty() {
-        for update in updates {
-            let old = crate::types::DecoratedLinkExpression {
-                author: update.old.author,
-                timestamp: update.old.timestamp,
-                data: crate::types::Link {
-                    source: update.old.data.source,
-                    target: update.old.data.target,
-                    predicate: update.old.data.predicate,
-                },
-                proof: crate::types::DecoratedExpressionProof {
-                    key: update.old.proof.as_ref().and_then(|p| p.key.clone()).unwrap_or_default(),
-                    signature: update.old.proof.as_ref().and_then(|p| p.signature.clone()).unwrap_or_default(),
-                    valid: update.old.proof.as_ref().and_then(|p| p.valid),
-                    invalid: update.old.proof.as_ref().and_then(|p| p.invalid),
-                },
-                status: update.old.status.map(|s| match s.as_str() {
-                    "shared" => crate::types::LinkStatus::Shared,
-                    _ => crate::types::LinkStatus::Local,
-                }),
-            };
-            let new_link = crate::types::Link {
-                source: update.new.source,
-                target: update.new.target,
-                predicate: update.new.predicate,
-            };
-            perspective
-                .update_link(old, new_link)
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-        }
-        results.insert("updates".to_string(), serde_json::json!(true));
-    }
-
-    Ok(Json(serde_json::Value::Object(results)))
+    Ok(Json(response))
 }
 
-/// POST /perspectives/:uuid/query — unified query { engine, query }
+/// POST /perspectives/:uuid/query — query perspective (prolog or surreal)
 pub async fn query_perspective(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -243,21 +337,26 @@ pub async fn query_perspective(
     Json(body): Json<QueryRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let perspective = get_perspective(&uuid)
-        .ok_or_else(|| ApiError::NotFound(format!("Perspective {} not found", uuid)))?;
+    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
     let result = match body.engine.as_str() {
         "prolog" => {
             let res = perspective
-                .prolog_query(&body.query)
+                .prolog_query_with_context(body.query, &agent_context)
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-            serde_json::to_value(res).unwrap_or_default()
+            serde_json::to_value(prolog_resolution_to_string(res)).unwrap_or_default()
         }
         "surreal" => {
             let res = perspective
-                .surreal_query(&body.query)
+                .surreal_query(body.query)
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             serde_json::to_value(res).unwrap_or_default()
@@ -281,23 +380,30 @@ pub async fn add_sdna(
     Json(body): Json<AddSdnaRequest>,
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let perspective = get_perspective(&uuid)
-        .ok_or_else(|| ApiError::NotFound(format!("Perspective {} not found", uuid)))?;
+    let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
-    let sdna_type = match body.sdna_type.as_str() {
-        "subject_class" => crate::perspectives::perspective_instance::SdnaType::SubjectClass,
-        "flow" => crate::perspectives::perspective_instance::SdnaType::Flow,
-        "custom" => crate::perspectives::perspective_instance::SdnaType::Custom,
-        _ => return Err(ApiError::BadRequest("Invalid SDNA type".into())),
-    };
+    let sdna_type = SdnaType::from_string(&body.sdna_type)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid SDNA type: {}", e)))?;
 
-    perspective
-        .add_sdna(body.name, body.sdna_code, sdna_type)
+    let result = perspective
+        .add_sdna(
+            body.name,
+            body.sdna_code.unwrap_or_default(),
+            sdna_type,
+            body.shacl_json,
+            &agent_context,
+        )
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    Ok(Json(true))
+    Ok(Json(result))
 }
 
 /// POST /perspectives/:uuid/commands — execute commands
@@ -308,9 +414,13 @@ pub async fn execute_commands(
     Json(body): Json<ExecuteCommandsRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e.message().to_string()))?;
 
-    let perspective = get_perspective(&uuid)
-        .ok_or_else(|| ApiError::NotFound(format!("Perspective {} not found", uuid)))?;
+    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
 
     let result = perspective
         .execute_commands(

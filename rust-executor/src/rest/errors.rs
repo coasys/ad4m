@@ -51,6 +51,18 @@ impl From<deno_core::error::AnyError> for ApiError {
     }
 }
 
+impl From<serde_json::Error> for ApiError {
+    fn from(e: serde_json::Error) -> Self {
+        ApiError::Internal(e.to_string())
+    }
+}
+
+impl From<std::io::Error> for ApiError {
+    fn from(e: std::io::Error) -> Self {
+        ApiError::Internal(e.to_string())
+    }
+}
+
 impl From<coasys_juniper::FieldError> for ApiError {
     fn from(e: coasys_juniper::FieldError) -> Self {
         let msg = e.message().to_string();

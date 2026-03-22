@@ -2,11 +2,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{
     Agent, AgentStatus, Apps, PerspectiveHandle, Perspective,
+    DecoratedLinkExpression, Link, LinkExpression, LinkMutations,
+    LinkQuery, LinkStatus, Notification, TriggeredNotification,
+    AITask, Model, ModelType, OnlineAgent,
+    InteractionCall, InteractionMeta, LanguageMeta, LanguageRef,
 };
-use crate::types::{
-    DecoratedLinkExpression, Link, Notification, TriggeredNotification,
-    AITask, Model, ModelType,
-};
+
+// Re-export for use in handler files
+pub use crate::agent::capabilities::user_email_from_token;
 
 // ── Agent ──
 
@@ -35,6 +38,13 @@ pub struct SignMessageRequest {
     pub message: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSignature {
+    pub public_key: String,
+    pub signature: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProfileRequest {
@@ -61,7 +71,7 @@ pub struct GenerateJwtRequest {
     pub request_id: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthInfoInput {
     pub app_desc: String,
@@ -73,14 +83,14 @@ pub struct AuthInfoInput {
     pub user_did: Option<String>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CapabilityInput {
     pub can: Vec<String>,
     pub with: ResourceInput,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceInput {
     pub domain: String,
@@ -100,13 +110,13 @@ pub struct EntanglementProofInput {
 
 // ── Perspectives & Links ──
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveInput {
     pub links: Vec<LinkInput>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkInput {
     pub source: String,
@@ -131,7 +141,7 @@ pub struct UpdatePerspectiveRequest {
 #[serde(rename_all = "camelCase")]
 pub struct LinkMutationRequest {
     pub additions: Option<Vec<LinkInput>>,
-    pub removals: Option<Vec<LinkExpressionInput>>,
+    pub removals: Option<Vec<LinkInput>>,
     pub updates: Option<Vec<LinkUpdateInput>>,
     pub status: Option<String>,
     pub batch_id: Option<String>,
@@ -139,28 +149,18 @@ pub struct LinkMutationRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LinkExpressionInput {
-    pub author: String,
-    pub timestamp: String,
-    pub data: LinkInput,
-    pub proof: Option<ExpressionProofInput>,
-    pub status: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct LinkUpdateInput {
-    pub old: LinkExpressionInput,
-    pub new: LinkInput,
+    pub old_link: LinkInput,
+    pub new_link: LinkInput,
 }
 
-#[derive(Deserialize)]
+/// Unified link mutation response.
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExpressionProofInput {
-    pub key: Option<String>,
-    pub signature: Option<String>,
-    pub valid: Option<bool>,
-    pub invalid: Option<bool>,
+pub struct LinkMutationResponse {
+    pub additions: Vec<DecoratedLinkExpression>,
+    pub removals: Vec<DecoratedLinkExpression>,
+    pub updates: Vec<DecoratedLinkExpression>,
 }
 
 /// Unified query request (harmonised: engine + query in one).
@@ -182,22 +182,23 @@ pub struct JoinNeighbourhoodRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishNeighbourhoodRequest {
-    pub uuid: String,
+    pub perspective_uuid: String,
     pub link_language: String,
-    pub meta: Option<PerspectiveInput>,
+    pub meta: PerspectiveInput,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SendBroadcastRequest {
-    pub perspective: PerspectiveInput,
+pub struct BroadcastRequest {
+    pub payload: PerspectiveInput,
     pub signed: Option<bool>,
+    pub loopback: Option<bool>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SendSignalRequest {
-    pub recipient: String,
+pub struct SignalRequest {
+    pub remote_agent_did: String,
     pub payload: PerspectiveInput,
     pub signed: Option<bool>,
 }
@@ -205,7 +206,7 @@ pub struct SendSignalRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetOnlineStatusRequest {
-    pub perspective: PerspectiveInput,
+    pub status: PerspectiveInput,
     pub signed: Option<bool>,
 }
 
@@ -224,13 +225,63 @@ pub struct ExpressionManyRequest {
     pub urls: Vec<String>,
 }
 
+// ── Languages ──
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageHandle {
+    pub address: String,
+    pub name: String,
+    pub settings: Option<String>,
+    pub constructor_icon: Option<Icon>,
+    pub icon: Option<Icon>,
+    pub settings_icon: Option<Icon>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Icon {
+    pub code: Option<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct InteractRequest {
-    pub interaction_call: String,
+pub struct PublishLanguageRequest {
+    pub language_path: String,
+    pub language_meta: LanguageMetaInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageMetaInput {
+    pub name: String,
+    pub description: String,
+    pub possible_template_params: Option<Vec<String>>,
+    pub source_code_link: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyTemplateRequest {
+    pub source_language_hash: String,
+    pub template_data: String,
+}
+
+#[derive(Serialize)]
+pub struct LanguageLanguageInput {
+    pub bundle: String,
+    pub meta: LanguageMeta,
 }
 
 // ── Runtime ──
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeInfo {
+    pub is_initialized: bool,
+    pub is_unlocked: bool,
+    pub ad4m_executor_version: String,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -279,7 +330,7 @@ pub struct FriendsListRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CreateUserRequest {
     pub email: String,
-    pub password: Option<String>,
+    pub password: String,
 }
 
 #[derive(Deserialize)]
@@ -287,6 +338,7 @@ pub struct CreateUserRequest {
 pub struct LoginUserRequest {
     pub email: String,
     pub password: String,
+    pub app_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -294,6 +346,8 @@ pub struct LoginUserRequest {
 pub struct VerifyEmailRequest {
     pub email: String,
     pub code: String,
+    pub verification_type: Option<String>,
+    pub app_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -306,58 +360,22 @@ pub struct SetMultiUserRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AddModelRequest {
-    pub model: ModelInput,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelInput {
-    pub name: String,
-    pub api_base_url: Option<String>,
-    pub api_key: Option<String>,
-    pub api_type: Option<String>,
-    pub model_type: Option<String>,
-    pub token_limit: Option<i32>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct PromptRequest {
-    pub model_id: Option<String>,
+    pub task_id: String,
     pub prompt: String,
-    pub system: Option<String>,
-    pub examples: Option<Vec<PromptExample>>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PromptExample {
-    pub input: String,
-    pub output: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmbedRequest {
-    pub model_id: Option<String>,
+    pub model_id: String,
     pub text: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TaskRequest {
-    pub action: String, // "add" | "update" | "remove"
-    pub task: Option<AITaskInput>,
-    pub task_id: Option<String>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AITaskInput {
-    pub name: Option<String>,
-    pub model_id: Option<String>,
-    pub description: Option<String>,
+pub struct SetDefaultModelRequest {
+    pub model_type: ModelType,
 }
 
 // ── Notifications ──
@@ -381,8 +399,9 @@ pub struct NotificationInput {
 #[serde(rename_all = "camelCase")]
 pub struct AddSdnaRequest {
     pub name: String,
-    pub sdna_code: String,
+    pub sdna_code: Option<String>,
     pub sdna_type: String,
+    pub shacl_json: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -390,28 +409,6 @@ pub struct AddSdnaRequest {
 pub struct ExecuteCommandsRequest {
     pub commands: Vec<serde_json::Value>,
     pub expression: serde_json::Value,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateSubjectRequest {
-    pub subject_class: String,
-    pub expression_address: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GetSubjectDataRequest {
-    pub subject_class: String,
-    pub expression_address: String,
-}
-
-// ── Link Language Templates ──
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LinkLanguageTemplatesRequest {
-    pub addresses: Vec<String>,
 }
 
 // ── Hosting ──
@@ -431,17 +428,6 @@ pub struct HostingWalletResponse {
     pub pubkey: Option<String>,
 }
 
-// ── Dev ──
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EmailTestRequest {
-    pub action: String, // "send" | "enable" | "disable" | "get-code" | "clear" | "set-expiry"
-    pub to: Option<String>,
-    pub email: Option<String>,
-    pub expiry_seconds: Option<i64>,
-}
-
 // ── Verify Signature ──
 
 #[derive(Deserialize)]
@@ -452,21 +438,13 @@ pub struct VerifySignatureRequest {
     pub signed_data: String,
 }
 
-// ── Batch ──
+// ── Dev ──
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CommitBatchRequest {
-    pub additions: Option<serde_json::Value>,
-    pub removals: Option<serde_json::Value>,
-}
-
-// ── SSE event wrapper ──
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SseEvent<T: Serialize> {
-    #[serde(rename = "type")]
-    pub event_type: String,
-    pub data: T,
+pub struct EmailTestRequest {
+    pub action: String,
+    pub to: Option<String>,
+    pub email: Option<String>,
+    pub expiry_seconds: Option<i64>,
 }
