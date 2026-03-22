@@ -325,7 +325,7 @@ describe("isExecutorRunning", () => {
       1000,
       "http://localhost:12000/graphql",
     );
-    expect(result).toBe(false);
+    expect(result).toBe("graphql");
   });
 
   it("returns false when both endpoints fail", async () => {
