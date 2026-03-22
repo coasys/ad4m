@@ -227,6 +227,8 @@ impl Ad4mMcpHandler {
             .iter()
             .map(|n| n.to_lowercase())
             .chain(std::iter::once(did.to_lowercase()))
+            // Protocol-level group mentions: ad4m://everyone notifies all agents
+            .chain(std::iter::once("ad4m://everyone".to_string()))
             .collect();
 
         let mention_conditions: Vec<String> = all_terms
