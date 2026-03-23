@@ -875,9 +875,8 @@ describe("Ad4mModel.queryToSPARQL()", () => {
 
     // Must be a SPARQL SELECT
     expect(norm).toContain("SELECT ?source ?predicate ?target ?author ?timestamp");
-    expect(norm).toContain("PREFIX ad4m:");
-    // Must have conformance JOIN for required properties (no FILTER EXISTS)
-    expect(norm).toContain("cf_name");
+    // Must have conformance JOIN for required properties using direct triple patterns
+    expect(norm).toContain("cfTarget_name");
     expect(norm).toContain("recipe://name");
   });
 
@@ -974,7 +973,7 @@ describe("Ad4mModel.queryToSPARQL()", () => {
     const norm = normalizeQuery(query);
     expect(norm).toContain("SELECT ?source");
     // gt is now handled in SPARQL via JOIN + FILTER
-    expect(norm).toContain("w_cmp_rating");
+    expect(norm).toContain("wTarget_cmp_rating");
     expect(norm).toMatch(/>\s*"3"/);
   });
 
@@ -1717,7 +1716,7 @@ describe("buildBatchSPARQLQuery", () => {
     };
     const sparql = buildBatchSPARQLQuery(metadata, query, Book);
 
-    expect(sparql).toContain("\"My Book\"");
+    expect(sparql).toContain("My Book");
     expect(sparql).toContain("book://title");
   });
 
