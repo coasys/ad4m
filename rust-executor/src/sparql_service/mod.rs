@@ -6,31 +6,14 @@ use oxigraph::model::*;
 use oxigraph::sparql::{QueryOptions, QueryResults};
 use oxigraph::store::Store;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-const LINK_PREFIX: &str = "ad4m://link/";
-
-const ONT_LINK: &str = "ad4m://ontology/Link";
-const ONT_SOURCE: &str = "ad4m://ontology/source";
-const ONT_TARGET: &str = "ad4m://ontology/target";
-const ONT_PREDICATE: &str = "ad4m://ontology/predicate";
 const ONT_AUTHOR: &str = "ad4m://ontology/author";
 const ONT_TIMESTAMP: &str = "ad4m://ontology/timestamp";
 const ONT_PROOF_KEY: &str = "ad4m://ontology/proofKey";
 const ONT_PROOF_SIG: &str = "ad4m://ontology/proofSignature";
 const ONT_PROOF_VALID: &str = "ad4m://ontology/proofValid";
 const ONT_STATUS: &str = "ad4m://ontology/status";
-
-fn link_uri(link: &DecoratedLinkExpression) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(link.data.source.as_bytes());
-    hasher.update(link.data.predicate.as_deref().unwrap_or("").as_bytes());
-    hasher.update(link.data.target.as_bytes());
-    hasher.update(link.author.as_bytes());
-    hasher.update(link.timestamp.as_bytes());
-    format!("{}{:x}", LINK_PREFIX, hasher.finalize())
-}
 
 fn literal(val: &str) -> Literal {
     Literal::new_simple_literal(val)
@@ -121,58 +104,20 @@ pub fn validate_readonly_query(query: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn link_from_store(store: &Store, subject: &NamedNode) -> Option<DecoratedLinkExpression> {
-    let subj = subject.as_ref();
-    let get = |ont_uri: &str| -> Option<String> {
-        store
-            .quads_for_pattern(
-                Some(subj.into()),
-                Some(NamedNodeRef::new_unchecked(ont_uri)),
-                None,
-                None,
-            )
-            .next()
-            .and_then(|q| q.ok())
-            .and_then(|q| match q.object {
-                Term::Literal(l) => Some(l.value().to_string()),
-                _ => None,
-            })
-    };
-
-    let source = get(ONT_SOURCE)?;
-    let target = get(ONT_TARGET)?;
-    let predicate = get(ONT_PREDICATE).and_then(|p| if p.is_empty() { None } else { Some(p) });
-    let author = get(ONT_AUTHOR).unwrap_or_default();
-    let timestamp = get(ONT_TIMESTAMP).unwrap_or_default();
-    let proof_key = get(ONT_PROOF_KEY).unwrap_or_default();
-    let proof_sig = get(ONT_PROOF_SIG).unwrap_or_default();
-    let proof_valid = get(ONT_PROOF_VALID).map(|v| v == "true");
-    let status_val = get(ONT_STATUS);
-    let status = match status_val.as_deref() {
-        Some("Local") => Some(LinkStatus::Local),
-        Some("Shared") => Some(LinkStatus::Shared),
-        _ => None,
-    };
-
-    Some(DecoratedLinkExpression {
-        author,
-        timestamp,
-        data: Link {
-            source,
-            predicate,
-            target,
-        },
-        proof: DecoratedExpressionProof {
-            key: proof_key,
-            signature: proof_sig,
-            valid: proof_valid,
-            invalid: proof_valid.map(|v| !v),
-        },
-        status,
-    })
+/// Build the direct triple (source, predicate, target as IRIs) for a link.
+fn make_direct_triple(link: &DecoratedLinkExpression) -> Result<(NamedNode, NamedNode, NamedNode), Error> {
+    let source_iri = NamedNode::new(&link.data.source)
+        .map_err(|e| anyhow!("Invalid source IRI '{}': {}", link.data.source, e))?;
+    let predicate_val = link.data.predicate.as_deref().unwrap_or("");
+    let predicate_iri = NamedNode::new(predicate_val)
+        .map_err(|e| anyhow!("Invalid predicate IRI '{}': {}", predicate_val, e))?;
+    let target_iri = NamedNode::new(&link.data.target)
+        .map_err(|e| anyhow!("Invalid target IRI '{}': {}", link.data.target, e))?;
+    Ok((source_iri, predicate_iri, target_iri))
 }
 
 /// Oxigraph-backed SPARQL store for AD4M link data.
+/// Uses direct triples + RDF-star annotations for metadata.
 /// Synchronous API — Oxigraph operations are not async.
 #[derive(Clone)]
 pub struct SparqlService {
@@ -181,7 +126,6 @@ pub struct SparqlService {
 
 impl SparqlService {
     /// Create a new SparqlService with an in-memory store.
-    /// Links are synced from the perspective on startup via sync_existing_links_to_sparql().
     pub fn new(_data_path: Option<&str>) -> Result<Self, Error> {
         let store = Store::new()?;
         Ok(SparqlService {
@@ -190,75 +134,48 @@ impl SparqlService {
     }
 
     fn insert_link_triples(&self, link: &DecoratedLinkExpression) -> Result<(), Error> {
-        let uri_str = link_uri(link);
-        let subj = NamedNode::new(&uri_str)?;
-        let subj_ref = subj.as_ref();
+        let (source_iri, predicate_iri, target_iri) = make_direct_triple(link)?;
 
-        let predicate_val = link.data.predicate.as_deref().unwrap_or("");
+        // 1. Insert the direct triple: <source> <predicate> <target>
+        self.store.insert(QuadRef::new(
+            source_iri.as_ref(),
+            predicate_iri.as_ref(),
+            TermRef::NamedNode(target_iri.as_ref()),
+            GraphNameRef::DefaultGraph,
+        ))?;
+
+        // 2. Insert RDF-star annotations on the quoted triple
+        let quoted = Triple::new(
+            source_iri.clone(),
+            predicate_iri.clone(),
+            target_iri.clone(),
+        );
+        let quoted_subject: Subject = quoted.into();
+
         let proof = &link.proof;
         let valid_str = proof.valid.unwrap_or(false).to_string();
 
-        let rdf_type =
-            NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
-
-        let lit_source = literal(&link.data.source);
-        let lit_target = literal(&link.data.target);
-        let lit_predicate = literal(predicate_val);
-        let lit_author = literal(&link.author);
-        let lit_timestamp = literal(&link.timestamp);
-        let lit_proof_key = literal(&proof.key);
-        let lit_proof_sig = literal(&proof.signature);
-        let lit_proof_valid = literal(&valid_str);
-        let lit_status = literal(status_str(&link.status));
-
-        let triples: [(NamedNodeRef, TermRef); 10] = [
-            (rdf_type, NamedNodeRef::new_unchecked(ONT_LINK).into()),
-            (
-                NamedNodeRef::new_unchecked(ONT_SOURCE),
-                lit_source.as_ref().into(),
-            ),
-            (
-                NamedNodeRef::new_unchecked(ONT_TARGET),
-                lit_target.as_ref().into(),
-            ),
-            (
-                NamedNodeRef::new_unchecked(ONT_PREDICATE),
-                lit_predicate.as_ref().into(),
-            ),
-            (
-                NamedNodeRef::new_unchecked(ONT_AUTHOR),
-                lit_author.as_ref().into(),
-            ),
-            (
-                NamedNodeRef::new_unchecked(ONT_TIMESTAMP),
-                lit_timestamp.as_ref().into(),
-            ),
-            (
-                NamedNodeRef::new_unchecked(ONT_PROOF_KEY),
-                lit_proof_key.as_ref().into(),
-            ),
-            (
-                NamedNodeRef::new_unchecked(ONT_PROOF_SIG),
-                lit_proof_sig.as_ref().into(),
-            ),
-            (
-                NamedNodeRef::new_unchecked(ONT_PROOF_VALID),
-                lit_proof_valid.as_ref().into(),
-            ),
-            (
-                NamedNodeRef::new_unchecked(ONT_STATUS),
-                lit_status.as_ref().into(),
-            ),
+        let annotations: &[(&str, &str)] = &[
+            (ONT_AUTHOR, &link.author),
+            (ONT_TIMESTAMP, &link.timestamp),
+            (ONT_PROOF_KEY, &proof.key),
+            (ONT_PROOF_SIG, &proof.signature),
+            (ONT_PROOF_VALID, &valid_str),
+            (ONT_STATUS, status_str(&link.status)),
         ];
 
-        for (pred, obj) in &triples {
+        for (pred_uri, value) in annotations {
+            let pred = NamedNodeRef::new_unchecked(pred_uri);
+            let lit = literal(value);
+            let subj_ref: SubjectRef = quoted_subject.as_ref();
             self.store.insert(QuadRef::new(
                 subj_ref,
-                *pred,
-                *obj,
+                pred,
+                TermRef::Literal(lit.as_ref()),
                 GraphNameRef::DefaultGraph,
             ))?;
         }
+
         Ok(())
     }
 
@@ -269,40 +186,69 @@ impl SparqlService {
 
     /// Remove all triples for a link from the store.
     pub fn remove_link(&self, link: &DecoratedLinkExpression) -> Result<(), Error> {
-        let uri_str = link_uri(link);
-        let subj = NamedNode::new(&uri_str)?;
-        let subj_ref = subj.as_ref();
-        let quads: Vec<_> = self
+        let (source_iri, predicate_iri, target_iri) = make_direct_triple(link)?;
+
+        // 1. Remove the direct triple
+        self.store.remove(QuadRef::new(
+            source_iri.as_ref(),
+            predicate_iri.as_ref(),
+            TermRef::NamedNode(target_iri.as_ref()),
+            GraphNameRef::DefaultGraph,
+        ))?;
+
+        // 2. Remove RDF-star annotation triples
+        let quoted = Triple::new(
+            source_iri.clone(),
+            predicate_iri.clone(),
+            target_iri.clone(),
+        );
+        let quoted_subject: Subject = quoted.into();
+
+        let annotation_quads: Vec<_> = self
             .store
-            .quads_for_pattern(Some(subj_ref.into()), None, None, None)
+            .quads_for_pattern(Some(quoted_subject.as_ref().into()), None, None, None)
             .collect::<Result<Vec<_>, _>>()?;
-        for quad in quads {
+        for quad in annotation_quads {
             self.store.remove(&quad)?;
         }
         Ok(())
     }
 
-    /// Return all links in the store.
+    /// Return all links in the store by querying via SPARQL-star.
     pub fn get_all_links(&self) -> Result<Vec<DecoratedLinkExpression>, Error> {
-        let rdf_type =
-            NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
-        let link_type = NamedNodeRef::new_unchecked(ONT_LINK);
-        let mut links = Vec::new();
-        for quad in self
-            .store
-            .quads_for_pattern(None, Some(rdf_type), Some(link_type.into()), None)
-        {
-            let quad = quad?;
-            if let Subject::NamedNode(subj) = quad.subject {
-                if let Some(link) = link_from_store(&self.store, &subj) {
-                    links.push(link);
-                }
+        let query = r#"
+            SELECT ?source ?predicate ?target ?author ?timestamp ?proofKey ?proofSig ?proofValid ?status WHERE {
+                ?source ?predicate ?target .
+                FILTER(isIRI(?source))
+                BIND(<< ?source ?predicate ?target >> AS ?ann)
+                ?ann <ad4m://ontology/author> ?author .
+                ?ann <ad4m://ontology/timestamp> ?timestamp .
+                OPTIONAL { ?ann <ad4m://ontology/proofKey> ?proofKey . }
+                OPTIONAL { ?ann <ad4m://ontology/proofSignature> ?proofSig . }
+                OPTIONAL { ?ann <ad4m://ontology/proofValid> ?proofValid . }
+                OPTIONAL { ?ann <ad4m://ontology/status> ?status . }
             }
+        "#;
+
+        let options = self.query_options();
+        let results = self.store.query_opt(query, options)?;
+
+        match results {
+            QueryResults::Solutions(solutions) => {
+                let mut links = Vec::new();
+                for solution in solutions {
+                    let solution = solution?;
+                    if let Some(link) = self.link_from_solution(&solution) {
+                        links.push(link);
+                    }
+                }
+                Ok(links)
+            }
+            _ => Ok(Vec::new()),
         }
-        Ok(links)
     }
 
-    /// Find links matching optional filters.
+    /// Find links matching optional filters using SPARQL-star.
     pub fn get_link(
         &self,
         source: Option<&str>,
@@ -342,11 +288,8 @@ impl SparqlService {
         self.get_link(None, Some(predicate), None, None, None)
     }
 
-    /// Execute an arbitrary read-only SPARQL SELECT query, returning a JSON string.
-    pub fn query(&self, query_string: &str) -> Result<String, Error> {
-        validate_readonly_query(query_string)?;
-
-        let options = QueryOptions::default()
+    fn query_options(&self) -> QueryOptions {
+        QueryOptions::default()
             .with_custom_function(
                 NamedNode::new_unchecked("ad4m://fn/parse_literal"),
                 parse_literal_fn,
@@ -354,8 +297,71 @@ impl SparqlService {
             .with_custom_function(
                 NamedNode::new_unchecked("ad4m://fn/strip_html"),
                 strip_html_fn,
-            );
+            )
+    }
 
+    fn link_from_solution(&self, solution: &oxigraph::sparql::QuerySolution) -> Option<DecoratedLinkExpression> {
+        let source = match solution.get("source")? {
+            Term::NamedNode(n) => n.as_str().to_string(),
+            _ => return None,
+        };
+        let predicate = match solution.get("predicate")? {
+            Term::NamedNode(n) => {
+                let s = n.as_str().to_string();
+                if s.is_empty() { None } else { Some(s) }
+            },
+            _ => return None,
+        };
+        let target = match solution.get("target")? {
+            Term::NamedNode(n) => n.as_str().to_string(),
+            _ => return None,
+        };
+
+        let get_str = |var: &str| -> String {
+            solution.get(var).and_then(|t| match t {
+                Term::Literal(l) => Some(l.value().to_string()),
+                Term::NamedNode(n) => Some(n.as_str().to_string()),
+                _ => None,
+            }).unwrap_or_default()
+        };
+
+        let author = get_str("author");
+        let timestamp = get_str("timestamp");
+        let proof_key = get_str("proofKey");
+        let proof_sig = get_str("proofSig");
+        let proof_valid_str = get_str("proofValid");
+        let proof_valid = if proof_valid_str.is_empty() { None } else { Some(proof_valid_str == "true") };
+        let status_val = get_str("status");
+        let status = match status_val.as_str() {
+            "Local" => Some(LinkStatus::Local),
+            "Shared" => Some(LinkStatus::Shared),
+            "" => None,
+            _ => None,
+        };
+
+        Some(DecoratedLinkExpression {
+            author,
+            timestamp,
+            data: Link {
+                source,
+                predicate,
+                target,
+            },
+            proof: DecoratedExpressionProof {
+                key: proof_key,
+                signature: proof_sig,
+                valid: proof_valid,
+                invalid: proof_valid.map(|v| !v),
+            },
+            status,
+        })
+    }
+
+    /// Execute an arbitrary read-only SPARQL SELECT query, returning a JSON string.
+    pub fn query(&self, query_string: &str) -> Result<String, Error> {
+        validate_readonly_query(query_string)?;
+
+        let options = self.query_options();
         let results = self.store.query_opt(query_string, options)?;
 
         match results {
