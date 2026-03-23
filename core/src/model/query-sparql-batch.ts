@@ -37,63 +37,54 @@ interface DepthBranch {
 //  Helpers
 // ──────────────────────────────────────────────────────────
 
-function buildConformanceFilters(metadata: ModelMetadata, sourceVar: string): string[] {
+function buildConformanceJoins(metadata: ModelMetadata, sourceVar: string, prefix: string): { joins: string[]; filters: string[] } {
+  const joins: string[] = [];
   const filters: string[] = [];
+  let hasConformance = false;
 
   for (const [, propMeta] of Object.entries(metadata.properties)) {
     if (propMeta.required) {
       if (propMeta.getter) continue;
+      hasConformance = true;
       if (propMeta.flag && propMeta.initial) {
-        filters.push(`
-          EXISTS {
-            ?cfLink a <${ONT}Link> ;
-              <${ONT}source> ${sourceVar} ;
-              <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-              <${ONT}target> ${formatSPARQLValue(propMeta.initial)} .
-          }
-        `);
+        joins.push(`
+          ?${prefix}_cf_${propMeta.name} a <${ONT}Link> ;
+            <${ONT}source> ${sourceVar} ;
+            <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
+            <${ONT}target> ${formatSPARQLValue(propMeta.initial)} .`);
       } else {
-        filters.push(`
-          EXISTS {
-            ?cfLink a <${ONT}Link> ;
-              <${ONT}source> ${sourceVar} ;
-              <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-              <${ONT}target> ?cfAny .
-          }
-        `);
+        joins.push(`
+          ?${prefix}_cf_${propMeta.name} a <${ONT}Link> ;
+            <${ONT}source> ${sourceVar} ;
+            <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
+            <${ONT}target> ?${prefix}_cfTarget_${propMeta.name} .`);
       }
     }
   }
 
   // Fallback: initial values
-  if (filters.length === 0) {
+  if (!hasConformance) {
     for (const [, propMeta] of Object.entries(metadata.properties)) {
       if (propMeta.initial) {
         if (propMeta.flag) {
-          filters.push(`
-            EXISTS {
-              ?cfInit a <${ONT}Link> ;
-                <${ONT}source> ${sourceVar} ;
-                <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-                <${ONT}target> ${formatSPARQLValue(propMeta.initial)} .
-            }
-          `);
+          joins.push(`
+          ?${prefix}_cfInit_${propMeta.name} a <${ONT}Link> ;
+            <${ONT}source> ${sourceVar} ;
+            <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
+            <${ONT}target> ${formatSPARQLValue(propMeta.initial)} .`);
         } else {
-          filters.push(`
-            EXISTS {
-              ?cfInit a <${ONT}Link> ;
-                <${ONT}source> ${sourceVar} ;
-                <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-                <${ONT}target> ?cfInitAny .
-            }
-          `);
+          joins.push(`
+          ?${prefix}_cfInit_${propMeta.name} a <${ONT}Link> ;
+            <${ONT}source> ${sourceVar} ;
+            <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
+            <${ONT}target> ?${prefix}_cfInitAny_${propMeta.name} .`);
         }
         break;
       }
     }
   }
 
-  return filters;
+  return { joins, filters };
 }
 
 /**
@@ -173,20 +164,18 @@ export function buildBatchSPARQLQuery(
   const branches = flattenIncludeTree(0, rootModelClass, includeMap, nextDepth);
 
   // ── Root UNION branch (depth 0) ──
-  const rootConformance = buildConformanceFilters(rootMetadata, "?source");
+  const rootConformance = buildConformanceJoins(rootMetadata, "?source", "root");
 
-  // Parent filter for root
-  const rootFilters = [...rootConformance];
+  // Parent JOIN for root
+  const rootJoins = [...rootConformance.joins];
+  const rootFilters = [...rootConformance.filters];
   if (query.parent) {
     const parentPredicate = resolveParentPredicate(query.parent, rootModelClass);
-    rootFilters.push(`
-      EXISTS {
-        ?parentLink a <${ONT}Link> ;
+    rootJoins.push(`
+        ?root_parentLink a <${ONT}Link> ;
           <${ONT}source> ${formatSPARQLValue(query.parent.id)} ;
           <${ONT}predicate> ${formatSPARQLValue(parentPredicate)} ;
-          <${ONT}target> ?source .
-      }
-    `);
+          <${ONT}target> ?source .`);
   }
 
   // Where filters for root (simple equality and id/base only — comparison operators in JS)
@@ -206,32 +195,26 @@ export function buildBatchSPARQLQuery(
       const propMeta = rootMetadata.properties[propertyName];
       if (!propMeta) continue;
 
-      // Simple equality only at SPARQL level
+      // Simple equality — use JOIN
       if (typeof condition === "string" || typeof condition === "number" || typeof condition === "boolean") {
-        rootFilters.push(`
-          EXISTS {
-            ?wLink a <${ONT}Link> ;
-              <${ONT}source> ?source ;
-              <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-              <${ONT}target> ?wTarget .
-            FILTER(?wTarget = ${formatSPARQLValue(condition)})
-          }
-        `);
+        rootJoins.push(`
+        ?root_w_${propertyName} a <${ONT}Link> ;
+          <${ONT}source> ?source ;
+          <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
+          <${ONT}target> ${formatSPARQLValue(condition)} .`);
       } else if (Array.isArray(condition)) {
         const formatted = (condition as any[]).map(v => formatSPARQLValue(v)).join(", ");
-        rootFilters.push(`
-          EXISTS {
-            ?wLink a <${ONT}Link> ;
-              <${ONT}source> ?source ;
-              <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-              <${ONT}target> ?wTarget .
-            FILTER(?wTarget IN (${formatted}))
-          }
-        `);
+        rootJoins.push(`
+        ?root_w_${propertyName} a <${ONT}Link> ;
+          <${ONT}source> ?source ;
+          <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
+          <${ONT}target> ?root_wTarget_${propertyName} .`);
+        rootFilters.push(`?root_wTarget_${propertyName} IN (${formatted})`);
       }
     }
   }
 
+  const rootJoinClause = rootJoins.join("\n");
   const rootFilterClause = rootFilters.length > 0
     ? `FILTER(\n          ${rootFilters.join(" &&\n          ")}\n        )`
     : "";
@@ -241,6 +224,7 @@ export function buildBatchSPARQLQuery(
   // Depth 0: root
   unionBranches.push(`
       {
+        ${rootJoinClause}
         ?link a ad4m:Link ;
               ad4m:source ?source ;
               ad4m:predicate ?predicate ;
@@ -256,14 +240,17 @@ export function buildBatchSPARQLQuery(
 
   // Depth N: include branches
   for (const branch of branches) {
-    const childConformance = buildConformanceFilters(branch.targetMetadata, "?source");
-    const childFilterClause = childConformance.length > 0
-      ? `FILTER(\n            ${childConformance.join(" &&\n            ")}\n          )`
+    const childConformance = buildConformanceJoins(branch.targetMetadata, "?source", `d${branch.depth}`);
+    const childJoinClause = childConformance.joins.join("\n");
+    const childFilterClause = childConformance.filters.length > 0
+      ? `FILTER(\n            ${childConformance.filters.join(" &&\n            ")}\n          )`
       : "";
 
+    // Build parent conformance JOINs for depth-0 parents
+    const parentJoinClause = branch.parentDepth === 0 ? rootJoinClause.replace(/\?source/g, '?parentBase') : '';
+    const parentFilterClause = branch.parentDepth === 0 ? rootFilterClause.replace(/\?source/g, '?parentBase') : '';
+
     if (branch.direction === 'forward') {
-      // Forward: parent has a link with predicate→child
-      // Find parentBase from depth branch.parentDepth
       unionBranches.push(`
       {
         # Depth ${branch.depth}: ${branch.relationName} (forward)
@@ -271,6 +258,7 @@ export function buildBatchSPARQLQuery(
               ad4m:source ?parentBase ;
               ad4m:predicate ${formatSPARQLValue(branch.parentPredicate)} ;
               ad4m:target ?source .
+        ${childJoinClause}
         ?link a ad4m:Link ;
               ad4m:source ?source ;
               ad4m:predicate ?predicate ;
@@ -278,13 +266,13 @@ export function buildBatchSPARQLQuery(
               ad4m:author ?author ;
               ad4m:timestamp ?timestamp .
         ${childFilterClause}
-        ${branch.parentDepth === 0 ? rootFilterClause.replace(/\?source/g, '?parentBase') : ''}
+        ${parentJoinClause}
+        ${parentFilterClause}
         BIND("${branch.depth}" AS ?depth)
         BIND("${branch.relationName}" AS ?relationName)
       }
       `);
     } else {
-      // Reverse: child has a link with predicate→parent
       unionBranches.push(`
       {
         # Depth ${branch.depth}: ${branch.relationName} (reverse)
@@ -292,6 +280,7 @@ export function buildBatchSPARQLQuery(
               ad4m:source ?source ;
               ad4m:predicate ${formatSPARQLValue(branch.parentPredicate)} ;
               ad4m:target ?parentBase .
+        ${childJoinClause}
         ?link a ad4m:Link ;
               ad4m:source ?source ;
               ad4m:predicate ?predicate ;
@@ -299,7 +288,8 @@ export function buildBatchSPARQLQuery(
               ad4m:author ?author ;
               ad4m:timestamp ?timestamp .
         ${childFilterClause}
-        ${branch.parentDepth === 0 ? rootFilterClause.replace(/\?source/g, '?parentBase') : ''}
+        ${parentJoinClause}
+        ${parentFilterClause}
         BIND("${branch.depth}" AS ?depth)
         BIND("${branch.relationName}" AS ?relationName)
       }

@@ -876,8 +876,8 @@ describe("Ad4mModel.queryToSPARQL()", () => {
     // Must be a SPARQL SELECT
     expect(norm).toContain("SELECT ?source ?predicate ?target ?author ?timestamp");
     expect(norm).toContain("PREFIX ad4m:");
-    // Must have conformance filter for required properties
-    expect(norm).toContain("EXISTS");
+    // Must have conformance JOIN for required properties (no FILTER EXISTS)
+    expect(norm).toContain("cf_name");
     expect(norm).toContain("recipe://name");
   });
 
@@ -895,7 +895,7 @@ describe("Ad4mModel.queryToSPARQL()", () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: { not: "Salad" } } });
     const norm = normalizeQuery(query);
 
-    expect(norm).toContain("!=");
+    expect(norm).toContain("NOT EXISTS");
     expect(norm).toContain("Salad");
   });
 
@@ -969,20 +969,20 @@ describe("Ad4mModel.queryToSPARQL()", () => {
   // The tests verify that the SPARQL still generates valid output (conformance filters)
   // but does NOT inject FILTER clauses for these operators.
 
-  it("should not inject SPARQL FILTER for gt operator (JS post-processed)", async () => {
+  it("should inject SPARQL FILTER for gt operator", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { gt: 3 } } });
     const norm = normalizeQuery(query);
     expect(norm).toContain("SELECT ?source");
-    expect(norm).toContain("EXISTS");
-    // gt is handled in JS, should NOT produce a > filter in SPARQL
-    expect(norm).not.toMatch(/\?\w+\s*>\s*"3"/);
+    // gt is now handled in SPARQL via JOIN + FILTER
+    expect(norm).toContain("w_cmp_rating");
+    expect(norm).toMatch(/>\s*"3"/);
   });
 
-  it("should not inject SPARQL FILTER for lt operator (JS post-processed)", async () => {
+  it("should inject SPARQL FILTER for lt operator", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { lt: 5 } } });
     const norm = normalizeQuery(query);
     expect(norm).toContain("SELECT ?source");
-    expect(norm).not.toMatch(/\?\w+\s*<\s*"5"/);
+    expect(norm).toMatch(/<\s*"5"/);
   });
 
   it("should inject SPARQL FILTER for gte/lte combined", async () => {
