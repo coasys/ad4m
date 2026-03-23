@@ -1225,7 +1225,7 @@ const Hosting = () => {
             <j-text size="400" color="ui-500">
               {freeHostingEnabled
                 ? "All users have free access. No payment or wallet setup required."
-                : "Users pay with wHOT credits to use this node. Configure your wallet below."}
+                : "Users pay with wHOT credits to use this node. To earn wHOT credits from users connecting to your node, register with the AD4M hosting index in Settings below."}
             </j-text>
           </j-box>
         </j-box>
@@ -1249,23 +1249,13 @@ const Hosting = () => {
                   <j-text size="500" weight="600" color="ui-600">
                     Earnings
                   </j-text>
-                  <j-box mt="200" mb="300">
+                  <j-box mt="200">
                     <j-text size="400" color="ui-500">
-                      Register your node with the AD4M hosting index to enable wHOT
-                      earnings and wallet tracking. Registration is free and takes
+                      Complete <strong>Host Index Registration</strong> in the Settings tab below to
+                      enable wHOT earnings and wallet tracking. Registration is free and takes
                       under a minute.
                     </j-text>
                   </j-box>
-                  <j-button
-                    variant="primary"
-                    size="sm"
-                    onClick={() => {
-                      setActiveTab("settings");
-                      setHostingProfileExpanded(true);
-                    }}
-                  >
-                    Register to get started
-                  </j-button>
                 </div>
               ) : (
                 <div
@@ -1576,10 +1566,313 @@ const Hosting = () => {
           {/* ===== SETTINGS TAB ===== */}
           {activeTab === "settings" && (
             <div style={{ padding: "0 var(--j-space-500)", margin: "var(--j-space-400) 0" }}>
-              {/* Hosting Profile - only shown for paid hosting */}
+              {/* TLS Settings */}
+              <ExpandableSection
+                title="TLS Configuration"
+                expanded={tlsExpanded}
+                onToggle={() => setTlsExpanded(!tlsExpanded)}
+                badge={
+                  tlsConfig?.enabled ? (
+                    tlsValidationErrors.length > 0 ? (
+                      <j-badge variant="danger">Error</j-badge>
+                    ) : (
+                      <j-badge variant="success">Enabled</j-badge>
+                    )
+                  ) : (
+                    <j-badge variant="gray">Disabled</j-badge>
+                  )
+                }
+              >
+                {tlsConfig && (
+                  <>
+                    <j-toggle
+                      checked={tlsConfig.enabled}
+                      onChange={(e: any) => {
+                        const newConfig = {
+                          ...tlsConfig,
+                          enabled: e.target.checked,
+                        };
+                        setTlsConfig(newConfig);
+                        handleTlsConfigChange(newConfig);
+                      }}
+                    >
+                      Enable TLS
+                    </j-toggle>
+
+                    {tlsConfig.enabled && (
+                      <div style={{ marginTop: "16px" }}>
+                        <div style={{ marginBottom: "12px" }}>
+                          <j-text size="400" weight="500" mb="200">
+                            Certificate File
+                          </j-text>
+                          <j-flex gap="200">
+                            <j-input
+                              value={tlsConfig.cert_file_path}
+                              readonly
+                            />
+                            <j-button
+                              variant="subtle"
+                              onClick={handleCertFilePicker}
+                            >
+                              Browse
+                            </j-button>
+                          </j-flex>
+                          {certPathError && (
+                            <j-text size="300" color="danger">
+                              {certPathError}
+                            </j-text>
+                          )}
+                        </div>
+                        <div style={{ marginBottom: "12px" }}>
+                          <j-text size="400" weight="500" mb="200">
+                            Private Key File
+                          </j-text>
+                          <j-flex gap="200">
+                            <j-input value={tlsConfig.key_file_path} readonly />
+                            <j-button
+                              variant="subtle"
+                              onClick={handleKeyFilePicker}
+                            >
+                              Browse
+                            </j-button>
+                          </j-flex>
+                          {keyPathError && (
+                            <j-text size="300" color="danger">
+                              {keyPathError}
+                            </j-text>
+                          )}
+                        </div>
+                        <div style={{ marginBottom: "12px" }}>
+                          <j-text size="400" weight="500" mb="200">
+                            TLS Port
+                          </j-text>
+                          <j-input
+                            type="number"
+                            value={tlsConfig.tls_port?.toString() || "12001"}
+                            onInput={(e: any) => {
+                              const newConfig = {
+                                ...tlsConfig,
+                                tls_port: parseInt(e.target.value) || 12001,
+                              };
+                              setTlsConfig(newConfig);
+                              handleTlsConfigChange(newConfig);
+                            }}
+                          />
+                        </div>
+                        {tlsValidationErrors.length > 0 && (
+                          <div
+                            style={{
+                              marginTop: "12px",
+                              padding: "12px",
+                              backgroundColor: "var(--j-color-danger-50, #fef2f2)",
+                              border: "1px solid var(--j-color-danger-200, #fecaca)",
+                              borderRadius: "8px",
+                            }}
+                          >
+                            <j-text size="400" weight="600" color="danger-500">
+                              TLS Configuration Issues
+                            </j-text>
+                            {tlsValidationErrors.map((err, i) => (
+                              <j-text key={i} size="300" color="danger-500" style={{ display: "block", marginTop: "4px" }}>
+                                {err}
+                              </j-text>
+                            ))}
+                          </div>
+                        )}
+                        {tlsValidationErrors.length === 0 && tlsConfig.cert_file_path && tlsConfig.key_file_path && (
+                          <div
+                            style={{
+                              marginTop: "12px",
+                              padding: "12px",
+                              backgroundColor: "var(--j-color-success-50, #f0fdf4)",
+                              border: "1px solid var(--j-color-success-200, #bbf7d0)",
+                              borderRadius: "8px",
+                            }}
+                          >
+                            <j-text size="400" color="success-500">
+                              TLS files are valid and readable.
+                            </j-text>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
+              </ExpandableSection>
+
+              {/* SMTP Settings */}
+              <ExpandableSection
+                title="Email Configuration (SMTP)"
+                expanded={smtpExpanded}
+                onToggle={() => setSmtpExpanded(!smtpExpanded)}
+                badge={
+                  smtpConfig?.enabled ? (
+                    <j-badge variant="success">Enabled</j-badge>
+                  ) : (
+                    <j-badge variant="gray">Disabled</j-badge>
+                  )
+                }
+              >
+                {smtpConfig && (
+                  <>
+                    <j-toggle
+                      checked={smtpConfig.enabled}
+                      onChange={(e: any) => {
+                        const newConfig = {
+                          ...smtpConfig,
+                          enabled: e.target.checked,
+                        };
+                        setSmtpConfig(newConfig);
+                        handleSmtpConfigChange(newConfig);
+                      }}
+                    >
+                      Enable Email/SMTP
+                    </j-toggle>
+
+                    {smtpConfig.enabled && (
+                      <div style={{ marginTop: "16px" }}>
+                        <div style={{ marginBottom: "12px" }}>
+                          <j-text size="400" weight="500" mb="200">
+                            SMTP Host
+                          </j-text>
+                          <j-input
+                            value={smtpConfig.host}
+                            onChange={(e: any) =>
+                              setSmtpConfig({
+                                ...smtpConfig,
+                                host: e.target.value,
+                              })
+                            }
+                            placeholder="smtp.gmail.com"
+                          />
+                        </div>
+                        <div style={{ marginBottom: "12px" }}>
+                          <j-text size="400" weight="500" mb="200">
+                            Port
+                          </j-text>
+                          <j-input
+                            type="number"
+                            value={smtpConfig.port.toString()}
+                            onChange={(e: any) =>
+                              setSmtpConfig({
+                                ...smtpConfig,
+                                port: parseInt(e.target.value) || 587,
+                              })
+                            }
+                          />
+                        </div>
+                        <div style={{ marginBottom: "12px" }}>
+                          <j-text size="400" weight="500" mb="200">
+                            Username
+                          </j-text>
+                          <j-input
+                            value={smtpConfig.username}
+                            onChange={(e: any) =>
+                              setSmtpConfig({
+                                ...smtpConfig,
+                                username: e.target.value,
+                              })
+                            }
+                          />
+                        </div>
+                        <div style={{ marginBottom: "12px" }}>
+                          <j-text size="400" weight="500" mb="200">
+                            Password
+                          </j-text>
+                          <j-input
+                            type={showSmtpPassword ? "text" : "password"}
+                            value={smtpConfig.password}
+                            onChange={(e: any) =>
+                              setSmtpConfig({
+                                ...smtpConfig,
+                                password: e.target.value,
+                              })
+                            }
+                          >
+                            <j-button
+                              onClick={() =>
+                                setShowSmtpPassword(!showSmtpPassword)
+                              }
+                              slot="end"
+                              variant="link"
+                              square
+                            >
+                              <j-icon
+                                name={showSmtpPassword ? "eye-slash" : "eye"}
+                                size="sm"
+                              ></j-icon>
+                            </j-button>
+                          </j-input>
+                        </div>
+                        <div style={{ marginBottom: "12px" }}>
+                          <j-text size="400" weight="500" mb="200">
+                            From Address
+                          </j-text>
+                          <j-input
+                            value={smtpConfig.from_address}
+                            onChange={(e: any) =>
+                              setSmtpConfig({
+                                ...smtpConfig,
+                                from_address: e.target.value,
+                              })
+                            }
+                            placeholder="noreply@example.com"
+                          />
+                        </div>
+
+                        <j-flex gap="300" mb="400">
+                          <j-button
+                            variant="primary"
+                            onClick={() => handleSmtpConfigChange(smtpConfig)}
+                          >
+                            Save
+                          </j-button>
+                          <j-button
+                            variant="subtle"
+                            onClick={() => {
+                              setSmtpTestEmail(hostSession?.email || "");
+                              setSmtpTestVisible(true);
+                            }}
+                          >
+                            Send Test
+                          </j-button>
+                        </j-flex>
+
+                        {smtpTestVisible && (
+                          <div style={{ marginBottom: "12px" }}>
+                            <j-flex gap="200">
+                              <j-input
+                                value={smtpTestEmail}
+                                onInput={(e: any) =>
+                                  setSmtpTestEmail(e.target.value)
+                                }
+                                placeholder="test@example.com"
+                              />
+                              <j-button
+                                variant="primary"
+                                onClick={handleSmtpTest}
+                                loading={smtpTestLoading}
+                              >
+                                Send
+                              </j-button>
+                            </j-flex>
+                            {smtpTestStatus && (
+                              <j-text size="300" mt="200">
+                                {smtpTestStatus}
+                              </j-text>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
+              </ExpandableSection>
+
+              {/* Host Index Registration - only shown for paid hosting */}
               {!freeHostingEnabled && (
               <ExpandableSection
-                title="Hosting Profile"
+                title="Host Index Registration"
                 expanded={hostingProfileExpanded}
                 onToggle={() =>
                   setHostingProfileExpanded(!hostingProfileExpanded)
@@ -1604,8 +1897,8 @@ const Hosting = () => {
                   >
                     <j-box mb="400">
                       <j-text size="400" color="ui-500">
-                        Register to appear in ad4m-connect and receive wHOT
-                        payments.
+                        Register to appear in ad4m-connect, receive wHOT payments, and enable earnings tracking.
+                        Registration is free and takes under a minute.
                       </j-text>
                     </j-box>
 
@@ -2230,309 +2523,6 @@ const Hosting = () => {
                 )}
               </ExpandableSection>
               )}
-
-              {/* TLS Settings */}
-              <ExpandableSection
-                title="TLS Configuration"
-                expanded={tlsExpanded}
-                onToggle={() => setTlsExpanded(!tlsExpanded)}
-                badge={
-                  tlsConfig?.enabled ? (
-                    tlsValidationErrors.length > 0 ? (
-                      <j-badge variant="danger">Error</j-badge>
-                    ) : (
-                      <j-badge variant="success">Enabled</j-badge>
-                    )
-                  ) : (
-                    <j-badge variant="gray">Disabled</j-badge>
-                  )
-                }
-              >
-                {tlsConfig && (
-                  <>
-                    <j-toggle
-                      checked={tlsConfig.enabled}
-                      onChange={(e: any) => {
-                        const newConfig = {
-                          ...tlsConfig,
-                          enabled: e.target.checked,
-                        };
-                        setTlsConfig(newConfig);
-                        handleTlsConfigChange(newConfig);
-                      }}
-                    >
-                      Enable TLS
-                    </j-toggle>
-
-                    {tlsConfig.enabled && (
-                      <div style={{ marginTop: "16px" }}>
-                        <div style={{ marginBottom: "12px" }}>
-                          <j-text size="400" weight="500" mb="200">
-                            Certificate File
-                          </j-text>
-                          <j-flex gap="200">
-                            <j-input
-                              value={tlsConfig.cert_file_path}
-                              readonly
-                            />
-                            <j-button
-                              variant="subtle"
-                              onClick={handleCertFilePicker}
-                            >
-                              Browse
-                            </j-button>
-                          </j-flex>
-                          {certPathError && (
-                            <j-text size="300" color="danger">
-                              {certPathError}
-                            </j-text>
-                          )}
-                        </div>
-                        <div style={{ marginBottom: "12px" }}>
-                          <j-text size="400" weight="500" mb="200">
-                            Private Key File
-                          </j-text>
-                          <j-flex gap="200">
-                            <j-input value={tlsConfig.key_file_path} readonly />
-                            <j-button
-                              variant="subtle"
-                              onClick={handleKeyFilePicker}
-                            >
-                              Browse
-                            </j-button>
-                          </j-flex>
-                          {keyPathError && (
-                            <j-text size="300" color="danger">
-                              {keyPathError}
-                            </j-text>
-                          )}
-                        </div>
-                        <div style={{ marginBottom: "12px" }}>
-                          <j-text size="400" weight="500" mb="200">
-                            TLS Port
-                          </j-text>
-                          <j-input
-                            type="number"
-                            value={tlsConfig.tls_port?.toString() || "12001"}
-                            onInput={(e: any) => {
-                              const newConfig = {
-                                ...tlsConfig,
-                                tls_port: parseInt(e.target.value) || 12001,
-                              };
-                              setTlsConfig(newConfig);
-                              handleTlsConfigChange(newConfig);
-                            }}
-                          />
-                        </div>
-                        {tlsValidationErrors.length > 0 && (
-                          <div
-                            style={{
-                              marginTop: "12px",
-                              padding: "12px",
-                              backgroundColor: "var(--j-color-danger-50, #fef2f2)",
-                              border: "1px solid var(--j-color-danger-200, #fecaca)",
-                              borderRadius: "8px",
-                            }}
-                          >
-                            <j-text size="400" weight="600" color="danger-500">
-                              TLS Configuration Issues
-                            </j-text>
-                            {tlsValidationErrors.map((err, i) => (
-                              <j-text key={i} size="300" color="danger-500" style={{ display: "block", marginTop: "4px" }}>
-                                {err}
-                              </j-text>
-                            ))}
-                          </div>
-                        )}
-                        {tlsValidationErrors.length === 0 && tlsConfig.cert_file_path && tlsConfig.key_file_path && (
-                          <div
-                            style={{
-                              marginTop: "12px",
-                              padding: "12px",
-                              backgroundColor: "var(--j-color-success-50, #f0fdf4)",
-                              border: "1px solid var(--j-color-success-200, #bbf7d0)",
-                              borderRadius: "8px",
-                            }}
-                          >
-                            <j-text size="400" color="success-500">
-                              TLS files are valid and readable.
-                            </j-text>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </>
-                )}
-              </ExpandableSection>
-
-              {/* SMTP Settings */}
-              <ExpandableSection
-                title="Email Configuration (SMTP)"
-                expanded={smtpExpanded}
-                onToggle={() => setSmtpExpanded(!smtpExpanded)}
-                badge={
-                  smtpConfig?.enabled ? (
-                    <j-badge variant="success">Enabled</j-badge>
-                  ) : (
-                    <j-badge variant="gray">Disabled</j-badge>
-                  )
-                }
-              >
-                {smtpConfig && (
-                  <>
-                    <j-toggle
-                      checked={smtpConfig.enabled}
-                      onChange={(e: any) => {
-                        const newConfig = {
-                          ...smtpConfig,
-                          enabled: e.target.checked,
-                        };
-                        setSmtpConfig(newConfig);
-                        handleSmtpConfigChange(newConfig);
-                      }}
-                    >
-                      Enable Email/SMTP
-                    </j-toggle>
-
-                    {smtpConfig.enabled && (
-                      <div style={{ marginTop: "16px" }}>
-                        <div style={{ marginBottom: "12px" }}>
-                          <j-text size="400" weight="500" mb="200">
-                            SMTP Host
-                          </j-text>
-                          <j-input
-                            value={smtpConfig.host}
-                            onChange={(e: any) =>
-                              setSmtpConfig({
-                                ...smtpConfig,
-                                host: e.target.value,
-                              })
-                            }
-                            placeholder="smtp.gmail.com"
-                          />
-                        </div>
-                        <div style={{ marginBottom: "12px" }}>
-                          <j-text size="400" weight="500" mb="200">
-                            Port
-                          </j-text>
-                          <j-input
-                            type="number"
-                            value={smtpConfig.port.toString()}
-                            onChange={(e: any) =>
-                              setSmtpConfig({
-                                ...smtpConfig,
-                                port: parseInt(e.target.value) || 587,
-                              })
-                            }
-                          />
-                        </div>
-                        <div style={{ marginBottom: "12px" }}>
-                          <j-text size="400" weight="500" mb="200">
-                            Username
-                          </j-text>
-                          <j-input
-                            value={smtpConfig.username}
-                            onChange={(e: any) =>
-                              setSmtpConfig({
-                                ...smtpConfig,
-                                username: e.target.value,
-                              })
-                            }
-                          />
-                        </div>
-                        <div style={{ marginBottom: "12px" }}>
-                          <j-text size="400" weight="500" mb="200">
-                            Password
-                          </j-text>
-                          <j-input
-                            type={showSmtpPassword ? "text" : "password"}
-                            value={smtpConfig.password}
-                            onChange={(e: any) =>
-                              setSmtpConfig({
-                                ...smtpConfig,
-                                password: e.target.value,
-                              })
-                            }
-                          >
-                            <j-button
-                              onClick={() =>
-                                setShowSmtpPassword(!showSmtpPassword)
-                              }
-                              slot="end"
-                              variant="link"
-                              square
-                            >
-                              <j-icon
-                                name={showSmtpPassword ? "eye-slash" : "eye"}
-                                size="sm"
-                              ></j-icon>
-                            </j-button>
-                          </j-input>
-                        </div>
-                        <div style={{ marginBottom: "12px" }}>
-                          <j-text size="400" weight="500" mb="200">
-                            From Address
-                          </j-text>
-                          <j-input
-                            value={smtpConfig.from_address}
-                            onChange={(e: any) =>
-                              setSmtpConfig({
-                                ...smtpConfig,
-                                from_address: e.target.value,
-                              })
-                            }
-                            placeholder="noreply@example.com"
-                          />
-                        </div>
-
-                        <j-flex gap="300" mb="400">
-                          <j-button
-                            variant="primary"
-                            onClick={() => handleSmtpConfigChange(smtpConfig)}
-                          >
-                            Save
-                          </j-button>
-                          <j-button
-                            variant="subtle"
-                            onClick={() => {
-                              setSmtpTestEmail(hostSession?.email || "");
-                              setSmtpTestVisible(true);
-                            }}
-                          >
-                            Send Test
-                          </j-button>
-                        </j-flex>
-
-                        {smtpTestVisible && (
-                          <div style={{ marginBottom: "12px" }}>
-                            <j-flex gap="200">
-                              <j-input
-                                value={smtpTestEmail}
-                                onInput={(e: any) =>
-                                  setSmtpTestEmail(e.target.value)
-                                }
-                                placeholder="test@example.com"
-                              />
-                              <j-button
-                                variant="primary"
-                                onClick={handleSmtpTest}
-                                loading={smtpTestLoading}
-                              >
-                                Send
-                              </j-button>
-                            </j-flex>
-                            {smtpTestStatus && (
-                              <j-text size="300" mt="200">
-                                {smtpTestStatus}
-                              </j-text>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </>
-                )}
-              </ExpandableSection>
             </div>
           )}
         </>
