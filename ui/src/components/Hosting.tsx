@@ -145,6 +145,7 @@ const Hosting = () => {
   const [membraneProofError, setMembraneProofError] = useState<string | null>(
     null,
   );
+  const [unytDnaInstalled, setUnytDnaInstalled] = useState(false);
 
   // ---- SMTP state ----
   const [smtpConfig, setSmtpConfig] = useState<{
@@ -295,6 +296,7 @@ const Hosting = () => {
             "Unyt DNA already installed, skipping membrane proof fetch",
           );
           setMembraneProofStatus("done");
+          setUnytDnaInstalled(true);
           return;
         }
       }
@@ -903,6 +905,24 @@ const Hosting = () => {
     fetchMembraneProof(hostSession);
   }, [client, hostSession, freeHostingEnabled]);
 
+  // Check Unyt DNA installation status after membrane proof is stored
+  useEffect(() => {
+    if (!client || membraneProofStatus !== "done" || unytDnaInstalled) return;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const vi = await client.runtime.unytVersionInfo();
+        if (vi) {
+          const info = JSON.parse(vi);
+          if (info.installed && !cancelled) setUnytDnaInstalled(true);
+        }
+      } catch { /* not installed yet */ }
+    };
+    check();
+    const interval = setInterval(check, 5000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [client, membraneProofStatus, unytDnaInstalled]);
+
   // Auto-populate host URL from TLS domain + port
   useEffect(() => {
     if (!client) return;
@@ -1256,6 +1276,47 @@ const Hosting = () => {
                     background: "var(--j-color-ui-50)",
                   }}
                 >
+                  {/* Registration progress steps */}
+                  {(!unytDnaInstalled || membraneProofStatus !== "done") && (
+                    <div style={{ padding: "12px 16px 8px", borderBottom: "1px solid var(--j-color-ui-100)", marginBottom: "4px" }}>
+                      <j-text size="400" weight="600" color="ui-600" style={{ marginBottom: "8px" }}>
+                        Setup progress
+                      </j-text>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "8px" }}>
+                        {/* Step 1: Registration */}
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                          <span style={{ fontSize: "14px" }}>✅</span>
+                          <j-text size="400" color="ui-500">Register with hosting index</j-text>
+                        </div>
+                        {/* Step 2: Membrane proof */}
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                          <span style={{ fontSize: "14px" }}>
+                            {membraneProofStatus === "done" ? "✅" : membraneProofStatus === "fetching" ? "⏳" : membraneProofStatus === "error" ? "❌" : "⬜"}
+                          </span>
+                          <j-text size="400" color={membraneProofStatus === "error" ? "danger-500" : "ui-500"}>
+                            Membrane proof received
+                            {membraneProofStatus === "fetching" && " — fetching..."}
+                            {membraneProofStatus === "error" && ` — ${membraneProofError || "failed"}`}
+                          </j-text>
+                          {membraneProofStatus === "error" && (
+                            <j-button size="xs" variant="subtle" onClick={() => hostSession && fetchMembraneProof(hostSession)}>
+                              Retry
+                            </j-button>
+                          )}
+                        </div>
+                        {/* Step 3: Unyt DNA */}
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                          <span style={{ fontSize: "14px" }}>
+                            {unytDnaInstalled ? "✅" : membraneProofStatus === "done" ? "⏳" : "⬜"}
+                          </span>
+                          <j-text size="400" color="ui-500">
+                            Unyt DNA installed
+                            {!unytDnaInstalled && membraneProofStatus === "done" && " — installing..."}
+                          </j-text>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   <Wallet key="wallet" />
                 </div>
               )}
