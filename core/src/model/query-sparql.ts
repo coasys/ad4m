@@ -1,13 +1,11 @@
 /**
  * SPARQL query building utilities for Ad4mModel.
  *
- * Replaces SurrealQL query generation with SPARQL queries against the
- * Oxigraph RDF store. The SPARQL store represents each link as a set of
- * triples with the `ad4m://ontology/` namespace.
+ * Uses the direct triple + RDF-star storage model where each AD4M link
+ * is stored as: <source> <predicate> <target> with RDF-star annotations
+ * for metadata (author, timestamp, proof, status).
  *
- * The main function `buildSPARQLQuery()` produces a SPARQL SELECT that
- * returns flat link rows (source, predicate, target, author, timestamp).
- * Grouping by source (instance) and hydration are handled in JS.
+ * All AD4M URIs (source, predicate, target) become RDF IRIs.
  *
  * @module
  */
@@ -15,8 +13,6 @@
 import { resolveParentPredicate } from "./query-common";
 import type { RelationMetadataEntry } from "./decorators";
 import type { Where, Query, ModelMetadata } from "./types";
-
-const ONT = "ad4m://ontology/";
 
 /**
  * Escape a string for use as a SPARQL string literal.
@@ -31,7 +27,7 @@ function escapeSPARQL(value: string): string {
 }
 
 /**
- * Format a value as a SPARQL literal (always a double-quoted string).
+ * Format a value as a SPARQL string literal (double-quoted).
  */
 export function formatSPARQLValue(value: any): string {
   if (typeof value === "string") {
@@ -41,13 +37,19 @@ export function formatSPARQLValue(value: any): string {
 }
 
 /**
+ * Format an AD4M URI as an RDF IRI for use in SPARQL triple patterns.
+ * All AD4M link source/predicate/target values become IRIs.
+ */
+function iri(value: string): string {
+  return `<${value}>`;
+}
+
+/**
  * Build a SPARQL query that returns all links belonging to instances of
  * the given model class, optionally filtered by `where` conditions.
  *
- * Returns flat rows: `?source ?predicate ?target ?author ?timestamp`
- * where `?source` is the base expression (instance URI).
- *
- * The caller groups rows by `?source` and hydrates model instances.
+ * Uses direct triple patterns: ?source ?predicate ?target
+ * with RDF-star annotations for metadata.
  */
 export function buildSPARQLQuery(
   metadata: ModelMetadata,
@@ -55,24 +57,17 @@ export function buildSPARQLQuery(
   query: Query,
   modelClass: any,
 ): string {
-  // Step 1: Build conformance JOIN patterns — triple patterns that ensure
-  // a source node has the required links to be considered an instance
-  // of this model class. Using JOINs instead of FILTER EXISTS for
-  // dramatically better performance in Oxigraph (~1000x faster).
   const joinPatterns: string[] = [];
   const filterExpressions: string[] = [];
 
-  // Parent filter (JOIN pattern)
+  // Parent filter — direct triple pattern
   if (query.parent) {
     const parentPredicate = resolveParentPredicate(query.parent, modelClass);
     joinPatterns.push(`
-      ?cf_parent a <${ONT}Link> ;
-        <${ONT}source> ${formatSPARQLValue(query.parent.id)} ;
-        <${ONT}predicate> ${formatSPARQLValue(parentPredicate)} ;
-        <${ONT}target> ?source .`);
+      ${iri(query.parent.id)} ${iri(parentPredicate)} ?source .`);
   }
 
-  // Required property JOIN patterns
+  // Required property JOIN patterns — direct triple patterns
   let hasConformance = false;
   for (const [, propMeta] of Object.entries(metadata.properties)) {
     if (propMeta.required) {
@@ -80,16 +75,10 @@ export function buildSPARQLQuery(
       hasConformance = true;
       if (propMeta.flag && propMeta.initial) {
         joinPatterns.push(`
-      ?cf_${propMeta.name} a <${ONT}Link> ;
-        <${ONT}source> ?source ;
-        <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-        <${ONT}target> ${formatSPARQLValue(propMeta.initial)} .`);
+      ?source ${iri(propMeta.predicate)} ${iri(propMeta.initial)} .`);
       } else {
         joinPatterns.push(`
-      ?cf_${propMeta.name} a <${ONT}Link> ;
-        <${ONT}source> ?source ;
-        <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-        <${ONT}target> ?cfTarget_${propMeta.name} .`);
+      ?source ${iri(propMeta.predicate)} ?cfTarget_${propMeta.name} .`);
       }
     }
   }
@@ -101,66 +90,58 @@ export function buildSPARQLQuery(
         hasConformance = true;
         if (propMeta.flag) {
           joinPatterns.push(`
-      ?cf_init_${propMeta.name} a <${ONT}Link> ;
-        <${ONT}source> ?source ;
-        <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-        <${ONT}target> ${formatSPARQLValue(propMeta.initial)} .`);
+      ?source ${iri(propMeta.predicate)} ${iri(propMeta.initial)} .`);
         } else {
           joinPatterns.push(`
-      ?cf_init_${propMeta.name} a <${ONT}Link> ;
-        <${ONT}source> ?source ;
-        <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-        <${ONT}target> ?cfInitTarget_${propMeta.name} .`);
+      ?source ${iri(propMeta.predicate)} ?cfInitTarget_${propMeta.name} .`);
         }
         break;
       }
     }
   }
 
-  // Fallback: open-world structural matching — at least one known predicate
+  // Fallback: open-world structural matching
   if (!hasConformance && joinPatterns.length === 0) {
     const knownPredicates: string[] = [];
     for (const [, propMeta] of Object.entries(metadata.properties)) {
       if (propMeta.predicate) {
-        knownPredicates.push(formatSPARQLValue(propMeta.predicate));
+        knownPredicates.push(iri(propMeta.predicate));
       }
     }
     if (metadata.relations) {
       for (const [, relMeta] of Object.entries(metadata.relations)) {
         if (relMeta.predicate) {
-          knownPredicates.push(formatSPARQLValue(relMeta.predicate));
+          knownPredicates.push(iri(relMeta.predicate));
         }
       }
     }
     if (knownPredicates.length > 0) {
       joinPatterns.push(`
-      ?cf_struct a <${ONT}Link> ;
-        <${ONT}source> ?source ;
-        <${ONT}predicate> ?cf_structPred .`);
+      ?source ?cf_structPred ?cf_structTarget .`);
       filterExpressions.push(`?cf_structPred IN (${knownPredicates.join(", ")})`);
     }
   }
 
-  // Step 2: Build WHERE clause filters from user query
+  // Build WHERE clause filters from user query
   const { joins: userJoins, filters: userFilters } = buildSPARQLWhereFilters(metadata, allRelationsMetadata, query.where);
   joinPatterns.push(...userJoins);
   filterExpressions.push(...userFilters);
 
-  // Step 3: Assemble the full query
+  // Main triple pattern — fetches all links for matched sources
+  // The direct triple pattern: ?source ?predicate ?target
+  // FILTER(isIRI(?source)) excludes RDF-star annotation triples
   const joinClause = joinPatterns.join("\n");
   const filterClause = filterExpressions.length > 0
     ? `FILTER(\n      ${filterExpressions.join(" &&\n      ")}\n    )`
     : "";
 
   return `
-    PREFIX ad4m: <${ONT}>
     SELECT ?source ?predicate ?target ?author ?timestamp WHERE {${joinClause}
-      ?link a ad4m:Link ;
-            ad4m:source ?source ;
-            ad4m:predicate ?predicate ;
-            ad4m:target ?target ;
-            ad4m:author ?author ;
-            ad4m:timestamp ?timestamp .
+      ?source ?predicate ?target .
+      FILTER(isIRI(?source) && isIRI(?predicate))
+      BIND(<< ?source ?predicate ?target >> AS ?ann)
+      ?ann <ad4m://ontology/author> ?author .
+      ?ann <ad4m://ontology/timestamp> ?timestamp .
       ${filterClause}
     }
     ${buildSPARQLOrderLimitOffset(metadata, query)}
@@ -169,19 +150,8 @@ export function buildSPARQLQuery(
 
 /**
  * Build ORDER BY / LIMIT / OFFSET clauses for the SPARQL query.
- *
- * Since the query returns flat link rows (multiple per instance),
- * we can't directly LIMIT/OFFSET. Instead we add ordering hints
- * that the JS-level post-processing uses. True server-side limiting
- * requires a subquery approach.
- *
- * For now, we generate no-op — the JS layer handles ordering/pagination.
- * This function is a placeholder for future server-side optimization.
  */
 function buildSPARQLOrderLimitOffset(_metadata: ModelMetadata, _query: Query): string {
-  // ORDER BY, LIMIT, OFFSET are handled in JS post-processing
-  // because each instance spans multiple flat link rows.
-  // A future optimization could use SPARQL subqueries to pre-filter sources.
   return "";
 }
 
@@ -190,15 +160,13 @@ function buildSPARQLOrderLimitOffset(_metadata: ModelMetadata, _query: Query): s
  */
 export function buildSPARQLGetDataQuery(baseExpression: string): string {
   return `
-    PREFIX ad4m: <${ONT}>
     SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
-      ?link a ad4m:Link ;
-            ad4m:source ${formatSPARQLValue(baseExpression)} ;
-            ad4m:predicate ?predicate ;
-            ad4m:target ?target ;
-            ad4m:author ?author ;
-            ad4m:timestamp ?timestamp .
-      BIND(${formatSPARQLValue(baseExpression)} AS ?source)
+      ${iri(baseExpression)} ?predicate ?target .
+      FILTER(isIRI(?predicate))
+      BIND(${iri(baseExpression)} AS ?source)
+      BIND(<< ${iri(baseExpression)} ?predicate ?target >> AS ?ann)
+      ?ann <ad4m://ontology/author> ?author .
+      ?ann <ad4m://ontology/timestamp> ?timestamp .
     }
   `.trim();
 }
@@ -206,8 +174,6 @@ export function buildSPARQLGetDataQuery(baseExpression: string): string {
 /**
  * Group flat SPARQL link rows into the same shape that SurrealDB returned:
  * `{ source_uri: string, links: Array<{predicate, target, author, timestamp}> }`
- *
- * This allows reuse of the existing `instancesFromSurrealResult` logic.
  */
 export function groupSPARQLResults(
   rows: Array<{ source: string; predicate: string; target: string; author: string; timestamp: string }>
@@ -235,9 +201,7 @@ export function groupSPARQLResults(
 
 /**
  * Build SPARQL FILTER expressions from user `where` conditions.
- *
- * These are returned as individual filter expression strings to be
- * combined with `&&` inside a single FILTER() block.
+ * Uses direct triple patterns instead of link-node reification.
  */
 function buildSPARQLWhereFilters(
   metadata: ModelMetadata,
@@ -253,107 +217,89 @@ function buildSPARQLWhereFilters(
     // 'base' maps to ?source
     if (propertyName === "base" || propertyName === "id") {
       if (Array.isArray(condition)) {
-        const formatted = (condition as any[]).map(v => formatSPARQLValue(v)).join(", ");
+        const formatted = (condition as any[]).map(v => iri(v)).join(", ");
         filters.push(`?source IN (${formatted})`);
       } else if (typeof condition === "object" && condition !== null) {
         const ops = condition as any;
         if (ops.not !== undefined) {
           if (Array.isArray(ops.not)) {
-            const formatted = (ops.not as any[]).map(v => formatSPARQLValue(v)).join(", ");
+            const formatted = (ops.not as any[]).map(v => iri(v)).join(", ");
             filters.push(`!(?source IN (${formatted}))`);
           } else {
-            filters.push(`?source != ${formatSPARQLValue(ops.not)}`);
+            filters.push(`?source != ${iri(ops.not)}`);
           }
         }
       } else {
-        filters.push(`?source = ${formatSPARQLValue(condition)}`);
+        filters.push(`?source = ${iri(String(condition))}`);
       }
       continue;
     }
 
-    // author/timestamp: handled in JS post-processing (values are computed per-instance)
     if (propertyName === "author" || propertyName === "timestamp") {
       continue;
     }
 
-    // Property filters
     const propMeta = metadata.properties[propertyName];
     if (!propMeta) continue;
 
     if (Array.isArray(condition)) {
-      // IN clause — needs FILTER inside a JOIN
-      const formatted = (condition as any[]).map(v => formatSPARQLValue(v)).join(", ");
+      // IN clause
       if (propMeta.resolveLanguage === "literal") {
         joins.push(`
-      ?w_${propertyName} a <${ONT}Link> ;
-        <${ONT}source> ?source ;
-        <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-        <${ONT}target> ?wTarget_${propertyName} .`);
-        filters.push(`<ad4m://fn/parse_literal>(?wTarget_${propertyName}) IN (${formatted})`);
+      ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
+        const formatted = (condition as any[]).map(v => formatSPARQLValue(v)).join(", ");
+        filters.push(`<ad4m://fn/parse_literal>(STR(?wTarget_${propertyName})) IN (${formatted})`);
       } else {
+        const formatted = (condition as any[]).map(v => iri(v)).join(", ");
         joins.push(`
-      ?w_${propertyName} a <${ONT}Link> ;
-        <${ONT}source> ?source ;
-        <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-        <${ONT}target> ?wTarget_${propertyName} .`);
+      ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
         filters.push(`?wTarget_${propertyName} IN (${formatted})`);
       }
     } else if (typeof condition === "object" && condition !== null) {
       const ops = condition as any;
       if (ops.not !== undefined) {
-        // NOT clause — must keep FILTER NOT EXISTS (no JOIN equivalent for negation)
         if (Array.isArray(ops.not)) {
-          const formatted = (ops.not as any[]).map(v => formatSPARQLValue(v)).join(", ");
           if (propMeta.resolveLanguage === "literal") {
+            const formatted = (ops.not as any[]).map(v => formatSPARQLValue(v)).join(", ");
             filters.push(`
           NOT EXISTS {
-            ?wLink_not_${propertyName} a <${ONT}Link> ;
-              <${ONT}source> ?source ;
-              <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-              <${ONT}target> ?wTarget_not_${propertyName} .
-            FILTER(<ad4m://fn/parse_literal>(?wTarget_not_${propertyName}) IN (${formatted}))
+            ?source ${iri(propMeta.predicate)} ?wTarget_not_${propertyName} .
+            FILTER(<ad4m://fn/parse_literal>(STR(?wTarget_not_${propertyName})) IN (${formatted}))
           }
         `);
           } else {
+            const formatted = (ops.not as any[]).map(v => iri(v)).join(", ");
             filters.push(`
           NOT EXISTS {
-            ?wLink_not_${propertyName} a <${ONT}Link> ;
-              <${ONT}source> ?source ;
-              <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-              <${ONT}target> ?wTarget_not_${propertyName} .
+            ?source ${iri(propMeta.predicate)} ?wTarget_not_${propertyName} .
             FILTER(?wTarget_not_${propertyName} IN (${formatted}))
           }
         `);
           }
         } else {
-          const formatted = formatSPARQLValue(ops.not);
           if (propMeta.resolveLanguage === "literal") {
+            const formatted = formatSPARQLValue(ops.not);
             filters.push(`
           NOT EXISTS {
-            ?wLink_not_${propertyName} a <${ONT}Link> ;
-              <${ONT}source> ?source ;
-              <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-              <${ONT}target> ?wTarget_not_${propertyName} .
-            FILTER(<ad4m://fn/parse_literal>(?wTarget_not_${propertyName}) = ${formatted})
+            ?source ${iri(propMeta.predicate)} ?wTarget_not_${propertyName} .
+            FILTER(<ad4m://fn/parse_literal>(STR(?wTarget_not_${propertyName})) = ${formatted})
           }
         `);
           } else {
             filters.push(`
           NOT EXISTS {
-            ?wLink_not_${propertyName} a <${ONT}Link> ;
-              <${ONT}source> ?source ;
-              <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-              <${ONT}target> ${formatted} .
+            ?source ${iri(propMeta.predicate)} ${iri(ops.not)} .
           }
         `);
           }
         }
       }
-      // Comparison operators: gt, gte, lt, lte, between, contains
+
+      // Comparison operators
       const targetVar = `?wTarget_cmp_${propertyName}`;
       const valueExpr = propMeta.resolveLanguage === "literal"
-        ? `<ad4m://fn/parse_literal>(${targetVar})`
-        : targetVar;
+        ? `<ad4m://fn/parse_literal>(STR(${targetVar}))`
+        : `STR(${targetVar})`;
 
       const compFilters: string[] = [];
       if (ops.gt !== undefined) compFilters.push(`${valueExpr} > ${formatSPARQLValue(ops.gt)}`);
@@ -369,28 +315,19 @@ function buildSPARQLWhereFilters(
 
       if (compFilters.length > 0) {
         joins.push(`
-      ?w_cmp_${propertyName} a <${ONT}Link> ;
-        <${ONT}source> ?source ;
-        <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-        <${ONT}target> ${targetVar} .`);
+      ?source ${iri(propMeta.predicate)} ${targetVar} .`);
         filters.push(...compFilters);
       }
     } else {
-      // Simple equality — JOIN with exact target value
-      const formatted = formatSPARQLValue(condition);
+      // Simple equality
       if (propMeta.resolveLanguage === "literal") {
+        const formatted = formatSPARQLValue(condition);
         joins.push(`
-      ?w_${propertyName} a <${ONT}Link> ;
-        <${ONT}source> ?source ;
-        <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-        <${ONT}target> ?wTarget_${propertyName} .`);
-        filters.push(`<ad4m://fn/parse_literal>(?wTarget_${propertyName}) = ${formatted}`);
+      ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
+        filters.push(`<ad4m://fn/parse_literal>(STR(?wTarget_${propertyName})) = ${formatted}`);
       } else {
         joins.push(`
-      ?w_${propertyName} a <${ONT}Link> ;
-        <${ONT}source> ?source ;
-        <${ONT}predicate> ${formatSPARQLValue(propMeta.predicate)} ;
-        <${ONT}target> ${formatted} .`);
+      ?source ${iri(propMeta.predicate)} ${iri(String(condition))} .`);
       }
     }
   }
