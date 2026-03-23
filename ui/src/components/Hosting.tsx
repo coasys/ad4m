@@ -780,7 +780,7 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
   const getUsers = useCallback(async () => {
     if (!client) return;
     try {
-      setUsersLoading(true);
+      setUsersLoading((prev) => prev || users.length === 0);
       const userList = await client.runtime.listUsers();
       setUsers(userList);
     } catch (error) {
@@ -788,7 +788,7 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
     } finally {
       setUsersLoading(false);
     }
-  }, [client]);
+  }, [client, users.length]);
 
   const formatLastSeen = (lastSeen: string | null | undefined) => {
     if (!lastSeen) return "Never";
@@ -892,9 +892,13 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
 
   // ---- Effects ----
 
+  // Fetch users immediately on tab switch and poll every 15s while viewing
   useEffect(() => {
-    if (multiUserEnabled && client) getUsers();
-  }, [multiUserEnabled, client, getUsers]);
+    if (!multiUserEnabled || !client || activeTab !== "users") return;
+    getUsers();
+    const interval = setInterval(getUsers, 15000);
+    return () => clearInterval(interval);
+  }, [multiUserEnabled, client, activeTab, getUsers]);
 
   useEffect(() => {
     if (freeHostingEnabled) return;
