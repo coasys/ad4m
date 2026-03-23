@@ -1490,105 +1490,41 @@ impl PerspectiveInstance {
         &self,
         query: &LinkQuery,
     ) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
-        // Build SPARQL query from LinkQuery parameters using direct triple model
-        let source_var = query.source.as_ref().map(|s| format!("<{}>", s));
-        let predicate_var = query.predicate.as_ref().map(|p| format!("<{}>", p));
-        let target_var = query.target.as_ref().map(|t| format!("<{}>", t));
+        let from_date = query.from_date.as_ref().map(|d| {
+            let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+            dt.to_rfc3339()
+        });
+        let until_date = query.until_date.as_ref().map(|d| {
+            let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+            dt.to_rfc3339()
+        });
 
-        let s = source_var.as_deref().unwrap_or("?source");
-        let p = predicate_var.as_deref().unwrap_or("?predicate");
-        let t = target_var.as_deref().unwrap_or("?target");
+        let decorated_links = self.sparql_service.query_links(
+            query.source.as_deref(),
+            query.predicate.as_deref(),
+            query.target.as_deref(),
+            from_date.as_deref(),
+            until_date.as_deref(),
+            query.limit.map(|l| l as usize),
+        )?;
 
-        let mut sparql = String::from("SELECT ?source ?predicate ?target ?author ?timestamp ?proofKey ?proofSig ?proofValid ?status WHERE {\n");
-        sparql.push_str(&format!("  {} {} {} .\n", s, p, t));
-
-        // Bind variables for fixed terms so they appear in results
-        if query.source.is_some() {
-            sparql.push_str(&format!("  BIND({} AS ?source)\n", s));
-        }
-        if query.predicate.is_some() {
-            sparql.push_str(&format!("  BIND({} AS ?predicate)\n", p));
-        }
-        if query.target.is_some() {
-            sparql.push_str(&format!("  BIND({} AS ?target)\n", t));
-        }
-
-        // Filter to only IRI subjects (excludes RDF-star quoted triple subjects)
-        if query.source.is_none() {
-            sparql.push_str("  FILTER(isIRI(?source))\n");
-        }
-
-        // RDF-star annotation lookup
-        sparql.push_str(&format!("  BIND(<< {} {} {} >> AS ?ann)\n", s, p, t));
-        sparql.push_str("  ?ann <ad4m://ontology/author> ?author .\n");
-        sparql.push_str("  ?ann <ad4m://ontology/timestamp> ?timestamp .\n");
-        sparql.push_str("  OPTIONAL { ?ann <ad4m://ontology/proofKey> ?proofKey . }\n");
-        sparql.push_str("  OPTIONAL { ?ann <ad4m://ontology/proofSignature> ?proofSig . }\n");
-        sparql.push_str("  OPTIONAL { ?ann <ad4m://ontology/proofValid> ?proofValid . }\n");
-        sparql.push_str("  OPTIONAL { ?ann <ad4m://ontology/status> ?status . }\n");
-
-        // Date filters
-        let mut filters = Vec::new();
-        if let Some(from_date) = &query.from_date {
-            let dt: chrono::DateTime<chrono::Utc> = from_date.clone().into();
-            filters.push(format!("?timestamp >= \"{}\"", dt.to_rfc3339()));
-        }
-        if let Some(until_date) = &query.until_date {
-            let dt: chrono::DateTime<chrono::Utc> = until_date.clone().into();
-            filters.push(format!("?timestamp <= \"{}\"", dt.to_rfc3339()));
-        }
-        if !filters.is_empty() {
-            sparql.push_str(&format!("  FILTER({})\n", filters.join(" && ")));
-        }
-
-        sparql.push_str("}\n");
-
-        if let Some(limit) = query.limit {
-            sparql.push_str(&format!("LIMIT {}\n", limit));
-        }
-
-        // Execute SPARQL query via the per-perspective sparql service
-        let json_str = self.sparql_service.query(&sparql)?;
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&json_str)?;
-
-        let mut result: Vec<(LinkExpression, LinkStatus)> = Vec::with_capacity(rows.len());
-        for row in rows {
-            let get = |key: &str| -> String {
-                row.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
-            };
-
-            let source = get("source");
-            let predicate_str = get("predicate");
-            let target = get("target");
-            let author = get("author");
-            let timestamp = get("timestamp");
-            let proof_key = get("proofKey");
-            let proof_sig = get("proofSig");
-            let proof_valid_str = get("proofValid");
-            let proof_valid = if proof_valid_str.is_empty() { None } else { Some(proof_valid_str == "true") };
-            let status_str = get("status");
-            let status = match status_str.as_str() {
-                "Local" => LinkStatus::Local,
-                _ => LinkStatus::Shared,
-            };
-
-            let link_expr = LinkExpression {
-                author,
-                timestamp,
-                data: Link {
-                    source,
-                    predicate: if predicate_str.is_empty() { None } else { Some(predicate_str) },
-                    target,
-                },
-                proof: ExpressionProof {
-                    key: proof_key,
-                    signature: proof_sig,
-                },
-                status: Some(status.clone()),
-            };
-
-            result.push((link_expr, status));
-        }
+        let result: Vec<(LinkExpression, LinkStatus)> = decorated_links
+            .into_iter()
+            .map(|decorated| {
+                let status = decorated.status.clone().unwrap_or(LinkStatus::Shared);
+                let link_expr = LinkExpression {
+                    author: decorated.author,
+                    timestamp: decorated.timestamp,
+                    data: decorated.data,
+                    proof: ExpressionProof {
+                        key: decorated.proof.key,
+                        signature: decorated.proof.signature,
+                    },
+                    status: Some(status.clone()),
+                };
+                (link_expr, status)
+            })
+            .collect();
 
         Ok(result)
     }
@@ -1694,8 +1630,8 @@ impl PerspectiveInstance {
         let mut links = self.get_links_local(&query).await?;
 
         links.sort_by(|(a, _), (b, _)| {
-            let a_time = DateTime::parse_from_rfc3339(&a.timestamp).unwrap();
-            let b_time = DateTime::parse_from_rfc3339(&b.timestamp).unwrap();
+            let a_time = DateTime::parse_from_rfc3339(&a.timestamp).unwrap_or_default();
+            let b_time = DateTime::parse_from_rfc3339(&b.timestamp).unwrap_or_default();
             if reverse {
                 b_time.cmp(&a_time)
             } else {

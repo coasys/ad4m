@@ -122,6 +122,36 @@ pub fn initialize_from_db() {
 
             let p = PerspectiveInstance::new(handle_clone.clone(), None, surreal_service);
 
+            // Rebuild SPARQL index from existing links
+            #[cfg(feature = "sparql")]
+            {
+                match p.get_links(&LinkQuery::default()).await {
+                    Ok(links) => {
+                        if !links.is_empty() {
+                            log::info!(
+                                "🔄 SPARQL REBUILD: Syncing {} links for perspective {}",
+                                links.len(),
+                                handle_clone.uuid
+                            );
+                            if let Err(e) = p.sync_existing_links_to_sparql(&links) {
+                                log::error!(
+                                    "Failed to sync links to SPARQL for perspective {}: {}",
+                                    handle_clone.uuid,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "Failed to get links for SPARQL sync in perspective {}: {}",
+                            handle_clone.uuid,
+                            e
+                        );
+                    }
+                }
+            }
+
             // Atomically check-and-insert to prevent race condition
             // (In case multiple initializations were spawned before any completed)
             let should_start_tasks = {

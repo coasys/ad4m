@@ -38,7 +38,8 @@ export function formatSPARQLValue(value: any): string {
 
 /**
  * Format an AD4M URI as an RDF IRI for use in SPARQL triple patterns.
- * All AD4M link source/predicate/target values become IRIs.
+ * All AD4M link source/predicate/target values become IRIs in angle brackets.
+ * The Rust SPARQL service transparently transforms these to valid IRI format.
  */
 function iri(value: string): string {
   return `<${value}>`;
