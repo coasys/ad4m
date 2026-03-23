@@ -265,6 +265,13 @@ await ad4m.agent.loginUser("alice@example.com", "securepassword");
 When email verification is enabled (SMTP configured), the login flow includes a verification step:
 
 ```typescript
+// Describe the app requesting access
+const appInfo = {
+  appName: "My App",
+  appDesc: "An example AD4M application",
+  appDomain: "myapp.example.com",
+};
+
 // Request login—triggers verification email
 const result = await ad4m.agent.requestLoginVerification(
   "alice@example.com",
@@ -298,9 +305,11 @@ If you're building an AD4M app, multi-user mode is transparent to you. The `ad4m
 import Ad4mConnect from "@coasys/ad4m-connect";
 
 const ui = Ad4mConnect({
-  appName: "My App",
-  appDesc: "Works the same on local or hosted AD4M",
-  appDomain: "myapp.example.com",
+  appInfo: {
+    name: "My App",
+    description: "Works the same on local or hosted AD4M",
+    url: "myapp.example.com",
+  },
   capabilities: [
     {
       with: { domain: "*", pointers: ["*"] },
@@ -326,9 +335,11 @@ can also set `remoteUrl` to pre-fill the host URL for convenience:
 import Ad4mConnect from "@coasys/ad4m-connect";
 
 const ui = Ad4mConnect({
-  appName: "My App",
-  appDesc: "A collaborative app powered by AD4M",
-  appDomain: "myapp.example.com",
+  appInfo: {
+    name: "My App",
+    description: "A collaborative app powered by AD4M",
+    url: "myapp.example.com",
+  },
   capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
   // Show the "Remote Node" option alongside "Local Node"
   hosting: true,

@@ -46,10 +46,12 @@ The easiest way to implement this flow is using our `ad4m-connect` library:
 import Ad4mConnect from "@coasys/ad4m-connect";
 
 const ui = Ad4mConnect({
-  appName: "My First ADAM App",
-  appDesc: "This is my first app here.",
-  appDomain: "ad4m.dev",
-  appIconPath: "https://i.ibb.co/GnqjPJP/icon.png",
+  appInfo: {
+    name: "My First ADAM App",
+    description: "This is my first app here.",
+    url: "ad4m.dev",
+    iconPath: "https://i.ibb.co/GnqjPJP/icon.png",
+  },
   capabilities: [
     {
       with: { domain: "*", pointers: ["*"] },
