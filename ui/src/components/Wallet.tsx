@@ -284,13 +284,12 @@ const Wallet = () => {
     <div>
       {needsRegistration && !loading && (
         <div style={{ padding: "16px 20px", margin: "12px 0", textAlign: "center" }}>
-          <j-icon name="info-circle" size="lg" color="ui-400" style={{ marginBottom: "8px" }}></j-icon>
           <j-text size="500" weight="600" color="ui-600">
             Registration required
           </j-text>
           <j-text size="400" color="ui-500" style={{ marginTop: "4px" }}>
             Your node is not yet registered with the AD4M hosting index.
-            Complete registration above to enable wHOT earnings and wallet tracking.
+            Complete registration below to enable wHOT earnings and wallet tracking.
           </j-text>
         </div>
       )}
