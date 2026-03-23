@@ -511,7 +511,10 @@ pub async fn request_capability(
     check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let auth_info: AuthInfo = body.auth_info.into();
+    let auth_info: AuthInfo = body
+        .auth_info
+        .try_into()
+        .map_err(|e: String| ApiError::BadRequest(e))?;
     let request_id = crate::agent::capabilities::request_capability(auth_info.clone()).await;
 
     if context.auto_permit_cap_requests {

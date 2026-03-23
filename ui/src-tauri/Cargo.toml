@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-launcher"
-version = "0.12.1-dev"
+version = "0.13.0-test-1"
 description = "Administration of ad4m services"
 authors = ["Kaichao Sun"]
 license = ""
