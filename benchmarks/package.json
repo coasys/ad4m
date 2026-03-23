@@ -9,7 +9,9 @@
     "bench:query": "tsx src/index.ts --suite query",
     "bench:sparql": "tsx src/index.ts --suite sparql",
     "bench:subject": "tsx src/index.ts --suite subject",
-    "bench:scale": "tsx src/index.ts --suite scale"
+    "bench:scale": "tsx src/index.ts --suite scale",
+    "perf-test": "tsx src/performance-regression.ts",
+    "integration-test": "tsx src/integration-test.ts"
   },
   "devDependencies": {
     "typescript": "^5.4.0",

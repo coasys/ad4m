@@ -1757,3 +1757,129 @@ describe("SPARQL comparison filters", () => {
     expect(query).toContain("widget");
   });
 });
+
+// ──────────────────────────────────────────────────────────
+// SPARQL Direct Triple Pattern & IRI Tests
+// ──────────────────────────────────────────────────────────
+
+import { buildSPARQLQuery, groupSPARQLResults, formatSPARQLValue, buildSPARQLGetDataQuery } from "./query-sparql";
+
+describe("SPARQL direct triple pattern generation", () => {
+  @Model({ name: "Channel" })
+  class Channel extends Ad4mModel {
+    @Flag({ through: "flux://entry_type", value: "flux://channel" })
+    type: string = "";
+
+    @Property({ through: "flux://name", resolveLanguage: "literal", required: true })
+    name: string = "";
+
+    @Optional({ through: "flux://description" })
+    description: string = "";
+
+    @HasMany({ through: "flux://has_message" })
+    messages: string[] = [];
+  }
+
+  const mockPersp = {} as any;
+
+  it("generates direct triple pattern with ?source ?predicate ?target", async () => {
+    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
+    // Must use direct triple pattern, not link-node reification
+    expect(query).toContain("?source ?predicate ?target");
+    expect(query).not.toContain("rdf:type");
+    expect(query).not.toContain("ad4m:Link");
+  });
+
+  it("generates Flag filter as ?source <predicate> <value>", async () => {
+    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
+    expect(query).toContain("<flux://entry_type>");
+    expect(query).toContain("<flux://channel>");
+  });
+
+  it("generates Property binding as ?source <predicate> ?varName", async () => {
+    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
+    expect(query).toContain("<flux://name>");
+    expect(query).toMatch(/\?source\s+<flux:\/\/name>\s+\?cfTarget_name/);
+  });
+
+  it("uses RDF-star annotations for author/timestamp", async () => {
+    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
+    expect(query).toContain("BIND(<< ?source ?predicate ?target >> AS ?ann)");
+    expect(query).toContain("<ad4m://ontology/author>");
+    expect(query).toContain("<ad4m://ontology/timestamp>");
+  });
+
+  it("uses FILTER(isIRI(?source)) to exclude annotation triples", async () => {
+    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
+    expect(query).toContain("FILTER(isIRI(?source)");
+  });
+});
+
+describe("SPARQL IRI formatting", () => {
+  it("wraps AD4M URIs in angle brackets", () => {
+    const query = buildSPARQLGetDataQuery("ad4m://test123");
+    expect(query).toContain("<ad4m://test123>");
+  });
+
+  it("wraps literal:// URIs in angle brackets", () => {
+    const query = buildSPARQLGetDataQuery("literal://string:foo");
+    expect(query).toContain("<literal://string:foo>");
+  });
+
+  it("wraps flux:// URIs in angle brackets", () => {
+    const query = buildSPARQLGetDataQuery("flux://has_channel");
+    expect(query).toContain("<flux://has_channel>");
+  });
+
+  it("wraps did:key URIs in angle brackets", () => {
+    const query = buildSPARQLGetDataQuery("did:key:z6MkhaXg");
+    expect(query).toContain("<did:key:z6MkhaXg>");
+  });
+});
+
+describe("groupSPARQLResults", () => {
+  it("groups flat rows by source URI", () => {
+    const rows = [
+      { source: "ad4m://a", predicate: "p1", target: "t1", author: "auth1", timestamp: "ts1" },
+      { source: "ad4m://a", predicate: "p2", target: "t2", author: "auth1", timestamp: "ts1" },
+      { source: "ad4m://b", predicate: "p1", target: "t3", author: "auth2", timestamp: "ts2" },
+    ];
+    const grouped = groupSPARQLResults(rows);
+    expect(grouped).toHaveLength(2);
+
+    const aGroup = grouped.find(g => g.source_uri === "ad4m://a");
+    expect(aGroup).toBeDefined();
+    expect(aGroup!.links).toHaveLength(2);
+
+    const bGroup = grouped.find(g => g.source_uri === "ad4m://b");
+    expect(bGroup).toBeDefined();
+    expect(bGroup!.links).toHaveLength(1);
+  });
+
+  it("returns empty array for empty input", () => {
+    expect(groupSPARQLResults([])).toEqual([]);
+  });
+
+  it("preserves metadata in grouped links", () => {
+    const rows = [
+      { source: "x", predicate: "p", target: "t", author: "did:key:z6Mk", timestamp: "2024-01-01T00:00:00Z" },
+    ];
+    const grouped = groupSPARQLResults(rows);
+    expect(grouped[0].links[0].author).toBe("did:key:z6Mk");
+    expect(grouped[0].links[0].timestamp).toBe("2024-01-01T00:00:00Z");
+  });
+});
+
+describe("formatSPARQLValue", () => {
+  it("wraps strings in double quotes", () => {
+    expect(formatSPARQLValue("hello")).toBe('"hello"');
+  });
+
+  it("escapes special characters", () => {
+    expect(formatSPARQLValue('say "hi"')).toBe('"say \\"hi\\""');
+  });
+
+  it("converts numbers to quoted strings", () => {
+    expect(formatSPARQLValue(42)).toBe('"42"');
+  });
+});

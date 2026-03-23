@@ -650,3 +650,343 @@ pub fn get_sparql_service() -> SparqlService {
     lock.clone()
         .expect("SparqlService not initialized. Call init_sparql_service() first.")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_link(source: &str, predicate: &str, target: &str) -> DecoratedLinkExpression {
+        DecoratedLinkExpression {
+            author: "did:key:z6Mktest".to_string(),
+            timestamp: "2024-01-15T10:00:00.000Z".to_string(),
+            data: Link {
+                source: source.to_string(),
+                predicate: if predicate.is_empty() { None } else { Some(predicate.to_string()) },
+                target: target.to_string(),
+            },
+            proof: DecoratedExpressionProof {
+                key: "testkey".to_string(),
+                signature: "testsig".to_string(),
+                valid: Some(true),
+                invalid: Some(false),
+            },
+            status: Some(LinkStatus::Shared),
+        }
+    }
+
+    fn make_link_with_ts(source: &str, predicate: &str, target: &str, ts: &str, author: &str) -> DecoratedLinkExpression {
+        let mut link = make_link(source, predicate, target);
+        link.timestamp = ts.to_string();
+        link.author = author.to_string();
+        link
+    }
+
+    fn new_service() -> SparqlService {
+        SparqlService::new(None).unwrap()
+    }
+
+    // ── Storage Model Tests ──
+
+    #[test]
+    fn test_add_link_creates_direct_triple() {
+        let svc = new_service();
+        let link = make_link("ad4m://source1", "ad4m://predicate1", "ad4m://target1");
+        svc.add_link(&link).unwrap();
+
+        let result = svc.query("SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(isIRI(?s) && isIRI(?o)) }").unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        // Should have at least the direct triple
+        let direct = rows.iter().find(|r| {
+            r["s"].as_str() == Some("ad4m://source1")
+                && r["p"].as_str() == Some("ad4m://predicate1")
+                && r["o"].as_str() == Some("ad4m://target1")
+        });
+        assert!(direct.is_some(), "Direct triple not found. Got: {}", result);
+    }
+
+    #[test]
+    fn test_add_link_creates_rdf_star_annotations() {
+        let svc = new_service();
+        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        svc.add_link(&link).unwrap();
+
+        // Query for annotations on the quoted triple
+        let result = svc.query(
+            r#"SELECT ?p ?v WHERE {
+                << <ad4m://src> <ad4m://pred> <ad4m://tgt> >> ?p ?v .
+            }"#
+        ).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+
+        let preds: Vec<&str> = rows.iter().filter_map(|r| r["p"].as_str()).collect();
+        assert!(preds.contains(&"ad4m://ontology/author"), "Missing author annotation");
+        assert!(preds.contains(&"ad4m://ontology/timestamp"), "Missing timestamp annotation");
+        assert!(preds.contains(&"ad4m://ontology/proofKey"), "Missing proofKey annotation");
+        assert!(preds.contains(&"ad4m://ontology/proofSignature"), "Missing proofSig annotation");
+        assert!(preds.contains(&"ad4m://ontology/status"), "Missing status annotation");
+
+        let author_row = rows.iter().find(|r| r["p"].as_str() == Some("ad4m://ontology/author")).unwrap();
+        assert_eq!(author_row["v"].as_str().unwrap(), "did:key:z6Mktest");
+    }
+
+    #[test]
+    fn test_remove_link_removes_direct_triple() {
+        let svc = new_service();
+        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        svc.add_link(&link).unwrap();
+        svc.remove_link(&link).unwrap();
+
+        let result = svc.query("SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(isIRI(?s)) }").unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert!(rows.is_empty(), "Triple still exists after removal: {}", result);
+    }
+
+    #[test]
+    fn test_remove_link_removes_annotations() {
+        let svc = new_service();
+        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        svc.add_link(&link).unwrap();
+        svc.remove_link(&link).unwrap();
+
+        let result = svc.query(
+            r#"SELECT ?p ?v WHERE {
+                << <ad4m://src> <ad4m://pred> <ad4m://tgt> >> ?p ?v .
+            }"#
+        ).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert!(rows.is_empty(), "Annotation triples still exist: {}", result);
+    }
+
+    #[test]
+    fn test_iri_roundtrip() {
+        let cases = vec![
+            "literal://string:foo",
+            "flux://has_channel",
+            "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            "ad4m://self",
+            "http://example.com/resource",
+            "https://schema.org/Person",
+        ];
+        for uri in cases {
+            let iri = to_iri(uri);
+            let back = from_iri(&iri);
+            assert_eq!(back, uri, "Roundtrip failed for '{}': to_iri='{}', from_iri='{}'", uri, iri, back);
+        }
+    }
+
+    #[test]
+    fn test_no_link_node_triples() {
+        let svc = new_service();
+        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        svc.add_link(&link).unwrap();
+
+        // Check no ad4m:Link type triples exist
+        let result = svc.query(
+            r#"SELECT ?s WHERE { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <ad4m://Link> . }"#
+        ).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert!(rows.is_empty(), "Found link-node type triples: {}", result);
+    }
+
+    // ── Query Tests ──
+
+    #[test]
+    fn test_query_links_by_source() {
+        let svc = new_service();
+        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t1")).unwrap();
+        svc.add_link(&make_link("ad4m://b", "ad4m://p", "ad4m://t2")).unwrap();
+        svc.add_link(&make_link("ad4m://a", "ad4m://q", "ad4m://t3")).unwrap();
+
+        let results = svc.query_links(Some("ad4m://a"), None, None, None, None, None).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|l| l.data.source == "ad4m://a"));
+    }
+
+    #[test]
+    fn test_query_links_by_predicate() {
+        let svc = new_service();
+        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t1")).unwrap();
+        svc.add_link(&make_link("ad4m://b", "ad4m://q", "ad4m://t2")).unwrap();
+        svc.add_link(&make_link("ad4m://c", "ad4m://p", "ad4m://t3")).unwrap();
+
+        let results = svc.query_links(None, Some("ad4m://p"), None, None, None, None).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|l| l.data.predicate.as_deref() == Some("ad4m://p")));
+    }
+
+    #[test]
+    fn test_query_links_by_target() {
+        let svc = new_service();
+        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t1")).unwrap();
+        svc.add_link(&make_link("ad4m://b", "ad4m://q", "ad4m://t1")).unwrap();
+        svc.add_link(&make_link("ad4m://c", "ad4m://r", "ad4m://t2")).unwrap();
+
+        let results = svc.query_links(None, None, Some("ad4m://t1"), None, None, None).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|l| l.data.target == "ad4m://t1"));
+    }
+
+    #[test]
+    fn test_query_links_by_source_and_predicate() {
+        let svc = new_service();
+        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t1")).unwrap();
+        svc.add_link(&make_link("ad4m://a", "ad4m://q", "ad4m://t2")).unwrap();
+        svc.add_link(&make_link("ad4m://b", "ad4m://p", "ad4m://t3")).unwrap();
+
+        let results = svc.query_links(Some("ad4m://a"), Some("ad4m://p"), None, None, None, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].data.target, "ad4m://t1");
+    }
+
+    #[test]
+    fn test_query_links_by_source_predicate_target() {
+        let svc = new_service();
+        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t1")).unwrap();
+        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t2")).unwrap();
+
+        let results = svc.query_links(Some("ad4m://a"), Some("ad4m://p"), Some("ad4m://t1"), None, None, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].data.target, "ad4m://t1");
+    }
+
+    #[test]
+    fn test_query_links_returns_metadata() {
+        let svc = new_service();
+        let link = make_link_with_ts("ad4m://s", "ad4m://p", "ad4m://t", "2024-06-01T12:00:00.000Z", "did:key:z6Mkauthor");
+        svc.add_link(&link).unwrap();
+
+        let results = svc.query_links(Some("ad4m://s"), None, None, None, None, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].author, "did:key:z6Mkauthor");
+        assert_eq!(results[0].timestamp, "2024-06-01T12:00:00.000Z");
+        assert_eq!(results[0].proof.key, "testkey");
+        assert_eq!(results[0].proof.signature, "testsig");
+        assert_eq!(results[0].proof.valid, Some(true));
+        assert_eq!(results[0].status, Some(LinkStatus::Shared));
+    }
+
+    #[test]
+    fn test_query_links_date_filter() {
+        let svc = new_service();
+        svc.add_link(&make_link_with_ts("ad4m://s", "ad4m://p", "ad4m://t1", "2024-01-01T00:00:00Z", "did:key:z6Mk1")).unwrap();
+        svc.add_link(&make_link_with_ts("ad4m://s", "ad4m://p", "ad4m://t2", "2024-06-15T00:00:00Z", "did:key:z6Mk2")).unwrap();
+        svc.add_link(&make_link_with_ts("ad4m://s", "ad4m://p", "ad4m://t3", "2024-12-31T00:00:00Z", "did:key:z6Mk3")).unwrap();
+
+        // fromDate filter
+        let results = svc.query_links(None, None, None, Some("2024-06-01T00:00:00Z"), None, None).unwrap();
+        assert_eq!(results.len(), 2);
+
+        // untilDate filter
+        let results = svc.query_links(None, None, None, None, Some("2024-06-30T00:00:00Z"), None).unwrap();
+        assert_eq!(results.len(), 2);
+
+        // both
+        let results = svc.query_links(None, None, None, Some("2024-06-01T00:00:00Z"), Some("2024-06-30T00:00:00Z"), None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].data.target, "ad4m://t2");
+    }
+
+    #[test]
+    fn test_query_links_limit() {
+        let svc = new_service();
+        for i in 0..10 {
+            svc.add_link(&make_link_with_ts(
+                "ad4m://s", "ad4m://p", &format!("ad4m://t{}", i),
+                &format!("2024-01-{:02}T00:00:00Z", i + 1), "did:key:z6Mk1"
+            )).unwrap();
+        }
+
+        let results = svc.query_links(None, None, None, None, None, Some(3)).unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_sparql_query_direct_triple_pattern() {
+        let svc = new_service();
+        svc.add_link(&make_link("flux://community1", "flux://has_channel", "flux://channel1")).unwrap();
+        svc.add_link(&make_link("flux://community1", "flux://has_channel", "flux://channel2")).unwrap();
+
+        let result = svc.query(
+            r#"SELECT ?channel WHERE {
+                <flux://community1> <flux://has_channel> ?channel .
+            }"#
+        ).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(rows.len(), 2);
+        let channels: Vec<&str> = rows.iter().filter_map(|r| r["channel"].as_str()).collect();
+        assert!(channels.contains(&"flux://channel1"));
+        assert!(channels.contains(&"flux://channel2"));
+    }
+
+    #[test]
+    fn test_sparql_query_with_join() {
+        let svc = new_service();
+        svc.add_link(&make_link("flux://ch1", "flux://entry_type", "flux://channel")).unwrap();
+        svc.add_link(&make_link("flux://ch1", "flux://name", "literal://string:general")).unwrap();
+        svc.add_link(&make_link("flux://ch2", "flux://entry_type", "flux://channel")).unwrap();
+        svc.add_link(&make_link("flux://ch2", "flux://name", "literal://string:random")).unwrap();
+        svc.add_link(&make_link("flux://msg1", "flux://entry_type", "flux://message")).unwrap();
+
+        let result = svc.query(
+            r#"SELECT ?ch ?name WHERE {
+                ?ch <flux://entry_type> <flux://channel> .
+                ?ch <flux://name> ?name .
+            }"#
+        ).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    // ── Sync / reload tests ──
+
+    #[test]
+    fn test_sync_existing_links_to_sparql() {
+        let svc = new_service();
+        let links = vec![
+            make_link("ad4m://a", "ad4m://p1", "ad4m://t1"),
+            make_link("ad4m://b", "ad4m://p2", "ad4m://t2"),
+            make_link("ad4m://c", "ad4m://p3", "ad4m://t3"),
+        ];
+        svc.reload(links).unwrap();
+
+        let all = svc.get_all_links().unwrap();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn test_link_add_then_query_roundtrip() {
+        let svc = new_service();
+        let link = make_link("literal://string:hello", "flux://has_channel", "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
+        svc.add_link(&link).unwrap();
+
+        let results = svc.query_links(Some("literal://string:hello"), Some("flux://has_channel"), None, None, None, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].data.source, "literal://string:hello");
+        assert_eq!(results[0].data.predicate.as_deref(), Some("flux://has_channel"));
+        assert_eq!(results[0].data.target, "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
+        assert_eq!(results[0].author, "did:key:z6Mktest");
+    }
+
+    // ── Validate readonly ──
+
+    #[test]
+    fn test_validate_readonly_rejects_insert() {
+        assert!(validate_readonly_query("INSERT DATA { <a> <b> <c> }").is_err());
+    }
+
+    #[test]
+    fn test_validate_readonly_allows_select() {
+        assert!(validate_readonly_query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }").is_ok());
+    }
+
+    // ── Clear / reload ──
+
+    #[test]
+    fn test_clear_removes_all() {
+        let svc = new_service();
+        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t")).unwrap();
+        svc.clear().unwrap();
+        let all = svc.get_all_links().unwrap();
+        assert!(all.is_empty());
+    }
+}
