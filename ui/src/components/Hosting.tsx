@@ -1257,6 +1257,49 @@ const Hosting = () => {
                     </j-text>
                   </j-box>
                 </div>
+              ) : regStep === "verify" ? (
+                <div
+                  style={{
+                    border: "1px solid var(--j-color-ui-200)",
+                    borderRadius: "12px",
+                    padding: "24px",
+                    background: "var(--j-color-ui-50)",
+                    textAlign: "center",
+                  }}
+                >
+                  <j-text size="500" weight="600" color="ui-600">
+                    Earnings
+                  </j-text>
+                  <j-box mt="200">
+                    <j-text size="400" color="ui-500">
+                      Check your inbox or spam folder for the verification email and paste the
+                      code in the <strong>Host Index Registration</strong> section below to
+                      activate your wallet.
+                    </j-text>
+                  </j-box>
+                </div>
+              ) : membraneProofStatus !== "done" || !hostReg.name ? (
+                <div
+                  style={{
+                    border: "1px solid var(--j-color-ui-200)",
+                    borderRadius: "12px",
+                    padding: "24px",
+                    background: "var(--j-color-ui-50)",
+                    textAlign: "center",
+                  }}
+                >
+                  <j-text size="500" weight="600" color="ui-600">
+                    Earnings
+                  </j-text>
+                  <j-box mt="200">
+                    <j-text size="400" color="ui-500">
+                      {membraneProofStatus === "done"
+                        ? <>Fill in your host name and details in the <strong>Host Index Registration</strong> section below, then save to activate your wallet.</>
+                        : <>Complete your hosting profile in the <strong>Host Index Registration</strong> section below to activate your wallet.</>
+                      }
+                    </j-text>
+                  </j-box>
+                </div>
               ) : (
                 <div
                   style={{

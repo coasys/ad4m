@@ -44,7 +44,6 @@ const Wallet = () => {
   const [history, setHistory] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [needsRegistration, setNeedsRegistration] = useState(false);
 
   // Version info
   const [versionInfo, setVersionInfo] = useState<{
@@ -115,19 +114,14 @@ const Wallet = () => {
     }).catch((e: any) => console.warn("Failed to fetch users:", e));
   }, [client]);
 
-  const isMembraneProofError = (msg: string) =>
-    msg.includes("No membrane proof stored") || msg.includes("setUnytMembraneProof");
-
   const initialLoadDone = React.useRef(false);
   const fetchWalletData = useCallback(async () => {
     if (!client) return;
     try {
       if (!initialLoadDone.current) setLoading(true);
       setError(null);
-      setNeedsRegistration(false);
 
       const errors: string[] = [];
-      let sawMembraneError = false;
 
       // Fetch balance
       try {
@@ -141,11 +135,7 @@ const Wallet = () => {
         }
       } catch (e: any) {
         console.error("Failed to fetch balance:", e);
-        if (isMembraneProofError(e.message || "")) {
-          sawMembraneError = true;
-        } else {
-          errors.push(`Balance: ${e.message}`);
-        }
+        errors.push(`Balance: ${e.message}`);
       }
 
       // Fetch pubkey
@@ -154,20 +144,11 @@ const Wallet = () => {
         setAgentPubkey(pk || "");
       } catch (e: any) {
         console.error("Failed to fetch agent pubkey:", e);
-        if (isMembraneProofError(e.message || "")) {
-          sawMembraneError = true;
-        } else {
-          errors.push(`Pubkey: ${e.message}`);
-        }
+        errors.push(`Pubkey: ${e.message}`);
       }
 
-      // If all failures are membrane-proof related, flag registration needed
-      if (sawMembraneError) {
-        setNeedsRegistration(true);
-      }
-
-      // Fetch history (skip if registration needed)
-      if (!sawMembraneError) {
+      // Fetch history
+      {
         try {
           const histStr = await client.runtime.unytWalletHistory(undefined, 50);
           console.log("Wallet history raw:", histStr);
@@ -282,18 +263,7 @@ const Wallet = () => {
   // Always render the structure, just show loading state inline
   return (
     <div>
-      {needsRegistration && !loading && (
-        <div style={{ padding: "16px 20px", margin: "12px 0", textAlign: "center" }}>
-          <j-text size="500" weight="600" color="ui-600">
-            Registration required
-          </j-text>
-          <j-text size="400" color="ui-500" style={{ marginTop: "4px" }}>
-            Your node is not yet registered with the AD4M hosting index.
-            Complete registration below to enable wHOT earnings and wallet tracking.
-          </j-text>
-        </div>
-      )}
-      {error && !needsRegistration && (
+      {error && (
         <div style={{ padding: "0 20px", margin: "12px 0" }}>
           <j-text size="400" color="danger-500">
             {error}
@@ -301,8 +271,7 @@ const Wallet = () => {
         </div>
       )}
 
-      {/* When registration is needed, only show the message above */}
-      {!needsRegistration && <>
+      <>
       {/* Header + Address */}
       <div style={{ padding: "4px 20px", margin: "12px 0" }}>
         <j-flex a="center" j="between">
@@ -310,7 +279,7 @@ const Wallet = () => {
             <j-text size="800" weight="600" color="black">
               Earnings
             </j-text>
-            {loading && <j-spinner size="sm"></j-spinner>}
+            {loading && <j-spinner size="xs"></j-spinner>}
             {agentPubkey && (
               <span
                 onClick={() => copyToClipboard(agentPubkey)}
@@ -367,7 +336,7 @@ const Wallet = () => {
               Balance
             </j-text>
             {loading ? (
-              <j-spinner size="sm"></j-spinner>
+              <j-spinner size="xs"></j-spinner>
             ) : Object.entries(balance).length > 0 ? (
               Object.entries(balance).map(([unit, amount]) => (
                 <span key={unit} style={{ display: "inline-flex", alignItems: "baseline", gap: "8px" }}>
@@ -788,7 +757,7 @@ const Wallet = () => {
           </div>
         )}
       </div>
-      </>}
+      </>
     </div>
   );
 };
