@@ -44,6 +44,7 @@ const Wallet = () => {
   const [history, setHistory] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [needsRegistration, setNeedsRegistration] = useState(false);
 
   // Version info
   const [versionInfo, setVersionInfo] = useState<{
@@ -114,14 +115,19 @@ const Wallet = () => {
     }).catch((e: any) => console.warn("Failed to fetch users:", e));
   }, [client]);
 
+  const isMembraneProofError = (msg: string) =>
+    msg.includes("No membrane proof stored") || msg.includes("setUnytMembraneProof");
+
   const initialLoadDone = React.useRef(false);
   const fetchWalletData = useCallback(async () => {
     if (!client) return;
     try {
       if (!initialLoadDone.current) setLoading(true);
       setError(null);
+      setNeedsRegistration(false);
 
       const errors: string[] = [];
+      let sawMembraneError = false;
 
       // Fetch balance
       try {
@@ -135,7 +141,11 @@ const Wallet = () => {
         }
       } catch (e: any) {
         console.error("Failed to fetch balance:", e);
-        errors.push(`Balance: ${e.message}`);
+        if (isMembraneProofError(e.message || "")) {
+          sawMembraneError = true;
+        } else {
+          errors.push(`Balance: ${e.message}`);
+        }
       }
 
       // Fetch pubkey
@@ -144,25 +154,36 @@ const Wallet = () => {
         setAgentPubkey(pk || "");
       } catch (e: any) {
         console.error("Failed to fetch agent pubkey:", e);
-        errors.push(`Pubkey: ${e.message}`);
+        if (isMembraneProofError(e.message || "")) {
+          sawMembraneError = true;
+        } else {
+          errors.push(`Pubkey: ${e.message}`);
+        }
       }
 
-      // Fetch history
-      try {
-        const histStr = await client.runtime.unytWalletHistory(undefined, 50);
-        console.log("Wallet history raw:", histStr);
-        if (histStr) {
-          try {
-            const parsed = JSON.parse(histStr);
-            console.log("Wallet history parsed:", parsed);
-            setHistory(parsed);
-          } catch {
-            setHistory([]);
+      // If all failures are membrane-proof related, flag registration needed
+      if (sawMembraneError) {
+        setNeedsRegistration(true);
+      }
+
+      // Fetch history (skip if registration needed)
+      if (!sawMembraneError) {
+        try {
+          const histStr = await client.runtime.unytWalletHistory(undefined, 50);
+          console.log("Wallet history raw:", histStr);
+          if (histStr) {
+            try {
+              const parsed = JSON.parse(histStr);
+              console.log("Wallet history parsed:", parsed);
+              setHistory(parsed);
+            } catch {
+              setHistory([]);
+            }
           }
+        } catch (e: any) {
+          console.error("Failed to fetch history:", e);
+          errors.push(`History: ${e.message}`);
         }
-      } catch (e: any) {
-        console.error("Failed to fetch history:", e);
-        errors.push(`History: ${e.message}`);
       }
 
       // Fetch version info
@@ -261,7 +282,19 @@ const Wallet = () => {
   // Always render the structure, just show loading state inline
   return (
     <div>
-      {error && (
+      {needsRegistration && !loading && (
+        <div style={{ padding: "16px 20px", margin: "12px 0", textAlign: "center" }}>
+          <j-icon name="info-circle" size="lg" color="ui-400" style={{ marginBottom: "8px" }}></j-icon>
+          <j-text size="500" weight="600" color="ui-600">
+            Registration required
+          </j-text>
+          <j-text size="400" color="ui-500" style={{ marginTop: "4px" }}>
+            Your node is not yet registered with the AD4M hosting index.
+            Complete registration above to enable wHOT earnings and wallet tracking.
+          </j-text>
+        </div>
+      )}
+      {error && !needsRegistration && (
         <div style={{ padding: "0 20px", margin: "12px 0" }}>
           <j-text size="400" color="danger-500">
             {error}
@@ -269,6 +302,8 @@ const Wallet = () => {
         </div>
       )}
 
+      {/* When registration is needed, only show the message above */}
+      {!needsRegistration && <>
       {/* Header + Address */}
       <div style={{ padding: "4px 20px", margin: "12px 0" }}>
         <j-flex a="center" j="between">
@@ -754,6 +789,7 @@ const Wallet = () => {
           </div>
         )}
       </div>
+      </>}
     </div>
   );
 };
