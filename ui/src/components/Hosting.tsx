@@ -1278,6 +1278,37 @@ const Hosting = () => {
                     </j-text>
                   </j-box>
                 </div>
+              ) : membraneProofStatus === "error" ? (
+                <div
+                  style={{
+                    border: "1px solid var(--j-color-ui-200)",
+                    borderRadius: "12px",
+                    padding: "24px",
+                    background: "var(--j-color-ui-50)",
+                    textAlign: "center",
+                  }}
+                >
+                  <j-text size="500" weight="600" color="ui-600">
+                    Earnings
+                  </j-text>
+                  <j-box mt="200">
+                    <j-flex direction="column" a="center" gap="300">
+                      <j-icon name="x-circle" color="danger"></j-icon>
+                      <j-text size="400" color="danger">
+                        {membraneProofError || "Failed to connect to Unyt network"}
+                      </j-text>
+                      <j-button
+                        size="sm"
+                        variant="primary"
+                        onClick={() =>
+                          hostSession && fetchMembraneProof(hostSession)
+                        }
+                      >
+                        Retry
+                      </j-button>
+                    </j-flex>
+                  </j-box>
+                </div>
               ) : membraneProofStatus !== "done" || !hostReg.name ? (
                 <div
                   style={{
@@ -1298,6 +1329,28 @@ const Hosting = () => {
                         : <>Complete your hosting profile in the <strong>Host Index Registration</strong> section below to activate your wallet.</>
                       }
                     </j-text>
+                  </j-box>
+                </div>
+              ) : !unytDnaInstalled ? (
+                <div
+                  style={{
+                    border: "1px solid var(--j-color-ui-200)",
+                    borderRadius: "12px",
+                    padding: "24px",
+                    background: "var(--j-color-ui-50)",
+                    textAlign: "center",
+                  }}
+                >
+                  <j-text size="500" weight="600" color="ui-600">
+                    Earnings
+                  </j-text>
+                  <j-box mt="200">
+                    <j-flex a="center" j="center" gap="300">
+                      <j-spinner size="sm"></j-spinner>
+                      <j-text size="400" color="ui-500">
+                        Installing Unyt DNA...
+                      </j-text>
+                    </j-flex>
                   </j-box>
                 </div>
               ) : (

@@ -151,11 +151,9 @@ const Wallet = () => {
       {
         try {
           const histStr = await client.runtime.unytWalletHistory(undefined, 50);
-          console.log("Wallet history raw:", histStr);
           if (histStr) {
             try {
               const parsed = JSON.parse(histStr);
-              console.log("Wallet history parsed:", parsed);
               setHistory(parsed);
             } catch {
               setHistory([]);
