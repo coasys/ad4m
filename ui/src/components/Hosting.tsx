@@ -1216,16 +1216,49 @@ const Hosting = () => {
           {/* ===== WALLET (Simple Framed) - only shown for paid hosting ===== */}
           {!freeHostingEnabled && (
             <j-box px="500" my="100">
-              <div
-                style={{
-                  border: "1px solid var(--j-color-ui-200)",
-                  borderRadius: "12px",
-                  padding: "10px",
-                  background: "var(--j-color-ui-50)",
-                }}
-              >
-                <Wallet key="wallet" />
-              </div>
+              {!hostSession ? (
+                <div
+                  style={{
+                    border: "1px solid var(--j-color-ui-200)",
+                    borderRadius: "12px",
+                    padding: "24px",
+                    background: "var(--j-color-ui-50)",
+                    textAlign: "center",
+                  }}
+                >
+                  <j-text size="500" weight="600" color="ui-600">
+                    Earnings
+                  </j-text>
+                  <j-box mt="200" mb="300">
+                    <j-text size="400" color="ui-500">
+                      Register your node with the AD4M hosting index to enable wHOT
+                      earnings and wallet tracking. Registration is free and takes
+                      under a minute.
+                    </j-text>
+                  </j-box>
+                  <j-button
+                    variant="primary"
+                    size="sm"
+                    onClick={() => {
+                      setActiveTab("settings");
+                      setHostingProfileExpanded(true);
+                    }}
+                  >
+                    Register to get started
+                  </j-button>
+                </div>
+              ) : (
+                <div
+                  style={{
+                    border: "1px solid var(--j-color-ui-200)",
+                    borderRadius: "12px",
+                    padding: "10px",
+                    background: "var(--j-color-ui-50)",
+                  }}
+                >
+                  <Wallet key="wallet" />
+                </div>
+              )}
             </j-box>
           )}
 
