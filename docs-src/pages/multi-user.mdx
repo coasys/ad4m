@@ -363,15 +363,42 @@ ui.connect().then((client) => {
 When `hosting: true` is set, the user sees the following screens:
 
 1. **Connection Options** — the user chooses between **Local Node** (connect to a local
-   executor) and **Remote Node** (connect to a hosted executor). Both options are always
-   shown.
+   executor) and **Remote Node** (connect to a hosted executor). The "Remote Node" option
+   is only shown when `hosting: true` is set.
+
+   <img
+     width="48%"
+     alt="Connection Options"
+     src="/images/ad4m-connect-connection-options.png"
+   />
+
 2. **Host Browser** — after clicking "Remote Node", the user sees a list of available
    hosts from the hosting index, plus a manual URL input at the bottom. If `remoteUrl` was
    provided, the manual input is **pre-filled** with that URL.
+
+   <img
+     width="48%"
+     alt="Host Browser"
+     src="/images/ad4m-connect-hosts.png"
+   />
+
 3. **Host Detail** — after selecting a host (or clicking "Connect" on the manual URL), the
    user sees host details and a trust warning.
+
+   <img
+     width="48%"
+     alt="Host Detail"
+     src="/images/ad4m-connect-host-details.png"
+   />
+
 4. **Remote Authentication** — the user is presented with an email + password sign-up/login
    form. If the host has SMTP configured, email verification is included.
+
+   <img
+     width="48%"
+     alt="Remote Authentication"
+     src="/images/ad4m-connect-remote-login.png"
+   />
 
 > **For end users**: When you connect to a hosted AD4M node through an app, you will be
 > asked for an email address and password to create your account. Your DID (decentralized
