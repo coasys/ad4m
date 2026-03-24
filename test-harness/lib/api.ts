@@ -82,11 +82,14 @@ export class ExecutorAPI {
   }
 
   async requestCapability(appName: string, appDesc: string, appUrl: string): Promise<string> {
+    const allCaps = [
+      { with: { domain: '*', pointers: ['*'] }, can: ['*'] },
+    ];
     const res = await this.mutate(
-      `mutation($appName: String!, $appDesc: String!, $appUrl: String!) {
-        agentRequestCapability(authInfo: { appName: $appName, appDesc: $appDesc, appUrl: $appUrl, appIconPath: "" })
+      `mutation($appName: String!, $appDesc: String!, $appUrl: String!, $caps: [CapabilityInput!]) {
+        agentRequestCapability(authInfo: { appName: $appName, appDesc: $appDesc, appUrl: $appUrl, appDomain: $appUrl, appIconPath: "", capabilities: $caps })
       }`,
-      { appName, appDesc, appUrl }
+      { appName, appDesc, appUrl, caps: allCaps }
     );
     if (res.errors) throw new Error(res.errors[0].message);
     return (res.data as Record<string, unknown>)['agentRequestCapability'] as string;
@@ -121,14 +124,14 @@ export class ExecutorAPI {
 
   async neighbourhoodPublish(perspectiveUuid: string, linkLanguage: string, meta?: { name?: string; description?: string }): Promise<string> {
     const res = await this.mutate(
-      `mutation($perspectiveUuid: String!, $linkLanguage: String!, $meta: PerspectiveInput) {
+      `mutation($perspectiveUUID: String!, $linkLanguage: String!, $meta: PerspectiveInput!) {
         neighbourhoodPublishFromPerspective(
-          perspectiveUuid: $perspectiveUuid
+          perspectiveUUID: $perspectiveUUID
           linkLanguage: $linkLanguage
           meta: $meta
         )
       }`,
-      { perspectiveUuid, linkLanguage, meta: meta ?? {} }
+      { perspectiveUUID: perspectiveUuid, linkLanguage, meta: meta ? { links: [] } : { links: [] } }
     );
     if (res.errors) throw new Error(res.errors[0].message);
     return (res.data as Record<string, unknown>)['neighbourhoodPublishFromPerspective'] as string;
@@ -149,12 +152,12 @@ export class ExecutorAPI {
     return (res.data as Record<string, Record<string, unknown>>)['runtimeInfo'];
   }
 
-  async sfuSetConfig(neighbourhoodUrl: string, mode: string, opts?: { designatedPeer?: string }): Promise<void> {
+  async sfuSetConfig(neighbourhoodUrl: string, mode: string, opts?: { designatedPeer?: string; fallback?: string; maxMeshParticipants?: number }): Promise<void> {
     const res = await this.mutate(
-      `mutation($nhUrl: String!, $mode: String!, $designatedPeer: String) {
-        neighbourhoodSetSfuConfig(nhUrl: $nhUrl, mode: $mode, designatedPeer: $designatedPeer)
+      `mutation($nhUrl: String!, $mode: String!, $designatedPeer: String, $fallback: String, $maxMeshParticipants: Int) {
+        sfuSetConfig(neighbourhoodUrl: $nhUrl, mode: $mode, designatedPeer: $designatedPeer, fallback: $fallback, maxMeshParticipants: $maxMeshParticipants)
       }`,
-      { nhUrl: neighbourhoodUrl, mode, designatedPeer: opts?.designatedPeer ?? null }
+      { nhUrl: neighbourhoodUrl, mode, designatedPeer: opts?.designatedPeer ?? null, fallback: opts?.fallback ?? 'mesh', maxMeshParticipants: opts?.maxMeshParticipants ?? 4 }
     );
     if (res.errors) throw new Error(res.errors[0].message);
   }
@@ -162,11 +165,15 @@ export class ExecutorAPI {
   async sfuStartRoom(neighbourhoodUrl: string, roomId: string): Promise<unknown> {
     const res = await this.mutate(
       `mutation($nhUrl: String!, $roomId: String!) {
-        neighbourhoodStartSfuRoom(nhUrl: $nhUrl, roomId: $roomId)
+        sfuStartRoom(neighbourhoodUrl: $nhUrl, roomId: $roomId) {
+          neighbourhoodUrl
+          roomName
+          participantCount
+        }
       }`,
       { nhUrl: neighbourhoodUrl, roomId }
     );
     if (res.errors) throw new Error(res.errors[0].message);
-    return (res.data as Record<string, unknown>)['neighbourhoodStartSfuRoom'];
+    return (res.data as Record<string, unknown>)['sfuStartRoom'];
   }
 }

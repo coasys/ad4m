@@ -30,7 +30,18 @@ const action: Action = {
       const perspective = await api.perspectiveAdd(name);
 
       // Publish as neighbourhood
-      const linkLanguage = (params.linkLanguage as string) ?? 'social-context';
+      // Find perspective-language address if no link language specified
+      let linkLanguage = params.linkLanguage as string | undefined;
+      if (!linkLanguage) {
+        const langRes = await api.query('{ languages { name address } }');
+        if (langRes.data) {
+          const langs = (langRes.data as Record<string, Array<{ name: string; address: string }>>)['languages'];
+          const perspLang = langs?.find(l => l.name === 'perspective-language');
+          linkLanguage = perspLang?.address ?? 'perspective-language';
+        } else {
+          linkLanguage = 'perspective-language';
+        }
+      }
       const nhUrl = await api.neighbourhoodPublish(perspective.uuid, linkLanguage, { name });
 
       const nhId = ctx.nextId('nh');

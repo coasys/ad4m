@@ -11,7 +11,7 @@ const action: Action = {
     port: { type: 'number', description: 'GraphQL port', default: 12000 },
     host: { type: 'string', description: '"local" or SSH target', default: 'local' },
     dataDir: { type: 'string', description: 'App data directory' },
-    holochain: { type: 'boolean', description: 'Enable Holochain', default: true },
+    holochain: { type: 'boolean', description: 'Enable Holochain (--connect-holochain)', default: true },
     features: { type: 'string[]', description: 'Cargo features', default: ['sfu'] },
     binaryPath: { type: 'string', description: 'Path to ad4m binary' },
     adminCredential: { type: 'string', description: 'Admin credential', default: 'harness-admin' },
@@ -28,20 +28,22 @@ const action: Action = {
     const adminCredential = (params.adminCredential as string) ?? 'harness-admin';
     const runDappServer = params.runDappServer ?? false;
     const languageLanguageOnly = params.languageLanguageOnly ?? false;
+    const holochain = params.holochain ?? true;
 
     // Determine binary path
     const repoRoot = process.env.AD4M_REPO ?? (host === 'local' ? process.cwd().replace(/\/test-harness$/, '') : '~/ad4m');
-    const binaryPath = (params.binaryPath as string) ?? `${repoRoot}/target/release/ad4m`;
+    const binaryPath = (params.binaryPath as string) ?? `${repoRoot}/target/release/ad4m-executor`;
 
     // Build the command
     const cmd = [
       binaryPath,
-      'executor', 'run',
+      'run',
       `--app-data-path "${dataDir}"`,
       `--gql-port ${port}`,
       `--admin-credential "${adminCredential}"`,
       `--run-dapp-server ${runDappServer}`,
       `--language-language-only ${languageLanguageOnly}`,
+      `--connect-holochain ${holochain}`,
     ].join(' ');
 
     try {

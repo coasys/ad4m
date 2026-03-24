@@ -18,10 +18,10 @@ const action: Action = {
     const id = ctx.nextId('exec');
     const host = (params.host as string) ?? 'local';
     const dataDir = (params.dataDir as string) ?? `/tmp/ad4m-harness-${id}`;
-    const binary = (params.binaryPath as string) ?? 'ad4m';
+    const binary = (params.binaryPath as string) ?? 'ad4m-executor';
     const runner = host === 'local' ? new LocalRunner() : createRunner(host);
 
-    const result = await runner.exec(`${binary} executor init --data-path "${dataDir}"`, { timeout: 30000 });
+    const result = await runner.exec(`${binary} init --data-path "${dataDir}"`, { timeout: 30000 });
 
     if (result.code !== 0 && !result.stderr.includes('already')) {
       return { ok: false, error: `Init failed: ${result.stderr}`, duration_ms: Date.now() - start };
