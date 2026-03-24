@@ -55,6 +55,18 @@ pub struct PaymentRequest {
     pub completed_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputeLogEntry {
+    pub id: i64,
+    pub user_email: String,
+    pub timestamp: String,
+    pub operation: String,
+    pub summary: Option<String>,
+    pub cost: f64,
+    pub credits_after: f64,
+}
+
 use std::sync::{Arc, Mutex};
 
 lazy_static! {
@@ -411,6 +423,22 @@ impl Ad4mDb {
         // Add unique index for existing databases that already created the table without UNIQUE
         conn.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_sends_proposal_hash ON pending_sends(proposal_action_hash)",
+        )?;
+
+        // Compute activity log — one row per billing event
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS compute_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_email TEXT NOT NULL,
+                timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+                operation TEXT NOT NULL,
+                summary TEXT,
+                cost REAL NOT NULL,
+                credits_after REAL NOT NULL
+            )",
+        )?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_compute_log_user_time ON compute_log(user_email, timestamp)",
         )?;
 
         Ok(Self { conn })
@@ -3084,6 +3112,103 @@ impl Ad4mDb {
             return Err(anyhow!("Insufficient compute credits"));
         }
         Ok(())
+    }
+
+    // ── Compute activity log ────────────────────────────────────────────
+
+    /// Insert a compute log entry after a billing event.
+    pub fn insert_compute_log(
+        &self,
+        email: &str,
+        operation: &str,
+        summary: Option<&str>,
+        cost: f64,
+        credits_after: f64,
+    ) -> Ad4mDbResult<i64> {
+        self.conn.execute(
+            "INSERT INTO compute_log (user_email, operation, summary, cost, credits_after) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![email, operation, summary, cost, credits_after],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Query compute log entries for a user, ordered newest-first.
+    /// If `since` is provided (ISO 8601), only entries after that timestamp are returned.
+    pub fn get_compute_log(
+        &self,
+        email: &str,
+        since: Option<&str>,
+        limit: i64,
+    ) -> Ad4mDbResult<Vec<ComputeLogEntry>> {
+        let (sql, params_vec): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match since {
+            Some(ts) => (
+                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log WHERE user_email = ?1 AND timestamp > ?2 ORDER BY id DESC LIMIT ?3",
+                vec![Box::new(email.to_string()), Box::new(ts.to_string()), Box::new(limit)],
+            ),
+            None => (
+                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log WHERE user_email = ?1 ORDER BY id DESC LIMIT ?2",
+                vec![Box::new(email.to_string()), Box::new(limit)],
+            ),
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let entries = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                Ok(ComputeLogEntry {
+                    id: row.get(0)?,
+                    user_email: row.get(1)?,
+                    timestamp: row.get(2)?,
+                    operation: row.get(3)?,
+                    summary: row.get(4)?,
+                    cost: row.get(5)?,
+                    credits_after: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(entries)
+    }
+
+    /// Query compute log entries for ALL users (admin). Newest-first.
+    pub fn get_compute_log_all(
+        &self,
+        since: Option<&str>,
+        limit: i64,
+    ) -> Ad4mDbResult<Vec<ComputeLogEntry>> {
+        let (sql, params_vec): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match since {
+            Some(ts) => (
+                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log WHERE timestamp > ?1 ORDER BY id DESC LIMIT ?2",
+                vec![Box::new(ts.to_string()), Box::new(limit)],
+            ),
+            None => (
+                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log ORDER BY id DESC LIMIT ?1",
+                vec![Box::new(limit)],
+            ),
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let entries = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                Ok(ComputeLogEntry {
+                    id: row.get(0)?,
+                    user_email: row.get(1)?,
+                    timestamp: row.get(2)?,
+                    operation: row.get(3)?,
+                    summary: row.get(4)?,
+                    cost: row.get(5)?,
+                    credits_after: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(entries)
+    }
+
+    /// Delete log entries older than the given ISO 8601 timestamp.
+    pub fn cleanup_compute_log(&self, before: &str) -> Ad4mDbResult<usize> {
+        let rows = self.conn.execute(
+            "DELETE FROM compute_log WHERE timestamp < ?1",
+            params![before],
+        )?;
+        Ok(rows)
     }
 
     pub fn get_user_hot_wallet(&self, email: &str) -> Ad4mDbResult<Option<String>> {

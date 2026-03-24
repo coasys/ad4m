@@ -56,11 +56,17 @@ fn get_rate(description: &str, default: f64) -> FieldResult<f64> {
 /// Deduct compute credits for a user after an operation completes.
 /// Uses clamped deduction (credits go to 0, never negative) so that the
 /// pre-check in check_compute_credits will block subsequent operations.
+/// Also inserts a compute log entry with the operation metadata.
 /// Returns Ok(()) if:
 /// - No user email in token (single-user mode, no billing)
 /// - User has free_access enabled
 /// - Credits were successfully deducted (clamped to 0)
-fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
+fn reserve_compute_credits(
+    auth_token: &str,
+    amount: f64,
+    operation: &str,
+    summary: Option<&str>,
+) -> FieldResult<()> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
         let global_free =
             Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
@@ -72,6 +78,15 @@ fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
         if !free {
             Ad4mDb::with_global_instance(|db| db.deduct_user_credits_if_available(email, amount))
                 .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+            // Log the billing event
+            let credits_after = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
+                .unwrap_or(0.0);
+            if let Err(e) = Ad4mDb::with_global_instance(|db| {
+                db.insert_compute_log(email, operation, summary, amount, credits_after)
+            }) {
+                log::warn!("Failed to insert compute log entry: {:?}", e);
+            }
+            crate::pubsub::push_compute_log_entry(email, operation, summary, amount, credits_after);
             mark_credits_dirty(email);
         }
     }
@@ -1974,6 +1989,8 @@ impl Mutation {
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
             get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
+            "link_write",
+            Some(&format!("1 link in perspective {}", uuid)),
         ) {
             log::warn!("Call exceeded compute credits (add_link): result returned but future calls will fail. Details: {:?}", e);
         }
@@ -2002,6 +2019,8 @@ impl Mutation {
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
             get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
+            "link_write",
+            Some(&format!("1 link in perspective {}", uuid)),
         ) {
             log::warn!("Call exceeded compute credits (add_link_expression): result returned but future calls will fail. Details: {:?}", e);
         }
@@ -2037,6 +2056,8 @@ impl Mutation {
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
             link_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
+            "link_write",
+            Some(&format!("{} links in perspective {}", link_count, uuid)),
         ) {
             log::warn!("Call exceeded compute credits (add_links, count={}): result returned but future calls will fail. Details: {:?}", link_count, e);
         }
@@ -2067,6 +2088,8 @@ impl Mutation {
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
             additions_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
+            "link_write",
+            Some(&format!("{} additions in perspective {}", additions_count, uuid)),
         ) {
             log::warn!("Call exceeded compute credits (link_mutations, additions={}): result returned but future calls will fail. Details: {:?}", additions_count, e
             );
@@ -2963,6 +2986,8 @@ impl Mutation {
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
             total_tokens as f64 * get_rate(&model_name, DEFAULT_TOKEN_RATE)?,
+            "ai_prompt",
+            Some(&format!("{}: {} prompt + {} completion tokens", model_name, result.prompt_tokens, result.completion_tokens)),
         ) {
             log::warn!("Call exceeded compute credits (ai_prompt, model={}, tokens={}): result returned but future calls will fail. Details: {:?}", model_name, total_tokens, e);
         }
@@ -2988,6 +3013,8 @@ impl Mutation {
             &context.auth_token,
             result.token_count as f64
                 * get_rate("embedding per token", DEFAULT_EMBEDDING_TOKEN_RATE)?,
+            "ai_embed",
+            Some(&format!("{} tokens", result.token_count)),
         ) {
             log::warn!("Call exceeded compute credits (ai_embed, tokens={}): result returned but future calls will fail. Details: {:?}", result.token_count, e);
         }
