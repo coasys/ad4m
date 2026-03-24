@@ -97,6 +97,7 @@ const Hosting = () => {
   const [users, setUsers] = useState<UserStatistics[]>([]);
   const [usersLoading, setUsersLoading] = useState(true);
   const usersFirstLoadDone = useRef(false);
+  const isFetchingUsers = useRef(false);
   const [creditAmounts, setCreditAmounts] = useState<Record<string, string>>(
     {},
   );
@@ -779,7 +780,8 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
   // ---- Users handlers ----
 
   const getUsers = useCallback(async () => {
-    if (!client) return;
+    if (!client || isFetchingUsers.current) return;
+    isFetchingUsers.current = true;
     try {
       if (!usersFirstLoadDone.current) {
         setUsersLoading(true);
@@ -791,6 +793,7 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
     } finally {
       usersFirstLoadDone.current = true;
       setUsersLoading(false);
+      isFetchingUsers.current = false;
     }
   }, [client]);
 
@@ -896,12 +899,31 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
 
   // ---- Effects ----
 
-  // Fetch users immediately on tab switch and poll every 15s while viewing
+  // Reset cached user state when the backing runtime changes so stale
+  // lists / finished-first-load flags don't persist across switches.
+  useEffect(() => {
+    setUsers([]);
+    setUsersLoading(true);
+    usersFirstLoadDone.current = false;
+  }, [client, multiUserEnabled]);
+
+  // Fetch users immediately on tab switch and poll every 15s while viewing.
+  // Uses self-scheduling setTimeout so each poll waits for the prior one.
   useEffect(() => {
     if (!multiUserEnabled || !client || activeTab !== "users") return;
-    getUsers();
-    const interval = setInterval(getUsers, 15000);
-    return () => clearInterval(interval);
+    let cancelled = false;
+    const poll = async () => {
+      await getUsers();
+      if (!cancelled) {
+        timer = setTimeout(poll, 15000);
+      }
+    };
+    let timer: ReturnType<typeof setTimeout>;
+    poll();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [multiUserEnabled, client, activeTab, getUsers]);
 
   useEffect(() => {
