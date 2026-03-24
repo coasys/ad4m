@@ -1418,10 +1418,7 @@ impl Query {
                     db.get_compute_log(email, since.as_deref(), max)
                 })
                 .map_err(|e| {
-                    FieldError::new(
-                        format!("Failed to get compute log: {}", e),
-                        Value::null(),
-                    )
+                    FieldError::new(format!("Failed to get compute log: {}", e), Value::null())
                 })?;
                 return Ok(entries
                     .into_iter()
@@ -1437,15 +1434,11 @@ impl Query {
                     .collect());
             }
             // Admin with no user_email — return all users
-            let entries = Ad4mDb::with_global_instance(|db| {
-                db.get_compute_log_all(since.as_deref(), max)
-            })
-            .map_err(|e| {
-                FieldError::new(
-                    format!("Failed to get compute log: {}", e),
-                    Value::null(),
-                )
-            })?;
+            let entries =
+                Ad4mDb::with_global_instance(|db| db.get_compute_log_all(since.as_deref(), max))
+                    .map_err(|e| {
+                        FieldError::new(format!("Failed to get compute log: {}", e), Value::null())
+                    })?;
             return Ok(entries
                 .into_iter()
                 .map(|e| ComputeLogEntry {
@@ -1468,10 +1461,7 @@ impl Query {
                     db.get_compute_log(&email, since.as_deref(), max)
                 })
                 .map_err(|e| {
-                    FieldError::new(
-                        format!("Failed to get compute log: {}", e),
-                        Value::null(),
-                    )
+                    FieldError::new(format!("Failed to get compute log: {}", e), Value::null())
                 })?;
                 Ok(entries
                     .into_iter()

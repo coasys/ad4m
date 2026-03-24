@@ -570,7 +570,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                 match PENDING_COMPUTE_LOG_ENTRIES.lock() {
                     Ok(mut vec) => vec.drain(..).collect(),
                     Err(e) => {
-                        error!("Credit flush: failed to lock pending compute log entries: {}", e);
+                        error!(
+                            "Credit flush: failed to lock pending compute log entries: {}",
+                            e
+                        );
                         Vec::new()
                     }
                 }

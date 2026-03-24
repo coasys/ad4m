@@ -3151,7 +3151,8 @@ impl Ad4mDb {
             ),
         };
         let mut stmt = self.conn.prepare(sql)?;
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
         let entries = stmt
             .query_map(params_refs.as_slice(), |row| {
                 Ok(ComputeLogEntry {
@@ -3185,7 +3186,8 @@ impl Ad4mDb {
             ),
         };
         let mut stmt = self.conn.prepare(sql)?;
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
         let entries = stmt
             .query_map(params_refs.as_slice(), |row| {
                 Ok(ComputeLogEntry {

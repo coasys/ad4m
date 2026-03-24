@@ -152,8 +152,9 @@ pub fn mark_credits_dirty(email: &str) {
 
 /// Buffer a compute log entry for async publication.
 /// The flush loop will drain these and publish to the subscription topic.
-pub static PENDING_COMPUTE_LOG_ENTRIES: LazyLock<std::sync::Mutex<Vec<crate::graphql::graphql_types::ComputeLogEntry>>> =
-    LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+pub static PENDING_COMPUTE_LOG_ENTRIES: LazyLock<
+    std::sync::Mutex<Vec<crate::graphql::graphql_types::ComputeLogEntry>>,
+> = LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
 
 pub fn push_compute_log_entry(
     email: &str,

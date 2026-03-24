@@ -79,8 +79,8 @@ fn reserve_compute_credits(
             Ad4mDb::with_global_instance(|db| db.deduct_user_credits_if_available(email, amount))
                 .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
             // Log the billing event
-            let credits_after = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
-                .unwrap_or(0.0);
+            let credits_after =
+                Ad4mDb::with_global_instance(|db| db.get_user_credits(email)).unwrap_or(0.0);
             if let Err(e) = Ad4mDb::with_global_instance(|db| {
                 db.insert_compute_log(email, operation, summary, amount, credits_after)
             }) {
@@ -2089,7 +2089,10 @@ impl Mutation {
             &context.auth_token,
             additions_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
             "link_write",
-            Some(&format!("{} additions in perspective {}", additions_count, uuid)),
+            Some(&format!(
+                "{} additions in perspective {}",
+                additions_count, uuid
+            )),
         ) {
             log::warn!("Call exceeded compute credits (link_mutations, additions={}): result returned but future calls will fail. Details: {:?}", additions_count, e
             );
@@ -2987,7 +2990,10 @@ impl Mutation {
             &context.auth_token,
             total_tokens as f64 * get_rate(&model_name, DEFAULT_TOKEN_RATE)?,
             "ai_prompt",
-            Some(&format!("{}: {} prompt + {} completion tokens", model_name, result.prompt_tokens, result.completion_tokens)),
+            Some(&format!(
+                "{}: {} prompt + {} completion tokens",
+                model_name, result.prompt_tokens, result.completion_tokens
+            )),
         ) {
             log::warn!("Call exceeded compute credits (ai_prompt, model={}, tokens={}): result returned but future calls will fail. Details: {:?}", model_name, total_tokens, e);
         }
