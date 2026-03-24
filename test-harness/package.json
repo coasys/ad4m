@@ -1,0 +1,28 @@
+{
+  "name": "@coasys/ad4m-test-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reusable automation toolkit for AD4M agent-driven testing",
+  "main": "dist/harness.js",
+  "bin": {
+    "ad4m-harness": "dist/harness.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "playwright": "^1.42.0"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.2.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
