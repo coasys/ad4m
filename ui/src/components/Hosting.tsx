@@ -96,6 +96,7 @@ const Hosting = () => {
   // ---- Users state ----
   const [users, setUsers] = useState<UserStatistics[]>([]);
   const [usersLoading, setUsersLoading] = useState(true);
+  const usersFirstLoadDone = useRef(false);
   const [creditAmounts, setCreditAmounts] = useState<Record<string, string>>(
     {},
   );
@@ -780,15 +781,18 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
   const getUsers = useCallback(async () => {
     if (!client) return;
     try {
-      setUsersLoading((prev) => prev || users.length === 0);
+      if (!usersFirstLoadDone.current) {
+        setUsersLoading(true);
+      }
       const userList = await client.runtime.listUsers();
       setUsers(userList);
     } catch (error) {
       console.error("Failed to load users:", error);
     } finally {
+      usersFirstLoadDone.current = true;
       setUsersLoading(false);
     }
-  }, [client, users.length]);
+  }, [client]);
 
   const formatLastSeen = (lastSeen: string | null | undefined) => {
     if (!lastSeen) return "Never";
