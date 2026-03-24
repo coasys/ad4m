@@ -31,7 +31,7 @@ async function discoverActions(baseDir: string): Promise<Map<string, string>> {
       const stat = await fs.stat(fullPath);
       if (stat.isDirectory()) {
         await scan(fullPath, prefix ? `${prefix}/${entry}` : entry);
-      } else if (entry.endsWith('.ts') || entry.endsWith('.js')) {
+      } else if (entry.endsWith('.ts') && !entry.endsWith('.d.ts') || entry.endsWith('.js') && !entry.endsWith('.d.js')) {
         const name = entry.replace(/\.(ts|js)$/, '');
         const actionName = prefix ? `${prefix}/${name}` : name;
         actions.set(actionName, fullPath);
