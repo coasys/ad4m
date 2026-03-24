@@ -838,7 +838,23 @@ impl PerspectiveInstance {
     ) -> Result<DecoratedLinkExpression, AnyError> {
         link.validate()?;
         let link_expr: LinkExpression = create_signed_expression(link.normalize(), context)?.into();
-        self.add_link_expression(link_expr, status, batch_id).await
+        let result = self
+            .add_link_expression(link_expr, status, batch_id)
+            .await?;
+
+        if let Some(ref email) = context.user_email {
+            let uuid = self.persisted.lock().await.uuid.clone();
+            if let Err(e) = crate::billing::bill_compute(
+                email,
+                crate::billing::get_link_write_rate(),
+                "link_write",
+                Some(&format!("1 link in perspective {}", uuid)),
+            ) {
+                log::warn!("Call exceeded compute credits (add_link): {:?}", e);
+            }
+        }
+
+        Ok(result)
     }
 
     pub async fn remove_link(
@@ -1092,6 +1108,24 @@ impl PerspectiveInstance {
                 self.spawn_commit_and_handle_error(&perspective_diff);
             }
 
+            // Bill for link writes
+            if let Some(ref email) = context.user_email {
+                let uuid = self.persisted.lock().await.uuid.clone();
+                let link_count = decorated_link_expressions.len();
+                if let Err(e) = crate::billing::bill_compute(
+                    email,
+                    link_count as f64 * crate::billing::get_link_write_rate(),
+                    "link_write",
+                    Some(&format!("{} links in perspective {}", link_count, uuid)),
+                ) {
+                    log::warn!(
+                        "Call exceeded compute credits (add_links, count={}): {:?}",
+                        link_count,
+                        e
+                    );
+                }
+            }
+
             Ok(decorated_link_expressions)
         }
     }
@@ -1141,6 +1175,30 @@ impl PerspectiveInstance {
             // Reset fallback sync interval when new shared links are added
             self.reset_fallback_sync_interval().await;
         }
+
+        // Bill for additions only (removals are free)
+        let additions_count = decorated_diff.additions.len();
+        if additions_count > 0 {
+            if let Some(ref email) = context.user_email {
+                let uuid = self.persisted.lock().await.uuid.clone();
+                if let Err(e) = crate::billing::bill_compute(
+                    email,
+                    additions_count as f64 * crate::billing::get_link_write_rate(),
+                    "link_write",
+                    Some(&format!(
+                        "{} additions in perspective {}",
+                        additions_count, uuid
+                    )),
+                ) {
+                    log::warn!(
+                        "Call exceeded compute credits (link_mutations, additions={}): {:?}",
+                        additions_count,
+                        e
+                    );
+                }
+            }
+        }
+
         Ok(decorated_diff)
     }
 
@@ -1257,6 +1315,19 @@ impl PerspectiveInstance {
             if link_status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&diff);
             }
+
+            // Bill for the replacement link (1 addition; removal is free)
+            if let Some(ref email) = context.user_email {
+                if let Err(e) = crate::billing::bill_compute(
+                    email,
+                    crate::billing::get_link_write_rate(),
+                    "link_write",
+                    Some(&format!("1 link update in perspective {}", handle.uuid)),
+                ) {
+                    log::warn!("Call exceeded compute credits (update_link): {:?}", e);
+                }
+            }
+
             Ok(decorated_new_link_expression)
         }
     }

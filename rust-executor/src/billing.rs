@@ -1,6 +1,16 @@
 use crate::db::Ad4mDb;
 use crate::pubsub::mark_credits_dirty;
 
+const DEFAULT_LINK_WRITE_RATE: f64 = 0.25; // credits per link write
+
+/// Look up the link write rate from the host_rates DB table, falling back to the default.
+pub fn get_link_write_rate() -> f64 {
+    Ad4mDb::with_global_instance(|db| db.get_host_rate("link write"))
+        .ok()
+        .flatten()
+        .unwrap_or(DEFAULT_LINK_WRITE_RATE)
+}
+
 /// Deduct credits and log a compute event for the given user email.
 /// No-ops if free hosting is enabled globally or the user has free access.
 ///
