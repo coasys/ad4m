@@ -76,17 +76,18 @@ fn reserve_compute_credits(
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
             .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
         if !free {
-            Ad4mDb::with_global_instance(|db| db.deduct_user_credits_if_available(email, amount))
-                .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
-            // Log the billing event
-            let credits_after =
-                Ad4mDb::with_global_instance(|db| db.get_user_credits(email)).unwrap_or(0.0);
-            if let Err(e) = Ad4mDb::with_global_instance(|db| {
-                db.insert_compute_log(email, operation, summary, amount, credits_after)
-            }) {
-                log::warn!("Failed to insert compute log entry: {:?}", e);
-            }
-            crate::pubsub::push_compute_log_entry(email, operation, summary, amount, credits_after);
+            let (row_id, credits_after) = Ad4mDb::with_global_instance(|db| {
+                db.deduct_credits_and_log(email, amount, operation, summary)
+            })
+            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+            crate::pubsub::push_compute_log_entry(
+                row_id,
+                email,
+                operation,
+                summary,
+                amount,
+                credits_after,
+            );
             mark_credits_dirty(email);
         }
     }

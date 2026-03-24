@@ -157,6 +157,7 @@ pub static PENDING_COMPUTE_LOG_ENTRIES: LazyLock<
 > = LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
 
 pub fn push_compute_log_entry(
+    id: i64,
     email: &str,
     operation: &str,
     summary: Option<&str>,
@@ -164,7 +165,7 @@ pub fn push_compute_log_entry(
     credits_after: f64,
 ) {
     let entry = crate::graphql::graphql_types::ComputeLogEntry {
-        id: 0, // will be set from DB if needed; not critical for realtime push
+        id: id as i32,
         user_email: email.to_owned(),
         timestamp: chrono::Utc::now().to_rfc3339(),
         operation: operation.to_owned(),
@@ -172,8 +173,12 @@ pub fn push_compute_log_entry(
         cost,
         credits_after,
     };
-    if let Ok(mut vec) = PENDING_COMPUTE_LOG_ENTRIES.lock() {
-        vec.push(entry);
+    match PENDING_COMPUTE_LOG_ENTRIES.lock() {
+        Ok(mut vec) => vec.push(entry),
+        Err(e) => error!(
+            "Failed to lock PENDING_COMPUTE_LOG_ENTRIES for compute log entry id={}: {}",
+            id, e
+        ),
     }
 }
 

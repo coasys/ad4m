@@ -1409,7 +1409,11 @@ impl Query {
     ) -> FieldResult<Vec<ComputeLogEntry>> {
         check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
 
-        let max = (limit.unwrap_or(100) as i64).min(1000);
+        let raw_limit = limit.unwrap_or(100);
+        if raw_limit < 0 {
+            return Err(FieldError::new("limit must be non-negative", Value::Null));
+        }
+        let max = (raw_limit as i64).min(1000);
 
         // If admin and user_email is provided, query that user's log
         if context.is_admin_credential {

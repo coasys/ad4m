@@ -589,7 +589,17 @@ impl Subscription {
                 let filter = if context.is_admin_credential {
                     None // Admin sees all users' log entries
                 } else {
-                    user_email_from_token(context.auth_token.clone())
+                    match user_email_from_token(context.auth_token.clone()) {
+                        Some(email) => Some(email),
+                        None => {
+                            return Box::pin(stream::once(async {
+                                Err(coasys_juniper::FieldError::new(
+                                    "Cannot resolve user identity for compute log subscription",
+                                    graphql_value!(null),
+                                ))
+                            }));
+                        }
+                    }
                 };
                 let pubsub = get_global_pubsub().await;
                 let topic = &COMPUTE_LOG_UPDATED_TOPIC;

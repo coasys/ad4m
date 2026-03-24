@@ -430,7 +430,7 @@ impl Ad4mDb {
             "CREATE TABLE IF NOT EXISTS compute_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_email TEXT NOT NULL,
-                timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+                timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
                 operation TEXT NOT NULL,
                 summary TEXT,
                 cost REAL NOT NULL,
@@ -3112,6 +3112,54 @@ impl Ad4mDb {
             return Err(anyhow!("Insufficient compute credits"));
         }
         Ok(())
+    }
+
+    /// Atomically deduct credits AND insert a compute log entry in a single transaction.
+    /// Returns the credits_after value on success.
+    pub fn deduct_credits_and_log(
+        &self,
+        email: &str,
+        amount: f64,
+        operation: &str,
+        summary: Option<&str>,
+    ) -> Ad4mDbResult<(i64, f64)> {
+        Self::validate_credit_amount(amount)?;
+        let tx = self.conn.unchecked_transaction()?;
+
+        // Deduct credits (fails if insufficient)
+        let rows = tx.execute(
+            "UPDATE users SET remaining_credits = remaining_credits - ?1 WHERE username = ?2 AND COALESCE(remaining_credits, 0) >= ?1",
+            params![amount, email],
+        )?;
+        if rows == 0 {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM users WHERE username = ?1)",
+                [email],
+                |row| row.get(0),
+            )?;
+            // tx is dropped here → auto-rollback
+            if !exists {
+                return Err(anyhow!("User not found: {}", email));
+            }
+            return Err(anyhow!("Insufficient compute credits"));
+        }
+
+        // Read the resulting balance within the same transaction
+        let credits_after: f64 = tx.query_row(
+            "SELECT COALESCE(remaining_credits, 0) FROM users WHERE username = ?1",
+            [email],
+            |row| row.get(0),
+        )?;
+
+        // Insert the audit log entry
+        tx.execute(
+            "INSERT INTO compute_log (user_email, operation, summary, cost, credits_after) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![email, operation, summary, amount, credits_after],
+        )?;
+        let row_id = tx.last_insert_rowid();
+
+        tx.commit()?;
+        Ok((row_id, credits_after))
     }
 
     // ── Compute activity log ────────────────────────────────────────────
