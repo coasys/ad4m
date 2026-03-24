@@ -59,6 +59,7 @@ fn estimate_token_count(text: &str) -> usize {
 static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
 static TRANSCRIPTION_TIMEOUT_SECS: u64 = 30; // 30 seconds (was 2 minutes)
 static TRANSCRIPTION_CHECK_INTERVAL_SECS: u64 = 5; // 5 seconds (was 10)
+const DEFAULT_TRANSCRIPTION_WORD_RATE: f64 = 5.0; // credits per word transcribed
 
 lazy_static! {
     static ref AI_SERVICE: Arc<Mutex<Option<AIService>>> = Arc::new(Mutex::new(None));
@@ -70,6 +71,12 @@ struct TranscriptionSession {
     samples_tx: futures_channel::mpsc::UnboundedSender<Vec<f32>>,
     drop_tx: oneshot::Sender<()>,
     last_activity: Arc<Mutex<std::time::Instant>>,
+    // Billing context (used by the async whisper task via cloned values;
+    // stored here for potential close-stream reconciliation)
+    #[allow(dead_code)]
+    model_id: String,
+    #[allow(dead_code)]
+    user_email: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1152,8 +1159,12 @@ impl AIService {
         &self,
         model_id: String,
         params: Option<VoiceActivityParams>,
+        auth_token: String,
     ) -> Result<String> {
         let model_size = Self::get_whisper_model_size(model_id.clone())?;
+
+        // Extract user email from token for billing in the async task
+        let user_email = crate::agent::capabilities::user_email_from_token(auth_token);
 
         // MEMORY OPTIMIZATION: Load each Whisper model size ONCE and share across all streams using that size
         // Arc cloning is cheap (just increments ref count), saves 500MB-1.5GB per stream!
@@ -1197,6 +1208,10 @@ impl AIService {
         let (samples_tx, samples_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
         let (drop_tx, drop_rx) = oneshot::channel();
         let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
+
+        // Clone billing context for the async task
+        let billing_email = user_email.clone();
+        let billing_model_id = model_id.clone();
 
         thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1246,9 +1261,37 @@ impl AIService {
                     _ = drop_rx => {},
                     _ = async {
                         while let Some(segment) = word_stream.next().await {
-                            //println!("GOT segment: {}", segment.text());
+                            let text = segment.text().to_string();
                             let stream_id_clone = stream_id_clone.clone();
 
+                            // Bill for transcribed words
+                            let word_count = text.split_whitespace().count();
+                            if word_count > 0 {
+                                if let Some(ref email) = billing_email {
+                                    let rate = crate::db::Ad4mDb::with_global_instance(|db| {
+                                        db.get_host_rate("whisper transcription")
+                                    })
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or(DEFAULT_TRANSCRIPTION_WORD_RATE);
+                                    let cost = word_count as f64 * rate;
+                                    if let Err(e) = crate::billing::bill_compute(
+                                        email,
+                                        cost,
+                                        "ai_transcription",
+                                        Some(&format!(
+                                            "{} words (model: {}): \"{}\"",
+                                            word_count,
+                                            billing_model_id,
+                                            if text.len() > 80 { &text[..80] } else { &text }
+                                        )),
+                                    ) {
+                                        log::warn!("Transcription billing failed: {:?}", e);
+                                    }
+                                }
+                            }
+
+                            let text_for_pubsub = text.clone();
                             rt.spawn(async move {
                                 let _ = get_global_pubsub()
                                     .await
@@ -1256,7 +1299,7 @@ impl AIService {
                                         &AI_TRANSCRIPTION_TEXT_TOPIC,
                                         &serde_json::to_string(&TranscriptionTextFilter {
                                             stream_id: stream_id_clone.clone(),
-                                            text: segment.text().to_string(),
+                                            text: text_for_pubsub,
                                         })
                                         .expect("TranscriptionTextFilter must be serializable"),
                                     )
@@ -1276,6 +1319,8 @@ impl AIService {
                 samples_tx,
                 drop_tx,
                 last_activity,
+                model_id: model_id.clone(),
+                user_email,
             },
         );
 
