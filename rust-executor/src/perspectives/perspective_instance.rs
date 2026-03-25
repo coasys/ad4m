@@ -1505,7 +1505,7 @@ impl PerspectiveInstance {
             query.target.as_deref(),
             from_date.as_deref(),
             until_date.as_deref(),
-            query.limit.map(|l| l as usize),
+            None, // Don't limit here — get_links() applies limit after sorting
         )?;
 
         let result: Vec<(LinkExpression, LinkStatus)> = decorated_links

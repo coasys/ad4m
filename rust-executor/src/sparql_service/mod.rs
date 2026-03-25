@@ -180,10 +180,27 @@ fn to_iri(ad4m_uri: &str) -> String {
     }
 }
 
+/// AD4M-specific schemes that use `://` format.
+/// `to_iri` strips `://` → `:` for these; `from_iri` restores it.
+/// Standard web schemes (http, https, ftp, ws, wss) already use `://`
+/// and are passed through unchanged by both functions.
+/// URIs with other schemes (e.g. `did:key:...`, `urn:...`) are never
+/// transformed.
+const AD4M_SCHEMES: &[&str] = &[
+    "literal",
+    "lang",
+    "ad4m",
+    "neighbourhood",
+    "flux",
+    "social-context",
+    "perspective",
+];
+
 /// Reverse of to_iri: transform opaque URI back to AD4M format.
 /// `literal:string:hello` → `literal://string:hello`
 ///
-/// Standard schemes are left unchanged.
+/// Only restores `://` for known AD4M schemes. Standard web schemes and
+/// other URI schemes (did:, urn:, etc.) are left unchanged.
 fn from_iri(iri: &str) -> String {
     // Standard web schemes already have ://
     if iri.starts_with("http://")
@@ -194,12 +211,12 @@ fn from_iri(iri: &str) -> String {
     {
         return iri.to_string();
     }
-    // Find scheme:path and transform to scheme://path
+    // Find scheme:path and transform to scheme://path only for known AD4M schemes
     if let Some(pos) = iri.find(':') {
         let scheme = &iri[..pos];
         let rest = &iri[pos + 1..];
-        // Only transform if it doesn't already have ://
-        if !rest.starts_with("//") {
+        // Only transform if it doesn't already have :// AND is a known AD4M scheme
+        if !rest.starts_with("//") && AD4M_SCHEMES.contains(&scheme) {
             format!("{}://{}", scheme, rest)
         } else {
             iri.to_string()
