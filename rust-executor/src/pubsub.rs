@@ -134,6 +134,7 @@ lazy_static::lazy_static! {
     pub static ref AI_MODEL_LOADING_STATUS: String = "ai-model-loading-status".to_owned();
     pub static ref PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC: String = "perspective-query-subscription-topic".to_owned();
     pub static ref HOSTING_USER_INFO_CHANGED_TOPIC: String = "hosting-user-info-changed-topic".to_owned();
+    pub static ref COMPUTE_LOG_UPDATED_TOPIC: String = "compute-log-updated-topic".to_owned();
 }
 
 /// Per-user dirty set for batched credit change notifications.
@@ -146,6 +147,38 @@ pub static DIRTY_CREDIT_USERS: LazyLock<std::sync::Mutex<HashSet<String>>> =
 pub fn mark_credits_dirty(email: &str) {
     if let Ok(mut set) = DIRTY_CREDIT_USERS.lock() {
         set.insert(email.to_owned());
+    }
+}
+
+/// Buffer a compute log entry for async publication.
+/// The flush loop will drain these and publish to the subscription topic.
+pub static PENDING_COMPUTE_LOG_ENTRIES: LazyLock<
+    std::sync::Mutex<Vec<crate::graphql::graphql_types::ComputeLogEntry>>,
+> = LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+pub fn push_compute_log_entry(
+    id: i64,
+    email: &str,
+    operation: &str,
+    summary: Option<&str>,
+    cost: f64,
+    credits_after: f64,
+) {
+    let entry = crate::graphql::graphql_types::ComputeLogEntry {
+        id: id as i32,
+        user_email: email.to_owned(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        operation: operation.to_owned(),
+        summary: summary.map(|s| s.to_owned()),
+        cost,
+        credits_after,
+    };
+    match PENDING_COMPUTE_LOG_ENTRIES.lock() {
+        Ok(mut vec) => vec.push(entry),
+        Err(e) => error!(
+            "Failed to lock PENDING_COMPUTE_LOG_ENTRIES for compute log entry id={}: {}",
+            id, e
+        ),
     }
 }
 

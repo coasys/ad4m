@@ -10,7 +10,7 @@ import {
   EntanglementProofInput,
   UserCreationResult,
 } from "./Agent";
-import { HostingUserInfo, PaymentRequestResult } from "../runtime/RuntimeResolver";
+import { HostingUserInfo, PaymentRequestResult, ComputeLogEntry } from "../runtime/RuntimeResolver";
 import { AgentStatus } from "./AgentStatus";
 import { LinkMutations } from "../links/Links";
 import { PerspectiveClient } from "../perspectives/PerspectiveClient";
@@ -83,6 +83,7 @@ export type AgentUpdatedCallback = (agent: Agent) => null;
 export type AgentStatusChangedCallback = (agent: Agent) => null;
 export type AgentAppsUpdatedCallback = () => null;
 export type HostingUserInfoChangedCallback = (info: HostingUserInfo) => void;
+export type ComputeLogUpdatedCallback = (entry: ComputeLogEntry) => void;
 /**
  * Provides access to all functions regarding the local agent,
  * such as generating, locking, unlocking, importing the DID keystore,
@@ -94,6 +95,7 @@ export class AgentClient {
   #updatedCallbacks: AgentUpdatedCallback[];
   #agentStatusChangedCallbacks: AgentStatusChangedCallback[];
   #hostingUserInfoChangedCallbacks: HostingUserInfoChangedCallback[];
+  #computeLogUpdatedCallbacks: ComputeLogUpdatedCallback[];
 
   constructor(client: ApolloClient<any>, subscribe: boolean = true) {
     this.#apolloClient = client;
@@ -101,6 +103,7 @@ export class AgentClient {
     this.#agentStatusChangedCallbacks = [];
     this.#appsChangedCallback = [];
     this.#hostingUserInfoChangedCallbacks = [];
+    this.#computeLogUpdatedCallbacks = [];
 
     if (subscribe) {
       this.subscribeAgentUpdated();
@@ -450,6 +453,34 @@ export class AgentClient {
       });
   }
 
+  addComputeLogUpdatedListener(listener: ComputeLogUpdatedCallback) {
+    this.#computeLogUpdatedCallbacks.push(listener);
+  }
+
+  subscribeComputeLogUpdated() {
+    this.#apolloClient
+      .subscribe({
+        query: gql`subscription {
+          runtimeComputeLogUpdated {
+            id
+            userEmail
+            timestamp
+            operation
+            summary
+            cost
+            creditsAfter
+          }
+        }`,
+      })
+      .subscribe({
+        next: (result) => {
+          const entry = result.data.runtimeComputeLogUpdated;
+          this.#computeLogUpdatedCallbacks.forEach((cb) => cb(entry));
+        },
+        error: (e) => console.error(e),
+      });
+  }
+
   async requestCapability(authInfo: AuthInfoInput): Promise<string> {
     const { agentRequestCapability } = unwrapApolloResult(
       await this.#apolloClient.mutate({
@@ -634,6 +665,27 @@ export class AgentClient {
       })
     );
     return runtimeHostingUserInfo;
+  }
+
+  async computeLog(since?: string, limit?: number, userEmail?: string): Promise<ComputeLogEntry[]> {
+    const { runtimeComputeLog } = unwrapApolloResult(
+      await this.#apolloClient.query({
+        query: gql`query runtimeComputeLog($since: String, $limit: Int, $userEmail: String) {
+          runtimeComputeLog(since: $since, limit: $limit, userEmail: $userEmail) {
+            id
+            userEmail
+            timestamp
+            operation
+            summary
+            cost
+            creditsAfter
+          }
+        }`,
+        variables: { since, limit, userEmail },
+        fetchPolicy: 'network-only',
+      })
+    );
+    return runtimeComputeLog;
   }
 
   async setHotWalletAddress(address: string): Promise<boolean> {

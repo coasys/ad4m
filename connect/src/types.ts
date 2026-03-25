@@ -58,3 +58,14 @@ export type UserInfo = {
   hotWalletAddress: string | null;  // user's wHOT public address (null until set)
   freeAccess: boolean;
 };
+
+/** A single compute activity log entry */
+export type ComputeLogEntryData = {
+  id: number;
+  userEmail: string;
+  timestamp: string;
+  operation: string;
+  summary: string | null;
+  cost: number;
+  creditsAfter: number;
+};
