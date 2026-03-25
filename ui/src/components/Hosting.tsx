@@ -103,7 +103,7 @@ const Hosting = () => {
     {},
   );
   const [userLogOpen, setUserLogOpen] = useState<string | null>(null);
-  const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loading: boolean; unavailable?: boolean }>>({});
+const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loading: boolean; unavailable?: boolean; _token?: number }>>({});
 
   // ---- Host Registration state ----
   const [hostSession, setHostSession] = useState<HostSession>(null);
@@ -851,13 +851,13 @@ const Hosting = () => {
     }
     setUserLogOpen(email);
     const requestToken = Date.now();
-    setUserLogs(prev => ({ ...prev, [email]: { entries: prev[email]?.entries ?? [], loading: true } }));
+    setUserLogs(prev => ({ ...prev, [email]: { entries: prev[email]?.entries ?? [], loading: true, _token: requestToken } }));
     try {
       const entries = await client!.agent.computeLog(undefined, 50, email);
       setUserLogs(prev => {
         // Discard stale responses if another fetch started for this email
-        if ((prev[email] as any)?._token > requestToken) return prev;
-        return { ...prev, [email]: { entries, loading: false } };
+        if ((prev[email]?._token ?? 0) > requestToken) return prev;
+        return { ...prev, [email]: { entries, loading: false, _token: requestToken } };
       });
     } catch (error) {
       console.error("Failed to load compute log:", error);
@@ -866,7 +866,9 @@ const Hosting = () => {
   };
 
   const formatTimeAgo = (timestamp: string): string => {
-    const diff = Date.now() - new Date(timestamp).getTime();
+    const date = new Date(timestamp);
+    if (isNaN(date.getTime())) return "";
+    const diff = Date.now() - date.getTime();
     const seconds = Math.floor(diff / 1000);
     if (seconds < 60) return `${seconds}s ago`;
     const minutes = Math.floor(seconds / 60);
