@@ -154,12 +154,15 @@ pub fn validate_readonly_query(query: &str) -> Result<(), Error> {
 }
 
 /// Transform an AD4M URI into a valid RDF IRI.
-/// AD4M uses `scheme://path` format (e.g., `literal://string:hello`)
-/// which can fail strict IRI validation when the authority part contains
-/// invalid characters. We transform to opaque URI format: `scheme:path`
-/// (e.g., `literal:string:hello`) which is always valid.
+/// Most AD4M URIs (e.g., `ad4m://self`, `flux://has_channel`, `test://source`)
+/// are already valid IRIs and pass through unchanged.
 ///
-/// Standard schemes (http, https, ftp, ws, wss) are left unchanged.
+/// Only URIs that would fail strict IRI parsing are transformed:
+/// specifically `literal://TYPE:VALUE` where the colon after TYPE triggers
+/// invalid port parsing (RFC 3986 §3.2.3: port = *DIGIT).
+///
+/// The transform strips `://` → `:` making it an opaque URI (`literal:string:hello`)
+/// which is always valid. Standard schemes (http, https, etc.) are never transformed.
 fn to_iri(ad4m_uri: &str) -> String {
     // Don't transform standard web schemes
     if ad4m_uri.starts_with("http://")
@@ -170,14 +173,38 @@ fn to_iri(ad4m_uri: &str) -> String {
     {
         return ad4m_uri.to_string();
     }
-    // Transform scheme://path → scheme:path
+    // Only transform if the URI contains :// AND would be invalid as an IRI.
+    // The main offender is literal://TYPE:VALUE where TYPE:VALUE has a colon
+    // that triggers port parsing (port must be *DIGIT).
+    // We detect this by checking: after the //, is there a colon followed by
+    // a non-digit (or non-slash, non-empty) before any slash?
     if let Some(pos) = ad4m_uri.find("://") {
-        let scheme = &ad4m_uri[..pos];
-        let rest = &ad4m_uri[pos + 3..];
-        format!("{}:{}", scheme, rest)
-    } else {
-        ad4m_uri.to_string()
+        let after_authority_start = &ad4m_uri[pos + 3..];
+        // Find the authority portion (up to first / or end of string)
+        let authority = match after_authority_start.find('/') {
+            Some(slash_pos) => &after_authority_start[..slash_pos],
+            None => after_authority_start,
+        };
+        // Check if authority contains a colon (host:port pattern)
+        if let Some(colon_pos) = authority.find(':') {
+            let port_part = &authority[colon_pos + 1..];
+            // If the "port" part is non-empty and not all digits, it's invalid
+            if !port_part.is_empty() && !port_part.chars().all(|c| c.is_ascii_digit()) {
+                // Also check for spaces or other invalid chars
+                let scheme = &ad4m_uri[..pos];
+                let rest = &ad4m_uri[pos + 3..];
+                return format!("{}:{}", scheme, rest);
+            }
+        }
+        // Also check for spaces (never valid in IRIs)
+        if authority.contains(' ') {
+            let scheme = &ad4m_uri[..pos];
+            let rest = &ad4m_uri[pos + 3..];
+            return format!("{}:{}", scheme, rest);
+        }
     }
+    // URI is valid as-is — pass through unchanged
+    ad4m_uri.to_string()
 }
 
 /// AD4M-specific schemes that use `://` format.
@@ -199,8 +226,10 @@ const AD4M_SCHEMES: &[&str] = &[
 /// Reverse of to_iri: transform opaque URI back to AD4M format.
 /// `literal:string:hello` → `literal://string:hello`
 ///
-/// Only restores `://` for known AD4M schemes. Standard web schemes and
-/// other URI schemes (did:, urn:, etc.) are left unchanged.
+/// Since to_iri now only transforms URIs with invalid authority sections
+/// (primarily `literal://`), from_iri only restores those specific cases.
+/// URIs that already contain `://` were never transformed and pass through.
+/// Standard web schemes and other URI schemes (did:, urn:, test://) are unchanged.
 fn from_iri(iri: &str) -> String {
     // Standard web schemes already have ://
     if iri.starts_with("http://")
@@ -211,12 +240,15 @@ fn from_iri(iri: &str) -> String {
     {
         return iri.to_string();
     }
-    // Find scheme:path and transform to scheme://path only for known AD4M schemes
+    // If it already has ://, it wasn't transformed — pass through
+    if iri.contains("://") {
+        return iri.to_string();
+    }
+    // Find scheme:path and restore :// only for known AD4M schemes
     if let Some(pos) = iri.find(':') {
         let scheme = &iri[..pos];
-        let rest = &iri[pos + 1..];
-        // Only transform if it doesn't already have :// AND is a known AD4M scheme
-        if !rest.starts_with("//") && AD4M_SCHEMES.contains(&scheme) {
+        if AD4M_SCHEMES.contains(&scheme) {
+            let rest = &iri[pos + 1..];
             format!("{}://{}", scheme, rest)
         } else {
             iri.to_string()
@@ -853,12 +885,18 @@ mod tests {
     #[test]
     fn test_iri_roundtrip() {
         let cases = vec![
-            "literal://string:foo",
+            // Valid IRIs — should NOT be transformed (pass through as-is)
             "flux://has_channel",
-            "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
             "ad4m://self",
+            "test://source",
+            "neighbourhood://QmABC123",
+            "lang://test-target",
             "http://example.com/resource",
             "https://schema.org/Person",
+            "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            // Invalid IRI — authority contains non-digit port, SHOULD be transformed
+            "literal://string:foo",
+            "literal://json:%7B%22key%22%3A%22value%22%7D",
         ];
         for uri in cases {
             let iri = to_iri(uri);
@@ -869,6 +907,19 @@ mod tests {
                 uri, iri, back
             );
         }
+
+        // Verify valid IRIs are NOT transformed by to_iri
+        assert_eq!(to_iri("flux://has_channel"), "flux://has_channel");
+        assert_eq!(to_iri("test://source"), "test://source");
+        assert_eq!(to_iri("ad4m://self"), "ad4m://self");
+        assert_eq!(
+            to_iri("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"),
+            "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+        );
+
+        // Verify invalid IRIs ARE transformed by to_iri
+        assert_eq!(to_iri("literal://string:foo"), "literal:string:foo");
+        assert_eq!(to_iri("literal://number:3.14"), "literal:number:3.14");
     }
 
     #[test]
