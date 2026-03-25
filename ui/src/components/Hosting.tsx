@@ -103,8 +103,7 @@ const Hosting = () => {
     {},
   );
   const [userLogOpen, setUserLogOpen] = useState<string | null>(null);
-  const [userLogEntries, setUserLogEntries] = useState<any[]>([]);
-  const [userLogLoading, setUserLogLoading] = useState(false);
+const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loading: boolean; unavailable?: boolean; _token?: number }>>({});
 
   // ---- Host Registration state ----
   const [hostSession, setHostSession] = useState<HostSession>(null);
@@ -261,7 +260,7 @@ const Hosting = () => {
           location: mine.location !== undefined ? mine.location : prev.location,
           hostUrl: mine.url !== undefined ? mine.url : prev.hostUrl,
           rates: Array.isArray(mine.rates) ? JSON.stringify(mine.rates) : prev.rates,
-          aiModels: Array.isArray(mine.aiModels) ? JSON.stringify(mine.aiModels) : prev.aiModels,
+          aiModels: Array.isArray(mine.aiModels) && mine.aiModels.length > 0 ? JSON.stringify(mine.aiModels) : prev.aiModels,
           computeSpecs: mine.computeSpecs !== undefined ? mine.computeSpecs : prev.computeSpecs,
         }));
         return mine.emailVerified ? "verified" : "unverified";
@@ -851,20 +850,25 @@ const Hosting = () => {
       return;
     }
     setUserLogOpen(email);
-    setUserLogLoading(true);
+    const requestToken = Date.now();
+    setUserLogs(prev => ({ ...prev, [email]: { entries: prev[email]?.entries ?? [], loading: true, _token: requestToken } }));
     try {
       const entries = await client!.agent.computeLog(undefined, 50, email);
-      setUserLogEntries(entries);
+      setUserLogs(prev => {
+        // Discard stale responses if another fetch started for this email
+        if ((prev[email]?._token ?? 0) > requestToken) return prev;
+        return { ...prev, [email]: { entries, loading: false, _token: requestToken } };
+      });
     } catch (error) {
       console.error("Failed to load compute log:", error);
-      setUserLogEntries([]);
-    } finally {
-      setUserLogLoading(false);
+      setUserLogs(prev => ({ ...prev, [email]: { entries: [], loading: false, unavailable: true } }));
     }
   };
 
   const formatTimeAgo = (timestamp: string): string => {
-    const diff = Date.now() - new Date(timestamp).getTime();
+    const date = new Date(timestamp);
+    if (isNaN(date.getTime())) return "";
+    const diff = Date.now() - date.getTime();
     const seconds = Math.floor(diff / 1000);
     if (seconds < 60) return `${seconds}s ago`;
     const minutes = Math.floor(seconds / 60);
@@ -1534,13 +1538,15 @@ const Hosting = () => {
                           </j-button>
                           {userLogOpen === user.email && (
                             <div style={{ marginTop: "8px" }}>
-                              {userLogLoading ? (
+                              {userLogs[user.email]?.loading ? (
                                 <j-text size="300" color="ui-500">Loading...</j-text>
-                              ) : userLogEntries.length === 0 ? (
+                              ) : userLogs[user.email]?.unavailable ? (
+                                <j-text size="300" color="ui-500">Activity unavailable</j-text>
+                              ) : (userLogs[user.email]?.entries ?? []).length === 0 ? (
                                 <j-text size="300" color="ui-500">No activity yet</j-text>
                               ) : (
                                 <div style={{ maxHeight: "200px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "4px" }}>
-                                  {userLogEntries.map((entry: any) => (
+                                  {(userLogs[user.email]?.entries ?? []).map((entry: any) => (
                                     <div
                                       key={entry.id}
                                       style={{
