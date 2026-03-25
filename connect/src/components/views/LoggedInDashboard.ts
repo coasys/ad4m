@@ -313,6 +313,11 @@ export class LoggedInDashboard extends LitElement {
         color: #c4a8ff;
       }
 
+      .activity-log-entry .op-badge.ai_transcription {
+        background: rgba(168, 130, 255, 0.2);
+        color: #c4a8ff;
+      }
+
       .activity-log-entry .op-badge.ai_embed {
         background: rgba(130, 200, 255, 0.2);
         color: #a8d8ff;
@@ -425,6 +430,7 @@ export class LoggedInDashboard extends LitElement {
     switch (op) {
       case 'ai_prompt': return 'AI Prompt';
       case 'ai_embed': return 'AI Embed';
+      case 'ai_transcription': return 'AI Transcription';
       case 'link_write': return 'Link Write';
       default: return op;
     }

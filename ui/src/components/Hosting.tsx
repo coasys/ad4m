@@ -885,6 +885,7 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
     switch (op) {
       case 'ai_prompt': return 'AI Prompt';
       case 'ai_embed': return 'AI Embed';
+      case 'ai_transcription': return 'AI Transcription';
       case 'link_write': return 'Link Write';
       default: return op;
     }
@@ -1721,7 +1722,7 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
                                       }}
                                     >
                                       <j-badge
-                                        variant={entry.operation === "ai_prompt" ? "primary" : "warning"}
+                                        variant={entry.operation.startsWith("ai_") ? "primary" : "warning"}
                                         size="sm"
                                       >
                                         {formatOperation(entry.operation)}
