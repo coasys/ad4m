@@ -1275,7 +1275,7 @@ impl AIService {
                                     .flatten()
                                     .unwrap_or(DEFAULT_TRANSCRIPTION_WORD_RATE);
                                     let cost = word_count as f64 * rate;
-                                    if let Err(e) = crate::billing::bill_compute(
+                                    match crate::billing::bill_compute(
                                         email,
                                         cost,
                                         "ai_transcription",
@@ -1286,7 +1286,14 @@ impl AIService {
                                             if text.len() > 80 { &text[..80] } else { &text }
                                         )),
                                     ) {
-                                        log::warn!("Transcription billing failed: {:?}", e);
+                                        Err(e) if e.to_string().contains("Insufficient compute credits") => {
+                                            log::warn!("Transcription stream terminated: insufficient credits for user {}", email);
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            log::warn!("Transcription billing failed: {:?}", e);
+                                        }
+                                        Ok(()) => {}
                                     }
                                 }
                             }
@@ -1331,10 +1338,13 @@ impl AIService {
         &self,
         stream_id: &String,
         audio_samples: Vec<f32>,
+        auth_token: &str,
     ) -> Result<()> {
         let mut map_lock = self.transcription_streams.lock().await;
 
         if let Some(stream) = map_lock.get_mut(stream_id) {
+            // Verify the caller owns this stream
+            Self::verify_stream_ownership(stream, auth_token)?;
             // Update last activity time
             *stream.last_activity.lock().await = std::time::Instant::now();
             stream.samples_tx.send(audio_samples).await.map_err(|e| {
@@ -1346,8 +1356,17 @@ impl AIService {
         }
     }
 
-    pub async fn close_transcription_stream(&self, stream_id: &String) -> Result<()> {
+    pub async fn close_transcription_stream(
+        &self,
+        stream_id: &String,
+        auth_token: &str,
+    ) -> Result<()> {
         let mut map_lock = self.transcription_streams.lock().await;
+
+        // Verify ownership before removing
+        if let Some(stream) = map_lock.get(stream_id) {
+            Self::verify_stream_ownership(stream, auth_token)?;
+        }
 
         if let Some(stream) = map_lock.remove(stream_id) {
             stream.drop_tx.send(()).map_err(|_| {
@@ -1358,6 +1377,27 @@ impl AIService {
             })
         } else {
             Err(AIServiceError::StreamNotFound.into())
+        }
+    }
+
+    /// Verify that the caller (identified by auth_token) owns the given transcription session.
+    /// In single-user mode (no email in token), ownership is not enforced.
+    fn verify_stream_ownership(session: &TranscriptionSession, auth_token: &str) -> Result<()> {
+        let caller_email =
+            crate::agent::capabilities::user_email_from_token(auth_token.to_string());
+        // If the session has an owner email, the caller must match
+        if let Some(ref owner_email) = session.user_email {
+            match caller_email {
+                Some(ref caller) if caller == owner_email => Ok(()),
+                Some(_) => Err(anyhow!(
+                    "Authorization error: caller does not own this transcription stream"
+                )),
+                // No email in caller token (single-user mode) — allow access
+                None => Ok(()),
+            }
+        } else {
+            // Session has no owner email (was created in single-user mode) — allow access
+            Ok(())
         }
     }
 

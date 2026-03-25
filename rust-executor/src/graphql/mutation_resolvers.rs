@@ -3070,7 +3070,7 @@ impl Mutation {
         // Feed each stream individually
         for stream_id in &stream_ids {
             if let Err(e) = service
-                .feed_transcription_stream(stream_id, audio_f32.clone())
+                .feed_transcription_stream(stream_id, audio_f32.clone(), &context.auth_token)
                 .await
             {
                 log::warn!("Error feeding stream {}: {}", stream_id, e);
@@ -3088,7 +3088,7 @@ impl Mutation {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
         AIService::global_instance()
             .await?
-            .close_transcription_stream(&stream_id)
+            .close_transcription_stream(&stream_id, &context.auth_token)
             .await?;
         Ok(String::from("true"))
     }

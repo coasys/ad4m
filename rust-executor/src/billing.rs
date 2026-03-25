@@ -13,8 +13,7 @@ pub fn bill_compute(
     operation: &str,
     summary: Option<&str>,
 ) -> Result<(), anyhow::Error> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+    let global_free = Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())?;
     if global_free {
         return Ok(());
     }
