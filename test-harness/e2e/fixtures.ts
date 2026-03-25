@@ -43,68 +43,69 @@ type SFUFixtures = {
 };
 
 export const test = base.extend<SFUFixtures>({
-  // Single executor
+  // Single executor (no Holochain by default for SFU tests)
   executor: async ({}, use) => {
-    const exec = await startExecutor();
+    const exec = await startExecutor({ holochain: false });
     await use(exec);
     await stopExecutor(exec);
   },
 
   // 2 executors
   executorPair: async ({}, use) => {
-    const execs = await startExecutors(2);
+    const execs = await startExecutors(2, { holochain: false });
     await use(execs);
     await stopAll(execs);
   },
 
   // 4 executors
   executorQuad: async ({}, use) => {
-    const execs = await startExecutors(4);
+    const execs = await startExecutors(4, { holochain: false });
     await use(execs);
     await stopAll(execs);
   },
 
   // 8 executors (for stress tests)
   executorOctet: async ({}, use) => {
-    const execs = await startExecutors(8);
+    const execs = await startExecutors(8, { holochain: false });
     await use(execs);
     await stopAll(execs);
   },
 
   // Create neighbourhood on first executor of executorPair, join from second
+  // NOTE: Requires Holochain — only works with holochain: true
   neighbourhood: async ({ executorPair }, use) => {
     const [creator, joiner] = executorPair;
 
-    // Create neighbourhood via GraphQL
-    const createResult = await creator.api.query(`
+    // Create perspective, then publish as neighbourhood
+    const perspResult = await creator.api.query(`
+      mutation { perspectiveAdd(name: "e2e-test-nh") { uuid } }
+    `);
+    const perspUuid = (perspResult.data?.perspectiveAdd as { uuid: string })?.uuid;
+
+    // Publish as neighbourhood (requires a link language — this will likely fail without Holochain)
+    const nhResult = await creator.api.query(`
       mutation {
-        neighbourhoodCreate(name: "e2e-test-neighbourhood") {
-          url
-          perspectiveUuid
-        }
+        neighbourhoodPublishFromPerspective(
+          perspectiveUUID: "${perspUuid}",
+          linkLanguage: "social-context",
+          meta: { links: [] }
+        )
       }
     `);
-
-    const nhData = createResult.data?.neighbourhoodCreate as { url: string; perspectiveUuid: string };
-    const nhUrl = nhData.url;
-    const perspectiveUuid = nhData.perspectiveUuid;
+    const nhUrl = nhResult.data?.neighbourhoodPublishFromPerspective as string;
 
     // Join from second executor
     await joiner.api.query(`
-      mutation {
-        neighbourhoodJoin(url: "${nhUrl}") {
-          perspectiveUuid
-        }
-      }
+      mutation { neighbourhoodJoinFromUrl(url: "${nhUrl}") { uuid } }
     `);
 
-    await use({ url: nhUrl, perspectiveUuid });
+    await use({ url: nhUrl, perspectiveUuid: perspUuid });
   },
 
   // Start a Vite dev server for Flux
   fluxServer: async ({}, use) => {
     const port = 5173 + Math.floor(Math.random() * 1000);
-    const fluxDir = process.env.FLUX_DIR ?? `${process.cwd().replace(/\/test-harness(\/e2e)?$/, '')}/flux`;
+    const fluxDir = process.env.FLUX_PATH ?? process.env.FLUX_DIR ?? `${process.cwd().replace(/\/test-harness(\/e2e)?$/, '')}/flux`;
 
     const proc = spawn('npx', ['vite', '--port', String(port), '--strictPort'], {
       cwd: fluxDir,

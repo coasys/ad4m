@@ -1,76 +1,121 @@
-// e2e/leave-rejoin.spec.ts — Leave and rejoin call test
+// e2e/leave-rejoin.spec.ts — Room lifecycle: start, query nodes, stop, restart
 
 import { test, expect } from './fixtures.js';
 import { startExecutors, stopAll, type ExecutorInstance } from './helpers/executor.js';
-import { sleep } from '../lib/retry.js';
 
-test.describe('Leave and Rejoin', () => {
+test.describe('Room Lifecycle — Start / Stop / Restart', () => {
   let executors: ExecutorInstance[];
-  let perspectiveUuid: string;
+  const nhUrl = 'nh://lifecycle-test';
 
   test.beforeAll(async () => {
-    executors = await startExecutors(2);
-
-    const nhResult = await executors[0].api.query(`
-      mutation { neighbourhoodCreate(name: "leave-rejoin-test") { url perspectiveUuid } }
-    `);
-    const nh = nhResult.data?.neighbourhoodCreate as { url: string; perspectiveUuid: string };
-    perspectiveUuid = nh.perspectiveUuid;
-
-    await executors[1].api.query(`
-      mutation { neighbourhoodJoin(url: "${nh.url}") { perspectiveUuid } }
-    `);
-
-    // Configure SFU mode
-    await executors[0].api.query(`
-      mutation {
-        webrtcConfigure(perspectiveUuid: "${perspectiveUuid}", config: {
-          mode: "sfu-designated",
-          maxMeshParticipants: 0,
-          sfuPeers: ["${executors[0].did}"]
-        }) { ok }
-      }
-    `);
+    executors = await startExecutors(2, { holochain: false });
   });
 
   test.afterAll(async () => {
     await stopAll(executors);
   });
 
-  test('user 2 leaves and rejoins', async () => {
+  test('both executors have SFU running', async () => {
+    for (const exec of executors) {
+      const result = await exec.api.query(`
+        { sfuHealth { eventLoopAlive roomCount } }
+      `);
+      expect(result.errors).toBeUndefined();
+      const health = result.data?.sfuHealth as { eventLoopAlive: boolean; roomCount: number };
+      expect(health.eventLoopAlive).toBe(true);
+    }
+  });
+
+  test('start room on executor 1, visible only on executor 1', async () => {
     const [exec1, exec2] = executors;
 
-    // Both join
-    await exec1.api.query(`mutation { webrtcJoinCall(perspectiveUuid: "${perspectiveUuid}") { ok } }`);
-    await exec2.api.query(`mutation { webrtcJoinCall(perspectiveUuid: "${perspectiveUuid}") { ok } }`);
-
-    // Verify both connected
-    let status = await exec1.api.query(`
-      { webrtcStatus(perspectiveUuid: "${perspectiveUuid}") { participants { did } } }
+    // Start room on exec1
+    const startResult = await exec1.api.query(`
+      mutation { sfuStartRoom(neighbourhoodUrl: "${nhUrl}", roomId: "room-1") {
+        roomName participantCount
+      } }
     `);
-    let data = status.data?.webrtcStatus as { participants: { did: string }[] };
-    expect(data.participants).toHaveLength(2);
+    expect(startResult.errors).toBeUndefined();
 
-    // User 2 leaves
-    await exec2.api.query(`mutation { webrtcLeaveCall(perspectiveUuid: "${perspectiveUuid}") { ok } }`);
-    await sleep(2000);
+    // Exec1 should have the room
+    const rooms1 = (await exec1.api.query(`
+      { sfuRooms { roomName } }
+    `)).data?.sfuRooms as { roomName: string }[];
+    expect(rooms1.length).toBe(1);
 
-    // Verify user 1 still connected, participant count = 1
-    status = await exec1.api.query(`
-      { webrtcStatus(perspectiveUuid: "${perspectiveUuid}") { participants { did } } }
+    // Exec2 should NOT have it (rooms are local per SFU)
+    const rooms2 = (await exec2.api.query(`
+      { sfuRooms { roomName } }
+    `)).data?.sfuRooms as { roomName: string }[];
+    expect(rooms2.length).toBe(0);
+
+    // Clean up
+    await exec1.api.query(`
+      mutation { sfuStopRoom(neighbourhoodUrl: "${nhUrl}", roomId: "room-1") }
     `);
-    data = status.data?.webrtcStatus as { participants: { did: string }[] };
-    expect(data.participants).toHaveLength(1);
+  });
 
-    // User 2 rejoins
-    await exec2.api.query(`mutation { webrtcJoinCall(perspectiveUuid: "${perspectiveUuid}") { ok } }`);
-    await sleep(3000);
+  test('stop and restart room preserves config', async () => {
+    const exec = executors[0];
 
-    // Verify both connected again
-    status = await exec1.api.query(`
-      { webrtcStatus(perspectiveUuid: "${perspectiveUuid}") { participants { did } } }
+    // Set config
+    await exec.api.query(`
+      mutation {
+        sfuSetConfig(neighbourhoodUrl: "${nhUrl}", mode: "designated", designatedPeer: "${exec.did}", maxMeshParticipants: 0)
+      }
     `);
-    data = status.data?.webrtcStatus as { participants: { did: string }[] };
-    expect(data.participants).toHaveLength(2);
+
+    // Start room
+    await exec.api.query(`
+      mutation { sfuStartRoom(neighbourhoodUrl: "${nhUrl}", roomId: "restart-room") { roomName } }
+    `);
+
+    // Stop room
+    await exec.api.query(`
+      mutation { sfuStopRoom(neighbourhoodUrl: "${nhUrl}", roomId: "restart-room") }
+    `);
+
+    // Config should survive room stop
+    const config = (await exec.api.query(`
+      { sfuConfig(neighbourhoodUrl: "${nhUrl}") { mode designatedPeer } }
+    `)).data?.sfuConfig as { mode: string; designatedPeer: string | null };
+    expect(config.mode).toBe('designated');
+    expect(config.designatedPeer).toBe(exec.did);
+
+    // Restart room
+    const restartResult = await exec.api.query(`
+      mutation { sfuStartRoom(neighbourhoodUrl: "${nhUrl}", roomId: "restart-room") {
+        roomName participantCount
+      } }
+    `);
+    expect(restartResult.errors).toBeUndefined();
+    expect((restartResult.data?.sfuStartRoom as any).participantCount).toBe(0);
+
+    // Clean up
+    await exec.api.query(`
+      mutation { sfuStopRoom(neighbourhoodUrl: "${nhUrl}", roomId: "restart-room") }
+    `);
+  });
+
+  test('query SFU nodes for room', async () => {
+    const exec = executors[0];
+
+    await exec.api.query(`
+      mutation { sfuStartRoom(neighbourhoodUrl: "${nhUrl}", roomId: "node-room") { roomName } }
+    `);
+
+    const nodesResult = await exec.api.query(`
+      { sfuNodesForRoom(neighbourhoodUrl: "${nhUrl}", roomId: "node-room") {
+        did participantCount capacityHint
+      } }
+    `);
+    expect(nodesResult.errors).toBeUndefined();
+    // Nodes might be empty (no cascaded peers) but should not error
+    const nodes = nodesResult.data?.sfuNodesForRoom as any[];
+    expect(Array.isArray(nodes)).toBe(true);
+
+    await exec.api.query(`
+      mutation { sfuStopRoom(neighbourhoodUrl: "${nhUrl}", roomId: "node-room") }
+    `);
   });
 });

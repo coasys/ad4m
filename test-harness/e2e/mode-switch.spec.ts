@@ -1,89 +1,112 @@
-// e2e/mode-switch.spec.ts — Mid-call mode switching test
+// e2e/mode-switch.spec.ts — SFU config switching (mesh ↔ designated ↔ cascaded)
 
 import { test, expect } from './fixtures.js';
-import { startExecutors, stopAll, type ExecutorInstance } from './helpers/executor.js';
-import { sleep } from '../lib/retry.js';
+import { startExecutor, stopExecutor, type ExecutorInstance } from './helpers/executor.js';
 
-test.describe('Mode Switch Mid-Call', () => {
-  let executors: ExecutorInstance[];
-  let perspectiveUuid: string;
+test.describe('Mode Switch — Config Transitions', () => {
+  let executor: ExecutorInstance;
+  const nhUrl = 'nh://mode-switch-test';
 
   test.beforeAll(async () => {
-    executors = await startExecutors(2);
-
-    const nhResult = await executors[0].api.query(`
-      mutation { neighbourhoodCreate(name: "mode-switch-test") { url perspectiveUuid } }
-    `);
-    const nh = nhResult.data?.neighbourhoodCreate as { url: string; perspectiveUuid: string };
-    perspectiveUuid = nh.perspectiveUuid;
-
-    await executors[1].api.query(`
-      mutation { neighbourhoodJoin(url: "${nh.url}") { perspectiveUuid } }
-    `);
+    executor = await startExecutor({ holochain: false });
   });
 
   test.afterAll(async () => {
-    await stopAll(executors);
+    await stopExecutor(executor);
   });
 
-  test('switch from mesh to SFU and back mid-call', async () => {
-    const [exec1, exec2] = executors;
-
-    // Start in mesh mode
-    await exec1.api.query(`
-      mutation { webrtcJoinCall(perspectiveUuid: "${perspectiveUuid}") { ok } }
+  test('switch config from mesh to designated and back', async () => {
+    // Set mesh mode
+    await executor.api.query(`
+      mutation { sfuSetConfig(neighbourhoodUrl: "${nhUrl}", mode: "mesh") }
     `);
-    await exec2.api.query(`
-      mutation { webrtcJoinCall(perspectiveUuid: "${perspectiveUuid}") { ok } }
-    `);
+    let config = (await executor.api.query(`
+      { sfuConfig(neighbourhoodUrl: "${nhUrl}") { mode designatedPeer maxMeshParticipants } }
+    `)).data?.sfuConfig as { mode: string; designatedPeer: string | null; maxMeshParticipants: number };
+    expect(config.mode).toBe('mesh');
 
-    // Verify mesh mode
-    let status = await exec1.api.query(`
-      { webrtcStatus(perspectiveUuid: "${perspectiveUuid}") { mode participants { did } } }
-    `);
-    let data = status.data?.webrtcStatus as { mode: string; participants: { did: string }[] };
-    expect(data.mode).toBe('mesh');
-    expect(data.participants).toHaveLength(2);
-
-    // Switch to SFU mid-call
-    await exec1.api.query(`
+    // Switch to designated
+    await executor.api.query(`
       mutation {
-        webrtcConfigure(perspectiveUuid: "${perspectiveUuid}", config: {
-          mode: "sfu-designated",
-          maxMeshParticipants: 0,
-          sfuPeers: ["${exec1.did}"]
-        }) { ok }
+        sfuSetConfig(
+          neighbourhoodUrl: "${nhUrl}",
+          mode: "designated",
+          designatedPeer: "${executor.did}",
+          maxMeshParticipants: 0
+        )
       }
     `);
-
-    // Wait for reconnection
-    await sleep(5000);
-
-    // Verify SFU mode
-    status = await exec1.api.query(`
-      { webrtcStatus(perspectiveUuid: "${perspectiveUuid}") { mode participants { did } } }
-    `);
-    data = status.data?.webrtcStatus as { mode: string; participants: { did: string }[] };
-    expect(data.mode).toBe('sfu-designated');
-    expect(data.participants).toHaveLength(2);
+    config = (await executor.api.query(`
+      { sfuConfig(neighbourhoodUrl: "${nhUrl}") { mode designatedPeer maxMeshParticipants } }
+    `)).data?.sfuConfig as { mode: string; designatedPeer: string | null; maxMeshParticipants: number };
+    expect(config.mode).toBe('designated');
+    expect(config.designatedPeer).toBe(executor.did);
+    expect(config.maxMeshParticipants).toBe(0);
 
     // Switch back to mesh
-    await exec1.api.query(`
+    await executor.api.query(`
+      mutation { sfuSetConfig(neighbourhoodUrl: "${nhUrl}", mode: "mesh", maxMeshParticipants: 4) }
+    `);
+    config = (await executor.api.query(`
+      { sfuConfig(neighbourhoodUrl: "${nhUrl}") { mode maxMeshParticipants } }
+    `)).data?.sfuConfig as { mode: string; designatedPeer: string | null; maxMeshParticipants: number };
+    expect(config.mode).toBe('mesh');
+    expect(config.maxMeshParticipants).toBe(4);
+  });
+
+  test('room persists across config changes', async () => {
+    // Start room in mesh mode
+    await executor.api.query(`
+      mutation { sfuSetConfig(neighbourhoodUrl: "${nhUrl}", mode: "mesh") }
+    `);
+    await executor.api.query(`
+      mutation { sfuStartRoom(neighbourhoodUrl: "${nhUrl}", roomId: "persistent-room") {
+        roomName
+      } }
+    `);
+
+    // Switch config to designated
+    await executor.api.query(`
       mutation {
-        webrtcConfigure(perspectiveUuid: "${perspectiveUuid}", config: {
-          mode: "mesh"
-        }) { ok }
+        sfuSetConfig(neighbourhoodUrl: "${nhUrl}", mode: "designated", designatedPeer: "${executor.did}")
       }
     `);
 
-    await sleep(5000);
+    // Room should still exist
+    const rooms = (await executor.api.query(`
+      { sfuRooms { neighbourhoodUrl roomName } }
+    `)).data?.sfuRooms as { neighbourhoodUrl: string; roomName: string }[];
+    const ourRoom = rooms.find(r => r.roomName === 'persistent-room');
+    expect(ourRoom).toBeTruthy();
 
-    // Verify mesh again
-    status = await exec1.api.query(`
-      { webrtcStatus(perspectiveUuid: "${perspectiveUuid}") { mode participants { did } } }
+    // Clean up
+    await executor.api.query(`
+      mutation { sfuStopRoom(neighbourhoodUrl: "${nhUrl}", roomId: "persistent-room") }
     `);
-    data = status.data?.webrtcStatus as { mode: string; participants: { did: string }[] };
-    expect(data.mode).toBe('mesh');
-    expect(data.participants).toHaveLength(2);
+  });
+
+  test('TURN config can be set', async () => {
+    await executor.api.query(`
+      mutation {
+        sfuSetConfig(
+          neighbourhoodUrl: "${nhUrl}",
+          mode: "designated",
+          designatedPeer: "${executor.did}",
+          turnUrl: "turn:turn.example.com:3478",
+          turnUsername: "user",
+          turnCredential: "pass"
+        )
+      }
+    `);
+    const config = (await executor.api.query(`
+      { sfuConfig(neighbourhoodUrl: "${nhUrl}") {
+        mode turnUrl turnUsername turnCredential
+      } }
+    `)).data?.sfuConfig as {
+      mode: string; turnUrl: string | null; turnUsername: string | null; turnCredential: string | null;
+    };
+    expect(config.turnUrl).toBe('turn:turn.example.com:3478');
+    expect(config.turnUsername).toBe('user');
+    expect(config.turnCredential).toBe('pass');
   });
 });

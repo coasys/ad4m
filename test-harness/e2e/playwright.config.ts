@@ -7,8 +7,8 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   workers: 1,
-  timeout: 30_000,
-  globalTimeout: 5 * 60_000,
+  timeout: 120_000,      // 2 min per test (executor startup is slow)
+  globalTimeout: 10 * 60_000,  // 10 min total
 
   reporter: [
     ['html', { open: 'never' }],

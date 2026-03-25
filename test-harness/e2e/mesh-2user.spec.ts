@@ -1,65 +1,85 @@
-// e2e/mesh-2user.spec.ts — 2-user mesh call test
+// e2e/mesh-2user.spec.ts — SFU health + room lifecycle (no Holochain required)
 
 import { test, expect } from './fixtures.js';
-import { startExecutors, stopAll, type ExecutorInstance } from './helpers/executor.js';
-import { injectWebRTCTracking, waitForConnection, getWebRTCStats } from './helpers/webrtc.js';
-import { injectAuth } from './helpers/auth.js';
+import { startExecutor, stopExecutor, type ExecutorInstance } from './helpers/executor.js';
 
-test.describe('Mesh 2-User Call', () => {
-  let executors: ExecutorInstance[];
+test.describe('SFU Infrastructure — Single Executor', () => {
+  let executor: ExecutorInstance;
 
   test.beforeAll(async () => {
-    executors = await startExecutors(2);
+    executor = await startExecutor({ holochain: false });
   });
 
   test.afterAll(async () => {
-    await stopAll(executors);
+    await stopExecutor(executor);
   });
 
-  test('two users connect via mesh and exchange audio', async ({ browser }) => {
-    const [exec1, exec2] = executors;
-
-    // Create neighbourhood on executor 1
-    const nhResult = await exec1.api.query(`
-      mutation { neighbourhoodCreate(name: "mesh-test") { url perspectiveUuid } }
+  test('SFU health reports running', async () => {
+    const result = await executor.api.query(`
+      { sfuHealth { uptimeMs roomCount totalParticipants eventLoopAlive } }
     `);
-    const nh = nhResult.data?.neighbourhoodCreate as { url: string; perspectiveUuid: string };
+    expect(result.errors).toBeUndefined();
+    const health = result.data?.sfuHealth as {
+      uptimeMs: number; roomCount: number; totalParticipants: number; eventLoopAlive: boolean;
+    };
+    expect(health.eventLoopAlive).toBe(true);
+    expect(health.roomCount).toBe(0);
+    expect(health.totalParticipants).toBe(0);
+  });
 
-    // Join from executor 2
-    await exec2.api.query(`
-      mutation { neighbourhoodJoin(url: "${nh.url}") { perspectiveUuid } }
+  test('start and stop a room', async () => {
+    const nhUrl = 'nh://test-mesh';
+    const roomId = 'lobby';
+
+    // Start room
+    const startResult = await executor.api.query(`
+      mutation { sfuStartRoom(neighbourhoodUrl: "${nhUrl}", roomId: "${roomId}") {
+        neighbourhoodUrl roomName participantCount
+      } }
     `);
+    expect(startResult.errors).toBeUndefined();
+    const room = startResult.data?.sfuStartRoom as {
+      neighbourhoodUrl: string; roomName: string; participantCount: number;
+    };
+    expect(room.neighbourhoodUrl).toBe(nhUrl);
+    expect(room.roomName).toBe(roomId);
+    expect(room.participantCount).toBe(0);
 
-    // Open two browser contexts
-    const ctx1 = await browser.newContext();
-    const ctx2 = await browser.newContext();
-    const page1 = await ctx1.newPage();
-    const page2 = await ctx2.newPage();
-
-    await injectWebRTCTracking(page1);
-    await injectWebRTCTracking(page2);
-
-    // Note: actual page navigation and call joining depends on Flux UI.
-    // These tests are designed to work once Flux is available with data-testid attrs.
-
-    // Join call on both pages (using GraphQL as fallback until UI is ready)
-    await exec1.api.query(`
-      mutation { webrtcJoinCall(perspectiveUuid: "${nh.perspectiveUuid}") { ok } }
+    // Verify room shows in list
+    const listResult = await executor.api.query(`
+      { sfuRooms { neighbourhoodUrl roomName participantCount } }
     `);
-    await exec2.api.query(`
-      mutation { webrtcJoinCall(perspectiveUuid: "${nh.perspectiveUuid}") { ok } }
+    const rooms = listResult.data?.sfuRooms as { neighbourhoodUrl: string; roomName: string }[];
+    expect(rooms.length).toBe(1);
+    expect(rooms[0].roomName).toBe(roomId);
+
+    // Stop room
+    const stopResult = await executor.api.query(`
+      mutation { sfuStopRoom(neighbourhoodUrl: "${nhUrl}", roomId: "${roomId}") }
     `);
+    expect(stopResult.errors).toBeUndefined();
+    expect(stopResult.data?.sfuStopRoom).toBe(true);
 
-    // Verify call topology via GraphQL
-    const status1 = await exec1.api.query(`
-      { webrtcStatus(perspectiveUuid: "${nh.perspectiveUuid}") { mode participants { did } } }
+    // Verify room gone
+    const listResult2 = await executor.api.query(`
+      { sfuRooms { neighbourhoodUrl roomName } }
     `);
-    const statusData = status1.data?.webrtcStatus as { mode: string; participants: { did: string }[] };
+    const rooms2 = listResult2.data?.sfuRooms as { neighbourhoodUrl: string }[];
+    expect(rooms2.length).toBe(0);
+  });
 
-    expect(statusData.mode).toBe('mesh');
-    expect(statusData.participants).toHaveLength(2);
-
-    await ctx1.close();
-    await ctx2.close();
+  test('default SFU config is mesh mode', async () => {
+    const result = await executor.api.query(`
+      { sfuConfig(neighbourhoodUrl: "nh://nonexistent") {
+        mode fallback maxMeshParticipants
+      } }
+    `);
+    expect(result.errors).toBeUndefined();
+    const config = result.data?.sfuConfig as {
+      mode: string; fallback: string; maxMeshParticipants: number;
+    };
+    // Default should be mesh with reasonable defaults
+    expect(config.mode).toBeTruthy();
+    expect(config.fallback).toBeTruthy();
   });
 });

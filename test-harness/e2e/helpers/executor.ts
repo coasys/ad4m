@@ -39,8 +39,9 @@ export interface StartExecutorOpts {
 export async function startExecutor(opts: StartExecutorOpts = {}): Promise<ExecutorInstance> {
   const port = opts.port ?? nextPort();
   const adminCredential = opts.adminCredential ?? 'harness-admin';
-  const repoRoot = process.env.AD4M_REPO ?? process.cwd().replace(/\/test-harness(\/e2e)?$/, '');
-  const binaryPath = opts.binaryPath ?? `${repoRoot}/target/release/ad4m-executor`;
+  const binaryPath = opts.binaryPath
+    ?? process.env.AD4M_BINARY
+    ?? `${(process.env.AD4M_REPO ?? process.cwd().replace(/\/test-harness(\/e2e)?$/, ''))}/target/release/ad4m-executor`;
   const holochain = opts.holochain ?? true;
   const id = `e2e-exec-${port}`;
   const dataDir = `/tmp/ad4m-e2e-${id}-${Date.now()}`;
