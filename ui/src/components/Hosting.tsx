@@ -148,6 +148,7 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
     null,
   );
   const [unytDnaInstalled, setUnytDnaInstalled] = useState(false);
+  const [unytInstallFail, setUnytInstallFail] = useState(false);
 
   // ---- SMTP state ----
   const [smtpConfig, setSmtpConfig] = useState<{
@@ -954,6 +955,8 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
   useEffect(() => {
     if (!client || membraneProofStatus !== "done" || unytDnaInstalled) return;
     let cancelled = false;
+    let attempts = 0;
+    const MAX_ATTEMPTS = 60; // ~5 minutes at 5s intervals
     const check = async () => {
       try {
         const vi = await client.runtime.unytVersionInfo();
@@ -961,7 +964,14 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
           const info = JSON.parse(vi);
           if (info.installed && !cancelled) setUnytDnaInstalled(true);
         }
-      } catch { /* not installed yet */ }
+      } catch {
+        attempts++;
+        if (attempts >= MAX_ATTEMPTS && !cancelled) {
+          cancelled = true;
+          clearInterval(interval);
+          setUnytInstallFail(true);
+        }
+      }
     };
     check();
     const interval = setInterval(check, 5000);
@@ -1340,7 +1350,7 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
                     <j-flex direction="column" a="center" gap="300">
                       <j-icon name="x-circle" color="danger"></j-icon>
                       <j-text size="400" color="danger">
-                        {membraneProofError || "Failed to connect to Unyt network"}
+                        Failed to connect to Unyt network. Please try again.
                       </j-text>
                       <j-button
                         size="sm"
@@ -1354,7 +1364,7 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
                     </j-flex>
                   </j-box>
                 </div>
-              ) : membraneProofStatus !== "done" || !hostReg.name ? (
+              ) : membraneProofStatus !== "done" || !hostData ? (
                 <div
                   style={{
                     border: "1px solid var(--j-color-ui-200)",
@@ -1390,12 +1400,23 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
                     Earnings
                   </j-text>
                   <j-box mt="200">
-                    <j-flex a="center" j="center" gap="300">
-                      <j-spinner size="sm"></j-spinner>
-                      <j-text size="400" color="ui-500">
-                        Installing Unyt DNA...
-                      </j-text>
-                    </j-flex>
+                    {unytInstallFail ? (
+                      <j-flex direction="column" a="center" gap="300">
+                        <j-text size="400" color="danger-500">
+                          Unyt DNA installation timed out.
+                        </j-text>
+                        <j-button size="sm" variant="subtle" onClick={() => { setUnytInstallFail(false); setUnytDnaInstalled(false); }}>
+                          Retry
+                        </j-button>
+                      </j-flex>
+                    ) : (
+                      <j-flex a="center" j="center" gap="300">
+                        <j-spinner size="sm"></j-spinner>
+                        <j-text size="400" color="ui-500">
+                          Installing Unyt DNA...
+                        </j-text>
+                      </j-flex>
+                    )}
                   </j-box>
                 </div>
               ) : (
