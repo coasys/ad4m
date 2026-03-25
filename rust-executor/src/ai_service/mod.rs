@@ -1284,8 +1284,8 @@ impl AIService {
                                         Ok(Some(rate)) => rate,
                                         Ok(None) => DEFAULT_TRANSCRIPTION_WORD_RATE,
                                         Err(e) => {
-                                            log::error!("Failed to query host rate for transcription billing: {:?}", e);
-                                            continue;
+                                            log::warn!("Failed to query host rate for transcription billing, using default: {:?}", e);
+                                            DEFAULT_TRANSCRIPTION_WORD_RATE
                                         }
                                     };
                                     let cost = word_count as f64 * rate;
