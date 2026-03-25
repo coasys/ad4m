@@ -102,6 +102,8 @@ const Hosting = () => {
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>(
     {},
   );
+  const [userLogOpen, setUserLogOpen] = useState<string | null>(null);
+const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loading: boolean; unavailable?: boolean; _token?: number }>>({});
 
   // ---- Host Registration state ----
   const [hostSession, setHostSession] = useState<HostSession>(null);
@@ -258,7 +260,7 @@ const Hosting = () => {
           location: mine.location !== undefined ? mine.location : prev.location,
           hostUrl: mine.url !== undefined ? mine.url : prev.hostUrl,
           rates: Array.isArray(mine.rates) ? JSON.stringify(mine.rates) : prev.rates,
-          aiModels: Array.isArray(mine.aiModels) ? JSON.stringify(mine.aiModels) : prev.aiModels,
+          aiModels: Array.isArray(mine.aiModels) && mine.aiModels.length > 0 ? JSON.stringify(mine.aiModels) : prev.aiModels,
           computeSpecs: mine.computeSpecs !== undefined ? mine.computeSpecs : prev.computeSpecs,
         }));
         return mine.emailVerified ? "verified" : "unverified";
@@ -839,6 +841,49 @@ const Hosting = () => {
       console.error("Failed to set credits:", error);
     } finally {
       setActionLoading((prev) => ({ ...prev, [key]: false }));
+    }
+  };
+
+  const handleViewUserLog = async (email: string) => {
+    if (userLogOpen === email) {
+      setUserLogOpen(null);
+      return;
+    }
+    setUserLogOpen(email);
+    const requestToken = Date.now();
+    setUserLogs(prev => ({ ...prev, [email]: { entries: prev[email]?.entries ?? [], loading: true, _token: requestToken } }));
+    try {
+      const entries = await client!.agent.computeLog(undefined, 50, email);
+      setUserLogs(prev => {
+        // Discard stale responses if another fetch started for this email
+        if ((prev[email]?._token ?? 0) > requestToken) return prev;
+        return { ...prev, [email]: { entries, loading: false, _token: requestToken } };
+      });
+    } catch (error) {
+      console.error("Failed to load compute log:", error);
+      setUserLogs(prev => ({ ...prev, [email]: { entries: [], loading: false, unavailable: true } }));
+    }
+  };
+
+  const formatTimeAgo = (timestamp: string): string => {
+    const date = new Date(timestamp);
+    if (isNaN(date.getTime())) return "";
+    const diff = Date.now() - date.getTime();
+    const seconds = Math.floor(diff / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
+  };
+
+  const formatOperation = (op: string): string => {
+    switch (op) {
+      case 'ai_prompt': return 'AI Prompt';
+      case 'ai_embed': return 'AI Embed';
+      case 'link_write': return 'Link Write';
+      default: return op;
     }
   };
 
@@ -1471,6 +1516,72 @@ const Hosting = () => {
                           </j-flex>
                         </j-box>
                         )}
+
+                        {/* Activity Log */}
+                        <j-box
+                          style={{
+                            borderTop: "1px solid var(--j-color-ui-200)",
+                            paddingTop: "var(--j-space-400)",
+                          }}
+                        >
+                          <j-button
+                            size="sm"
+                            variant="subtle"
+                            onClick={() => handleViewUserLog(user.email)}
+                          >
+                            <j-icon
+                              name={userLogOpen === user.email ? "chevron-down" : "chevron-right"}
+                              size="xs"
+                              slot="start"
+                            ></j-icon>
+                            Activity Log
+                          </j-button>
+                          {userLogOpen === user.email && (
+                            <div style={{ marginTop: "8px" }}>
+                              {userLogs[user.email]?.loading ? (
+                                <j-text size="300" color="ui-500">Loading...</j-text>
+                              ) : userLogs[user.email]?.unavailable ? (
+                                <j-text size="300" color="ui-500">Activity unavailable</j-text>
+                              ) : (userLogs[user.email]?.entries ?? []).length === 0 ? (
+                                <j-text size="300" color="ui-500">No activity yet</j-text>
+                              ) : (
+                                <div style={{ maxHeight: "200px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "4px" }}>
+                                  {(userLogs[user.email]?.entries ?? []).map((entry: any) => (
+                                    <div
+                                      key={entry.id}
+                                      style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "space-between",
+                                        padding: "4px 8px",
+                                        borderRadius: "4px",
+                                        background: "var(--j-color-ui-50)",
+                                        fontSize: "13px",
+                                        gap: "8px",
+                                      }}
+                                    >
+                                      <j-badge
+                                        variant={entry.operation === "ai_prompt" ? "primary" : "warning"}
+                                        size="sm"
+                                      >
+                                        {formatOperation(entry.operation)}
+                                      </j-badge>
+                                      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--j-color-ui-500)", fontSize: "12px" }}>
+                                        {entry.summary || ""}
+                                      </span>
+                                      <span style={{ fontWeight: 600, whiteSpace: "nowrap" }}>
+                                        {entry.cost.toFixed(2)}
+                                      </span>
+                                      <span style={{ fontSize: "11px", color: "var(--j-color-ui-400)", whiteSpace: "nowrap" }}>
+                                        {formatTimeAgo(entry.timestamp)}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </j-box>
                       </j-flex>
                     </div>
                   ))}

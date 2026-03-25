@@ -1398,6 +1398,92 @@ impl Query {
         .to_string())
     }
 
+    /// Get compute activity log entries.
+    /// Regular users see only their own entries; admin sees all users.
+    async fn runtime_compute_log(
+        &self,
+        context: &RequestContext,
+        since: Option<String>,
+        limit: Option<i32>,
+        user_email: Option<String>,
+    ) -> FieldResult<Vec<ComputeLogEntry>> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        let raw_limit = limit.unwrap_or(100);
+        if raw_limit < 0 {
+            return Err(FieldError::new("limit must be non-negative", Value::Null));
+        }
+        let max = (raw_limit as i64).min(1000);
+
+        // If admin and user_email is provided, query that user's log
+        if context.is_admin_credential {
+            if let Some(ref email) = user_email {
+                let entries = Ad4mDb::with_global_instance(|db| {
+                    db.get_compute_log(email, since.as_deref(), max)
+                })
+                .map_err(|e| {
+                    FieldError::new(format!("Failed to get compute log: {}", e), Value::null())
+                })?;
+                return Ok(entries
+                    .into_iter()
+                    .map(|e| ComputeLogEntry {
+                        id: e.id as i32,
+                        user_email: e.user_email,
+                        timestamp: e.timestamp,
+                        operation: e.operation,
+                        summary: e.summary,
+                        cost: e.cost,
+                        credits_after: e.credits_after,
+                    })
+                    .collect());
+            }
+            // Admin with no user_email — return all users
+            let entries =
+                Ad4mDb::with_global_instance(|db| db.get_compute_log_all(since.as_deref(), max))
+                    .map_err(|e| {
+                        FieldError::new(format!("Failed to get compute log: {}", e), Value::null())
+                    })?;
+            return Ok(entries
+                .into_iter()
+                .map(|e| ComputeLogEntry {
+                    id: e.id as i32,
+                    user_email: e.user_email,
+                    timestamp: e.timestamp,
+                    operation: e.operation,
+                    summary: e.summary,
+                    cost: e.cost,
+                    credits_after: e.credits_after,
+                })
+                .collect());
+        }
+
+        // Regular user — return only their own entries
+        let email = user_email_from_token(context.auth_token.clone());
+        match email {
+            Some(email) => {
+                let entries = Ad4mDb::with_global_instance(|db| {
+                    db.get_compute_log(&email, since.as_deref(), max)
+                })
+                .map_err(|e| {
+                    FieldError::new(format!("Failed to get compute log: {}", e), Value::null())
+                })?;
+                Ok(entries
+                    .into_iter()
+                    .map(|e| ComputeLogEntry {
+                        id: e.id as i32,
+                        user_email: e.user_email,
+                        timestamp: e.timestamp,
+                        operation: e.operation,
+                        summary: e.summary,
+                        cost: e.cost,
+                        credits_after: e.credits_after,
+                    })
+                    .collect())
+            }
+            None => Ok(vec![]),
+        }
+    }
+
     async fn ai_get_models(&self, context: &RequestContext) -> FieldResult<Vec<Model>> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
         let models_result = Ad4mDb::with_global_instance(|db| db.get_models());

@@ -309,6 +309,16 @@ export default class Ad4mConnect extends EventTarget {
       console.warn('[Ad4m Connect] Subscription not available, falling back to polling:', e);
     }
 
+    // Subscribe to compute log updates for real-time activity log
+    try {
+      this.ad4mClient.agent.addComputeLogUpdatedListener((entry) => {
+        this.dispatchEvent(new CustomEvent('computelogentry', { detail: entry }));
+      });
+      this.ad4mClient.agent.subscribeComputeLogUpdated();
+    } catch (e) {
+      console.warn('[Ad4m Connect] Compute log subscription not available:', e);
+    }
+
     // Always start polling as a safety-net (at a longer 60s interval)
     this.startCreditPolling();
   }
@@ -349,6 +359,12 @@ export default class Ad4mConnect extends EventTarget {
   async requestTopUp(amountHOT: number): Promise<{ success: boolean; message: string }> {
     if (!this.ad4mClient) throw new Error('Not connected');
     return requestPayment(this.ad4mClient, amountHOT);
+  }
+
+  /** Fetch recent compute log entries. */
+  async fetchComputeLog(since?: string, limit?: number): Promise<import('./types').ComputeLogEntryData[]> {
+    if (!this.ad4mClient) throw new Error('Not connected');
+    return this.ad4mClient.agent.computeLog(since, limit) as any;
   }
 
   /** Persist selected host after successful auth */
