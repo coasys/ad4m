@@ -16,7 +16,7 @@ export interface ExecutorInstance {
   stdout: string;
 }
 
-let portCounter = 12100;
+let portCounter = 12100 + Math.floor(Math.random() * 900);
 
 function nextPort(): number {
   return portCounter++;
