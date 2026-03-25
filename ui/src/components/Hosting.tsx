@@ -103,8 +103,7 @@ const Hosting = () => {
     {},
   );
   const [userLogOpen, setUserLogOpen] = useState<string | null>(null);
-  const [userLogEntries, setUserLogEntries] = useState<any[]>([]);
-  const [userLogLoading, setUserLogLoading] = useState(false);
+  const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loading: boolean; unavailable?: boolean }>>({});
 
   // ---- Host Registration state ----
   const [hostSession, setHostSession] = useState<HostSession>(null);
@@ -851,15 +850,18 @@ const Hosting = () => {
       return;
     }
     setUserLogOpen(email);
-    setUserLogLoading(true);
+    const requestToken = Date.now();
+    setUserLogs(prev => ({ ...prev, [email]: { entries: prev[email]?.entries ?? [], loading: true } }));
     try {
       const entries = await client!.agent.computeLog(undefined, 50, email);
-      setUserLogEntries(entries);
+      setUserLogs(prev => {
+        // Discard stale responses if another fetch started for this email
+        if ((prev[email] as any)?._token > requestToken) return prev;
+        return { ...prev, [email]: { entries, loading: false } };
+      });
     } catch (error) {
       console.error("Failed to load compute log:", error);
-      setUserLogEntries([]);
-    } finally {
-      setUserLogLoading(false);
+      setUserLogs(prev => ({ ...prev, [email]: { entries: [], loading: false, unavailable: true } }));
     }
   };
 
@@ -1534,13 +1536,15 @@ const Hosting = () => {
                           </j-button>
                           {userLogOpen === user.email && (
                             <div style={{ marginTop: "8px" }}>
-                              {userLogLoading ? (
+                              {userLogs[user.email]?.loading ? (
                                 <j-text size="300" color="ui-500">Loading...</j-text>
-                              ) : userLogEntries.length === 0 ? (
+                              ) : userLogs[user.email]?.unavailable ? (
+                                <j-text size="300" color="ui-500">Activity unavailable</j-text>
+                              ) : (userLogs[user.email]?.entries ?? []).length === 0 ? (
                                 <j-text size="300" color="ui-500">No activity yet</j-text>
                               ) : (
                                 <div style={{ maxHeight: "200px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "4px" }}>
-                                  {userLogEntries.map((entry: any) => (
+                                  {(userLogs[user.email]?.entries ?? []).map((entry: any) => (
                                     <div
                                       key={entry.id}
                                       style={{
