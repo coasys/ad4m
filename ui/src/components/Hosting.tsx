@@ -261,7 +261,7 @@ const Hosting = () => {
           location: mine.location !== undefined ? mine.location : prev.location,
           hostUrl: mine.url !== undefined ? mine.url : prev.hostUrl,
           rates: Array.isArray(mine.rates) ? JSON.stringify(mine.rates) : prev.rates,
-          aiModels: Array.isArray(mine.aiModels) ? JSON.stringify(mine.aiModels) : prev.aiModels,
+          aiModels: Array.isArray(mine.aiModels) && mine.aiModels.length > 0 ? JSON.stringify(mine.aiModels) : prev.aiModels,
           computeSpecs: mine.computeSpecs !== undefined ? mine.computeSpecs : prev.computeSpecs,
         }));
         return mine.emailVerified ? "verified" : "unverified";
