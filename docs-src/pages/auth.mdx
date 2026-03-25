@@ -7,12 +7,14 @@ AD4M uses a capability-based security model to protect user data and control acc
 ### What are Capabilities?
 
 Capabilities in AD4M are like permission tokens that:
+
 - Define what data an application can access (which perspectives)
 - Specify what operations an application can perform
 - Are scoped to specific domains and functions
 - Can be revoked by the user at any time
 
 A capability token might grant permissions like:
+
 - Read access to specific perspectives
 - Write access to create or modify links
 - Ability to create new perspectives
@@ -31,6 +33,7 @@ When an application wants to connect to an AD4M executor, it goes through a secu
 4. Upon successful verification, a capability token is issued
 
 This flow ensures that:
+
 - The user explicitly approves application access
 - The application only gets the permissions it needs
 - The connection between UI and executor is secure
@@ -43,14 +46,18 @@ The easiest way to implement this flow is using our `ad4m-connect` library:
 import Ad4mConnect from "@coasys/ad4m-connect";
 
 const ui = Ad4mConnect({
-  appName: "My First ADAM App",
-  appDesc: "This is my first app here.",
-  appDomain: "ad4m.dev",
-  appIconPath: "https://i.ibb.co/GnqjPJP/icon.png",
-  capabilities: [{ 
-    with: { domain: "*", pointers: ["*"] }, 
-    can: ["*"] 
-  }],
+  appInfo: {
+    name: "My First ADAM App",
+    description: "This is my first app here.",
+    url: "ad4m.dev",
+    iconPath: "https://i.ibb.co/GnqjPJP/icon.png",
+  },
+  capabilities: [
+    {
+      with: { domain: "*", pointers: ["*"] },
+      can: ["*"],
+    },
+  ],
 });
 
 // .connect() will show the authentication pop up
@@ -67,9 +74,9 @@ the AD4M Launcher to provide other connection settings:
 When ad4m-connect was able to find a running AD4M-executor, it will begin the authentication flow:
 ![ad4m-connect-1](/images/connect2.jpg)
 
-
 Clicking on "Authorize" will trigger the request against the AD4M-executor and Launcher will open a pop-up prompting the user
 with the nature of this request:
+
 - The application requesting access
 - The capabilities being requested
 
@@ -81,6 +88,35 @@ the AD4M-executor) really is the UI the users wants to use.
 (It could run on an external device, like the user's phone connecting through a proxy server).
 
 ![ad4m-connect-pop-up](/images/authorize2.jpg)
+
+### Remote Multi-User Authentication
+
+When connecting to a **remote multi-user host** (with `hosting: true` set in
+`ad4m-connect`), the user selects the **Remote Node** option on the connection screen
+and then chooses or enters a host URL. After selecting a host, the authentication flow
+differs from the local capability handshake described above.
+
+Instead of the code-based authorization dialog, `ad4m-connect` presents an **email +
+password form**:
+
+- **New users** enter an email address and password to create an account. If the host has
+  SMTP configured, a verification code is sent to the email and must be entered to complete
+  registration.
+- **Returning users** enter their email and password to log in. With SMTP enabled, a
+  verification code is sent on each login for additional security.
+
+Behind the scenes, this calls `ad4m.agent.createUser()` or
+`ad4m.agent.requestLoginVerification()` / `ad4m.agent.verifyEmailCode()` as described in
+the [Multi-User Mode](/multi-user) documentation.
+
+Each user receives their own **DID** and a scoped **JWT token** upon successful
+authentication. The token is managed automatically by `ad4m-connect` for all subsequent
+API calls.
+
+> **Note**: The remote authentication flow is shown when the user connects to a remote
+> host. The local capability handshake is shown when connecting to a local node.
+> `ad4m-connect` handles both flows — apps do not need to implement either one manually.
+
 ### Capability Specification
 
 When requesting capabilities, you need to specify:
@@ -96,6 +132,7 @@ When requesting capabilities, you need to specify:
 ```
 
 Examples:
+
 ```js
 // Request access to everything (development only)
 { with: { domain: "*", pointers: ["*"] }, can: ["*"] }
@@ -114,11 +151,12 @@ For automated scenarios or system integration, the authentication handshake can 
 ```js
 // In your application
 const client = new Ad4mClient({
-  adminCredential: "your-secret-here"
+  adminCredential: "your-secret-here",
 });
 ```
 
 This is particularly useful for:
+
 - CI/CD pipelines
 - Testing environments
 - System services
@@ -157,5 +195,6 @@ ad4m-executor run --admin-credential your-secret-here
 ## More Information
 
 For more details about implementing authentication in your application:
+
 - Check the [ad4m-connect documentation](https://github.com/coasys/ad4m/tree/main/connect)
 - See the [Ad4mClient API reference](/jsdoc/classes/Ad4mClient)

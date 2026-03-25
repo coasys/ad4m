@@ -148,21 +148,21 @@ const Wallet = () => {
       }
 
       // Fetch history
-      try {
-        const histStr = await client.runtime.unytWalletHistory(undefined, 50);
-        console.log("Wallet history raw:", histStr);
-        if (histStr) {
-          try {
-            const parsed = JSON.parse(histStr);
-            console.log("Wallet history parsed:", parsed);
-            setHistory(parsed);
-          } catch {
-            setHistory([]);
+      {
+        try {
+          const histStr = await client.runtime.unytWalletHistory(undefined, 50);
+          if (histStr) {
+            try {
+              const parsed = JSON.parse(histStr);
+              setHistory(parsed);
+            } catch {
+              setHistory([]);
+            }
           }
+        } catch (e: any) {
+          console.error("Failed to fetch history:", e);
+          errors.push(`History: ${e.message}`);
         }
-      } catch (e: any) {
-        console.error("Failed to fetch history:", e);
-        errors.push(`History: ${e.message}`);
       }
 
       // Fetch version info
@@ -269,6 +269,7 @@ const Wallet = () => {
         </div>
       )}
 
+      <>
       {/* Header + Address */}
       <div style={{ padding: "4px 20px", margin: "12px 0" }}>
         <j-flex a="center" j="between">
@@ -276,7 +277,7 @@ const Wallet = () => {
             <j-text size="800" weight="600" color="black">
               Earnings
             </j-text>
-            {loading && <j-spinner size="sm"></j-spinner>}
+            {loading && <j-spinner size="xs"></j-spinner>}
             {agentPubkey && (
               <span
                 onClick={() => copyToClipboard(agentPubkey)}
@@ -333,7 +334,7 @@ const Wallet = () => {
               Balance
             </j-text>
             {loading ? (
-              <j-spinner size="sm"></j-spinner>
+              <j-spinner size="xs"></j-spinner>
             ) : Object.entries(balance).length > 0 ? (
               Object.entries(balance).map(([unit, amount]) => (
                 <span key={unit} style={{ display: "inline-flex", alignItems: "baseline", gap: "8px" }}>
@@ -754,6 +755,7 @@ const Wallet = () => {
           </div>
         )}
       </div>
+      </>
     </div>
   );
 };
