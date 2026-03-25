@@ -674,7 +674,10 @@ impl Query {
         )?;
 
         // Forward all SurrealDB queries to SPARQL
-        log::info!("CANARY: Forwarding SurrealDB query to SPARQL for perspective {}", uuid);
+        log::info!(
+            "CANARY: Forwarding SurrealDB query to SPARQL for perspective {}",
+            uuid
+        );
         let result = get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",

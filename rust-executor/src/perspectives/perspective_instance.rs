@@ -1537,9 +1537,7 @@ impl PerspectiveInstance {
         let uuid = self.persisted.lock().await.uuid.clone();
 
         let decorated_links = match (&query.source, &query.predicate, &query.target) {
-            (None, None, None) => {
-                self.surreal_service.get_all_links(&uuid).await?
-            }
+            (None, None, None) => self.surreal_service.get_all_links(&uuid).await?,
             (Some(source), Some(predicate), Some(target)) => {
                 self.surreal_service
                     .get_links_by_source_predicate_target(&uuid, source, predicate, target)
