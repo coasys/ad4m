@@ -1163,8 +1163,18 @@ impl AIService {
     ) -> Result<String> {
         let model_size = Self::get_whisper_model_size(model_id.clone())?;
 
-        // Extract user email from token for billing in the async task
-        let user_email = crate::agent::capabilities::user_email_from_token(auth_token);
+        // Extract user email from token for billing and ownership tracking
+        let user_email = crate::agent::capabilities::user_email_from_token(auth_token.clone());
+
+        // In multi-user mode, reject requests with missing or invalid tokens
+        let multi_user_enabled = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.get_multi_user_enabled().unwrap_or(false)
+        });
+        if multi_user_enabled && user_email.is_none() {
+            return Err(anyhow!(
+                "Authorization error: valid token with user email required in multi-user mode"
+            ));
+        }
 
         // MEMORY OPTIMIZATION: Load each Whisper model size ONCE and share across all streams using that size
         // Arc cloning is cheap (just increments ref count), saves 500MB-1.5GB per stream!
@@ -1268,22 +1278,25 @@ impl AIService {
                             let word_count = text.split_whitespace().count();
                             if word_count > 0 {
                                 if let Some(ref email) = billing_email {
-                                    let rate = crate::db::Ad4mDb::with_global_instance(|db| {
+                                    let rate = match crate::db::Ad4mDb::with_global_instance(|db| {
                                         db.get_host_rate("whisper transcription")
-                                    })
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or(DEFAULT_TRANSCRIPTION_WORD_RATE);
+                                    }) {
+                                        Ok(Some(rate)) => rate,
+                                        Ok(None) => DEFAULT_TRANSCRIPTION_WORD_RATE,
+                                        Err(e) => {
+                                            log::error!("Failed to query host rate for transcription billing: {:?}", e);
+                                            continue;
+                                        }
+                                    };
                                     let cost = word_count as f64 * rate;
                                     match crate::billing::bill_compute(
                                         email,
                                         cost,
                                         "ai_transcription",
                                         Some(&format!(
-                                            "{} words (model: {}): \"{}\"",
+                                            "{} words (model: {})",
                                             word_count,
                                             billing_model_id,
-                                            if text.len() > 80 { &text[..80] } else { &text }
                                         )),
                                     ) {
                                         Err(e) if e.to_string().contains("Insufficient compute credits") => {
@@ -1381,23 +1394,37 @@ impl AIService {
     }
 
     /// Verify that the caller (identified by auth_token) owns the given transcription session.
-    /// In single-user mode (no email in token), ownership is not enforced.
+    /// In single-user mode, ownership is not enforced.
+    /// In multi-user mode, both the session and the caller must have valid emails that match.
     fn verify_stream_ownership(session: &TranscriptionSession, auth_token: &str) -> Result<()> {
-        let caller_email =
-            crate::agent::capabilities::user_email_from_token(auth_token.to_string());
-        // If the session has an owner email, the caller must match
-        if let Some(ref owner_email) = session.user_email {
-            match caller_email {
-                Some(ref caller) if caller == owner_email => Ok(()),
-                Some(_) => Err(anyhow!(
-                    "Authorization error: caller does not own this transcription stream"
-                )),
-                // No email in caller token (single-user mode) — allow access
-                None => Ok(()),
-            }
-        } else {
-            // Session has no owner email (was created in single-user mode) — allow access
+        let multi_user_enabled = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.get_multi_user_enabled().unwrap_or(false)
+        });
+
+        if !multi_user_enabled {
+            // Single-user mode — no ownership enforcement
+            return Ok(());
+        }
+
+        // Multi-user mode: require valid caller email
+        let caller_email = crate::agent::capabilities::user_email_from_token(
+            auth_token.to_string(),
+        )
+        .ok_or_else(|| {
+            anyhow!("Authorization error: valid token with user email required in multi-user mode")
+        })?;
+
+        // Session must also have an owner email (should always be set in multi-user mode)
+        let owner_email = session.user_email.as_ref().ok_or_else(|| {
+            anyhow!("Authorization error: session has no owner — cannot verify ownership")
+        })?;
+
+        if caller_email == *owner_email {
             Ok(())
+        } else {
+            Err(anyhow!(
+                "Authorization error: caller does not own this transcription stream"
+            ))
         }
     }
 
