@@ -518,6 +518,30 @@ impl Subscription {
         match check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY) {
             Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
+                // Verify the caller owns this transcription stream
+                let ai_service = match crate::ai_service::AIService::global_instance().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return Box::pin(stream::once(async move {
+                            Err(coasys_juniper::FieldError::new(
+                                format!("Failed to get AI service: {}", e),
+                                graphql_value!(null),
+                            ))
+                        }))
+                    }
+                };
+                if let Err(e) = ai_service
+                    .verify_stream_access(&stream_id, &context.auth_token)
+                    .await
+                {
+                    return Box::pin(stream::once(async move {
+                        Err(coasys_juniper::FieldError::new(
+                            format!("Access denied: {}", e),
+                            graphql_value!(null),
+                        ))
+                    }));
+                }
+
                 let pubsub = get_global_pubsub().await;
                 let topic = &AI_TRANSCRIPTION_TEXT_TOPIC;
                 subscribe_and_process::<TranscriptionTextFilter>(

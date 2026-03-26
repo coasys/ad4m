@@ -1449,6 +1449,17 @@ impl AIService {
         }
     }
 
+    /// Verify that a caller (identified by auth_token) is allowed to subscribe to a given stream.
+    /// Returns Ok(()) if access is allowed, or an error if not.
+    pub async fn verify_stream_access(&self, stream_id: &str, auth_token: &str) -> Result<()> {
+        let map_lock = self.transcription_streams.lock().await;
+        if let Some(session) = map_lock.get(stream_id) {
+            Self::verify_stream_ownership(session, auth_token)
+        } else {
+            Err(anyhow!("Transcription stream not found: {}", stream_id))
+        }
+    }
+
     async fn load_transcriber_model(model_id: String) {
         publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
 
