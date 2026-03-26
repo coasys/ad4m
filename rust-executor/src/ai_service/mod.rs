@@ -1166,14 +1166,19 @@ impl AIService {
         // Extract user email from token for billing and ownership tracking
         let user_email = crate::agent::capabilities::user_email_from_token(auth_token.clone());
 
-        // In multi-user mode, reject requests with missing or invalid tokens
+        // In multi-user mode, reject requests with invalid tokens.
+        // The main/admin user has a valid token but no email (sub claim is None),
+        // so we check token validity rather than requiring an email.
         let multi_user_enabled = crate::db::Ad4mDb::with_global_instance(|db| {
             db.get_multi_user_enabled().unwrap_or(false)
         });
         if multi_user_enabled && user_email.is_none() {
-            return Err(anyhow!(
-                "Authorization error: valid token with user email required in multi-user mode"
-            ));
+            // Token is valid if decode_jwt succeeds — admin user has no email but a valid token
+            if crate::agent::capabilities::decode_jwt(auth_token.clone()).is_err() {
+                return Err(anyhow!(
+                    "Authorization error: valid token required in multi-user mode"
+                ));
+            }
         }
 
         // MEMORY OPTIMIZATION: Load each Whisper model size ONCE and share across all streams using that size
@@ -1406,18 +1411,34 @@ impl AIService {
             return Ok(());
         }
 
-        // Multi-user mode: require valid caller email
-        let caller_email = crate::agent::capabilities::user_email_from_token(
-            auth_token.to_string(),
-        )
-        .ok_or_else(|| {
-            anyhow!("Authorization error: valid token with user email required in multi-user mode")
-        })?;
+        // Multi-user mode: require valid token
+        let caller_email =
+            crate::agent::capabilities::user_email_from_token(auth_token.to_string());
 
-        // Session must also have an owner email (should always be set in multi-user mode)
-        let owner_email = session.user_email.as_ref().ok_or_else(|| {
-            anyhow!("Authorization error: session has no owner — cannot verify ownership")
-        })?;
+        // If caller has no email, they must still have a valid token (admin/main user)
+        if caller_email.is_none() {
+            if crate::agent::capabilities::decode_jwt(auth_token.to_string()).is_err() {
+                return Err(anyhow!(
+                    "Authorization error: valid token required in multi-user mode"
+                ));
+            }
+            // Admin user (valid token, no email) — allow access to any stream
+            return Ok(());
+        }
+
+        let caller_email = caller_email.unwrap();
+
+        // Session must also have an owner email to enforce ownership
+        let owner_email = match session.user_email.as_ref() {
+            Some(email) => email,
+            // Session has no owner email (created by admin) — only admin can access,
+            // but we already handled the admin case above, so reject.
+            None => {
+                return Err(anyhow!(
+                    "Authorization error: caller does not own this transcription stream"
+                ))
+            }
+        };
 
         if caller_email == *owner_email {
             Ok(())
