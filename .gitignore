@@ -74,3 +74,4 @@ waker-bridge/package-lock.json
 
 # Benchmark results
 benchmarks/results/
+ui/src-tauri/gen/schemas/macOS-schema.json

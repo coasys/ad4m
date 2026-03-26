@@ -673,19 +673,24 @@ impl Query {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        // Forward all SurrealDB queries to SPARQL
-        log::info!(
-            "CANARY: Forwarding SurrealDB query to SPARQL for perspective {}",
-            uuid
-        );
-        let result = get_perspective(&uuid)
-            .ok_or(FieldError::from(format!(
-                "No perspective found with uuid {}",
-                uuid
-            )))?
-            .sparql_query(query)?;
+        #[cfg(feature = "surreal")]
+        {
+            let result = get_perspective(&uuid)
+                .ok_or(FieldError::from(format!(
+                    "No perspective found with uuid {}",
+                    uuid
+                )))?
+                .surreal_query(query)
+                .await?;
+            return Ok(serde_json::to_string(&result)?);
+        }
 
-        Ok(result)
+        #[cfg(not(feature = "surreal"))]
+        {
+            Err(FieldError::from(
+                "SurrealDB queries are not available. This executor was compiled with SPARQL support only. Use perspectiveQuerySparql instead.".to_string(),
+            ))
+        }
     }
 
     /// Query using SPARQL (Oxigraph) — available when compiled with `sparql` feature

@@ -28,7 +28,7 @@ path = "src/bin/generate_snapshot.rs"
 
 [features]
 # Pass metal and cuda features (set through build.rs) through to kalosm
-default = ["sparql"]
+default = ["sparql", "surreal"]
 metal = ["kalosm/metal"]
 cuda = ["kalosm/cuda"]
 generate_snapshot = []  # Feature flag for snapshot generation mode

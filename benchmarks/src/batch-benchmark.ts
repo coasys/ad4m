@@ -521,7 +521,7 @@ async function ensureAgentReady() {
       const status = await gql('{ agentStatus { isInitialized isUnlocked } }');
       const { isInitialized, isUnlocked } = status.agentStatus;
       if (!isInitialized) {
-        await gql('mutation { agentGenerate(passphrase: "test", holochain: false) { isInitialized did } }');
+        await gql('mutation { agentGenerate(passphrase: "test") { isInitialized did } }');
       } else if (!isUnlocked) {
         await gql('mutation { agentUnlock(passphrase: "test", holochain: false) { isInitialized did } }');
       }
