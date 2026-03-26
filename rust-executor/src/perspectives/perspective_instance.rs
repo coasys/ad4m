@@ -836,6 +836,9 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<DecoratedLinkExpression, AnyError> {
+        if let Some(ref email) = context.user_email {
+            crate::billing::check_compute_credits(email)?;
+        }
         link.validate()?;
         let link_expr: LinkExpression = create_signed_expression(link.normalize(), context)?.into();
         let result = self
@@ -1063,6 +1066,9 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        if let Some(ref email) = context.user_email {
+            crate::billing::check_compute_credits(email)?;
+        }
         for link in &links {
             link.validate()?;
         }
@@ -1136,6 +1142,11 @@ impl PerspectiveInstance {
         status: LinkStatus,
         context: &AgentContext,
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
+        if !mutations.additions.is_empty() {
+            if let Some(ref email) = context.user_email {
+                crate::billing::check_compute_credits(email)?;
+            }
+        }
         let addition_links: Vec<Link> = mutations.additions.into_iter().map(Link::from).collect();
         for link in &addition_links {
             link.validate()?;
@@ -1209,6 +1220,9 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<DecoratedLinkExpression, AnyError> {
+        if let Some(ref email) = context.user_email {
+            crate::billing::check_compute_credits(email)?;
+        }
         let handle = self.persisted.lock().await.clone();
 
         // Query SurrealDB instead of Rusqlite

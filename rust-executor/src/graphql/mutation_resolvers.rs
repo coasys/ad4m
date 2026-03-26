@@ -1975,7 +1975,6 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        check_compute_credits(&context.auth_token)?;
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let result = perspective
@@ -2032,7 +2031,6 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        check_compute_credits(&context.auth_token)?;
 
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
@@ -2059,7 +2057,6 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        check_compute_credits(&context.auth_token)?;
 
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
