@@ -4251,7 +4251,7 @@ mod tests {
         }
 
         let query = LinkQuery::default();
-        let mut links = perspective.get_links(&query).unwrap();
+        let mut links = perspective.get_links(&query).await.unwrap();
         assert_eq!(links.len(), 5);
         let mut all_links_sorted = all_links.clone();
         let cmp = |a: &DecoratedLinkExpression, b: &DecoratedLinkExpression| {
@@ -4296,7 +4296,7 @@ mod tests {
             source: Some(source.to_string()),
             ..Default::default()
         };
-        let mut links = perspective.get_links(&query).unwrap();
+        let mut links = perspective.get_links(&query).await.unwrap();
         let mut expected_links: Vec<_> = all_links
             .into_iter()
             .filter(|expr| expr.data.source == source)
@@ -4329,7 +4329,7 @@ mod tests {
 
         // Ensure the link is present
         let query = LinkQuery::default();
-        let links_before_removal = perspective.get_links(&query).unwrap();
+        let links_before_removal = perspective.get_links(&query).await.unwrap();
         assert!(links_before_removal.contains(&expression));
 
         // Remove the link from the perspective
@@ -4339,7 +4339,7 @@ mod tests {
             .unwrap();
 
         // Ensure the link is no longer present
-        let links_after_removal = perspective.get_links(&query).unwrap();
+        let links_after_removal = perspective.get_links(&query).await.unwrap();
         assert!(!links_after_removal.contains(&expression));
     }
 
@@ -4373,7 +4373,7 @@ mod tests {
             ..Default::default()
         };
         //println!("Query with from_date: {:?}", query_with_from_date);
-        let links_from_date = perspective.get_links(&query_with_from_date).unwrap();
+        let links_from_date = perspective.get_links(&query_with_from_date).await.unwrap();
         //println!("Links from date: {:?}", links_from_date);
         assert_eq!(links_from_date.len(), 2);
 
@@ -4383,7 +4383,7 @@ mod tests {
             until_date: Some(until_date),
             ..Default::default()
         };
-        let links_until_date = perspective.get_links(&query_with_until_date).unwrap();
+        let links_until_date = perspective.get_links(&query_with_until_date).await.unwrap();
         assert_eq!(links_until_date.len(), 4);
 
         // Query for links with both from_date and until_date set to filter a range
@@ -4395,7 +4395,7 @@ mod tests {
             until_date: Some(until_date),
             ..Default::default()
         };
-        let links_date_range = perspective.get_links(&query_with_date_range).unwrap();
+        let links_date_range = perspective.get_links(&query_with_date_range).await.unwrap();
         assert_eq!(links_date_range.len(), 2);
 
         // reverse for descending order
@@ -4408,7 +4408,7 @@ mod tests {
             ..Default::default()
         };
 
-        let links_date_desc = perspective.get_links(&query_with_date_range).unwrap();
+        let links_date_desc = perspective.get_links(&query_with_date_range).await.unwrap();
         assert_eq!(links_date_desc.len(), 5);
         assert_eq!(links_date_desc[0].data.target, all_links[4].data.target);
         assert_eq!(links_date_desc[1].data.target, all_links[3].data.target);
@@ -4427,7 +4427,7 @@ mod tests {
             ..Default::default()
         };
 
-        let links_date_desc = perspective.get_links(&query_with_date_range).unwrap();
+        let links_date_desc = perspective.get_links(&query_with_date_range).await.unwrap();
         assert_eq!(links_date_desc.len(), 3);
         links_date_desc
             .iter()
@@ -4447,7 +4447,7 @@ mod tests {
             ..Default::default()
         };
 
-        let links_date_desc = perspective.get_links(&query_with_date_range).unwrap();
+        let links_date_desc = perspective.get_links(&query_with_date_range).await.unwrap();
         assert_eq!(links_date_desc.len(), 3);
         links_date_desc
             .iter()
@@ -4477,7 +4477,7 @@ mod tests {
             .unwrap();
 
         let query = LinkQuery::default();
-        let links = perspective.get_links(&query).unwrap();
+        let links = perspective.get_links(&query).await.unwrap();
         assert_eq!(links.len(), 0);
 
         // Commit the batch
@@ -4488,7 +4488,7 @@ mod tests {
         assert_eq!(diff.additions.len(), 1);
 
         // Verify links are now in DB
-        let links = perspective.get_links(&query).unwrap();
+        let links = perspective.get_links(&query).await.unwrap();
         assert_eq!(links.len(), 1);
     }
 
@@ -4510,7 +4510,7 @@ mod tests {
             .unwrap();
 
         let query = LinkQuery::default();
-        let links = perspective.get_links(&query).unwrap();
+        let links = perspective.get_links(&query).await.unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].data.target, link.target);
 
@@ -4534,7 +4534,7 @@ mod tests {
             .unwrap();
 
         // Verify final state in DB
-        let links = perspective.get_links(&query).unwrap();
+        let links = perspective.get_links(&query).await.unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].data.target, new_link.target);
     }
@@ -4588,7 +4588,7 @@ mod tests {
 
         let query = LinkQuery::default();
 
-        let links_before = perspective.get_links(&query).unwrap();
+        let links_before = perspective.get_links(&query).await.unwrap();
         assert_eq!(links_before.len(), 1);
 
         // Commit the batch
@@ -4599,7 +4599,7 @@ mod tests {
         assert_eq!(diff.additions.len(), 2); // link1 and link2
         assert_eq!(diff.removals.len(), 1); // link1
 
-        let links_after = perspective.get_links(&query).unwrap();
+        let links_after = perspective.get_links(&query).await.unwrap();
         assert_eq!(links_after.len(), 2);
     }
 
@@ -4689,7 +4689,7 @@ mod tests {
             until_date: None,
             limit: None,
         };
-        let links = perspective.get_links(&query).unwrap();
+        let links = perspective.get_links(&query).await.unwrap();
         assert_eq!(links.len(), 0);
 
         // Commit batch and verify links are now visible
@@ -4700,7 +4700,7 @@ mod tests {
         assert_eq!(diff.additions.len(), 2);
         assert_eq!(diff.removals.len(), 0);
 
-        let links_after = perspective.get_links(&query).unwrap();
+        let links_after = perspective.get_links(&query).await.unwrap();
         assert_eq!(links_after.len(), 2);
     }
 
@@ -4732,7 +4732,7 @@ mod tests {
     //         until_date: None,
     //         limit: None,
     //     };
-    //     let links = perspective.get_links(&query).unwrap();
+    //     let links = perspective.get_links(&query).await.unwrap();
     //     assert_eq!(links.len(), 0);
 
     //     // Commit batch and verify subject links are now visible
@@ -4740,7 +4740,7 @@ mod tests {
     //     assert!(diff.additions.len() > 0);
     //     assert_eq!(diff.removals.len(), 0);
 
-    //     let links_after = perspective.get_links(&query).unwrap();
+    //     let links_after = perspective.get_links(&query).await.unwrap();
     //     assert!(links_after.len() > 0);
     // }
 
