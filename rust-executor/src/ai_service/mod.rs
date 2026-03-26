@@ -1304,7 +1304,7 @@ impl AIService {
                                             billing_model_id,
                                         )),
                                     ) {
-                                        Err(e) if e.to_string().contains("Insufficient compute credits") => {
+                                        Err(crate::billing::BillingError::InsufficientCredits) => {
                                             log::warn!("Transcription stream terminated: insufficient credits for user {}", email);
                                             break;
                                         }
