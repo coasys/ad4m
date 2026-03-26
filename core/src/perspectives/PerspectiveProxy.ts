@@ -13,7 +13,7 @@ import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
 import { gql } from "@apollo/client/core";
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
 import { AllInstancesResult } from "../model/types";
-import { escapeSurrealString } from "../utils";
+
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
 
@@ -1167,7 +1167,6 @@ export class PerspectiveProxy {
         }
         
         const shapeUri = shapeUriLinks[0].data.target;
-        const escapedShapeUri = escapeSurrealString(shapeUri);
         
         // First get property shape URIs so we can query everything in one go
         const propertyLinks = await this.get(new LinkQuery({
@@ -1175,18 +1174,21 @@ export class PerspectiveProxy {
             predicate: "sh://property"
         }));
         
-        // Build a single surreal query that fetches all relevant links
+        // Fetch all links from the shape and its property shapes
         const sourceUris = [shapeUri, ...propertyLinks.map(l => l.data.target)];
-        const escapedSources = sourceUris.map(u => `'${escapeSurrealString(u)}'`).join(', ');
+        const allLinks: Array<{source: string, predicate: string, target: string}> = [];
+        for (const uri of sourceUris) {
+            const links = await this.get(new LinkQuery({ source: uri }));
+            for (const l of links) {
+                allLinks.push({
+                    source: l.data.source,
+                    predicate: l.data.predicate,
+                    target: l.data.target
+                });
+            }
+        }
         
-        const query = `SELECT in.uri AS source, predicate, out.uri AS target FROM link WHERE in.uri IN [${escapedSources}]`;
-        const result = await this.querySurrealDB(query);
-        
-        const shapeLinks = (result || []).map((r: any) => ({
-            source: r.source,
-            predicate: r.predicate,
-            target: r.target
-        }));
+        const shapeLinks = allLinks;
         
         return SHACLShape.fromLinks(shapeLinks, shapeUri);
     }
@@ -1300,22 +1302,22 @@ export class PerspectiveProxy {
         }
         
         const flowUri = flowUriLinks[0].data.target;
-        const escapedFlowUri = escapeSurrealString(flowUri);
-        
         // Compute alternate prefix for state/transition URIs
         const alternatePrefix = flowUri.endsWith('Flow') 
             ? flowUri.slice(0, -4) + '.'
             : flowUri + '.';
-        const escapedAltPrefix = escapeSurrealString(alternatePrefix);
         
-        // Single surreal query to get all flow-related links
-        const query = `SELECT in.uri AS source, predicate, out.uri AS target FROM link WHERE in.uri = '${escapedFlowUri}' OR string::starts_with(in.uri, '${escapedAltPrefix}')`;
-        const result = await this.querySurrealDB(query);
+        // Fetch flow links using SPARQL to match flowUri source OR alternatePrefix sources
+        const sparqlQuery = `SELECT ?s ?p ?o WHERE {
+            ?s ?p ?o .
+            FILTER(?s = <${flowUri}> || STRSTARTS(STR(?s), "${alternatePrefix}"))
+        }`;
+        const sparqlResult = await this.querySparql(sparqlQuery);
         
-        const flowLinks = (result || []).map((r: any) => ({
-            source: r.source,
-            predicate: r.predicate,
-            target: r.target
+        const flowLinks = (sparqlResult || []).map((r: any) => ({
+            source: r.s,
+            predicate: r.p,
+            target: r.o
         }));
         
         return SHACLFlow.fromLinks(flowLinks, flowUri);
@@ -1509,38 +1511,21 @@ export class PerspectiveProxy {
 
         // If no required triples, any expression with links is an instance
         if (metadata.requiredTriples.length === 0) {
-            const escapedExpression = escapeSurrealString(expression);
-            const checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${escapedExpression}'`;
-            const result = await this.querySurrealDB(checkQuery);
-            const count = result[0]?.count ?? 0;
-            const countValue = typeof count === 'object' && count?.Int !== undefined ? count.Int : count;
-            return countValue > 0;
+            const links = await this.get(new LinkQuery({ source: expression }));
+            return links.length > 0;
         }
 
         // Check if the expression has all required triples (predicate + optional exact target)
         for (const triple of metadata.requiredTriples) {
-            const escapedExpression = escapeSurrealString(expression);
-            const escapedPredicate = escapeSurrealString(triple.predicate);
-            let checkQuery: string;
+            let query: LinkQuery;
             if (triple.target) {
-                // Flag: must match both predicate AND exact target value
-                const escapedTarget = escapeSurrealString(triple.target);
-                checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${escapedExpression}' AND predicate = '${escapedPredicate}' AND out.uri = '${escapedTarget}'`;
+                query = new LinkQuery({ source: expression, predicate: triple.predicate, target: triple.target });
             } else {
-                // Property: just check predicate exists
-                checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${escapedExpression}' AND predicate = '${escapedPredicate}'`;
+                query = new LinkQuery({ source: expression, predicate: triple.predicate });
             }
-            const result = await this.querySurrealDB(checkQuery);
+            const links = await this.get(query);
 
-            if (!result || result.length === 0) {
-                return false;
-            }
-
-            const count = result[0]?.count ?? 0;
-            // Handle potential object response like {Int: 0}
-            const countValue = typeof count === 'object' && count?.Int !== undefined ? count.Int : count;
-
-            if (countValue === 0) {
+            if (!links || links.length === 0) {
                 return false;
             }
         }
@@ -1645,31 +1630,52 @@ export class PerspectiveProxy {
     /**
      * Generates a SurrealDB query to find instances based on class metadata.
      */
-    private generateSurrealInstanceQuery(metadata: {
+    /**
+     * Finds all instances matching subject class metadata by querying links.
+     * Returns base URIs of matching instances.
+     */
+    private async findInstancesByMetadata(metadata: {
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
         properties: Map<string, { predicate: string, resolveLanguage?: string }>,
         relations: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
-    }): string {
+    }): Promise<Array<{base: string}>> {
         if (metadata.requiredTriples.length === 0) {
-            // No required triples - any node with links is an instance
-            return `SELECT DISTINCT uri AS base FROM node WHERE count(->link) > 0`;
+            // No required triples - return all unique sources that have any link
+            const allLinks = await this.get(new LinkQuery({}));
+            const sources = new Set(allLinks.map(l => l.data.source));
+            return Array.from(sources).map(s => ({ base: s }));
         }
 
-        // Generate WHERE conditions for each required triple (predicate + optional exact target)
-        const whereConditions = metadata.requiredTriples.map(triple => {
-            const escapedPredicate = escapeSurrealString(triple.predicate);
-            if (triple.target) {
-                // Flag: must match both predicate AND exact target value
-                const escapedTarget = escapeSurrealString(triple.target);
-                return `count(->link[WHERE predicate = '${escapedPredicate}' AND out.uri = '${escapedTarget}']) > 0`;
-            } else {
-                // Property: just check predicate exists
-                return `count(->link[WHERE predicate = '${escapedPredicate}']) > 0`;
-            }
-        }).join(' AND ');
+        // Use first required triple to get candidate set, then filter by rest
+        const first = metadata.requiredTriples[0];
+        let query: LinkQuery;
+        if (first.target) {
+            query = new LinkQuery({ predicate: first.predicate, target: first.target });
+        } else {
+            query = new LinkQuery({ predicate: first.predicate });
+        }
+        const candidateLinks = await this.get(query);
+        let candidates = [...new Set(candidateLinks.map(l => l.data.source))];
 
-        return `SELECT uri AS base FROM node WHERE ${whereConditions}`;
+        // Filter by remaining required triples
+        for (let i = 1; i < metadata.requiredTriples.length; i++) {
+            const triple = metadata.requiredTriples[i];
+            const remaining: string[] = [];
+            for (const expr of candidates) {
+                let q: LinkQuery;
+                if (triple.target) {
+                    q = new LinkQuery({ source: expr, predicate: triple.predicate, target: triple.target });
+                } else {
+                    q = new LinkQuery({ source: expr, predicate: triple.predicate });
+                }
+                const links = await this.get(q);
+                if (links.length > 0) remaining.push(expr);
+            }
+            candidates = remaining;
+        }
+
+        return candidates.map(c => ({ base: c }));
     }
 
     /**
@@ -1687,16 +1693,13 @@ export class PerspectiveProxy {
             return undefined;
         }
 
-        const escapedBaseExpression = escapeSurrealString(baseExpression);
-        const escapedPredicate = escapeSurrealString(propMeta.predicate);
-        const query = `SELECT out.uri AS value FROM link WHERE in.uri = '${escapedBaseExpression}' AND predicate = '${escapedPredicate}' LIMIT 1`;
-        const result = await this.querySurrealDB(query);
+        const links = await this.get(new LinkQuery({ source: baseExpression, predicate: propMeta.predicate }));
 
-        if (!result || result.length === 0) {
+        if (!links || links.length === 0) {
             return undefined;
         }
 
-        const value = result[0].value;
+        const value = links[0].data.target;
 
         // Handle expression resolution if needed
         if (propMeta.resolveLanguage && value) {
@@ -1731,16 +1734,16 @@ export class PerspectiveProxy {
             return [];
         }
 
-        const escapedBaseExpression = escapeSurrealString(baseExpression);
-        const escapedPredicate = escapeSurrealString(relMeta.predicate);
-        const query = `SELECT out.uri AS value, timestamp FROM link WHERE in.uri = '${escapedBaseExpression}' AND predicate = '${escapedPredicate}' ORDER BY timestamp ASC`;
-        const result = await this.querySurrealDB(query);
+        const links = await this.get(new LinkQuery({ source: baseExpression, predicate: relMeta.predicate }));
 
-        if (!result || result.length === 0) {
+        if (!links || links.length === 0) {
             return [];
         }
 
-        let values = result.map(r => r.value).filter(v => v !== "" && v !== '');
+        // Sort by timestamp ascending
+        links.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+        let values = links.map(l => l.data.target).filter(v => v !== "" && v !== '');
         
         // Apply condition filtering if present
         if (relMeta.condition && values.length > 0) {
@@ -1753,14 +1756,26 @@ export class PerspectiveProxy {
                         .replace(/\$base/g, `'${baseExpression}'`)
                         .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
                     
-                    // If condition starts with WHERE, wrap in array length check
-                    if (condition.trim().startsWith('WHERE')) {
-                        condition = `array::len(SELECT * FROM link ${condition}) > 0`;
-                    }
+                    // Parse condition to extract link query parameters
+                    // Conditions typically look like: WHERE in.uri = 'X' AND predicate = 'Y' AND out.uri = 'Z'
+                    // or: array::len(SELECT * FROM link WHERE ...) > 0
+                    // Convert to queryLinks calls
+                    const sourceMatch = condition.match(/in\.uri\s*=\s*'([^']+)'/);
+                    const predicateMatch = condition.match(/predicate\s*=\s*'([^']+)'/);
+                    const targetMatch = condition.match(/out\.uri\s*=\s*'([^']+)'/);
                     
-                    const filterResult = await this.querySurrealDB(`RETURN ${condition}`);
-                    const isTrue = filterResult === true || (Array.isArray(filterResult) && filterResult.length > 0 && filterResult[0] === true);
-                    if (isTrue) {
+                    if (sourceMatch || predicateMatch || targetMatch) {
+                        const linkQuery: any = {};
+                        if (sourceMatch) linkQuery.source = sourceMatch[1];
+                        if (predicateMatch) linkQuery.predicate = predicateMatch[1];
+                        if (targetMatch) linkQuery.target = targetMatch[1];
+                        
+                        const matchingLinks = await this.get(new LinkQuery(linkQuery));
+                        if (matchingLinks.length > 0) {
+                            filteredValues.push(value);
+                        }
+                    } else {
+                        // Can't parse condition, include by default
                         filteredValues.push(value);
                     }
                 }
@@ -1809,33 +1824,30 @@ export class PerspectiveProxy {
 
         // If no required triples, check which expressions have any links
         if (metadata.requiredTriples.length === 0) {
-            const escapedExpressions = expressions.map(e => `'${escapeSurrealString(e)}'`).join(', ');
-            const checkQuery = `SELECT in.uri AS uri FROM link WHERE in.uri IN [${escapedExpressions}] GROUP BY in.uri HAVING count() > 0`;
-            const result = await this.querySurrealDB(checkQuery);
-            return result.map(r => r.uri);
+            const results: string[] = [];
+            for (const expr of expressions) {
+                const links = await this.get(new LinkQuery({ source: expr }));
+                if (links.length > 0) results.push(expr);
+            }
+            return results;
         }
 
-        // For each required triple, build a query that finds matching expressions
+        // For each required triple, find which expressions match
         const validExpressionSets: Set<string>[] = [];
         
         for (const triple of metadata.requiredTriples) {
-            const escapedExpressions = expressions.map(e => `'${escapeSurrealString(e)}'`).join(', ');
-            const escapedPredicate = escapeSurrealString(triple.predicate);
-            
-            let checkQuery: string;
-            if (triple.target) {
-                // Flag: must match both predicate AND exact target value
-                const escapedTarget = escapeSurrealString(triple.target);
-                // Note: Removed GROUP BY because it was causing SurrealDB to only return one result
-                checkQuery = `SELECT in.uri AS uri FROM link WHERE in.uri IN [${escapedExpressions}] AND predicate = '${escapedPredicate}' AND out.uri = '${escapedTarget}'`;
-            } else {
-                // Property: just check predicate exists
-                // Note: Removed GROUP BY because it was causing SurrealDB to only return one result
-                checkQuery = `SELECT in.uri AS uri FROM link WHERE in.uri IN [${escapedExpressions}] AND predicate = '${escapedPredicate}'`;
+            const matchingExprs = new Set<string>();
+            for (const expr of expressions) {
+                let query: LinkQuery;
+                if (triple.target) {
+                    query = new LinkQuery({ source: expr, predicate: triple.predicate, target: triple.target });
+                } else {
+                    query = new LinkQuery({ source: expr, predicate: triple.predicate });
+                }
+                const links = await this.get(query);
+                if (links.length > 0) matchingExprs.add(expr);
             }
-            
-            const result = await this.querySurrealDB(checkQuery);
-            validExpressionSets.push(new Set(result.map(r => r.uri)));
+            validExpressionSets.push(matchingExprs);
         }
 
         // Find intersection: expressions that passed ALL required triple checks
@@ -1895,8 +1907,8 @@ export class PerspectiveProxy {
             const metadata = await this.getSubjectClassMetadataFromSDNA(className);
             //console.log(`getAllSubjectInstances: Got metadata for ${className}:`, metadata);
             if (metadata) {
-                const surrealQuery = this.generateSurrealInstanceQuery(metadata);
-                const results = await this.querySurrealDB(surrealQuery);
+                const results = await this.findInstancesByMetadata(metadata);
+                
                // console.log(`getAllSubjectInstances: SurrealDB returned ${results?.length || 0} results`);
 
                 for (const result of results || []) {
@@ -1946,8 +1958,8 @@ export class PerspectiveProxy {
             // Query SDNA for metadata, then query SurrealDB for instances
             const metadata = await this.getSubjectClassMetadataFromSDNA(className);
             if (metadata) {
-                const surrealQuery = this.generateSurrealInstanceQuery(metadata);
-                const results = await this.querySurrealDB(surrealQuery);
+                const results = await this.findInstancesByMetadata(metadata);
+                
 
                 for (const result of results || []) {
                     try {
@@ -1998,16 +2010,16 @@ export class PerspectiveProxy {
             return null;
         }
 
-        // Single SurrealDB query to find all classes and their properties/relations
-        const query = `SELECT 
-            in.uri AS shape_source, 
-            predicate, 
-            out.uri AS target 
-        FROM link 
-        WHERE predicate IN ['rdf://type', 'sh://property', 'sh://collection']`;
-        
-        const results = await this.querySurrealDB(query);
-        if (!results || results.length === 0) return null;
+        // Query links for class shapes using queryLinks
+        const typeLinks = await this.get(new LinkQuery({ predicate: 'rdf://type', target: 'ad4m://SubjectClass' }));
+        const propLinks = await this.get(new LinkQuery({ predicate: 'sh://property' }));
+        const collLinks = await this.get(new LinkQuery({ predicate: 'sh://collection' }));
+        const results = [
+            ...typeLinks.map(l => ({ shape_source: l.data.source, predicate: l.data.predicate, target: l.data.target })),
+            ...propLinks.map(l => ({ shape_source: l.data.source, predicate: l.data.predicate, target: l.data.target })),
+            ...collLinks.map(l => ({ shape_source: l.data.source, predicate: l.data.predicate, target: l.data.target })),
+        ];
+        if (results.length === 0) return null;
 
         // Build a map of className -> { properties, relations }
         const classShapes: Map<string, { shapeUri: string, properties: string[], relations: string[] }> = new Map();
