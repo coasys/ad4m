@@ -26,7 +26,6 @@ path = "src/ad4m_executor.rs"
 metal = ["ad4m-executor/metal"]
 cuda = ["ad4m-executor/cuda"]
 sparql = ["ad4m-executor/sparql"]
-surreal = ["ad4m-executor/surreal"]
 default = ["sparql"]
 
 [dependencies]

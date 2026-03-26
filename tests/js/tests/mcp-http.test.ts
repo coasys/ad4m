@@ -1655,8 +1655,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             console.log("Channel waker query:", JSON.stringify(config, null, 2));
 
-            expect(config.surreal_query).to.be.a('string');
-            expect(config.surreal_query).to.include("ad4m://has_child");
+            expect(config.query).to.be.a('string');
+            expect(config.query).to.include("ad4m://has_child");
             expect(config.subscription_id).to.be.a('string');
 
             // Use WakerSubscriptionManager to subscribe and verify it works
@@ -1676,7 +1676,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 type: "channel-messages" as const,
                 perspective: wakerPerspectiveUuid,
                 channel: wakerChannelAddr,
-                query: config.surreal_query,
+                query: config.query,
             });
 
             // The subscription should fire with existing children (from the mention test)

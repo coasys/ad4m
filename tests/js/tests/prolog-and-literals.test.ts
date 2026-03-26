@@ -2158,7 +2158,7 @@ describe("Prolog + Literals", () => {
                     expect(notesAfterDelete.length).to.equal(0);
                 });
 
-                describe("SurrealDB vs Prolog Subscriptions", () => {
+                describe("Query Subscriptions", () => {
                     let perspective: PerspectiveProxy;
 
                     @Model({ name: "SubscriptionTestModel" })
@@ -2192,11 +2192,11 @@ describe("Prolog + Literals", () => {
                     // With SHACL migration, SurrealDB is now the primary query engine.
                     // Prolog subscriptions are deprecated - no need for parity testing.
 
-                    it("should demonstrate SurrealDB subscription performance", async () => {
+                    it("should demonstrate subscription performance", async () => {
                         // Measure latency of update
-                        const surrealCallback = sinon.fake();
-                        const surrealBuilder = TestModel.query(perspective).where({ status: "perf-test" });
-                        await surrealBuilder.subscribe(surrealCallback);
+                        const subscriptionCallback = sinon.fake();
+                        const queryBuilder = TestModel.query(perspective).where({ status: "perf-test" });
+                        await queryBuilder.subscribe(subscriptionCallback);
 
                         const start = Date.now();
                         const model = new TestModel(perspective);
@@ -2206,7 +2206,7 @@ describe("Prolog + Literals", () => {
                         const saveTime = Date.now();
 
                         // Poll until callback called
-                        while (!surrealCallback.called) {
+                        while (!subscriptionCallback.called) {
                             await sleep(10);
                             if (Date.now() - saveTime > 5000) throw new Error("Timeout waiting for subscription update");
                         }
@@ -2214,9 +2214,9 @@ describe("Prolog + Literals", () => {
                         const saveLatency = saveTime - start;
                         const subscriptionLatency = Date.now() - saveTime;
                         console.log(`TestModel.save() latency: ${saveLatency}ms`);
-                        console.log(`SurrealDB subscription update latency: ${subscriptionLatency}ms`);
+                        console.log(`Subscription update latency: ${subscriptionLatency}ms`);
 
-                        surrealBuilder.dispose();
+                        queryBuilder.dispose();
                     });
                 });
 

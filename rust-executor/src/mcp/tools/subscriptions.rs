@@ -128,14 +128,9 @@ impl Ad4mMcpHandler {
             "parent_address": p.parent_address,
             "predicate": p.predicate,
             "target_value": p.target_value,
-            "surreal_query": query,
-            "waker_config": {
-                "id": subscription_id,
-                "perspective": p.perspective_id,
-                "query": query,
-            },
+            "query": query,
             "message": format!(
-                "Subscription {} created for {} changes{}. Add the waker_config entry to your waker's config file and restart it. The waker uses perspectiveSubscribeSurrealQuery (same as Flux UI) for live change detection. Store this subscription_id in your memory with its context so you know what to do when woken.",
+                "Subscription {} created for {} changes{}. Note: SurrealDB has been removed; use SPARQL queries instead.",
                 subscription_id,
                 p.class_name,
                 p.parent_address.as_ref().map(|a| format!(" under parent {}", a)).unwrap_or_default()

@@ -4,7 +4,6 @@ use crate::agent::{capabilities::*, did_document_for_context, signatures, AgentC
 use crate::ai_service::AIService;
 use crate::config::get_global_config;
 use crate::languages::LanguageController;
-#[cfg(feature = "surreal")]
 use crate::perspectives::utils::prolog_resolution_to_string;
 use crate::types::{AITask, DecoratedExpressionProof, ModelType};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
@@ -638,34 +637,24 @@ impl Query {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        #[cfg(feature = "surreal")]
-        {
-            let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
-            Ok(prolog_resolution_to_string(
-                get_perspective(&uuid)
-                    .ok_or(FieldError::from(format!(
-                        "No perspective found with uuid {}",
-                        uuid
-                    )))?
-                    .prolog_query_with_context(query, &agent_context)
-                    .await?,
-            ))
-        }
-
-        #[cfg(not(feature = "surreal"))]
-        {
-            let _ = (query, uuid);
-            Err(FieldError::from(
-                "Prolog queries are not available. Use perspective_query_sparql or perspective_query_surreal_db instead.".to_string(),
-            ))
-        }
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        Ok(prolog_resolution_to_string(
+            get_perspective(&uuid)
+                .ok_or(FieldError::from(format!(
+                    "No perspective found with uuid {}",
+                    uuid
+                )))?
+                .prolog_query_with_context(query, &agent_context)
+                .await?,
+        ))
     }
 
-    /// Query using SurrealDB — available when compiled with `surreal` feature
+    /// Query using SurrealDB — DEPRECATED: SurrealDB has been removed.
+    /// Returns an error directing users to use perspectiveQuerySparql instead.
     async fn perspective_query_surreal_db(
         &self,
         context: &RequestContext,
-        query: String,
+        _query: String,
         uuid: String,
     ) -> FieldResult<String> {
         check_capability(
@@ -673,27 +662,12 @@ impl Query {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        #[cfg(feature = "surreal")]
-        {
-            let result = get_perspective(&uuid)
-                .ok_or(FieldError::from(format!(
-                    "No perspective found with uuid {}",
-                    uuid
-                )))?
-                .surreal_query(query)
-                .await?;
-            return Ok(serde_json::to_string(&result)?);
-        }
-
-        #[cfg(not(feature = "surreal"))]
-        {
-            Err(FieldError::from(
-                "SurrealDB queries are not available. This executor was compiled with SPARQL support only. Use perspectiveQuerySparql instead.".to_string(),
-            ))
-        }
+        Err(FieldError::from(
+            "SurrealDB has been removed. Use perspectiveQuerySparql instead.".to_string(),
+        ))
     }
 
-    /// Query using SPARQL (Oxigraph) — available when compiled with `sparql` feature
+    /// Query using SPARQL (Oxigraph) — the sole query backend.
     async fn perspective_query_sparql(
         &self,
         context: &RequestContext,
@@ -705,25 +679,14 @@ impl Query {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        #[cfg(feature = "sparql")]
-        {
-            let result = get_perspective(&uuid)
-                .ok_or(FieldError::from(format!(
-                    "No perspective found with uuid {}",
-                    uuid
-                )))?
-                .sparql_query(query)?;
+        let result = get_perspective(&uuid)
+            .ok_or(FieldError::from(format!(
+                "No perspective found with uuid {}",
+                uuid
+            )))?
+            .sparql_query(query)?;
 
-            Ok(result)
-        }
-
-        #[cfg(not(feature = "sparql"))]
-        {
-            let _ = (query, uuid);
-            Err(FieldError::from(
-                "SPARQL support not enabled. Rebuild with --features sparql".to_string(),
-            ))
-        }
+        Ok(result)
     }
 
     async fn perspective_snapshot(

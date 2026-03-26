@@ -164,6 +164,9 @@ export class PerspectiveClient {
      * 
      * Note: GraphQL field name is "perspectiveQuerySurrealDb" (lowercase "b" in "Db")
      * as generated from Rust method "perspective_query_surreal_db"
+     * 
+     * @deprecated SurrealDB has been removed. Use querySparql() instead.
+     * This method is kept for backward compatibility but will always return an error.
      */
     async querySurrealDB(uuid: string, query: string): Promise<any> {
         const { perspectiveQuerySurrealDb } = unwrapApolloResult(await this.#apolloClient.query({

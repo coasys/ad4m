@@ -13,7 +13,6 @@ mod prolog_service;
 pub mod runtime_service;
 #[cfg(feature = "sparql")]
 pub mod sparql_service;
-mod surreal_service;
 pub mod unyt_service;
 pub mod user_management;
 pub mod utils;

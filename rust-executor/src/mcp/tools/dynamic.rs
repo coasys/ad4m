@@ -906,7 +906,7 @@ impl Ad4mMcpHandler {
                                 data.insert(prop_name.clone(), serde_json::Value::Array(items));
                             }
                             Err(_) => {
-                                // Fall back to naive get_links on SurrealQL error
+                                // Fall back to get_links (SurrealDB removed, always takes this path)
                                 let value_links = match perspective
                                     .get_links(&LinkQuery {
                                         source: Some(expression_address.clone()),
@@ -971,7 +971,7 @@ impl Ad4mMcpHandler {
                             }
                         }
                         Err(_) => {
-                            // Fall back to get_links
+                            // Fall back to get_links (SurrealDB removed, always takes this path)
                             let value_links = match perspective
                                 .get_links(&LinkQuery {
                                     source: Some(expression_address.clone()),

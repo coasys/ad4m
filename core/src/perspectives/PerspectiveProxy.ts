@@ -555,6 +555,9 @@ export class PerspectiveProxy {
      * @param query - SurrealQL query string (read-only operations only)
      * @returns Query results as parsed JSON
      * 
+     * @deprecated SurrealDB has been removed. Use querySparql() instead.
+     * This method is kept for backward compatibility but will return an error from the executor.
+     * 
      * @example
      * ```typescript
      * // Get all links
