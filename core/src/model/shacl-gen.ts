@@ -163,7 +163,7 @@ export function buildSHACL(
         // ── Constructor / Destructor entries ────────────────────────────
         const effectiveInitial = propMeta.initial
             ?? (propMeta.required && propMeta.writable && !propMeta.flag && propMeta.through
-                ? "literal://string:" : undefined);
+                ? "literal:string:" : undefined);
 
         if (effectiveInitial) {
             constructorActions.push({

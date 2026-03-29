@@ -160,7 +160,7 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
     links.push(Link {
         source: flow_uri.clone(),
         predicate: Some("ad4m://flowName".to_string()),
-        target: format!("literal://string:{}", urlencoding::encode(flow_name)),
+        target: format!("literal:string:{}", urlencoding::encode(flow_name)),
     });
 
     // Flowable condition
@@ -168,7 +168,7 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
         "ad4m://any".to_string()
     } else {
         format!(
-            "literal://string:{}",
+            "literal:string:{}",
             urlencoding::encode(&flow.flowable.to_string())
         )
     };
@@ -185,7 +185,7 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
         links.push(Link {
             source: flow_uri.clone(),
             predicate: Some("ad4m://startAction".to_string()),
-            target: format!("literal://string:{}", urlencoding::encode(&actions_json)),
+            target: format!("literal:string:{}", urlencoding::encode(&actions_json)),
         });
     }
 
@@ -211,14 +211,14 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
         links.push(Link {
             source: state_uri.clone(),
             predicate: Some("ad4m://stateName".to_string()),
-            target: format!("literal://string:{}", urlencoding::encode(&state.name)),
+            target: format!("literal:string:{}", urlencoding::encode(&state.name)),
         });
 
         // State value
         links.push(Link {
             source: state_uri.clone(),
             predicate: Some("ad4m://stateValue".to_string()),
-            target: format!("literal://number:{}", state.value),
+            target: format!("literal:number:{}", state.value),
         });
 
         // State check pattern
@@ -227,7 +227,7 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
         links.push(Link {
             source: state_uri.clone(),
             predicate: Some("ad4m://stateCheck".to_string()),
-            target: format!("literal://string:{}", urlencoding::encode(&check_json)),
+            target: format!("literal:string:{}", urlencoding::encode(&check_json)),
         });
     }
 
@@ -259,7 +259,7 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
             source: transition_uri.clone(),
             predicate: Some("ad4m://actionName".to_string()),
             target: format!(
-                "literal://string:{}",
+                "literal:string:{}",
                 urlencoding::encode(&transition.action_name)
             ),
         });
@@ -285,7 +285,7 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
             links.push(Link {
                 source: transition_uri.clone(),
                 predicate: Some("ad4m://transitionActions".to_string()),
-                target: format!("literal://string:{}", urlencoding::encode(&actions_json)),
+                target: format!("literal:string:{}", urlencoding::encode(&actions_json)),
             });
         }
     }
@@ -305,7 +305,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
     let shape_uri = format!("{}{}Shape", namespace, class_name);
 
     // Create name mapping for class lookup (needed by isSubjectInstance)
-    let name_mapping = format!("literal://string:shacl://{}", class_name);
+    let name_mapping = format!("literal:string:shacl://{}", class_name);
 
     links.push(Link {
         source: "ad4m://self".to_string(),
@@ -354,7 +354,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         links.push(Link {
             source: shape_uri.clone(),
             predicate: Some("ad4m://constructor".to_string()),
-            target: format!("literal://string:{}", constructor_json),
+            target: format!("literal:string:{}", constructor_json),
         });
     }
 
@@ -365,7 +365,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         links.push(Link {
             source: shape_uri.clone(),
             predicate: Some("ad4m://destructor".to_string()),
-            target: format!("literal://string:{}", destructor_json),
+            target: format!("literal:string:{}", destructor_json),
         });
     }
 
@@ -418,7 +418,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("sh://minCount".to_string()),
-                target: format!("literal://{}^^xsd:integer", min_count),
+                target: format!("literal:{}^^xsd:integer", min_count),
             });
         }
 
@@ -426,7 +426,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("sh://maxCount".to_string()),
-                target: format!("literal://{}^^xsd:integer", max_count),
+                target: format!("literal:{}^^xsd:integer", max_count),
             });
         }
 
@@ -434,7 +434,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://writable".to_string()),
-                target: format!("literal://{}", writable),
+                target: format!("literal:{}", writable),
             });
         }
 
@@ -442,7 +442,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://resolveLanguage".to_string()),
-                target: format!("literal://string:{}", resolve_lang),
+                target: format!("literal:string:{}", resolve_lang),
             });
         }
 
@@ -465,7 +465,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://local".to_string()),
-                target: format!("literal://{}", local),
+                target: format!("literal:{}", local),
             });
         }
 
@@ -476,7 +476,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://setter".to_string()),
-                target: format!("literal://string:{}", setter_json),
+                target: format!("literal:string:{}", setter_json),
             });
         }
 
@@ -486,7 +486,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://adder".to_string()),
-                target: format!("literal://string:{}", adder_json),
+                target: format!("literal:string:{}", adder_json),
             });
         }
 
@@ -496,7 +496,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://remover".to_string()),
-                target: format!("literal://string:{}", remover_json),
+                target: format!("literal:string:{}", remover_json),
             });
         }
     }
@@ -641,7 +641,7 @@ mod tests {
         let shacl_json = r#"{
             "target_class": "recipe://Recipe",
             "constructor_actions": [
-                {"action": "addLink", "source": "this", "predicate": "recipe://name", "target": "literal://string:uninitialized"}
+                {"action": "addLink", "source": "this", "predicate": "recipe://name", "target": "literal:string:uninitialized"}
             ],
             "destructor_actions": [
                 {"action": "removeLink", "source": "this", "predicate": "recipe://name", "target": "*"}
@@ -672,7 +672,8 @@ mod tests {
         assert!(
             links.iter().any(|l| l.source == "recipe://RecipeShape"
                 && l.predicate == Some("ad4m://constructor".to_string())
-                && l.target.starts_with("literal://string:")),
+                && l.target.starts_with("literal://string:")
+                || l.target.starts_with("literal:string:")),
             "Missing constructor action link"
         );
 
@@ -680,7 +681,8 @@ mod tests {
         assert!(
             links.iter().any(|l| l.source == "recipe://RecipeShape"
                 && l.predicate == Some("ad4m://destructor".to_string())
-                && l.target.starts_with("literal://string:")),
+                && l.target.starts_with("literal://string:")
+                || l.target.starts_with("literal:string:")),
             "Missing destructor action link"
         );
 
@@ -688,7 +690,8 @@ mod tests {
         assert!(
             links.iter().any(|l| l.source == "recipe://Recipe.name"
                 && l.predicate == Some("ad4m://setter".to_string())
-                && l.target.starts_with("literal://string:")),
+                && l.target.starts_with("literal://string:")
+                || l.target.starts_with("literal:string:")),
             "Missing setter action link"
         );
 
@@ -698,7 +701,8 @@ mod tests {
                 .iter()
                 .any(|l| l.source == "recipe://Recipe.ingredients"
                     && l.predicate == Some("ad4m://adder".to_string())
-                    && l.target.starts_with("literal://string:")),
+                    && l.target.starts_with("literal://string:")
+                    || l.target.starts_with("literal:string:")),
             "Missing adder action link"
         );
 
@@ -708,7 +712,8 @@ mod tests {
                 .iter()
                 .any(|l| l.source == "recipe://Recipe.ingredients"
                     && l.predicate == Some("ad4m://remover".to_string())
-                    && l.target.starts_with("literal://string:")),
+                    && l.target.starts_with("literal://string:")
+                    || l.target.starts_with("literal:string:")),
             "Missing remover action link"
         );
     }
@@ -769,7 +774,8 @@ mod tests {
         assert!(
             links.iter().any(|l| l.source == "todo://TODOFlow"
                 && l.predicate == Some("ad4m://startAction".to_string())
-                && l.target.starts_with("literal://string:")),
+                && l.target.starts_with("literal://string:")
+                || l.target.starts_with("literal:string:")),
             "Missing start action link"
         );
 
@@ -827,7 +833,8 @@ mod tests {
 
         // Should be a literal with JSON, not "ad4m://any"
         assert!(
-            flowable_link.target.starts_with("literal://string:"),
+            flowable_link.target.starts_with("literal://string:")
+                || flowable_link.target.starts_with("literal:string:"),
             "Flowable should be encoded as literal JSON"
         );
         assert!(

@@ -3441,13 +3441,15 @@ impl PerspectiveInstance {
         })
     }
 
-    /// Parse actions JSON from a literal target (format: "literal://string:{json}")
+    /// Parse actions JSON from a literal target (format: "literal:string:{json}" or legacy "literal://string:{json}")
     fn parse_actions_from_literal(target: &str) -> Result<Vec<Command>, AnyError> {
-        let prefix = "literal://string:";
-        if !target.starts_with(prefix) {
+        let json_str = if let Some(rest) = target.strip_prefix("literal://string:") {
+            rest
+        } else if let Some(rest) = target.strip_prefix("literal:string:") {
+            rest
+        } else {
             return Err(anyhow!("Invalid literal format: {}", target));
-        }
-        let json_str = &target[prefix.len()..];
+        };
         // Decode URL-encoded characters if present
         let decoded = urlencoding::decode(json_str)
             .map(|s| s.to_string())
@@ -3515,14 +3517,18 @@ impl PerspectiveInstance {
             .get_links_by_predicate_and_source_suffix("ad4m://resolveLanguage", &prop_suffix)?;
 
         if let Some(link) = links.first() {
-            // Extract value from literal://string:{value}
-            let prefix = "literal://string:";
-            if link.data.target.starts_with(prefix) {
-                let encoded_value = &link.data.target[prefix.len()..];
-                let decoded = urlencoding::decode(encoded_value)
-                    .map_err(|e| anyhow!("Failed to decode resolve language value: {}", e))?;
-                return Ok(Some(decoded.to_string()));
-            }
+            // Extract value from literal:string:{value} or legacy literal://string:{value}
+            let encoded_value =
+                if let Some(rest) = link.data.target.strip_prefix("literal://string:") {
+                    rest
+                } else if let Some(rest) = link.data.target.strip_prefix("literal:string:") {
+                    rest
+                } else {
+                    return Ok(Some(link.data.target.clone()));
+                };
+            let decoded = urlencoding::decode(encoded_value)
+                .map_err(|e| anyhow!("Failed to decode resolve language value: {}", e))?;
+            return Ok(Some(decoded.to_string()));
         }
 
         Ok(None)

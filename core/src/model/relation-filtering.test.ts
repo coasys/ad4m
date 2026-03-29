@@ -170,7 +170,7 @@ describe("SHACL shape getter serialization", () => {
     // Verify getter link exists
     const getterLink = links.find(l => l.predicate === "ad4m://getter");
     expect(getterLink).toBeDefined();
-    expect(getterLink!.target).toBe(`literal://string:${testGetter}`);
+    expect(getterLink!.target).toBe(`literal:string:${testGetter}`);
 
     // Verify conditions link exists
     const conditionsLink = links.find(l => l.predicate === "ad4m://conformanceConditions");

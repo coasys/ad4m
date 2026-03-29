@@ -11,10 +11,11 @@ export class Literal {
     #url?: string
 
     public static fromUrl(url: string) {
-        if(!url || !url.startsWith("literal://"))
+        if(!url || !(url.startsWith("literal://") || url.startsWith("literal:")))
             throw new Error("Can't create Literal from non-literal URL")
         const l = new Literal()
-        l.#url = url
+        // Normalize legacy literal:// to literal:
+        l.#url = url.startsWith("literal://") ? "literal:" + url.substring(10) : url
         return l
     }
 
@@ -46,7 +47,7 @@ export class Literal {
                 break;
         }
 
-        return `literal://${encoded}`
+        return `literal:${encoded}`
     }
 
     get(): any {
@@ -56,11 +57,13 @@ export class Literal {
         if(!this.#url)
             throw new Error("Can't render empty Literal")
 
-        if(!this.#url.startsWith("literal://"))
+        if(!this.#url.startsWith("literal:"))
             throw new Error("Can't render Literal from non-literal URL")
         
-        // get rid of "literal://"
-        const body = this.#url.substring(10)
+        // Handle both literal:// (legacy) and literal: (new) prefixes
+        const body = this.#url.startsWith("literal://") 
+            ? this.#url.substring(10) 
+            : this.#url.substring(8)
         
 
         if(body.startsWith("string:")) {

@@ -35,10 +35,13 @@ fn parse_literal_fn(args: &[Term]) -> Option<Term> {
         Term::Literal(l) => l.value().to_string(),
         _ => return Some(args[0].clone()),
     };
-    if !val.starts_with("literal://") {
+    let body = if val.starts_with("literal://") {
+        &val[10..]
+    } else if val.starts_with("literal:") {
+        &val[8..]
+    } else {
         return Some(args[0].clone());
-    }
-    let body = &val[10..];
+    };
     if let Some(rest) = body.strip_prefix("string:") {
         let decoded = urlencoding::decode(rest).unwrap_or_else(|_| rest.into());
         Some(Literal::new_simple_literal(decoded.as_ref()).into())
@@ -214,7 +217,6 @@ fn to_iri(ad4m_uri: &str) -> String {
 /// URIs with other schemes (e.g. `did:key:...`, `urn:...`) are never
 /// transformed.
 const AD4M_SCHEMES: &[&str] = &[
-    "literal",
     "lang",
     "ad4m",
     "neighbourhood",
@@ -224,12 +226,11 @@ const AD4M_SCHEMES: &[&str] = &[
 ];
 
 /// Reverse of to_iri: transform opaque URI back to AD4M format.
-/// `literal:string:hello` → `literal://string:hello`
+/// e.g. `ad4m:self` → `ad4m://self`
 ///
-/// Since to_iri now only transforms URIs with invalid authority sections
-/// (primarily `literal://`), from_iri only restores those specific cases.
-/// URIs that already contain `://` were never transformed and pass through.
-/// Standard web schemes and other URI schemes (did:, urn:, test://) are unchanged.
+/// `literal:` URIs are NOT restored to `literal://` — the new canonical
+/// format is `literal:` (opaque URI, RFC 3986 compliant).
+/// Other AD4M schemes (ad4m, flux, etc.) are restored to `://` format.
 fn from_iri(iri: &str) -> String {
     // Standard web schemes already have ://
     if iri.starts_with("http://")
@@ -914,25 +915,34 @@ mod tests {
     fn test_iri_roundtrip() {
         let cases = vec![
             // Valid IRIs — should NOT be transformed (pass through as-is)
-            "flux://has_channel",
-            "ad4m://self",
-            "test://source",
-            "neighbourhood://QmABC123",
-            "lang://test-target",
-            "http://example.com/resource",
-            "https://schema.org/Person",
-            "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
-            // Invalid IRI — authority contains non-digit port, SHOULD be transformed
-            "literal://string:foo",
-            "literal://json:%7B%22key%22%3A%22value%22%7D",
+            ("flux://has_channel", "flux://has_channel"),
+            ("ad4m://self", "ad4m://self"),
+            ("test://source", "test://source"),
+            ("neighbourhood://QmABC123", "neighbourhood://QmABC123"),
+            ("lang://test-target", "lang://test-target"),
+            ("http://example.com/resource", "http://example.com/resource"),
+            ("https://schema.org/Person", "https://schema.org/Person"),
+            (
+                "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+                "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            ),
+            // literal:// (legacy) → to_iri → from_iri produces literal: (new canonical)
+            ("literal://string:foo", "literal:string:foo"),
+            (
+                "literal://json:%7B%22key%22%3A%22value%22%7D",
+                "literal:json:%7B%22key%22%3A%22value%22%7D",
+            ),
+            // literal: (new) passes through unchanged
+            ("literal:string:bar", "literal:string:bar"),
+            ("literal:number:42", "literal:number:42"),
         ];
-        for uri in cases {
-            let iri = to_iri(uri);
+        for (input, expected) in cases {
+            let iri = to_iri(input);
             let back = from_iri(&iri);
             assert_eq!(
-                back, uri,
-                "Roundtrip failed for '{}': to_iri='{}', from_iri='{}'",
-                uri, iri, back
+                back, expected,
+                "Failed for '{}': to_iri='{}', from_iri='{}'",
+                input, iri, back
             );
         }
 
@@ -1199,7 +1209,7 @@ mod tests {
         svc.add_link(&make_link(
             "flux://ch1",
             "flux://name",
-            "literal://string:general",
+            "literal:string:general",
         ))
         .unwrap();
         svc.add_link(&make_link(
@@ -1211,7 +1221,7 @@ mod tests {
         svc.add_link(&make_link(
             "flux://ch2",
             "flux://name",
-            "literal://string:random",
+            "literal:string:random",
         ))
         .unwrap();
         svc.add_link(&make_link(
@@ -1253,7 +1263,7 @@ mod tests {
     fn test_link_add_then_query_roundtrip() {
         let svc = new_service();
         let link = make_link(
-            "literal://string:hello",
+            "literal:string:hello",
             "flux://has_channel",
             "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
         );
@@ -1261,7 +1271,7 @@ mod tests {
 
         let results = svc
             .query_links(
-                Some("literal://string:hello"),
+                Some("literal:string:hello"),
                 Some("flux://has_channel"),
                 None,
                 None,
@@ -1270,7 +1280,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].data.source, "literal://string:hello");
+        assert_eq!(results[0].data.source, "literal:string:hello");
         assert_eq!(
             results[0].data.predicate.as_deref(),
             Some("flux://has_channel")

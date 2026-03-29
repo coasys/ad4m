@@ -1128,7 +1128,7 @@ export class PerspectiveProxy {
         const shapeLinks = shape.toLinks();
         
         // Create name -> shape mapping links
-        const nameMapping = Literal.fromUrl(`literal://string:shacl://${name}`);
+        const nameMapping = Literal.fromUrl(`literal:string:shacl://${name}`);
         const allLinks: Link[] = [
             ...shapeLinks.map(l => new Link({
                 source: l.source,
@@ -1156,7 +1156,7 @@ export class PerspectiveProxy {
      */
     async getShacl(name: string): Promise<SHACLShape | null> {
         // Find the shape URI from the name mapping
-        const nameMapping = Literal.fromUrl(`literal://string:shacl://${name}`);
+        const nameMapping = Literal.fromUrl(`literal:string:shacl://${name}`);
         const shapeUriLinks = await this.get(new LinkQuery({
             source: nameMapping.toUrl(),
             predicate: "ad4m://shacl_shape_uri"
@@ -1450,10 +1450,12 @@ export class PerspectiveProxy {
 
         for (const link of links) {
             if (shapePattern.test(link.data.source)) {
-                // Parse actions from literal://string:{json}
-                const prefix = "literal://string:";
-                if (link.data.target.startsWith(prefix)) {
-                    const jsonStr = link.data.target.slice(prefix.length);
+                // Parse actions from literal:string:{json} (or legacy literal://string:{json})
+                const legacyPrefix = "literal://string:";
+                const prefix = "literal:string:";
+                if (link.data.target.startsWith(legacyPrefix) || link.data.target.startsWith(prefix)) {
+                    const usedPrefix = link.data.target.startsWith(legacyPrefix) ? legacyPrefix : prefix;
+                    const jsonStr = link.data.target.slice(usedPrefix.length);
                     // Decode URL-encoded JSON if needed, with fallback for raw % characters
                     let decoded = jsonStr;
                     try { decoded = decodeURIComponent(jsonStr); } catch {}

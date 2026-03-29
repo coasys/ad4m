@@ -361,7 +361,7 @@ export function buildModelFromJSONSchema(
         // If property is required, ensure it has an initial value
         if (isRequired && !initial) {
           if (isObjectType(propertySchema)) {
-            initial = 'literal://json:{}';
+            initial = 'literal:json:{}';
           } else {
             initial = "ad4m://undefined";
           }

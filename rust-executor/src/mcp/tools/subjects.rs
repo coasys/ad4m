@@ -268,7 +268,7 @@ impl Ad4mMcpHandler {
 
         match self.get_readable_perspective(&p.perspective_id).await {
             Ok(perspective) => {
-                let name_literal = format!("literal://string:shacl://{}", p.class_name);
+                let name_literal = format!("literal:string:shacl://{}", p.class_name);
                 let shape_links = match perspective
                     .get_links(&LinkQuery {
                         source: Some(name_literal),

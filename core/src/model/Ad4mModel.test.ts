@@ -709,48 +709,48 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   });
 
   it("should handle id special field", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: "literal://test" } });
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: "literal:test" } });
     
-    expect(query).toContain("uri = 'literal://test'");
+    expect(query).toContain("uri = 'literal:test'");
   });
 
   it("should handle id special field with array (IN clause)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: ["literal://test1", "literal://test2"] } });
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: ["literal:test1", "literal:test2"] } });
     
-    expect(query).toContain("uri IN ['literal://test1', 'literal://test2']");
+    expect(query).toContain("uri IN ['literal:test1', 'literal:test2']");
   });
 
   it("should handle id special field with not operator", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { not: "literal://test" } } });
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { not: "literal:test" } } });
     
-    expect(query).toContain("uri != 'literal://test'");
+    expect(query).toContain("uri != 'literal:test'");
   });
 
   it("should handle id special field with not operator and array (NOT IN)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { not: ["literal://test1", "literal://test2"] } } });
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { not: ["literal:test1", "literal:test2"] } } });
     
-    expect(query).toContain("uri NOT IN ['literal://test1', 'literal://test2']");
+    expect(query).toContain("uri NOT IN ['literal:test1', 'literal:test2']");
   });
 
   it("should handle id special field with between operator", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { between: ["literal://a", "literal://z"] } } } as any);
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { between: ["literal:a", "literal:z"] } } } as any);
     
     const normalized = normalizeQuery(query);
-    expect(normalized).toContain("uri >= 'literal://a' AND uri <= 'literal://z'");
+    expect(normalized).toContain("uri >= 'literal:a' AND uri <= 'literal:z'");
   });
 
   it("should handle id special field with gt operator", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { gt: "literal://m" } } } as any);
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { gt: "literal:m" } } } as any);
     
-    expect(query).toContain("uri > 'literal://m'");
+    expect(query).toContain("uri > 'literal:m'");
   });
 
   it("should handle id special field with gte and lte operators", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { gte: "literal://a", lte: "literal://z" } } } as any);
+    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { gte: "literal:a", lte: "literal:z" } } } as any);
     
     const normalized = normalizeQuery(query);
-    expect(normalized).toContain("uri >= 'literal://a'");
-    expect(normalized).toContain("uri <= 'literal://z'");
+    expect(normalized).toContain("uri >= 'literal:a'");
+    expect(normalized).toContain("uri <= 'literal:z'");
   });
 
   it("should handle timestamp special field with gt operator (filtered in JavaScript)", async () => {
@@ -1080,7 +1080,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     const surrealResults = [
       {
         source: "node:abc123",
-        source_uri: "literal://recipe1",
+        source_uri: "literal:recipe1",
         links: [
           { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
@@ -1091,7 +1091,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
       },
       {
         source: "node:def456",
-        source_uri: "literal://recipe2",
+        source_uri: "literal:recipe2",
         links: [
           { predicate: "recipe://name", target: "Pizza", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
           { predicate: "recipe://rating", target: "4", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
@@ -1123,7 +1123,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     const surrealResults = [
       {
         source: "node:abc123",
-        source_uri: "literal://recipe1",
+        source_uri: "literal:recipe1",
         links: [
           { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
@@ -1154,7 +1154,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     const surrealResults = [
       {
         source: "node:abc123",
-        source_uri: "literal://recipe1",
+        source_uri: "literal:recipe1",
         links: [
           { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
@@ -1199,7 +1199,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     const surrealResults = [
       {
         source: "node:abc123",
-        source_uri: "literal://recipe1",
+        source_uri: "literal:recipe1",
         links: [
           { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
@@ -1221,7 +1221,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
   it("should use Prolog when useSurrealDB is false in findAll()", async () => {
     const prologResults = [{
       AllInstances: [
-        ["literal://recipe1", [["name", "Pasta"]], [["ingredients", ["pasta"]]], "2023-01-01T00:00:00Z", "did:key:alice"]
+        ["literal:recipe1", [["name", "Pasta"]], [["ingredients", ["pasta"]]], "2023-01-01T00:00:00Z", "did:key:alice"]
       ],
       TotalCount: 1
     }];
@@ -1239,7 +1239,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     const surrealResults = [
       {
         source: "node:abc123",
-        source_uri: "literal://recipe1",
+        source_uri: "literal:recipe1",
         links: [
           { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
@@ -1262,7 +1262,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     const surrealResults = [
       {
         source: "node:abc123",
-        source_uri: "literal://recipe1",
+        source_uri: "literal:recipe1",
         links: [
           { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
@@ -1287,7 +1287,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     // mock 5 recipe sources
     const surrealResults = Array.from({ length: 5 }, (_, i) => ({
       source: `node:abc${i+1}`,
-      source_uri: `literal://recipe${i+1}`,
+      source_uri: `literal:recipe${i+1}`,
       links: [
         { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
         { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
@@ -1318,7 +1318,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     const surrealResults = [
       {
         source: "node:abc123",
-        source_uri: "literal://recipe1",
+        source_uri: "literal:recipe1",
         links: [
           { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
@@ -1343,7 +1343,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
   it("should use Prolog when useSurrealDB(false) in ModelQueryBuilder.get()", async () => {
     const prologResults = [{
       AllInstances: [
-        ["literal://recipe1", [["name", "Pasta"]], [["ingredients", ["pasta"]]], "2023-01-01T00:00:00Z", "did:key:alice"]
+        ["literal:recipe1", [["name", "Pasta"]], [["ingredients", ["pasta"]]], "2023-01-01T00:00:00Z", "did:key:alice"]
       ],
       TotalCount: 1
     }];
@@ -1364,7 +1364,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     // count() counts the number of rows returned by the query (one row per source)
     const surrealResults = Array.from({ length: 3 }, (_, i) => ({
       source: `node:abc${i+1}`,
-      source_uri: `literal://recipe${i+1}`,
+      source_uri: `literal:recipe${i+1}`,
       links: [
         { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
         { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
@@ -1386,7 +1386,7 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     const surrealResults = [
       {
         source: "node:abc123",
-        source_uri: "literal://recipe1",
+        source_uri: "literal:recipe1",
         links: [
           { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
@@ -1440,7 +1440,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     // Mock SurrealDB results: 5 recipes with ratings 1, 2, 3, 4, 5
     const surrealResults = Array.from({ length: 5 }, (_, i) => ({
       source: `node:abc${i+1}`,
-      source_uri: `literal://recipe${i+1}`,
+      source_uri: `literal:recipe${i+1}`,
       links: [
         { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
         { predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
@@ -1463,7 +1463,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     // Mock SurrealDB results: 5 recipes with ratings 1, 2, 3, 4, 5
     const surrealResults = Array.from({ length: 5 }, (_, i) => ({
       source: `node:abc${i+1}`,
-      source_uri: `literal://recipe${i+1}`,
+      source_uri: `literal:recipe${i+1}`,
       links: [
         { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
         { predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
@@ -1486,7 +1486,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     // Mock SurrealDB results: 5 recipes with different timestamps
     const surrealResults = Array.from({ length: 5 }, (_, i) => ({
       source: `node:abc${i+1}`,
-      source_uri: `literal://recipe${i+1}`,
+      source_uri: `literal:recipe${i+1}`,
       links: [
         { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
         { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
@@ -1510,7 +1510,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     // Mock SurrealDB results: 5 recipes with different timestamps
     const surrealResults = Array.from({ length: 5 }, (_, i) => ({
       source: `node:abc${i+1}`,
-      source_uri: `literal://recipe${i+1}`,
+      source_uri: `literal:recipe${i+1}`,
       links: [
         { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
         { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
@@ -1540,7 +1540,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     const surrealResults = [
       ...Array.from({ length: 3 }, (_, i) => ({
         source: `node:abc${i+1}`,
-        source_uri: `literal://recipe${i+1}`,
+        source_uri: `literal:recipe${i+1}`,
         links: [
           { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
@@ -1548,7 +1548,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
       })),
       ...Array.from({ length: 2 }, (_, i) => ({
         source: `node:def${i+4}`,
-        source_uri: `literal://recipe${i+4}`,
+        source_uri: `literal:recipe${i+4}`,
         links: [
           { predicate: "recipe://name", target: `Recipe ${i+4}`, author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" }
@@ -1572,7 +1572,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     // Mock SurrealDB results: 5 recipes with ratings 1, 2, 3, 4, 5
     const surrealResults = Array.from({ length: 5 }, (_, i) => ({
       source: `node:abc${i+1}`,
-      source_uri: `literal://recipe${i+1}`,
+      source_uri: `literal:recipe${i+1}`,
       links: [
         { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
         { predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
@@ -1601,7 +1601,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     // Mock SurrealDB results: 5 recipes with different timestamps
     const surrealResults = Array.from({ length: 5 }, (_, i) => ({
       source: `node:abc${i+1}`,
-      source_uri: `literal://recipe${i+1}`,
+      source_uri: `literal:recipe${i+1}`,
       links: [
         { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
         { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
@@ -1821,9 +1821,9 @@ describe("SPARQL IRI formatting", () => {
     expect(query).toContain("<ad4m://test123>");
   });
 
-  it("wraps literal:// URIs in angle brackets", () => {
-    const query = buildSPARQLGetDataQuery("literal://string:foo");
-    expect(query).toContain("<literal://string:foo>");
+  it("wraps literal: URIs in angle brackets", () => {
+    const query = buildSPARQLGetDataQuery("literal:string:foo");
+    expect(query).toContain("<literal:string:foo>");
   });
 
   it("wraps flux:// URIs in angle brackets", () => {

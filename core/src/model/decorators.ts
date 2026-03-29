@@ -523,7 +523,7 @@ export function Model(opts: ModelConfig) {
  * Properties are optional by default. When a model instance is created without
  * providing a value for an optional property, no link is added to the graph.
  * Set `required: true` explicitly when a property must always be present (this
- * also adds a `"literal://string:uninitialized"` sentinel as the initial value
+ * also adds a `"literal:string:uninitialized"` sentinel as the initial value
  * so that the SDNA constructor creates a placeholder link).
  * 
  * @example
@@ -562,7 +562,7 @@ export function Model(opts: ModelConfig) {
  * @param {PropertyOptions} opts - Property configuration
  * @param {string} opts.through - The predicate URI for the property
  * @param {boolean} [opts.required=false] - Whether the property is required (adds query filters and sentinel initial value)
- * @param {string} [opts.initial] - Initial value (defaults to "literal://string:uninitialized" when required)
+ * @param {string} [opts.initial] - Initial value (defaults to "literal:string:uninitialized" when required)
  * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
@@ -575,7 +575,7 @@ export function Property(opts: PropertyOptions) {
         required,
         readOnly: opts.readOnly ?? false,
         resolveLanguage: opts.resolveLanguage ?? "literal",
-        initial: opts.initial ?? (required ? "literal://string:uninitialized" : undefined),
+        initial: opts.initial ?? (required ? "literal:string:uninitialized" : undefined),
     });
 }
 

@@ -175,8 +175,8 @@ pub async fn load_class_properties_with_uri(
     // Try both URL-encoded and raw formats (Flux uses raw, Rust Literal encodes)
     let encoded = ad4m_client::literal::Literal::from_string(format!("shacl://{}", class_name))
         .to_url()
-        .unwrap_or_else(|_| format!("literal://string:shacl://{}", class_name));
-    let raw = format!("literal://string:shacl://{}", class_name);
+        .unwrap_or_else(|_| format!("literal:string:shacl://{}", class_name));
+    let raw = format!("literal:string:shacl://{}", class_name);
     let mut shape_links = match perspective
         .get_links(&LinkQuery {
             source: Some(encoded),
@@ -327,6 +327,7 @@ pub async fn load_class_properties_with_uri(
                 let raw = links[0].data.target.clone();
                 Some(
                     raw.strip_prefix("literal://string:")
+                        .or_else(|| raw.strip_prefix("literal:string:"))
                         .unwrap_or(&raw)
                         .to_string(),
                 )
@@ -358,8 +359,14 @@ pub async fn load_class_properties_with_uri(
         {
             Ok(links) if !links.is_empty() => {
                 let target = &links[0].data.target;
-                let prefix = "literal://string:";
-                if target.starts_with(prefix) {
+                let prefix_legacy = "literal://string:";
+                let prefix = "literal:string:";
+                if target.starts_with(prefix_legacy) {
+                    let encoded_value = &target[prefix_legacy.len()..];
+                    urlencoding::decode(encoded_value)
+                        .ok()
+                        .map(|v| v.to_string())
+                } else if target.starts_with(prefix) {
                     let encoded_value = &target[prefix.len()..];
                     urlencoding::decode(encoded_value)
                         .ok()

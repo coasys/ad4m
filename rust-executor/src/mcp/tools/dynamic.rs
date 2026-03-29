@@ -428,7 +428,7 @@ impl Ad4mMcpHandler {
                         }
                     })
                     .collect();
-                format!("literal://string:{}", random_id)
+                format!("literal:string:{}", random_id)
             }
         };
 
@@ -868,6 +868,7 @@ impl Ad4mMcpHandler {
                         let raw = links[0].data.target.clone();
                         Some(
                             raw.strip_prefix("literal://string:")
+                                .or_else(|| raw.strip_prefix("literal:string:"))
                                 .unwrap_or(&raw)
                                 .to_string(),
                         )
@@ -1434,7 +1435,9 @@ impl Ad4mMcpHandler {
         };
 
         // Find and remove the link with matching target
-        let target = if value.starts_with("literal://") || value.contains("://") {
+        let target = if (value.starts_with("literal://") || value.starts_with("literal:"))
+            || value.contains("://")
+        {
             value.clone()
         } else {
             Self::encode_literal(&value)
