@@ -56,6 +56,18 @@ fn notification_pool_name(uuid: &str) -> String {
     format!("notification_{}", uuid)
 }
 
+fn is_sparql_query(query: &str) -> bool {
+    let trimmed = query.trim();
+    trimmed.starts_with("SELECT")
+        || trimmed.starts_with("select")
+        || trimmed.starts_with("ASK")
+        || trimmed.starts_with("ask")
+        || trimmed.starts_with("CONSTRUCT")
+        || trimmed.starts_with("construct")
+        || trimmed.starts_with("DESCRIBE")
+        || trimmed.starts_with("describe")
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub enum SdnaType {
     SubjectClass,
@@ -3928,10 +3940,14 @@ impl PerspectiveInstance {
         } else {
             crate::agent::AgentContext::main_agent()
         };
-        let initial_result = self
-            .prolog_query_subscription_with_context(query.clone(), &agent_context)
-            .await?;
-        let result_string = prolog_resolution_to_string(initial_result);
+        let result_string = if is_sparql_query(&query) {
+            self.sparql_query(query.clone())?
+        } else {
+            let initial_result = self
+                .prolog_query_subscription_with_context(query.clone(), &agent_context)
+                .await?;
+            prolog_resolution_to_string(initial_result)
+        };
 
         let subscribed_query = SubscribedQuery {
             query,
@@ -4034,26 +4050,37 @@ impl PerspectiveInstance {
                 } else {
                     crate::agent::AgentContext::main_agent()
                 };
-                if let Ok(result) = self_clone
-                    .prolog_query_subscription_with_context(query_string, &agent_context)
-                    .await
-                {
-                    let result_string = prolog_resolution_to_string(result);
-                    // Compare with stored last_result only now, avoiding the clone earlier
-                    let mut queries = self_clone.subscribed_queries.lock().await;
-                    if let Some(stored_query) = queries.get_mut(&id) {
-                        if result_string != stored_query.last_result {
-                            //log::info!("Query {} has changed: {}", id, result_string);
-                            // Release lock before sending update
-                            drop(queries);
-                            self_clone
-                                .send_subscription_update(id.clone(), result_string.clone(), None)
-                                .await;
-                            // Re-acquire lock to update the result
-                            let mut queries = self_clone.subscribed_queries.lock().await;
-                            if let Some(stored_query) = queries.get_mut(&id) {
-                                stored_query.last_result = result_string;
-                            }
+                let result_string = if is_sparql_query(&query_string) {
+                    match self_clone.sparql_query(query_string) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            log::error!("SPARQL subscription query failed: {}", e);
+                            return;
+                        }
+                    }
+                } else {
+                    match self_clone
+                        .prolog_query_subscription_with_context(query_string, &agent_context)
+                        .await
+                    {
+                        Ok(result) => prolog_resolution_to_string(result),
+                        Err(_) => return,
+                    }
+                };
+                // Compare with stored last_result only now, avoiding the clone earlier
+                let mut queries = self_clone.subscribed_queries.lock().await;
+                if let Some(stored_query) = queries.get_mut(&id) {
+                    if result_string != stored_query.last_result {
+                        //log::info!("Query {} has changed: {}", id, result_string);
+                        // Release lock before sending update
+                        drop(queries);
+                        self_clone
+                            .send_subscription_update(id.clone(), result_string.clone(), None)
+                            .await;
+                        // Re-acquire lock to update the result
+                        let mut queries = self_clone.subscribed_queries.lock().await;
+                        if let Some(stored_query) = queries.get_mut(&id) {
+                            stored_query.last_result = result_string;
                         }
                     }
                 }
@@ -4094,16 +4121,8 @@ impl PerspectiveInstance {
     }
 
     async fn subscribed_queries_loop(&self) {
-        // Prolog subscriptions only make sense in Simple and Pooled modes
-        // In SdnaOnly mode, link queries don't work, only SDNA queries
-        // In Disabled mode, prolog is disabled entirely
-        if PROLOG_MODE == PrologMode::SdnaOnly || PROLOG_MODE == PrologMode::Disabled {
-            log::debug!(
-                "Prolog subscription loop disabled in {:?} mode",
-                PROLOG_MODE
-            );
-            return;
-        }
+        // Note: the subscription loop must run even when Prolog is disabled,
+        // because SPARQL subscriptions don't use Prolog at all.
 
         let mut log_counter = 0;
         const LOG_INTERVAL: u32 = 300; // Log every ~60 seconds (300 * 200ms)
