@@ -29,14 +29,8 @@ describe("Literal", () => {
         expect(Literal.fromUrl(testUrl).get()).toBe(testString)
     })
 
-    it("accepts legacy literal:// URLs for backward compatibility", () => {
-        expect(Literal.fromUrl("literal://string:hello").get()).toBe("hello")
-        expect(Literal.fromUrl("literal://number:42").get()).toBe(42)
-        expect(Literal.fromUrl("literal://json:%7B%22a%22%3A1%7D").get()).toStrictEqual({a: 1})
-    })
-
-    it("normalizes legacy literal:// to literal: in toUrl()", () => {
-        const l = Literal.fromUrl("literal://string:hello")
-        expect(l.toUrl()).toBe("literal:string:hello")
+    it("rejects legacy literal:// URLs", () => {
+        expect(() => Literal.fromUrl("literal://string:hello")).toThrow("literal:// format is no longer supported")
+        expect(() => Literal.fromUrl("literal://number:42")).toThrow("literal:// format is no longer supported")
     })
 })

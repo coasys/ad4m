@@ -25,17 +25,14 @@ pub struct Literal {
 
 impl Literal {
     pub fn from_url(url: String) -> Result<Self> {
-        // Accept both legacy literal:// and new literal: prefix
-        if url.starts_with("literal://") || url.starts_with("literal:") {
-            // Normalize legacy literal:// to literal:
-            let normalized = if url.starts_with("literal://") {
-                format!("literal:{}", &url[10..])
-            } else {
-                url
-            };
+        if url.starts_with("literal://") {
+            Err(anyhow!(
+                "literal:// format is no longer supported. Use literal: instead."
+            ))
+        } else if url.starts_with("literal:") {
             Ok(Self {
                 value: None,
-                url: Some(normalized),
+                url: Some(url),
             })
         } else {
             Err(anyhow!("Not a literal URL"))
@@ -85,10 +82,7 @@ impl Literal {
 
     pub fn parse_url(&self) -> Result<LiteralValue> {
         if let Some(url) = &self.url {
-            // Handle both literal: (new) and literal:// (legacy, normalized on input)
-            let body = if url.starts_with("literal://") {
-                &url[10..]
-            } else if url.starts_with("literal:") {
+            let body = if url.starts_with("literal:") {
                 &url[8..]
             } else {
                 return Err(anyhow!("Not a literal URL"));
@@ -228,14 +222,8 @@ mod test {
     }
 
     #[test]
-    fn backward_compat_legacy_literal_urls() {
-        // Legacy literal:// URLs should still parse correctly
-        let literal = super::Literal::from_url("literal://string:hello".into()).unwrap();
-        assert_eq!(
-            literal.get().unwrap(),
-            super::LiteralValue::String("hello".into())
-        );
-        // And normalize to literal: format
-        assert_eq!(literal.to_url().unwrap(), "literal:string:hello");
+    fn rejects_legacy_literal_urls() {
+        // Legacy literal:// URLs are no longer accepted
+        assert!(super::Literal::from_url("literal://string:hello".into()).is_err());
     }
 }

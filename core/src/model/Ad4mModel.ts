@@ -344,7 +344,7 @@ export class Ad4mModel {
    * const recipe = new Recipe(perspective);
    * 
    * // Create with specific base expression
-   * const recipe = new Recipe(perspective, "literal://...");
+   * const recipe = new Recipe(perspective, "literal:...");
    * ```
    */
   constructor(perspective: PerspectiveProxy, baseExpression?: string) {
@@ -1313,7 +1313,7 @@ export class Ad4mModel {
     // Get resolve language from metadata (replaces Prolog query)
     let resolveLanguage = metadata.resolveLanguage;
 
-    // Skip storing empty/null/undefined values to avoid invalid empty literals (e.g. literal://string:)
+    // Skip storing empty/null/undefined values to avoid invalid empty literals (e.g. literal:string:)
     if (value === undefined || value === null || value === "") {
       return;
     }

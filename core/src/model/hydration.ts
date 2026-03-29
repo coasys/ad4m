@@ -131,7 +131,7 @@ export async function hydratePropertyValue(
       propMeta.resolveLanguage != null &&
       propMeta.resolveLanguage !== 'literal' &&
       typeof target === 'string' &&
-      !target.startsWith('literal://') && !target.startsWith('literal:')
+      !target.startsWith('literal:')
     ) {
       try {
         const expression = await perspective.getExpression(target);
@@ -146,7 +146,7 @@ export async function hydratePropertyValue(
     else if (
       propMeta.resolveLanguage === 'literal' &&
       typeof target === 'string' &&
-      (target.startsWith('literal://') || target.startsWith('literal:'))
+      (target.startsWith('literal:'))
     ) {
       try {
         const parsed = Literal.fromUrl(target).get();

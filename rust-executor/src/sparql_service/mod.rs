@@ -35,9 +35,7 @@ fn parse_literal_fn(args: &[Term]) -> Option<Term> {
         Term::Literal(l) => l.value().to_string(),
         _ => return Some(args[0].clone()),
     };
-    let body = if val.starts_with("literal://") {
-        &val[10..]
-    } else if val.starts_with("literal:") {
+    let body = if val.starts_with("literal:") {
         &val[8..]
     } else {
         return Some(args[0].clone());
@@ -78,55 +76,6 @@ fn strip_html_fn(args: &[Term]) -> Option<Term> {
     Some(Literal::new_simple_literal(&result).into())
 }
 
-/// Transform AD4M-style URIs in angle brackets within a SPARQL query string.
-/// Converts `<scheme://path>` to `<scheme:path>` for non-standard schemes,
-/// making them valid IRIs that the SPARQL parser will accept.
-/// Standard schemes (http, https, ftp, ws, wss) are left unchanged.
-fn transform_sparql_iris(query: &str) -> String {
-    let mut result = String::with_capacity(query.len());
-    let bytes = query.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'<' {
-            // Find the closing >
-            if let Some(end) = query[i + 1..].find('>') {
-                let iri_content = &query[i + 1..i + 1 + end];
-                // Only transform if it contains :// and is not a standard scheme
-                let transformed = to_iri(iri_content);
-                result.push('<');
-                result.push_str(&transformed);
-                result.push('>');
-                i = i + 1 + end + 1;
-            } else {
-                result.push(bytes[i] as char);
-                i += 1;
-            }
-        } else if bytes[i] == b'"' {
-            // Skip string literals
-            result.push('"');
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    result.push(bytes[i] as char);
-                    result.push(bytes[i + 1] as char);
-                    i += 2;
-                } else if bytes[i] == b'"' {
-                    result.push('"');
-                    i += 1;
-                    break;
-                } else {
-                    result.push(bytes[i] as char);
-                    i += 1;
-                }
-            }
-        } else {
-            result.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    result
-}
-
 /// Validates that a SPARQL query is read-only (no INSERT/DELETE/DROP/CLEAR/CREATE/LOAD)
 pub fn validate_readonly_query(query: &str) -> Result<(), Error> {
     let upper = query.to_uppercase();
@@ -156,116 +105,12 @@ pub fn validate_readonly_query(query: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// Transform an AD4M URI into a valid RDF IRI.
-/// Most AD4M URIs (e.g., `ad4m://self`, `flux://has_channel`, `test://source`)
-/// are already valid IRIs and pass through unchanged.
-///
-/// Only URIs that would fail strict IRI parsing are transformed:
-/// specifically `literal://TYPE:VALUE` where the colon after TYPE triggers
-/// invalid port parsing (RFC 3986 §3.2.3: port = *DIGIT).
-///
-/// The transform strips `://` → `:` making it an opaque URI (`literal:string:hello`)
-/// which is always valid. Standard schemes (http, https, etc.) are never transformed.
-fn to_iri(ad4m_uri: &str) -> String {
-    // Don't transform standard web schemes
-    if ad4m_uri.starts_with("http://")
-        || ad4m_uri.starts_with("https://")
-        || ad4m_uri.starts_with("ftp://")
-        || ad4m_uri.starts_with("ws://")
-        || ad4m_uri.starts_with("wss://")
-    {
-        return ad4m_uri.to_string();
-    }
-    // Only transform if the URI contains :// AND would be invalid as an IRI.
-    // The main offender is literal://TYPE:VALUE where TYPE:VALUE has a colon
-    // that triggers port parsing (port must be *DIGIT).
-    // We detect this by checking: after the //, is there a colon followed by
-    // a non-digit (or non-slash, non-empty) before any slash?
-    if let Some(pos) = ad4m_uri.find("://") {
-        let after_authority_start = &ad4m_uri[pos + 3..];
-        // Find the authority portion (up to first / or end of string)
-        let authority = match after_authority_start.find('/') {
-            Some(slash_pos) => &after_authority_start[..slash_pos],
-            None => after_authority_start,
-        };
-        // Check if authority contains a colon (host:port pattern)
-        if let Some(colon_pos) = authority.find(':') {
-            let port_part = &authority[colon_pos + 1..];
-            // If the "port" part is non-empty and not all digits, it's invalid
-            if !port_part.is_empty() && !port_part.chars().all(|c| c.is_ascii_digit()) {
-                // Also check for spaces or other invalid chars
-                let scheme = &ad4m_uri[..pos];
-                let rest = &ad4m_uri[pos + 3..];
-                return format!("{}:{}", scheme, rest);
-            }
-        }
-        // Also check for spaces (never valid in IRIs)
-        if authority.contains(' ') {
-            let scheme = &ad4m_uri[..pos];
-            let rest = &ad4m_uri[pos + 3..];
-            return format!("{}:{}", scheme, rest);
-        }
-    }
-    // URI is valid as-is — pass through unchanged
-    ad4m_uri.to_string()
-}
-
-/// AD4M-specific schemes that use `://` format.
-/// `to_iri` strips `://` → `:` for these; `from_iri` restores it.
-/// Standard web schemes (http, https, ftp, ws, wss) already use `://`
-/// and are passed through unchanged by both functions.
-/// URIs with other schemes (e.g. `did:key:...`, `urn:...`) are never
-/// transformed.
-const AD4M_SCHEMES: &[&str] = &[
-    "lang",
-    "ad4m",
-    "neighbourhood",
-    "flux",
-    "social-context",
-    "perspective",
-];
-
-/// Reverse of to_iri: transform opaque URI back to AD4M format.
-/// e.g. `ad4m:self` → `ad4m://self`
-///
-/// `literal:` URIs are NOT restored to `literal://` — the new canonical
-/// format is `literal:` (opaque URI, RFC 3986 compliant).
-/// Other AD4M schemes (ad4m, flux, etc.) are restored to `://` format.
-fn from_iri(iri: &str) -> String {
-    // Standard web schemes already have ://
-    if iri.starts_with("http://")
-        || iri.starts_with("https://")
-        || iri.starts_with("ftp://")
-        || iri.starts_with("ws://")
-        || iri.starts_with("wss://")
-    {
-        return iri.to_string();
-    }
-    // If it already has ://, it wasn't transformed — pass through
-    if iri.contains("://") {
-        return iri.to_string();
-    }
-    // Find scheme:path and restore :// only for known AD4M schemes
-    if let Some(pos) = iri.find(':') {
-        let scheme = &iri[..pos];
-        if AD4M_SCHEMES.contains(&scheme) {
-            let rest = &iri[pos + 1..];
-            format!("{}://{}", scheme, rest)
-        } else {
-            iri.to_string()
-        }
-    } else {
-        iri.to_string()
-    }
-}
-
 /// Build the direct triple (source, predicate, target as IRIs) for a link.
-/// Transforms AD4M URIs to valid RDF IRIs using opaque URI format.
 fn make_direct_triple(link: &DecoratedLinkExpression) -> (NamedNode, NamedNode, NamedNode) {
-    let source_iri = NamedNode::new_unchecked(to_iri(&link.data.source));
+    let source_iri = NamedNode::new_unchecked(&link.data.source);
     let predicate_val = link.data.predicate.as_deref().unwrap_or("");
-    let predicate_iri = NamedNode::new_unchecked(to_iri(predicate_val));
-    let target_iri = NamedNode::new_unchecked(to_iri(&link.data.target));
+    let predicate_iri = NamedNode::new_unchecked(predicate_val);
+    let target_iri = NamedNode::new_unchecked(&link.data.target);
     (source_iri, predicate_iri, target_iri)
 }
 
@@ -412,9 +257,9 @@ impl SparqlService {
         until_date: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
-        let source_node = source.map(|s| NamedNode::new_unchecked(to_iri(s)));
-        let predicate_node = predicate.map(|p| NamedNode::new_unchecked(to_iri(p)));
-        let target_node = target.map(|t| NamedNode::new_unchecked(to_iri(t)));
+        let source_node = source.map(|s| NamedNode::new_unchecked(s));
+        let predicate_node = predicate.map(|p| NamedNode::new_unchecked(p));
+        let target_node = target.map(|t| NamedNode::new_unchecked(t));
 
         let s_ref = source_node.as_ref().map(|n| n.as_ref().into());
         let p_ref = predicate_node.as_ref().map(|n| n.as_ref());
@@ -433,15 +278,15 @@ impl SparqlService {
 
             // Skip non-IRI subjects (RDF-star annotation triples have quoted triple subjects)
             let (src_raw, src) = match &quad.subject {
-                Subject::NamedNode(n) => (n.as_str().to_string(), from_iri(n.as_str())),
+                Subject::NamedNode(n) => (n.as_str().to_string(), n.as_str().to_string()),
                 _ => continue,
             };
             let (pred_raw, pred) = (
                 quad.predicate.as_str().to_string(),
-                from_iri(quad.predicate.as_str()),
+                quad.predicate.as_str().to_string(),
             );
             let (tgt_raw, tgt) = match &quad.object {
-                Term::NamedNode(n) => (n.as_str().to_string(), from_iri(n.as_str())),
+                Term::NamedNode(n) => (n.as_str().to_string(), n.as_str().to_string()),
                 _ => continue,
             };
 
@@ -600,12 +445,12 @@ impl SparqlService {
         solution: &oxigraph::sparql::QuerySolution,
     ) -> Option<DecoratedLinkExpression> {
         let source = match solution.get("source")? {
-            Term::NamedNode(n) => from_iri(n.as_str()),
+            Term::NamedNode(n) => n.as_str().to_string(),
             _ => return None,
         };
         let predicate = match solution.get("predicate")? {
             Term::NamedNode(n) => {
-                let s = from_iri(n.as_str());
+                let s = n.as_str().to_string();
                 if s.is_empty() {
                     None
                 } else {
@@ -615,7 +460,7 @@ impl SparqlService {
             _ => return None,
         };
         let target = match solution.get("target")? {
-            Term::NamedNode(n) => from_iri(n.as_str()),
+            Term::NamedNode(n) => n.as_str().to_string(),
             _ => return None,
         };
 
@@ -667,14 +512,12 @@ impl SparqlService {
     }
 
     /// Execute an arbitrary read-only SPARQL SELECT query, returning a JSON string.
-    /// AD4M URIs in angle brackets are automatically transformed to valid RDF IRIs
-    /// (e.g., `<literal://string:foo>` → `<literal:string:foo>`).
+    /// All AD4M URIs are valid IRIs, so queries are passed through as-is.
     pub fn query(&self, query_string: &str) -> Result<String, Error> {
-        let transformed = transform_sparql_iris(query_string);
-        validate_readonly_query(&transformed)?;
+        validate_readonly_query(query_string)?;
 
         let options = self.query_options();
-        let results = self.store.query_opt(&transformed, options)?;
+        let results = self.store.query_opt(query_string, options)?;
 
         match results {
             QueryResults::Solutions(solutions) => {
@@ -690,7 +533,7 @@ impl SparqlService {
                     for var in &vars {
                         if let Some(term) = solution.get(var.as_str()) {
                             let val = match term {
-                                Term::NamedNode(n) => Value::String(from_iri(n.as_str())),
+                                Term::NamedNode(n) => Value::String(n.as_str().to_string()),
                                 Term::Literal(l) => Value::String(l.value().to_string()),
                                 Term::BlankNode(b) => Value::String(format!("_:{}", b.as_str())),
                                 Term::Triple(_) => Value::Null,
@@ -909,55 +752,6 @@ mod tests {
             "Annotation triples still exist: {}",
             result
         );
-    }
-
-    #[test]
-    fn test_iri_roundtrip() {
-        let cases = vec![
-            // Valid IRIs — should NOT be transformed (pass through as-is)
-            ("flux://has_channel", "flux://has_channel"),
-            ("ad4m://self", "ad4m://self"),
-            ("test://source", "test://source"),
-            ("neighbourhood://QmABC123", "neighbourhood://QmABC123"),
-            ("lang://test-target", "lang://test-target"),
-            ("http://example.com/resource", "http://example.com/resource"),
-            ("https://schema.org/Person", "https://schema.org/Person"),
-            (
-                "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
-                "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
-            ),
-            // literal:// (legacy) → to_iri → from_iri produces literal: (new canonical)
-            ("literal://string:foo", "literal:string:foo"),
-            (
-                "literal://json:%7B%22key%22%3A%22value%22%7D",
-                "literal:json:%7B%22key%22%3A%22value%22%7D",
-            ),
-            // literal: (new) passes through unchanged
-            ("literal:string:bar", "literal:string:bar"),
-            ("literal:number:42", "literal:number:42"),
-        ];
-        for (input, expected) in cases {
-            let iri = to_iri(input);
-            let back = from_iri(&iri);
-            assert_eq!(
-                back, expected,
-                "Failed for '{}': to_iri='{}', from_iri='{}'",
-                input, iri, back
-            );
-        }
-
-        // Verify valid IRIs are NOT transformed by to_iri
-        assert_eq!(to_iri("flux://has_channel"), "flux://has_channel");
-        assert_eq!(to_iri("test://source"), "test://source");
-        assert_eq!(to_iri("ad4m://self"), "ad4m://self");
-        assert_eq!(
-            to_iri("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"),
-            "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
-        );
-
-        // Verify invalid IRIs ARE transformed by to_iri
-        assert_eq!(to_iri("literal://string:foo"), "literal:string:foo");
-        assert_eq!(to_iri("literal://number:3.14"), "literal:number:3.14");
     }
 
     #[test]

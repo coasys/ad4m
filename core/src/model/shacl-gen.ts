@@ -278,7 +278,7 @@ export function buildSHACL(
     }
 
     // Always set constructor and destructor actions on the shape, even
-    // when empty.  An empty array serialises to `literal://string:[]`
+    // when empty.  An empty array serialises to `literal:string:[]`
     // which the Rust executor parses as a valid (no-op) command list,
     // avoiding "No SHACL constructor found" errors for models whose
     // properties are all optional and have no @Flag.

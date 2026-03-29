@@ -634,7 +634,7 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "sh://minCount"
       );
       if (minCountLink) {
-        // Handle both formats: literal://5^^xsd:integer and literal://number:5
+        // Handle both formats: literal:5^^xsd:integer and literal:number:5
         let val = minCountLink.target.replace(/^literal:\/\/|^literal:/, '').replace(/\^\^.*$/, '');
         if (val.startsWith('number:')) val = val.substring(7);
         prop.minCount = parseInt(val);
@@ -644,7 +644,7 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "sh://maxCount"
       );
       if (maxCountLink) {
-        // Handle both formats: literal://5^^xsd:integer and literal://number:5
+        // Handle both formats: literal:5^^xsd:integer and literal:number:5
         let val = maxCountLink.target.replace(/^literal:\/\/|^literal:/, '').replace(/\^\^.*$/, '');
         if (val.startsWith('number:')) val = val.substring(7);
         prop.maxCount = parseInt(val);
@@ -661,7 +661,7 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "sh://minInclusive"
       );
       if (minInclusiveLink) {
-        // Handle both formats: literal://5 and literal://number:5
+        // Handle both formats: literal:5 and literal:number:5
         let val = minInclusiveLink.target.replace(/^literal:\/\/|^literal:/, '');
         if (val.startsWith('number:')) val = val.substring(7);
         prop.minInclusive = parseFloat(val);
@@ -671,7 +671,7 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "sh://maxInclusive"
       );
       if (maxInclusiveLink) {
-        // Handle both formats: literal://5 and literal://number:5
+        // Handle both formats: literal:5 and literal:number:5
         let val = maxInclusiveLink.target.replace(/^literal:\/\/|^literal:/, '');
         if (val.startsWith('number:')) val = val.substring(7);
         prop.maxInclusive = parseFloat(val);
@@ -689,7 +689,7 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "ad4m://local"
       );
       if (localLink) {
-        // Handle both formats: literal://true and literal://boolean:true
+        // Handle both formats: literal:true and literal:boolean:true
         let val = localLink.target.replace(/^literal:\/\/|^literal:/, '');
         if (val.startsWith('boolean:')) val = val.substring(8);
         prop.local = val === 'true';
@@ -699,7 +699,7 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "ad4m://writable"
       );
       if (writableLink) {
-        // Handle both formats: literal://true and literal://boolean:true
+        // Handle both formats: literal:true and literal:boolean:true
         let val = writableLink.target.replace(/^literal:\/\/|^literal:/, '');
         if (val.startsWith('boolean:')) val = val.substring(8);
         prop.writable = val === 'true';
