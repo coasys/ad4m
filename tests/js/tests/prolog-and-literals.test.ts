@@ -216,7 +216,7 @@ describe("Prolog + Literals", () => {
                 expect(stateLinks[0].data.target).to.equal("todo://ready")
 
                 // Check name mapping
-                const nameMappingUrl = Literal.fromUrl(`literal://string:shacl://Todo`).toUrl()
+                const nameMappingUrl = Literal.fromUrl(`literal:string:shacl://Todo`).toUrl()
                 const nameMappingLinks = await perspective!.get(new LinkQuery({source: nameMappingUrl}))
                 nameMappingLinks.forEach(link => console.log("  ", link.data.predicate, "->", link.data.target))
 
@@ -3488,7 +3488,7 @@ describe("Prolog + Literals", () => {
                     namespace: "test://",
                     propertyOptions: {
                         "status": { initial: "test://active" },
-                        "count": { initial: "literal://number:0" }
+                        "count": { initial: "literal:number:0" }
                     }
                 })
 
@@ -3501,7 +3501,7 @@ describe("Prolog + Literals", () => {
                 const sdna = TestClass.generateSDNA()
                 expect(sdna.sdna).to.include('constructor(')
                 expect(sdna.sdna).to.include('test://active')
-                expect(sdna.sdna).to.include('literal://number:0')
+                expect(sdna.sdna).to.include('literal:number:0')
             })
 
             it("should handle complex property types with full data storage and retrieval", async () => {

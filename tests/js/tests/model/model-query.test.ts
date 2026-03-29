@@ -472,7 +472,7 @@ describe("Ad4mModel — Query API", function () {
 
   it("findOne() returns null when no instance matches", async () => {
     const missing = await TestPost.findOne(perspective, {
-      where: { id: "literal://string:no-such-id" },
+      where: { id: "literal:string:no-such-id" },
     });
     expect(missing).to.be.null;
   });

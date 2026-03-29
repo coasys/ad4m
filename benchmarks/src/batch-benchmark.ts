@@ -102,11 +102,11 @@ async function seedFlat(uuid: string, count: number): Promise<number> {
     const batch: Array<{source: string, predicate: string, target: string}> = [];
     const end = Math.min(i + BATCH, count);
     for (let j = i; j < end; j++) {
-      const src = `literal://string:post-${j}`;
+      const src = `literal:string:post-${j}`;
       batch.push({ source: src, predicate: 'blog://entry_type', target: 'blog://post' });
-      batch.push({ source: src, predicate: 'blog://title', target: `literal://string:Title ${j}` });
-      batch.push({ source: src, predicate: 'blog://body', target: `literal://string:Body content for post ${j}` });
-      batch.push({ source: src, predicate: 'blog://published_at', target: `literal://string:2024-01-${(j % 28 + 1).toString().padStart(2, '0')}` });
+      batch.push({ source: src, predicate: 'blog://title', target: `literal:string:Title ${j}` });
+      batch.push({ source: src, predicate: 'blog://body', target: `literal:string:Body content for post ${j}` });
+      batch.push({ source: src, predicate: 'blog://published_at', target: `literal:string:2024-01-${(j % 28 + 1).toString().padStart(2, '0')}` });
     }
     await addLinks(uuid, batch);
     links += batch.length;
@@ -119,18 +119,18 @@ async function seedHierarchy(uuid: string, communities: number, channels: number
   const BATCH = 50;
   // Seed communities
   for (let c = 0; c < communities; c++) {
-    const csrc = `literal://string:community-${c}`;
+    const csrc = `literal:string:community-${c}`;
     await addLinks(uuid, [
       { source: csrc, predicate: 'flux://entry_type', target: 'flux://has_community' },
-      { source: csrc, predicate: 'rdf://name', target: `literal://string:Community ${c}` },
+      { source: csrc, predicate: 'rdf://name', target: `literal:string:Community ${c}` },
     ]);
     links += 2;
     // Seed channels
     for (let ch = 0; ch < channels; ch++) {
-      const chsrc = `literal://string:chan-${c}-${ch}`;
+      const chsrc = `literal:string:chan-${c}-${ch}`;
       await addLinks(uuid, [
         { source: chsrc, predicate: 'flux://entry_type', target: 'flux://has_channel' },
-        { source: chsrc, predicate: 'rdf://name', target: `literal://string:Channel ${ch}` },
+        { source: chsrc, predicate: 'rdf://name', target: `literal:string:Channel ${ch}` },
         { source: csrc, predicate: 'flux://has_channel', target: chsrc },
       ]);
       links += 3;
@@ -139,10 +139,10 @@ async function seedHierarchy(uuid: string, communities: number, channels: number
         const batch: Array<{source: string, predicate: string, target: string}> = [];
         const end = Math.min(m + BATCH, messages);
         for (let mi = m; mi < end; mi++) {
-          const msrc = `literal://string:msg-${c}-${ch}-${mi}`;
+          const msrc = `literal:string:msg-${c}-${ch}-${mi}`;
           batch.push({ source: msrc, predicate: 'flux://entry_type', target: 'flux://has_message' });
-          batch.push({ source: msrc, predicate: 'flux://body', target: `literal://string:Message ${mi} in channel ${ch}` });
-          batch.push({ source: msrc, predicate: 'flux://timestamp', target: `literal://number:${1700000000 + mi}` });
+          batch.push({ source: msrc, predicate: 'flux://body', target: `literal:string:Message ${mi} in channel ${ch}` });
+          batch.push({ source: msrc, predicate: 'flux://timestamp', target: `literal:number:${1700000000 + mi}` });
           batch.push({ source: chsrc, predicate: 'flux://has_message', target: msrc });
         }
         await addLinks(uuid, batch);
@@ -160,15 +160,15 @@ async function seedWide(uuid: string, count: number): Promise<number> {
     const batch: Array<{source: string, predicate: string, target: string}> = [];
     const end = Math.min(i + BATCH, count);
     for (let j = i; j < end; j++) {
-      const src = `literal://string:profile-${j}`;
+      const src = `literal:string:profile-${j}`;
       batch.push({ source: src, predicate: 'profile://type', target: 'profile://user' });
-      batch.push({ source: src, predicate: 'profile://name', target: `literal://string:User ${j}` });
-      batch.push({ source: src, predicate: 'profile://email', target: `literal://string:user${j}@example.com` });
-      batch.push({ source: src, predicate: 'profile://bio', target: `literal://string:Bio for user ${j}` });
-      batch.push({ source: src, predicate: 'profile://avatar', target: `literal://string:https://avatar.example.com/${j}.png` });
-      batch.push({ source: src, predicate: 'profile://location', target: `literal://string:City ${j % 50}` });
-      batch.push({ source: src, predicate: 'profile://website', target: `literal://string:https://user${j}.example.com` });
-      batch.push({ source: src, predicate: 'profile://joined_at', target: `literal://string:2024-${(j % 12 + 1).toString().padStart(2, '0')}-01` });
+      batch.push({ source: src, predicate: 'profile://name', target: `literal:string:User ${j}` });
+      batch.push({ source: src, predicate: 'profile://email', target: `literal:string:user${j}@example.com` });
+      batch.push({ source: src, predicate: 'profile://bio', target: `literal:string:Bio for user ${j}` });
+      batch.push({ source: src, predicate: 'profile://avatar', target: `literal:string:https://avatar.example.com/${j}.png` });
+      batch.push({ source: src, predicate: 'profile://location', target: `literal:string:City ${j % 50}` });
+      batch.push({ source: src, predicate: 'profile://website', target: `literal:string:https://user${j}.example.com` });
+      batch.push({ source: src, predicate: 'profile://joined_at', target: `literal:string:2024-${(j % 12 + 1).toString().padStart(2, '0')}-01` });
     }
     await addLinks(uuid, batch);
     links += batch.length;
@@ -416,7 +416,7 @@ async function runHierarchyBenchmark(label: string, communities: number, channel
   console.log(`   Seeded ${linkCount} links`);
 
   const results: TestResult[] = [];
-  const firstChan = `literal://string:chan-0-0`;
+  const firstChan = `literal:string:chan-0-0`;
 
   console.log('   Measuring...');
   results.push(await measure('LinkQuery (all)', () => queryLinks(uuid), iters));

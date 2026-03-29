@@ -23,8 +23,8 @@ async function createMessageInstance(
 ): Promise<void> {
   await client.addLink(uuid, instanceId, 'rdf://type', 'ad4m://Message')
   await client.addLink(uuid, instanceId, 'ad4m://has-author', author)
-  await client.addLink(uuid, instanceId, 'ad4m://has-content', `literal://string:${content}`)
-  await client.addLink(uuid, instanceId, 'ad4m://has-timestamp', `literal://number:${timestamp}`)
+  await client.addLink(uuid, instanceId, 'ad4m://has-content', `literal:string:${content}`)
+  await client.addLink(uuid, instanceId, 'ad4m://has-timestamp', `literal:number:${timestamp}`)
 }
 
 async function benchFindAll(
@@ -76,16 +76,16 @@ async function benchPropertyUpdate(
   warmup: number,
   rng: () => number,
 ): Promise<Stats> {
-  let prevLink = await client.addLink(uuid, instanceId, 'ad4m://has-content', `literal://string:pre-warmup`)
+  let prevLink = await client.addLink(uuid, instanceId, 'ad4m://has-content', `literal:string:pre-warmup`)
   for (let i = 0; i < warmup; i++) {
     await client.removeLink(uuid, prevLink)
-    prevLink = await client.addLink(uuid, instanceId, 'ad4m://has-content', `literal://string:updated-warmup-${i}`)
+    prevLink = await client.addLink(uuid, instanceId, 'ad4m://has-content', `literal:string:updated-warmup-${i}`)
   }
   const samples: number[] = []
   for (let i = 0; i < iterations; i++) {
     const end = timeIt()
     await client.removeLink(uuid, prevLink)
-    prevLink = await client.addLink(uuid, instanceId, 'ad4m://has-content', `literal://string:updated-${i}`)
+    prevLink = await client.addLink(uuid, instanceId, 'ad4m://has-content', `literal:string:updated-${i}`)
     samples.push(end())
   }
   return computeStats(samples)

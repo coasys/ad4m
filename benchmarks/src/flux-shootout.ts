@@ -138,7 +138,7 @@ const MESSAGE_BODIES = [
   'Heads up: maintenance window tonight from 10pm to 2am.',
 ];
 
-function lit(s: string) { return `literal://string:${s}`; }
+function lit(s: string) { return `literal:string:${s}`; }
 
 interface ScaleConfig {
   label: string;
@@ -280,7 +280,7 @@ async function nPlus1_fullCommunityLoad(uuid: string, communityUri: string) {
 
 // Batched SPARQL approach — uses direct triple model:
 // Each AD4M link is a direct triple <source> <predicate> <target> (all IRIs).
-// Values are IRIs like <literal://string:foo>, <flux://whatever>, etc.
+// Values are IRIs like <literal:string:foo>, <flux://whatever>, etc.
 
 async function sparql_communityOverview(uuid: string) {
   return await querySparql(uuid, `

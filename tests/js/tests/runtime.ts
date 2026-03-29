@@ -343,7 +343,7 @@ export default function runtimeTests(testContext: TestContext) {
             await notificationPerspective.add(new Link({
                 source: "message://1",
                 predicate: "rdf://content",
-                target: "literal://string:Hello%20world"
+                target: "literal:string:Hello%20world"
             }))
             await sleep(2000)
             expect(mockFunction.called).to.be.false
@@ -353,7 +353,7 @@ export default function runtimeTests(testContext: TestContext) {
             await notificationPerspective.add(new Link({
                 source: "message://2",
                 predicate: "rdf://content",
-                target: `literal://string:${encodeURIComponent(messageWithMention)}`
+                target: `literal:string:${encodeURIComponent(messageWithMention)}`
             }))
             await sleep(7000)
             expect(mockFunction.called).to.be.true

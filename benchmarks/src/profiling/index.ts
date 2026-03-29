@@ -172,7 +172,7 @@ async function seedFluxLikeData(): Promise<SeedResult> {
   let totalLinks = 0;
 
   // Create community root
-  const communityBase = `literal://string:community-${Date.now()}`;
+  const communityBase = `literal:string:community-${Date.now()}`;
   await gql(`mutation { perspectiveAddLink(uuid: "${uuid}", link: {
     source: "${communityBase}",
     predicate: "flux://entry_type",
@@ -183,13 +183,13 @@ async function seedFluxLikeData(): Promise<SeedResult> {
   await gql(`mutation { perspectiveAddLink(uuid: "${uuid}", link: {
     source: "${communityBase}",
     predicate: "rdf://name",
-    target: "literal://string:Test Community"
+    target: "literal:string:Test Community"
   }) { author } }`);
   totalLinks++;
 
   // Create channels
   for (let c = 0; c < NUM_CHANNELS; c++) {
-    const channelBase = `literal://string:channel-${c}-${Date.now()}`;
+    const channelBase = `literal:string:channel-${c}-${Date.now()}`;
     channelIds.push(channelBase);
 
     // Flag link
@@ -204,7 +204,7 @@ async function seedFluxLikeData(): Promise<SeedResult> {
     await gql(`mutation { perspectiveAddLink(uuid: "${uuid}", link: {
       source: "${channelBase}",
       predicate: "rdf://name",
-      target: "literal://string:Channel ${c}"
+      target: "literal:string:Channel ${c}"
     }) { author } }`);
     totalLinks++;
 
@@ -219,7 +219,7 @@ async function seedFluxLikeData(): Promise<SeedResult> {
     // Create messages
     const msgs: string[] = [];
     for (let m = 0; m < MSGS_PER_CHANNEL; m++) {
-      const msgBase = `literal://string:msg-${c}-${m}-${Date.now()}`;
+      const msgBase = `literal:string:msg-${c}-${m}-${Date.now()}`;
       msgs.push(msgBase);
 
       // Flag
@@ -234,7 +234,7 @@ async function seedFluxLikeData(): Promise<SeedResult> {
       await gql(`mutation { perspectiveAddLink(uuid: "${uuid}", link: {
         source: "${msgBase}",
         predicate: "msg://content",
-        target: "literal://string:Message ${m} in channel ${c} - Lorem ipsum dolor sit amet"
+        target: "literal:string:Message ${m} in channel ${c} - Lorem ipsum dolor sit amet"
       }) { author } }`);
       totalLinks++;
 
@@ -250,7 +250,7 @@ async function seedFluxLikeData(): Promise<SeedResult> {
       await gql(`mutation { perspectiveAddLink(uuid: "${uuid}", link: {
         source: "${msgBase}",
         predicate: "msg://timestamp",
-        target: "literal://number:${Date.now() - (MSGS_PER_CHANNEL - m) * 1000}"
+        target: "literal:number:${Date.now() - (MSGS_PER_CHANNEL - m) * 1000}"
       }) { author } }`);
       totalLinks++;
     }
@@ -525,11 +525,11 @@ async function phase4Scale(seed: SeedResult): Promise<TimingResult[]> {
   // 4c. Link add + immediate query (write-then-read latency)
   try {
     results.push(await measure('Write-then-read: addLink → SPARQL query', Math.min(ITERATIONS, 10), async () => {
-      const id = `literal://string:perf-${Date.now()}-${Math.random()}`;
+      const id = `literal:string:perf-${Date.now()}-${Math.random()}`;
       await gql(`mutation { perspectiveAddLink(uuid: "${uuid}", link: {
         source: "${id}",
         predicate: "perf://test",
-        target: "literal://string:value"
+        target: "literal:string:value"
       }) { author } }`);
       await gql(`query { perspectiveQuerySparql(uuid: "${uuid}", query: "SELECT ?o WHERE { <${id}> <perf://test> ?o }") }`);
     }));

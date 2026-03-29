@@ -997,7 +997,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
     // ========================================================================
     // 5b. Resolve Language — verify properties with resolve_language produce
-    //     proper literal://json: expressions instead of literal://string:
+    //     proper literal:json: expressions instead of literal:string:
     // ========================================================================
 
     describe("5b. Resolve Language for Boolean/String Properties", function() {
@@ -1017,7 +1017,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             console.log("channel_create with booleans:", resultStr);
         });
 
-        it("should store boolean properties as literal://json: expressions, not literal://string:", async function() {
+        it("should store boolean properties as literal:json: expressions, not literal:string:", async function() {
             // Query the raw links to verify the encoding format
             var links = await callMcpTool(MCP_BASE_URL,'query_links', {
                 perspective_id: perspectiveUuid,
@@ -1026,17 +1026,17 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             console.log("isConversation links:", JSON.stringify(links));
 
-            // The target should be a literal://json: expression (signed expression),
-            // NOT literal://string:false
+            // The target should be a literal:json: expression (signed expression),
+            // NOT literal:string:false
             var linksArr = Array.isArray(links) ? links : (links.links || []);
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("isConversation target:", target);
-            expect(target).to.not.include("literal://string:false");
-            expect(target).to.include("literal://json:");
+            expect(target).to.not.include("literal:string:false");
+            expect(target).to.include("literal:json:");
         });
 
-        it("should store string properties as literal://json: expressions when resolve_language is set", async function() {
+        it("should store string properties as literal:json: expressions when resolve_language is set", async function() {
             var links = await callMcpTool(MCP_BASE_URL,'query_links', {
                 perspective_id: perspectiveUuid,
                 source: resolveTestChannelAddr,
@@ -1048,8 +1048,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("name target:", target);
-            // Should be a signed expression (literal://json:) not a raw string literal
-            expect(target).to.include("literal://json:");
+            // Should be a signed expression (literal:json:) not a raw string literal
+            expect(target).to.include("literal:json:");
         });
 
         it("should resolve boolean values via channel_set_isconversation", async function() {
@@ -1070,8 +1070,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("Updated isConversation target:", target);
-            expect(target).to.not.include("literal://string:true");
-            expect(target).to.include("literal://json:");
+            expect(target).to.not.include("literal:string:true");
+            expect(target).to.include("literal:json:");
         });
 
         it("should resolve string values via set_subject_property with resolve_language", async function() {
@@ -1084,7 +1084,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             expect(result.success).to.be.true;
 
-            // Verify the stored link target uses literal://json: (signed expression)
+            // Verify the stored link target uses literal:json: (signed expression)
             var links = await callMcpTool(MCP_BASE_URL,'query_links', {
                 perspective_id: perspectiveUuid,
                 source: resolveTestChannelAddr,
@@ -1094,7 +1094,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("description target:", target);
-            expect(target).to.include("literal://json:");
+            expect(target).to.include("literal:json:");
         });
 
         it("should resolve boolean values via channel_update (dynamic update)", async function() {
@@ -1114,8 +1114,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(linksArr.length).to.be.greaterThan(0);
             var target = linksArr[0].data?.target || linksArr[0].target || '';
             console.log("Updated isPinned target:", target);
-            expect(target).to.not.include("literal://string:false");
-            expect(target).to.include("literal://json:");
+            expect(target).to.not.include("literal:string:false");
+            expect(target).to.include("literal:json:");
         });
     });
 
@@ -1134,7 +1134,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         });
 
         it("should add children to a parent address", async function() {
-            // Use a plain string parent — tool should auto-wrap as literal://string:
+            // Use a plain string parent — tool should auto-wrap as literal:string:
             parentAddr = "test-parent-" + Date.now();
             child1Addr = "test-child-1-" + Date.now();
             child2Addr = "test-child-2-" + Date.now();
@@ -1183,8 +1183,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         });
 
         it("should handle pre-wrapped literal URIs", async function() {
-            // If parent is already a literal://string: URI, should not double-wrap
-            var wrappedParent = "literal://string:pre-wrapped-parent-" + Date.now();
+            // If parent is already a literal:string: URI, should not double-wrap
+            var wrappedParent = "literal:string:pre-wrapped-parent-" + Date.now();
             child3Addr = "test-child-3-" + Date.now();
 
             var result = await callMcpTool(MCP_BASE_URL,'add_child', {
@@ -1300,7 +1300,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     data: {
                         source: "flux://profile",
                         predicate: "sioc://has_username",
-                        target: "literal://string:raw-link-user",
+                        target: "literal:string:raw-link-user",
                     },
                     proof: { key: "", signature: "", valid: false, invalid: true },
                 },
@@ -1310,7 +1310,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     data: {
                         source: "flux://profile",
                         predicate: "sioc://has_bio",
-                        target: "literal://string:Set via raw links",
+                        target: "literal:string:Set via raw links",
                     },
                     proof: { key: "", signature: "", valid: false, invalid: true },
                 },

@@ -58,10 +58,10 @@ async function main() {
 
   // 2. Batch add links
   const testLinks = [
-    { source: 'ad4m://entity1', predicate: 'test://name', target: 'literal://string:Alice' },
-    { source: 'ad4m://entity1', predicate: 'test://age', target: 'literal://string:30' },
-    { source: 'ad4m://entity2', predicate: 'test://name', target: 'literal://string:Bob' },
-    { source: 'ad4m://entity2', predicate: 'test://age', target: 'literal://string:25' },
+    { source: 'ad4m://entity1', predicate: 'test://name', target: 'literal:string:Alice' },
+    { source: 'ad4m://entity1', predicate: 'test://age', target: 'literal:string:30' },
+    { source: 'ad4m://entity2', predicate: 'test://name', target: 'literal:string:Bob' },
+    { source: 'ad4m://entity2', predicate: 'test://age', target: 'literal:string:25' },
     { source: 'ad4m://entity1', predicate: 'test://friend', target: 'ad4m://entity2' },
   ];
 
@@ -106,7 +106,7 @@ async function main() {
     );
     const rows = JSON.parse(d.perspectiveQuerySurrealDb);
     assert(rows.length === 1, `Expected 1 row, got ${rows.length}`);
-    assert(rows[0].name === 'literal://string:Alice', `Expected Alice, got ${rows[0].name}`);
+    assert(rows[0].name === 'literal:string:Alice', `Expected Alice, got ${rows[0].name}`);
   });
 
   await test('SPARQL join query works', async () => {
@@ -132,7 +132,7 @@ async function main() {
           author timestamp data { source predicate target } proof { valid key signature }
         }
       }`,
-      { uuid, link: { source: 'ad4m://temp', predicate: 'test://temp', target: 'literal://string:temp' } }
+      { uuid, link: { source: 'ad4m://temp', predicate: 'test://temp', target: 'literal:string:temp' } }
     );
     const addedLink = addResp.perspectiveAddLink;
 

@@ -52,7 +52,7 @@ async function ensureAgent() {
   else if (!s.isUnlocked) await gql(`mutation { agentUnlock(passphrase: "${PASSPHRASE}") { did } }`);
 }
 
-function lit(s: string) { return `literal://string:${s}`; }
+function lit(s: string) { return `literal:string:${s}`; }
 
 function generateLinks() {
   const links: Array<{ source: string; predicate: string; target: string }> = [];

@@ -28,7 +28,7 @@ async function populateStructured(client: GraphQLClient, uuid: string, rng: () =
         const msgId = generateId(rng, 'msg')
         await client.addLink(uuid, channelId, 'ad4m://has-message', msgId)
         await client.addLink(uuid, msgId, 'ad4m://has-author', `did:key:author-${Math.floor(rng() * 10)}`)
-        await client.addLink(uuid, msgId, 'ad4m://has-content', `literal://string:message-${m}`)
+        await client.addLink(uuid, msgId, 'ad4m://has-content', `literal:string:message-${m}`)
       }
     }
   }
