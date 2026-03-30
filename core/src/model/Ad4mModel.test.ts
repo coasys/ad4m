@@ -939,18 +939,10 @@ describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
   });
 
   it("should use SPARQL when engine is 'sparql' in ModelQueryBuilder.paginate()", async () => {
-    // ModelQueryBuilder.paginate passes result directly to instancesFromQueryResult (no groupSPARQLResults),
-    // so mock must be in grouped format
     const queryResults = [
-      {
-        source: "node:abc123",
-        source_uri: "literal:recipe1",
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-      }
+      { source: "literal:recipe1", predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
+      { source: "literal:recipe1", predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
+      { source: "literal:recipe1", predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
     ];
 
     mockPerspective.querySparql.mockResolvedValue(queryResults);
