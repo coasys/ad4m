@@ -869,6 +869,7 @@ export class Ad4mModel {
             const reverseLinks = await perspective.get(
               new LinkQuery({ predicate: relMeta.predicate, target: inst.id })
             );
+            console.log(`[REVERSE DEBUG] ${relName}: predicate=${relMeta.predicate}, target=${inst.id}, found=${reverseLinks.length} links, sources=${JSON.stringify(reverseLinks.map(l => l.data.source))}`);
             const sourceIds = reverseLinks
               .filter((l) => l.data.target === inst.id)
               .map((l) => l.data.source);
@@ -1056,6 +1057,7 @@ export class Ad4mModel {
       const sparqlQuery = await this.queryToSPARQL(perspective, query);
       const rawResult = await perspective.querySparql(sparqlQuery);
       const grouped = groupSPARQLResults(rawResult);
+      console.log(`[FINDALL DEBUG] ${this.name || 'Model'}: where=${JSON.stringify(query.where)}, rawRows=${rawResult?.length ?? 0}, grouped=${grouped.length}`);
       const { results } = await this.instancesFromQueryResult(perspective, query, grouped);
       return results;
     } else {
