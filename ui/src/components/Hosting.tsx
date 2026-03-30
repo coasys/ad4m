@@ -2698,18 +2698,28 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
                               />
                             </div>
 
-                            {/* Per-model token prices */}
-                            {modelNames.map((name) => (
-                              <div key={name} style={rowStyle}>
-                                <span style={labelStyle}>{name} <span style={{ color: "var(--j-color-ui-400)", fontSize: "14px" }}>(per token)</span></span>
-                                <PriceInput
-                                  initialValue={getPrice(name)}
-                                  placeholder={String(getDefault(name))}
-                                  style={inputStyle}
-                                  onCommit={(val) => commitPrice(name, val)}
-                                />
-                              </div>
-                            ))}
+                            {/* Per-model prices with correct unit label */}
+                            {modelNames.map((name) => {
+                              // Find the model object for this name
+                              const model = aiModels.find((m) => m.name === name);
+                              // If modelType or type is 'transcription', show per word
+                              const isTranscription = model && (model.modelType === 'transcription' || model.type === 'transcription' || (model.name && model.name.toLowerCase().includes('whisper')));
+                              return (
+                                <div key={name} style={rowStyle}>
+                                  <span style={labelStyle}>
+                                    {name} <span style={{ color: "var(--j-color-ui-400)", fontSize: "14px" }}>
+                                      ({isTranscription ? 'per word' : 'per token'})
+                                    </span>
+                                  </span>
+                                  <PriceInput
+                                    initialValue={getPrice(name)}
+                                    placeholder={String(getDefault(name))}
+                                    style={inputStyle}
+                                    onCommit={(val) => commitPrice(name, val)}
+                                  />
+                                </div>
+                              );
+                            })}
 
                             {modelNames.length === 0 && (
                               <div style={{ ...rowStyle, borderBottom: "none" }}>
