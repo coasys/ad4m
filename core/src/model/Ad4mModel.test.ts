@@ -555,39 +555,40 @@ describe("Ad4mModel.queryToSPARQL()", () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { gt: 3 } } });
     const norm = normalizeQuery(query);
     expect(norm).toContain("SELECT ?source");
-    // gt is now handled in SPARQL via JOIN + FILTER
+    // gt is now handled via JS post-filter — SPARQL just joins the property
     expect(norm).toContain("wTarget_cmp_rating");
-    expect(norm).toMatch(/>\s*"3"/);
   });
 
   it("should inject SPARQL FILTER for lt operator", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { lt: 5 } } });
     const norm = normalizeQuery(query);
     expect(norm).toContain("SELECT ?source");
-    expect(norm).toMatch(/<\s*"5"/);
+    // lt is now handled via JS post-filter
+    expect(norm).toContain("wTarget_cmp_rating");
   });
 
   it("should inject SPARQL FILTER for gte/lte combined", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { gte: 2, lte: 8 } } });
     const norm = normalizeQuery(query);
     expect(norm).toContain("SELECT ?source");
-    expect(norm).toMatch(/>=/);
-    expect(norm).toMatch(/<=/);
+    // gte/lte are now handled via JS post-filter
+    expect(norm).toContain("wTarget_cmp_rating");
   });
 
   it("should inject SPARQL FILTER for between operator", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { between: [1, 10] } } });
     const norm = normalizeQuery(query);
     expect(norm).toContain("SELECT ?source");
-    expect(norm).toMatch(/>=/);
-    expect(norm).toMatch(/<=/);
+    // between is now handled via JS post-filter
+    expect(norm).toContain("wTarget_cmp_rating");
   });
 
   it("should inject SPARQL FILTER for contains operator", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: { contains: "pasta" } } });
     const norm = normalizeQuery(query);
     expect(norm).toContain("SELECT ?source");
-    expect(norm).toContain("CONTAINS");
+    // contains is now handled via JS post-filter
+    expect(norm).toContain("wTarget_cmp_name");
   });
 
   // ---- Multiple property filters combined ----
@@ -1269,22 +1270,22 @@ describe("SPARQL comparison filters", () => {
   it("should generate gt filter", async () => {
     const mockPersp = { getLinks: jest.fn().mockResolvedValue([]) } as any;
     const query = await (Item as any).queryToSPARQL(mockPersp, { where: { price: { gt: 10 } } });
-    expect(query).toContain(">");
+    // gt is now JS post-filter — SPARQL just joins the property
     expect(query).toContain("item://price");
   });
 
   it("should generate between filter", async () => {
     const mockPersp = { getLinks: jest.fn().mockResolvedValue([]) } as any;
     const query = await (Item as any).queryToSPARQL(mockPersp, { where: { price: { between: [5, 20] } } });
-    expect(query).toContain(">=");
-    expect(query).toContain("<=");
+    // between is now JS post-filter
+    expect(query).toContain("item://price");
   });
 
   it("should generate contains filter", async () => {
     const mockPersp = { getLinks: jest.fn().mockResolvedValue([]) } as any;
     const query = await (Item as any).queryToSPARQL(mockPersp, { where: { name: { contains: "widget" } } });
-    expect(query).toContain("CONTAINS");
-    expect(query).toContain("widget");
+    // contains is now JS post-filter
+    expect(query).toContain("item://name");
   });
 });
 
