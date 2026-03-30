@@ -1408,10 +1408,10 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(config.names).to.include("wakerbot");
             expect(config.names).to.include("WakerTest");
             expect(config.query).to.be.a('string');
-            expect(config.query).to.include("fn::contains");
-            expect(config.query).to.include("fn::parse_literal");
-            // Query uses direct body-link matching (body predicate from SHACL), not two-hop traversal
-            expect(config.query).to.include("SELECT * FROM link WHERE");
+            expect(config.query).to.include("CONTAINS");
+            expect(config.query).to.include("LCASE");
+            // Query uses SPARQL with FILTER for mention matching
+            expect(config.query).to.include("SELECT ?source ?predicate ?target WHERE");
             console.log("SPARQL query:", config.query);
         });
 
@@ -1713,7 +1713,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 type: "mention" as const,
                 perspective: bogusId,
                 channel: "",
-                query: "SELECT * FROM link WHERE predicate = 'ad4m://has_child'",
+                query: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <ad4m://has_child>) }",
             });
 
             // Should not have woken or added to active subscriptions
@@ -1747,7 +1747,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     type: "mention" as const,
                     perspective: bogusId,
                     channel: "",
-                    query: "SELECT * FROM link WHERE predicate = 'ad4m://has_child'",
+                    query: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <ad4m://has_child>) }",
                 });
             } catch {
                 // Expected — subscribe should throw for non-existent perspective

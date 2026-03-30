@@ -157,7 +157,7 @@ export default function runtimeTests(testContext: TestContext) {
                 appName: "Test App Name",
                 appUrl: "Test App URL",
                 appIconPath: "Test App Icon Path",
-                trigger: "SELECT * FROM link WHERE predicate = 'test://never-matches'",
+                trigger: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <test://never-matches>) }",
                 perspectiveIds: ["Test Perspective ID"],
                 webhookUrl: "Test Webhook URL",
                 webhookAuth: "Test Webhook Auth"
@@ -217,7 +217,7 @@ export default function runtimeTests(testContext: TestContext) {
                 appName: "Test App Name",
                 appUrl: "Test App URL",
                 appIconPath: "Test App Icon Path",
-                trigger: "SELECT * FROM link WHERE predicate = 'test://updated'",
+                trigger: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <test://updated>) }",
                 perspectiveIds: ["Test Perspective ID"],
                 webhookUrl: "Test Webhook URL",
                 webhookAuth: "Test Webhook Auth"
@@ -250,7 +250,7 @@ export default function runtimeTests(testContext: TestContext) {
                 appName: "ADAM tests",
                 appUrl: "Test App URL",
                 appIconPath: "Test App Icon Path",
-                trigger: `SELECT source, target, predicate FROM link WHERE predicate = '${triggerPredicate}'`,
+                trigger: `SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <${triggerPredicate}>) }`,
                 perspectiveIds: [notificationPerspective.uuid],
                 webhookUrl: "Test Webhook URL",
                 webhookAuth: "Test Webhook Auth"
@@ -317,15 +317,7 @@ export default function runtimeTests(testContext: TestContext) {
                 appUrl: "https://flux.app",
                 appIconPath: "/flux-icon.png",
                 // Extract multiple data points from the match
-                trigger: `SELECT
-                    source as message_id,
-                    fn::parse_literal(target) as message_content,
-                    fn::strip_html(fn::parse_literal(target)) as plain_text,
-                    $agentDid as mentioned_agent,
-                    $perspectiveId as perspective_id
-                FROM link
-                WHERE predicate = 'rdf://content'
-                    AND fn::contains(fn::parse_literal(target), $agentDid)`,
+                trigger: `SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <rdf://content>) FILTER(CONTAINS(STR(?target), "${agentDid}")) }`,
                 perspectiveIds: [notificationPerspective.uuid],
                 webhookUrl: "https://test.webhook",
                 webhookAuth: "test-auth"
@@ -363,21 +355,13 @@ export default function runtimeTests(testContext: TestContext) {
             let triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
             expect(triggerMatch.length).to.equal(1)
 
-            // Verify all extracted data points
+            // Verify extracted data points (SPARQL returns source/predicate/target variable names)
             //@ts-ignore
-            expect(triggerMatch[0].message_id).to.equal("message://2")
+            expect(triggerMatch[0].source).to.equal("message://2")
             //@ts-ignore
-            expect(triggerMatch[0].message_content).to.include(agentDid)
+            expect(triggerMatch[0].predicate).to.equal("rdf://content")
             //@ts-ignore
-            expect(triggerMatch[0].message_content).to.include("<strong>")
-            //@ts-ignore
-            expect(triggerMatch[0].plain_text).to.include(agentDid)
-            //@ts-ignore
-            expect(triggerMatch[0].plain_text).to.not.include("<strong>")
-            //@ts-ignore
-            expect(triggerMatch[0].mentioned_agent).to.equal(agentDid)
-            //@ts-ignore
-            expect(triggerMatch[0].perspective_id).to.equal(notificationPerspective.uuid)
+            expect(triggerMatch[0].target).to.include(agentDid)
         })
 
         it("can export and import database", async () => {
