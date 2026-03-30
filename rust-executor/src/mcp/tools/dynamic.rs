@@ -428,7 +428,7 @@ impl Ad4mMcpHandler {
                         }
                     })
                     .collect();
-                format!("literal:string:{}", random_id)
+                format!("literal://string:{}", random_id)
             }
         };
 

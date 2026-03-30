@@ -170,8 +170,7 @@ export class WakerSubscriptionManager {
         for (const msgAddr of newMessages) {
           const parents: string[] = [];
           try {
-            const escaped = msgAddr.replace(/'/g, "\\'");
-            const parentQuery = `SELECT * FROM link WHERE predicate = 'ad4m://has_child' AND target = '${escaped}'`;
+            const parentQuery = `SELECT ?source WHERE { ?source <ad4m://has_child> <${msgAddr}> . }`;
             this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
             const parentResult = await this.perspectiveClient.querySparql(sub.perspective, parentQuery);
             if (Array.isArray(parentResult)) {
