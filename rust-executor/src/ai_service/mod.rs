@@ -1228,6 +1228,10 @@ impl AIService {
         let billing_email = user_email.clone();
         let billing_model_id = model_id.clone();
 
+        // Clone the streams map so the thread can remove itself on exit
+        let streams_map = self.transcription_streams.clone();
+        let stream_id_for_cleanup = stream_id.clone();
+
         thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
 
@@ -1335,6 +1339,13 @@ impl AIService {
                         }
                     } => {}
                 }
+            });
+
+            // Clean up the stream entry so feed calls get StreamNotFound
+            // instead of "receiver is gone" errors looping forever
+            rt.block_on(async {
+                streams_map.lock().await.remove(&stream_id_for_cleanup);
+                log::info!("Transcription stream {} cleaned up", stream_id_for_cleanup);
             });
         });
 
