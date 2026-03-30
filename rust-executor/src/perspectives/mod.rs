@@ -3,7 +3,7 @@ pub mod perspective_instance;
 pub mod sdna;
 pub mod shacl_parser;
 pub mod shacl_to_prolog;
-pub mod utils; // TODO: Remove this module after all users have migrated to SurrealDB
+pub mod utils;
 use crate::graphql::graphql_types::{
     LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveExpression, PerspectiveHandle,
     PerspectiveRemovedWithOwner, PerspectiveState, PerspectiveWithOwner,
@@ -30,7 +30,7 @@ lazy_static! {
         RwLock::new(HashMap::new());
 }
 
-/// Set the application data path for file-based SurrealDB storage
+/// Set the application data path for perspective storage
 ///
 /// This must be called before creating perspectives to enable file-based storage.
 /// Each perspective will create its own SPARQL (Oxigraph) store in memory.
@@ -47,6 +47,7 @@ pub fn set_app_data_path(path: String) {
 /// # Returns
 /// * `Some(String)` - The configured app data path if set
 /// * `None` - No app data path configured (will use in-memory storage)
+#[allow(dead_code)]
 fn get_app_data_path() -> Option<String> {
     APP_DATA_PATH.read().unwrap().clone()
 }
@@ -308,26 +309,6 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
 
     if let Some(ref instance) = removed_instance {
         instance.teardown_background_tasks().await;
-
-        // Clean up legacy SurrealDB/RocksDB directory for this perspective (if any)
-        if let Some(data_path) = get_app_data_path() {
-            let db_path =
-                std::path::Path::new(&data_path).join(format!("surrealdb_perspectives/{}", uuid));
-            if db_path.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&db_path) {
-                    log::warn!(
-                        "Failed to remove legacy SurrealDB directory for perspective {}: {}",
-                        uuid,
-                        e
-                    );
-                } else {
-                    log::debug!(
-                        "Cleaned up legacy SurrealDB directory for perspective {}",
-                        uuid
-                    );
-                }
-            }
-        }
 
         // Publish one removal event per owner so each user gets their own notification
         let handle = instance.persisted.lock().await.clone();
@@ -598,7 +579,7 @@ pub async fn import_perspective(
             .map_err(|e| format!("Failed to create perspective: {}", e))?;
     }
 
-    // Add all links directly to SurrealDB to preserve original authorship
+    // Add all links directly to SPARQL store to preserve original authorship
     let perspective = get_perspective(&instance.handle.uuid)
         .ok_or_else(|| "Perspective not found after creation".to_string())?;
 
@@ -616,11 +597,11 @@ pub async fn import_perspective(
         removals: vec![],
     };
 
-    // Write to SurrealDB
+    // Write to SPARQL store
     perspective
         .persist_link_diff(&diff)
         .await
-        .map_err(|e| format!("Failed to persist link diff to SurrealDB: {}", e))?;
+        .map_err(|e| format!("Failed to persist link diff to SPARQL store: {}", e))?;
 
     Ok(instance.handle)
 }

@@ -8,7 +8,7 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 
 /// A SHACL subject class with its properties and metadata.
 ///
-/// Contains enough information to construct SurrealQL subscription queries
+/// Contains enough information to construct SPARQL subscription queries
 /// and generate dynamic MCP tools without hardcoding type-specific predicates.
 #[derive(Debug, Clone)]
 pub struct ShaclClass {
@@ -42,7 +42,7 @@ pub struct ShaclProperty {
     pub max_count: Option<u32>,
     /// Node kind (e.g., "sh://IRI", "sh://Literal")
     pub node_kind: Option<String>,
-    /// Pre-computed SurrealQL getter expression for reading this property/relation.
+    /// Pre-computed getter expression for reading this property/relation.
     /// For relations with a target model, this encodes conformance filtering.
     pub getter: Option<String>,
     /// Target SHACL node shape URI (sh:class). When present, linked nodes

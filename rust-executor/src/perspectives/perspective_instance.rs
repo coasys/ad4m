@@ -772,7 +772,7 @@ impl PerspectiveInstance {
                 .collect(),
         };
 
-        // Write to SurrealDB (primary storage for links)
+        // Write to SPARQL store (primary storage for links)
         self.persist_link_diff(&decorated_diff).await?;
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
@@ -821,7 +821,7 @@ impl PerspectiveInstance {
 
             let _handle = self.persisted.lock().await.clone();
 
-            // Query SurrealDB instead of Rusqlite
+            // Query SPARQL store
             let decorated_link = self
                 .sparql_service
                 .get_link(
@@ -841,7 +841,7 @@ impl PerspectiveInstance {
         } else {
             let _handle = self.persisted.lock().await.clone();
 
-            // Query SurrealDB instead of Rusqlite
+            // Query SPARQL store
             if let Some(decorated_link) = self.sparql_service.get_link(
                 &link_expression.data.source,
                 link_expression.data.predicate.as_deref(),
@@ -858,7 +858,7 @@ impl PerspectiveInstance {
                 let decorated_diff =
                     DecoratedPerspectiveDiff::from_removals(vec![decorated_link_result.clone()]);
 
-                // Remove from SurrealDB (primary storage)
+                // Remove from SPARQL store (primary storage)
                 self.persist_link_diff(&decorated_diff).await?;
 
                 // Update both Prolog engines: subscription (immediate) + query (lazy)
@@ -978,14 +978,14 @@ impl PerspectiveInstance {
             )));
         }
 
-        // Store link in SurrealDB (no longer using Rusqlite for links)
+        // Store link in SPARQL store
         let diff = PerspectiveDiff::from_additions(vec![link_expression.clone()]);
         let decorated_link_expression =
             DecoratedLinkExpression::from((link_expression.clone(), status.clone()));
         let decorated_perspective_diff =
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
-        // Write to SurrealDB (primary storage for links)
+        // Write to SPARQL store (primary storage for links)
         self.persist_link_diff(&decorated_perspective_diff).await?;
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
@@ -1042,7 +1042,7 @@ impl PerspectiveInstance {
             let decorated_perspective_diff =
                 DecoratedPerspectiveDiff::from_additions(decorated_link_expressions.clone());
 
-            // Write to SurrealDB (primary storage for links)
+            // Write to SPARQL store (primary storage for links)
             self.persist_link_diff(&decorated_perspective_diff).await?;
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
@@ -1090,7 +1090,7 @@ impl PerspectiveInstance {
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
 
-        // Write to SurrealDB (primary storage for links)
+        // Write to SPARQL store (primary storage for links)
         self.persist_link_diff(&decorated_diff).await?;
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
@@ -1113,7 +1113,7 @@ impl PerspectiveInstance {
     ) -> Result<DecoratedLinkExpression, AnyError> {
         let handle = self.persisted.lock().await.clone();
 
-        // Query SurrealDB instead of Rusqlite
+        // Query SPARQL store
         let decorated_link_option = self.sparql_service.get_link(
             &old_link.data.source,
             old_link.data.predicate.as_deref(),
@@ -1168,7 +1168,7 @@ impl PerspectiveInstance {
                 vec![decorated_old_link.clone()],
             );
 
-            // Write to SurrealDB (primary storage for links)
+            // Write to SPARQL store (primary storage for links)
             self.persist_link_diff(&decorated_diff).await?;
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
@@ -1227,7 +1227,7 @@ impl PerspectiveInstance {
         // Filter to only existing links and collect their statuses
         let mut existing_links = Vec::new();
         for link in link_expressions {
-            // Query SurrealDB instead of Rusqlite
+            // Query SPARQL store
             if let Some(decorated_link) = self.sparql_service.get_link(
                 &link.data.source,
                 link.data.predicate.as_deref(),
@@ -1274,7 +1274,7 @@ impl PerspectiveInstance {
 
             let decorated_diff = DecoratedPerspectiveDiff::from_removals(decorated_links.clone());
 
-            // Remove from SurrealDB (primary storage)
+            // Remove from SPARQL store (primary storage)
             self.persist_link_diff(&decorated_diff).await?;
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
@@ -2318,271 +2318,9 @@ impl PerspectiveInstance {
         .await
     }
 
-    /// Executes a SurrealQL query against the perspective's SurrealDB cache
-    /// Returns results as JSON values for easy handling
-    ///
-    /// # Errors
-    /// Returns an error if the query fails to execute or contains invalid syntax.
-    /// Callers should handle errors appropriately rather than silently ignoring them.
-    /// SurrealDB has been removed. Returns an error directing users to SPARQL.
-    pub async fn surreal_query(&self, _query: String) -> Result<Vec<serde_json::Value>, AnyError> {
-        Err(anyhow!(
-            "SurrealDB has been removed. Use SPARQL queries instead (perspectiveQuerySparql)."
-        ))
-    }
-
     /// Execute a SPARQL query against this perspective's Oxigraph store
     pub fn sparql_query(&self, query: String) -> Result<String, deno_core::anyhow::Error> {
         self.sparql_service.query(&query)
-    }
-
-    /// Execute a notification trigger query against the SPARQL store.
-    /// Accepts both legacy SurrealQL queries (auto-converted) and native SPARQL queries.
-    pub async fn surreal_query_notification(
-        &self,
-        query: String,
-        _user_email: Option<String>,
-    ) -> Result<Vec<serde_json::Value>, AnyError> {
-        let sparql = if query.trim().to_uppercase().starts_with("SELECT")
-            && query.to_uppercase().contains("FROM LINK")
-        {
-            // Legacy SurrealQL: parse simple SELECT ... FROM link WHERE ... patterns
-            Self::surrealql_to_sparql(&query)?
-        } else {
-            // Assume it's already a SPARQL query
-            query
-        };
-
-        let result_json = self.sparql_service.query(&sparql)?;
-        let results: Vec<serde_json::Value> = serde_json::from_str(&result_json)?;
-        Ok(results)
-    }
-
-    /// Convert a simple SurrealQL `SELECT ... FROM link WHERE ...` query to SPARQL.
-    /// Supports conditions: field = 'value', field IN ['a', 'b'], ORDER BY, LIMIT.
-    /// Also supports fn::contains(...) patterns used in mention queries.
-    fn surrealql_to_sparql(surreal_query: &str) -> Result<String, AnyError> {
-        // Extract WHERE clause
-        let upper = surreal_query.to_uppercase();
-        let where_clause = if let Some(pos) = upper.find("WHERE ") {
-            let rest = &surreal_query[pos + 6..];
-            // Strip trailing ORDER BY / LIMIT
-            let end = rest
-                .to_uppercase()
-                .find(" ORDER BY")
-                .or_else(|| rest.to_uppercase().find(" LIMIT"))
-                .unwrap_or(rest.len());
-            rest[..end].trim().to_string()
-        } else {
-            String::new()
-        };
-
-        // Extract LIMIT
-        let limit = if let Some(pos) = upper.find("LIMIT ") {
-            let rest = &surreal_query[pos + 6..];
-            rest.trim()
-                .split_whitespace()
-                .next()
-                .and_then(|n| n.parse::<usize>().ok())
-        } else {
-            None
-        };
-
-        let mut filters = Vec::new();
-
-        if !where_clause.is_empty() {
-            // Parse conditions separated by AND
-            // Handle fn::contains patterns for mention queries
-            Self::parse_surrealql_conditions(&where_clause, &mut filters);
-        }
-
-        let filter_str = if filters.is_empty() {
-            String::new()
-        } else {
-            format!("\n  FILTER({})", filters.join(" && "))
-        };
-
-        let limit_str = if let Some(n) = limit {
-            format!("\nLIMIT {}", n)
-        } else {
-            String::new()
-        };
-
-        Ok(format!(
-            "SELECT ?source ?predicate ?target WHERE {{\n  ?source ?predicate ?target .\n  FILTER(isIRI(?source) && isIRI(?predicate)){}{}}}",
-            filter_str, limit_str
-        ))
-    }
-
-    /// Parse SurrealQL WHERE conditions into SPARQL FILTER expressions.
-    fn parse_surrealql_conditions(where_clause: &str, filters: &mut Vec<String>) {
-        // Handle OR groups (for mention queries with fn::contains)
-        // Also handle simple field = 'value' AND chains
-        // Split on AND (case-insensitive), but be careful with parenthesized OR groups
-        let parts = Self::split_and_conditions(where_clause);
-
-        for part in parts {
-            let trimmed = part.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            // fn::contains(...) pattern → SPARQL CONTAINS
-            if trimmed.contains("fn::contains") {
-                // This is a mention-style condition, possibly with OR
-                // Convert the whole thing to SPARQL CONTAINS filters
-                if let Some(filter) = Self::convert_contains_group(trimmed) {
-                    filters.push(filter);
-                }
-            } else if let Some(filter) = Self::convert_simple_condition(trimmed) {
-                filters.push(filter);
-            }
-        }
-    }
-
-    /// Split a WHERE clause on top-level AND keywords (respecting parentheses).
-    fn split_and_conditions(clause: &str) -> Vec<String> {
-        let mut parts = Vec::new();
-        let mut depth = 0;
-        let mut current = String::new();
-        let chars: Vec<char> = clause.chars().collect();
-        let mut i = 0;
-
-        while i < chars.len() {
-            match chars[i] {
-                '(' => {
-                    depth += 1;
-                    current.push('(');
-                }
-                ')' => {
-                    depth -= 1;
-                    current.push(')');
-                }
-                _ => {
-                    // Check for " AND " at depth 0
-                    if depth == 0 && i + 5 <= chars.len() {
-                        let slice: String = chars[i..i + 5].iter().collect();
-                        if slice.to_uppercase() == " AND " {
-                            parts.push(current.trim().to_string());
-                            current.clear();
-                            i += 5;
-                            continue;
-                        }
-                    }
-                    current.push(chars[i]);
-                }
-            }
-            i += 1;
-        }
-        if !current.trim().is_empty() {
-            parts.push(current.trim().to_string());
-        }
-        parts
-    }
-
-    /// Convert a simple SurrealQL condition like `predicate = 'value'` or
-    /// `predicate IN ['a', 'b']` to a SPARQL FILTER expression.
-    fn convert_simple_condition(condition: &str) -> Option<String> {
-        // field = 'value'
-        if let Some(eq_pos) = condition.find('=') {
-            let field = condition[..eq_pos].trim().to_lowercase();
-            let value = condition[eq_pos + 1..]
-                .trim()
-                .trim_matches('\'')
-                .trim_matches('"')
-                .to_string();
-            let var = match field.as_str() {
-                "source" => "?source",
-                "predicate" => "?predicate",
-                "target" => "?target",
-                _ => return None,
-            };
-            return Some(format!("STR({}) = \"{}\"", var, value));
-        }
-
-        // field IN ['a', 'b']
-        let upper = condition.to_uppercase();
-        if let Some(in_pos) = upper.find(" IN ") {
-            let field = condition[..in_pos].trim().to_lowercase();
-            let var = match field.as_str() {
-                "source" => "?source",
-                "predicate" => "?predicate",
-                "target" => "?target",
-                _ => return None,
-            };
-            // Extract values from [...]
-            let list_str = condition[in_pos + 4..].trim();
-            let inner = list_str.trim_start_matches('[').trim_end_matches(']');
-            let values: Vec<&str> = inner
-                .split(',')
-                .map(|v| v.trim().trim_matches('\''))
-                .collect();
-            let conditions: Vec<String> = values
-                .iter()
-                .map(|v| format!("STR({}) = \"{}\"", var, v))
-                .collect();
-            return Some(format!("({})", conditions.join(" || ")));
-        }
-
-        None
-    }
-
-    /// Convert fn::contains based mention conditions to SPARQL CONTAINS filters.
-    fn convert_contains_group(condition: &str) -> Option<String> {
-        // Extract individual fn::contains calls
-        let mut contains_filters = Vec::new();
-        let mut search_start = 0;
-
-        while let Some(pos) = condition[search_start..].find("fn::contains(") {
-            let abs_pos = search_start + pos;
-            // Find the matching closing paren
-            let after = &condition[abs_pos + 13..]; // after "fn::contains("
-            let mut depth = 1;
-            let mut end = 0;
-            for (i, ch) in after.char_indices() {
-                match ch {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = i;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            let args = &after[..end];
-            // args is like: string::lowercase(<string> fn::parse_literal(target)), 'term'
-            // We just need the search term and the field (target)
-            if let Some(comma) = args.rfind(',') {
-                let term = args[comma + 1..]
-                    .trim()
-                    .trim_matches('\'')
-                    .trim_matches('"');
-                // Determine the field - check if source/predicate/target appears
-                let field_part = &args[..comma].to_lowercase();
-                let var = if field_part.contains("target") {
-                    "?target"
-                } else if field_part.contains("source") {
-                    "?source"
-                } else if field_part.contains("predicate") {
-                    "?predicate"
-                } else {
-                    "?target" // default
-                };
-                contains_filters.push(format!("CONTAINS(LCASE(STR({})), \"{}\")", var, term));
-            }
-            search_start = abs_pos + 13 + end + 1;
-        }
-
-        if contains_filters.is_empty() {
-            None
-        } else if contains_filters.len() == 1 {
-            Some(contains_filters.into_iter().next().unwrap())
-        } else {
-            Some(format!("({})", contains_filters.join(" || ")))
-        }
     }
 
     pub(crate) async fn persist_link_diff(
@@ -2802,10 +2540,15 @@ impl PerspectiveInstance {
                 // Handle errors per-notification to prevent one user's DID failure from
                 // silencing all notifications. This can happen with orphaned notifications
                 // from deleted users or corrupted data.
-                match self
-                    .surreal_query_notification(n.trigger.clone(), n.user_email.clone())
-                    .await
-                {
+                match {
+                    let query = n.trigger.clone();
+                    let result_json = self.sparql_service.query(&query);
+                    match result_json {
+                        Ok(json) => serde_json::from_str::<Vec<serde_json::Value>>(&json)
+                            .map_err(|e| anyhow::anyhow!(e)),
+                        Err(e) => Err(e),
+                    }
+                } {
                     Ok(matches) => {
                         trigger_cache.insert(cache_key, matches.clone());
                         result_map.insert(n.clone(), matches);
@@ -3476,7 +3219,7 @@ impl PerspectiveInstance {
         class_name: &str,
         predicate: &str,
     ) -> Result<Option<Vec<Command>>, AnyError> {
-        // Query SurrealDB for links with the given predicate whose source ends with {ClassName}Shape
+        // Query SPARQL store for links with the given predicate whose source ends with {ClassName}Shape
         let shape_suffix = format!("{}Shape", class_name);
         let _uuid = self.persisted.lock().await.uuid.clone();
 
@@ -4322,7 +4065,7 @@ impl PerspectiveInstance {
             //let db_start = std::time::Instant::now();
             //log::info!("🔄 BATCH COMMIT: Starting DB operations for shared changes");
 
-            // Commit to link language (SurrealDB will be updated later via persist_link_diff)
+            // Commit to link language (SPARQL store will be updated later via persist_link_diff)
             if self.has_link_language().await {
                 //let link_lang_start = std::time::Instant::now();
                 //log::info!("🔄 BATCH COMMIT: Starting link language commit");
@@ -4345,7 +4088,7 @@ impl PerspectiveInstance {
             }
         }
 
-        // Create combined diff for prolog update, SurrealDB update, and return value
+        // Create combined diff for prolog update, SPARQL store update, and return value
         let combined_diff = DecoratedPerspectiveDiff {
             additions: [shared_diff.additions.clone(), local_diff.additions.clone()].concat(),
             removals: [shared_diff.removals.clone(), local_diff.removals.clone()].concat(),
@@ -5009,6 +4752,6 @@ mod tests {
 
     // ============================================================================
     // DOCUMENTATION EXAMPLES TESTS
-    // These tests verify all query examples from the SurrealDB documentation
+    // These tests verify query examples against the SPARQL backend
     // ============================================================================
 }

@@ -435,7 +435,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     // NOTE: load_system_languages() is called directly from Rust in
     // agent_generate/agent_unlock mutation resolvers.
 
-    // Set app data path for perspectives module (needed for file-based SurrealDB)
+    // Set app data path for perspectives module
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
 
     perspectives::initialize_from_db();

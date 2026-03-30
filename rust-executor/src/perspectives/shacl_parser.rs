@@ -62,7 +62,7 @@ pub struct PropertyShape {
     /// Remover action for collection properties
     #[serde(default)]
     pub remover: Vec<AD4MAction>,
-    /// Pre-computed SurrealQL getter expression for reading this relation/property.
+    /// Pre-computed getter expression for reading this relation/property.
     /// For relations with a target model, this encodes conformance filtering.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub getter: Option<String>,

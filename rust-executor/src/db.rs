@@ -1591,7 +1591,7 @@ impl Ad4mDb {
         Ok(links?)
     }
 
-    /// Check if a perspective's links have been migrated from Rusqlite to SurrealDB
+    /// Check if a perspective's links have been migrated from Rusqlite
     ///
     /// # Arguments
     /// * `perspective_uuid` - UUID of the perspective to check
@@ -1607,7 +1607,7 @@ impl Ad4mDb {
         Ok(count > 0)
     }
 
-    /// Mark a perspective as having been migrated from Rusqlite to SurrealDB
+    /// Mark a perspective as having been migrated from Rusqlite
     ///
     /// This function is idempotent - calling it multiple times for the same perspective is safe.
     ///
@@ -1624,7 +1624,7 @@ impl Ad4mDb {
 
     /// Delete all links for a perspective from Rusqlite storage
     ///
-    /// This should only be called after successfully migrating links to SurrealDB.
+    /// This should only be called after successfully migrating links.
     ///
     /// # Arguments
     /// * `perspective_uuid` - UUID of the perspective whose links should be deleted

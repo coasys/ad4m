@@ -2354,19 +2354,6 @@ impl Mutation {
         })
     }
 
-    /// DEPRECATED: SurrealDB has been removed.
-    async fn perspective_subscribe_surreal_query(
-        &self,
-        _context: &RequestContext,
-        _uuid: String,
-        _query: String,
-    ) -> FieldResult<QuerySubscription> {
-        Err(FieldError::from(
-            "SurrealDB has been removed. Use perspectiveSubscribeQuery with SPARQL instead."
-                .to_string(),
-        ))
-    }
-
     async fn perspective_keep_alive_query(
         &self,
         context: &RequestContext,
@@ -2381,16 +2368,6 @@ impl Mutation {
         let perspective = get_perspective_with_access_control(&uuid, context).await?;
         perspective.keepalive_query(subscription_id).await?;
         Ok(true)
-    }
-
-    /// DEPRECATED: SurrealDB has been removed.
-    async fn perspective_keep_alive_surreal_query(
-        &self,
-        _context: &RequestContext,
-        _uuid: String,
-        _subscription_id: String,
-    ) -> FieldResult<bool> {
-        Err(FieldError::from("SurrealDB has been removed.".to_string()))
     }
 
     async fn perspective_dispose_query_subscription(
@@ -2408,16 +2385,6 @@ impl Mutation {
         Ok(perspective
             .dispose_query_subscription(subscription_id)
             .await?)
-    }
-
-    /// DEPRECATED: SurrealDB has been removed.
-    async fn perspective_dispose_surreal_query_subscription(
-        &self,
-        _context: &RequestContext,
-        _uuid: String,
-        _subscription_id: String,
-    ) -> FieldResult<bool> {
-        Err(FieldError::from("SurrealDB has been removed.".to_string()))
     }
 
     async fn runtime_add_friends(

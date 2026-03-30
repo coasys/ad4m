@@ -649,24 +649,6 @@ impl Query {
         ))
     }
 
-    /// Query using SurrealDB — DEPRECATED: SurrealDB has been removed.
-    /// Returns an error directing users to use perspectiveQuerySparql instead.
-    async fn perspective_query_surreal_db(
-        &self,
-        context: &RequestContext,
-        _query: String,
-        uuid: String,
-    ) -> FieldResult<String> {
-        check_capability(
-            &context.capabilities,
-            &perspective_query_capability(vec![uuid.clone()]),
-        )?;
-
-        Err(FieldError::from(
-            "SurrealDB has been removed. Use perspectiveQuerySparql instead.".to_string(),
-        ))
-    }
-
     /// Query using SPARQL (Oxigraph) — the sole query backend.
     async fn perspective_query_sparql(
         &self,
