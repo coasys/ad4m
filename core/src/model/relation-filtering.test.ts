@@ -22,7 +22,7 @@ import {
   SHACLPropertyShape,
   ConformanceCondition,
 } from "../shacl/SHACLShape";
-import { compileWhereClause } from "./surreal-utils";
+import { compileWhereClause } from "./query-utils";
 
 // ============================================================================
 // Test models
@@ -93,7 +93,7 @@ describe("buildConformanceFilter()", () => {
     expect(reqCond!.predicate).toBe("test://name");
     expect(reqCond!.value).toBeUndefined();
 
-    // Getter string should be a SurrealQL expression
+    // Getter string should be a SPARQL expression
     expect(result!.getter).toContain("->link[WHERE predicate =");
     expect(result!.getter).toContain("test://has_flagged");
     expect(result!.getter).toContain("test://type");
@@ -574,7 +574,7 @@ describe("where clause validation", () => {
 });
 
 describe("where clause compilation", () => {
-  it("should compile where clause to SurrealQL getter", () => {
+  it("should compile where clause to SPARQL getter", () => {
     @Model({ name: "WhereTarget" })
     class WhereTarget extends Ad4mModel {
       @Property({ through: "test://status", required: true })
@@ -760,7 +760,7 @@ describe("where clause compilation", () => {
 // ============================================================================
 
 describe("compileWhereClause()", () => {
-  it("should compile simple equality to SurrealQL condition", () => {
+  it("should compile simple equality to SPARQL condition", () => {
     const conditions = compileWhereClause(
       { status: "active" },
       { properties: { status: { name: "status", predicate: "test://status", required: false, readOnly: false } }, relations: {}, className: "Test" }

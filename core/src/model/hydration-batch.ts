@@ -27,7 +27,7 @@ interface BatchRow {
 }
 
 /**
- * Grouped link data for one instance (same shape as SurrealDB grouped result).
+ * Grouped link data for one instance (same shape as SPARQL grouped result).
  */
 interface GroupedInstance {
   source_uri: string;

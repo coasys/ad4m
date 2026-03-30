@@ -71,8 +71,6 @@ export class QuerySubscriptionProxy {
     #initReject?: (reason?: any) => void;
     #initTimeoutId?: NodeJS.Timeout;
     #query: string;
-    /** @deprecated isSurrealDB is no longer used — all subscriptions route through SPARQL */
-    isSurrealDB: boolean = false;
 
     /** Creates a new query subscription
      * @param uuid - The UUID of the perspective
@@ -533,40 +531,16 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Executes a SurrealQL query against the perspective's link cache.
-     * This allows powerful SQL-like queries on the link data stored in SurrealDB.
+     * Executes a SPARQL query against the perspective's link cache.
+     * This allows powerful SQL-like queries on the link data stored in SPARQL.
      * 
      * **Security Note:** Only read-only queries (SELECT, RETURN, etc.) are permitted.
      * Mutating operations (DELETE, UPDATE, INSERT, CREATE, DROP, DEFINE, etc.) are
      * blocked for security reasons. Use the perspective's add/remove methods to modify links.
      * 
-     * @param query - SurrealQL query string (read-only operations only)
+     * @param query - SPARQL query string (read-only operations only)
      * @returns Query results as parsed JSON
      * 
-     * @deprecated SurrealDB has been removed. Use querySparql() instead.
-     * This method is kept for backward compatibility but will return an error from the executor.
-     * 
-     * @example
-     * ```typescript
-     * // Get all links
-     * const links = await perspective.querySurrealDB('SELECT * FROM link');
-     * 
-     * // Filter links by predicate
-     * const follows = await perspective.querySurrealDB(
-     *   "SELECT * FROM link WHERE predicate = 'follows'"
-     * );
-     * 
-     * // Complex aggregation query
-     * const stats = await perspective.querySurrealDB(
-     *   "SELECT predicate, count() as total FROM link GROUP BY predicate"
-     * );
-     * ```
-     */
-    async querySurrealDB(query: string): Promise<any> {
-        return await this.#client.querySurrealDB(this.#handle.uuid, query)
-    }
-
-    /**
      * Executes a SPARQL query against the perspective's RDF (Oxigraph) store.
      *
      * @param query - SPARQL query string
@@ -1616,7 +1590,7 @@ export class PerspectiveProxy {
         }
     }
     /**
-     * Generates a SurrealDB query to find instances based on class metadata.
+     * Generates a SPARQL query to find instances based on class metadata.
      */
     /**
      * Finds all instances matching subject class metadata by querying links.
@@ -1667,10 +1641,10 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Gets a property value using SurrealDB when Prolog fails.
+     * Gets a property value using SPARQL when Prolog fails.
      * This is used as a fallback in SdnaOnly mode where link data isn't in Prolog.
      */
-    async getPropertyValueViaSurreal(baseExpression: string, className: string, propertyName: string): Promise<any> {
+    async getPropertyValueViaSparql(baseExpression: string, className: string, propertyName: string): Promise<any> {
         const metadata = await this.getSubjectClassMetadataFromSDNA(className);
         if (!metadata) {
             return undefined;
@@ -1707,11 +1681,11 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Gets relation values using SurrealDB when Prolog fails.
+     * Gets relation values using SPARQL when Prolog fails.
      * This is used as a fallback in SdnaOnly mode where link data isn't in Prolog.
      * Note: This is used by Subject.ts (legacy pattern). Ad4mModel.ts uses getModelMetadata() instead.
      */
-    async getRelationValuesViaSurreal(baseExpression: string, className: string, relationName: string): Promise<any[]> {
+    async getRelationValuesViaSparql(baseExpression: string, className: string, relationName: string): Promise<any[]> {
         const metadata = await this.getSubjectClassMetadataFromSDNA(className);
         if (!metadata) {
             return [];
@@ -1794,7 +1768,7 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Batch-checks multiple expressions against subject class metadata using a single or limited SurrealDB queries.
+     * Batch-checks multiple expressions against subject class metadata using a single or limited SPARQL queries.
      * This avoids N+1 query problems by checking all values at once.
      */
     async batchCheckSubjectInstances(
@@ -1891,13 +1865,13 @@ export class PerspectiveProxy {
         let instances = []
         for(let className of classes) {
             //console.log(`getAllSubjectInstances: Processing class ${className}`);
-            // Query SDNA for metadata, then query SurrealDB for instances
+            // Query SDNA for metadata, then query SPARQL for instances
             const metadata = await this.getSubjectClassMetadataFromSDNA(className);
             //console.log(`getAllSubjectInstances: Got metadata for ${className}:`, metadata);
             if (metadata) {
                 const results = await this.findInstancesByMetadata(metadata);
                 
-               // console.log(`getAllSubjectInstances: SurrealDB returned ${results?.length || 0} results`);
+               // console.log(`getAllSubjectInstances: SPARQL returned ${results?.length || 0} results`);
 
                 for (const result of results || []) {
                     //console.log(`getAllSubjectInstances: Creating subject for base ${result.base}`);
@@ -1943,7 +1917,7 @@ export class PerspectiveProxy {
 
         let instances = []
         for(let className of classes) {
-            // Query SDNA for metadata, then query SurrealDB for instances
+            // Query SDNA for metadata, then query SPARQL for instances
             const metadata = await this.getSubjectClassMetadataFromSDNA(className);
             if (metadata) {
                 const results = await this.findInstancesByMetadata(metadata);
@@ -2211,7 +2185,7 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Creates a subscription for a SurrealQL query that updates in real-time.
+     * Creates a subscription for a SPARQL query that updates in real-time.
      * 
      * This method:
      * 1. Creates the subscription on the Rust side
@@ -2226,14 +2200,6 @@ export class PerspectiveProxy {
      * when dispose() is called. Make sure to call dispose() when you're done to
      * prevent memory leaks and ensure proper cleanup of resources.
      * 
-     * @deprecated Use subscribeQuery() instead. SurrealDB has been removed; all subscriptions now route through SPARQL.
-     * @param query - Query string (SPARQL or legacy SurrealQL — will be routed through SPARQL endpoint)
-     * @returns Initialized QuerySubscriptionProxy instance
-     */
-    async subscribeSurrealDB(query: string): Promise<QuerySubscriptionProxy> {
-        return this.subscribeQuery(query);
-    }
-
     /** Subscribe to a query with live updates via the SPARQL subscription endpoint.
      * @param query - Query string
      * @returns Initialized QuerySubscriptionProxy instance

@@ -2,7 +2,7 @@
  * hydration.ts — Instance hydration helpers extracted from Ad4mModel.
  *
  * Pure / stateless functions that populate Ad4mModel instances from
- * raw link arrays, Prolog tuples, or SurrealDB rows.  None of these
+ * raw link arrays, Prolog tuples, or query results.  None of these
  * functions depend on the `Ad4mModel` class at runtime — they accept
  * the instance, metadata, or perspective as explicit parameters.
  */
@@ -12,8 +12,8 @@ import { LinkQuery } from "../perspectives/LinkQuery";
 import type { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { getPropertiesMetadata, getRelationsMetadata, buildConformanceFilter } from "./decorators";
 import type { RelationMetadataEntry } from "./decorators";
-import { escapeSurrealString } from "../utils";
-import { formatSurrealValue, compileWhereClause } from "./surreal-utils";
+import { escapeQueryString } from "../utils";
+import { formatQueryValue, compileWhereClause } from "./query-utils";
 import type {
   PropertyMetadata, RelationMetadata, ModelMetadata,
   ValueTuple, WhereCondition, IncludeMap, RelationSubQuery,
@@ -413,11 +413,11 @@ export async function assignValuesToInstance(
 }
 
 // ──────────────────────────────────────────────────────────
-//  SurrealQL custom getter evaluation
+//  SPARQL custom getter evaluation
 // ──────────────────────────────────────────────────────────
 
 /**
- * Builds a SurrealQL conformance getter for a relation whose `target` model
+ * Builds a SPARQL conformance getter for a relation whose `target` model
  * is known but no explicit `getter` string was supplied.
  *
  * The generated getter traverses outgoing links matching the relation's
@@ -429,7 +429,7 @@ export async function assignValuesToInstance(
  *
  * @param relationPredicate - The relation's predicate URI (e.g. "flux://entry_type")
  * @param targetClass       - The target model class (result of calling the `target()` thunk)
- * @returns A SurrealQL expression string, or `undefined` if no conformance
+ * @returns A SPARQL expression string, or `undefined` if no conformance
  *          conditions could be derived from the target model.
  */
 export function buildConformanceGetter(
@@ -446,7 +446,7 @@ export function buildConformanceGetter(
 }
 
 /**
- * Evaluates custom SurrealQL getters for properties and relations on a specific instance.
+ * Evaluates custom SPARQL getters for properties and relations on a specific instance.
  *
  * For relations that declare a `target` but no explicit `getter`, a conformance
  * getter is auto-generated from the target model's metadata (unless `filter: false`).
@@ -457,7 +457,7 @@ export async function evaluateCustomGettersForInstance(
   metadata: ModelMetadata,
   options?: { requestedProperties?: string[]; include?: Record<string, any> }
 ): Promise<void> {
-  const safeBaseExpression = formatSurrealValue(instance.id);
+  const safeBaseExpression = formatQueryValue(instance.id);
 
   // Build projection filter — when requestedProperties is active, only
   // evaluate getters for fields that are requested (or included).
@@ -472,7 +472,7 @@ export async function evaluateCustomGettersForInstance(
         // Replace 'Base' placeholder with actual base expression
         const query = (propMeta as any).getter.replace(/Base/g, safeBaseExpression);
         // Query from node table to have graph traversal context
-        const result = await perspective.querySurrealDB(
+        const result = await perspective.querySparql(
           `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`
         );
         if (result && result.length > 0 && result[0].value !== undefined && result[0].value !== null && result[0].value !== 'None' && result[0].value !== '') {
@@ -492,12 +492,12 @@ export async function evaluateCustomGettersForInstance(
 
     // Determine the getter to execute:
     // 1. Explicit `getter` always wins
-    // 2. `where` clause → compile DSL to SurrealQL getter
+    // 2. `where` clause → compile DSL to SPARQL getter
     // 3. If `target` is set and `filter !== false`, auto-generate from target metadata
     //    BUT skip auto-generation for reverse relations (belongsToMany / belongsToOne)
     //    because buildConformanceGetter traverses outgoing links (->link) which is
     //    wrong for reverse relations. Their values are already populated by the
-    //    reverse link lookup in instancesFromSurrealResult / getData.
+    //    reverse link lookup in instancesFromQueryResult / getData.
     let getter = meta.getter;
     if (!getter && meta.where && meta.direction !== 'reverse') {
       try {
@@ -507,7 +507,7 @@ export async function evaluateCustomGettersForInstance(
           : null;
         const conditions = compileWhereClause(meta.where, targetMetadata);
         if (conditions.length > 0) {
-          const escapedPred = escapeSurrealString(meta.predicate);
+          const escapedPred = escapeQueryString(meta.predicate);
           getter = `(->link[WHERE predicate = '${escapedPred}'].out[WHERE ${conditions.join(' AND ')}].uri)`;
         }
       } catch (e) {
@@ -532,7 +532,7 @@ export async function evaluateCustomGettersForInstance(
         const query = getter.replace(/Base/g, safeBaseExpression);
         const fullQuery = `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`;
         // Query from node table to have graph traversal context
-        const result = await perspective.querySurrealDB(fullQuery);
+        const result = await perspective.querySparql(fullQuery);
 
         if (result && result.length > 0 && result[0].value !== undefined && result[0].value !== null) {
           // Filter out 'None' from relation results

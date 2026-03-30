@@ -161,7 +161,7 @@ export interface SHACLPropertyShape {
   /** AD4M-specific: Remover action for collection properties */
   remover?: AD4MAction[];
 
-  /** AD4M-specific: Pre-computed SurrealQL getter expression for reading this relation/property.
+  /** AD4M-specific: Pre-computed SPARQL getter expression for reading this relation/property.
    *  For relations with a target model, this encodes conformance filtering
    *  so that Rust/MCP can execute the exact same query as the JS runtime. */
   getter?: string;

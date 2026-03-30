@@ -173,7 +173,7 @@ export function buildSPARQLGetDataQuery(baseExpression: string): string {
 }
 
 /**
- * Group flat SPARQL link rows into the same shape that SurrealDB returned:
+ * Group flat SPARQL link rows into the same shape that SPARQL returned:
  * `{ source_uri: string, links: Array<{predicate, target, author, timestamp}> }`
  */
 export function groupSPARQLResults(

@@ -186,7 +186,7 @@ export class SHACLFlow {
 
   /**
    * Serialize the flow to AD4M links
-   * These links can be stored in a perspective and queried via SurrealDB
+   * These links can be stored in a perspective and queried via SPARQL
    * 
    * @returns Array of Link objects representing the flow
    */

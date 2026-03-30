@@ -14,7 +14,7 @@ export * from "./query-common";
 export * from "./query-prolog";
 export * from "./prolog-facts";
 export * from "./json-schema";
-export * from "./query-surreal";
+export * from "./query-utils";
 export * from "./query-sparql";
 export * from "./hydration";
 export * from "./ModelQueryBuilder";

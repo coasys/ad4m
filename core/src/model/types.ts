@@ -2,7 +2,7 @@
  * Shared type definitions for the Ad4mModel system.
  *
  * Extracted into a standalone module so that utility files
- * (`surreal-utils.ts`, `decorators.ts`, etc.) can import types without
+ * (`query-utils.ts`, `decorators.ts`, etc.) can import types without
  * creating circular runtime dependencies on `Ad4mModel.ts`.
  */
 
@@ -134,7 +134,7 @@ export interface PropertyMetadata {
   prologGetter?: string;
   /** Custom Prolog setter code */
   prologSetter?: string;
-  /** Custom SurrealQL getter code */
+  /** Custom getter code */
   getter?: string;
   /** Whether stored locally only */
   local?: boolean;
@@ -152,7 +152,7 @@ export interface RelationMetadata {
   name: string;
   /** The predicate URI (through value) */
   predicate: string;
-  /** Custom SurrealQL getter code */
+  /** Custom getter code */
   getter?: string;
   /** Whether stored locally only */
   local?: boolean;

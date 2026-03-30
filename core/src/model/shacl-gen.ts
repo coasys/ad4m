@@ -8,8 +8,8 @@
  */
 import { SHACLShape } from "../shacl/SHACLShape";
 import type { SHACLPropertyShape, ConformanceCondition } from "../shacl/SHACLShape";
-import { escapeSurrealString } from "../utils";
-import { compileWhereClause } from "./surreal-utils";
+import { escapeQueryString } from "../utils";
+import { compileWhereClause } from "./query-utils";
 import { propertyNameToSetterName } from "./util";
 import type { PropertyMetadataEntry, RelationMetadataEntry, Ad4mModelLike } from "./decorators";
 
@@ -224,7 +224,7 @@ export function buildSHACL(
         // ── Build Getter (conformance filter) ───────────────────────────
         // Priority chain:
         // 1. Explicit getter string → use verbatim
-        // 2. `where` clause → compile DSL to SurrealQL getter
+        // 2. `where` clause → compile DSL to SPARQL getter
         // 3. target + filter !== false → auto-derive from shape
         if (relMeta.getter) {
             relShape.getter = relMeta.getter;
@@ -241,7 +241,7 @@ export function buildSHACL(
                 );
 
                 if (conditions.length > 0) {
-                    const escapedPredicate = escapeSurrealString(relMeta.predicate);
+                    const escapedPredicate = escapeQueryString(relMeta.predicate);
                     relShape.getter = `(->link[WHERE predicate = '${escapedPredicate}'].out[WHERE ${conditions.join(' AND ')}].uri)`;
                 }
             } catch (e) {

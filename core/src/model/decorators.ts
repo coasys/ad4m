@@ -2,7 +2,7 @@ import { capitalize } from "./util";
 import type { Where } from "./types";
 import { buildSDNA } from "./sdna";
 import { buildSHACL } from "./shacl-gen";
-import { escapeSurrealString } from "../utils";
+import { escapeQueryString } from "../utils";
 import type { ConformanceCondition } from "../shacl/SHACLShape";
 
 // ============================================================================
@@ -32,7 +32,7 @@ export interface RelationMetadataEntry {
     maxCount?: number;
     local?: boolean;
     /**
-     * Custom SurrealQL getter to resolve the relation values.
+     * Custom getter to resolve the relation values.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      */
     getter?: string;
@@ -137,7 +137,7 @@ export interface Ad4mModelLike {
  *
  * Inspects the target class's property metadata to derive:
  * - `conformanceConditions`: Structured, DB-agnostic conditions (flag & required checks)
- * - `getter`: Pre-computed SurrealQL expression that traverses outgoing links and filters
+ * - `getter`: Pre-computed graph traversal expression that traverses outgoing links and filters
  *   target nodes to only those conforming to the target shape.
  *
  * @param relationPredicate - The relation's predicate URI (e.g. "flux://entry_type")
@@ -151,7 +151,7 @@ export function buildConformanceFilter(
     try {
         const targetProps = getPropertiesMetadata(targetClass);
         const conditions: ConformanceCondition[] = [];
-        const surrealConditions: string[] = [];
+        const filterConditions: string[] = [];
 
         // 1. Flags — check predicate + value
         for (const [_propName, propMeta] of Object.entries(targetProps)) {
@@ -161,8 +161,8 @@ export function buildConformanceFilter(
                     predicate: propMeta.through,
                     value: propMeta.initial,
                 });
-                surrealConditions.push(
-                    `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.through)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
+                filterConditions.push(
+                    `count(->link[WHERE predicate = '${escapeQueryString(propMeta.through)}' AND out.uri = '${escapeQueryString(propMeta.initial)}']) > 0`
                 );
             }
         }
@@ -175,8 +175,8 @@ export function buildConformanceFilter(
                     type: 'required',
                     predicate: propMeta.through,
                 });
-                surrealConditions.push(
-                    `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.through)}']) > 0`
+                filterConditions.push(
+                    `count(->link[WHERE predicate = '${escapeQueryString(propMeta.through)}']) > 0`
                 );
             }
         }
@@ -185,8 +185,8 @@ export function buildConformanceFilter(
             return undefined;
         }
 
-        const escapedPredicate = escapeSurrealString(relationPredicate);
-        const getter = `(->link[WHERE predicate = '${escapedPredicate}'].out[WHERE ${surrealConditions.join(' AND ')}].uri)`;
+        const escapedPredicate = escapeQueryString(relationPredicate);
+        const getter = `(->link[WHERE predicate = '${escapedPredicate}'].out[WHERE ${filterConditions.join(' AND ')}].uri)`;
 
         return { getter, conformanceConditions: conditions };
     } catch (e) {
@@ -233,7 +233,7 @@ export interface PropertyOptions {
     prologSetter?: string;
 
     /**
-     * Custom SurrealQL getter to resolve the property value. Use this for custom graph traversals.
+     * Custom getter to resolve the property value. Use this for custom graph traversals.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      * Example: "(<-link[WHERE predicate = 'flux://has_reply'].in.uri)[0]"
      */
@@ -659,7 +659,7 @@ export interface RelationOptions {
      *  Cannot be combined with `getter`. */
     target?: () => Ad4mModelLike;
     /**
-     * Custom SurrealQL getter to resolve the relation values. Use this for custom graph traversals.
+     * Custom getter to resolve the relation values. Use this for custom graph traversals.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      * Example: "(<-link[WHERE predicate = 'flux://has_reply'].out.uri)"
      *
@@ -750,7 +750,7 @@ function resolveRelationArgs(
         if (opts.where) {
             throw new Error(
                 'Relation decorator: `where` and `getter` are mutually exclusive. ' +
-                'Use `where` for DSL-based filtering, or `getter` for raw SurrealQL.'
+                'Use `where` for DSL-based filtering, or `getter` for raw getter expression.'
             );
         }
         return opts;
