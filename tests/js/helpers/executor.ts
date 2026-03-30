@@ -103,7 +103,7 @@ export async function startAgent(
         return;
       }
       // Resolve when the process actually exits (not just when the signal is sent).
-      // This prevents the next test from starting while SurrealDB/HC ports are still held.
+      // This prevents the next test from starting while SPARQL/HC ports are still held.
       const fallbackTimer = setTimeout(() => {
         try {
           executorProcess.kill("SIGKILL");

@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-// AD4M Benchmark CLI — compare Oxigraph/SPARQL vs SurrealDB executors
+// AD4M Benchmark CLI — compare Oxigraph/SPARQL vs baseline executors
 
 import { parseArgs } from 'node:util'
 import { resolve } from 'node:path'
@@ -14,7 +14,7 @@ import {
 const { values } = parseArgs({
   options: {
     'sparql-port': { type: 'string', default: '12000' },
-    'surreal-port': { type: 'string', default: '12001' },
+    'baseline-port': { type: 'string', default: '12001' },
     'admin-credential': { type: 'string', default: 'test-admin' },
     'suite': { type: 'string' },
     'iterations': { type: 'string', default: '100' },
@@ -24,7 +24,7 @@ const { values } = parseArgs({
     'no-manage': { type: 'boolean', default: false },
     'json': { type: 'boolean', default: false },
     'sparql-binary': { type: 'string' },
-    'surreal-binary': { type: 'string' },
+    'baseline-binary': { type: 'string' },
     'help': { type: 'boolean', short: 'h', default: false },
   },
   strict: true,
@@ -32,13 +32,13 @@ const { values } = parseArgs({
 
 if (values.help) {
   console.log(`
-AD4M Benchmark Tool — Oxigraph/SPARQL vs SurrealDB
+AD4M Benchmark Tool — Oxigraph/SPARQL vs baseline
 
 Usage: npx tsx src/index.ts [options]
 
 Options:
   --sparql-port <port>       Port for SPARQL executor (default: 12000)
-  --surreal-port <port>      Port for SurrealDB executor (default: 12001)
+  --baseline-port <port>      Port for baseline executor (default: 12001)
   --admin-credential <str>   Admin credential (default: test-admin)
   --suite <name>             Run specific suite: write|query|sparql|subject|scale
   --iterations <n>           Iterations per test (default: 100)
@@ -47,7 +47,7 @@ Options:
   --warmup <n>               Warmup iterations (default: 5)
   --no-manage                Don't start/stop executors (assume running)
   --sparql-binary <path>     Path to SPARQL executor binary
-  --surreal-binary <path>    Path to SurrealDB executor binary
+  --baseline-binary <path>    Path to baseline executor binary
   --json                     Output JSON only
   -h, --help                 Show this help
 `)
@@ -55,13 +55,13 @@ Options:
 }
 
 const sparqlPort = parseInt(values['sparql-port']!, 10)
-const surrealPort = parseInt(values['surreal-port']!, 10)
+const baselinePort = parseInt(values['baseline-port']!, 10)
 const adminCredential = values['admin-credential']!
 const iterations = parseInt(values.iterations!, 10)
 const maxScale = parseInt(values.scale!, 10)
 const warmup = parseInt(values.warmup!, 10)
 
-for (const [name, val] of Object.entries({ sparqlPort, surrealPort, iterations, maxScale, warmup })) {
+for (const [name, val] of Object.entries({ sparqlPort, baselinePort, iterations, maxScale, warmup })) {
   if (Number.isNaN(val)) {
     console.error(`Invalid numeric value for --${name.replace(/([A-Z])/g, '-$1').toLowerCase()}: expected a number`)
     process.exit(1)
@@ -88,32 +88,32 @@ const sparqlConfig: ExecutorConfig = {
   label: 'sparql',
 }
 
-if (!values['surreal-binary']) {
-  console.error('--surreal-binary is required: path to the SurrealDB executor binary')
+if (!values['baseline-binary']) {
+  console.error('--baseline-binary is required: path to the baseline executor binary')
   process.exit(1)
 }
 
-const surrealConfig: ExecutorConfig = {
-  binary: values['surreal-binary'],
-  port: surrealPort,
-  dataPath: resolve('/tmp/ad4m-bench-surrealdb'),
+const baselineConfig: ExecutorConfig = {
+  binary: values['baseline-binary'],
+  port: baselinePort,
+  dataPath: resolve('/tmp/ad4m-bench-baseline'),
   adminCredential,
-  label: 'surrealdb',
+  label: 'baseline',
 }
 
 async function main(): Promise<void> {
-  console.log('\n  AD4M Benchmark: Oxigraph/SPARQL vs SurrealDB')
+  console.log('\n  AD4M Benchmark: Oxigraph/SPARQL vs baseline')
   console.log('  ' + '═'.repeat(50))
   console.log(`  Iterations: ${iterations} | Warmup: ${warmup} | Suites: ${suites.join(', ')}`)
 
   if (!noManage) {
     try {
       await startExecutor(sparqlConfig)
-      await startExecutor(surrealConfig)
+      await startExecutor(baselineConfig)
     } catch (err) {
       console.error(`\n  ✗ Failed to start executors: ${err}`)
       await stopExecutor(sparqlConfig).catch(() => {})
-      await stopExecutor(surrealConfig).catch(() => {})
+      await stopExecutor(baselineConfig).catch(() => {})
       process.exit(1)
     }
   }
@@ -122,18 +122,18 @@ async function main(): Promise<void> {
     ? new GraphQLClient({ label: 'sparql', url: `http://127.0.0.1:${sparqlPort}/graphql`, adminCredential })
     : getClient(sparqlConfig)
 
-  const surrealClient = noManage
-    ? new GraphQLClient({ label: 'surrealdb', url: `http://127.0.0.1:${surrealPort}/graphql`, adminCredential })
-    : getClient(surrealConfig)
+  const baselineClient = noManage
+    ? new GraphQLClient({ label: 'baseline', url: `http://127.0.0.1:${baselinePort}/graphql`, adminCredential })
+    : getClient(baselineConfig)
 
   // Verify connectivity
-  for (const [label, client] of [['SPARQL', sparqlClient], ['SurrealDB', surrealClient]] as const) {
+  for (const [label, client] of [['SPARQL', sparqlClient], ['baseline', baselineClient]] as const) {
     const ok = await client.healthCheck()
     if (!ok) {
       console.error(`\n  ✗ Cannot reach ${label} executor. Is it running?`)
       if (!noManage) {
         await stopExecutor(sparqlConfig).catch(() => {})
-        await stopExecutor(surrealConfig).catch(() => {})
+        await stopExecutor(baselineConfig).catch(() => {})
       }
       process.exit(1)
     }
@@ -143,7 +143,7 @@ async function main(): Promise<void> {
   try {
     const report = await runBenchmarks({
       sparqlClient,
-      surrealClient,
+      baselineClient,
       suites,
       iterations,
       warmup,
@@ -163,7 +163,7 @@ async function main(): Promise<void> {
   } finally {
     if (!noManage) {
       await stopExecutor(sparqlConfig).catch(() => {})
-      await stopExecutor(surrealConfig).catch(() => {})
+      await stopExecutor(baselineConfig).catch(() => {})
     }
   }
 }

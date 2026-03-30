@@ -100,14 +100,14 @@ export class GraphQLClient {
     return data.perspectiveQueryLinks
   }
 
-  async querySparqlOrSurreal(uuid: string, queryStr: string): Promise<string> {
-    const data = await this.query<{ perspectiveQuerySurrealDb: string }>(
+  async querySparql(uuid: string, queryStr: string): Promise<string> {
+    const data = await this.query<{ perspectiveQuerySparql: string }>(
       `query($uuid: String!, $query: String!) {
-        perspectiveQuerySurrealDb(uuid: $uuid, query: $query)
+        perspectiveQuerySparql(uuid: $uuid, query: $query)
       }`,
       { uuid, query: queryStr }
     )
-    return data.perspectiveQuerySurrealDb
+    return data.perspectiveQuerySparql
   }
 
   async queryProlog(uuid: string, queryStr: string): Promise<string> {

@@ -1,6 +1,6 @@
-# AD4M Benchmark: Oxigraph/SPARQL vs SurrealDB
+# AD4M Benchmark: Oxigraph/SPARQL vs Baseline
 
-Compare the performance of the new Oxigraph/SPARQL executor against the reference SurrealDB executor.
+Compare the performance of the new Oxigraph/SPARQL executor against the reference Baseline executor.
 
 ## Quick Start
 
@@ -9,13 +9,13 @@ Compare the performance of the new Oxigraph/SPARQL executor against the referenc
 pnpm install
 
 # Run with both executors already running
-npx tsx src/index.ts --no-manage --sparql-port 12000 --surreal-port 12001
+npx tsx src/index.ts --no-manage --sparql-port 12000 --baseline-port 12001
 
 # Run specific suite
 npx tsx src/index.ts --no-manage --suite write --iterations 50
 
 # Let the tool manage executor lifecycle
-npx tsx src/index.ts --sparql-binary /path/to/new/ad4m-executor --surreal-binary ./bin/ad4m-cli-executor-macos-0.12.0-rc2-aarch64
+npx tsx src/index.ts --sparql-binary /path/to/new/ad4m-executor --baseline-binary ./bin/ad4m-cli-executor-macos-0.12.0-rc2-aarch64
 ```
 
 ## Benchmark Suites
@@ -24,7 +24,7 @@ npx tsx src/index.ts --sparql-binary /path/to/new/ad4m-executor --surreal-binary
 |-------|------|---------------|
 | **write** | `--suite write` | Single & batch link write throughput |
 | **query** | `--suite query` | Point queries by source, predicate, combined |
-| **sparql** | `--suite sparql` | Complex queries (SPARQL vs SurrealQL) |
+| **sparql** | `--suite sparql` | Complex queries (SPARQL vs SPARQL) |
 | **subject** | `--suite subject` | SHACL subject class operations |
 | **scale** | `--suite scale` | Performance at 100, 1K, 10K links |
 
@@ -33,7 +33,7 @@ npx tsx src/index.ts --sparql-binary /path/to/new/ad4m-executor --surreal-binary
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--sparql-port` | 12000 | Port for SPARQL/Oxigraph executor |
-| `--surreal-port` | 12001 | Port for SurrealDB executor |
+| `--baseline-port` | 12001 | Port for Baseline executor |
 | `--admin-credential` | test-admin | Admin credential for both executors |
 | `--suite` | all | Run specific suite only |
 | `--iterations` | 100 | Iterations per test |
@@ -42,7 +42,7 @@ npx tsx src/index.ts --sparql-binary /path/to/new/ad4m-executor --surreal-binary
 | `--output` | ./results | Output directory |
 | `--no-manage` | false | Don't start/stop executors |
 | `--sparql-binary` | ./bin/ad4m-executor | Path to SPARQL executor |
-| `--surreal-binary` | ./bin/ad4m-cli-executor-* | Path to reference executor |
+| `--baseline-binary` | ./bin/ad4m-cli-executor-* | Path to reference executor |
 | `--json` | false | JSON output only |
 
 ## Output
@@ -60,4 +60,4 @@ Results are written to `results/` as both JSON (raw data) and Markdown (formatte
 
 ## Reference Binary
 
-The SurrealDB reference binary (`ad4m-cli-executor-macos-0.12.0-rc2-aarch64`) is downloaded from [GitHub releases](https://github.com/coasys/ad4m/releases/tag/v0.12.0-rc2) into `bin/`. This directory is gitignored.
+The Baseline reference binary (`ad4m-cli-executor-macos-0.12.0-rc2-aarch64`) is downloaded from [GitHub releases](https://github.com/coasys/ad4m/releases/tag/v0.12.0-rc2) into `bin/`. This directory is gitignored.

@@ -2,8 +2,8 @@
  * Ad4mModel — custom getter integration tests
  *
  * Covers:
- *   - @Property(getter:) — custom SurrealQL expression for computed properties
- *   - @HasMany(getter:)  — custom SurrealQL expression for computed relations
+ *   - @Property(getter:) — custom SPARQL expression for computed properties
+ *   - @HasMany(getter:)  — custom SPARQL expression for computed relations
  *   - @HasMany(where:)   — DSL-compiled getter for relation filtering
  *   - None / empty-value filtering from getter results
  *

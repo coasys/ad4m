@@ -1,11 +1,11 @@
 /**
  * Ad4mModel — subscription integration tests
  *
- * Covers: ModelQueryBuilder.subscribe() initial callback, SurrealDB live-query
+ * Covers: ModelQueryBuilder.subscribe() initial callback, SPARQL live-query
  * re-fire on link-added and link-removed, dispose() stopping callbacks,
  * countSubscribe(), and parent-scoped subscriptions.
  *
- * Adapted from PR #694 subscription tests for our SurrealDB-based subscription
+ * Adapted from PR #694 subscription tests for our SPARQL-based subscription
  * system (ModelQueryBuilder.subscribe / countSubscribe / dispose).
  *
  * Run with:
@@ -21,7 +21,7 @@ import { TestComment, TestPost, TestTag, TestChannel } from "./models.js";
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-describe("Ad4mModel — Subscriptions (SurrealDB)", function () {
+describe("Ad4mModel — Subscriptions (SPARQL)", function () {
   this.timeout(120_000);
 
   let ownStop: (() => Promise<void>) | null = null;
@@ -112,7 +112,7 @@ describe("Ad4mModel — Subscriptions (SurrealDB)", function () {
 
     await post.delete();
 
-    // Small settling delay — under load the SurrealDB live-query notification
+    // Small settling delay — under load the SPARQL live-query notification
     // can lag slightly before the subscription re-fires.
     await new Promise((r) => setTimeout(r, 300));
 

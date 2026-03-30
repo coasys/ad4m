@@ -8,7 +8,7 @@ export interface ScaleResult {
   tests: Array<{
     name: string
     sparql: Stats
-    surrealdb: Stats
+    baseline: Stats
   }>
 }
 
@@ -68,7 +68,7 @@ async function populateAndBench(
 
 export async function run(
   sparqlClient: GraphQLClient,
-  surrealClient: GraphQLClient,
+  baselineClient: GraphQLClient,
   iterations: number,
   warmup: number,
   maxScale: number,
@@ -81,23 +81,23 @@ export async function run(
     process.stdout.write(`    Scale ${scale.toLocaleString()} links... `)
 
     const sparqlResult = await populateAndBench(sparqlClient, scale, queryIter, warmup, createRng(scale))
-    const surrealResult = await populateAndBench(surrealClient, scale, queryIter, warmup, createRng(scale))
+    const baselineResult = await populateAndBench(baselineClient, scale, queryIter, warmup, createRng(scale))
     console.log('done')
 
     tests.push({
       name: `Write ${scale.toLocaleString()} links`,
       sparql: sparqlResult.writeStats,
-      surrealdb: surrealResult.writeStats,
+      baseline: baselineResult.writeStats,
     })
     tests.push({
       name: `Query by source @ ${scale.toLocaleString()}`,
       sparql: sparqlResult.queryBySourceStats,
-      surrealdb: surrealResult.queryBySourceStats,
+      baseline: baselineResult.queryBySourceStats,
     })
     tests.push({
       name: `Query all @ ${scale.toLocaleString()}`,
       sparql: sparqlResult.queryAllStats,
-      surrealdb: surrealResult.queryAllStats,
+      baseline: baselineResult.queryAllStats,
     })
   }
 

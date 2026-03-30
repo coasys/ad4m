@@ -8,7 +8,7 @@ export interface PointQueryResult {
   tests: Array<{
     name: string
     sparql: Stats
-    surrealdb: Stats
+    baseline: Stats
   }>
 }
 
@@ -50,7 +50,7 @@ async function benchQuery(
 
 export async function run(
   sparqlClient: GraphQLClient,
-  surrealClient: GraphQLClient,
+  baselineClient: GraphQLClient,
   iterations: number,
   warmup: number,
 ): Promise<PointQueryResult> {
@@ -59,47 +59,47 @@ export async function run(
   const LINK_COUNT = 1000
 
   const sparqlUuid = await sparqlClient.addPerspective('bench-query-sparql')
-  const surrealUuid = await surrealClient.addPerspective('bench-query-surreal')
+  const baselineUuid = await baselineClient.addPerspective('bench-query-baseline')
 
   try {
     process.stdout.write('    Populating perspectives... ')
     const sparqlData = await populate(sparqlClient, sparqlUuid, LINK_COUNT, createRng(42))
-    const surrealData = await populate(surrealClient, surrealUuid, LINK_COUNT, createRng(42))
+    const baselineData = await populate(baselineClient, baselineUuid, LINK_COUNT, createRng(42))
     console.log('done')
 
     // Query by source
     process.stdout.write('    Query by source... ')
     const src = sparqlData.sources[0]
     const sparqlBySource = await benchQuery(sparqlClient, sparqlUuid, { source: src }, iterations, warmup)
-    const surrealBySource = await benchQuery(surrealClient, surrealUuid, { source: src }, iterations, warmup)
+    const baselineBySource = await benchQuery(baselineClient, baselineUuid, { source: src }, iterations, warmup)
     console.log('done')
-    tests.push({ name: 'Query by Source', sparql: sparqlBySource, surrealdb: surrealBySource })
+    tests.push({ name: 'Query by Source', sparql: sparqlBySource, baseline: baselineBySource })
 
     // Query by predicate
     process.stdout.write('    Query by predicate... ')
     const pred = sparqlData.predicates[0]
     const sparqlByPred = await benchQuery(sparqlClient, sparqlUuid, { predicate: pred }, iterations, warmup)
-    const surrealByPred = await benchQuery(surrealClient, surrealUuid, { predicate: pred }, iterations, warmup)
+    const baselineByPred = await benchQuery(baselineClient, baselineUuid, { predicate: pred }, iterations, warmup)
     console.log('done')
-    tests.push({ name: 'Query by Predicate', sparql: sparqlByPred, surrealdb: surrealByPred })
+    tests.push({ name: 'Query by Predicate', sparql: sparqlByPred, baseline: baselineByPred })
 
     // Query by source + predicate
     process.stdout.write('    Query by source+predicate... ')
     const sparqlCombo = await benchQuery(sparqlClient, sparqlUuid, { source: src, predicate: pred }, iterations, warmup)
-    const surrealCombo = await benchQuery(surrealClient, surrealUuid, { source: src, predicate: pred }, iterations, warmup)
+    const baselineCombo = await benchQuery(baselineClient, baselineUuid, { source: src, predicate: pred }, iterations, warmup)
     console.log('done')
-    tests.push({ name: 'Query by Source+Predicate', sparql: sparqlCombo, surrealdb: surrealCombo })
+    tests.push({ name: 'Query by Source+Predicate', sparql: sparqlCombo, baseline: baselineCombo })
 
     // Query all
     process.stdout.write('    Query all links... ')
     const sparqlAll = await benchQuery(sparqlClient, sparqlUuid, {}, iterations, warmup)
-    const surrealAll = await benchQuery(surrealClient, surrealUuid, {}, iterations, warmup)
+    const baselineAll = await benchQuery(baselineClient, baselineUuid, {}, iterations, warmup)
     console.log('done')
-    tests.push({ name: 'Query All Links', sparql: sparqlAll, surrealdb: surrealAll })
+    tests.push({ name: 'Query All Links', sparql: sparqlAll, baseline: baselineAll })
 
   } finally {
     await sparqlClient.removePerspective(sparqlUuid).catch(() => {})
-    await surrealClient.removePerspective(surrealUuid).catch(() => {})
+    await baselineClient.removePerspective(baselineUuid).catch(() => {})
   }
 
   return { name: 'Point Queries', tests }

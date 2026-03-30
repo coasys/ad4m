@@ -101,17 +101,17 @@ async function main() {
   // 4. Query via SPARQL
   await test('SPARQL direct triple query returns correct data', async () => {
     const d = await gql<any>(
-      `query($uuid: String!, $query: String!) { perspectiveQuerySurrealDb(uuid: $uuid, query: $query) }`,
+      `query($uuid: String!, $query: String!) { perspectiveQuerySparql(uuid: $uuid, query: $query) }`,
       { uuid, query: `SELECT ?name WHERE { <ad4m://entity1> <test://name> ?name . }` }
     );
-    const rows = JSON.parse(d.perspectiveQuerySurrealDb);
+    const rows = JSON.parse(d.perspectiveQuerySparql);
     assert(rows.length === 1, `Expected 1 row, got ${rows.length}`);
     assert(rows[0].name === 'literal:string:Alice', `Expected Alice, got ${rows[0].name}`);
   });
 
   await test('SPARQL join query works', async () => {
     const d = await gql<any>(
-      `query($uuid: String!, $query: String!) { perspectiveQuerySurrealDb(uuid: $uuid, query: $query) }`,
+      `query($uuid: String!, $query: String!) { perspectiveQuerySparql(uuid: $uuid, query: $query) }`,
       {
         uuid,
         query: `SELECT ?person ?name WHERE {
@@ -120,7 +120,7 @@ async function main() {
         }`
       }
     );
-    const rows = JSON.parse(d.perspectiveQuerySurrealDb);
+    const rows = JSON.parse(d.perspectiveQuerySparql);
     assert(rows.length === 2, `Expected 2 rows, got ${rows.length}`);
   });
 
@@ -164,10 +164,10 @@ async function main() {
 
     // Verify gone from SPARQL
     const s = await gql<any>(
-      `query($uuid: String!, $query: String!) { perspectiveQuerySurrealDb(uuid: $uuid, query: $query) }`,
+      `query($uuid: String!, $query: String!) { perspectiveQuerySparql(uuid: $uuid, query: $query) }`,
       { uuid, query: `SELECT ?o WHERE { <ad4m://temp> <test://temp> ?o . }` }
     );
-    const rows = JSON.parse(s.perspectiveQuerySurrealDb);
+    const rows = JSON.parse(s.perspectiveQuerySparql);
     assert(rows.length === 0, `Link should be gone from SPARQL, got ${rows.length}`);
   });
 
@@ -193,13 +193,13 @@ async function main() {
     // Annotations have quoted triple subjects which appear as null in serialized results
     // but the annotation predicates and values should be present
     const s = await gql<any>(
-      `query($uuid: String!, $query: String!) { perspectiveQuerySurrealDb(uuid: $uuid, query: $query) }`,
+      `query($uuid: String!, $query: String!) { perspectiveQuerySparql(uuid: $uuid, query: $query) }`,
       {
         uuid,
         query: `SELECT ?p ?v WHERE { ?s ?p ?v . FILTER(!isIRI(?s) && !isBlank(?s)) } LIMIT 10`
       }
     );
-    const rows = JSON.parse(s.perspectiveQuerySurrealDb);
+    const rows = JSON.parse(s.perspectiveQuerySparql);
     const preds = rows.map((r: any) => r.p);
     assert(preds.includes('ad4m://ontology/author'), 'Should find author annotation');
     assert(preds.includes('ad4m://ontology/timestamp'), 'Should find timestamp annotation');

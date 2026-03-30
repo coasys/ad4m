@@ -1,7 +1,7 @@
 {
   "name": "ad4m-benchmarks",
   "version": "1.0.0",
-  "description": "Benchmark tool comparing Oxigraph/SPARQL vs SurrealDB AD4M executors",
+  "description": "Benchmark tool comparing Oxigraph/SPARQL vs Baseline AD4M executors",
   "private": true,
   "scripts": {
     "bench": "tsx src/index.ts",

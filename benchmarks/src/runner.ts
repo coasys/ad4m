@@ -13,7 +13,7 @@ export type SuiteName = typeof SUITE_NAMES[number]
 
 export interface RunConfig {
   sparqlClient: GraphQLClient
-  surrealClient: GraphQLClient
+  baselineClient: GraphQLClient
   suites: SuiteName[]
   iterations: number
   warmup: number
@@ -22,7 +22,7 @@ export interface RunConfig {
 
 export async function runBenchmarks(config: RunConfig): Promise<BenchmarkReport> {
   const results: SuiteResult[] = []
-  const { sparqlClient, surrealClient, iterations, warmup, suites, maxScale } = config
+  const { sparqlClient, baselineClient, iterations, warmup, suites, maxScale } = config
 
   for (const suite of suites) {
     console.log(`\n  Running: ${suite}`)
@@ -30,27 +30,27 @@ export async function runBenchmarks(config: RunConfig): Promise<BenchmarkReport>
 
     switch (suite) {
       case 'write': {
-        const r = await runWrite(sparqlClient, surrealClient, iterations, warmup)
+        const r = await runWrite(sparqlClient, baselineClient, iterations, warmup)
         results.push(r)
         break
       }
       case 'query': {
-        const r = await runPointQueries(sparqlClient, surrealClient, iterations, warmup)
+        const r = await runPointQueries(sparqlClient, baselineClient, iterations, warmup)
         results.push(r)
         break
       }
       case 'sparql': {
-        const r = await runSparqlQueries(sparqlClient, surrealClient, iterations, warmup)
+        const r = await runSparqlQueries(sparqlClient, baselineClient, iterations, warmup)
         results.push(r)
         break
       }
       case 'subject': {
-        const r = await runSubjectOps(sparqlClient, surrealClient, iterations, warmup)
+        const r = await runSubjectOps(sparqlClient, baselineClient, iterations, warmup)
         results.push(r)
         break
       }
       case 'scale': {
-        const r = await runScale(sparqlClient, surrealClient, iterations, warmup, maxScale)
+        const r = await runScale(sparqlClient, baselineClient, iterations, warmup, maxScale)
         results.push(r)
         break
       }

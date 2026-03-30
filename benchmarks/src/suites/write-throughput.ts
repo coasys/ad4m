@@ -8,7 +8,7 @@ export interface WriteBenchmarkResult {
   tests: Array<{
     name: string
     sparql: Stats
-    surrealdb: Stats
+    baseline: Stats
   }>
 }
 
@@ -66,7 +66,7 @@ async function benchBatchWrite(
 
 export async function run(
   sparqlClient: GraphQLClient,
-  surrealClient: GraphQLClient,
+  baselineClient: GraphQLClient,
   iterations: number,
   warmup: number,
 ): Promise<WriteBenchmarkResult> {
@@ -74,28 +74,28 @@ export async function run(
   const rng = createRng(42)
 
   const sparqlUuid = await sparqlClient.addPerspective('bench-write-sparql')
-  const surrealUuid = await surrealClient.addPerspective('bench-write-surreal')
+  const baselineUuid = await baselineClient.addPerspective('bench-write-baseline')
 
   try {
     // Single link add
     process.stdout.write('    Single Link Add... ')
     const sparqlSingle = await benchSingleWrite(sparqlClient, sparqlUuid, iterations, warmup, createRng(100))
-    const surrealSingle = await benchSingleWrite(surrealClient, surrealUuid, iterations, warmup, createRng(100))
+    const baselineSingle = await benchSingleWrite(baselineClient, baselineUuid, iterations, warmup, createRng(100))
     console.log('done')
-    tests.push({ name: 'Single Link Add', sparql: sparqlSingle, surrealdb: surrealSingle })
+    tests.push({ name: 'Single Link Add', sparql: sparqlSingle, baseline: baselineSingle })
 
     // Batch sizes
     for (const batchSize of [10, 100, 1000]) {
       const batchIter = batchSize >= 100 ? Math.max(1, Math.floor(iterations / 10)) : iterations
       process.stdout.write(`    Batch ${batchSize} Links... `)
       const sparqlBatch = await benchBatchWrite(sparqlClient, sparqlUuid, batchSize, batchIter, Math.min(warmup, 2), createRng(200 + batchSize))
-      const surrealBatch = await benchBatchWrite(surrealClient, surrealUuid, batchSize, batchIter, Math.min(warmup, 2), createRng(200 + batchSize))
+      const baselineBatch = await benchBatchWrite(baselineClient, baselineUuid, batchSize, batchIter, Math.min(warmup, 2), createRng(200 + batchSize))
       console.log('done')
-      tests.push({ name: `Batch ${batchSize} Links`, sparql: sparqlBatch, surrealdb: surrealBatch })
+      tests.push({ name: `Batch ${batchSize} Links`, sparql: sparqlBatch, baseline: baselineBatch })
     }
   } finally {
     await sparqlClient.removePerspective(sparqlUuid).catch(() => {})
-    await surrealClient.removePerspective(surrealUuid).catch(() => {})
+    await baselineClient.removePerspective(baselineUuid).catch(() => {})
   }
 
   return { name: 'Write Throughput', tests }

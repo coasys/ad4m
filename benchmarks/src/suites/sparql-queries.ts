@@ -1,4 +1,4 @@
-// Complex query benchmark suite (SPARQL vs SurrealQL/Prolog)
+// Complex query benchmark suite (SPARQL vs SPARQL/Prolog)
 
 import type { GraphQLClient } from '../client'
 import { timeIt, createRng, generateId, computeStats, type Stats } from '../utils'
@@ -8,7 +8,7 @@ export interface SparqlQueryResult {
   tests: Array<{
     name: string
     sparql: Stats
-    surrealdb: Stats
+    baseline: Stats
   }>
 }
 
@@ -42,12 +42,12 @@ async function benchSparqlQuery(
   warmup: number,
 ): Promise<Stats> {
   for (let i = 0; i < warmup; i++) {
-    await client.querySparqlOrSurreal(uuid, queryStr)
+    await client.querySparql(uuid, queryStr)
   }
   const samples: number[] = []
   for (let i = 0; i < iterations; i++) {
     const end = timeIt()
-    await client.querySparqlOrSurreal(uuid, queryStr)
+    await client.querySparql(uuid, queryStr)
     samples.push(end())
   }
   return computeStats(samples)
@@ -55,35 +55,35 @@ async function benchSparqlQuery(
 
 export async function run(
   sparqlClient: GraphQLClient,
-  surrealClient: GraphQLClient,
+  baselineClient: GraphQLClient,
   iterations: number,
   warmup: number,
 ): Promise<SparqlQueryResult> {
   const tests: SparqlQueryResult['tests'] = []
 
   const sparqlUuid = await sparqlClient.addPerspective('bench-sparql-sparql')
-  const surrealUuid = await surrealClient.addPerspective('bench-sparql-surreal')
+  const baselineUuid = await baselineClient.addPerspective('bench-sparql-baseline')
 
   try {
     process.stdout.write('    Populating structured data... ')
     await populateStructured(sparqlClient, sparqlUuid, createRng(42))
-    await populateStructured(surrealClient, surrealUuid, createRng(42))
+    await populateStructured(baselineClient, baselineUuid, createRng(42))
     console.log('done')
 
-    // Simple SELECT — SPARQL on sparql executor, SurrealQL on surreal executor
+    // Simple SELECT — SPARQL on sparql executor, SPARQL on baseline executor
     process.stdout.write('    Simple SELECT... ')
     const sparqlSimple = await benchSparqlQuery(
       sparqlClient, sparqlUuid,
       'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100',
       iterations, warmup,
     )
-    const surrealSimple = await benchSparqlQuery(
-      surrealClient, surrealUuid,
+    const baselineSimple = await benchSparqlQuery(
+      baselineClient, baselineUuid,
       'SELECT * FROM links LIMIT 100',
       iterations, warmup,
     )
     console.log('done')
-    tests.push({ name: 'Simple SELECT (100 rows)', sparql: sparqlSimple, surrealdb: surrealSimple })
+    tests.push({ name: 'Simple SELECT (100 rows)', sparql: sparqlSimple, baseline: baselineSimple })
 
     // Filtered by predicate
     process.stdout.write('    Filtered SELECT... ')
@@ -92,13 +92,13 @@ export async function run(
       'SELECT ?s ?o WHERE { ?s <ad4m://has-message> ?o }',
       iterations, warmup,
     )
-    const surrealFiltered = await benchSparqlQuery(
-      surrealClient, surrealUuid,
+    const baselineFiltered = await benchSparqlQuery(
+      baselineClient, baselineUuid,
       "SELECT * FROM links WHERE predicate = 'ad4m://has-message'",
       iterations, warmup,
     )
     console.log('done')
-    tests.push({ name: 'Filtered SELECT (by predicate)', sparql: sparqlFiltered, surrealdb: surrealFiltered })
+    tests.push({ name: 'Filtered SELECT (by predicate)', sparql: sparqlFiltered, baseline: baselineFiltered })
 
     // Multi-join: messages in a specific channel
     process.stdout.write('    Multi-join query... ')
@@ -111,8 +111,8 @@ export async function run(
       }`,
       iterations, warmup,
     )
-    const surrealJoin = await benchSparqlQuery(
-      surrealClient, surrealUuid,
+    const baselineJoin = await benchSparqlQuery(
+      baselineClient, baselineUuid,
       `SELECT msg.target AS msg,
               (SELECT target FROM links WHERE source = msg.target AND predicate = 'ad4m://has-author' LIMIT 1)[0].target AS author,
               (SELECT target FROM links WHERE source = msg.target AND predicate = 'ad4m://has-content' LIMIT 1)[0].target AS content
@@ -121,7 +121,7 @@ export async function run(
       iterations, warmup,
     )
     console.log('done')
-    tests.push({ name: 'Multi-join (channel→messages→details)', sparql: sparqlJoin, surrealdb: surrealJoin })
+    tests.push({ name: 'Multi-join (channel→messages→details)', sparql: sparqlJoin, baseline: baselineJoin })
 
     // Count aggregation
     process.stdout.write('    Aggregation (COUNT)... ')
@@ -130,18 +130,18 @@ export async function run(
       'SELECT ?p (COUNT(?s) AS ?count) WHERE { ?s ?p ?o } GROUP BY ?p',
       iterations, warmup,
     )
-    const surrealCount = await benchSparqlQuery(
-      surrealClient, surrealUuid,
+    const baselineCount = await benchSparqlQuery(
+      baselineClient, baselineUuid,
       'SELECT predicate, count() AS total FROM links GROUP BY predicate',
       iterations, warmup,
     )
     console.log('done')
-    tests.push({ name: 'Aggregation (COUNT GROUP BY)', sparql: sparqlCount, surrealdb: surrealCount })
+    tests.push({ name: 'Aggregation (COUNT GROUP BY)', sparql: sparqlCount, baseline: baselineCount })
 
   } finally {
     await sparqlClient.removePerspective(sparqlUuid).catch(() => {})
-    await surrealClient.removePerspective(surrealUuid).catch(() => {})
+    await baselineClient.removePerspective(baselineUuid).catch(() => {})
   }
 
-  return { name: 'Complex Queries (SPARQL vs SurrealQL)', tests }
+  return { name: 'Complex Queries (SPARQL vs SPARQL)', tests }
 }

@@ -95,10 +95,10 @@ function generateLinks() {
 
 async function querySparql(uuid: string, sparql: string): Promise<any> {
   const d = await gql<any>(
-    `query($uuid: String!, $query: String!) { perspectiveQuerySurrealDb(uuid: $uuid, query: $query) }`,
+    `query($uuid: String!, $query: String!) { perspectiveQueryBaselineDb(uuid: $uuid, query: $query) }`,
     { uuid, query: sparql }
   );
-  return JSON.parse(d.perspectiveQuerySurrealDb);
+  return JSON.parse(d.perspectiveQueryBaselineDb);
 }
 
 async function queryLinks(uuid: string, q: Record<string, string>): Promise<any[]> {

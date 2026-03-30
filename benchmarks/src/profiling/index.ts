@@ -9,7 +9,7 @@
  * Usage:
  *   npx tsx src/profiling/index.ts --port 12000 --admin-credential test-admin
  * 
- * Requires a running ad4m-executor with both sparql and surreal features.
+ * Requires a running ad4m-executor with both sparql and baseline features.
  */
 
 import { parseArgs } from 'node:util';
@@ -331,31 +331,31 @@ async function phase1RawQueries(seed: SeedResult): Promise<TimingResult[]> {
     console.log(`  SPARQL: channels with message counts (GROUP BY): SKIPPED (${e.message.slice(0, 80)})`);
   }
 
-  // 1g. SurrealDB: equivalent filtered query (if available)
+  // 1g. baseline: equivalent filtered query (if available)
   try {
-    results.push(await measure('SurrealDB: messages by predicate filter', ITERATIONS, async () => {
-      await gql(`query { perspectiveQuerySurrealDb(uuid: "${uuid}", query: "SELECT * FROM link WHERE predicate = 'flux://has_message' AND source = '${ch0}'") }`);
+    results.push(await measure('baseline: messages by predicate filter', ITERATIONS, async () => {
+      await gql(`query { perspectiveQueryBaselineDb(uuid: "${uuid}", query: "SELECT * FROM link WHERE predicate = 'flux://has_message' AND source = '${ch0}'") }`);
     }));
     console.log(`  ${results.at(-1)!.name}: avg ${results.at(-1)!.avgMs.toFixed(2)}ms`);
   } catch (e: any) {
-    console.log(`  SurrealDB: SKIPPED (${e.message.slice(0, 60)})`);
+    console.log(`  baseline: SKIPPED (${e.message.slice(0, 60)})`);
   }
 
-  // 1h. SurrealDB: multi-table join equivalent (has to be done as separate queries)
+  // 1h. baseline: multi-table join equivalent (has to be done as separate queries)
   try {
-    results.push(await measure('SurrealDB: messages + content (2 queries)', ITERATIONS, async () => {
+    results.push(await measure('baseline: messages + content (2 queries)', ITERATIONS, async () => {
       // First get message IDs
-      const msgResult = await gql(`query { perspectiveQuerySurrealDb(uuid: "${uuid}", query: "SELECT target FROM link WHERE predicate = 'flux://has_message' AND source = '${ch0}'") }`);
-      // Then get content for each — but SurrealDB can't do JOINs, so we do a WHERE IN
-      const parsed = JSON.parse(msgResult.perspectiveQuerySurrealDb);
+      const msgResult = await gql(`query { perspectiveQueryBaselineDb(uuid: "${uuid}", query: "SELECT target FROM link WHERE predicate = 'flux://has_message' AND source = '${ch0}'") }`);
+      // Then get content for each — but baseline can't do JOINs, so we do a WHERE IN
+      const parsed = JSON.parse(msgResult.perspectiveQueryBaselineDb);
       const targets = (parsed as any[]).map((r: any) => `'${r.target}'`).join(',');
       if (targets) {
-        await gql(`query { perspectiveQuerySurrealDb(uuid: "${uuid}", query: "SELECT * FROM link WHERE predicate = 'msg://content' AND source IN [${targets}]") }`);
+        await gql(`query { perspectiveQueryBaselineDb(uuid: "${uuid}", query: "SELECT * FROM link WHERE predicate = 'msg://content' AND source IN [${targets}]") }`);
       }
     }));
     console.log(`  ${results.at(-1)!.name}: avg ${results.at(-1)!.avgMs.toFixed(2)}ms`);
   } catch (e: any) {
-    console.log(`  SurrealDB multi-query: SKIPPED (${e.message.slice(0, 60)})`);
+    console.log(`  baseline multi-query: SKIPPED (${e.message.slice(0, 60)})`);
   }
 
   return results;

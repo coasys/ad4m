@@ -8,7 +8,7 @@ export interface SubjectOperationsResult {
   tests: Array<{
     name: string
     sparql: Stats
-    surrealdb: Stats
+    baseline: Stats
   }>
 }
 
@@ -93,7 +93,7 @@ async function benchPropertyUpdate(
 
 export async function run(
   sparqlClient: GraphQLClient,
-  surrealClient: GraphQLClient,
+  baselineClient: GraphQLClient,
   iterations: number,
   warmup: number,
 ): Promise<SubjectOperationsResult> {
@@ -102,7 +102,7 @@ export async function run(
   const rng = createRng(42)
 
   const sparqlUuid = await sparqlClient.addPerspective('bench-subject-sparql')
-  const surrealUuid = await surrealClient.addPerspective('bench-subject-surreal')
+  const baselineUuid = await baselineClient.addPerspective('bench-subject-baseline')
 
   const instanceIds: string[] = []
 
@@ -112,35 +112,35 @@ export async function run(
       const id = generateId(rng, 'msg')
       instanceIds.push(id)
       await createMessageInstance(sparqlClient, sparqlUuid, id, `did:key:author-${i % 10}`, `Hello ${i}`, String(Date.now() + i))
-      await createMessageInstance(surrealClient, surrealUuid, id, `did:key:author-${i % 10}`, `Hello ${i}`, String(Date.now() + i))
+      await createMessageInstance(baselineClient, baselineUuid, id, `did:key:author-${i % 10}`, `Hello ${i}`, String(Date.now() + i))
     }
     console.log('done')
 
     // findAll
     process.stdout.write('    findAll (type query)... ')
     const sparqlFindAll = await benchFindAll(sparqlClient, sparqlUuid, iterations, warmup)
-    const surrealFindAll = await benchFindAll(surrealClient, surrealUuid, iterations, warmup)
+    const baselineFindAll = await benchFindAll(baselineClient, baselineUuid, iterations, warmup)
     console.log('done')
-    tests.push({ name: 'findAll (100 instances)', sparql: sparqlFindAll, surrealdb: surrealFindAll })
+    tests.push({ name: 'findAll (100 instances)', sparql: sparqlFindAll, baseline: baselineFindAll })
 
     // getInstance
     process.stdout.write('    getInstance (property hydration)... ')
     const targetId = instanceIds[0]
     const sparqlGetInstance = await benchGetInstance(sparqlClient, sparqlUuid, targetId, iterations, warmup)
-    const surrealGetInstance = await benchGetInstance(surrealClient, surrealUuid, targetId, iterations, warmup)
+    const baselineGetInstance = await benchGetInstance(baselineClient, baselineUuid, targetId, iterations, warmup)
     console.log('done')
-    tests.push({ name: 'getInstance (hydration)', sparql: sparqlGetInstance, surrealdb: surrealGetInstance })
+    tests.push({ name: 'getInstance (hydration)', sparql: sparqlGetInstance, baseline: baselineGetInstance })
 
     // Property update
     process.stdout.write('    Property update... ')
     const sparqlUpdate = await benchPropertyUpdate(sparqlClient, sparqlUuid, targetId, iterations, warmup, createRng(99))
-    const surrealUpdate = await benchPropertyUpdate(surrealClient, surrealUuid, targetId, iterations, warmup, createRng(99))
+    const baselineUpdate = await benchPropertyUpdate(baselineClient, baselineUuid, targetId, iterations, warmup, createRng(99))
     console.log('done')
-    tests.push({ name: 'Property Update', sparql: sparqlUpdate, surrealdb: surrealUpdate })
+    tests.push({ name: 'Property Update', sparql: sparqlUpdate, baseline: baselineUpdate })
 
   } finally {
     await sparqlClient.removePerspective(sparqlUuid).catch(() => {})
-    await surrealClient.removePerspective(surrealUuid).catch(() => {})
+    await baselineClient.removePerspective(baselineUuid).catch(() => {})
   }
 
   return { name: 'Subject Operations', tests }

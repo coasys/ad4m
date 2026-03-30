@@ -1348,11 +1348,11 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     // 8. Waker Subscription Integration Tests
     //
     // Tests the full subscription pipeline:
-    //   get_mention_waker_config → SurrealDB subscription → add message with
+    //   get_mention_waker_config → SPARQL subscription → add message with
     //   mention → verify subscription fires with correct result
     // ========================================================================
 
-    describe("8. Waker Subscription (SurrealDB Live Query)", function() {
+    describe("8. Waker Subscription (SPARQL Live Query)", function() {
         // Uses the extracted WakerSubscriptionManager — same code path as the plugin
         let wakerClient: Ad4mClient;
         let wakerPerspectiveUuid: string;
@@ -1397,7 +1397,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             console.log("Waker test channel:", wakerChannelAddr);
         });
 
-        it("should get mention waker config with SurrealQL query", async function() {
+        it("should get mention waker config with SPARQL query", async function() {
             var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
                 perspective_id: wakerPerspectiveUuid,
             }, mcpSessionId);
@@ -1412,7 +1412,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(config.query).to.include("fn::parse_literal");
             // Query uses direct body-link matching (body predicate from SHACL), not two-hop traversal
             expect(config.query).to.include("SELECT * FROM link WHERE");
-            console.log("SurrealQL query:", config.query);
+            console.log("SPARQL query:", config.query);
         });
 
         it("should create WakerSubscriptionManager and receive initial (empty) result via onWake", async function() {

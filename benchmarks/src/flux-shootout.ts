@@ -101,11 +101,11 @@ async function queryLinks(uuid: string, q: Record<string, string>): Promise<any[
 async function querySparql(uuid: string, sparql: string): Promise<any> {
   const d = await gql<any>(
     `query($uuid: String!, $query: String!) {
-      perspectiveQuerySurrealDb(uuid: $uuid, query: $query)
+      perspectiveQueryBaselineDb(uuid: $uuid, query: $query)
     }`,
     { uuid, query: sparql }
   );
-  return JSON.parse(d.perspectiveQuerySurrealDb);
+  return JSON.parse(d.perspectiveQueryBaselineDb);
 }
 
 // ── Data generation ──
@@ -128,7 +128,7 @@ const MESSAGE_BODIES = [
   'The documentation for the new SDK is now live at docs.example.com.',
   'Reminder: demo day is this Friday at 3pm.',
   'I\'ve been experimenting with WebSockets for real-time updates and the results look promising.',
-  'Does anyone have experience with SurrealDB? Thinking about it for our next project.',
+  'Does anyone have experience with baseline? Thinking about it for our next project.',
   'The CI pipeline is green again after fixing the flaky test.',
   'Proposal: let\'s add end-to-end encryption for DMs.',
   'Working on the notification system — should we use push or pull?',

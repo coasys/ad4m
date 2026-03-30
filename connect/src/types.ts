@@ -47,7 +47,7 @@ export type RemoteHost = {
 
 /** Flexible pricing item — avoids locking the interface to a specific pricing model */
 export type PricingItem = {
-  description: string;       // e.g. "gpt-4o per token", "link write", "SurrealDB query"
+  description: string;       // e.g. "gpt-4o per token", "link write", "SPARQL query"
   priceInHOT: number;        // e.g. 0.000001
 };
 

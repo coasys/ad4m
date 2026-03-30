@@ -258,7 +258,7 @@ describe("Prolog + Literals", () => {
 
             // REMOVED: InstanceQuery(condition: ..) test - required Prolog-only allSelf method
             // The InstanceQuery with condition parameter required Prolog inference.
-            // Future: Could be reimplemented with SHACL-based query conditions via SurrealDB.
+            // Future: Could be reimplemented with SHACL-based query conditions via SPARQL.
 
             it("can deal with properties that resolve the URI and create Expressions", async () => {
                 let todos = await Todo.all(perspective!)
@@ -324,7 +324,7 @@ describe("Prolog + Literals", () => {
 
             // REMOVED: Custom getter prolog code test - required Prolog-based property getters
             // The isLiked property used custom Prolog code for computed values.
-            // Future: Could be reimplemented with SHACL-based computed properties or SurrealDB queries.
+            // Future: Could be reimplemented with SHACL-based computed properties or SPARQL queries.
 
             describe("with Message subject class registered", () => {
                 before(async () => {
@@ -377,7 +377,7 @@ describe("Prolog + Literals", () => {
                     let message = new Message(perspective!, messageEntry)
                     await message.save()
 
-                    // Allow SurrealDB to index the new type flag
+                    // Allow SPARQL to index the new type flag
                     await sleep(500)
                     
                     // Refresh todo data to apply collection filtering
@@ -575,12 +575,12 @@ describe("Prolog + Literals", () => {
                     expect(updatedRecipies.length).to.equal(2)
                 })
 
-                it("can constrain relation entries through SurrealQL getter", async () => {
+                it("can constrain relation entries through SPARQL getter", async () => {
                     // Define a Recipe model with a getter-based filtered relation.
                     // Both `entries` and `ingredients` share the same predicate ("recipe://entries"),
                     // but `ingredients` uses an explicit getter to filter by an arbitrary link condition.
-                    @Model({ name: "RecipeWithSurrealFilter" })
-                    class RecipeWithSurrealFilter extends Ad4mModel {
+                    @Model({ name: "RecipeWithSparqlFilter" })
+                    class RecipeWithSparqlFilter extends Ad4mModel {
                         @Flag({
                             through: "ad4m://type",
                             value: "recipe://instance"
@@ -603,13 +603,13 @@ describe("Prolog + Literals", () => {
                     }
 
                     // Register the class
-                    await perspective!.ensureSDNASubjectClass(RecipeWithSurrealFilter);
+                    await perspective!.ensureSDNASubjectClass(RecipeWithSparqlFilter);
                     
                     // Wait for SHACL metadata to be indexed
                     await sleep(500);
 
-                    let root = Literal.from("Active record surreal condition test").toUrl();
-                    const recipe = new RecipeWithSurrealFilter(perspective!, root);
+                    let root = Literal.from("Active record SPARQL condition test").toUrl();
+                    const recipe = new RecipeWithSparqlFilter(perspective!, root);
 
                     let entry1 = Literal.from("entry with ingredient").toUrl();
                     let entry2 = Literal.from("entry without ingredient").toUrl();
@@ -626,10 +626,10 @@ describe("Prolog + Literals", () => {
                         target: "recipe://test"
                     }));
 
-                    // Small delay for SurrealDB indexing
+                    // Small delay for SPARQL indexing
                     await sleep(500);
 
-                    const recipe2 = new RecipeWithSurrealFilter(perspective!, root);
+                    const recipe2 = new RecipeWithSparqlFilter(perspective!, root);
                     await recipe2.get();
 
                     // Should have 2 entries total
@@ -1780,7 +1780,7 @@ describe("Prolog + Literals", () => {
                     await notification3.save();
 
                     await sleep(200); // Give it time but don't wait the full second
-                    // With SurrealDB we get 3 updates because we do comparison filtering in the client
+                    // With SPARQL we get 3 updates because we do comparison filtering in the client
                     // and not the query. So the raw query result actually is different, even though
                     // the ultimate result is the same.
                     //expect(updateCount).to.equal(2);
@@ -2187,9 +2187,9 @@ describe("Prolog + Literals", () => {
                         }
                     });
 
-                    // REMOVED: SurrealDB vs Prolog parity test
-                    // This test compared SurrealDB and Prolog subscription results.
-                    // With SHACL migration, SurrealDB is now the primary query engine.
+                    // REMOVED: SPARQL vs Prolog parity test
+                    // This test compared SPARQL and Prolog subscription results.
+                    // With SHACL migration, SPARQL is now the primary query engine.
                     // Prolog subscriptions are deprecated - no need for parity testing.
 
                     it("should demonstrate subscription performance", async () => {
@@ -2811,7 +2811,7 @@ describe("Prolog + Literals", () => {
                     comment2.text = "This is another valid comment";
                     await comment2.save();
 
-                    // Add delay to allow SurrealDB to finish indexing
+                    // Add delay to allow SPARQL to finish indexing
                     await sleep(1500);
 
                     // Add links to article
@@ -2857,7 +2857,7 @@ describe("Prolog + Literals", () => {
                     comment.text = "Valid comment text";
                     await comment.save();
 
-                    // Add delay to allow SurrealDB to finish indexing
+                    // Add delay to allow SPARQL to finish indexing
                     await sleep(1500);
 
                     // Add both to article
@@ -2909,7 +2909,7 @@ describe("Prolog + Literals", () => {
                     c2.text = "Comment 2 text";
                     await c2.save();
 
-                    // Add delay to allow SurrealDB to finish indexing
+                    // Add delay to allow SPARQL to finish indexing
                     await sleep(1500);
 
                     // Add comments to articles (mix of valid and invalid)
@@ -3011,8 +3011,8 @@ describe("Prolog + Literals", () => {
 
     // SKIPPED: Embedding cache tests - only applies to Prolog-pooled mode
     // These tests verify embedding URL post-processing with Prolog infer() queries.
-    // With SHACL migration, embedding queries should use SurrealDB vector search instead.
-    // Keeping as reference for future SurrealDB vector embedding implementation.
+    // With SHACL migration, embedding queries should use SPARQL vector search instead.
+    // Keeping as reference for future SPARQL vector embedding implementation.
     describe.skip('Embedding cache', () => {
         let perspective: PerspectiveProxy | null = null;
         const EMBEDDING_LANG = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";

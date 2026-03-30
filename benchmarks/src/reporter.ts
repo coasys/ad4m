@@ -9,7 +9,7 @@ export interface SuiteResult {
   tests: Array<{
     name: string
     sparql: Stats
-    surrealdb: Stats
+    baseline: Stats
   }>
 }
 
@@ -19,11 +19,11 @@ export interface BenchmarkReport {
   config: Record<string, unknown>
 }
 
-function speedup(sparql: Stats, surrealdb: Stats): string {
-  if (sparql.median === 0 || surrealdb.median === 0) return 'N/A'
-  const ratio = surrealdb.median / sparql.median
+function speedup(sparql: Stats, baseline: Stats): string {
+  if (sparql.median === 0 || baseline.median === 0) return 'N/A'
+  const ratio = baseline.median / sparql.median
   if (ratio > 1) return `SPARQL ${ratio.toFixed(2)}x faster`
-  if (ratio < 1) return `SurrealDB ${(1 / ratio).toFixed(2)}x faster`
+  if (ratio < 1) return `baseline ${(1 / ratio).toFixed(2)}x faster`
   return 'Equal'
 }
 
@@ -34,7 +34,7 @@ function padRight(s: string, len: number): string {
 export function printTerminal(report: BenchmarkReport): void {
   const W = 66
   console.log('╔' + '═'.repeat(W) + '╗')
-  console.log('║' + padRight('  AD4M Benchmark: Oxigraph/SPARQL vs SurrealDB', W) + '║')
+  console.log('║' + padRight('  AD4M Benchmark: Oxigraph/SPARQL vs baseline', W) + '║')
   console.log('║' + padRight(`  ${report.timestamp}`, W) + '║')
   console.log('╠' + '═'.repeat(W) + '╣')
   console.log('')
@@ -46,8 +46,8 @@ export function printTerminal(report: BenchmarkReport): void {
     for (const test of suite.tests) {
       console.log(`    ${test.name}`)
       console.log(`      SPARQL:    ${padRight(formatDuration(test.sparql.median) + ' median', 16)} (p95: ${formatDuration(test.sparql.p95)}, p99: ${formatDuration(test.sparql.p99)})  ${formatOps(test.sparql.opsPerSec)}`)
-      console.log(`      SurrealDB: ${padRight(formatDuration(test.surrealdb.median) + ' median', 16)} (p95: ${formatDuration(test.surrealdb.p95)}, p99: ${formatDuration(test.surrealdb.p99)})  ${formatOps(test.surrealdb.opsPerSec)}`)
-      console.log(`      Δ: ${speedup(test.sparql, test.surrealdb)}`)
+      console.log(`      baseline: ${padRight(formatDuration(test.baseline.median) + ' median', 16)} (p95: ${formatDuration(test.baseline.p95)}, p99: ${formatDuration(test.baseline.p99)})  ${formatOps(test.baseline.opsPerSec)}`)
+      console.log(`      Δ: ${speedup(test.sparql, test.baseline)}`)
       console.log('')
     }
   }
@@ -57,7 +57,7 @@ export function printTerminal(report: BenchmarkReport): void {
 
 export function generateMarkdown(report: BenchmarkReport): string {
   const lines: string[] = [
-    `# AD4M Benchmark: Oxigraph/SPARQL vs SurrealDB`,
+    `# AD4M Benchmark: Oxigraph/SPARQL vs baseline`,
     ``,
     `**Date:** ${report.timestamp}`,
     ``,
@@ -69,9 +69,9 @@ export function generateMarkdown(report: BenchmarkReport): string {
     lines.push('|------|--------|--------|-----|-----|-------|---------|')
 
     for (const test of suite.tests) {
-      const delta = speedup(test.sparql, test.surrealdb)
+      const delta = speedup(test.sparql, test.baseline)
       lines.push(`| ${test.name} | SPARQL | ${formatDuration(test.sparql.median)} | ${formatDuration(test.sparql.p95)} | ${formatDuration(test.sparql.p99)} | ${formatOps(test.sparql.opsPerSec)} | ${delta} |`)
-      lines.push(`| | SurrealDB | ${formatDuration(test.surrealdb.median)} | ${formatDuration(test.surrealdb.p95)} | ${formatDuration(test.surrealdb.p99)} | ${formatOps(test.surrealdb.opsPerSec)} | |`)
+      lines.push(`| | baseline | ${formatDuration(test.baseline.median)} | ${formatDuration(test.baseline.p95)} | ${formatDuration(test.baseline.p99)} | ${formatOps(test.baseline.opsPerSec)} | |`)
     }
     lines.push('')
   }
