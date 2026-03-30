@@ -579,38 +579,35 @@ export async function evaluateCustomGettersForInstance(
     if (projectionSet && !projectionSet.has(relName) && !(options?.include && relName in options.include)) continue;
     const meta = relMeta as RelationMetadata;
 
-    // Determine the getter to execute:
-    // 1. Explicit `getter` always wins
-    // 2. `where` clause → compile to getter
-    // 3. If `target` is set and `filter !== false`, auto-generate conformance getter
-    //    BUT skip auto-generation for reverse relations (belongsToMany / belongsToOne)
-    let getter = meta.getter;
-    if (!getter && meta.where && meta.direction !== 'reverse') {
-      try {
+    // For relations with a `where` clause (e.g. @HasMany with where filter),
+    // filter the linked IDs in JS by checking each target against the where conditions.
+    // This replaces the SPARQL getter approach which had cross-subject join issues.
+    if (!meta.getter && meta.where && meta.direction !== 'reverse') {
+      const rawIds = instance[relName];
+      if (Array.isArray(rawIds) && rawIds.length > 0) {
         const TargetClass = meta.target?.();
-        const targetMetadata = TargetClass
-          ? (TargetClass as any).getModelMetadata?.() ?? null
-          : null;
-        const conditions = compileWhereClause(meta.where, targetMetadata);
-        if (conditions.length > 0) {
-          const escapedPred = escapeQueryString(meta.predicate);
-          getter = `(->link[WHERE predicate = '${escapedPred}'].out[WHERE ${conditions.join(' AND ')}].uri)`;
+        if (TargetClass) {
+          try {
+            // Fetch all linked instances and filter by where conditions
+            const linkedInstances = await (TargetClass as any).findAll(perspective, {
+              where: { id: rawIds, ...meta.where } as any,
+            });
+            instance[relName] = linkedInstances.map((inst: any) => inst.id);
+          } catch (e) {
+            // Fallback: keep raw IDs
+          }
         }
-      } catch (e) {
-        // Target metadata may not be available yet
       }
+      continue;
     }
-    if (!getter && meta.target && meta.filter !== false && meta.direction !== 'reverse') {
-      try {
-        const TargetClass = meta.target();
-        getter = buildConformanceGetter(meta.predicate, TargetClass);
-        if (!getter) {
-          console.warn(`[Ad4mModel] buildConformanceGetter returned undefined for relation "${relName}" (predicate: "${meta.predicate}")`);
-        }
-      } catch (e) {
-        console.warn(`[Ad4mModel] auto-generation failed for relation "${relName}":`, e);
-      }
-    }
+
+    // For explicit getters, use the SPARQL getter path
+    let getter = meta.getter;
+
+    // Skip auto-generated conformance getters — hydrateFromLinks already handles
+    // relation population from the main findAll query. The conformance getter
+    // SPARQL queries have cross-subject join issues in some environments.
+    if (!getter) continue;
 
     if (getter) {
       try {
@@ -618,7 +615,6 @@ export async function evaluateCustomGettersForInstance(
         const converted = convertGetterToSPARQL(getterStr, baseExpression);
         if (converted) {
           const result = await perspective.querySparql(converted.query);
-          console.log(`[GETTER DEBUG] ${relName}: query=${converted.query}, results=${result?.length ?? 0}, values=${JSON.stringify(result?.map((r: any) => r.target))}`);
           if (result && result.length > 0) {
             const values = result
               .map((r: any) => r.target)
@@ -643,7 +639,6 @@ export async function evaluateCustomGettersForInstance(
         }
       } catch (error) {
         console.warn(`Failed to evaluate getter for ${relName}:`, error);
-        console.warn(`[GETTER DEBUG] getter was: ${getter}`);
       }
     }
   }
