@@ -3814,7 +3814,6 @@ impl PerspectiveInstance {
                 let mut queries = self_clone.subscribed_queries.lock().await;
                 if let Some(stored_query) = queries.get_mut(&id) {
                     if result_string != stored_query.last_result {
-                        
                         // Release lock before sending update
                         drop(queries);
                         self_clone
@@ -3875,7 +3874,6 @@ impl PerspectiveInstance {
             let should_check = { *self.trigger_prolog_subscription_check.lock().await };
 
             if should_check {
-                
                 self.check_subscribed_queries().await;
                 *self.trigger_prolog_subscription_check.lock().await = false;
             }
