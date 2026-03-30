@@ -1287,8 +1287,18 @@ impl AIService {
                             let word_count = text.split_whitespace().count();
                             if word_count > 0 {
                                 if let Some(ref email) = billing_email {
+                                    // Resolve model name from ID for rate lookup
+                                    // (host_rates are stored by display name, not UUID)
+                                    let rate_key = crate::db::Ad4mDb::with_global_instance(|db| {
+                                        db.get_model(billing_model_id.clone())
+                                    })
+                                    .ok()
+                                    .flatten()
+                                    .map(|m| m.name)
+                                    .unwrap_or_else(|| billing_model_id.clone());
+
                                     let rate = match crate::db::Ad4mDb::with_global_instance(|db| {
-                                        db.get_host_rate(&billing_model_id)
+                                        db.get_host_rate(&rate_key)
                                     }) {
                                         Ok(Some(rate)) => rate,
                                         Ok(None) => DEFAULT_TRANSCRIPTION_WORD_RATE,
