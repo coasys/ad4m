@@ -1288,7 +1288,7 @@ impl AIService {
                             if word_count > 0 {
                                 if let Some(ref email) = billing_email {
                                     let rate = match crate::db::Ad4mDb::with_global_instance(|db| {
-                                        db.get_host_rate("whisper transcription")
+                                        db.get_host_rate(&billing_model_id)
                                     }) {
                                         Ok(Some(rate)) => rate,
                                         Ok(None) => DEFAULT_TRANSCRIPTION_WORD_RATE,
