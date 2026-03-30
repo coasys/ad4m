@@ -340,28 +340,20 @@ function buildSPARQLWhereFilters(
         }
       }
 
-      // Comparison operators
-      const targetVar = `?wTarget_cmp_${propertyName}`;
-      const valueExpr = useParseLiteral
-        ? `<ad4m://fn/parse_literal>(STR(${targetVar}))`
-        : `STR(${targetVar})`;
+      // Comparison operators — skip SPARQL-level filtering for literal-stored
+      // properties because parse_literal returns strings and string comparison
+      // doesn't work correctly for numbers (e.g. "10" < "5" in string order).
+      // These are handled by the JS post-filter in instancesFromQueryResult.
+      // We only add a JOIN to ensure the property exists (for conformance).
+      const hasCompOps = ops.gt !== undefined || ops.gte !== undefined ||
+        ops.lt !== undefined || ops.lte !== undefined ||
+        ops.between !== undefined || ops.contains !== undefined;
 
-      const compFilters: string[] = [];
-      if (ops.gt !== undefined) compFilters.push(`${valueExpr} > ${formatSPARQLValue(ops.gt)}`);
-      if (ops.gte !== undefined) compFilters.push(`${valueExpr} >= ${formatSPARQLValue(ops.gte)}`);
-      if (ops.lt !== undefined) compFilters.push(`${valueExpr} < ${formatSPARQLValue(ops.lt)}`);
-      if (ops.lte !== undefined) compFilters.push(`${valueExpr} <= ${formatSPARQLValue(ops.lte)}`);
-      if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
-        compFilters.push(`${valueExpr} >= ${formatSPARQLValue(ops.between[0])} && ${valueExpr} <= ${formatSPARQLValue(ops.between[1])}`);
-      }
-      if (ops.contains !== undefined) {
-        compFilters.push(`CONTAINS(STR(${valueExpr}), ${formatSPARQLValue(ops.contains)})`);
-      }
-
-      if (compFilters.length > 0) {
+      if (hasCompOps) {
+        const targetVar = `?wTarget_cmp_${propertyName}`;
         joins.push(`
       ?source ${iri(propMeta.predicate)} ${targetVar} .`);
-        filters.push(...compFilters);
+        // No FILTER expressions — comparison is done in JS post-filter
       }
     } else {
       // Simple equality
