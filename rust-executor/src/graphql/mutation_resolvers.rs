@@ -61,7 +61,7 @@ fn get_rate(description: &str, default: f64) -> FieldResult<f64> {
 /// - No user email in token (single-user mode, no billing)
 /// - User has free_access enabled
 /// - Credits were successfully deducted (clamped to 0)
-fn reserve_compute_credits(
+fn deduct_compute_credits(
     auth_token: &str,
     amount: f64,
     operation: &str,
@@ -96,7 +96,7 @@ fn reserve_compute_credits(
 
 /// Read-only credit check. Returns Ok(()) if the user can afford compute.
 /// Used as a fast pre-check before expensive operations; the actual deduction
-/// happens after the operation via reserve_compute_credits with the exact cost.
+/// happens after the operation via deduct_compute_credits with the exact cost.
 fn check_compute_credits(auth_token: &str) -> FieldResult<()> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
         let global_free =
@@ -1987,7 +1987,7 @@ impl Mutation {
             )
             .await?;
 
-        if let Err(e) = reserve_compute_credits(
+        if let Err(e) = deduct_compute_credits(
             &context.auth_token,
             get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
             "link_write",
@@ -2017,7 +2017,7 @@ impl Mutation {
             .add_link_expression(link, link_status_from_input(status)?, batch_id)
             .await?;
 
-        if let Err(e) = reserve_compute_credits(
+        if let Err(e) = deduct_compute_credits(
             &context.auth_token,
             get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
             "link_write",
@@ -2054,7 +2054,7 @@ impl Mutation {
             )
             .await?;
 
-        if let Err(e) = reserve_compute_credits(
+        if let Err(e) = deduct_compute_credits(
             &context.auth_token,
             link_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
             "link_write",
@@ -2086,7 +2086,7 @@ impl Mutation {
             .link_mutations(mutations, link_status_from_input(status)?, &agent_context)
             .await?;
 
-        if let Err(e) = reserve_compute_credits(
+        if let Err(e) = deduct_compute_credits(
             &context.auth_token,
             additions_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
             "link_write",
@@ -2987,7 +2987,7 @@ impl Mutation {
                     String::new()
                 }
             };
-        if let Err(e) = reserve_compute_credits(
+        if let Err(e) = deduct_compute_credits(
             &context.auth_token,
             total_tokens as f64 * get_rate(&model_name, DEFAULT_TOKEN_RATE)?,
             "ai_prompt",
@@ -3016,7 +3016,7 @@ impl Mutation {
             .embed(model_id, text)
             .await?;
 
-        if let Err(e) = reserve_compute_credits(
+        if let Err(e) = deduct_compute_credits(
             &context.auth_token,
             result.token_count as f64
                 * get_rate("embedding per token", DEFAULT_EMBEDDING_TOKEN_RATE)?,
