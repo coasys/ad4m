@@ -918,6 +918,7 @@ export class Ad4mModel {
           if (!isPropField) {
             // Relation-based where — filter in JS against the populated field
             if (!matchesCondition(instance[propertyName], condition)) {
+              console.log(`[WHERE DEBUG] Relation filter: ${propertyName}=${JSON.stringify(instance[propertyName])} vs condition=${JSON.stringify(condition)} → REJECTED`);
               return false;
             }
             continue;

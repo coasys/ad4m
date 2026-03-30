@@ -618,6 +618,7 @@ export async function evaluateCustomGettersForInstance(
         const converted = convertGetterToSPARQL(getterStr, baseExpression);
         if (converted) {
           const result = await perspective.querySparql(converted.query);
+          console.log(`[GETTER DEBUG] ${relName}: query=${converted.query}, results=${result?.length ?? 0}, values=${JSON.stringify(result?.map((r: any) => r.target))}`);
           if (result && result.length > 0) {
             const values = result
               .map((r: any) => r.target)
@@ -642,6 +643,7 @@ export async function evaluateCustomGettersForInstance(
         }
       } catch (error) {
         console.warn(`Failed to evaluate getter for ${relName}:`, error);
+        console.warn(`[GETTER DEBUG] getter was: ${getter}`);
       }
     }
   }
