@@ -487,6 +487,18 @@ function convertGetterToSPARQL(getter: string, baseExpression: string): { query:
     conditions.push(`?target <${match[1]}> <${match[2]}> .`);
   }
 
+  // Match conditions like: count(->link[WHERE predicate = 'P' AND fn::parse_literal(out.uri) = 'V']) > 0
+  // This handles literal-resolved properties where the stored value is a literal: IRI
+  const parseLiteralPattern = /count\(->link\[WHERE\s+predicate\s*=\s*'([^']+)'\s+AND\s+fn::parse_literal\(out\.uri\)\s*=\s*'([^']+)'\]\)\s*>\s*0/g;
+  while ((match = parseLiteralPattern.exec(whereClause)) !== null) {
+    // Convert the plain value to a literal: IRI for matching
+    const alreadyCaptured = conditions.some(c => c.includes(`<${match[1]}>`));
+    if (!alreadyCaptured) {
+      const literalIri = Literal.from(match[2]).toUrl();
+      conditions.push(`?target <${match[1]}> <${literalIri}> .`);
+    }
+  }
+
   // Match conditions like: count(->link[WHERE predicate = 'P']) > 0 (without out.uri)
   const requiredPattern = /count\(->link\[WHERE\s+predicate\s*=\s*'([^']+)'\]\)\s*>\s*0/g;
   while ((match = requiredPattern.exec(whereClause)) !== null) {
