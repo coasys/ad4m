@@ -12,7 +12,8 @@ import { resolveParentPredicate } from "./query-common";
 import { getRelationsMetadata } from "./decorators";
 import type { RelationMetadataEntry } from "./decorators";
 import { formatSPARQLValue } from "./query-sparql";
-import type { Query, IncludeMap, ModelMetadata } from "./types";
+import { Literal } from "../Literal";
+import type { Query, IncludeMap, ModelMetadata, PropertyMetadata } from "./types";
 
 // ──────────────────────────────────────────────────────────
 //  Helpers
@@ -20,6 +21,35 @@ import type { Query, IncludeMap, ModelMetadata } from "./types";
 
 function iri(value: string): string {
   return `<${value}>`;
+}
+
+/**
+ * Check if a string value looks like a URI (has a scheme).
+ */
+function looksLikeUri(value: string): boolean {
+  return /^[a-zA-Z][a-zA-Z0-9+\-._]*:/.test(value);
+}
+
+/**
+ * Convert a JS value to its literal: IRI form.
+ */
+function valueToLiteralIri(value: any): string {
+  if (typeof value === 'string') {
+    if (looksLikeUri(value)) return value;
+    return Literal.from(value).toUrl();
+  }
+  if (typeof value === 'number') return Literal.from(value).toUrl();
+  if (typeof value === 'boolean') return Literal.from(value).toUrl();
+  return Literal.from(String(value)).toUrl();
+}
+
+/**
+ * Determine if a property stores values as literal: IRIs.
+ */
+function isLiteralStoredProperty(propMeta: PropertyMetadata): boolean {
+  if (propMeta.flag) return false;
+  if (propMeta.resolveLanguage && propMeta.resolveLanguage !== "literal") return false;
+  return true;
 }
 
 interface DepthBranch {
@@ -165,9 +195,18 @@ export function buildBatchSPARQLQuery(
       const propMeta = rootMetadata.properties[propertyName];
       if (!propMeta) continue;
 
+      const useParseLiteral = isLiteralStoredProperty(propMeta);
+
       if (typeof condition === "string" || typeof condition === "number" || typeof condition === "boolean") {
-        rootJoins.push(`
+        if (useParseLiteral) {
+          // Use parse_literal for literal-stored properties
+          rootJoins.push(`
+        ?source ${iri(propMeta.predicate)} ?root_wTarget_eq_${propertyName} .`);
+          rootFilters.push(`<ad4m://fn/parse_literal>(STR(?root_wTarget_eq_${propertyName})) = ${formatSPARQLValue(condition)}`);
+        } else {
+          rootJoins.push(`
         ?source ${iri(propMeta.predicate)} ${iri(String(condition))} .`);
+        }
       } else if (Array.isArray(condition)) {
         const formatted = (condition as any[]).map(v => iri(v)).join(", ");
         rootJoins.push(`

@@ -10,9 +10,50 @@
  * @module
  */
 
+import { Literal } from "../Literal";
 import { resolveParentPredicate } from "./query-common";
 import type { RelationMetadataEntry } from "./decorators";
-import type { Where, Query, ModelMetadata } from "./types";
+import type { Where, Query, ModelMetadata, PropertyMetadata } from "./types";
+
+/**
+ * Check if a string value looks like a URI (has a scheme).
+ */
+function looksLikeUri(value: string): boolean {
+  return /^[a-zA-Z][a-zA-Z0-9+\-._]*:/.test(value);
+}
+
+/**
+ * Convert a JS value to its literal: IRI form, matching how the Rust executor
+ * stores property values that don't have a resolveLanguage set.
+ * Strings that already look like URIs are returned as-is.
+ */
+function valueToLiteralIri(value: any): string {
+  if (typeof value === 'string') {
+    if (looksLikeUri(value)) return value;
+    return Literal.from(value).toUrl();
+  }
+  if (typeof value === 'number') {
+    return Literal.from(value).toUrl();
+  }
+  if (typeof value === 'boolean') {
+    return Literal.from(value).toUrl();
+  }
+  return Literal.from(String(value)).toUrl();
+}
+
+/**
+ * Determine if a property stores values as literal: IRIs (needs parse_literal for comparisons).
+ * Properties with resolveLanguage === "literal" AND properties without resolveLanguage
+ * both store values as literal: URIs. Only properties with a non-literal resolveLanguage
+ * (e.g. file storage) or flag properties store raw URIs.
+ */
+function isLiteralStoredProperty(propMeta: PropertyMetadata): boolean {
+  if (propMeta.flag) return false;
+  // If resolveLanguage is set to something other than "literal", it's a language expression URI
+  if (propMeta.resolveLanguage && propMeta.resolveLanguage !== "literal") return false;
+  // Everything else (resolveLanguage === "literal" or undefined) stores as literal: URIs
+  return true;
+}
 
 /**
  * Escape a string for use as a SPARQL string literal.
@@ -243,9 +284,12 @@ function buildSPARQLWhereFilters(
     const propMeta = metadata.properties[propertyName];
     if (!propMeta) continue;
 
+    // Determine if this property stores values as literal: IRIs
+    const useParseLiteral = isLiteralStoredProperty(propMeta);
+
     if (Array.isArray(condition)) {
       // IN clause
-      if (propMeta.resolveLanguage === "literal") {
+      if (useParseLiteral) {
         joins.push(`
       ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
         const formatted = (condition as any[]).map(v => formatSPARQLValue(v)).join(", ");
@@ -260,7 +304,7 @@ function buildSPARQLWhereFilters(
       const ops = condition as any;
       if (ops.not !== undefined) {
         if (Array.isArray(ops.not)) {
-          if (propMeta.resolveLanguage === "literal") {
+          if (useParseLiteral) {
             const formatted = (ops.not as any[]).map(v => formatSPARQLValue(v)).join(", ");
             filters.push(`
           NOT EXISTS {
@@ -278,7 +322,7 @@ function buildSPARQLWhereFilters(
         `);
           }
         } else {
-          if (propMeta.resolveLanguage === "literal") {
+          if (useParseLiteral) {
             const formatted = formatSPARQLValue(ops.not);
             filters.push(`
           NOT EXISTS {
@@ -298,7 +342,7 @@ function buildSPARQLWhereFilters(
 
       // Comparison operators
       const targetVar = `?wTarget_cmp_${propertyName}`;
-      const valueExpr = propMeta.resolveLanguage === "literal"
+      const valueExpr = useParseLiteral
         ? `<ad4m://fn/parse_literal>(STR(${targetVar}))`
         : `STR(${targetVar})`;
 
@@ -321,7 +365,8 @@ function buildSPARQLWhereFilters(
       }
     } else {
       // Simple equality
-      if (propMeta.resolveLanguage === "literal") {
+      if (useParseLiteral) {
+        // For literal-stored properties, use parse_literal to compare values
         const formatted = formatSPARQLValue(condition);
         joins.push(`
       ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);

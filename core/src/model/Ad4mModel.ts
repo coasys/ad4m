@@ -11,7 +11,7 @@ import { buildParentQuery, buildAuthorAndTimestampQuery, buildPropertiesQuery, b
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
-import { buildSPARQLQuery, groupSPARQLResults } from "./query-sparql";
+import { buildSPARQLQuery, buildSPARQLGetDataQuery, groupSPARQLResults } from "./query-sparql";
 import { buildBatchSPARQLQuery } from "./query-sparql-batch";
 import { hydrateBatchResult } from "./hydration-batch";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
@@ -610,13 +610,7 @@ export class Ad4mModel {
       const metadata = ctor.getModelMetadata();
 
       // Query for all links from this specific node (base expression)
-      const safeBaseExpression = formatQueryValue(this._baseExpression);
-      const linksQuery = `
-        SELECT id, predicate, out.uri AS target, author, timestamp
-        FROM link
-        WHERE in.uri = ${safeBaseExpression}
-        ORDER BY timestamp ASC
-      `;
+      const linksQuery = buildSPARQLGetDataQuery(this._baseExpression);
       const links = await this._perspective.querySparql(linksQuery);
 
       if (links && links.length > 0) {
@@ -896,17 +890,19 @@ export class Ad4mModel {
       await evaluateCustomGettersForInstance(instance, perspective, metadata, getterOpts);
     }
     
-    // Filter by where conditions that couldn't be filtered in SQL
+    // Filter by where conditions that couldn't be filtered in SPARQL
     // This includes:
     // - author/timestamp (computed from grouped links)
     // - Properties with comparison operators (gt, gte, lt, lte, between, contains)
     //   because fn::parse_literal() comparisons in SPARQL subqueries don't work reliably
+    // - Relation-based where clauses (e.g., { post: postId } for @BelongsToOne)
+    //   which require reverse-link resolution before filtering
     let filteredInstances = instances;
     if (query.where) {
       filteredInstances = instances.filter(instance => {
         for (const [propertyName, condition] of Object.entries(query.where!)) {
-          // Skip 'base' as it's filtered in SQL
-          if (propertyName === 'base') continue;
+          // Skip 'base'/'id' as it's filtered in SPARQL
+          if (propertyName === 'base' || propertyName === 'id') continue;
 
           // For author and timestamp, always filter in JS
           if (propertyName === 'author' || propertyName === 'timestamp') {
@@ -916,8 +912,19 @@ export class Ad4mModel {
             continue;
           }
 
+          // Check if this is a relation field (not in properties metadata)
+          const isPropField = propertyName in metadata.properties;
+
+          if (!isPropField) {
+            // Relation-based where — filter in JS against the populated field
+            if (!matchesCondition(instance[propertyName], condition)) {
+              return false;
+            }
+            continue;
+          }
+
           // For regular properties, only filter comparison operators in JS
-          // Simple equality and NOT are handled in SQL, but gt/gte/lt/lte/between/contains need JS
+          // Simple equality and NOT are handled in SPARQL, but gt/gte/lt/lte/between/contains need JS
           if (typeof condition === 'object' && condition !== null && !Array.isArray(condition)) {
             const ops = condition as any;
             // Check if any comparison operators are present

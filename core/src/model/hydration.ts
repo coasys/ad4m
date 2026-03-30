@@ -446,10 +446,74 @@ export function buildConformanceGetter(
 }
 
 /**
+ * Parse a SurrealDB-style conformance getter and convert it to a SPARQL query.
+ * 
+ * Handles patterns like:
+ * - `(->link[WHERE predicate = 'P'].out[WHERE count(->link[WHERE predicate = 'Q' AND out.uri = 'V']) > 0].uri)`
+ * - `(->link[WHERE predicate = 'P'].out.uri)[0]`
+ * - `(->link[WHERE predicate = 'P'].out[WHERE count(->link[WHERE predicate = 'Q']) > 0 AND count(->link[WHERE predicate = 'R' AND out.uri = 'S']) > 0].uri)`
+ * 
+ * Returns null if the getter can't be parsed.
+ */
+function convertGetterToSPARQL(getter: string, baseExpression: string): { query: string; isScalar: boolean } | null {
+  // Check for [0] suffix indicating scalar result
+  const isScalar = getter.trimEnd().endsWith('[0]');
+  const cleanGetter = getter.replace(/\)\s*\[\d+\]\s*$/, ')');
+
+  // Extract the relation predicate: ->link[WHERE predicate = 'PRED']
+  const relPredMatch = cleanGetter.match(/->link\[WHERE\s+predicate\s*=\s*'([^']+)'\]/);
+  if (!relPredMatch) return null;
+  const relationPredicate = relPredMatch[1];
+
+  // Check if there's a target filter: .out[WHERE ...]
+  const outFilterMatch = cleanGetter.match(/\.out\[WHERE\s+(.+?)\]\.uri/);
+  
+  if (!outFilterMatch) {
+    // Simple: just follow the relation, no conformance filter
+    return {
+      query: `SELECT ?target WHERE { <${baseExpression}> <${relationPredicate}> ?target . }`,
+      isScalar,
+    };
+  }
+
+  // Parse conformance conditions from the WHERE clause
+  const whereClause = outFilterMatch[1];
+  const conditions: string[] = [];
+
+  // Match conditions like: count(->link[WHERE predicate = 'P' AND out.uri = 'V']) > 0
+  const flagPattern = /count\(->link\[WHERE\s+predicate\s*=\s*'([^']+)'\s+AND\s+out\.uri\s*=\s*'([^']+)'\]\)\s*>\s*0/g;
+  let match;
+  while ((match = flagPattern.exec(whereClause)) !== null) {
+    conditions.push(`?target <${match[1]}> <${match[2]}> .`);
+  }
+
+  // Match conditions like: count(->link[WHERE predicate = 'P']) > 0 (without out.uri)
+  const requiredPattern = /count\(->link\[WHERE\s+predicate\s*=\s*'([^']+)'\]\)\s*>\s*0/g;
+  while ((match = requiredPattern.exec(whereClause)) !== null) {
+    // Avoid duplicating conditions already captured by the flag pattern
+    const alreadyCaptured = conditions.some(c => c.includes(`<${match[1]}>`));
+    if (!alreadyCaptured) {
+      conditions.push(`?target <${match[1]}> ?_req_${match[1].replace(/[^a-zA-Z0-9]/g, '_')} .`);
+    }
+  }
+
+  const conformanceClause = conditions.length > 0 ? '\n    ' + conditions.join('\n    ') : '';
+
+  return {
+    query: `SELECT ?target WHERE {
+    <${baseExpression}> <${relationPredicate}> ?target .${conformanceClause}
+  }`,
+    isScalar,
+  };
+}
+
+/**
  * Evaluates custom SPARQL getters for properties and relations on a specific instance.
  *
  * For relations that declare a `target` but no explicit `getter`, a conformance
  * getter is auto-generated from the target model's metadata (unless `filter: false`).
+ * 
+ * SurrealDB-style getters are automatically converted to proper SPARQL queries.
  */
 export async function evaluateCustomGettersForInstance(
   instance: any,
@@ -457,7 +521,7 @@ export async function evaluateCustomGettersForInstance(
   metadata: ModelMetadata,
   options?: { requestedProperties?: string[]; include?: Record<string, any> }
 ): Promise<void> {
-  const safeBaseExpression = formatQueryValue(instance.id);
+  const baseExpression = instance.id;
 
   // Build projection filter — when requestedProperties is active, only
   // evaluate getters for fields that are requested (or included).
@@ -469,14 +533,27 @@ export async function evaluateCustomGettersForInstance(
     if (projectionSet && !projectionSet.has(propName)) continue;
     if ((propMeta as any).getter) {
       try {
-        // Replace 'Base' placeholder with actual base expression
-        const query = (propMeta as any).getter.replace(/Base/g, safeBaseExpression);
-        // Query from node table to have graph traversal context
-        const result = await perspective.querySparql(
-          `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`
-        );
-        if (result && result.length > 0 && result[0].value !== undefined && result[0].value !== null && result[0].value !== 'None' && result[0].value !== '') {
-          instance[propName] = result[0].value;
+        const getterStr = (propMeta as any).getter.replace(/Base/g, formatQueryValue(baseExpression));
+        const converted = convertGetterToSPARQL(getterStr, baseExpression);
+        if (converted) {
+          const result = await perspective.querySparql(converted.query);
+          if (result && result.length > 0 && result[0].target !== undefined && result[0].target !== null && result[0].target !== 'None' && result[0].target !== '') {
+            if (converted.isScalar) {
+              instance[propName] = result[0].target;
+            } else {
+              instance[propName] = result.map((r: any) => r.target).filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None');
+            }
+          }
+        } else {
+          // Fallback: try as raw SPARQL (for genuinely SPARQL-syntax getters)
+          try {
+            const result = await perspective.querySparql(getterStr);
+            if (result && result.length > 0) {
+              instance[propName] = result[0].value ?? result[0].target;
+            }
+          } catch {
+            console.warn(`Failed to evaluate getter for property ${propName}: unsupported getter syntax`);
+          }
         }
       } catch (error) {
         console.warn(`Failed to evaluate getter for ${propName}:`, error);
@@ -492,12 +569,9 @@ export async function evaluateCustomGettersForInstance(
 
     // Determine the getter to execute:
     // 1. Explicit `getter` always wins
-    // 2. `where` clause → compile DSL to SPARQL getter
-    // 3. If `target` is set and `filter !== false`, auto-generate from target metadata
+    // 2. `where` clause → compile to getter
+    // 3. If `target` is set and `filter !== false`, auto-generate conformance getter
     //    BUT skip auto-generation for reverse relations (belongsToMany / belongsToOne)
-    //    because buildConformanceGetter traverses outgoing links (->link) which is
-    //    wrong for reverse relations. Their values are already populated by the
-    //    reverse link lookup in instancesFromQueryResult / getData.
     let getter = meta.getter;
     if (!getter && meta.where && meta.direction !== 'reverse') {
       try {
@@ -528,18 +602,31 @@ export async function evaluateCustomGettersForInstance(
 
     if (getter) {
       try {
-        // Replace 'Base' placeholder with actual base expression
-        const query = getter.replace(/Base/g, safeBaseExpression);
-        const fullQuery = `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`;
-        // Query from node table to have graph traversal context
-        const result = await perspective.querySparql(fullQuery);
-
-        if (result && result.length > 0 && result[0].value !== undefined && result[0].value !== null) {
-          // Filter out 'None' from relation results
-          const value = result[0].value;
-          instance[relName] = Array.isArray(value) 
-            ? value.filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None')
-            : value;
+        const getterStr = getter.replace(/Base/g, formatQueryValue(baseExpression));
+        const converted = convertGetterToSPARQL(getterStr, baseExpression);
+        if (converted) {
+          const result = await perspective.querySparql(converted.query);
+          if (result && result.length > 0) {
+            const values = result
+              .map((r: any) => r.target)
+              .filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None');
+            instance[relName] = converted.isScalar
+              ? (values.length > 0 ? values[0] : null)
+              : values;
+          }
+        } else {
+          // Fallback: try as raw SPARQL
+          try {
+            const result = await perspective.querySparql(getterStr);
+            if (result && result.length > 0) {
+              const value = result[0].value ?? result[0].target;
+              instance[relName] = Array.isArray(value)
+                ? value.filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None')
+                : value;
+            }
+          } catch {
+            console.warn(`Failed to evaluate getter for relation ${relName}: unsupported getter syntax`);
+          }
         }
       } catch (error) {
         console.warn(`Failed to evaluate getter for ${relName}:`, error);
