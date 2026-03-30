@@ -923,19 +923,11 @@ export class Ad4mModel {
             continue;
           }
 
-          // For regular properties, only filter comparison operators in JS
-          // Simple equality and NOT are handled in SPARQL, but gt/gte/lt/lte/between/contains need JS
-          if (typeof condition === 'object' && condition !== null && !Array.isArray(condition)) {
-            const ops = condition as any;
-            // Check if any comparison operators are present
-            const hasComparisonOps = ops.gt !== undefined || ops.gte !== undefined ||
-                                     ops.lt !== undefined || ops.lte !== undefined ||
-                                     ops.between !== undefined || ops.contains !== undefined;
-            if (hasComparisonOps) {
-              if (!matchesCondition(instance[propertyName], condition)) {
-                return false;
-              }
-            }
+          // Filter ALL property conditions in JS (equality, NOT, IN, comparison operators).
+          // SPARQL-level filtering with parse_literal is unreliable across environments,
+          // so we do all property filtering here after hydration resolves values.
+          if (!matchesCondition(instance[propertyName], condition)) {
+            return false;
           }
         }
         return true;
@@ -1056,13 +1048,10 @@ export class Ad4mModel {
       : engine;
 
     if (resolvedEngine === 'sparql') {
-      // Use batch SPARQL for queries with includes (eager-loading)
-      if (query.include && Object.keys(query.include).length > 0) {
-        const sparqlQuery = buildBatchSPARQLQuery(this.getModelMetadata(), query, this);
-        const rawResult = await perspective.querySparql(sparqlQuery);
-        return hydrateBatchResult<T>(rawResult, this, query.include, perspective);
-      }
-
+      // Always use the regular SPARQL path + JS-level hydrateRelations for includes.
+      // The batch SPARQL approach had issues with sub-queries (where/order/limit on includes),
+      // non-conforming node filtering, and parse_literal compatibility.
+      // hydrateRelations handles all of these correctly via per-relation findAll calls.
       const sparqlQuery = await this.queryToSPARQL(perspective, query);
       const rawResult = await perspective.querySparql(sparqlQuery);
       const grouped = groupSPARQLResults(rawResult);

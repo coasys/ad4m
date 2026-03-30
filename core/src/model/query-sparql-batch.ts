@@ -199,19 +199,24 @@ export function buildBatchSPARQLQuery(
 
       if (typeof condition === "string" || typeof condition === "number" || typeof condition === "boolean") {
         if (useParseLiteral) {
-          // Use parse_literal for literal-stored properties
+          // For literal-stored properties, just add a join for conformance — filtering is done in JS
           rootJoins.push(`
         ?source ${iri(propMeta.predicate)} ?root_wTarget_eq_${propertyName} .`);
-          rootFilters.push(`<ad4m://fn/parse_literal>(STR(?root_wTarget_eq_${propertyName})) = ${formatSPARQLValue(condition)}`);
         } else {
           rootJoins.push(`
         ?source ${iri(propMeta.predicate)} ${iri(String(condition))} .`);
         }
       } else if (Array.isArray(condition)) {
-        const formatted = (condition as any[]).map(v => iri(v)).join(", ");
-        rootJoins.push(`
+        if (useParseLiteral) {
+          // For literal-stored properties, just add a join for conformance — filtering is done in JS
+          rootJoins.push(`
         ?source ${iri(propMeta.predicate)} ?root_wTarget_${propertyName} .`);
-        rootFilters.push(`?root_wTarget_${propertyName} IN (${formatted})`);
+        } else {
+          const formatted = (condition as any[]).map(v => iri(v)).join(", ");
+          rootJoins.push(`
+        ?source ${iri(propMeta.predicate)} ?root_wTarget_${propertyName} .`);
+          rootFilters.push(`?root_wTarget_${propertyName} IN (${formatted})`);
+        }
       }
     }
   }

@@ -287,86 +287,65 @@ function buildSPARQLWhereFilters(
     // Determine if this property stores values as literal: IRIs
     const useParseLiteral = isLiteralStoredProperty(propMeta);
 
-    if (Array.isArray(condition)) {
-      // IN clause
-      if (useParseLiteral) {
-        joins.push(`
-      ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
-        const formatted = (condition as any[]).map(v => formatSPARQLValue(v)).join(", ");
-        filters.push(`<ad4m://fn/parse_literal>(STR(?wTarget_${propertyName})) IN (${formatted})`);
+    // For literal-stored properties, skip SPARQL-level FILTER expressions entirely.
+    // The parse_literal custom function is unreliable across oxigraph versions and
+    // environments. All property-level where filtering is done in JS post-filter
+    // (instancesFromQueryResult) after hydration resolves values to JS primitives.
+    // We only add a JOIN pattern to ensure the property exists (conformance check).
+    if (useParseLiteral) {
+      // Just ensure the property exists — no value filtering in SPARQL
+      if (typeof condition === "object" && condition !== null && !Array.isArray(condition)) {
+        const ops = condition as any;
+        const hasCompOps = ops.gt !== undefined || ops.gte !== undefined ||
+          ops.lt !== undefined || ops.lte !== undefined ||
+          ops.between !== undefined || ops.contains !== undefined ||
+          ops.not !== undefined;
+        if (hasCompOps) {
+          joins.push(`
+      ?source ${iri(propMeta.predicate)} ?wTarget_cmp_${propertyName} .`);
+        }
+        // NOT filters: no SPARQL-level filtering — handled in JS
       } else {
-        const formatted = (condition as any[]).map(v => iri(v)).join(", ");
+        // Simple equality or IN — add join for conformance, filter in JS
         joins.push(`
       ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
-        filters.push(`?wTarget_${propertyName} IN (${formatted})`);
       }
+    } else if (Array.isArray(condition)) {
+      const formatted = (condition as any[]).map(v => iri(v)).join(", ");
+      joins.push(`
+      ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
+      filters.push(`?wTarget_${propertyName} IN (${formatted})`);
     } else if (typeof condition === "object" && condition !== null) {
       const ops = condition as any;
       if (ops.not !== undefined) {
         if (Array.isArray(ops.not)) {
-          if (useParseLiteral) {
-            const formatted = (ops.not as any[]).map(v => formatSPARQLValue(v)).join(", ");
-            filters.push(`
-          NOT EXISTS {
-            ?source ${iri(propMeta.predicate)} ?wTarget_not_${propertyName} .
-            FILTER(<ad4m://fn/parse_literal>(STR(?wTarget_not_${propertyName})) IN (${formatted}))
-          }
-        `);
-          } else {
-            const formatted = (ops.not as any[]).map(v => iri(v)).join(", ");
-            filters.push(`
+          const formatted = (ops.not as any[]).map(v => iri(v)).join(", ");
+          filters.push(`
           NOT EXISTS {
             ?source ${iri(propMeta.predicate)} ?wTarget_not_${propertyName} .
             FILTER(?wTarget_not_${propertyName} IN (${formatted}))
           }
         `);
-          }
         } else {
-          if (useParseLiteral) {
-            const formatted = formatSPARQLValue(ops.not);
-            filters.push(`
-          NOT EXISTS {
-            ?source ${iri(propMeta.predicate)} ?wTarget_not_${propertyName} .
-            FILTER(<ad4m://fn/parse_literal>(STR(?wTarget_not_${propertyName})) = ${formatted})
-          }
-        `);
-          } else {
-            filters.push(`
+          filters.push(`
           NOT EXISTS {
             ?source ${iri(propMeta.predicate)} ${iri(ops.not)} .
           }
         `);
-          }
         }
       }
 
-      // Comparison operators — skip SPARQL-level filtering for literal-stored
-      // properties because parse_literal returns strings and string comparison
-      // doesn't work correctly for numbers (e.g. "10" < "5" in string order).
-      // These are handled by the JS post-filter in instancesFromQueryResult.
-      // We only add a JOIN to ensure the property exists (for conformance).
       const hasCompOps = ops.gt !== undefined || ops.gte !== undefined ||
         ops.lt !== undefined || ops.lte !== undefined ||
         ops.between !== undefined || ops.contains !== undefined;
-
       if (hasCompOps) {
-        const targetVar = `?wTarget_cmp_${propertyName}`;
         joins.push(`
-      ?source ${iri(propMeta.predicate)} ${targetVar} .`);
-        // No FILTER expressions — comparison is done in JS post-filter
+      ?source ${iri(propMeta.predicate)} ?wTarget_cmp_${propertyName} .`);
       }
     } else {
-      // Simple equality
-      if (useParseLiteral) {
-        // For literal-stored properties, use parse_literal to compare values
-        const formatted = formatSPARQLValue(condition);
-        joins.push(`
-      ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
-        filters.push(`<ad4m://fn/parse_literal>(STR(?wTarget_${propertyName})) = ${formatted}`);
-      } else {
-        joins.push(`
+      // Simple equality — non-literal property, use exact IRI match
+      joins.push(`
       ?source ${iri(propMeta.predicate)} ${iri(String(condition))} .`);
-      }
     }
   }
 

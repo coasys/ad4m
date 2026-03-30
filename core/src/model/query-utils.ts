@@ -53,7 +53,11 @@ export function buildWhereCondition(
     opts?: { resolveLanguage?: string },
 ): string {
     const escapedPredicate = escapeQueryString(predicate);
-    const targetField = opts?.resolveLanguage === 'literal'
+    // Default to fn::parse_literal for properties without resolveLanguage or with resolveLanguage="literal",
+    // since the Rust executor stores their values as literal: IRIs.
+    // Only use raw out.uri when resolveLanguage is explicitly set to a non-literal language.
+    const useParseLiteral = !opts?.resolveLanguage || opts.resolveLanguage === 'literal';
+    const targetField = useParseLiteral
         ? 'fn::parse_literal(out.uri)'
         : 'out.uri';
 

@@ -468,35 +468,35 @@ describe("Ad4mModel.queryToSPARQL()", () => {
     const norm = normalizeQuery(query);
 
     expect(norm).toContain("SELECT ?source ?predicate ?target ?author ?timestamp");
-    // Should have filter for name = "Pasta" using parse_literal
+    // For literal-stored properties, SPARQL only adds a JOIN (no FILTER value) — filtering is in JS
     expect(norm).toContain("recipe://name");
-    expect(norm).toContain("Pasta");
+    // Value should NOT be in SPARQL — filtering happens in JS post-filter
+    expect(norm).toContain("?wTarget_name");
   });
 
   it("should generate query with NOT operator", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: { not: "Salad" } } });
     const norm = normalizeQuery(query);
 
-    expect(norm).toContain("NOT EXISTS");
-    expect(norm).toContain("Salad");
+    // For literal-stored properties, NOT filtering is done in JS — no NOT EXISTS in SPARQL
+    expect(norm).toContain("recipe://name");
   });
 
   it("should generate query with NOT IN operator (array)", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: { not: ["Salad", "Soup"] } } });
     const norm = normalizeQuery(query);
 
-    expect(norm).toContain("Salad");
-    expect(norm).toContain("Soup");
-    expect(norm).toContain("IN");
+    // For literal-stored properties, NOT IN filtering is done in JS — no filter values in SPARQL
+    expect(norm).toContain("recipe://name");
   });
 
   it("should generate query with IN clause (array values)", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: ["Pasta", "Pizza"] } });
     const norm = normalizeQuery(query);
 
-    expect(norm).toContain("Pasta");
-    expect(norm).toContain("Pizza");
-    expect(norm).toContain("IN");
+    // For literal-stored properties, IN filtering is done in JS — only a JOIN exists
+    expect(norm).toContain("recipe://name");
+    expect(norm).toContain("?wTarget_name");
   });
 
   it("should generate query with base filter", async () => {
@@ -1247,8 +1247,9 @@ describe("buildBatchSPARQLQuery", () => {
     };
     const sparql = buildBatchSPARQLQuery(metadata, query, Book);
 
-    expect(sparql).toContain("My Book");
+    // For literal-stored properties, SPARQL only has a JOIN (no FILTER value) — filtering in JS
     expect(sparql).toContain("book://title");
+    expect(sparql).toContain("root_wTarget_eq_title");
   });
 
   it("should throw when include is empty", () => {
