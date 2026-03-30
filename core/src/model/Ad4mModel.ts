@@ -1057,7 +1057,9 @@ export class Ad4mModel {
       const sparqlQuery = await this.queryToSPARQL(perspective, query);
       const rawResult = await perspective.querySparql(sparqlQuery);
       const grouped = groupSPARQLResults(rawResult);
-      console.log(`[FINDALL DEBUG] ${this.name || 'Model'}: where=${JSON.stringify(query.where)}, rawRows=${rawResult?.length ?? 0}, grouped=${grouped.length}`);
+      if ((rawResult?.length ?? 0) === 0) {
+        console.log(`[FINDALL DEBUG] ${this.name || 'Model'}: where=${JSON.stringify(query.where)}, rawRows=0, SPARQL=${sparqlQuery.replace(/\s+/g, ' ').substring(0, 300)}`);
+      }
       const { results } = await this.instancesFromQueryResult(perspective, query, grouped);
       return results;
     } else {
