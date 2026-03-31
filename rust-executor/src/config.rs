@@ -4,6 +4,40 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// Network mode for the AD4M executor
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkMode {
+    Mainnet,
+    Devnet,
+    Local,
+}
+
+impl std::fmt::Display for NetworkMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NetworkMode::Mainnet => write!(f, "mainnet"),
+            NetworkMode::Devnet => write!(f, "devnet"),
+            NetworkMode::Local => write!(f, "local"),
+        }
+    }
+}
+
+impl std::str::FromStr for NetworkMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "mainnet" => Ok(NetworkMode::Mainnet),
+            "devnet" => Ok(NetworkMode::Devnet),
+            "local" => Ok(NetworkMode::Local),
+            _ => Err(format!(
+                "Invalid network mode: '{}'. Must be mainnet, devnet, or local",
+                s
+            )),
+        }
+    }
+}
+
 lazy_static::lazy_static! {
     /// Global SMTP configuration for sending emails
     pub static ref SMTP_CONFIG: Arc<Mutex<Option<SmtpConfig>>> = Arc::new(Mutex::new(None));

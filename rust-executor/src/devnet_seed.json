@@ -1,0 +1,14 @@
+{
+  "trustedAgents": [
+    "did:key:z6MkdevnetTrusted1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "did:key:z6MkdevnetTrusted2BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+  ],
+  "knownLinkLanguages": [
+    "QmDevnetLinkLanguagePlaceholder000000000000000000000"
+  ],
+  "directMessageLanguage": "QmDevnetDirectMessagePlaceholder0000000000000000000",
+  "agentLanguage": "QmDevnetAgentLanguagePlaceholder00000000000000000000",
+  "perspectiveLanguage": "QmDevnetPerspectiveLanguagePlaceholder000000000000",
+  "neighbourhoodLanguage": "QmDevnetNeighbourhoodLanguagePlaceholder0000000000",
+  "languageLanguageBundle": "// devnet placeholder - no language language bundle in devnet mode\nexport const name = 'languages-devnet';\nexport default async function create(context) { return { name }; }\n"
+}

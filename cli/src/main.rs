@@ -34,6 +34,7 @@ use ad4m_client::*;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use rust_executor::Ad4mConfig;
+use rust_executor::config::NetworkMode;
 use startup::executor_data_path;
 
 /// AD4M command line interface.
@@ -78,6 +79,10 @@ struct ClapApp {
     /// Provide admin credential to gain all capabilities
     #[arg(short, long)]
     admin_credential: Option<String>,
+
+    /// Data directory to read executor-port from (default: ~/.ad4m)
+    #[arg(long)]
+    data_path: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -166,6 +171,12 @@ enum Domain {
         /// Write the executor PID to this file on startup (removed on clean shutdown).
         #[arg(long)]
         pid_file: Option<String>,
+        /// Run in development mode (data: ~/.ad4m-dev, network: devnet, log: debug)
+        #[arg(long, action)]
+        dev: bool,
+        /// Network mode: mainnet (default), devnet, or local
+        #[arg(long)]
+        network_mode: Option<String>,
     },
     RunLocalHcServices {},
     Eve {
@@ -178,7 +189,7 @@ async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
     let executor_url = if let Some(custom_url) = args.executor_url.clone() {
         custom_url
     } else {
-        crate::startup::get_executor_url()?
+        crate::startup::get_executor_url(args.data_path.as_deref())?
     };
 
     let cap_token = if let Some(admin_credential) = &args.admin_credential {
@@ -247,8 +258,70 @@ async fn main() -> Result<()> {
         enable_mcp,
         mcp_port,
         pid_file,
+        dev,
+        network_mode,
     } = args.domain
     {
+        // Validate production build constraints
+        if rust_executor::globals::IS_PRODUCTION_BUILD && dev {
+            eprintln!("ERROR: Cannot use --dev with production builds");
+            std::process::exit(1);
+        }
+
+        // Parse network mode
+        let network_mode: NetworkMode = if let Some(ref mode_str) = network_mode {
+            mode_str.parse().unwrap_or_else(|e: String| {
+                eprintln!("ERROR: {}", e);
+                std::process::exit(1);
+            })
+        } else if dev {
+            NetworkMode::Devnet
+        } else {
+            NetworkMode::Mainnet
+        };
+
+        // Apply --dev defaults
+        let app_data_path = if dev && app_data_path.is_none() {
+            let home = dirs::home_dir().expect("Could not get home directory");
+            Some(home.join(".ad4m-dev").to_string_lossy().into_owned())
+        } else {
+            app_data_path
+        };
+
+        // Apply network mode to config
+        let (hc_use_mdns, hc_use_bootstrap, hc_use_proxy, hc_proxy_url, hc_bootstrap_url) = match network_mode {
+            NetworkMode::Local => {
+                (Some(true), Some(false), Some(false), Some(String::new()), Some(String::new()))
+            }
+            _ => (hc_use_mdns, hc_use_bootstrap, hc_use_proxy, hc_proxy_url, hc_bootstrap_url),
+        };
+
+        // For devnet mode, write devnet seed instead of mainnet
+        let network_bootstrap_seed = if network_mode == NetworkMode::Devnet && network_bootstrap_seed.is_none() {
+            // Will be handled in config.prepare() — write devnet seed file
+            let data_path = app_data_path.clone().unwrap_or_else(|| {
+                let home = dirs::home_dir().expect("Could not get home directory");
+                home.join(".ad4m").to_string_lossy().into_owned()
+            });
+            std::fs::create_dir_all(&data_path).ok();
+            let seed_path = std::path::PathBuf::from(&data_path).join("devnet_seed.seed");
+            std::fs::write(&seed_path, rust_executor::globals::DEVNET_JSON)
+                .expect("Could not write devnet seed file");
+            Some(seed_path.to_string_lossy().into_owned())
+        } else {
+            network_bootstrap_seed
+        };
+
+        if dev {
+            eprintln!("⚠️  DEVELOPMENT MODE — data: {} | network: {}",
+                app_data_path.as_deref().unwrap_or("~/.ad4m-dev"),
+                network_mode);
+            // Set RUST_LOG to debug if not already set
+            if std::env::var("RUST_LOG").is_err() {
+                std::env::set_var("RUST_LOG", "debug");
+            }
+        }
+
         let _ = tokio::spawn(async move {
             rust_executor::run(Ad4mConfig {
                 app_data_path,
@@ -348,6 +421,8 @@ async fn main() -> Result<()> {
             enable_mcp: _,
             mcp_port: _,
             pid_file: _,
+            dev: _,
+            network_mode: _,
         } => unreachable!(),
         Domain::RunLocalHcServices {} => unreachable!(),
         Domain::Eve { command: _ } => unreachable!(),

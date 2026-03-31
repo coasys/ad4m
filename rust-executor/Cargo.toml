@@ -32,6 +32,7 @@ default = []
 metal = ["kalosm/metal"]
 cuda = ["kalosm/cuda"]
 generate_snapshot = []  # Feature flag for snapshot generation mode
+production = []  # Production build: disables --dev flag, defaults to mainnet
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -45,6 +46,7 @@ deno_snapshots = {version = "0.19.0", git = "https://github.com/coasys/deno.git"
 sys_traits = "=0.1.9"
 # deno_runtime = {version = "0.162.0", path = "../../deno/runtime"}
 tokio = { version = "1.25.0", features = ["full"] }
+fs2 = "0.4"
 url = "2.3.1"
 urlencoding = "2.1"
 percent-encoding = "2"

@@ -102,6 +102,7 @@ dependencies = [
  "dirs 5.0.1",
  "env_logger 0.10.2",
  "fake",
+ "fs2",
  "fs_extra",
  "futures",
  "futures-channel",
@@ -6809,6 +6810,16 @@ checksum = "73fde052dbfc920003cfd2c8e2c6e6d4cc7c1091538c3a24226cec0665ab08c0"
 dependencies = [
  "autocfg",
  "tokio",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]

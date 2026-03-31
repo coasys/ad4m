@@ -1,10 +1,12 @@
 #[macro_use]
 extern crate lazy_static;
 
+use fs2::FileExt;
+
 pub mod config;
 pub mod email_service;
 pub mod entanglement_service;
-mod globals;
+pub mod globals;
 pub mod graphql;
 pub mod holochain_service;
 pub mod js_core;
@@ -30,6 +32,8 @@ mod pubsub;
 use rustls::crypto::aws_lc_rs;
 #[cfg(test)]
 mod test_utils;
+#[cfg(test)]
+mod dev_prod_tests;
 pub mod types;
 
 use std::thread::JoinHandle;
@@ -191,6 +195,32 @@ async fn holochain_signal_receiver() {
 
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
+    // Prepare config defaults before lockfile acquisition
+    config.prepare();
+
+    let data_path = config.app_data_path.clone().unwrap();
+
+    // Acquire advisory lockfile on the data directory
+    let lock_path = std::path::PathBuf::from(&data_path).join(".ad4m-lock");
+    std::fs::create_dir_all(&data_path).expect("Could not create data directory");
+    let lock_file = std::fs::File::create(&lock_path)
+        .expect("Could not create lockfile");
+    if lock_file.try_lock_exclusive().is_err() {
+        eprintln!(
+            "ERROR: Another AD4M executor is already running against this data directory: {}",
+            data_path
+        );
+        std::process::exit(1);
+    }
+    // Keep lock_file alive for the entire process lifetime
+    // (leaking is intentional — OS releases lock on process exit)
+    let _lock_file = Box::leak(Box::new(lock_file));
+
+    // Print startup banner
+    if !globals::IS_PRODUCTION_BUILD {
+        eprintln!("[dev build]");
+    }
+
     #[cfg(unix)]
     unsafe {
         let mut action: sigaction = std::mem::zeroed();
