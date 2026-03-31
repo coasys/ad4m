@@ -31,8 +31,13 @@ fn parse_literal_fn(args: &[Term]) -> Option<Term> {
     if args.len() != 1 {
         return None;
     }
+    // Extract the string value from either a Literal or a NamedNode.
+    // AD4M stores link targets as NamedNodes (via NamedNode::new_unchecked),
+    // so we need to handle both cases for `fn::parse_literal` to be useful
+    // in SPARQL queries that operate on link targets.
     let val = match &args[0] {
         Term::Literal(l) => l.value().to_string(),
+        Term::NamedNode(n) => n.as_str().to_string(),
         _ => return Some(args[0].clone()),
     };
     let body = if val.starts_with("literal:") {
@@ -49,6 +54,17 @@ fn parse_literal_fn(args: &[Term]) -> Option<Term> {
         Some(Literal::new_simple_literal(rest).into())
     } else if let Some(rest) = body.strip_prefix("json:") {
         let decoded = urlencoding::decode(rest).unwrap_or_else(|_| rest.into());
+        // For JSON literals that are signed expressions (contain "data" field),
+        // extract just the data field value for content matching.
+        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&decoded) {
+            if let Some(data) = json_val.get("data") {
+                let data_str = match data {
+                    serde_json::Value::String(s) => s.clone(),
+                    _ => serde_json::to_string(data).unwrap_or(decoded.into_owned()),
+                };
+                return Some(Literal::new_simple_literal(&data_str).into());
+            }
+        }
         Some(Literal::new_simple_literal(decoded.as_ref()).into())
     } else {
         Some(args[0].clone())

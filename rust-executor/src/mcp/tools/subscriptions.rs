@@ -213,28 +213,18 @@ impl Ad4mMcpHandler {
             .collect();
 
         // Build CONTAINS conditions for mention matching.
-        // Targets are stored as named-node IRIs where the body text is
-        // percent-encoded (e.g. `literal://string:Hello%20world`).
-        // We need to match against the encoded form, so we produce TWO
-        // conditions per term: one with the raw term (handles ad-hoc
-        // targets that aren't percent-encoded) and one with the term
-        // percent-encoded (handles the standard literal:// encoding).
+        // Use fn::parse_literal to decode literal:// targets:
+        // - literal:string: targets are URL-decoded to plain text
+        // - literal:json: signed expressions are decoded and only the "data"
+        //   field is returned, so author/timestamp metadata doesn't match
+        // This ensures we match against the actual message content, not metadata.
         let mention_conditions: Vec<String> = all_terms
             .iter()
             .map(|t| {
-                let encoded = urlencoding::encode(t);
-                if encoded == *t {
-                    // No special characters — single condition suffices
-                    format!("CONTAINS(LCASE(STR(?target)), \"{}\")", t)
-                } else {
-                    // Term contains characters that get percent-encoded;
-                    // match either the raw or the encoded form
-                    format!(
-                        "(CONTAINS(LCASE(STR(?target)), \"{}\") || CONTAINS(LCASE(STR(?target)), \"{}\"))",
-                        t,
-                        encoded.to_lowercase()
-                    )
-                }
+                format!(
+                    "CONTAINS(LCASE(STR(<ad4m://fn/parse_literal>(?target))), \"{}\")",
+                    t
+                )
             })
             .collect();
 
