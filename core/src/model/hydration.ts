@@ -622,8 +622,11 @@ export async function evaluateCustomGettersForInstance(
     const currentVal = instance[relName];
     const needsPopulation = !currentVal || (Array.isArray(currentVal) && currentVal.length === 0);
     const needsWhereFilter = meta.where != null;
+    // Relations with a target class need conformance filtering — even if already
+    // populated by hydrateFromLinks, the raw IDs may include non-conforming nodes.
+    const needsConformanceFilter = meta.target != null && !needsPopulation;
 
-    if (!needsPopulation && !needsWhereFilter) continue;
+    if (!needsPopulation && !needsWhereFilter && !needsConformanceFilter) continue;
 
     // Get linked IDs from the perspective directly
     let rawIds: string[] = [];
@@ -652,7 +655,7 @@ export async function evaluateCustomGettersForInstance(
         });
         instance[relName] = linkedInstances.map((inst: any) => inst.id);
       } catch { /* keep existing value */ }
-    } else if (needsPopulation && meta.target) {
+    } else if ((needsPopulation || needsConformanceFilter) && meta.target) {
       // Use findAll with id filter for conformance checking
       try {
         const TargetClass = meta.target();
