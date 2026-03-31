@@ -37,15 +37,14 @@ use base64::prelude::*;
 use super::query_resolvers::can_access_perspective;
 
 // Default pricing in HOT (used when no rate is configured in the DB)
-const DEFAULT_TOKEN_RATE: f64 = 12.5; // per token (prompt + completion)
-const DEFAULT_EMBEDDING_TOKEN_RATE: f64 = 1.0; // per input token
-const DEFAULT_LINK_WRITE_RATE: f64 = 0.25; // per link write
-
-/// Look up a rate from the host_rates DB table, falling back to the given default.
-fn get_rate(description: &str, default: f64) -> FieldResult<f64> {
+/// Look up a rate from the host_rates DB table. Errors if no rate is configured.
+fn get_rate(description: &str) -> FieldResult<f64> {
     match Ad4mDb::with_global_instance(|db| db.get_host_rate(description)) {
         Ok(Some(rate)) => Ok(rate),
-        Ok(None) => Ok(default),
+        Ok(None) => Err(FieldError::new(
+            format!("No host rate configured for '{}'", description),
+            graphql_value!(null),
+        )),
         Err(e) => Err(FieldError::new(
             format!("Failed to read host rate: {}", e),
             graphql_value!(null),
@@ -1969,7 +1968,7 @@ impl Mutation {
 
         if let Err(e) = deduct_compute_credits(
             &context.auth_token,
-            get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
+            get_rate("link write")?,
             "link_write",
             Some(&format!("1 link in perspective {}", uuid)),
         ) {
@@ -1999,7 +1998,7 @@ impl Mutation {
 
         if let Err(e) = deduct_compute_credits(
             &context.auth_token,
-            get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
+            get_rate("link write")?,
             "link_write",
             Some(&format!("1 link in perspective {}", uuid)),
         ) {
@@ -2036,7 +2035,7 @@ impl Mutation {
 
         if let Err(e) = deduct_compute_credits(
             &context.auth_token,
-            link_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
+            link_count as f64 * get_rate("link write")?,
             "link_write",
             Some(&format!("{} links in perspective {}", link_count, uuid)),
         ) {
@@ -2068,7 +2067,7 @@ impl Mutation {
 
         if let Err(e) = deduct_compute_credits(
             &context.auth_token,
-            additions_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
+            additions_count as f64 * get_rate("link write")?,
             "link_write",
             Some(&format!(
                 "{} additions in perspective {}",
@@ -2969,7 +2968,7 @@ impl Mutation {
             };
         if let Err(e) = deduct_compute_credits(
             &context.auth_token,
-            total_tokens as f64 * get_rate(&model_name, DEFAULT_TOKEN_RATE)?,
+            total_tokens as f64 * get_rate(&model_name)?,
             "ai_prompt",
             Some(&format!(
                 "{}: {} prompt + {} completion tokens",
@@ -2998,8 +2997,7 @@ impl Mutation {
 
         if let Err(e) = deduct_compute_credits(
             &context.auth_token,
-            result.token_count as f64
-                * get_rate("embedding per token", DEFAULT_EMBEDDING_TOKEN_RATE)?,
+            result.token_count as f64 * get_rate("embedding per token")?,
             "ai_embed",
             Some(&format!("{} tokens", result.token_count)),
         ) {

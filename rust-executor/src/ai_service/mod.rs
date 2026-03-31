@@ -59,7 +59,6 @@ fn estimate_token_count(text: &str) -> usize {
 static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
 static TRANSCRIPTION_TIMEOUT_SECS: u64 = 30; // 30 seconds (was 2 minutes)
 static TRANSCRIPTION_CHECK_INTERVAL_SECS: u64 = 5; // 5 seconds (was 10)
-const DEFAULT_TRANSCRIPTION_WORD_RATE: f64 = 5.0; // credits per word transcribed
 
 lazy_static! {
     static ref AI_SERVICE: Arc<Mutex<Option<AIService>>> = Arc::new(Mutex::new(None));
@@ -1286,10 +1285,13 @@ impl AIService {
                                         db.get_host_rate(&rate_key)
                                     }) {
                                         Ok(Some(rate)) => rate,
-                                        Ok(None) => DEFAULT_TRANSCRIPTION_WORD_RATE,
+                                        Ok(None) => {
+                                            log::error!("No host rate configured for '{}' — cannot bill transcription", rate_key);
+                                            continue;
+                                        }
                                         Err(e) => {
-                                            log::warn!("Failed to query host rate for transcription billing, using default: {:?}", e);
-                                            DEFAULT_TRANSCRIPTION_WORD_RATE
+                                            log::error!("Failed to query host rate for '{}': {:?}", rate_key, e);
+                                            continue;
                                         }
                                     };
                                     let cost = word_count as f64 * rate;
