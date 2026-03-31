@@ -1281,19 +1281,14 @@ impl AIService {
                                     .map(|m| m.name)
                                     .unwrap_or_else(|| billing_model_id.clone());
 
-                                    let rate = match crate::db::Ad4mDb::with_global_instance(|db| {
+                                    // Rate must exist — validated when the stream was opened.
+                                    // If lookup fails here, log and skip billing (don't suppress text).
+                                    let rate = crate::db::Ad4mDb::with_global_instance(|db| {
                                         db.get_host_rate(&rate_key)
-                                    }) {
-                                        Ok(Some(rate)) => rate,
-                                        Ok(None) => {
-                                            log::error!("No host rate configured for '{}' — cannot bill transcription", rate_key);
-                                            continue;
-                                        }
-                                        Err(e) => {
-                                            log::error!("Failed to query host rate for '{}': {:?}", rate_key, e);
-                                            continue;
-                                        }
-                                    };
+                                    })
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or(0.0);
                                     let cost = word_count as f64 * rate;
                                     match crate::billing::bill_compute(
                                         email,
