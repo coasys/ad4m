@@ -212,9 +212,30 @@ impl Ad4mMcpHandler {
             .chain(std::iter::once(did.to_lowercase()))
             .collect();
 
+        // Build CONTAINS conditions for mention matching.
+        // Targets are stored as named-node IRIs where the body text is
+        // percent-encoded (e.g. `literal://string:Hello%20world`).
+        // We need to match against the encoded form, so we produce TWO
+        // conditions per term: one with the raw term (handles ad-hoc
+        // targets that aren't percent-encoded) and one with the term
+        // percent-encoded (handles the standard literal:// encoding).
         let mention_conditions: Vec<String> = all_terms
             .iter()
-            .map(|t| format!("CONTAINS(LCASE(STR(?target)), \"{}\")", t))
+            .map(|t| {
+                let encoded = urlencoding::encode(t);
+                if encoded == *t {
+                    // No special characters — single condition suffices
+                    format!("CONTAINS(LCASE(STR(?target)), \"{}\")", t)
+                } else {
+                    // Term contains characters that get percent-encoded;
+                    // match either the raw or the encoded form
+                    format!(
+                        "(CONTAINS(LCASE(STR(?target)), \"{}\") || CONTAINS(LCASE(STR(?target)), \"{}\"))",
+                        t,
+                        encoded.to_lowercase()
+                    )
+                }
+            })
             .collect();
 
         let mention_predicate = format!("({})", mention_conditions.join(" || "));
