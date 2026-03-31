@@ -1577,13 +1577,10 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         it("should fire onWake when mention uses agent DID", async function() {
             this.timeout(30000);
 
-            console.log("=== DID MENTION TEST START ===");
-
             var didPerspResult = await callMcpTool(MCP_BASE_URL, 'add_perspective', {
                 name: "Waker DID Mention Test",
             }, mcpSessionId);
             var didPerspId = didPerspResult.uuid;
-            console.log("DID mention test: created perspective", didPerspId);
 
             await callMcpTool(MCP_BASE_URL, 'add_model', {
                 perspective_id: didPerspId,
@@ -1606,9 +1603,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
                 perspective_id: didPerspId,
             }, mcpSessionId);
-            console.log("DID mention test: config.query =", config.query);
-            console.log("DID mention test: config.did =", config.did);
-            console.log("DID mention test: config.names =", config.names);
 
             var wakePromise = new Promise<any>(function(resolve, reject) {
                 var timeout = setTimeout(function() {

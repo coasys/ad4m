@@ -317,7 +317,9 @@ export default function runtimeTests(testContext: TestContext) {
                 appUrl: "https://flux.app",
                 appIconPath: "/flux-icon.png",
                 // Extract multiple data points from the match
-                trigger: `SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <rdf://content>) FILTER(CONTAINS(STR(?target), "${agentDid}")) }`,
+                // Note: targets are stored as literal:// URIs with percent-encoded content,
+                // so we need to search for the percent-encoded form of the DID.
+                trigger: `SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <rdf://content>) FILTER(CONTAINS(STR(?target), "${encodeURIComponent(agentDid!)}")) }`,
                 perspectiveIds: [notificationPerspective.uuid],
                 webhookUrl: "https://test.webhook",
                 webhookAuth: "test-auth"

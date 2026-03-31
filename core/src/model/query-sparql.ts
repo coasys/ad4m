@@ -178,7 +178,7 @@ export function buildSPARQLQuery(
     : "";
 
   return `
-    SELECT ?source ?predicate ?target ?author ?timestamp WHERE {${joinClause}
+    SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp WHERE {${joinClause}
       ?source ?predicate ?target .
       FILTER(isIRI(?source) && isIRI(?predicate))
       BIND(<< ?source ?predicate ?target >> AS ?ann)
