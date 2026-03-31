@@ -783,8 +783,8 @@ describe("Prolog + Literals", () => {
                     recipe2.plain = "recipe://findAll_test2";
                     await recipe2.save();
 
-                    // Test findAll
-                    const recipes = await Recipe.findAll(perspective!);
+                    // Test findAll (sort by name — SPARQL result order is non-deterministic)
+                    const recipes = (await Recipe.findAll(perspective!)).sort((a, b) => a.name.localeCompare(b.name));
 
                     expect(recipes.length).to.equal(2);
                     expect(recipes[0].name).to.equal("findAll test 1");
@@ -807,17 +807,23 @@ describe("Prolog + Literals", () => {
                     recipe2.comments = ["recipe://comment/r2/1", "recipe://comment/r2/2"];
                     await recipe2.save();
 
-                    // Test findAll
-                    const recipes = await Recipe.findAll(perspective!);
+                    // Test findAll (sort by id — SPARQL result order is non-deterministic)
+                    const recipes = (await Recipe.findAll(perspective!)).sort((a, b) => a.id.localeCompare(b.id));
 
                     expect(recipes.length).to.equal(2);
-                    expect(recipes[0].comments.length).to.equal(2);
-                    expect(recipes[0].comments).to.include("recipe://comment/r1/1");
-                    expect(recipes[0].comments).to.include("recipe://comment/r1/2");
+                    // Find which recipe is which by matching root expressions
+                    const r1 = recipes.find(r => r.id === root1)!;
+                    const r2 = recipes.find(r => r.id === root2)!;
+                    expect(r1).to.not.be.undefined;
+                    expect(r2).to.not.be.undefined;
 
-                    expect(recipes[1].comments.length).to.equal(2);
-                    expect(recipes[1].comments).to.include("recipe://comment/r2/1");
-                    expect(recipes[1].comments).to.include("recipe://comment/r2/2");
+                    expect(r1.comments.length).to.equal(2);
+                    expect(r1.comments).to.include("recipe://comment/r1/1");
+                    expect(r1.comments).to.include("recipe://comment/r1/2");
+
+                    expect(r2.comments.length).to.equal(2);
+                    expect(r2.comments).to.include("recipe://comment/r2/1");
+                    expect(r2.comments).to.include("recipe://comment/r2/2");
                 })
 
                 it("findAll() returns author & timestamp on instances", async () => {

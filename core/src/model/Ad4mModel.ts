@@ -821,8 +821,18 @@ export class Ad4mModel {
         
         const instance = new this(perspective, base) as any;
 
-        // Core hydration via unified helper (pass requestedProperties for sparse fieldset)
-        await hydrateFromLinks(instance, links, metadata, perspective, requestedProperties.length > 0 ? requestedProperties : undefined);
+        // Core hydration via unified helper (pass requestedProperties for sparse fieldset).
+        // Also hydrate any properties referenced in `where` so the JS post-filter can match them,
+        // even if they're not in the user's `properties` projection.
+        let hydrationProps = requestedProperties.length > 0 ? [...requestedProperties] : undefined;
+        if (hydrationProps && query.where) {
+          for (const key of Object.keys(query.where)) {
+            if (!hydrationProps.includes(key)) {
+              hydrationProps.push(key);
+            }
+          }
+        }
+        await hydrateFromLinks(instance, links, metadata, perspective, hydrationProps);
         
         // NOTE: Property deletion for sparse fieldsets is deferred until AFTER
         // where-filtering so that where conditions can reference any property,
