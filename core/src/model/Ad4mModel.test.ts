@@ -1415,3 +1415,440 @@ describe("formatSPARQLValue", () => {
     expect(formatSPARQLValue(42)).toBe('"42"');
   });
 });
+
+// ──────────────────────────────────────────────────────────
+//  Comprehensive SPARQL migration unit tests
+// ──────────────────────────────────────────────────────────
+
+import { matchesCondition, hydrateFromLinks } from "./hydration";
+import { Literal } from "../Literal";
+
+// Helper: create literal URLs using JSON encoding (which handles all types including booleans)
+function literalUrl(value: any): string {
+  if (typeof value === 'string') return Literal.from(value).toUrl();
+  // Use JSON encoding for numbers and booleans since Literal.get() doesn't handle boolean: prefix
+  return `literal:json:${encodeURIComponent(JSON.stringify(value))}`;
+}
+
+describe("matchesCondition()", () => {
+  // Simple equality
+  it("simple string equality — match", () => {
+    expect(matchesCondition("hello", "hello")).toBe(true);
+  });
+  it("simple string equality — mismatch", () => {
+    expect(matchesCondition("hello", "world")).toBe(false);
+  });
+  it("simple boolean equality — true", () => {
+    expect(matchesCondition(true, true)).toBe(true);
+  });
+  it("simple boolean equality — false", () => {
+    expect(matchesCondition(false, false)).toBe(true);
+  });
+  it("boolean mismatch", () => {
+    expect(matchesCondition(true, false)).toBe(false);
+  });
+  it("simple number equality", () => {
+    expect(matchesCondition(42, 42)).toBe(true);
+  });
+  it("number mismatch", () => {
+    expect(matchesCondition(42, 99)).toBe(false);
+  });
+
+  // Array IN clause
+  it("array IN clause — value present", () => {
+    expect(matchesCondition("a", ["a", "b", "c"])).toBe(true);
+  });
+  it("array IN clause — value absent", () => {
+    expect(matchesCondition("d", ["a", "b", "c"])).toBe(false);
+  });
+
+  // NOT operator
+  it("not operator with string", () => {
+    expect(matchesCondition("bob", { not: "alice" })).toBe(true);
+    expect(matchesCondition("alice", { not: "alice" })).toBe(false);
+  });
+  it("not operator with array (NOT IN)", () => {
+    expect(matchesCondition("a", { not: ["b", "c"] })).toBe(true);
+    expect(matchesCondition("b", { not: ["b", "c"] })).toBe(false);
+  });
+
+  // Comparison operators
+  it("gt", () => {
+    expect(matchesCondition(10, { gt: 5 })).toBe(true);
+    expect(matchesCondition(5, { gt: 5 })).toBe(false);
+  });
+  it("gte", () => {
+    expect(matchesCondition(5, { gte: 5 })).toBe(true);
+    expect(matchesCondition(4, { gte: 5 })).toBe(false);
+  });
+  it("lt", () => {
+    expect(matchesCondition(3, { lt: 5 })).toBe(true);
+    expect(matchesCondition(5, { lt: 5 })).toBe(false);
+  });
+  it("lte", () => {
+    expect(matchesCondition(5, { lte: 5 })).toBe(true);
+    expect(matchesCondition(6, { lte: 5 })).toBe(false);
+  });
+  it("combined gt + lt (range)", () => {
+    expect(matchesCondition(5, { gt: 3, lt: 7 })).toBe(true);
+    expect(matchesCondition(3, { gt: 3, lt: 7 })).toBe(false);
+    expect(matchesCondition(7, { gt: 3, lt: 7 })).toBe(false);
+  });
+
+  // Between
+  it("between — inclusive range", () => {
+    expect(matchesCondition(5, { between: [3, 7] })).toBe(true);
+    expect(matchesCondition(3, { between: [3, 7] })).toBe(true);
+    expect(matchesCondition(7, { between: [3, 7] })).toBe(true);
+    expect(matchesCondition(2, { between: [3, 7] })).toBe(false);
+    expect(matchesCondition(8, { between: [3, 7] })).toBe(false);
+  });
+
+  // Contains
+  it("contains with string", () => {
+    expect(matchesCondition("hello world", { contains: "world" })).toBe(true);
+    expect(matchesCondition("hello world", { contains: "xyz" })).toBe(false);
+  });
+  it("contains with array", () => {
+    expect(matchesCondition(["a", "b", "c"], { contains: "b" })).toBe(true);
+    expect(matchesCondition(["a", "b", "c"], { contains: "d" })).toBe(false);
+  });
+
+  // Edge cases
+  it("returns false for undefined value with equality check", () => {
+    expect(matchesCondition(undefined, "hello")).toBe(false);
+  });
+  it("returns false for empty string when condition is non-empty", () => {
+    expect(matchesCondition("", "Recipe 2")).toBe(false);
+  });
+  it("returns true for undefined with not operator", () => {
+    expect(matchesCondition(undefined, { not: "hello" })).toBe(true);
+  });
+});
+
+describe("hydrateFromLinks()", () => {
+  // Create a mock perspective that won't be called for literal properties
+  const mockPerspective = {} as any;
+
+  @Model({ name: "HydrationTest" })
+  class HydrationTest extends Ad4mModel {
+    @Property({ through: "test://name", resolveLanguage: "literal" })
+    name: string = "";
+
+    @Property({ through: "test://score", resolveLanguage: "literal" })
+    score: number = 0;
+
+    @Property({ through: "test://active", resolveLanguage: "literal" })
+    active: boolean = false;
+  }
+
+  const metadata = HydrationTest.getModelMetadata();
+
+  it("hydrates all properties when requestedProperties is undefined", async () => {
+    const instance = new HydrationTest(mockPerspective) as any;
+    const links = [
+      { predicate: "test://name", target: literalUrl("Alice"), author: "did:test", timestamp: "1000" },
+      { predicate: "test://score", target: literalUrl(42), author: "did:test", timestamp: "1000" },
+      { predicate: "test://active", target: literalUrl(true), author: "did:test", timestamp: "1000" },
+    ];
+    await hydrateFromLinks(instance, links, metadata, mockPerspective, undefined);
+    expect(instance.name).toBe("Alice");
+    expect(instance.score).toBe(42);
+    expect(instance.active).toBe(true);
+  });
+
+  it("hydrates only requested properties when requestedProperties is provided", async () => {
+    const instance = new HydrationTest(mockPerspective) as any;
+    const links = [
+      { predicate: "test://name", target: literalUrl("Alice"), author: "did:test", timestamp: "1000" },
+      { predicate: "test://score", target: literalUrl(42), author: "did:test", timestamp: "1000" },
+      { predicate: "test://active", target: literalUrl(true), author: "did:test", timestamp: "1000" },
+    ];
+    await hydrateFromLinks(instance, links, metadata, mockPerspective, ["name"]);
+    expect(instance.name).toBe("Alice");
+    // score and active should remain at defaults since not requested
+    expect(instance.score).toBe(0);
+    expect(instance.active).toBe(false);
+  });
+
+  it("hydrates where-clause + projection properties when both are in requestedProperties", async () => {
+    const instance = new HydrationTest(mockPerspective) as any;
+    const links = [
+      { predicate: "test://name", target: literalUrl("Recipe 2"), author: "did:test", timestamp: "1000" },
+      { predicate: "test://active", target: literalUrl(true), author: "did:test", timestamp: "1000" },
+    ];
+    // Simulate merged hydration props: projection ["active"] + where clause props ["name"]
+    await hydrateFromLinks(instance, links, metadata, mockPerspective, ["active", "name"]);
+    expect(instance.name).toBe("Recipe 2");
+    expect(instance.active).toBe(true);
+  });
+
+  it("sets author and timestamps from links", async () => {
+    const instance = new HydrationTest(mockPerspective) as any;
+    const links = [
+      { predicate: "test://name", target: literalUrl("Bob"), author: "did:author1", timestamp: "1000" },
+      { predicate: "test://score", target: literalUrl(10), author: "did:author2", timestamp: "2000" },
+    ];
+    await hydrateFromLinks(instance, links, metadata, mockPerspective);
+    expect(instance.author).toBe("did:author1");
+    expect(instance.createdAt).toBe(1000);
+    expect(instance.updatedAt).toBe(2000);
+  });
+
+  it("handles empty links array", async () => {
+    const instance = new HydrationTest(mockPerspective) as any;
+    await hydrateFromLinks(instance, [], metadata, mockPerspective);
+    expect(instance.name).toBe("");
+    expect(instance.score).toBe(0);
+  });
+});
+
+describe("instancesFromQueryResult — where + properties interaction", () => {
+  const mockPerspective = {
+    get: jest.fn().mockResolvedValue([]),
+    querySparql: jest.fn().mockResolvedValue([]),
+    getExpression: jest.fn().mockResolvedValue(null),
+  } as any;
+
+  @Model({ name: "Recipe" })
+  class Recipe extends Ad4mModel {
+    @Property({ through: "recipe://name", resolveLanguage: "literal", required: true })
+    name: string = "";
+
+    @Property({ through: "recipe://booleanTest", resolveLanguage: "literal" })
+    booleanTest: boolean = false;
+
+    @Property({ through: "recipe://score", resolveLanguage: "literal" })
+    score: number = 0;
+  }
+
+  it("should filter by where clause property even when not in properties projection", async () => {
+    // Simulate SPARQL result with two recipes
+    const grouped = [
+      {
+        source_uri: "expr:recipe1",
+        links: [
+          { predicate: "recipe://name", target: literalUrl("Recipe 1"), author: "did:test", timestamp: "1000" },
+          { predicate: "recipe://booleanTest", target: literalUrl(true), author: "did:test", timestamp: "1000" },
+        ],
+      },
+      {
+        source_uri: "expr:recipe2",
+        links: [
+          { predicate: "recipe://name", target: literalUrl("Recipe 2"), author: "did:test", timestamp: "1000" },
+          { predicate: "recipe://booleanTest", target: literalUrl(false), author: "did:test", timestamp: "1000" },
+        ],
+      },
+    ];
+
+    const query = { where: { name: "Recipe 2" }, properties: ["booleanTest"] };
+    const { results } = await Recipe.instancesFromQueryResult(mockPerspective, query, grouped);
+
+    expect(results.length).toBe(1);
+    expect((results[0] as any).booleanTest).toBe(false);
+    // name should be deleted after filtering since it wasn't in properties projection
+    expect((results[0] as any).name).toBeUndefined();
+  });
+
+  it("should delete unrequested properties AFTER where-filtering", async () => {
+    const grouped = [
+      {
+        source_uri: "expr:recipe1",
+        links: [
+          { predicate: "recipe://name", target: literalUrl("Recipe 1"), author: "did:test", timestamp: "1000" },
+          { predicate: "recipe://score", target: literalUrl(99), author: "did:test", timestamp: "1000" },
+        ],
+      },
+    ];
+
+    const query = { where: { name: "Recipe 1" }, properties: ["score"] };
+    const { results } = await Recipe.instancesFromQueryResult(mockPerspective, query, grouped);
+
+    expect(results.length).toBe(1);
+    expect((results[0] as any).score).toBe(99);
+    // name was used for filtering but should be deleted from final result
+    expect((results[0] as any).name).toBeUndefined();
+  });
+
+  it("should return all properties when no projection is specified", async () => {
+    const grouped = [
+      {
+        source_uri: "expr:recipe1",
+        links: [
+          { predicate: "recipe://name", target: literalUrl("Test"), author: "did:test", timestamp: "1000" },
+          { predicate: "recipe://booleanTest", target: literalUrl(true), author: "did:test", timestamp: "1000" },
+          { predicate: "recipe://score", target: literalUrl(50), author: "did:test", timestamp: "1000" },
+        ],
+      },
+    ];
+
+    const query = { where: { name: "Test" } };
+    const { results } = await Recipe.instancesFromQueryResult(mockPerspective, query, grouped);
+
+    expect(results.length).toBe(1);
+    expect((results[0] as any).name).toBe("Test");
+    expect((results[0] as any).booleanTest).toBe(true);
+    expect((results[0] as any).score).toBe(50);
+  });
+});
+
+describe("groupSPARQLResults()", () => {
+  it("groups rows by source", () => {
+    const rows = [
+      { source: "a", predicate: "p1", target: "t1", author: "auth", timestamp: "ts1" },
+      { source: "a", predicate: "p2", target: "t2", author: "auth", timestamp: "ts2" },
+      { source: "b", predicate: "p1", target: "t3", author: "auth", timestamp: "ts3" },
+    ];
+    const grouped = groupSPARQLResults(rows);
+    expect(grouped.length).toBe(2);
+    const groupA = grouped.find(g => g.source_uri === "a")!;
+    const groupB = grouped.find(g => g.source_uri === "b")!;
+    expect(groupA.links.length).toBe(2);
+    expect(groupB.links.length).toBe(1);
+  });
+
+  it("handles empty input", () => {
+    expect(groupSPARQLResults([])).toEqual([]);
+  });
+
+  it("preserves link metadata", () => {
+    const rows = [
+      { source: "x", predicate: "pred", target: "tgt", author: "did:auth", timestamp: "2024-01-01" },
+    ];
+    const grouped = groupSPARQLResults(rows);
+    expect(grouped[0].links[0]).toEqual({
+      predicate: "pred",
+      target: "tgt",
+      author: "did:auth",
+      timestamp: "2024-01-01",
+    });
+  });
+});
+
+describe("buildSPARQLQuery edge cases", () => {
+  @Model({ name: "FlagModel" })
+  class FlagModel extends Ad4mModel {
+    @Flag({ through: "flag://type", value: "flag://FlagModel" })
+    type: string = "";
+
+    @Property({ through: "flag://name", resolveLanguage: "literal", required: true })
+    name: string = "";
+  }
+
+  @Model({ name: "NoFlagModel" })
+  class NoFlagModel extends Ad4mModel {
+    @Property({ through: "noflag://title", resolveLanguage: "literal" })
+    title: string = "";
+  }
+
+  it("adds conformance JOIN for flag + required properties", () => {
+    const metadata = FlagModel.getModelMetadata();
+    const allRelsMeta = {} as any;
+    const sparql = buildSPARQLQuery(metadata, allRelsMeta, {}, FlagModel);
+    // Should contain flag triple pattern
+    expect(sparql).toContain("<flag://type>");
+    expect(sparql).toContain("<flag://FlagModel>");
+    // Should contain required property pattern
+    expect(sparql).toContain("<flag://name>");
+  });
+
+  it("uses structural subquery when no conformance patterns exist", () => {
+    const metadata = NoFlagModel.getModelMetadata();
+    const allRelsMeta = {} as any;
+    const sparql = buildSPARQLQuery(metadata, allRelsMeta, {}, NoFlagModel);
+    // Should contain structural subquery with DISTINCT
+    expect(sparql).toContain("SELECT DISTINCT ?source");
+    expect(sparql).toContain("<noflag://title>");
+  });
+
+  it("adds JOIN for where-clause on literal-stored fields", () => {
+    const metadata = FlagModel.getModelMetadata();
+    const allRelsMeta = {} as any;
+    const sparql = buildSPARQLQuery(metadata, allRelsMeta, { where: { name: "test" } }, FlagModel);
+    // Where clause should add a join pattern for name
+    expect(sparql).toContain("flag://name");
+  });
+
+  it("handles where: {id: 'specific-id'} with FILTER on ?source", () => {
+    const metadata = FlagModel.getModelMetadata();
+    const allRelsMeta = {} as any;
+    const sparql = buildSPARQLQuery(metadata, allRelsMeta, { where: { id: "expr:123" } as any }, FlagModel);
+    // Should filter by source
+    expect(sparql).toContain("expr:123");
+  });
+});
+
+describe("sparse fieldset property deletion timing", () => {
+  const mockPerspective = {
+    get: jest.fn().mockResolvedValue([]),
+    querySparql: jest.fn().mockResolvedValue([]),
+    getExpression: jest.fn().mockResolvedValue(null),
+  } as any;
+
+  @Model({ name: "TimingTest" })
+  class TimingTest extends Ad4mModel {
+    @Property({ through: "timing://a", resolveLanguage: "literal" })
+    a: string = "";
+
+    @Property({ through: "timing://b", resolveLanguage: "literal" })
+    b: string = "";
+
+    @Property({ through: "timing://c", resolveLanguage: "literal" })
+    c: string = "";
+  }
+
+  it("where-clause properties are available during filtering but deleted after", async () => {
+    const grouped = [
+      {
+        source_uri: "expr:1",
+        links: [
+          { predicate: "timing://a", target: literalUrl("match"), author: "did:test", timestamp: "1000" },
+          { predicate: "timing://b", target: literalUrl("keep"), author: "did:test", timestamp: "1000" },
+          { predicate: "timing://c", target: literalUrl("ignore"), author: "did:test", timestamp: "1000" },
+        ],
+      },
+      {
+        source_uri: "expr:2",
+        links: [
+          { predicate: "timing://a", target: literalUrl("no-match"), author: "did:test", timestamp: "1000" },
+          { predicate: "timing://b", target: literalUrl("skip"), author: "did:test", timestamp: "1000" },
+          { predicate: "timing://c", target: literalUrl("skip"), author: "did:test", timestamp: "1000" },
+        ],
+      },
+    ];
+
+    // properties projection asks for "b" only, where clause filters on "a"
+    const query = { where: { a: "match" }, properties: ["b"] };
+    const { results } = await TimingTest.instancesFromQueryResult(mockPerspective, query, grouped);
+
+    // Only the matching instance should survive
+    expect(results.length).toBe(1);
+    // "b" was requested — should be present
+    expect((results[0] as any).b).toBe("keep");
+    // "a" was used for filtering but not in projection — should be deleted
+    expect((results[0] as any).a).toBeUndefined();
+    // "c" was not requested — should be deleted
+    expect((results[0] as any).c).toBeUndefined();
+  });
+
+  it("properties not in projection are undefined after instancesFromQueryResult", async () => {
+    const grouped = [
+      {
+        source_uri: "expr:1",
+        links: [
+          { predicate: "timing://a", target: literalUrl("val-a"), author: "did:test", timestamp: "1000" },
+          { predicate: "timing://b", target: literalUrl("val-b"), author: "did:test", timestamp: "1000" },
+          { predicate: "timing://c", target: literalUrl("val-c"), author: "did:test", timestamp: "1000" },
+        ],
+      },
+    ];
+
+    const query = { properties: ["a"] };
+    const { results } = await TimingTest.instancesFromQueryResult(mockPerspective, query, grouped);
+
+    expect(results.length).toBe(1);
+    expect((results[0] as any).a).toBe("val-a");
+    expect((results[0] as any).b).toBeUndefined();
+    expect((results[0] as any).c).toBeUndefined();
+  });
+});

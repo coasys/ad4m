@@ -369,9 +369,30 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
         const sparqlQuery = await ctor.queryToSPARQL(this.perspective, this.queryParams);
         this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
 
+        // Track last emitted result fingerprint to suppress duplicate callbacks
+        // when the raw SPARQL result changes but the JS-filtered set doesn't
+        // (e.g. a non-matching record was added/removed).
+        let lastResultFingerprint: string | null = null;
+
+        const buildFingerprint = (results: any[]) => {
+            // Include IDs and all where-clause property values for change detection
+            return JSON.stringify(results.map((r: any) => {
+                const entry: any = { id: r.id };
+                if (this.queryParams.where) {
+                    for (const key of Object.keys(this.queryParams.where)) {
+                        entry[key] = r[key];
+                    }
+                }
+                return entry;
+            }).sort((a: any, b: any) => (a.id || '').localeCompare(b.id || '')));
+        };
+
         const processResults = async (result: any) => {
             const grouped = groupSPARQLResults(Array.isArray(result) ? result : []);
             const { results } = await ctor.instancesFromQueryResult(this.perspective, this.queryParams, grouped);
+            const fp = buildFingerprint(results);
+            if (fp === lastResultFingerprint) return; // filtered set unchanged — skip callback
+            lastResultFingerprint = fp;
             callback(results as T[]);
         };
 
@@ -384,6 +405,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
             this.queryParams, 
             initialGrouped
         );
+        lastResultFingerprint = buildFingerprint(results);
         // Also invoke callback with initial results so subscribers see them
         callback(results as T[]);
         return results as T[];
