@@ -31,9 +31,9 @@ mod neighbourhoods;
 mod pubsub;
 use rustls::crypto::aws_lc_rs;
 #[cfg(test)]
-mod test_utils;
-#[cfg(test)]
 mod dev_prod_tests;
+#[cfg(test)]
+mod test_utils;
 pub mod types;
 
 use std::thread::JoinHandle;
@@ -203,8 +203,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     // Acquire advisory lockfile on the data directory
     let lock_path = std::path::PathBuf::from(&data_path).join(".ad4m-lock");
     std::fs::create_dir_all(&data_path).expect("Could not create data directory");
-    let lock_file = std::fs::File::create(&lock_path)
-        .expect("Could not create lockfile");
+    let lock_file = std::fs::File::create(&lock_path).expect("Could not create lockfile");
     if lock_file.try_lock_exclusive().is_err() {
         eprintln!(
             "ERROR: Another AD4M executor is already running against this data directory: {}",
