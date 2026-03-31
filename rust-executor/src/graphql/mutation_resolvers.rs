@@ -99,6 +99,23 @@ fn check_compute_credits(auth_token: &str) -> FieldResult<()> {
     Ok(())
 }
 
+/// Returns true if billing is active for this user (not free hosting, not free access).
+/// Returns false if there's no user email (single-user / local mode) or if hosting/user is free.
+fn is_billing_active(auth_token: &str) -> FieldResult<bool> {
+    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+        if global_free {
+            return Ok(false);
+        }
+        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+        Ok(!free)
+    } else {
+        Ok(false)
+    }
+}
+
 // Helper function to get perspective with access control
 async fn get_perspective_with_access_control(
     uuid: &str,
@@ -3024,6 +3041,28 @@ impl Mutation {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
         check_compute_credits(&context.auth_token)?;
+
+        // When billing is active, verify a rate is configured for this model
+        // before spinning up the stream (and loading the Whisper model).
+        if is_billing_active(&context.auth_token)? {
+            let rate_key = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+                .ok()
+                .flatten()
+                .map(|m| m.name)
+                .unwrap_or_else(|| model_id.clone());
+            let has_rate = Ad4mDb::with_global_instance(|db| db.get_host_rate(&rate_key))
+                .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+            if has_rate.is_none() {
+                return Err(FieldError::new(
+                    format!(
+                        "No host rate configured for '{}' — cannot open transcription stream",
+                        rate_key
+                    ),
+                    graphql_value!(null),
+                ));
+            }
+        }
+
         Ok(AIService::global_instance()
             .await?
             .open_transcription_stream(
