@@ -457,7 +457,7 @@ describe("Ad4mModel.queryToSPARQL()", () => {
     const norm = normalizeQuery(query);
 
     // Must be a SPARQL SELECT
-    expect(norm).toContain("SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp");
+    expect(norm).toContain("SELECT ?source ?predicate ?target ?author ?timestamp");
     // Must have conformance JOIN for required properties using direct triple patterns
     expect(norm).toContain("cfTarget_name");
     expect(norm).toContain("recipe://name");
@@ -467,7 +467,7 @@ describe("Ad4mModel.queryToSPARQL()", () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: "Pasta" } });
     const norm = normalizeQuery(query);
 
-    expect(norm).toContain("SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp");
+    expect(norm).toContain("SELECT ?source ?predicate ?target ?author ?timestamp");
     // For literal-stored properties, SPARQL only adds a JOIN (no FILTER value) — filtering is in JS
     expect(norm).toContain("recipe://name");
     // Value should NOT be in SPARQL — filtering happens in JS post-filter
@@ -512,7 +512,7 @@ describe("Ad4mModel.queryToSPARQL()", () => {
     const norm = normalizeQuery(query);
 
     // Should not break the query
-    expect(norm).toContain("SELECT DISTINCT ?source");
+    expect(norm).toContain("SELECT ?source");
   });
 
   // =========================================================================
@@ -554,7 +554,7 @@ describe("Ad4mModel.queryToSPARQL()", () => {
   it("should inject SPARQL FILTER for gt operator", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { gt: 3 } } });
     const norm = normalizeQuery(query);
-    expect(norm).toContain("SELECT DISTINCT ?source");
+    expect(norm).toContain("SELECT ?source");
     // gt is now handled via JS post-filter — SPARQL just joins the property
     expect(norm).toContain("wTarget_cmp_rating");
   });
@@ -562,7 +562,7 @@ describe("Ad4mModel.queryToSPARQL()", () => {
   it("should inject SPARQL FILTER for lt operator", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { lt: 5 } } });
     const norm = normalizeQuery(query);
-    expect(norm).toContain("SELECT DISTINCT ?source");
+    expect(norm).toContain("SELECT ?source");
     // lt is now handled via JS post-filter
     expect(norm).toContain("wTarget_cmp_rating");
   });
@@ -570,7 +570,7 @@ describe("Ad4mModel.queryToSPARQL()", () => {
   it("should inject SPARQL FILTER for gte/lte combined", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { gte: 2, lte: 8 } } });
     const norm = normalizeQuery(query);
-    expect(norm).toContain("SELECT DISTINCT ?source");
+    expect(norm).toContain("SELECT ?source");
     // gte/lte are now handled via JS post-filter
     expect(norm).toContain("wTarget_cmp_rating");
   });
@@ -578,7 +578,7 @@ describe("Ad4mModel.queryToSPARQL()", () => {
   it("should inject SPARQL FILTER for between operator", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { between: [1, 10] } } });
     const norm = normalizeQuery(query);
-    expect(norm).toContain("SELECT DISTINCT ?source");
+    expect(norm).toContain("SELECT ?source");
     // between is now handled via JS post-filter
     expect(norm).toContain("wTarget_cmp_rating");
   });
@@ -586,7 +586,7 @@ describe("Ad4mModel.queryToSPARQL()", () => {
   it("should inject SPARQL FILTER for contains operator", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: { contains: "pasta" } } });
     const norm = normalizeQuery(query);
-    expect(norm).toContain("SELECT DISTINCT ?source");
+    expect(norm).toContain("SELECT ?source");
     // contains is now handled via JS post-filter
     expect(norm).toContain("wTarget_cmp_name");
   });
@@ -609,21 +609,21 @@ describe("Ad4mModel.queryToSPARQL()", () => {
   it("should not include ORDER BY in SPARQL (JS post-processed)", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { order: { name: "ASC" } });
     const norm = normalizeQuery(query);
-    expect(norm).toContain("SELECT DISTINCT ?source");
+    expect(norm).toContain("SELECT ?source");
     expect(norm).not.toContain("ORDER BY");
   });
 
   it("should not include LIMIT in SPARQL (JS post-processed)", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { limit: 10 });
     const norm = normalizeQuery(query);
-    expect(norm).toContain("SELECT DISTINCT ?source");
+    expect(norm).toContain("SELECT ?source");
     expect(norm).not.toContain("LIMIT");
   });
 
   it("should not include OFFSET in SPARQL (JS post-processed)", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { offset: 5 });
     const norm = normalizeQuery(query);
-    expect(norm).toContain("SELECT DISTINCT ?source");
+    expect(norm).toContain("SELECT ?source");
     expect(norm).not.toContain("OFFSET");
   });
 });

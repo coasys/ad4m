@@ -143,6 +143,8 @@ export function buildSPARQLQuery(
   }
 
   // Fallback: open-world structural matching
+  // Use a subquery with DISTINCT to avoid row multiplication when the main
+  // ?source ?predicate ?target pattern cross-joins with multiple structural matches.
   if (!hasConformance && joinPatterns.length === 0) {
     const knownPredicates: string[] = [];
     for (const [, propMeta] of Object.entries(metadata.properties)) {
@@ -159,8 +161,7 @@ export function buildSPARQLQuery(
     }
     if (knownPredicates.length > 0) {
       joinPatterns.push(`
-      ?source ?cf_structPred ?cf_structTarget .`);
-      filterExpressions.push(`?cf_structPred IN (${knownPredicates.join(", ")})`);
+      { SELECT DISTINCT ?source WHERE { ?source ?cf_structPred ?cf_structTarget . FILTER(?cf_structPred IN (${knownPredicates.join(", ")})) } }`);
     }
   }
 
@@ -178,7 +179,7 @@ export function buildSPARQLQuery(
     : "";
 
   return `
-    SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp WHERE {${joinClause}
+    SELECT ?source ?predicate ?target ?author ?timestamp WHERE {${joinClause}
       ?source ?predicate ?target .
       FILTER(isIRI(?source) && isIRI(?predicate))
       BIND(<< ?source ?predicate ?target >> AS ?ann)
