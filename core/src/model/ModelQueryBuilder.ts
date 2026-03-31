@@ -375,13 +375,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
         let lastResultFingerprint: string | null = null;
 
         const buildFingerprint = (results: any[]) => {
-            // Include IDs and all where-clause property values for change detection
+            // Serialize ALL enumerable properties of each result for change detection.
+            // We need to catch: where-filter changes (non-matching records added/removed),
+            // property updates, AND relation changes (@HasMany additions etc).
             return JSON.stringify(results.map((r: any) => {
-                const entry: any = { id: r.id };
-                if (this.queryParams.where) {
-                    for (const key of Object.keys(this.queryParams.where)) {
-                        entry[key] = r[key];
-                    }
+                const entry: any = {};
+                for (const key of Object.keys(r)) {
+                    const val = r[key];
+                    // Skip internal/non-serializable fields
+                    if (key.startsWith('_') || typeof val === 'function') continue;
+                    entry[key] = val;
                 }
                 return entry;
             }).sort((a: any, b: any) => (a.id || '').localeCompare(b.id || '')));
