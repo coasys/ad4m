@@ -1304,8 +1304,7 @@ impl AIService {
                                         )),
                                     ) {
                                         Err(crate::billing::BillingError::InsufficientCredits) => {
-                                            log::warn!("Transcription paused: insufficient credits for user {} — stream kept alive, text suppressed", email);
-                                            continue;
+                                            log::warn!("Transcription: insufficient credits for user {} — delivering already-computed text, future feeds will be rejected", email);
                                         }
                                         Err(e) => {
                                             log::warn!("Transcription billing failed: {:?}", e);

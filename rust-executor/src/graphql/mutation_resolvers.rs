@@ -3064,6 +3064,7 @@ impl Mutation {
         audio: Vec<f64>,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
+        check_compute_credits(&context.auth_token)?;
         let audio_f32: Vec<f32> = audio.into_iter().map(|x| x as f32).collect();
         let service = AIService::global_instance().await?;
 
