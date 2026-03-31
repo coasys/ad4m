@@ -823,6 +823,8 @@ export async function hydrateRelations<T>(
 
     if (uriSet.size === 0) continue;
 
+    console.log(`DEBUG hydrateRelations: relName=${relName} uriSet=[${Array.from(uriSet).join(', ')}]`);
+
     // Hydrate related instances using findAll to ensure conformance checking.
     // findAll validates model membership via graph traversal (required predicates / flags),
     // so non-conforming linked URIs are silently dropped — matching the documented behaviour.
@@ -838,6 +840,7 @@ export async function hydrateRelations<T>(
       ...(subQuery?.properties && { properties: subQuery.properties }),
     };
     const results = await TargetClass.findAll(perspective, fetchQuery);
+    console.log(`DEBUG hydrateRelations: findAll returned ${results.length} results, ids=[${results.map((r: any) => r.id).join(', ')}]`);
     for (const result of results) {
       hydrated.set(result.id, result);
     }

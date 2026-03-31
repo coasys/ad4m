@@ -38,6 +38,7 @@ import {
   HasMany,
   HasManyMethods,
   Link,
+  LinkQuery,
   Literal,
   Model,
   PerspectiveProxy,
@@ -1012,10 +1013,20 @@ describe("Ad4mModel — Query API", function () {
         }),
       );
 
+      // Debug: check what links exist
+      const allLinks = await edgePerspective.get(new LinkQuery({}));
+      console.log("DEBUG all links in perspective:", JSON.stringify(allLinks.map(l => ({ s: l.data.source, p: l.data.predicate, t: l.data.target })), null, 2));
+
+      // Debug: check what EdgeComment.findAll returns without id filter
+      const allComments = await EdgeComment.findAll(edgePerspective);
+      console.log("DEBUG EdgeComment.findAll() count:", allComments.length, "ids:", allComments.map(c => c.id));
+
       const retrieved = await EdgeArticle.findOne(edgePerspective, {
         where: { id: article.id },
         include: { comments: true },
       });
+
+      console.log("DEBUG retrieved.comments:", JSON.stringify(retrieved?.comments?.map((c: any) => ({ id: c.id, text: c.text, type: c.type })), null, 2));
 
       expect(retrieved).to.not.be.null;
       expect(retrieved!.comments).to.have.lengthOf(1);
