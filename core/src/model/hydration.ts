@@ -579,39 +579,10 @@ export async function evaluateCustomGettersForInstance(
     if (projectionSet && !projectionSet.has(relName) && !(options?.include && relName in options.include)) continue;
     const meta = relMeta as RelationMetadata;
 
-    // For relations with a `where` clause (e.g. @HasMany with where filter),
-    // filter the linked IDs in JS by checking each target against the where conditions.
-    // This replaces the SPARQL getter approach which had cross-subject join issues.
-    if (!meta.getter && meta.where && meta.direction !== 'reverse') {
-      const rawIds = instance[relName];
-      if (Array.isArray(rawIds) && rawIds.length > 0) {
-        const TargetClass = meta.target?.();
-        if (TargetClass) {
-          try {
-            // Fetch all linked instances and filter by where conditions
-            const linkedInstances = await (TargetClass as any).findAll(perspective, {
-              where: { id: rawIds, ...meta.where } as any,
-            });
-            instance[relName] = linkedInstances.map((inst: any) => inst.id);
-          } catch (e) {
-            // Fallback: keep raw IDs
-          }
-        }
-      }
-      continue;
-    }
-
     // For explicit getters, use the SPARQL getter path
-    let getter = meta.getter;
-
-    // Skip auto-generated conformance getters — hydrateFromLinks already handles
-    // relation population from the main findAll query. The conformance getter
-    // SPARQL queries have cross-subject join issues in some environments.
-    if (!getter) continue;
-
-    if (getter) {
+    if (meta.getter) {
       try {
-        const getterStr = getter.replace(/Base/g, formatQueryValue(baseExpression));
+        const getterStr = meta.getter.replace(/Base/g, formatQueryValue(baseExpression));
         const converted = convertGetterToSPARQL(getterStr, baseExpression);
         if (converted) {
           const result = await perspective.querySparql(converted.query);
@@ -624,7 +595,6 @@ export async function evaluateCustomGettersForInstance(
               : values;
           }
         } else {
-          // Fallback: try as raw SPARQL
           try {
             const result = await perspective.querySparql(getterStr);
             if (result && result.length > 0) {
@@ -640,6 +610,60 @@ export async function evaluateCustomGettersForInstance(
       } catch (error) {
         console.warn(`Failed to evaluate getter for ${relName}:`, error);
       }
+      continue;
+    }
+
+    // For relations without explicit getter that weren't populated by hydrateFromLinks
+    // (e.g. predicate collision with another relation), or that need where filtering,
+    // resolve via perspective.get + findAll.
+    if (meta.direction === 'reverse') continue; // reverse relations handled separately
+
+    // Check if this relation needs population (empty array from collision or default)
+    const currentVal = instance[relName];
+    const needsPopulation = !currentVal || (Array.isArray(currentVal) && currentVal.length === 0);
+    const needsWhereFilter = meta.where != null;
+
+    if (!needsPopulation && !needsWhereFilter) continue;
+
+    // Get linked IDs from the perspective directly
+    let rawIds: string[] = [];
+    if (needsPopulation) {
+      try {
+        const links = await perspective.get(
+          new LinkQuery({ source: baseExpression, predicate: meta.predicate })
+        );
+        rawIds = links
+          .filter(l => l.data.source === baseExpression && l.data.predicate === meta.predicate)
+          .map(l => l.data.target);
+      } catch { /* ignore */ }
+    } else {
+      // Already have IDs from hydrateFromLinks
+      rawIds = Array.isArray(currentVal) ? currentVal.filter((v: any) => typeof v === 'string') : [];
+    }
+
+    if (rawIds.length === 0) continue;
+
+    if (needsWhereFilter && meta.target) {
+      // Use findAll with where to filter by both conformance and where conditions
+      try {
+        const TargetClass = meta.target();
+        const linkedInstances = await (TargetClass as any).findAll(perspective, {
+          where: { id: rawIds, ...meta.where } as any,
+        });
+        instance[relName] = linkedInstances.map((inst: any) => inst.id);
+      } catch { /* keep existing value */ }
+    } else if (needsPopulation && meta.target) {
+      // Use findAll with id filter for conformance checking
+      try {
+        const TargetClass = meta.target();
+        const linkedInstances = await (TargetClass as any).findAll(perspective, {
+          where: { id: rawIds } as any,
+        });
+        instance[relName] = linkedInstances.map((inst: any) => inst.id);
+      } catch { /* keep existing value */ }
+    } else if (needsPopulation) {
+      // No target class — just use raw IDs
+      instance[relName] = rawIds;
     }
   }
 }

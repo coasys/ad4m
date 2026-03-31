@@ -284,6 +284,14 @@ function buildSPARQLWhereFilters(
     const propMeta = metadata.properties[propertyName];
     if (!propMeta) continue;
 
+    // Skip reverse relations (belongsToOne / belongsToMany) — these are registered as
+    // read-only properties but the link direction is reversed (target→source, not source→target).
+    // Adding a forward join pattern would match nothing. These are filtered in JS post-filter.
+    const relMeta = _allRelationsMetadata[propertyName];
+    if (relMeta && (relMeta.kind === 'belongsToOne' || relMeta.kind === 'belongsToMany')) {
+      continue;
+    }
+
     // Determine if this property stores values as literal: IRIs
     const useParseLiteral = isLiteralStoredProperty(propMeta);
 

@@ -869,7 +869,6 @@ export class Ad4mModel {
             const reverseLinks = await perspective.get(
               new LinkQuery({ predicate: relMeta.predicate, target: inst.id })
             );
-            console.log(`[REVERSE DEBUG] ${relName}: predicate=${relMeta.predicate}, target=${inst.id}, found=${reverseLinks.length} links, sources=${JSON.stringify(reverseLinks.map(l => l.data.source))}`);
             const sourceIds = reverseLinks
               .filter((l) => l.data.target === inst.id)
               .map((l) => l.data.source);
@@ -919,7 +918,6 @@ export class Ad4mModel {
           if (!isPropField) {
             // Relation-based where — filter in JS against the populated field
             if (!matchesCondition(instance[propertyName], condition)) {
-              console.log(`[WHERE DEBUG] Relation filter: ${propertyName}=${JSON.stringify(instance[propertyName])} vs condition=${JSON.stringify(condition)} → REJECTED`);
               return false;
             }
             continue;
@@ -1057,9 +1055,6 @@ export class Ad4mModel {
       const sparqlQuery = await this.queryToSPARQL(perspective, query);
       const rawResult = await perspective.querySparql(sparqlQuery);
       const grouped = groupSPARQLResults(rawResult);
-      if ((rawResult?.length ?? 0) === 0) {
-        console.log(`[FINDALL DEBUG] ${this.name || 'Model'}: where=${JSON.stringify(query.where)}, rawRows=0, SPARQL=${sparqlQuery.replace(/\s+/g, ' ').substring(0, 300)}`);
-      }
       const { results } = await this.instancesFromQueryResult(perspective, query, grouped);
       return results;
     } else {
