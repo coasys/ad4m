@@ -362,8 +362,9 @@ export default function runtimeTests(testContext: TestContext) {
             expect(triggerMatch[0].source).to.equal("message://2")
             //@ts-ignore
             expect(triggerMatch[0].predicate).to.equal("rdf://content")
+            // Target is the raw literal:// IRI with URL-encoded content
             //@ts-ignore
-            expect(triggerMatch[0].target).to.include(agentDid)
+            expect(decodeURIComponent(triggerMatch[0].target)).to.include(agentDid)
         })
 
         it("can export and import database", async () => {
