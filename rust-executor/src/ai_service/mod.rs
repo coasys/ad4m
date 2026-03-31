@@ -1166,21 +1166,6 @@ impl AIService {
         // Extract user email from token for billing and ownership tracking
         let user_email = crate::agent::capabilities::user_email_from_token(auth_token.clone());
 
-        // In multi-user mode, reject requests with invalid tokens.
-        // The main/admin user has a valid token but no email (sub claim is None),
-        // so we check token validity rather than requiring an email.
-        let multi_user_enabled = crate::db::Ad4mDb::with_global_instance(|db| {
-            db.get_multi_user_enabled().unwrap_or(false)
-        });
-        if multi_user_enabled && user_email.is_none() {
-            // Token is valid if decode_jwt succeeds — admin user has no email but a valid token
-            if crate::agent::capabilities::decode_jwt(auth_token.clone()).is_err() {
-                return Err(anyhow!(
-                    "Authorization error: valid token required in multi-user mode"
-                ));
-            }
-        }
-
         // MEMORY OPTIMIZATION: Load each Whisper model size ONCE and share across all streams using that size
         // Arc cloning is cheap (just increments ref count), saves 500MB-1.5GB per stream!
         let whisper_model = {
