@@ -824,27 +824,9 @@ export class Ad4mModel {
         // Core hydration via unified helper (pass requestedProperties for sparse fieldset)
         await hydrateFromLinks(instance, links, metadata, perspective, requestedProperties.length > 0 ? requestedProperties : undefined);
         
-        // When specific properties are requested, delete unrequested properties
-        // so they return undefined instead of their constructor defaults (e.g. 0, [])
-        if (requestedProperties.length > 0) {
-          const requested = new Set(requestedProperties);
-          for (const propName of Object.keys(metadata.properties)) {
-            if (!requested.has(propName)) {
-              delete instance[propName];
-            }
-          }
-          for (const relName of Object.keys(metadata.relations)) {
-            if (!requested.has(relName) && !(query.include && relName in query.include)) {
-              delete instance[relName];
-            }
-          }
-          // Also strip metadata fields unless explicitly requested
-          for (const metaField of ['author', 'createdAt', 'updatedAt'] as const) {
-            if (!requested.has(metaField)) {
-              delete instance[metaField];
-            }
-          }
-        }
+        // NOTE: Property deletion for sparse fieldsets is deferred until AFTER
+        // where-filtering so that where conditions can reference any property,
+        // even ones not in the `properties` projection.
 
         instances.push(instance);
       } catch (error) {
@@ -981,6 +963,29 @@ export class Ad4mModel {
       const start = query.offset || 0;
       const end = query.limit ? start + query.limit : undefined;
       paginatedInstances = filteredInstances.slice(start, end);
+    }
+
+    // Now that where-filtering is done, strip unrequested properties for sparse fieldsets.
+    // This must happen AFTER where-filtering so conditions can reference any property.
+    if (requestedProperties.length > 0) {
+      const requested = new Set(requestedProperties);
+      for (const inst of paginatedInstances) {
+        for (const propName of Object.keys(metadata.properties)) {
+          if (!requested.has(propName)) {
+            delete (inst as any)[propName];
+          }
+        }
+        for (const relName of Object.keys(metadata.relations)) {
+          if (!requested.has(relName) && !(query.include && relName in query.include)) {
+            delete (inst as any)[relName];
+          }
+        }
+        for (const metaField of ['author', 'createdAt', 'updatedAt'] as const) {
+          if (!requested.has(metaField)) {
+            delete (inst as any)[metaField];
+          }
+        }
+      }
     }
 
     // Eager-load relations if requested (BEFORE snapshot so dirty tracking is accurate)
