@@ -68,28 +68,8 @@ fn deduct_compute_credits(
     summary: Option<&str>,
 ) -> FieldResult<()> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
-        let global_free =
-            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
-        if global_free {
-            return Ok(());
-        }
-        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+        crate::billing::bill_compute(email, amount, operation, summary)
             .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
-        if !free {
-            let (row_id, credits_after) = Ad4mDb::with_global_instance(|db| {
-                db.deduct_credits_and_log(email, amount, operation, summary)
-            })
-            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
-            crate::pubsub::push_compute_log_entry(
-                row_id,
-                email,
-                operation,
-                summary,
-                amount,
-                credits_after,
-            );
-            mark_credits_dirty(email);
-        }
     }
     Ok(())
 }
