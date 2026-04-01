@@ -54,7 +54,18 @@ export type PricingItem = {
 /** User account data returned by the host after auth */
 export type UserInfo = {
   email: string;
-  remainingCredits: number;  // in HOT equivalent
-  hotWalletAddress: string | null;  // user's mHOT public address (null until set)
+  remainingCredits: number;  // in wHOT equivalent
+  hotWalletAddress: string | null;  // user's wHOT public address (null until set)
   freeAccess: boolean;
+};
+
+/** A single compute activity log entry */
+export type ComputeLogEntryData = {
+  id: number;
+  userEmail: string;
+  timestamp: string;
+  operation: string;
+  summary: string | null;
+  cost: number;
+  creditsAfter: number;
 };

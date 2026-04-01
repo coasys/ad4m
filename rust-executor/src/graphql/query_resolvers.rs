@@ -967,6 +967,17 @@ impl Query {
         })
     }
 
+    async fn runtime_free_hosting_enabled(&self, context: &RequestContext) -> FieldResult<bool> {
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY,
+        )?;
+        Ad4mDb::with_global_instance(|db| {
+            db.get_free_hosting_enabled()
+                .map_err(|e| FieldError::new(e.to_string(), Value::null()))
+        })
+    }
+
     async fn runtime_list_users(
         &self,
         context: &RequestContext,
@@ -991,6 +1002,8 @@ impl Query {
         // For each user, count their perspectives
         let mut user_stats = vec![];
         let all_perspectives = all_perspectives();
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(false);
 
         for user in users {
             // Count perspectives owned by this user
@@ -1004,8 +1017,8 @@ impl Query {
                 }
             }
 
-            let free_access: bool =
-                Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user.username))
+            let free_access: bool = global_free
+                || Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user.username))
                     .map_err(|e| {
                         FieldError::new(
                             format!("Failed to get user free access: {}", e),
@@ -1089,13 +1102,17 @@ impl Query {
             )
         })?;
 
-        let free_access = Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user_email))
-            .map_err(|e| {
-            FieldError::new(
-                format!("Failed to get free access status: {}", e),
-                Value::null(),
-            )
-        })?;
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(false);
+        let free_access = global_free
+            || Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user_email)).map_err(
+                |e| {
+                    FieldError::new(
+                        format!("Failed to get free access status: {}", e),
+                        Value::null(),
+                    )
+                },
+            )?;
 
         let remaining_credits = if free_access {
             "unlimited".to_string()
@@ -1143,7 +1160,7 @@ impl Query {
         Ok(serde_json::to_string(&json).unwrap_or_else(|_| "[]".to_string()))
     }
 
-    /// Get the host's mHOT wallet balance from the alliance DNA ledger.
+    /// Get the host's wHOT wallet balance from the alliance DNA ledger.
     async fn runtime_hot_wallet_balance(&self, context: &RequestContext) -> FieldResult<String> {
         check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
 
@@ -1157,13 +1174,13 @@ impl Query {
                 Ok(serde_json::to_string(&balance).unwrap_or_else(|_| "{}".to_string()))
             }
             Err(e) => Err(FieldError::new(
-                format!("Failed to get mHOT wallet balance: {}", e),
+                format!("Failed to get wHOT wallet balance: {}", e),
                 Value::null(),
             )),
         }
     }
 
-    /// Get the host's mHOT transaction history (outgoing + incoming).
+    /// Get the host's wHOT transaction history (outgoing + incoming).
     async fn runtime_hot_wallet_history(
         &self,
         context: &RequestContext,
@@ -1342,14 +1359,14 @@ impl Query {
         Ok(serde_json::to_string(&all_txs).unwrap_or_else(|_| "[]".to_string()))
     }
 
-    /// Get the host's mHOT agent public key (their identity on the mHOT DHT).
+    /// Get the host's wHOT agent public key (their identity on the wHOT DHT).
     async fn runtime_hot_agent_pubkey(&self, context: &RequestContext) -> FieldResult<String> {
         check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
 
         match crate::unyt_service::whoami().await {
             Ok(pubkey) => Ok(pubkey),
             Err(e) => Err(FieldError::new(
-                format!("Failed to get mHOT agent pubkey: {}", e),
+                format!("Failed to get wHOT agent pubkey: {}", e),
                 Value::null(),
             )),
         }
@@ -1379,6 +1396,92 @@ impl Query {
             "needsUpdate": installed.as_deref() != Some(bundled.as_str()),
         })
         .to_string())
+    }
+
+    /// Get compute activity log entries.
+    /// Regular users see only their own entries; admin sees all users.
+    async fn runtime_compute_log(
+        &self,
+        context: &RequestContext,
+        since: Option<String>,
+        limit: Option<i32>,
+        user_email: Option<String>,
+    ) -> FieldResult<Vec<ComputeLogEntry>> {
+        check_capability(&context.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)?;
+
+        let raw_limit = limit.unwrap_or(100);
+        if raw_limit < 0 {
+            return Err(FieldError::new("limit must be non-negative", Value::Null));
+        }
+        let max = (raw_limit as i64).min(1000);
+
+        // If admin and user_email is provided, query that user's log
+        if context.is_admin_credential {
+            if let Some(ref email) = user_email {
+                let entries = Ad4mDb::with_global_instance(|db| {
+                    db.get_compute_log(email, since.as_deref(), max)
+                })
+                .map_err(|e| {
+                    FieldError::new(format!("Failed to get compute log: {}", e), Value::null())
+                })?;
+                return Ok(entries
+                    .into_iter()
+                    .map(|e| ComputeLogEntry {
+                        id: e.id as i32,
+                        user_email: e.user_email,
+                        timestamp: e.timestamp,
+                        operation: e.operation,
+                        summary: e.summary,
+                        cost: e.cost,
+                        credits_after: e.credits_after,
+                    })
+                    .collect());
+            }
+            // Admin with no user_email — return all users
+            let entries =
+                Ad4mDb::with_global_instance(|db| db.get_compute_log_all(since.as_deref(), max))
+                    .map_err(|e| {
+                        FieldError::new(format!("Failed to get compute log: {}", e), Value::null())
+                    })?;
+            return Ok(entries
+                .into_iter()
+                .map(|e| ComputeLogEntry {
+                    id: e.id as i32,
+                    user_email: e.user_email,
+                    timestamp: e.timestamp,
+                    operation: e.operation,
+                    summary: e.summary,
+                    cost: e.cost,
+                    credits_after: e.credits_after,
+                })
+                .collect());
+        }
+
+        // Regular user — return only their own entries
+        let email = user_email_from_token(context.auth_token.clone());
+        match email {
+            Some(email) => {
+                let entries = Ad4mDb::with_global_instance(|db| {
+                    db.get_compute_log(&email, since.as_deref(), max)
+                })
+                .map_err(|e| {
+                    FieldError::new(format!("Failed to get compute log: {}", e), Value::null())
+                })?;
+                Ok(entries
+                    .into_iter()
+                    .map(|e| ComputeLogEntry {
+                        id: e.id as i32,
+                        user_email: e.user_email,
+                        timestamp: e.timestamp,
+                        operation: e.operation,
+                        summary: e.summary,
+                        cost: e.cost,
+                        credits_after: e.credits_after,
+                    })
+                    .collect())
+            }
+            None => Ok(vec![]),
+        }
     }
 
     async fn ai_get_models(&self, context: &RequestContext) -> FieldResult<Vec<Model>> {

@@ -2,7 +2,7 @@ import React, { useContext, useEffect, useState, useCallback } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { cardStyle } from "./styles";
 
-const HotLogo = ({ size = 14 }: { size?: number }) => (
+export const HotLogo = ({ size = 14 }: { size?: number }) => (
   <svg
     xmlns="http://www.w3.org/2000/svg"
     viewBox="0 0 1175.48 847.82"
@@ -130,7 +130,7 @@ const Wallet = () => {
           try {
             setBalance(JSON.parse(balStr));
           } catch {
-            setBalance({ HOT: balStr });
+            setBalance({ wHOT: balStr });
           }
         }
       } catch (e: any) {
@@ -148,21 +148,21 @@ const Wallet = () => {
       }
 
       // Fetch history
-      try {
-        const histStr = await client.runtime.unytWalletHistory(undefined, 50);
-        console.log("Wallet history raw:", histStr);
-        if (histStr) {
-          try {
-            const parsed = JSON.parse(histStr);
-            console.log("Wallet history parsed:", parsed);
-            setHistory(parsed);
-          } catch {
-            setHistory([]);
+      {
+        try {
+          const histStr = await client.runtime.unytWalletHistory(undefined, 50);
+          if (histStr) {
+            try {
+              const parsed = JSON.parse(histStr);
+              setHistory(parsed);
+            } catch {
+              setHistory([]);
+            }
           }
+        } catch (e: any) {
+          console.error("Failed to fetch history:", e);
+          errors.push(`History: ${e.message}`);
         }
-      } catch (e: any) {
-        console.error("Failed to fetch history:", e);
-        errors.push(`History: ${e.message}`);
       }
 
       // Fetch version info
@@ -269,6 +269,7 @@ const Wallet = () => {
         </div>
       )}
 
+      <>
       {/* Header + Address */}
       <div style={{ padding: "4px 20px", margin: "12px 0" }}>
         <j-flex a="center" j="between">
@@ -276,7 +277,7 @@ const Wallet = () => {
             <j-text size="800" weight="600" color="black">
               Earnings
             </j-text>
-            {loading && <j-spinner size="sm"></j-spinner>}
+            {loading && <j-spinner size="xs"></j-spinner>}
             {agentPubkey && (
               <span
                 onClick={() => copyToClipboard(agentPubkey)}
@@ -333,7 +334,7 @@ const Wallet = () => {
               Balance
             </j-text>
             {loading ? (
-              <j-spinner size="sm"></j-spinner>
+              <j-spinner size="xs"></j-spinner>
             ) : Object.entries(balance).length > 0 ? (
               Object.entries(balance).map(([unit, amount]) => (
                 <span key={unit} style={{ display: "inline-flex", alignItems: "baseline", gap: "8px" }}>
@@ -341,7 +342,7 @@ const Wallet = () => {
                     {amount}
                   </j-text>
                   <span style={{ display: "inline-flex", alignItems: "baseline", gap: "3px", fontSize: "14px" }}>
-                    <span style={{ opacity: 0.6 }}>mirrored</span> <HotLogo size={22} />
+                    <span style={{ opacity: 0.6 }}>w</span> <HotLogo size={22} />
                   </span>
                 </span>
               ))
@@ -373,7 +374,7 @@ const Wallet = () => {
           <div style={{ marginTop: "12px" }}>
             <div style={{ marginBottom: "8px" }}>
               <j-text size="400" weight="500">
-                Amount (HOT)
+                Amount (wHOT)
               </j-text>
             </div>
             <j-flex a="center" gap="200">
@@ -542,7 +543,7 @@ const Wallet = () => {
             {confirmSend && (
               <div style={{ marginTop: "12px", padding: "12px 16px", background: "var(--j-color-ui-50)", borderRadius: "8px", border: "1px solid var(--j-color-warning-300)" }}>
                 <j-text size="400" weight="500">
-                  Confirm: Send {sendAmount} <span style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}><span style={{ fontSize: "0.75em", opacity: 0.6 }}>mirrored</span> <HotLogo size={16} /></span> to {sendRecipient.includes("@") ? sendRecipient : sendRecipient.substring(0, 12) + "..."}?
+                  Confirm: Send {sendAmount} <span style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}><span style={{ fontSize: "0.75em", opacity: 0.6 }}>w</span> <HotLogo size={16} /></span> to {sendRecipient.includes("@") ? sendRecipient : sendRecipient.substring(0, 12) + "..."}?
                 </j-text>
                 <j-flex gap="200" mt="200">
                   <j-button
@@ -734,7 +735,7 @@ const Wallet = () => {
                       </j-flex>
                       {amountStr && (
                         <j-text size="400" weight="500" color={amountColor}>
-                          {isIncoming && !isRejected ? "+" : isSend ? "-" : ""}{amountStr} <span style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}><span style={{ fontSize: "0.75em", opacity: 0.6 }}>m</span><HotLogo size={14} /></span>
+                          {isIncoming && !isRejected ? "+" : isSend ? "-" : ""}{amountStr} <span style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}><span style={{ fontSize: "0.75em", opacity: 0.6 }}>w</span><HotLogo size={14} /></span>
                         </j-text>
                       )}
                     </j-flex>
@@ -754,6 +755,7 @@ const Wallet = () => {
           </div>
         )}
       </div>
+      </>
     </div>
   );
 };

@@ -589,6 +589,14 @@ export class Ad4mConnectElement extends LitElement {
           @disconnect=${this.disconnect}
           @request-top-up=${this.handleRequestTopUp}
           @set-wallet-address=${this.handleSetWalletAddress}
+          @fetch-compute-log=${(e: CustomEvent) => {
+            const cb = e?.detail?.callback;
+            if (typeof cb !== 'function') return;
+            this.core.fetchComputeLog().then(cb).catch((err: any) => {
+              console.error('[Ad4m Connect] Failed to fetch compute log:', err);
+              cb([]);
+            });
+          }}
         ></logged-in-dashboard>
       `;
     }
@@ -634,7 +642,7 @@ export class Ad4mConnectElement extends LitElement {
         <div class="settings-bar">
           ${credits != null ? html`
             <span class="credit-badge ${this.lowCredit ? 'low-credit' : ''}">
-              ${CreditIcon()} ${credits.toFixed(2)} HOT
+              ${CreditIcon()} ${credits.toFixed(2)} wHOT
             </span>
           ` : ''}
           <button

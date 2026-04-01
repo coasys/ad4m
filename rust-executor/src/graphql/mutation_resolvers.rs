@@ -56,17 +56,38 @@ fn get_rate(description: &str, default: f64) -> FieldResult<f64> {
 /// Deduct compute credits for a user after an operation completes.
 /// Uses clamped deduction (credits go to 0, never negative) so that the
 /// pre-check in check_compute_credits will block subsequent operations.
+/// Also inserts a compute log entry with the operation metadata.
 /// Returns Ok(()) if:
 /// - No user email in token (single-user mode, no billing)
 /// - User has free_access enabled
 /// - Credits were successfully deducted (clamped to 0)
-fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
+fn reserve_compute_credits(
+    auth_token: &str,
+    amount: f64,
+    operation: &str,
+    summary: Option<&str>,
+) -> FieldResult<()> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+        if global_free {
+            return Ok(());
+        }
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
             .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
         if !free {
-            Ad4mDb::with_global_instance(|db| db.deduct_user_credits_if_available(email, amount))
-                .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+            let (row_id, credits_after) = Ad4mDb::with_global_instance(|db| {
+                db.deduct_credits_and_log(email, amount, operation, summary)
+            })
+            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+            crate::pubsub::push_compute_log_entry(
+                row_id,
+                email,
+                operation,
+                summary,
+                amount,
+                credits_after,
+            );
             mark_credits_dirty(email);
         }
     }
@@ -78,6 +99,11 @@ fn reserve_compute_credits(auth_token: &str, amount: f64) -> FieldResult<()> {
 /// happens after the operation via reserve_compute_credits with the exact cost.
 fn check_compute_credits(auth_token: &str) -> FieldResult<()> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+        if global_free {
+            return Ok(());
+        }
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
             .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
         if !free {
@@ -330,7 +356,9 @@ impl Mutation {
         auth_info: AuthInfoInput,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)?;
-        let auth_info: AuthInfo = auth_info.into();
+        let auth_info: AuthInfo = auth_info.try_into().map_err(|e: String| {
+            coasys_juniper::FieldError::new(e, coasys_juniper::Value::null())
+        })?;
         let request_id = request_capability(auth_info.clone()).await;
         if context.auto_permit_cap_requests {
             println!("======================================");
@@ -1962,6 +1990,8 @@ impl Mutation {
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
             get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
+            "link_write",
+            Some(&format!("1 link in perspective {}", uuid)),
         ) {
             log::warn!("Call exceeded compute credits (add_link): result returned but future calls will fail. Details: {:?}", e);
         }
@@ -1990,6 +2020,8 @@ impl Mutation {
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
             get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
+            "link_write",
+            Some(&format!("1 link in perspective {}", uuid)),
         ) {
             log::warn!("Call exceeded compute credits (add_link_expression): result returned but future calls will fail. Details: {:?}", e);
         }
@@ -2025,6 +2057,8 @@ impl Mutation {
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
             link_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
+            "link_write",
+            Some(&format!("{} links in perspective {}", link_count, uuid)),
         ) {
             log::warn!("Call exceeded compute credits (add_links, count={}): result returned but future calls will fail. Details: {:?}", link_count, e);
         }
@@ -2055,6 +2089,11 @@ impl Mutation {
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
             additions_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
+            "link_write",
+            Some(&format!(
+                "{} additions in perspective {}",
+                additions_count, uuid
+            )),
         ) {
             log::warn!("Call exceeded compute credits (link_mutations, additions={}): result returned but future calls will fail. Details: {:?}", additions_count, e
             );
@@ -2583,6 +2622,28 @@ impl Mutation {
         })
     }
 
+    async fn runtime_set_free_hosting_enabled(
+        &self,
+        context: &RequestContext,
+        enabled: bool,
+    ) -> FieldResult<bool> {
+        if !context.is_admin_credential {
+            return Err(FieldError::new("Admin credentials required", Value::null()));
+        }
+        Ad4mDb::with_global_instance(|db| {
+            db.set_free_hosting_enabled(enabled)
+                .map_err(|e| FieldError::new(e.to_string(), Value::null()))?;
+            // Mark all users dirty so the credit flush loop pushes updated
+            // HostingUserInfo (with the new freeAccess value) to clients.
+            if let Ok(users) = db.list_users() {
+                for u in users {
+                    mark_credits_dirty(&u.username);
+                }
+            }
+            Ok(enabled)
+        })
+    }
+
     async fn runtime_request_install_notification(
         &self,
         context: &RequestContext,
@@ -2929,6 +2990,11 @@ impl Mutation {
         if let Err(e) = reserve_compute_credits(
             &context.auth_token,
             total_tokens as f64 * get_rate(&model_name, DEFAULT_TOKEN_RATE)?,
+            "ai_prompt",
+            Some(&format!(
+                "{}: {} prompt + {} completion tokens",
+                model_name, result.prompt_tokens, result.completion_tokens
+            )),
         ) {
             log::warn!("Call exceeded compute credits (ai_prompt, model={}, tokens={}): result returned but future calls will fail. Details: {:?}", model_name, total_tokens, e);
         }
@@ -2954,6 +3020,8 @@ impl Mutation {
             &context.auth_token,
             result.token_count as f64
                 * get_rate("embedding per token", DEFAULT_EMBEDDING_TOKEN_RATE)?,
+            "ai_embed",
+            Some(&format!("{} tokens", result.token_count)),
         ) {
             log::warn!("Call exceeded compute credits (ai_embed, tokens={}): result returned but future calls will fail. Details: {:?}", result.token_count, e);
         }
@@ -3164,6 +3232,17 @@ impl Mutation {
     ) -> FieldResult<PaymentRequestResult> {
         check_capability(&context.capabilities, &RUNTIME_HOSTING_UPDATE_CAPABILITY)?;
 
+        // When free hosting is enabled, payments are not applicable
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+        if global_free {
+            return Ok(PaymentRequestResult {
+                success: false,
+                message: "Payments are disabled — this host is configured for free access."
+                    .to_string(),
+            });
+        }
+
         let user_email = user_email_from_token(context.auth_token.clone()).ok_or_else(|| {
             FieldError::new(
                 "Payment requests require multi-user authentication",
@@ -3185,7 +3264,7 @@ impl Mutation {
             ));
         }
 
-        // Look up user's mHOT wallet address (= Holochain AgentPubKey)
+        // Look up user's wHOT wallet address (= Holochain AgentPubKey)
         let wallet_address = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
             .map_err(|e| FieldError::new(format!("DB error: {}", e), Value::null()))?;
 
@@ -3194,13 +3273,13 @@ impl Mutation {
             _ => {
                 return Ok(PaymentRequestResult {
                     success: false,
-                    message: "User has not set their mHOT wallet address. Call setHotWalletAddress first.".to_string(),
+                    message: "User has not set their wHOT wallet address. Call setHotWalletAddress first.".to_string(),
                 });
             }
         };
 
         // Create payment proposal via Unyt alliance DNA
-        let note = format!("AD4M hosting top-up: {} HOT for {}", amountHOT, user_email);
+        let note = format!("AD4M hosting top-up: {} wHOT for {}", amountHOT, user_email);
         match crate::unyt_service::create_proposal(&amountHOT, &wallet_address, Some(&note)).await {
             Ok(proposal_hash) => {
                 // Record the payment request in the DB — fail the whole operation if this doesn't persist
@@ -3215,7 +3294,7 @@ impl Mutation {
                 }
 
                 log::info!(
-                    "Created mHOT payment proposal {} for user={} amount={}",
+                    "Created wHOT payment proposal {} for user={} amount={}",
                     proposal_hash,
                     user_email,
                     amountHOT
@@ -3224,7 +3303,7 @@ impl Mutation {
                 Ok(PaymentRequestResult {
                     success: true,
                     message: format!(
-                        "Payment proposal created (hash: {}). Awaiting approval in user's mHOT wallet.",
+                        "Payment proposal created (hash: {}). Awaiting approval in user's wHOT wallet.",
                         proposal_hash
                     ),
                 })
@@ -3232,7 +3311,7 @@ impl Mutation {
             Err(e) => {
                 let err_str = e.to_string();
                 log::error!(
-                    "Failed to create mHOT payment proposal for user={}: {}",
+                    "Failed to create wHOT payment proposal for user={}: {}",
                     user_email,
                     err_str
                 );
@@ -3335,7 +3414,7 @@ impl Mutation {
         }
     }
 
-    /// Send mHOT from the host's wallet to an external address.
+    /// Send wHOT from the host's wallet to an external address.
     async fn runtime_send_hot(
         &self,
         context: &RequestContext,
@@ -3345,7 +3424,7 @@ impl Mutation {
         // Admin-only: only the host operator can send from the wallet
         if !context.is_admin_credential {
             return Err(FieldError::new(
-                "Only the admin (launcher) can send mHOT",
+                "Only the admin (launcher) can send wHOT",
                 Value::null(),
             ));
         }
@@ -3376,13 +3455,13 @@ impl Mutation {
             Ok(commitment_hash) => Ok(PaymentRequestResult {
                 success: true,
                 message: format!(
-                    "Sent {} HOT to {} (commitment: {})",
+                    "Sent {} wHOT to {} (commitment: {})",
                     amount, recipient, commitment_hash
                 ),
             }),
             Err(e) => Ok(PaymentRequestResult {
                 success: false,
-                message: format!("Failed to send mHOT: {}", e),
+                message: format!("Failed to send wHOT: {}", e),
             }),
         }
     }

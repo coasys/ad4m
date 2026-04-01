@@ -481,7 +481,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     tokio::spawn(async {
         use crate::db::Ad4mDb;
         use crate::pubsub::{
-            get_global_pubsub, DIRTY_CREDIT_USERS, HOSTING_USER_INFO_CHANGED_TOPIC,
+            get_global_pubsub, COMPUTE_LOG_UPDATED_TOPIC, DIRTY_CREDIT_USERS,
+            HOSTING_USER_INFO_CHANGED_TOPIC, PENDING_COMPUTE_LOG_ENTRIES,
         };
 
         loop {
@@ -504,8 +505,18 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             }
 
             let pubsub = get_global_pubsub().await;
+            let global_free = match Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("Credit flush: get_free_hosting_enabled failed: {}", e);
+                    true // default to free on transient errors to avoid wrongly blocking users
+                }
+            };
             for email in &dirty_emails {
-                let free_access =
+                let free_access = if global_free {
+                    true
+                } else {
                     match Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)) {
                         Ok(v) => v,
                         Err(e) => {
@@ -515,7 +526,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                             );
                             continue;
                         }
-                    };
+                    }
+                };
                 let remaining_credits = if free_access {
                     "unlimited".to_string()
                 } else {
@@ -550,6 +562,25 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                     pubsub
                         .publish(&HOSTING_USER_INFO_CHANGED_TOPIC, &json)
                         .await;
+                }
+            }
+
+            // Drain and publish pending compute log entries
+            let pending_entries: Vec<crate::graphql::graphql_types::ComputeLogEntry> = {
+                match PENDING_COMPUTE_LOG_ENTRIES.lock() {
+                    Ok(mut vec) => vec.drain(..).collect(),
+                    Err(e) => {
+                        error!(
+                            "Credit flush: failed to lock pending compute log entries: {}",
+                            e
+                        );
+                        Vec::new()
+                    }
+                }
+            };
+            for entry in pending_entries {
+                if let Ok(json) = serde_json::to_string(&entry) {
+                    pubsub.publish(&COMPUTE_LOG_UPDATED_TOPIC, &json).await;
                 }
             }
         }

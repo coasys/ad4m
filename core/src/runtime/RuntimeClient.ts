@@ -414,6 +414,25 @@ export class RuntimeClient {
         return runtimeSetMultiUserEnabled
     }
 
+    async freeHostingEnabled(): Promise<boolean> {
+        const { runtimeFreeHostingEnabled } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeFreeHostingEnabled {
+                runtimeFreeHostingEnabled
+            }`
+        }))
+        return runtimeFreeHostingEnabled
+    }
+
+    async setFreeHostingEnabled(enabled: boolean): Promise<boolean> {
+        const { runtimeSetFreeHostingEnabled } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeSetFreeHostingEnabled($enabled: Boolean!) {
+                runtimeSetFreeHostingEnabled(enabled: $enabled)
+            }`,
+            variables: { enabled }
+        }))
+        return runtimeSetFreeHostingEnabled
+    }
+
     async listUsers(): Promise<UserStatistics[]> {
         const { runtimeListUsers } = unwrapApolloResult(await this.#apolloClient.query({
             query: gql`query runtimeListUsers {

@@ -268,6 +268,40 @@ export class PaymentRequestResult {
     }
 }
 
+@ObjectType()
+export class ComputeLogEntry {
+    @Field()
+    id: number;
+
+    @Field()
+    userEmail: string;
+
+    @Field()
+    timestamp: string;
+
+    @Field()
+    operation: string;
+
+    @Field({ nullable: true })
+    summary?: string;
+
+    @Field()
+    cost: number;
+
+    @Field()
+    creditsAfter: number;
+
+    constructor(id: number, userEmail: string, timestamp: string, operation: string, cost: number, creditsAfter: number, summary?: string) {
+        this.id = id;
+        this.userEmail = userEmail;
+        this.timestamp = timestamp;
+        this.operation = operation;
+        this.cost = cost;
+        this.creditsAfter = creditsAfter;
+        this.summary = summary;
+    }
+}
+
 /**
  * Resolver classes are used here to define the GraphQL schema 
  * (through the type-graphql annotations)
@@ -513,6 +547,16 @@ export default class RuntimeResolver {
         return enabled
     }
 
+    @Query(returns => Boolean)
+    runtimeFreeHostingEnabled(): boolean {
+        return true
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeSetFreeHostingEnabled(@Arg("enabled") enabled: boolean): boolean {
+        return enabled
+    }
+
     @Query(returns => [UserStatistics])
     runtimeListUsers(): UserStatistics[] {
         return [{
@@ -613,6 +657,15 @@ export default class RuntimeResolver {
     @Query(returns => HostingUserInfo)
     runtimeHostingUserInfo(): HostingUserInfo {
         return new HostingUserInfo("test@example.com", "100000000", null, false)
+    }
+
+    @Query(returns => [ComputeLogEntry])
+    runtimeComputeLog(
+        @Arg("since", { nullable: true }) since?: string,
+        @Arg("limit", { nullable: true }) limit?: number,
+        @Arg("userEmail", { nullable: true }) userEmail?: string,
+    ): ComputeLogEntry[] {
+        return []
     }
 
     @Mutation(returns => Boolean)

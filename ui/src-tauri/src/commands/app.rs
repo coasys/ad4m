@@ -236,16 +236,31 @@ pub fn get_tls_config() -> Option<TlsConfig> {
 
 #[tauri::command]
 pub fn set_tls_config(config: TlsConfig) -> Result<(), String> {
-    // Validate file paths exist if TLS is enabled
+    // Validate file paths exist and are readable if TLS is enabled
     if config.enabled {
-        if !std::path::Path::new(&config.cert_file_path).exists() {
+        let cert_path = std::path::Path::new(&config.cert_file_path);
+        if !cert_path.exists() {
             return Err(format!(
                 "Certificate file not found: {}",
                 config.cert_file_path
             ));
         }
-        if !std::path::Path::new(&config.key_file_path).exists() {
+        if std::fs::File::open(cert_path).is_err() {
+            return Err(format!(
+                "Certificate file is not readable (check permissions): {}",
+                config.cert_file_path
+            ));
+        }
+
+        let key_path = std::path::Path::new(&config.key_file_path);
+        if !key_path.exists() {
             return Err(format!("Key file not found: {}", config.key_file_path));
+        }
+        if std::fs::File::open(key_path).is_err() {
+            return Err(format!(
+                "Key file is not readable (check permissions): {}",
+                config.key_file_path
+            ));
         }
     }
 
@@ -278,6 +293,50 @@ pub fn set_tls_config(config: TlsConfig) -> Result<(), String> {
         .map_err(|e| format!("Failed to save launcher state: {}", e))?;
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn validate_tls_config() -> Result<Vec<String>, String> {
+    let state =
+        LauncherState::load().map_err(|e| format!("Failed to load launcher state: {}", e))?;
+
+    let tls_cfg = state
+        .multi_user_config
+        .as_ref()
+        .and_then(|m| m.tls_config.as_ref())
+        .or(state.tls_config.as_ref());
+
+    let config = match tls_cfg {
+        Some(c) if c.enabled => c,
+        _ => return Ok(vec![]),
+    };
+
+    let mut errors = Vec::new();
+
+    let cert_path = std::path::Path::new(&config.cert_file_path);
+    if !cert_path.exists() {
+        errors.push(format!(
+            "Certificate file not found: {}",
+            config.cert_file_path
+        ));
+    } else if std::fs::File::open(cert_path).is_err() {
+        errors.push(format!(
+            "Certificate file is not readable (permission denied): {}",
+            config.cert_file_path
+        ));
+    }
+
+    let key_path = std::path::Path::new(&config.key_file_path);
+    if !key_path.exists() {
+        errors.push(format!("Key file not found: {}", config.key_file_path));
+    } else if std::fs::File::open(key_path).is_err() {
+        errors.push(format!(
+            "Key file is not readable (permission denied): {}",
+            config.key_file_path
+        ));
+    }
+
+    Ok(errors)
 }
 
 #[tauri::command]

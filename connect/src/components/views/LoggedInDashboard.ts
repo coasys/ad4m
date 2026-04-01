@@ -2,7 +2,7 @@ import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { sharedStyles } from "../../styles/shared-styles";
 import { CheckIcon, CrossIcon, CreditIcon, MapPinIcon, WalletIcon } from "../icons";
-import type { RemoteHost, UserInfo } from "../../types";
+import type { RemoteHost, UserInfo, ComputeLogEntryData } from "../../types";
 
 @customElement("logged-in-dashboard")
 export class LoggedInDashboard extends LitElement {
@@ -17,6 +17,9 @@ export class LoggedInDashboard extends LitElement {
   @state() private topUpAmount = "";
   @state() private awaitingApproval = false;
   @state() private creditsUpdated = false;
+  @state() private activityLogOpen = false;
+  @state() private activityLog: ComputeLogEntryData[] = [];
+  @state() private activityLogLoading = false;
   private previousCredits: number | null = null;
 
   static styles = [
@@ -248,6 +251,106 @@ export class LoggedInDashboard extends LitElement {
       button.full {
         width: 100%;
       }
+
+      .activity-log-toggle {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        cursor: pointer;
+        padding: 10px 12px;
+        border-radius: 8px;
+        background: rgba(128, 178, 201, 0.08);
+        box-shadow: 0 0 0 1px var(--ac-border-color-light);
+        font-size: 14px;
+        color: rgba(255, 255, 255, 0.7);
+        user-select: none;
+      }
+
+      .activity-log-toggle:hover {
+        background: rgba(128, 178, 201, 0.14);
+      }
+
+      .activity-log-toggle .chevron {
+        transition: transform 0.2s;
+        font-size: 12px;
+      }
+
+      .activity-log-toggle .chevron.open {
+        transform: rotate(90deg);
+      }
+
+      .activity-log-list {
+        max-height: 200px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .activity-log-entry {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 6px 10px;
+        border-radius: 6px;
+        background: rgba(128, 178, 201, 0.06);
+        font-size: 13px;
+        color: rgba(255, 255, 255, 0.75);
+      }
+
+      .activity-log-entry .op-badge {
+        display: inline-block;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+
+      .activity-log-entry .op-badge.ai_prompt {
+        background: rgba(168, 130, 255, 0.2);
+        color: #c4a8ff;
+      }
+
+      .activity-log-entry .op-badge.ai_embed {
+        background: rgba(130, 200, 255, 0.2);
+        color: #a8d8ff;
+      }
+
+      .activity-log-entry .op-badge.link_write {
+        background: rgba(255, 200, 100, 0.2);
+        color: #ffd080;
+      }
+
+      .activity-log-entry .cost {
+        font-weight: 600;
+        color: #ffffff;
+        white-space: nowrap;
+      }
+
+      .activity-log-entry .time {
+        font-size: 11px;
+        color: rgba(255, 255, 255, 0.4);
+        white-space: nowrap;
+      }
+
+      .activity-log-entry .summary {
+        flex: 1;
+        margin: 0 8px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: rgba(255, 255, 255, 0.5);
+        font-size: 12px;
+      }
+
+      .activity-log-empty {
+        text-align: center;
+        padding: 12px;
+        color: rgba(255, 255, 255, 0.4);
+        font-size: 13px;
+      }
     `
   ];
 
@@ -276,6 +379,55 @@ export class LoggedInDashboard extends LitElement {
   private truncateMiddle(str: string, startChars = 8, endChars = 6): string {
     if (str.length <= startChars + endChars + 3) return str;
     return `${str.slice(0, startChars)}…${str.slice(-endChars)}`;
+  }
+
+  private async toggleActivityLog() {
+    this.activityLogOpen = !this.activityLogOpen;
+    if (this.activityLogOpen && this.activityLog.length === 0) {
+      await this.loadActivityLog();
+    }
+  }
+
+  private async loadActivityLog() {
+    this.activityLogLoading = true;
+    try {
+      this.dispatchEvent(new CustomEvent('fetch-compute-log', {
+        bubbles: true, composed: true,
+        detail: {
+          callback: (entries: ComputeLogEntryData[]) => {
+            this.activityLog = entries;
+            this.activityLogLoading = false;
+          }
+        }
+      }));
+    } catch {
+      this.activityLogLoading = false;
+    }
+  }
+
+  /** Call this externally to push a realtime log entry */
+  pushLogEntry(entry: ComputeLogEntryData) {
+    this.activityLog = [entry, ...this.activityLog].slice(0, 100);
+  }
+
+  private formatTimeAgo(timestamp: string): string {
+    const diff = Date.now() - new Date(timestamp).getTime();
+    const seconds = Math.floor(diff / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
+  }
+
+  private formatOperation(op: string): string {
+    switch (op) {
+      case 'ai_prompt': return 'AI Prompt';
+      case 'ai_embed': return 'AI Embed';
+      case 'link_write': return 'Link Write';
+      default: return op;
+    }
   }
 
   private get hasWallet(): boolean {
@@ -358,7 +510,7 @@ export class LoggedInDashboard extends LitElement {
           <div class="credit-display">
             ${CreditIcon()}
             <span class="credit-amount">${credits.toFixed(2)}</span>
-            <span class="credit-label">HOT</span>
+            <span class="credit-label">wHOT</span>
           </div>
 
           ${this.isDepleted ? html`
@@ -373,7 +525,7 @@ export class LoggedInDashboard extends LitElement {
 
           <!-- Wallet address -->
           <div class="wallet-section">
-            <label>${WalletIcon()} mHOT Wallet Address</label>
+            <label>${WalletIcon()} wHOT Wallet Address</label>
             ${this.hasWallet && !this.editingWallet ? html`
               <div class="wallet-row">
                 <div class="wallet-display" title=${this.userInfo!.hotWalletAddress}>${this.truncateMiddle(this.userInfo!.hotWalletAddress || '')}</div>
@@ -390,7 +542,7 @@ export class LoggedInDashboard extends LitElement {
               <div class="wallet-row">
                 <input
                   type="text"
-                  placeholder="Enter your mHOT wallet address"
+                  placeholder="Enter your wHOT wallet address"
                   .value=${this.walletInput}
                   @input=${(e: Event) => { this.walletInput = (e.target as HTMLInputElement).value; }}
                   @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter') this.setWalletAddress(); }}
@@ -414,7 +566,7 @@ export class LoggedInDashboard extends LitElement {
               <input
                 type="number"
                 min="1"
-                placeholder="Amount in HOT"
+                placeholder="Amount in wHOT"
                 .value=${this.topUpAmount}
                 @input=${(e: Event) => { this.topUpAmount = (e.target as HTMLInputElement).value; }}
                 @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter' && this.topUpAmount && Number(this.topUpAmount) > 0) this.requestTopUp(Number(this.topUpAmount)); }}
@@ -435,7 +587,7 @@ export class LoggedInDashboard extends LitElement {
                   ?disabled=${this.topUpDisabled}
                   @click=${() => { this.topUpAmount = String(amount); this.requestTopUp(amount); }}
                 >
-                  ${amount} HOT
+                  ${amount} wHOT
                 </button>
               `)}
             </div>
@@ -458,6 +610,30 @@ export class LoggedInDashboard extends LitElement {
             <div class="error-message">${this.paymentError}</div>
           ` : ''}
         `}
+
+        <!-- Activity Log -->
+        <div class="activity-log-toggle" @click=${this.toggleActivityLog}>
+          <span>Activity Log</span>
+          <span class="chevron ${this.activityLogOpen ? 'open' : ''}">&#9654;</span>
+        </div>
+        ${this.activityLogOpen ? html`
+          ${this.activityLogLoading ? html`
+            <div class="activity-log-empty">Loading...</div>
+          ` : this.activityLog.length === 0 ? html`
+            <div class="activity-log-empty">No activity yet</div>
+          ` : html`
+            <div class="activity-log-list">
+              ${this.activityLog.map(entry => html`
+                <div class="activity-log-entry">
+                  <span class="op-badge ${entry.operation}">${this.formatOperation(entry.operation)}</span>
+                  <span class="summary" title=${entry.summary || ''}>${entry.summary || ''}</span>
+                  <span class="cost">${entry.cost.toFixed(2)}</span>
+                  <span class="time">${this.formatTimeAgo(entry.timestamp)}</span>
+                </div>
+              `)}
+            </div>
+          `}
+        ` : ''}
 
         <div class="footer-actions">
           <button class="primary" ?disabled=${this.isDepleted && !this.isFreeAccess} @click=${this.close}>
