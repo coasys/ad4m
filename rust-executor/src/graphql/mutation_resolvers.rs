@@ -36,36 +36,35 @@ use base64::prelude::*;
 // Use the shared can_access_perspective function from query_resolvers
 use super::query_resolvers::can_access_perspective;
 
-// Default pricing in HOT (used when no rate is configured in the DB)
-/// Look up a rate from the host_rates DB table. Errors if no rate is configured.
-fn get_rate(description: &str) -> FieldResult<f64> {
-    match Ad4mDb::with_global_instance(|db| db.get_host_rate(description)) {
-        Ok(Some(rate)) => Ok(rate),
-        Ok(None) => Err(FieldError::new(
-            format!("No host rate configured for '{}'", description),
-            graphql_value!(null),
-        )),
-        Err(e) => Err(FieldError::new(
-            format!("Failed to read host rate: {}", e),
-            graphql_value!(null),
-        )),
-    }
-}
-
 /// Deduct compute credits for a user after an operation completes.
-/// Uses clamped deduction (credits go to 0, never negative) so that the
-/// pre-check in check_compute_credits will block subsequent operations.
-/// Also inserts a compute log entry with the operation metadata.
-/// Returns Ok(()) if:
-/// - No user email in token (single-user mode, no billing)
-/// - User has free_access enabled
-/// - Credits were successfully deducted (clamped to 0)
+/// Only looks up the rate and bills when billing is actually active.
+/// No-ops in single-user mode, free hosting, or free-access users.
 fn deduct_compute_credits(
     auth_token: &str,
-    amount: f64,
+    rate_key: &str,
+    quantity: f64,
     operation: &str,
     summary: Option<&str>,
 ) -> FieldResult<()> {
+    if !is_billing_active(auth_token)? {
+        return Ok(());
+    }
+    let rate = match Ad4mDb::with_global_instance(|db| db.get_host_rate(rate_key)) {
+        Ok(Some(rate)) => rate,
+        Ok(None) => {
+            return Err(FieldError::new(
+                format!("No host rate configured for '{}'", rate_key),
+                graphql_value!(null),
+            ))
+        }
+        Err(e) => {
+            return Err(FieldError::new(
+                format!("Failed to read host rate: {}", e),
+                graphql_value!(null),
+            ))
+        }
+    };
+    let amount = quantity * rate;
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
         crate::billing::bill_compute(email, amount, operation, summary)
             .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
@@ -1985,7 +1984,8 @@ impl Mutation {
 
         if let Err(e) = deduct_compute_credits(
             &context.auth_token,
-            get_rate("link write")?,
+            "link write",
+            1.0,
             "link_write",
             Some(&format!("1 link in perspective {}", uuid)),
         ) {
@@ -2015,7 +2015,8 @@ impl Mutation {
 
         if let Err(e) = deduct_compute_credits(
             &context.auth_token,
-            get_rate("link write")?,
+            "link write",
+            1.0,
             "link_write",
             Some(&format!("1 link in perspective {}", uuid)),
         ) {
@@ -2052,7 +2053,8 @@ impl Mutation {
 
         if let Err(e) = deduct_compute_credits(
             &context.auth_token,
-            link_count as f64 * get_rate("link write")?,
+            "link write",
+            link_count as f64,
             "link_write",
             Some(&format!("{} links in perspective {}", link_count, uuid)),
         ) {
@@ -2084,7 +2086,8 @@ impl Mutation {
 
         if let Err(e) = deduct_compute_credits(
             &context.auth_token,
-            additions_count as f64 * get_rate("link write")?,
+            "link write",
+            additions_count as f64,
             "link_write",
             Some(&format!(
                 "{} additions in perspective {}",
@@ -2985,7 +2988,8 @@ impl Mutation {
             };
         if let Err(e) = deduct_compute_credits(
             &context.auth_token,
-            total_tokens as f64 * get_rate(&model_name)?,
+            &model_name,
+            total_tokens as f64,
             "ai_prompt",
             Some(&format!(
                 "{}: {} prompt + {} completion tokens",
@@ -3014,7 +3018,8 @@ impl Mutation {
 
         if let Err(e) = deduct_compute_credits(
             &context.auth_token,
-            result.token_count as f64 * get_rate("embedding per token")?,
+            "embedding per token",
+            result.token_count as f64,
             "ai_embed",
             Some(&format!("{} tokens", result.token_count)),
         ) {
