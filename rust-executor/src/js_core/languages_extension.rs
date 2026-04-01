@@ -6,7 +6,6 @@ use tokio::sync::RwLock;
 
 use crate::{
     graphql::graphql_types::{PerspectiveExpression, PerspectiveState},
-    js_core::error::AnyhowWrapperError,
     types::PerspectiveDiff,
 };
 

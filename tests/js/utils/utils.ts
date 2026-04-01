@@ -1,7 +1,7 @@
 import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions/index.js";
-import { ApolloClient, InMemoryCache } from "@apollo/client/core/index.js";
+import { ApolloClient, InMemoryCache, gql } from "@apollo/client/core/index.js";
 import Websocket from "ws";
 import { createClient } from "graphql-ws";
 import path from "path";
@@ -92,8 +92,9 @@ export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bo
                 }
             }
 
-            // Resolve when we have both ports
-            if (bootstrapPort && relayPort && !resolved) {
+            // Resolve when we have bootstrap port (relay is now internal to bootstrap server)
+            // The new kitsune2-bootstrap-srv (0.4.0+) doesn't output a separate relay port
+            if (bootstrapPort && !resolved) {
                 resolved = true;
                 cleanup();
                 resolve();
@@ -151,6 +152,8 @@ export async function startExecutor(dataPath: string,
     proxyUrl: string = "wss://dev-test-bootstrap2.holochain.org",
     bootstrapUrl: string = "https://dev-test-bootstrap2.holochain.org",
     relayUrl?: string,
+    enableMcp: boolean = false,
+    mcpPort?: number,
 ): Promise<ChildProcess> {
     const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
 
@@ -168,9 +171,9 @@ export async function startExecutor(dataPath: string,
     }
 
     // Build args array explicitly so spawn() can run the executor directly
-    // (no shell wrapper). exec() spawns `sh -c "..."` — kill() only kills
-    // the shell, leaving the actual executor running as an orphan.
-    // spawn() runs the binary directly so kill()/SIGKILL actually reach it.
+    // (no shell wrapper). This is critical: exec() spawns `sh -c "..."` and
+    // kill() only kills the shell, leaving the actual executor running.
+    // spawn() runs the binary directly, so kill() / SIGKILL actually reach it.
     const args = [
         'run',
         '--app-data-path', dataPath,
@@ -187,20 +190,30 @@ export async function startExecutor(dataPath: string,
         '--run-dapp-server', 'false',
     ];
     if (relayUrl) { args.push('--hc-relay-url', relayUrl); }
+    if (enableMcp) { args.push('--enable-mcp', 'true'); }
+    if (mcpPort) { args.push('--mcp-port', String(mcpPort)); }
     if (adminCredential) { args.push('--admin-credential', adminCredential); }
 
     executorProcess = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let executorReady = new Promise<void>((resolve, reject) => {
-        executorProcess!.stdout!.on('data', (data) => {
-            if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
-                resolve()
+        const waitFor = enableMcp
+            ? [`listening on http://127.0.0.1:${gqlPort}`, 'MCP HTTP server listening']
+            : [`listening on http://127.0.0.1:${gqlPort}`];
+        const found = new Set<string>();
+
+        const checkReady = (data: string) => {
+            for (const marker of waitFor) {
+                if (data.includes(marker)) {
+                    found.add(marker);
+                }
             }
-        });
-        executorProcess!.stderr!.on('data', (data) => {
-            if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
-                resolve()
+            if (found.size === waitFor.length) {
+                resolve();
             }
-        });
+        };
+
+        executorProcess!.stdout!.on('data', (data: any) => checkReady(data.toString()));
+        executorProcess!.stderr!.on('data', (data: any) => checkReady(data.toString()));
     })
 
     executorProcess!.stdout!.on('data', (data) => {
@@ -260,15 +273,120 @@ export function sleep(ms: number) {
 }
 
 /**
+ * Clears all links in a perspective in a single removeLinks() batch call.
+ * Import from here or from helpers/assertions to get a clean slate before each test.
+ */
+export async function wipePerspective(
+  perspective: import("@coasys/ad4m").PerspectiveProxy,
+): Promise<void> {
+  const { LinkQuery } = await import("@coasys/ad4m");
+  const links = await perspective.get(new LinkQuery({}));
+  if (links.length > 0) {
+    await perspective.removeLinks(links);
+  }
+}
+
+/**
  * Kill any process listening on the given ports.
- * Use as a safety net in after() hooks — catches executors that survived kill().
+ * Uses SIGTERM → wait → SIGKILL escalation for graceful shutdown.
+ * Use this in after() hooks as a safety net.
  */
 export function killByPorts(ports: number[]): void {
     for (const port of ports) {
         try {
-            execSync(`lsof -ti TCP:${port} -s TCP:LISTEN | xargs -r kill -9`, { stdio: 'ignore' });
+            // First try SIGTERM for graceful shutdown
+            execSync(`lsof -ti:${port} | xargs -r kill -TERM`, { stdio: 'ignore' });
         } catch (e) {
             // Port not in use — fine
         }
+    }
+    // Give processes a moment to shut down gracefully
+    try { execSync('sleep 2', { stdio: 'ignore' }); } catch (e) { /* ignore */ }
+    for (const port of ports) {
+        try {
+            // SIGKILL anything still lingering
+            execSync(`lsof -ti:${port} | xargs -r kill -9`, { stdio: 'ignore' });
+        } catch (e) {
+            // Port not in use — fine
+        }
+    }
+}
+
+/**
+ * Gracefully shut down a ChildProcess using SIGTERM → wait → SIGKILL escalation.
+ * Replaces the common pattern of `while (!process.killed) { process.kill(); await sleep(500); }`
+ * which sends repeated SIGTERM signals unnecessarily.
+ *
+ * @param proc - The ChildProcess to shut down
+ * @param label - Label for logging
+ * @param timeoutMs - How long to wait for graceful shutdown before SIGKILL (default: 10s)
+ */
+export async function gracefulShutdown(proc: ChildProcess | null | undefined, label: string = "process", timeoutMs: number = 10000): Promise<void> {
+    if (!proc || proc.killed) return;
+
+    console.log(`Sending SIGTERM to ${label} (PID ${proc.pid})...`);
+    proc.kill('SIGTERM');
+
+    // Wait for the process to actually exit (not just signal sent)
+    const exited = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), timeoutMs);
+        proc!.on('close', () => {
+            clearTimeout(timer);
+            resolve(true);
+        });
+    });
+
+    if (!exited) {
+        console.log(`${label} did not exit after ${timeoutMs}ms, sending SIGKILL...`);
+        proc.kill('SIGKILL');
+        // Wait for SIGKILL to take effect
+        await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 5000);
+            proc!.on('close', () => {
+                clearTimeout(timer);
+                resolve();
+            });
+        });
+    }
+
+    console.log(`${label} shut down (pid=${proc.pid})`);
+}
+
+/**
+ * Gracefully quit an executor by sending the runtimeQuit GraphQL mutation,
+ * then falling back to gracefulShutdown (SIGTERM → SIGKILL) if needed.
+ */
+export async function quitExecutor(
+    executorProcess: ChildProcess,
+    gqlPort: number,
+    adminCredential?: string,
+    timeoutMs: number = 8000,
+): Promise<void> {
+    if (executorProcess.exitCode !== null) return;
+
+    // Fire the runtimeQuit mutation. The executor calls process::exit(0) which
+    // kills it before it can send a GraphQL response, so we'll get a WebSocket
+    // close error — that's expected.
+    try {
+        const client = apolloClient(gqlPort, adminCredential);
+        await Promise.race([
+            client.mutate({ mutation: gql`mutation { runtimeQuit }` }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('runtimeQuit timeout')), 3000)),
+        ]);
+    } catch (_e) {
+        // Expected: connection dropped or timed out
+    }
+
+    // Wait for natural exit after runtimeQuit
+    const exited = await new Promise<boolean>((resolve) => {
+        if (executorProcess.exitCode !== null) { resolve(true); return; }
+        const timer = setTimeout(() => resolve(false), timeoutMs);
+        executorProcess.once('exit', () => { clearTimeout(timer); resolve(true); });
+    });
+
+    if (!exited) {
+        // runtimeQuit didn't work — fall back to SIGTERM/SIGKILL escalation
+        console.warn(`quitExecutor: executor (port ${gqlPort}) still running after runtimeQuit, falling back to gracefulShutdown`);
+        await gracefulShutdown(executorProcess, `executor:${gqlPort}`);
     }
 }

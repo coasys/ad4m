@@ -23,6 +23,7 @@ pub const RUNTIME_KNOWN_LINK_LANGUAGES: &str = "runtime.known_link_languages";
 pub const RUNTIME_FRIENDS: &str = "runtime.friends";
 pub const RUNTIME_MESSAGES: &str = "runtime.messages";
 pub const RUNTIME_USER_MANAGEMENT: &str = "runtime.user_management";
+pub const RUNTIME_HOSTING: &str = "runtime.hosting";
 pub const AI: &str = "artificial intelligence";
 
 // admin capabilities
@@ -218,6 +219,25 @@ lazy_static! {
         can: vec![WILD_CARD.to_string()],
     };
 
+}
+
+lazy_static! {
+    // Hosting capabilities for wallet, credits, and payment operations
+    pub static ref RUNTIME_HOSTING_READ_CAPABILITY: Capability = Capability {
+        with: Resource {
+            domain: RUNTIME_HOSTING.to_string(),
+            pointers: vec![WILD_CARD.to_string()],
+        },
+        can: vec![READ.to_string()],
+    };
+
+    pub static ref RUNTIME_HOSTING_UPDATE_CAPABILITY: Capability = Capability {
+        with: Resource {
+            domain: RUNTIME_HOSTING.to_string(),
+            pointers: vec![WILD_CARD.to_string()],
+        },
+        can: vec![UPDATE.to_string()],
+    };
 }
 
 #[allow(dead_code)]
@@ -532,6 +552,9 @@ pub fn get_user_default_capabilities() -> Vec<Capability> {
         RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY.clone(),
         // Note: Excluding RUNTIME_QUIT_CAPABILITY as this is an admin operation
 
+        // Hosting capabilities - allow users to view and manage their hosting info
+        RUNTIME_HOSTING_READ_CAPABILITY.clone(),
+        RUNTIME_HOSTING_UPDATE_CAPABILITY.clone(),
         // AI capabilities - allow users to use AI (prompt, transcribe) but not manage models
         AI_READ_CAPABILITY.clone(),
         AI_PROMPT_CAPABILITY.clone(),

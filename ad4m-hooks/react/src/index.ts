@@ -3,7 +3,7 @@ import { useMe } from "./useMe";
 import { toCustomElement } from "./register";
 import { usePerspective } from "./usePerspective";
 import { usePerspectives } from "./usePerspectives";
-import { useModel } from "./useModel";
+import { useLiveQuery } from "./useLiveQuery";
 
 export {
   toCustomElement,
@@ -11,5 +11,7 @@ export {
   useMe,
   usePerspective,
   usePerspectives,
-  useModel,
+  useLiveQuery,
 };
+
+export type { LiveCollectionResult, LiveInstanceResult } from "./useLiveQuery";

@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-executor"
-version = "0.12.0-rc1-dev.2"
+version = "0.13.0-test-1"
 edition = "2021"
 authors = ["Nicolas Luck <nicolas.luck@coasys.org>"]
 description = "Runtime implementation of AD4M as library - https://ad4m.dev"
@@ -68,6 +68,9 @@ hex = "0.4.3"
 argon2 = { version = "0.5.0", features = ["simple"] }
 rand = "0.8.5"
 base64 = "0.21.0"
+rmcp = { version = "0.15.0", features = ["server", "transport-streamable-http-server"] }
+axum = "0.8"
+schemars = "1.0"
 clap = { version = "4.0.8", features = ["derive"] }
 fs_extra = "1.3.0"
 os_info = "3.7.0"
@@ -97,17 +100,17 @@ webbrowser = "0.8.12"
 # holochain_types = { version = "0.5.2" }
 holochain_cli_run_local_services = { version = "0.5.0-dev.12" }
 kitsune_p2p_types = { version = "0.5.0-dev.9" }
-kitsune2_api = "0.1.15"
-holochain = { version = "0.7.0-dev.10", default-features = false, features = ["test_utils", "transport-iroh",   "sqlite-encrypted", "metrics_influxive", "schema", "wasmer_sys"], git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys" }
-holochain_cli_bundle = { version = "0.7.0-dev.10", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys" }
-holochain_types = { version = "0.7.0-dev.10", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys" }
+#kitsune2_api = "0.1.15"
+holochain = { version = "0.7.0-dev.16", default-features = false, features = ["test_utils", "transport-iroh",   "sqlite-encrypted", "schema", "wasmer_sys"], git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.16-space-override-coasys" }
+holochain_cli_bundle = { version = "0.7.0-dev.15", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.16-space-override-coasys" }
+holochain_types = { version = "0.7.0-dev.15", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.16-space-override-coasys" }
 lair_keystore_api = { version = "0.6.3", git = "https://github.com/coasys/lair.git", branch = "0.6.3-coasys" }
 sodoken = "=0.1.0"
 
 scryer-prolog = { version = "0.10", git = "https://github.com/coasys/scryer-prolog", branch = "ad4m" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
-ad4m-client = { path = "../rust-client", version="0.12.0-rc1-dev.2" }
+ad4m-client = { path = "../rust-client", version="0.13.0-test-1" }
 reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
 
 # rusqlite = { version = "0.29.0", git = "https://github.com/coasys/rusqlite.git", rev = "12ec1330bd4b46411ab9895364da4a3e172d0fbb", features = ["bundled"] }
@@ -124,6 +127,7 @@ include_dir = "0.6.0"
 rustls = "0.23"
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
+x509-parser = "0.16"
 
 kalosm = { version = "0.3.2", git = "https://github.com/coasys/floneum.git", branch = "coasys-2-without-pdf", features = ["language", "sound"] }
 candle-core = "0.8.2"
@@ -152,6 +156,16 @@ fs_extra = "1.3.0"
 # Force static CRT on Windows MSVC to match libort_sys (ONNX Runtime) and avoid LNK2038 mismatch
 [target.'cfg(target_env = "msvc")'.dependencies]
 surrealdb-librocksdb-sys = { version = "0.17", features = ["mt_static"] }
+# aws-lc-sys: use pre-compiled NASM assembly objects on Windows.
+# Without this, aws-lc-sys needs NASM installed and cmake integration which
+# fails on MSVC. The prebuilt-nasm feature ships .obj files in the crate.
+aws-lc-sys = { version = "0.35", features = ["prebuilt-nasm"] }
+
+# macOS ARM64: ONNX Runtime static lib is too large for ARM64 branch instructions
+# (b(l) range ±128MB). load-dynamic links ort at runtime instead of statically,
+# reducing binary size below the ARM64 branch limit.
+[target.'cfg(target_os = "macos")'.dependencies]
+ort = { version = "2.0.0-rc.4", features = ["load-dynamic"] }
 
 [patch.crates-io]
 rusqlite = { version = "0.34.0" }

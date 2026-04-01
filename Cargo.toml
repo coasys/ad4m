@@ -23,3 +23,14 @@ members = [
 #kitsune2_transport_iroh = { path = "../../kitsune2/crates/transport_iroh" }
 #kitsune2_bootstrap_client = { git = "https://github.com/lucksus/kitsune2.git", branch = "debug-logs" }
 #kitsune2_bootstrap_client = { path = "../../kitsune2/crates/bootstrap_client" }
+
+kitsune2 = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+kitsune2_api = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+kitsune2_bootstrap_client = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+kitsune2_bootstrap_srv = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+kitsune2_core = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+kitsune2_dht = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+kitsune2_gossip = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+#kitsune2_test_utils = { git = "https://github.com/holochain/kitsune2.git", rev = "26159cb9bac7cc845fff57a1630aa9d7112c37d5" }
+kitsune2_transport_iroh = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+kitsune2_transport_tx5 = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
