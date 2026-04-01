@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::config::Ad4mConfig;
     use fs2::FileExt;
     use std::fs;
     use std::path::PathBuf;
