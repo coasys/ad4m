@@ -61,11 +61,38 @@ mod tests {
     }
 
     #[test]
-    fn test_devnet_seed_differs_from_mainnet() {
-        assert_ne!(crate::globals::MAINNET_JSON, crate::globals::DEVNET_JSON);
+    fn test_devnet_seed_is_valid_and_uses_real_languages() {
         // Both should be valid JSON
-        assert!(serde_json::from_str::<serde_json::Value>(crate::globals::MAINNET_JSON).is_ok());
-        assert!(serde_json::from_str::<serde_json::Value>(crate::globals::DEVNET_JSON).is_ok());
+        let mainnet: serde_json::Value =
+            serde_json::from_str(crate::globals::MAINNET_JSON).expect("mainnet seed is valid JSON");
+        let devnet: serde_json::Value =
+            serde_json::from_str(crate::globals::DEVNET_JSON).expect("devnet seed is valid JSON");
+
+        // Devnet uses the same real language addresses as mainnet —
+        // isolation comes from separate data directories and Holochain conductors,
+        // not from different language binaries.
+        assert_eq!(
+            mainnet["agentLanguage"], devnet["agentLanguage"],
+            "devnet must use real agent language"
+        );
+        assert_eq!(
+            mainnet["perspectiveLanguage"], devnet["perspectiveLanguage"],
+            "devnet must use real perspective language"
+        );
+        assert_eq!(
+            mainnet["neighbourhoodLanguage"], devnet["neighbourhoodLanguage"],
+            "devnet must use real neighbourhood language"
+        );
+        assert_eq!(
+            mainnet["knownLinkLanguages"], devnet["knownLinkLanguages"],
+            "devnet must use real link languages"
+        );
+        // Language-language bundle must be present (not empty placeholder)
+        let bundle = devnet["languageLanguageBundle"].as_str().unwrap_or("");
+        assert!(
+            bundle.len() > 1000,
+            "devnet must include the real language-language bundle"
+        );
     }
 
     #[test]
