@@ -1970,7 +1970,6 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        check_compute_credits(&context.auth_token)?;
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let result = perspective
@@ -1982,15 +1981,6 @@ impl Mutation {
             )
             .await?;
 
-        if let Err(e) = deduct_compute_credits(
-            &context.auth_token,
-            "link write",
-            1.0,
-            "link_write",
-            Some(&format!("1 link in perspective {}", uuid)),
-        ) {
-            log::warn!("Call exceeded compute credits (add_link): result returned but future calls will fail. Details: {:?}", e);
-        }
         Ok(result)
     }
 
@@ -2037,8 +2027,6 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        check_compute_credits(&context.auth_token)?;
-        let link_count = links.len();
 
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
@@ -2051,15 +2039,6 @@ impl Mutation {
             )
             .await?;
 
-        if let Err(e) = deduct_compute_credits(
-            &context.auth_token,
-            "link write",
-            link_count as f64,
-            "link_write",
-            Some(&format!("{} links in perspective {}", link_count, uuid)),
-        ) {
-            log::warn!("Call exceeded compute credits (add_links, count={}): result returned but future calls will fail. Details: {:?}", link_count, e);
-        }
         Ok(result)
     }
 
@@ -2074,9 +2053,6 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        check_compute_credits(&context.auth_token)?;
-        // Only charge for additions, not removals
-        let additions_count = mutations.additions.len();
 
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
@@ -2084,19 +2060,6 @@ impl Mutation {
             .link_mutations(mutations, link_status_from_input(status)?, &agent_context)
             .await?;
 
-        if let Err(e) = deduct_compute_credits(
-            &context.auth_token,
-            "link write",
-            additions_count as f64,
-            "link_write",
-            Some(&format!(
-                "{} additions in perspective {}",
-                additions_count, uuid
-            )),
-        ) {
-            log::warn!("Call exceeded compute credits (link_mutations, additions={}): result returned but future calls will fail. Details: {:?}", additions_count, e
-            );
-        }
         Ok(result)
     }
 
