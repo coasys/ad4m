@@ -140,6 +140,12 @@ enum Domain {
         /// Useful for test harnesses that need targeted process cleanup.
         #[arg(long)]
         pid_file: Option<String>,
+        /// Run in development mode (data: ~/.ad4m-dev, network: devnet, log: debug)
+        #[arg(long, action)]
+        dev: bool,
+        /// Network mode: mainnet (default), devnet, or local
+        #[arg(long)]
+        network_mode: Option<String>,
     },
     RunLocalHcServices {},
 }
@@ -169,19 +175,19 @@ async fn main() -> Result<()> {
     };
 
     if let Domain::Run {
-        app_data_path,
-        network_bootstrap_seed,
+        mut app_data_path,
+        mut network_bootstrap_seed,
         language_language_only,
         run_dapp_server,
         gql_port,
         hc_admin_port,
         hc_app_port,
-        hc_use_bootstrap,
+        mut hc_use_bootstrap,
         hc_use_local_proxy,
-        hc_use_mdns,
+        mut hc_use_mdns,
         hc_use_proxy,
-        hc_proxy_url,
-        hc_bootstrap_url,
+        mut hc_proxy_url,
+        mut hc_bootstrap_url,
         hc_relay_url,
         connect_holochain,
         admin_credential,
@@ -194,8 +200,75 @@ async fn main() -> Result<()> {
         enable_mcp,
         mcp_port,
         pid_file,
+        dev,
+        network_mode,
     } = args.domain
     {
+        use rust_executor::config::NetworkMode;
+
+        // Refuse --dev in production builds
+        if rust_executor::globals::IS_PRODUCTION_BUILD && dev {
+            eprintln!("ERROR: Cannot use --dev with production builds");
+            std::process::exit(1);
+        }
+
+        // Parse network mode
+        let network_mode: NetworkMode = if let Some(ref mode_str) = network_mode {
+            mode_str.parse().unwrap_or_else(|_| {
+                eprintln!(
+                    "ERROR: Invalid network mode '{}'. Use: mainnet, devnet, local",
+                    mode_str
+                );
+                std::process::exit(1);
+            })
+        } else if dev {
+            NetworkMode::Devnet
+        } else {
+            NetworkMode::Mainnet
+        };
+
+        // Apply --dev defaults
+        if dev && app_data_path.is_none() {
+            let home = dirs::home_dir().expect("Could not get home directory");
+            app_data_path = Some(home.join(".ad4m-dev").to_string_lossy().into_owned());
+        }
+
+        // Apply network mode to config
+        match network_mode {
+            NetworkMode::Local => {
+                hc_use_mdns = Some(true);
+                hc_use_bootstrap = Some(false);
+                hc_proxy_url = Some(String::new());
+                hc_bootstrap_url = Some(String::new());
+            }
+            _ => {}
+        };
+
+        // For devnet mode, write devnet seed
+        if network_mode == NetworkMode::Devnet && network_bootstrap_seed.is_none() {
+            let data_path = app_data_path.clone().unwrap_or_else(|| {
+                let home = dirs::home_dir().expect("Could not get home directory");
+                home.join(".ad4m").to_string_lossy().into_owned()
+            });
+            std::fs::create_dir_all(&data_path).ok();
+            let seed_path = std::path::PathBuf::from(&data_path).join("devnet_seed.seed");
+            std::fs::write(&seed_path, rust_executor::globals::DEVNET_JSON)
+                .expect("Could not write devnet seed file");
+            network_bootstrap_seed = Some(seed_path.to_string_lossy().into_owned());
+        }
+
+        if dev {
+            eprintln!(
+                "⚠️  DEVELOPMENT MODE — data: {} | network: {}",
+                app_data_path.as_deref().unwrap_or("~/.ad4m-dev"),
+                network_mode
+            );
+            if std::env::var("RUST_LOG").is_err() {
+                std::env::set_var("RUST_LOG", "debug");
+            }
+        } else if !rust_executor::globals::IS_PRODUCTION_BUILD {
+            eprintln!("[dev build] Use --dev for development mode defaults");
+        }
         let tls = if tls_cert_file.is_some() && tls_key_file.is_some() {
             Some(TlsConfig {
                 cert_file_path: tls_cert_file.unwrap(),
