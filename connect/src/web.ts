@@ -243,12 +243,15 @@ export class Ad4mConnectElement extends LitElement {
 
     this.core.addEventListener('creditdepleted', () => {
       this.lowCredit = true;
-      // Auto-open the dashboard so the user sees the top-up options — only once per depletion session
-      if (this.core.connectedHost && !this.modalOpen) {
-        this.currentView = "logged-in-dashboard";
-        this.modalOpen = true;
+      if (this.core.connectedHost) {
+        // Always record depletion state so .forceOpen can act on it later
         this.openedDueToCreditDepletion = true;
-        this.core.options.onCreditsDepleted?.();
+        try { this.core.options.onCreditsDepleted?.(); } catch (e) { console.error('[Ad4m Connect] onCreditsDepleted callback error:', e); }
+        // Auto-open the dashboard so the user sees the top-up options
+        if (!this.modalOpen) {
+          this.currentView = "logged-in-dashboard";
+          this.modalOpen = true;
+        }
       }
       this.requestUpdate();
     });
@@ -592,7 +595,7 @@ export class Ad4mConnectElement extends LitElement {
           @close=${() => { this.openedDueToCreditDepletion = false; this.modalOpen = false; }}
           @use-app=${() => {
             this.openedDueToCreditDepletion = false;
-            this.core.options.onUseApp?.();
+            try { this.core.options.onUseApp?.(); } catch (e) { console.error('[Ad4m Connect] onUseApp callback error:', e); }
             this.modalOpen = false;
           }}
           @disconnect=${this.disconnect}
