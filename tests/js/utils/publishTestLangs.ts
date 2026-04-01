@@ -71,7 +71,7 @@ function injectSystemLanguages() {
         bootstrapSeed["knownLinkLanguages"] = [languageHashes["perspectiveDiffSync"]];
         fs.writeFileSync(bootstrapSeedPath, JSON.stringify(bootstrapSeed));
     } else {
-        throw new Error(`Could not find boostrapSeed at path: ${bootstrapSeedPath}`)
+        throw new Error(`Could not find bootstrapSeed at path: ${bootstrapSeedPath}`)
     }
 }
 

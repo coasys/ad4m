@@ -92,10 +92,6 @@ pub struct LanguageController {
 
     // Cached language names (address -> name)
     language_names: Arc<TokioMutex<HashMap<String, String>>>,
-
-    // Watch channel for signaling when all languages are ready
-    languages_ready_tx: Arc<tokio::sync::watch::Sender<bool>>,
-    languages_ready_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 impl LanguageController {
@@ -114,14 +110,11 @@ impl LanguageController {
     }
 
     fn new() -> Self {
-        let (languages_ready_tx, languages_ready_rx) = tokio::sync::watch::channel(false);
         Self {
             runtimes: Arc::new(TokioMutex::new(HashMap::new())),
             system_addresses: Arc::new(TokioMutex::new(SystemLanguageAddresses::default())),
             language_aliases: Arc::new(TokioMutex::new(HashMap::new())),
             language_names: Arc::new(TokioMutex::new(HashMap::new())),
-            languages_ready_tx: Arc::new(languages_ready_tx),
-            languages_ready_rx,
         }
     }
 
@@ -315,6 +308,35 @@ impl LanguageController {
                     message: e,
                 }
             });
+        }
+
+        Err(LanguageError::NotFound {
+            address: language_address.to_string(),
+        })
+    }
+
+    /// Execute a script in a language runtime with a specific agent context.
+    /// The agent context is passed through the channel so the runtime thread
+    /// sets it as the thread-local before executing the script.
+    pub async fn execute_on_language_with_context(
+        &self,
+        language_address: &str,
+        script: &str,
+        agent_context: &AgentContext,
+    ) -> Result<String, LanguageError> {
+        let handle = {
+            let runtimes = self.runtimes.lock().await;
+            runtimes.get(language_address).cloned()
+        };
+
+        if let Some(handle) = handle {
+            return handle
+                .execute_with_context(script.to_string(), agent_context.clone())
+                .await
+                .map_err(|e| LanguageError::RuntimeError {
+                    address: language_address.to_string(),
+                    message: e,
+                });
         }
 
         Err(LanguageError::NotFound {
@@ -521,15 +543,10 @@ impl LanguageController {
             .load_system_languages_inner(language_language_only)
             .await;
 
-        // Always signal that languages are ready, even on failure.
-        // During the transition period, the JS-side LanguageController handles
-        // language loading and the Rust side may fail. Other operations like
-        // install_language() wait on this signal and must not be blocked forever.
-        let _ = self.languages_ready_tx.send(true);
         if result.is_ok() {
             info!("All languages loaded and ready");
         } else {
-            warn!("System language loading had errors, but signaling ready for JS-side fallback");
+            warn!("System language loading had errors");
         }
 
         result
@@ -2208,7 +2225,9 @@ impl LanguageController {
             content_json, content_json
         );
 
-        let result = self.execute_on_language(&resolved_address, &script).await?;
+        let result = self
+            .execute_on_language_with_context(&resolved_address, &script, agent_context)
+            .await?;
 
         // Strip surrounding quotes from the result (it's a JSON-encoded string)
         let expression_address = result.trim().trim_matches('"').to_string();

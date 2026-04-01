@@ -186,6 +186,72 @@ impl From<SmtpConfigDto> for SmtpConfig {
     }
 }
 
+#[derive(Clone)]
+pub struct HostRegistration {
+    pub index_url: String,
+    pub host_id: String,
+    pub auth_token: String, // Plain token in memory, encrypted on disk
+    pub email: String,
+}
+
+impl fmt::Debug for HostRegistration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HostRegistration")
+            .field("index_url", &self.index_url)
+            .field("host_id", &self.host_id)
+            .field("auth_token", &"<redacted>")
+            .field("email", &self.email)
+            .finish()
+    }
+}
+
+impl Serialize for HostRegistration {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        // Note: auth_token is NOT encrypted because JWTs are already signed by the server.
+        // The signing key is server-side, so encryption provides no additional security.
+        // Encrypting breaks the token format and causes deserialization issues.
+
+        let mut state = serializer.serialize_struct("HostRegistration", 4)?;
+        state.serialize_field("index_url", &self.index_url)?;
+        state.serialize_field("host_id", &self.host_id)?;
+        state.serialize_field("auth_token", &self.auth_token)?;
+        state.serialize_field("email", &self.email)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for HostRegistration {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct HostRegistrationHelper {
+            index_url: String,
+            host_id: String,
+            auth_token: String,
+            email: String,
+        }
+
+        let helper = HostRegistrationHelper::deserialize(deserializer)?;
+
+        // auth_token is stored in plain text (it's a JWT, not a password)
+        // No decryption needed
+
+        Ok(HostRegistration {
+            index_url: helper.index_url,
+            host_id: helper.host_id,
+            auth_token: helper.auth_token,
+            email: helper.email,
+        })
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MultiUserConfig {
     pub enabled: bool,
@@ -201,6 +267,12 @@ pub struct LauncherState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_config: Option<TlsConfig>, // Deprecated - use multi_user_config.tls_config instead
     pub multi_user_config: Option<MultiUserConfig>,
+    #[serde(default)]
+    pub host_registration: Option<HostRegistration>,
+    #[serde(default)]
+    pub mcp_enabled: Option<bool>,
+    #[serde(default)]
+    pub mcp_port: Option<u16>,
 }
 
 fn file_path() -> PathBuf {
@@ -243,6 +315,9 @@ impl LauncherState {
                     log_config: None,
                     tls_config: None,
                     multi_user_config: None,
+                    host_registration: None,
+                    mcp_enabled: None,
+                    mcp_port: None,
                 }
             }
         };

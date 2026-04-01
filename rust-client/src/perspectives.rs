@@ -13,8 +13,14 @@ use serde_json::Value;
 
 type DateTime = NaiveDateTime;
 
-use self::add_link::AddLinkPerspectiveAddLink;
-use self::all::AllPerspectives;
+pub use self::add_link::AddLinkPerspectiveAddLink;
+pub use self::all::{AllPerspectives, AllPerspectivesNeighbourhoodDataMetaLinks};
+pub use self::query_links::QueryLinksPerspectiveQueryLinks;
+pub use self::snapshot::{
+    SnapshotPerspectiveSnapshot, SnapshotPerspectiveSnapshotLinks,
+    SnapshotPerspectiveSnapshotLinksData, SnapshotPerspectiveSnapshotLinksProof,
+};
+pub use self::subscription_link_added::SubscriptionLinkAddedPerspectiveLinkAdded;
 
 #[derive(GraphQLQuery)]
 #[graphql(

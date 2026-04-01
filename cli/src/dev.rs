@@ -57,7 +57,10 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     tls: None,
                     log_holochain_metrics: None,
                     enable_multi_user: None,
+                    enable_mcp: None,
+                    mcp_port: None,
                     smtp_config: None,
+                    pid_file: None,
                 })
                 .await
                 .join()
@@ -162,7 +165,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
             };
             let temp_publish_bootstrap_path = data_path.join("publishing_bootstrap.json");
             green_ln!(
-                "Writting temp publish boostrap at path: {:?}\n",
+                "Writting temp publish bootstrap at path: {:?}\n",
                 temp_publish_bootstrap_path.to_str()
             );
             fs::write(
@@ -211,7 +214,10 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     tls: None,
                     log_holochain_metrics: None,
                     enable_multi_user: None,
+                    enable_mcp: None,
+                    mcp_port: None,
                     smtp_config: None,
+                    pid_file: None,
                 })
                 .await
                 .join()

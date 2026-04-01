@@ -11,11 +11,11 @@ import Login from "./components/Login";
 import Navigation from "./components/Navigation";
 import Notification from "./components/Notification";
 import Perspectives from "./components/Perspectives";
+import Hosting from "./components/Hosting";
 import Settings from "./components/Settings";
 import Splashscreen from "./components/Splashscreen";
 import TrayMessage from "./components/TrayMessage";
 import TrustAgent from "./components/TrustAgent";
-import Users from "./components/Users";
 import { Ad4minContext } from "./context/Ad4minContext";
 import { AgentProvider } from "./context/AgentContext";
 const appWindow = getCurrentWebviewWindow();
@@ -75,7 +75,7 @@ const App = () => {
             element={<Perspectives setOpened={setOpened} opened={opened} />}
           />
           <Route path="ai" element={<AI />} />
-          <Route path="users" element={<Users />} />
+          <Route path="hosting" element={<Hosting />} />
           <Route
             path="settings"
             element={

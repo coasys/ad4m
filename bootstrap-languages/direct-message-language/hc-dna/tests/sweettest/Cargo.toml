@@ -13,12 +13,12 @@ path = "src/integration_tests.rs"
 
 [dependencies]
 # Holochain dependencies - matching the zome's versions
-holochain = { git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys", features = ["sweettest", "test_utils"] }
-hdk = { version = "0.7.0-dev.6", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys" }
-hdi = { version = "0.8.0-dev.4", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys" }
-holochain_types = { git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys" }
+holochain = { version = "0.7.0-dev.16", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.16-space-override-coasys", features = ["sweettest", "test_utils"] }
+hdk = { version = "0.7.0-dev.10", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.16-space-override-coasys" }
+hdi = { version = "0.8.0-dev.7", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.16-space-override-coasys" }
+holochain_types = { version = "0.7.0-dev.15", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.16-space-override-coasys" }
 holochain_serialized_bytes = "=0.0.56"
-holochain_zome_types = { git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys" }
+holochain_zome_types = { version = "0.7.0-dev.9", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.16-space-override-coasys" }
 
 # Shared types from the integrity zome
 direct-message-integrity = { path = "../../zomes/direct-message-integrity" }

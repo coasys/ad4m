@@ -40,10 +40,12 @@ mod util;
 
 use crate::app_state::LauncherState;
 use crate::commands::app::{
-    add_app_agent_state, clear_state, close_application, close_main_window, get_app_agent_list,
-    get_data_path, get_log_config, get_smtp_config, get_tls_config, open_dapp, open_tray,
-    open_tray_message, remove_app_agent_state, set_log_config, set_selected_agent, set_smtp_config,
-    set_tls_config, show_main_window, test_smtp_config,
+    add_app_agent_state, clear_state, close_application, close_main_window, delete_agent,
+    get_app_agent_list, get_data_path, get_host_registration, get_log_config, get_mcp_config,
+    get_smtp_config, get_tls_config, open_dapp, open_tray, open_tray_message,
+    remove_app_agent_state, set_host_registration, set_log_config, set_mcp_config,
+    set_selected_agent, set_smtp_config, set_tls_config, show_main_window, test_smtp_config,
+    validate_tls_config,
 };
 use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
@@ -117,20 +119,42 @@ fn rlim_execute() {
 pub fn run() {
     let state = LauncherState::load().unwrap();
 
-    // Validate TLS config if enabled
-    if let Some(tls_cfg) = &state.tls_config {
+    // Validate TLS config if enabled (check both multi_user_config and legacy tls_config)
+    let tls_to_validate = state
+        .multi_user_config
+        .as_ref()
+        .and_then(|m| m.tls_config.as_ref())
+        .or(state.tls_config.as_ref());
+
+    if let Some(tls_cfg) = tls_to_validate {
         if tls_cfg.enabled {
-            if !std::path::Path::new(&tls_cfg.cert_file_path).exists() {
+            let cert_path = std::path::Path::new(&tls_cfg.cert_file_path);
+            let key_path = std::path::Path::new(&tls_cfg.key_file_path);
+
+            if !cert_path.exists() {
                 error!(
                     "TLS is enabled but certificate file not found: {}. \
                      TLS will be disabled. Please check your TLS settings.",
                     tls_cfg.cert_file_path
                 );
+            } else if std::fs::File::open(cert_path).is_err() {
+                error!(
+                    "TLS is enabled but certificate file is not readable: {}. \
+                     Check file permissions.",
+                    tls_cfg.cert_file_path
+                );
             }
-            if !std::path::Path::new(&tls_cfg.key_file_path).exists() {
+
+            if !key_path.exists() {
                 error!(
                     "TLS is enabled but key file not found: {}. \
                      TLS will be disabled. Please check your TLS settings.",
+                    tls_cfg.key_file_path
+                );
+            } else if std::fs::File::open(key_path).is_err() {
+                error!(
+                    "TLS is enabled but key file is not readable: {}. \
+                     Check file permissions (current user needs read access).",
                     tls_cfg.key_file_path
                 );
             }
@@ -246,6 +270,7 @@ pub fn run() {
             get_app_agent_list,
             set_selected_agent,
             remove_app_agent_state,
+            delete_agent,
             get_data_path,
             get_log_config,
             set_log_config,
@@ -253,7 +278,12 @@ pub fn run() {
             set_smtp_config,
             test_smtp_config,
             get_tls_config,
-            set_tls_config
+            set_tls_config,
+            validate_tls_config,
+            get_mcp_config,
+            set_mcp_config,
+            get_host_registration,
+            set_host_registration
         ])
         .setup(move |app| {
             // Hides the dock icon
@@ -340,6 +370,8 @@ pub fn run() {
                 localhost: Some(localhost),
                 enable_multi_user,
                 smtp_config,
+                enable_mcp: launcher_state.mcp_enabled,
+                mcp_port: launcher_state.mcp_port,
                 ..Default::default()
             };
 

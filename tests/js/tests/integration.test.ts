@@ -4,7 +4,8 @@ import { isProcessRunning, sleep } from "../utils/utils";
 import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
 import { fileURLToPath } from 'url';
 import { expect } from "chai";
-import { startExecutor, apolloClient, runHcLocalServices, killByPorts } from "../utils/utils";
+import { startExecutor, apolloClient, runHcLocalServices, quitExecutor } from "../utils/utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'child_process';
 import perspectiveTests from "./perspective";
 import agentTests from "./agent";
@@ -67,11 +68,22 @@ export class TestContext {
     }
 
     async makeAllNodesKnown() {
-      const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
-      const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
-    
-      await this.#alice!.runtime.hcAddAgentInfos(bobAgentInfo);
-      await this.#bob!.runtime.hcAddAgentInfos(aliceAgentInfo);
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        try {
+          const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
+          const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
+
+          await this.#alice!.runtime.hcAddAgentInfos(bobAgentInfo);
+          await this.#bob!.runtime.hcAddAgentInfos(aliceAgentInfo);
+          console.log(`Agent info exchange attempt ${attempt} successful`);
+          break;
+        } catch (error) {
+          console.log(`Agent info exchange attempt ${attempt} failed:`, error);
+          if (attempt < 5) {
+            await sleep(3000);
+          }
+        }
+      }
     }
 }
 let testContext: TestContext = new TestContext()
@@ -81,9 +93,9 @@ describe("Integration tests", function () {
     this.timeout(200000)
     const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    const gqlPort = 15300
-    const hcAdminPort = 15301
-    const hcAppPort = 15302
+    let gqlPort: number;
+    let hcAdminPort: number;
+    let hcAppPort: number;
 
     let executorProcess: ChildProcess | null = null
 
@@ -92,7 +104,9 @@ describe("Integration tests", function () {
     let localServicesProcess: ChildProcess | null = null;
     let relayUrl: string | null = null;
 
-    before(async () => {    
+    before(async () => {
+        [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+        registerPorts([gqlPort, hcAdminPort, hcAppPort]);
         if(!fs.existsSync(TEST_DIR)) {
           throw Error("Please ensure that prepare-test is run before running tests!");
         }
@@ -116,15 +130,12 @@ describe("Integration tests", function () {
 
     after(async () => {
       if (executorProcess) {
-        executorProcess.kill('SIGTERM');
-        await sleep(500);
-        if (!executorProcess.killed) executorProcess.kill('SIGKILL');
+        await quitExecutor(executorProcess, gqlPort);
       }
       if (localServicesProcess) {
         localServicesProcess.kill('SIGKILL');
       }
-      // Port-based kill as safety net — catches the executor even if kill() missed it
-      killByPorts([gqlPort, hcAdminPort, hcAppPort]);
+      deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
@@ -136,12 +147,14 @@ describe("Integration tests", function () {
 
     describe('with Alice and Bob', () => {
         let bobExecutorProcess: ChildProcess | null = null
+        let bobGqlPort: number;
+        let bobHcAdminPort: number;
+        let bobHcAppPort: number;
         before(async () => {
           const bobAppDataPath = path.join(TEST_DIR, 'agents', 'bob')
           const bobBootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-          const bobGqlPort = 15400
-          const bobHcAdminPort = 15401
-          const bobHcAppPort = 15402
+          [bobGqlPort, bobHcAdminPort, bobHcAppPort] = await getFreePorts(3);
+          registerPorts([bobGqlPort, bobHcAdminPort, bobHcAppPort]);
 
           if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
             fs.mkdirSync(path.join(TEST_DIR, 'agents'))
@@ -173,12 +186,9 @@ describe("Integration tests", function () {
 
         after(async () => {
           if (bobExecutorProcess) {
-            bobExecutorProcess.kill('SIGTERM');
-            await sleep(500);
-            if (!bobExecutorProcess.killed) bobExecutorProcess.kill('SIGKILL');
+            await quitExecutor(bobExecutorProcess, bobGqlPort);
           }
-          // Port-based kill as safety net (bob: 15400/15401/15402)
-          killByPorts([15400, 15401, 15402]);
+          deregisterPorts([bobGqlPort, bobHcAdminPort, bobHcAppPort]);
         })
 
         describe('Agent Language', agentLanguageTests(testContext))

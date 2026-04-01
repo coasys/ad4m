@@ -12,7 +12,7 @@ async function main() {
             bootstrapSeed["languageLanguageBundle"] = bundleData;
             fs.writeFileSync(bootstrapSeedPath, JSON.stringify(bootstrapSeed));
         } else {
-            throw new Error(`Could not find boostrapSeed at path: ${bootstrapSeedPath}`)
+            throw new Error(`Could not find bootstrapSeed at path: ${bootstrapSeedPath}`)
         }
 
         if (fs.existsSync(publishingBootstrapSeedPath)) {
@@ -20,7 +20,7 @@ async function main() {
             bootstrapSeed["languageLanguageBundle"] = bundleData;
             fs.writeFileSync(publishingBootstrapSeedPath, JSON.stringify(bootstrapSeed));
         } else {
-            throw new Error(`Could not find publishingBoostrapSeed at path: ${publishingBootstrapSeedPath}`)
+            throw new Error(`Could not find publishingBootstrapSeed at path: ${publishingBootstrapSeedPath}`)
         }
     } else {
         throw new Error(`Could not find lanuageLanguage at path: ${languageLanguagePath}`)

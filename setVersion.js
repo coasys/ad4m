@@ -84,11 +84,6 @@ vueHooks.version = VERSION
 vueHooks.dependencies["@coasys/ad4m"] = 'workspace:'+VERSION
 fs.writeFileSync('ad4m-hooks/vue/package.json', JSON.stringify(vueHooks, null, 2) + '\n')
 
-const executor = JSON.parse(fs.readFileSync('executor/package.json', 'utf8'))
-console.log("Executor version: " + executor.version + " -> " + VERSION)
-executor.version = VERSION
-fs.writeFileSync('executor/package.json', JSON.stringify(executor, null, 2) + '\n')
-
 const rustExecutor = JSON.parse(fs.readFileSync('rust-executor/package.json', 'utf8'))
 console.log("Executor version: " + rustExecutor.version + " -> " + VERSION)
 rustExecutor.version = VERSION
@@ -98,15 +93,6 @@ const tests = JSON.parse(fs.readFileSync('tests/js/package.json', 'utf8'))
 console.log("Executor version: " + tests.version + " -> " + VERSION)
 tests.version = VERSION
 fs.writeFileSync('tests/js/package.json', JSON.stringify(tests, null, 2) + '\n')
-
-
-const executorHardWired = replaceVersionLine(
-    fs.readFileSync('executor/src/core/Config.ts', 'utf8'), 
-    VERSION, 
-    'export let ad4mExecutorVersion = ',
-    ';')
-console.log("Hard-wired version string in executor's Config.ts: " + executorHardWired.oldVersion + " -> " + VERSION)
-fs.writeFileSync('executor/src/core/Config.ts', executorHardWired.newContent)
 
 const rustClient = replaceVersionLine(fs.readFileSync('rust-client/Cargo.toml', 'utf8'), VERSION)
 console.log("rust-client version: " + rustClient.oldVersion + " -> " + VERSION)

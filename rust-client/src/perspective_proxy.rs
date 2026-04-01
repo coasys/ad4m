@@ -3,8 +3,7 @@ use std::collections::BTreeMap;
 use crate::{
     literal::{Literal, LiteralValue},
     perspectives::{
-        add_link::AddLinkPerspectiveAddLink, query_links::QueryLinksPerspectiveQueryLinks,
-        PerspectivesClient,
+        AddLinkPerspectiveAddLink, PerspectivesClient, QueryLinksPerspectiveQueryLinks,
     },
     subject_proxy::SubjectProxy,
     types::LinkExpression,
