@@ -73,6 +73,10 @@ struct ClapApp {
     /// Provide admin credential to gain all capabilities
     #[arg(short, long)]
     admin_credential: Option<String>,
+
+    /// Data directory to read executor-port from (default: ~/.ad4m)
+    #[arg(long)]
+    data_path: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
