@@ -117,7 +117,7 @@ async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
     let executor_url = if let Some(custom_url) = args.executor_url.clone() {
         custom_url
     } else {
-        crate::startup::get_executor_url()?
+        crate::startup::get_executor_url(args.data_path.as_deref())?
     };
 
     let cap_token = if let Some(admin_credential) = &args.admin_credential {
