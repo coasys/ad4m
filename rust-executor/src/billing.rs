@@ -1,6 +1,16 @@
 use crate::db::Ad4mDb;
 use crate::pubsub::mark_credits_dirty;
 
+#[derive(Debug, thiserror::Error)]
+pub enum BillingError {
+    #[error("Insufficient compute credits")]
+    InsufficientCredits,
+    #[error("User not found: {0}")]
+    UserNotFound(String),
+    #[error("{0}")]
+    Other(#[from] anyhow::Error),
+}
+
 const DEFAULT_LINK_WRITE_RATE: f64 = 0.25; // credits per link write
 
 /// Look up the link write rate from the host_rates DB table, falling back to the default.
@@ -43,9 +53,8 @@ pub fn bill_compute(
     amount: f64,
     operation: &str,
     summary: Option<&str>,
-) -> Result<(), anyhow::Error> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+) -> Result<(), BillingError> {
+    let global_free = Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())?;
     if global_free {
         return Ok(());
     }
@@ -53,10 +62,32 @@ pub fn bill_compute(
     if free {
         return Ok(());
     }
-    let (row_id, credits_after) = Ad4mDb::with_global_instance(|db| {
+    let result = Ad4mDb::with_global_instance(|db| {
         db.deduct_credits_and_log(email, amount, operation, summary)
-    })?;
-    crate::pubsub::push_compute_log_entry(row_id, email, operation, summary, amount, credits_after);
-    mark_credits_dirty(email);
-    Ok(())
+    });
+
+    match result {
+        Ok((row_id, credits_after)) => {
+            crate::pubsub::push_compute_log_entry(
+                row_id,
+                email,
+                operation,
+                summary,
+                amount,
+                credits_after,
+            );
+            mark_credits_dirty(email);
+            Ok(())
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("Insufficient compute credits") {
+                Err(BillingError::InsufficientCredits)
+            } else if msg.starts_with("User not found") {
+                Err(BillingError::UserNotFound(email.to_string()))
+            } else {
+                Err(BillingError::Other(e))
+            }
+        }
+    }
 }
