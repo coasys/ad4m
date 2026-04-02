@@ -3,7 +3,7 @@ use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
 use deno_core::anyhow::{anyhow, Error};
 use lazy_static::lazy_static;
 use oxigraph::model::*;
-use oxigraph::sparql::{QueryOptions, QueryResults};
+use oxigraph::sparql::{Query, QueryOptions, QueryResults};
 use oxigraph::store::Store;
 use serde_json::Value;
 use std::sync::Arc;
@@ -92,32 +92,16 @@ fn strip_html_fn(args: &[Term]) -> Option<Term> {
     Some(Literal::new_simple_literal(&result).into())
 }
 
-/// Validates that a SPARQL query is read-only (no INSERT/DELETE/DROP/CLEAR/CREATE/LOAD)
+/// Validates that a SPARQL query is read-only by parsing it with Oxigraph's SPARQL parser.
+/// Only SELECT, ASK, CONSTRUCT, and DESCRIBE queries are accepted.
+/// UPDATE operations (INSERT, DELETE, DROP, etc.) will fail to parse as a Query.
 pub fn validate_readonly_query(query: &str) -> Result<(), Error> {
-    let upper = query.to_uppercase();
-    let mutating = ["INSERT", "DELETE", "DROP", "CLEAR", "CREATE", "LOAD"];
-    for op in &mutating {
-        let mut pos = 0;
-        while let Some(idx) = upper[pos..].find(op) {
-            let abs = pos + idx;
-            let before_ok = abs == 0 || {
-                let c = upper.as_bytes()[abs - 1];
-                matches!(c, b' ' | b'\t' | b'\n' | b'\r' | b';' | b'(' | b'{')
-            };
-            let after_pos = abs + op.len();
-            let after_ok = after_pos >= upper.len() || {
-                let c = upper.as_bytes()[after_pos];
-                matches!(c, b' ' | b'\t' | b'\n' | b'\r' | b';' | b'(' | b'{' | b'}')
-            };
-            if before_ok && after_ok {
-                return Err(anyhow!(
-                    "Query contains mutating operation '{}'. Only read-only SPARQL is permitted.",
-                    op
-                ));
-            }
-            pos = abs + 1;
-        }
-    }
+    Query::parse(query, None).map_err(|e| {
+        anyhow!(
+            "Query is not valid read-only SPARQL (only SELECT/ASK/CONSTRUCT/DESCRIBE allowed): {}",
+            e
+        )
+    })?;
     Ok(())
 }
 
@@ -133,18 +117,45 @@ fn make_direct_triple(link: &DecoratedLinkExpression) -> (NamedNode, NamedNode, 
 /// Oxigraph-backed SPARQL store for AD4M link data.
 /// Uses direct triples + RDF-star annotations for metadata.
 /// Synchronous API — Oxigraph operations are not async.
+///
+/// # Thread Safety
+/// Oxigraph's `Store` is `Send + Sync` and uses internal locking for concurrent access.
+/// Multiple threads can safely read and write simultaneously without external synchronization.
+/// See: oxigraph 0.4 source — `Store` derives `Clone` and wraps an internally-locked storage layer.
+/// The oxigraph test suite includes a `test_send_sync` test verifying `Store: Send + Sync`.
 #[derive(Clone)]
 pub struct SparqlService {
     store: Arc<Store>,
 }
 
 impl SparqlService {
-    /// Create a new SparqlService with an in-memory store.
+    /// Create a new SparqlService.
+    ///
+    /// If `data_path` is `Some`, opens a persistent RocksDB-backed store at that path.
+    /// If `data_path` is `None`, creates an in-memory store (useful for tests).
+    ///
+    /// Note: Persistence requires the `rocksdb` feature on oxigraph, which is not currently
+    /// enabled (we use `default-features = false`). Until enabled, all stores are in-memory
+    /// and `data_path` is ignored. TODO: Enable `rocksdb` feature once build compatibility
+    /// is confirmed, then wire up `Store::open(path)` here.
     pub fn new(_data_path: Option<&str>) -> Result<Self, Error> {
+        // TODO: When rocksdb feature is enabled, use:
+        // if let Some(path) = _data_path {
+        //     let store = Store::open(path)?;
+        //     return Ok(SparqlService { store: Arc::new(store) });
+        // }
         let store = Store::new()?;
         Ok(SparqlService {
             store: Arc::new(store),
         })
+    }
+
+    /// Returns true if the store contains any quads (non-empty).
+    pub fn has_data(&self) -> bool {
+        self.store
+            .quads_for_pattern(None, None, None, None)
+            .next()
+            .is_some()
     }
 
     fn insert_link_triples(&self, link: &DecoratedLinkExpression) -> Result<(), Error> {
@@ -533,7 +544,10 @@ impl SparqlService {
         validate_readonly_query(query_string)?;
 
         let options = self.query_options();
-        let results = self.store.query_opt(query_string, options)?;
+        let results = self.store.query_opt(query_string, options).map_err(|e| {
+            let truncated = &query_string[..query_string.len().min(500)];
+            anyhow!("SPARQL query failed: {}\nQuery: {}", e, truncated)
+        })?;
 
         match results {
             QueryResults::Solutions(solutions) => {
@@ -1124,5 +1138,228 @@ mod tests {
         svc.clear().unwrap();
         let all = svc.get_all_links().unwrap();
         assert!(all.is_empty());
+    }
+
+    // ── Concurrent write protection tests (Tier 1, 3.1) ──
+
+    #[test]
+    fn test_concurrent_writes_no_panic() {
+        let svc = new_service();
+        let svc = Arc::new(svc);
+        let mut handles = vec![];
+        for thread_id in 0..10 {
+            let svc = svc.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..100 {
+                    let link = make_link_with_ts(
+                        &format!("ad4m://src_{}", thread_id),
+                        "ad4m://pred",
+                        &format!("ad4m://tgt_{}_{}", thread_id, i),
+                        &format!("2024-01-01T{:02}:{:02}:00Z", thread_id, i),
+                        "did:key:z6Mktest",
+                    );
+                    svc.add_link(&link).unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let all = svc.get_all_links().unwrap();
+        assert_eq!(all.len(), 1000, "Expected 1000 links, got {}", all.len());
+    }
+
+    #[test]
+    fn test_concurrent_read_during_write() {
+        let svc = Arc::new(new_service());
+        let svc_writer = svc.clone();
+        let svc_reader = svc.clone();
+
+        let writer = std::thread::spawn(move || {
+            for i in 0..200 {
+                let link = make_link_with_ts(
+                    "ad4m://src",
+                    "ad4m://pred",
+                    &format!("ad4m://tgt_{}", i),
+                    &format!("2024-01-01T00:{:02}:{:02}Z", i / 60, i % 60),
+                    "did:key:z6Mktest",
+                );
+                svc_writer.add_link(&link).unwrap();
+            }
+        });
+
+        let reader = std::thread::spawn(move || {
+            for _ in 0..200 {
+                // Should never error, even during concurrent writes
+                let _ = svc_reader
+                    .query("SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10")
+                    .unwrap();
+            }
+        });
+
+        writer.join().unwrap();
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn test_concurrent_removes_no_corruption() {
+        let svc = Arc::new(new_service());
+        // Add 200 links: 100 "keep" and 100 "remove"
+        for i in 0..100 {
+            svc.add_link(&make_link_with_ts(
+                "ad4m://keep",
+                "ad4m://pred",
+                &format!("ad4m://tgt_{}", i),
+                &format!("2024-01-01T00:{:02}:00Z", i),
+                "did:key:z6Mktest",
+            ))
+            .unwrap();
+            svc.add_link(&make_link_with_ts(
+                "ad4m://remove",
+                "ad4m://pred",
+                &format!("ad4m://tgt_{}", i),
+                &format!("2024-01-01T01:{:02}:00Z", i),
+                "did:key:z6Mktest",
+            ))
+            .unwrap();
+        }
+
+        // Remove the "remove" links in parallel from 5 threads
+        let mut handles = vec![];
+        for chunk_start in (0..100).step_by(20) {
+            let svc = svc.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in chunk_start..chunk_start + 20 {
+                    let link = make_link_with_ts(
+                        "ad4m://remove",
+                        "ad4m://pred",
+                        &format!("ad4m://tgt_{}", i),
+                        &format!("2024-01-01T01:{:02}:00Z", i),
+                        "did:key:z6Mktest",
+                    );
+                    svc.remove_link(&link).unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let keep_links = svc
+            .query_links(Some("ad4m://keep"), None, None, None, None, None)
+            .unwrap();
+        assert_eq!(keep_links.len(), 100, "Keep links corrupted");
+        let remove_links = svc
+            .query_links(Some("ad4m://remove"), None, None, None, None, None)
+            .unwrap();
+        assert_eq!(remove_links.len(), 0, "Remove links not fully removed");
+    }
+
+    // ── Persistence tests (Tier 1, 3.2) ──
+    // Note: Persistence via Store::open() requires the `rocksdb` feature which is not
+    // currently enabled. These tests document the expected behavior for when it is.
+
+    #[test]
+    fn test_inmemory_store_for_tests() {
+        let svc = SparqlService::new(None).unwrap();
+        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t"))
+            .unwrap();
+        assert!(svc.has_data());
+    }
+
+    #[test]
+    fn test_has_data_empty_store() {
+        let svc = new_service();
+        assert!(!svc.has_data());
+    }
+
+    #[test]
+    fn test_has_data_after_add() {
+        let svc = new_service();
+        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t"))
+            .unwrap();
+        assert!(svc.has_data());
+    }
+
+    // ── Error messages with query text (Tier 3, 3.10) ──
+
+    #[test]
+    fn test_error_includes_query_text() {
+        let svc = new_service();
+        let bad_query = "SELECT ?s WHERE { INVALID SPARQL HERE }";
+        let result = svc.query(bad_query);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("INVALID SPARQL HERE"),
+            "Error should contain query text, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_error_truncates_long_queries() {
+        let svc = new_service();
+        // Build a query longer than 500 chars
+        let long_part = "x".repeat(600);
+        let bad_query = format!("SELECT ?s WHERE {{ {} }}", long_part);
+        let result = svc.query(&bad_query);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        // The query text in the error should be truncated to 500 chars
+        // (the full query is >500 chars, so the error won't contain the full thing)
+        assert!(
+            !err_msg.contains(&long_part),
+            "Error should truncate long queries"
+        );
+        assert!(
+            err_msg.contains("Query:"),
+            "Error should contain 'Query:' label"
+        );
+    }
+
+    // ── Parser-based SPARQL validation (Tier 3, 3.8) ──
+
+    #[test]
+    fn test_rejects_insert_query() {
+        assert!(validate_readonly_query("INSERT DATA { <a> <b> <c> }").is_err());
+    }
+
+    #[test]
+    fn test_rejects_delete_query() {
+        assert!(validate_readonly_query("DELETE DATA { <a> <b> <c> }").is_err());
+    }
+
+    #[test]
+    fn test_accepts_valid_select() {
+        assert!(validate_readonly_query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }").is_ok());
+    }
+
+    #[test]
+    fn test_rejects_insert_in_comment() {
+        // "INSERT" in a comment should NOT cause rejection — the parser handles this correctly
+        let query = "SELECT * WHERE { ?s ?p ?o # INSERT } ";
+        // This is valid SPARQL (comment doesn't affect parsing)
+        assert!(validate_readonly_query(query).is_ok());
+    }
+
+    #[test]
+    fn test_rejects_syntactically_invalid_sparql() {
+        assert!(validate_readonly_query("NOT VALID SPARQL AT ALL").is_err());
+    }
+
+    #[test]
+    fn test_accepts_ask_query() {
+        assert!(validate_readonly_query("ASK WHERE { ?s ?p ?o }").is_ok());
+    }
+
+    #[test]
+    fn test_accepts_construct_query() {
+        assert!(validate_readonly_query("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }").is_ok());
+    }
+
+    #[test]
+    fn test_accepts_describe_query() {
+        assert!(validate_readonly_query("DESCRIBE <http://example.org>").is_ok());
     }
 }
