@@ -367,6 +367,11 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
     if (this.engineFlag === 'sparql') {
         const sparqlQuery = await ctor.queryToSPARQL(this.perspective, this.queryParams);
+        // TODO (3.6 - Subscription predicate filtering): Extract predicates used in the
+        // SPARQL query and pass them as hints to subscribeQuery so the Rust-side
+        // subscription can filter link-change notifications by predicate, avoiding
+        // unnecessary re-queries for unrelated link changes. This requires Rust-side
+        // support in PerspectiveProxy.subscribeQuery to accept a predicate whitelist.
         this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
 
         // Track last emitted result fingerprint to suppress duplicate callbacks
@@ -375,19 +380,13 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
         let lastResultFingerprint: string | null = null;
 
         const buildFingerprint = (results: any[]) => {
-            // Serialize ALL enumerable properties of each result for change detection.
-            // We need to catch: where-filter changes (non-matching records added/removed),
-            // property updates, AND relation changes (@HasMany additions etc).
-            return JSON.stringify(results.map((r: any) => {
-                const entry: any = {};
-                for (const key of Object.keys(r)) {
-                    const val = r[key];
-                    // Skip internal/non-serializable fields
-                    if (key.startsWith('_') || typeof val === 'function') continue;
-                    entry[key] = val;
-                }
-                return entry;
-            }).sort((a: any, b: any) => (a.id || '').localeCompare(b.id || '')));
+            // Lightweight fingerprint: IDs + count + timestamps.
+            // Avoids JSON.stringify of all properties for performance.
+            // Catches additions, removals, and timestamp-based updates.
+            if (results.length === 0) return '0:';
+            const ids = results.map((r: any) => r.id || '').sort().join(',');
+            const ts = results.map((r: any) => r.updatedAt || r.timestamp || '').join(',');
+            return `${results.length}:${ids}:${ts}`;
         };
 
         const processResults = async (result: any) => {
