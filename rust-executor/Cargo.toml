@@ -28,11 +28,10 @@ path = "src/bin/generate_snapshot.rs"
 
 [features]
 # Pass metal and cuda features (set through build.rs) through to kalosm
-default = ["sparql"]
+default = []
 metal = ["kalosm/metal"]
 cuda = ["kalosm/cuda"]
 generate_snapshot = []  # Feature flag for snapshot generation mode
-sparql = ["dep:oxigraph"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -142,7 +141,7 @@ anyhow = "1.0.95"
 portpicker = "0.1.1"
 deno_error = "0.5.6"
 thiserror = "2.0.12"
-oxigraph = { version = "0.4", optional = true, default-features = false }
+oxigraph = { version = "0.4", default-features = false }
 
 [dev-dependencies]
 maplit = "1.0.2"

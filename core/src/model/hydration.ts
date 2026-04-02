@@ -13,7 +13,6 @@ import type { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { getPropertiesMetadata, getRelationsMetadata, buildConformanceFilter } from "./decorators";
 import type { RelationMetadataEntry } from "./decorators";
 import { escapeQueryString } from "../utils";
-import { formatQueryValue, compileWhereClause } from "./query-utils";
 import type {
   PropertyMetadata, RelationMetadata, ModelMetadata,
   ValueTuple, WhereCondition, IncludeMap, RelationSubQuery,
@@ -446,80 +445,72 @@ export function buildConformanceGetter(
 }
 
 /**
- * Parse a SurrealDB-style conformance getter and convert it to a SPARQL query.
- * 
- * Handles patterns like:
- * - `(->link[WHERE predicate = 'P'].out[WHERE count(->link[WHERE predicate = 'Q' AND out.uri = 'V']) > 0].uri)`
- * - `(->link[WHERE predicate = 'P'].out.uri)[0]`
- * - `(->link[WHERE predicate = 'P'].out[WHERE count(->link[WHERE predicate = 'Q']) > 0 AND count(->link[WHERE predicate = 'R' AND out.uri = 'S']) > 0].uri)`
- * 
- * Returns null if the getter can't be parsed.
+ * Execute a SPARQL getter string by replacing <Base> with the instance URI
+ * and running it against the perspective.
+ *
+ * Getters are native SPARQL SELECT queries with `<Base>` as a placeholder.
+ * A `LIMIT 1` suffix indicates a scalar result.
+ *
+ * Also supports legacy SurrealDB-style getters for backward compatibility,
+ * converting them to SPARQL on the fly.
  */
-function convertGetterToSPARQL(getter: string, baseExpression: string): { query: string; isScalar: boolean } | null {
-  // Check for [0] suffix indicating scalar result
+function prepareGetterQuery(getter: string, baseExpression: string): { query: string; isScalar: boolean } | null {
+  // New format: native SPARQL with <Base> placeholder
+  if (getter.includes('SELECT') && getter.includes('WHERE')) {
+    const isScalar = getter.includes('LIMIT 1');
+    const query = getter.replace(/<Base>/g, `<${baseExpression}>`);
+    return { query, isScalar };
+  }
+
+  // Legacy format: SurrealDB-style getter — convert to SPARQL
   const isScalar = getter.trimEnd().endsWith('[0]');
   const cleanGetter = getter.replace(/\)\s*\[\d+\]\s*$/, ')');
 
   // Extract the relation predicate: ->link[WHERE predicate = 'PRED']
   const relPredMatch = cleanGetter.match(/->link\[WHERE\s+predicate\s*=\s*'([^']+)'\]/);
   if (!relPredMatch) {
-    if (getter.trim().length > 0) {
-      console.warn(`convertGetterToSPARQL: could not parse getter: ${getter.slice(0, 100)}`);
+    // Try as backward relation: <-link[WHERE predicate = 'PRED']
+    const backRelMatch = cleanGetter.match(/<-link\[WHERE\s+predicate\s*=\s*'([^']+)'\]/);
+    if (backRelMatch) {
+      return {
+        query: `SELECT ?target WHERE { ?target <${backRelMatch[1]}> <${baseExpression}> . }`,
+        isScalar,
+      };
     }
     return null;
   }
   const relationPredicate = relPredMatch[1];
 
-  // Check if there's a target filter: .out[WHERE ...]
+  // Check for target filter: .out[WHERE ...]
   const outFilterMatch = cleanGetter.match(/\.out\[WHERE\s+(.+?)\]\.uri/);
-  
   if (!outFilterMatch) {
-    // Simple: just follow the relation, no conformance filter
     return {
       query: `SELECT ?target WHERE { <${baseExpression}> <${relationPredicate}> ?target . }`,
       isScalar,
     };
   }
 
-  // Parse conformance conditions from the WHERE clause
+  // Parse conformance conditions from the legacy WHERE clause
   const whereClause = outFilterMatch[1];
   const conditions: string[] = [];
 
-  // Match conditions like: count(->link[WHERE predicate = 'P' AND out.uri = 'V']) > 0
   const flagPattern = /count\(->link\[WHERE\s+predicate\s*=\s*'([^']+)'\s+AND\s+out\.uri\s*=\s*'([^']+)'\]\)\s*>\s*0/g;
   let match;
   while ((match = flagPattern.exec(whereClause)) !== null) {
     conditions.push(`?target <${match[1]}> <${match[2]}> .`);
   }
 
-  // Match conditions like: count(->link[WHERE predicate = 'P' AND fn::parse_literal(out.uri) = 'V']) > 0
-  // This handles literal-resolved properties where the stored value is a literal: IRI
-  const parseLiteralPattern = /count\(->link\[WHERE\s+predicate\s*=\s*'([^']+)'\s+AND\s+fn::parse_literal\(out\.uri\)\s*=\s*'([^']+)'\]\)\s*>\s*0/g;
-  while ((match = parseLiteralPattern.exec(whereClause)) !== null) {
-    // Convert the plain value to a literal: IRI for matching
-    const alreadyCaptured = conditions.some(c => c.includes(`<${match[1]}>`));
-    if (!alreadyCaptured) {
-      const literalIri = Literal.from(match[2]).toUrl();
-      conditions.push(`?target <${match[1]}> <${literalIri}> .`);
-    }
-  }
-
-  // Match conditions like: count(->link[WHERE predicate = 'P']) > 0 (without out.uri)
   const requiredPattern = /count\(->link\[WHERE\s+predicate\s*=\s*'([^']+)'\]\)\s*>\s*0/g;
   while ((match = requiredPattern.exec(whereClause)) !== null) {
-    // Avoid duplicating conditions already captured by the flag pattern
     const alreadyCaptured = conditions.some(c => c.includes(`<${match[1]}>`));
     if (!alreadyCaptured) {
-      conditions.push(`?target <${match[1]}> ?_req_${match[1].replace(/[^a-zA-Z0-9]/g, '_')} .`);
+      conditions.push(`?target <${match[1]}> ?_req_${conditions.length} .`);
     }
   }
 
-  const conformanceClause = conditions.length > 0 ? '\n    ' + conditions.join('\n    ') : '';
-
+  const conformanceClause = conditions.length > 0 ? ' ' + conditions.join(' ') : '';
   return {
-    query: `SELECT ?target WHERE {
-    <${baseExpression}> <${relationPredicate}> ?target .${conformanceClause}
-  }`,
+    query: `SELECT ?target WHERE { <${baseExpression}> <${relationPredicate}> ?target .${conformanceClause} }`,
     isScalar,
   };
 }
@@ -550,8 +541,8 @@ export async function evaluateCustomGettersForInstance(
     if (projectionSet && !projectionSet.has(propName)) continue;
     if ((propMeta as any).getter) {
       try {
-        const getterStr = (propMeta as any).getter.replace(/Base/g, formatQueryValue(baseExpression));
-        const converted = convertGetterToSPARQL(getterStr, baseExpression);
+        const getterStr = (propMeta as any).getter;
+        const converted = prepareGetterQuery(getterStr, baseExpression);
         if (converted) {
           const result = await perspective.querySparql(converted.query);
           if (result && result.length > 0 && result[0].target !== undefined && result[0].target !== null && result[0].target !== 'None' && result[0].target !== '') {
@@ -587,8 +578,8 @@ export async function evaluateCustomGettersForInstance(
     // For explicit getters, use the SPARQL getter path
     if (meta.getter) {
       try {
-        const getterStr = meta.getter.replace(/Base/g, formatQueryValue(baseExpression));
-        const converted = convertGetterToSPARQL(getterStr, baseExpression);
+        const getterStr = meta.getter;
+        const converted = prepareGetterQuery(getterStr, baseExpression);
         if (converted) {
           const result = await perspective.querySparql(converted.query);
           if (result && result.length > 0) {

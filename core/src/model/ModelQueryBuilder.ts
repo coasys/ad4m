@@ -284,10 +284,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   async get(): Promise<T[]> {
     let results: T[];
     if (this.engineFlag === 'sparql') {
-      const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
-      const rawResult = await this.perspective.querySparql(sparqlQuery);
-      const grouped = groupSPARQLResults(rawResult);
-      ({ results } = await this.ctor.instancesFromQueryResult(this.perspective, this.queryParams, grouped) as { results: T[] });
+      results = await this.executeSparqlQuery();
     } else {
       const query = await this.ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
       const result = await this.perspective.infer(query);
@@ -301,6 +298,13 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * Executes the query once using SPARQL and returns the results.
    */
   async getSparql(): Promise<T[]> {
+    return this.executeSparqlQuery();
+  }
+
+  /**
+   * Shared SPARQL query execution logic used by both get() and getSparql().
+   */
+  private async executeSparqlQuery(): Promise<T[]> {
     const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
     const rawResult = await this.perspective.querySparql(sparqlQuery);
     const grouped = groupSPARQLResults(rawResult);

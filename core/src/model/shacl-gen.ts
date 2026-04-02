@@ -242,7 +242,7 @@ export function buildSHACL(
 
                 if (conditions.length > 0) {
                     const escapedPredicate = escapeQueryString(relMeta.predicate);
-                    relShape.getter = `(->link[WHERE predicate = '${escapedPredicate}'].out[WHERE ${conditions.join(' AND ')}].uri)`;
+                    relShape.getter = `SELECT ?target WHERE { <Base> <${escapedPredicate}> ?target . ${conditions.join(' ')} }`;
                 }
             } catch (e) {
                 // Target metadata may not be available yet

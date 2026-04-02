@@ -94,7 +94,7 @@ describe("buildConformanceFilter()", () => {
     expect(reqCond!.value).toBeUndefined();
 
     // Getter string should be a SPARQL expression
-    expect(result!.getter).toContain("->link[WHERE predicate =");
+    expect(result!.getter).toContain("SELECT ?target WHERE");
     expect(result!.getter).toContain("test://has_flagged");
     expect(result!.getter).toContain("test://type");
     expect(result!.getter).toContain("test://flagged_type");
@@ -148,7 +148,7 @@ describe("buildConformanceFilter()", () => {
 // ============================================================================
 
 describe("SHACL shape getter serialization", () => {
-  const testGetter = "(->link[WHERE predicate = 'test://pred'].out[WHERE count(->link[WHERE predicate = 'test://type' AND out.uri = 'test://flag']) > 0].uri)";
+  const testGetter = "SELECT ?target WHERE { <Base> <test://pred> ?target . ?target <test://type> <test://flag> . }";
   const testConditions: ConformanceCondition[] = [
     { type: "flag", predicate: "test://type", value: "test://flag" },
     { type: "required", predicate: "test://name" },
@@ -776,7 +776,7 @@ describe("compileWhereClause()", () => {
       { properties: { status: { name: "status", predicate: "test://status", required: false, readOnly: false } }, relations: {}, className: "Test" }
     );
     expect(conditions).toHaveLength(1);
-    expect(conditions[0]).toContain("= 0");  // negation
+    expect(conditions[0]).toContain("NOT EXISTS");  // negation
     expect(conditions[0]).toContain("archived");
   });
 

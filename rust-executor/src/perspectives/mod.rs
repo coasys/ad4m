@@ -3,6 +3,7 @@ pub mod perspective_instance;
 pub mod sdna;
 pub mod shacl_parser;
 pub mod shacl_to_prolog;
+pub mod sparql_store;
 pub mod utils;
 use crate::graphql::graphql_types::{
     LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveExpression, PerspectiveHandle,

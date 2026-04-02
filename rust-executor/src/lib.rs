@@ -9,10 +9,9 @@ pub mod graphql;
 pub mod holochain_service;
 pub mod js_core;
 pub mod mcp;
+pub mod perspectives;
 mod prolog_service;
 pub mod runtime_service;
-#[cfg(feature = "sparql")]
-pub mod sparql_service;
 pub mod unyt_service;
 pub mod user_management;
 pub mod utils;
@@ -27,7 +26,6 @@ pub mod init;
 pub mod languages;
 pub mod logging;
 mod neighbourhoods;
-pub mod perspectives;
 mod pubsub;
 use rustls::crypto::aws_lc_rs;
 #[cfg(test)]
@@ -407,10 +405,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         init_prolog_service().await;
     }
 
-    #[cfg(feature = "sparql")]
     {
         info!("Initializing SPARQL service...");
-        sparql_service::init_sparql_service(config.app_data_path.as_deref())
+        perspectives::sparql_store::init_sparql_store(config.app_data_path.as_deref())
             .expect("Failed to initialize SPARQL service");
     }
 

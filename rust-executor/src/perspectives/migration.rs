@@ -79,7 +79,7 @@ pub fn convert_link_literal_uris(link: &mut DecoratedLinkExpression) -> usize {
 /// The function is idempotent — calling it multiple times on the same perspective is safe.
 pub fn migrate_links_from_rusqlite_to_sparql(
     perspective_uuid: &str,
-    sparql_service: &crate::sparql_service::SparqlService,
+    sparql_store: &crate::perspectives::sparql_store::SparqlStore,
 ) -> Result<MigrationResult, String> {
     // Check if already migrated
     let already_migrated = Ad4mDb::with_global_instance(|db| {
@@ -150,7 +150,7 @@ pub fn migrate_links_from_rusqlite_to_sparql(
         // Convert literal:// → literal: in all URI fields
         total_literal_conversions += convert_link_literal_uris(&mut decorated_link);
 
-        match sparql_service.add_link(&decorated_link) {
+        match sparql_store.add_link(&decorated_link) {
             Ok(_) => {
                 migrated_count += 1;
             }
@@ -211,7 +211,7 @@ pub fn migrate_links_from_rusqlite_to_sparql(
 mod tests {
     use super::*;
     use crate::graphql::graphql_types::LinkStatus;
-    use crate::sparql_service::SparqlService;
+    use crate::perspectives::sparql_store::SparqlStore;
     use crate::types::{ExpressionProof, Link, LinkExpression};
     use chrono::Utc;
 
@@ -502,7 +502,7 @@ mod tests {
             "Test Empty Migration SPARQL".to_string(),
         );
 
-        let sparql = SparqlService::new(None).expect("Failed to create SparqlService");
+        let sparql = SparqlStore::new(None).expect("Failed to create SparqlStore");
 
         let result =
             migrate_links_from_rusqlite_to_sparql(&handle.uuid, &sparql).expect("Migration failed");
@@ -563,7 +563,7 @@ mod tests {
                 .unwrap();
         });
 
-        let sparql = SparqlService::new(None).expect("Failed to create SparqlService");
+        let sparql = SparqlStore::new(None).expect("Failed to create SparqlStore");
 
         let result =
             migrate_links_from_rusqlite_to_sparql(&handle.uuid, &sparql).expect("Migration failed");
@@ -632,7 +632,7 @@ mod tests {
                 .unwrap();
         });
 
-        let sparql = SparqlService::new(None).expect("Failed to create SparqlService");
+        let sparql = SparqlStore::new(None).expect("Failed to create SparqlStore");
 
         // First migration
         let result1 = migrate_links_from_rusqlite_to_sparql(&handle.uuid, &sparql)

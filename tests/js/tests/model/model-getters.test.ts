@@ -41,13 +41,13 @@ describe("Ad4mModel — Custom Getters", function () {
     @Property({
       through: "blog://parent",
       getter:
-        "(->link[WHERE predicate = 'blog://reply_to'].out.uri)[0]",
+        "SELECT ?target WHERE { <Base> <blog://reply_to> ?target . } LIMIT 1",
     })
     parentPost: string | undefined;
 
     @HasMany({
       getter:
-        "(->link[WHERE predicate = 'blog://tagged_with'].out.uri)",
+        "SELECT ?target WHERE { <Base> <blog://tagged_with> ?target . }",
     })
     tags: string[] = [];
   }

@@ -3,6 +3,8 @@
  *
  * These functions are used by both the runtime query builder (`Ad4mModel`) and
  * the compile-time SHACL generator (`decorators.ts`).
+ *
+ * All output uses native SPARQL syntax.
  */
 
 import type { WhereCondition, Where, ModelMetadata } from "./types";
@@ -36,16 +38,17 @@ export function formatQueryValue(value: any): string {
 }
 
 /**
- * Compile a single Where condition for a property into a query
- * graph-traversal sub-expression.
+ * Compile a single Where condition for a property into a SPARQL triple pattern
+ * that can be embedded in a getter's WHERE clause.
  *
- * Operates on the **target node** — generates `count(->link[WHERE ...]) > 0`
- * style checks that can be used inside a `[WHERE ...]` filter on nodes.
+ * The generated pattern operates on `?target` — e.g.:
+ *   `?target <pred> <value> .`
+ *   `FILTER EXISTS { ?target <pred> ?_v0 }`
  *
  * @param predicate  - The predicate URI for the property
  * @param condition  - The Where condition value
  * @param opts       - Optional settings (e.g. `resolveLanguage`)
- * @returns A single query condition string
+ * @returns A single SPARQL condition string
  */
 export function buildWhereCondition(
     predicate: string,
@@ -53,18 +56,19 @@ export function buildWhereCondition(
     opts?: { resolveLanguage?: string },
 ): string {
     const escapedPredicate = escapeQueryString(predicate);
-    // Default to fn::parse_literal for properties without resolveLanguage or with resolveLanguage="literal",
-    // since the Rust executor stores their values as literal: IRIs.
-    // Only use raw out.uri when resolveLanguage is explicitly set to a non-literal language.
+    // For literal-resolved properties, we match against the raw IRI (which is a literal: URI)
+    // For language-resolved properties, we match against the plain URI
     const useParseLiteral = !opts?.resolveLanguage || opts.resolveLanguage === 'literal';
-    const targetField = useParseLiteral
-        ? 'fn::parse_literal(out.uri)'
-        : 'out.uri';
 
     if (Array.isArray(condition)) {
-        // Array values → IN clause
-        const formattedValues = (condition as any[]).map(v => formatQueryValue(v)).join(', ');
-        return `count(->link[WHERE predicate = '${escapedPredicate}' AND ${targetField} IN [${formattedValues}]]) > 0`;
+        // Array values → FILTER IN
+        const formattedValues = (condition as any[]).map(v => {
+            if (typeof v === 'string') {
+                return useParseLiteral ? `"${escapeQueryString(v)}"` : `<${escapeQueryString(v)}>`;
+            }
+            return `"${v}"`;
+        }).join(', ');
+        return `FILTER EXISTS { ?target <${escapedPredicate}> ?_val . FILTER(?_val IN (${formattedValues})) }`;
     } else if (typeof condition === 'object' && condition !== null) {
         // Operator object
         const ops = condition as any;
@@ -72,39 +76,48 @@ export function buildWhereCondition(
 
         if (ops.not !== undefined) {
             if (Array.isArray(ops.not)) {
-                const formattedValues = ops.not.map((v: any) => formatQueryValue(v)).join(', ');
+                const formattedValues = ops.not.map((v: any) => {
+                    if (typeof v === 'string') {
+                        return useParseLiteral ? `"${escapeQueryString(v)}"` : `<${escapeQueryString(v)}>`;
+                    }
+                    return `"${v}"`;
+                }).join(', ');
                 parts.push(
-                    `count(->link[WHERE predicate = '${escapedPredicate}' AND ${targetField} IN [${formattedValues}]]) = 0`,
+                    `FILTER NOT EXISTS { ?target <${escapedPredicate}> ?_nval . FILTER(?_nval IN (${formattedValues})) }`,
                 );
             } else {
+                const val = typeof ops.not === 'string'
+                    ? (useParseLiteral ? `"${escapeQueryString(ops.not)}"` : `<${escapeQueryString(ops.not)}>`)
+                    : `"${ops.not}"`;
                 parts.push(
-                    `count(->link[WHERE predicate = '${escapedPredicate}' AND ${targetField} = ${formatQueryValue(ops.not)}]) = 0`,
+                    `FILTER NOT EXISTS { ?target <${escapedPredicate}> ${val} }`,
                 );
             }
         }
 
-        // Comparison operators — ensure property exists (actual comparison
-        // may be post-filtered in JS at runtime, but the query condition
-        // is valid for compile-time getter generation too).
+        // Comparison operators — ensure property exists
         const hasComparisonOps =
             ops.gt !== undefined || ops.gte !== undefined ||
             ops.lt !== undefined || ops.lte !== undefined ||
             ops.between !== undefined || ops.contains !== undefined;
         if (hasComparisonOps) {
             parts.push(
-                `count(->link[WHERE predicate = '${escapedPredicate}']) > 0`,
+                `FILTER EXISTS { ?target <${escapedPredicate}> ?_cmp }`,
             );
         }
 
-        return parts.join(' AND ');
+        return parts.join(' ');
     } else {
         // Simple equality
-        return `count(->link[WHERE predicate = '${escapedPredicate}' AND ${targetField} = ${formatQueryValue(condition)}]) > 0`;
+        const val = typeof condition === 'string'
+            ? (useParseLiteral ? `"${escapeQueryString(condition)}"` : `<${escapeQueryString(condition)}>`)
+            : `"${condition}"`;
+        return `?target <${escapedPredicate}> ${val} .`;
     }
 }
 
 /**
- * Compile a full `Where` clause to an array of query condition strings.
+ * Compile a full `Where` clause to an array of SPARQL condition strings.
  *
  * When `metadata` is provided, property names are resolved to predicates
  * using the model's property metadata.  When `metadata` is `null`, property

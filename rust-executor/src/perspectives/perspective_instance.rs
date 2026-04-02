@@ -193,7 +193,7 @@ pub struct PerspectiveInstance {
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
-    sparql_service: Arc<crate::sparql_service::SparqlService>,
+    sparql_store: Arc<crate::perspectives::sparql_store::SparqlStore>,
 }
 
 impl PerspectiveInstance {
@@ -216,8 +216,8 @@ impl PerspectiveInstance {
             batch_store: Arc::new(RwLock::new(HashMap::new())),
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
             fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
-            sparql_service: Arc::new(
-                crate::sparql_service::SparqlService::new(None)
+            sparql_store: Arc::new(
+                crate::perspectives::sparql_store::SparqlStore::new(None)
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
         }
@@ -243,7 +243,7 @@ impl PerspectiveInstance {
         &self,
         links: &[DecoratedLinkExpression],
     ) -> Result<(), deno_core::anyhow::Error> {
-        self.sparql_service.reload(links.to_vec())
+        self.sparql_store.reload(links.to_vec())
     }
 
     async fn ensure_link_language(&self) {
@@ -519,7 +519,7 @@ impl PerspectiveInstance {
 
         if let Some(mut link_language) = link_language_clone {
             // Query SPARQL store for all links
-            let decorated_links = match self.sparql_service.get_all_links() {
+            let decorated_links = match self.sparql_store.get_all_links() {
                 Ok(links) => links,
                 Err(e) => {
                     log::error!(
@@ -842,7 +842,7 @@ impl PerspectiveInstance {
 
             // Query SPARQL store
             let decorated_link = self
-                .sparql_service
+                .sparql_store
                 .get_link(
                     &link_expression.data.source,
                     link_expression.data.predicate.as_deref(),
@@ -861,7 +861,7 @@ impl PerspectiveInstance {
             let _handle = self.persisted.lock().await.clone();
 
             // Query SPARQL store
-            if let Some(decorated_link) = self.sparql_service.get_link(
+            if let Some(decorated_link) = self.sparql_store.get_link(
                 &link_expression.data.source,
                 link_expression.data.predicate.as_deref(),
                 &link_expression.data.target,
@@ -1186,7 +1186,7 @@ impl PerspectiveInstance {
         let handle = self.persisted.lock().await.clone();
 
         // Query SPARQL store
-        let decorated_link_option = self.sparql_service.get_link(
+        let decorated_link_option = self.sparql_store.get_link(
             &old_link.data.source,
             old_link.data.predicate.as_deref(),
             &old_link.data.target,
@@ -1313,7 +1313,7 @@ impl PerspectiveInstance {
         let mut existing_links = Vec::new();
         for link in link_expressions {
             // Query SPARQL store
-            if let Some(decorated_link) = self.sparql_service.get_link(
+            if let Some(decorated_link) = self.sparql_store.get_link(
                 &link.data.source,
                 link.data.predicate.as_deref(),
                 &link.data.target,
@@ -1497,7 +1497,7 @@ impl PerspectiveInstance {
             dt.to_rfc3339()
         });
 
-        let decorated_links = self.sparql_service.query_links(
+        let decorated_links = self.sparql_store.query_links(
             query.source.as_deref(),
             query.predicate.as_deref(),
             query.target.as_deref(),
@@ -2405,7 +2405,7 @@ impl PerspectiveInstance {
 
     /// Execute a SPARQL query against this perspective's Oxigraph store
     pub fn sparql_query(&self, query: String) -> Result<String, deno_core::anyhow::Error> {
-        self.sparql_service.query(&query)
+        self.sparql_store.query(&query)
     }
 
     pub(crate) async fn persist_link_diff(
@@ -2418,13 +2418,13 @@ impl PerspectiveInstance {
 
         // Removals first
         for removal in &diff.removals {
-            if let Err(e) = self.sparql_service.remove_link(removal) {
+            if let Err(e) = self.sparql_store.remove_link(removal) {
                 log::warn!("Failed to remove link from SPARQL store: {:?}", e);
             }
         }
         // Additions after
         for addition in &diff.additions {
-            if let Err(e) = self.sparql_service.add_link(addition) {
+            if let Err(e) = self.sparql_store.add_link(addition) {
                 log::warn!("Failed to add link to SPARQL store: {:?}", e);
             }
         }
@@ -2627,7 +2627,7 @@ impl PerspectiveInstance {
                 // from deleted users or corrupted data.
                 match {
                     let query = n.trigger.clone();
-                    let result_json = self.sparql_service.query(&query);
+                    let result_json = self.sparql_store.query(&query);
                     match result_json {
                         Ok(json) => serde_json::from_str::<Vec<serde_json::Value>>(&json)
                             .map_err(|e| anyhow::anyhow!(e)),
@@ -3309,7 +3309,7 @@ impl PerspectiveInstance {
         let _uuid = self.persisted.lock().await.uuid.clone();
 
         let links = self
-            .sparql_service
+            .sparql_store
             .get_links_by_predicate_and_source_suffix(predicate, &shape_suffix)?;
 
         // Return the first match
@@ -3332,7 +3332,7 @@ impl PerspectiveInstance {
         let _uuid = self.persisted.lock().await.uuid.clone();
 
         let links = self
-            .sparql_service
+            .sparql_store
             .get_links_by_predicate_and_source_suffix(predicate, &prop_suffix)?;
 
         // Return the first match
@@ -3353,7 +3353,7 @@ impl PerspectiveInstance {
         let _uuid = self.persisted.lock().await.uuid.clone();
 
         let links = self
-            .sparql_service
+            .sparql_store
             .get_links_by_predicate_and_source_suffix("ad4m://resolveLanguage", &prop_suffix)?;
 
         if let Some(link) = links.first() {

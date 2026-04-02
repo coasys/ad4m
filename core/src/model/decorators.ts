@@ -151,7 +151,8 @@ export function buildConformanceFilter(
     try {
         const targetProps = getPropertiesMetadata(targetClass);
         const conditions: ConformanceCondition[] = [];
-        const filterConditions: string[] = [];
+        const sparqlConditions: string[] = [];
+        let varIdx = 0;
 
         // 1. Flags — check predicate + value
         for (const [_propName, propMeta] of Object.entries(targetProps)) {
@@ -161,8 +162,8 @@ export function buildConformanceFilter(
                     predicate: propMeta.through,
                     value: propMeta.initial,
                 });
-                filterConditions.push(
-                    `count(->link[WHERE predicate = '${escapeQueryString(propMeta.through)}' AND out.uri = '${escapeQueryString(propMeta.initial)}']) > 0`
+                sparqlConditions.push(
+                    `?target <${escapeQueryString(propMeta.through)}> <${escapeQueryString(propMeta.initial)}> .`
                 );
             }
         }
@@ -175,8 +176,8 @@ export function buildConformanceFilter(
                     type: 'required',
                     predicate: propMeta.through,
                 });
-                filterConditions.push(
-                    `count(->link[WHERE predicate = '${escapeQueryString(propMeta.through)}']) > 0`
+                sparqlConditions.push(
+                    `?target <${escapeQueryString(propMeta.through)}> ?_v${varIdx++} .`
                 );
             }
         }
@@ -185,8 +186,7 @@ export function buildConformanceFilter(
             return undefined;
         }
 
-        const escapedPredicate = escapeQueryString(relationPredicate);
-        const getter = `(->link[WHERE predicate = '${escapedPredicate}'].out[WHERE ${filterConditions.join(' AND ')}].uri)`;
+        const getter = `SELECT ?target WHERE { <Base> <${escapeQueryString(relationPredicate)}> ?target . ${sparqlConditions.join(' ')} }`;
 
         return { getter, conformanceConditions: conditions };
     } catch (e) {
@@ -235,7 +235,7 @@ export interface PropertyOptions {
     /**
      * Custom getter to resolve the property value. Use this for custom graph traversals.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
-     * Example: "(<-link[WHERE predicate = 'flux://has_reply'].in.uri)[0]"
+     * Example: "SELECT ?target WHERE { <Base> <flux://has_reply> ?target . } LIMIT 1"
      */
     getter?: string;
 
@@ -661,7 +661,7 @@ export interface RelationOptions {
     /**
      * Custom getter to resolve the relation values. Use this for custom graph traversals.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
-     * Example: "(<-link[WHERE predicate = 'flux://has_reply'].out.uri)"
+     * Example: "SELECT ?target WHERE { ?target <flux://has_reply> <Base> . }"
      *
      * Mutually exclusive with `through` and `target`. When `getter` is provided the
      * relation is read-only (no adder/remover actions are generated).

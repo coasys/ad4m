@@ -136,12 +136,12 @@ fn make_direct_triple(link: &DecoratedLinkExpression) -> (NamedNode, NamedNode, 
 /// See: oxigraph 0.4 source — `Store` derives `Clone` and wraps an internally-locked storage layer.
 /// The oxigraph test suite includes a `test_send_sync` test verifying `Store: Send + Sync`.
 #[derive(Clone)]
-pub struct SparqlService {
+pub struct SparqlStore {
     store: Arc<Store>,
 }
 
-impl SparqlService {
-    /// Create a new SparqlService.
+impl SparqlStore {
+    /// Create a new SparqlStore.
     ///
     /// If `data_path` is `Some`, opens a persistent RocksDB-backed store at that path.
     /// If `data_path` is `None`, creates an in-memory store (useful for tests).
@@ -154,10 +154,10 @@ impl SparqlService {
         // TODO: When rocksdb feature is enabled, use:
         // if let Some(path) = _data_path {
         //     let store = Store::open(path)?;
-        //     return Ok(SparqlService { store: Arc::new(store) });
+        //     return Ok(SparqlStore { store: Arc::new(store) });
         // }
         let store = Store::new()?;
-        Ok(SparqlService {
+        Ok(SparqlStore {
             store: Arc::new(store),
         })
     }
@@ -641,21 +641,21 @@ impl SparqlService {
 }
 
 lazy_static! {
-    static ref SPARQL_SERVICE: Arc<std::sync::RwLock<Option<SparqlService>>> =
+    static ref SPARQL_SERVICE: Arc<std::sync::RwLock<Option<SparqlStore>>> =
         Arc::new(std::sync::RwLock::new(None));
 }
 
-pub fn init_sparql_service(data_path: Option<&str>) -> Result<(), Error> {
-    let service = SparqlService::new(data_path)?;
+pub fn init_sparql_store(data_path: Option<&str>) -> Result<(), Error> {
+    let service = SparqlStore::new(data_path)?;
     let mut lock = SPARQL_SERVICE.write().unwrap();
     *lock = Some(service);
     Ok(())
 }
 
-pub fn get_sparql_service() -> SparqlService {
+pub fn get_sparql_store() -> SparqlStore {
     let lock = SPARQL_SERVICE.read().unwrap();
     lock.clone()
-        .expect("SparqlService not initialized. Call init_sparql_service() first.")
+        .expect("SparqlStore not initialized. Call init_sparql_store() first.")
 }
 
 #[cfg(test)]
@@ -698,8 +698,8 @@ mod tests {
         link
     }
 
-    fn new_service() -> SparqlService {
-        SparqlService::new(None).unwrap()
+    fn new_service() -> SparqlStore {
+        SparqlStore::new(None).unwrap()
     }
 
     // ── Storage Model Tests ──
@@ -1286,7 +1286,7 @@ mod tests {
 
     #[test]
     fn test_inmemory_store_for_tests() {
-        let svc = SparqlService::new(None).unwrap();
+        let svc = SparqlStore::new(None).unwrap();
         svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t"))
             .unwrap();
         assert!(svc.has_data());
