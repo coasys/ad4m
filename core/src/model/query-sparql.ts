@@ -312,18 +312,13 @@ function buildSPARQLWhereFilters(
         }
         // NOT filters: no SPARQL-level filtering — handled in JS
       } else {
-        // Simple equality or IN — add join for conformance, plus push-down FILTER optimization.
-        // JS post-filter remains as safety net; this just reduces the SPARQL result set.
+        // Simple equality or IN — add join for conformance.
+        // NOTE: push-down FILTER with fn::parse_literal was attempted but removed because
+        // Oxigraph's query parser rejects the fn:: custom function syntax at parse time
+        // (custom functions are only available at execution time). All literal property
+        // filtering is done in JS post-filter after hydration resolves values.
         joins.push(`
       ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
-        if (!Array.isArray(condition) && (typeof condition !== 'object' || condition === null)) {
-          // Simple equality — push down fn::parse_literal FILTER
-          filters.push(`fn::parse_literal(?wTarget_${propertyName}) = ${formatSPARQLValue(condition)}`);
-        } else if (Array.isArray(condition)) {
-          // IN clause — push down fn::parse_literal IN FILTER
-          const values = (condition as any[]).map(v => formatSPARQLValue(v)).join(', ');
-          filters.push(`fn::parse_literal(?wTarget_${propertyName}) IN (${values})`);
-        }
       }
     } else if (Array.isArray(condition)) {
       const formatted = (condition as any[]).map(v => iri(v)).join(", ");
