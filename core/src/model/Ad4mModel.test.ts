@@ -1970,19 +1970,20 @@ describe("Push-down FILTER for literal equality", () => {
 
   const normalizeQuery = (q: string) => q.replace(/\s+/g, " ").trim();
 
-  it("SPARQL query for where: { name: 'Alice' } should include FILTER with fn::parse_literal", async () => {
+  it("SPARQL query for where: { name: 'Alice' } should add JOIN but NOT parse_literal FILTER", async () => {
     const query = await (FilterTest as any).queryToSPARQL(mockPerspective, { where: { name: "Alice" } });
     const norm = normalizeQuery(query);
-    expect(norm).toContain("fn::parse_literal(?wTarget_name)");
-    expect(norm).toContain('"Alice"');
+    // JOIN pattern exists (ensures property is present for JS post-filter)
+    expect(norm).toContain("?wTarget_name");
+    // No parse_literal FILTER — custom fn:: functions aren't valid in parsed SPARQL
+    expect(norm).not.toContain("fn::parse_literal");
   });
 
-  it("SPARQL query for where: { name: ['Alice', 'Bob'] } should include FILTER with IN", async () => {
+  it("SPARQL query for where: { name: ['Alice', 'Bob'] } should add JOIN but NOT parse_literal FILTER", async () => {
     const query = await (FilterTest as any).queryToSPARQL(mockPerspective, { where: { name: ["Alice", "Bob"] } });
     const norm = normalizeQuery(query);
-    expect(norm).toContain("fn::parse_literal(?wTarget_name) IN");
-    expect(norm).toContain('"Alice"');
-    expect(norm).toContain('"Bob"');
+    expect(norm).toContain("?wTarget_name");
+    expect(norm).not.toContain("fn::parse_literal");
   });
 
   it("SPARQL query for where: { rating: { gt: 5 } } should NOT include parse_literal FILTER", async () => {
@@ -1991,14 +1992,9 @@ describe("Push-down FILTER for literal equality", () => {
     expect(norm).not.toContain("fn::parse_literal");
   });
 
-  it("push-down filter should coexist with JS post-filter (both produce correct results)", async () => {
-    // The SPARQL query includes the FILTER, but JS post-filter also runs.
-    // This test verifies the query is valid and both layers can work together.
+  it("literal property where clause adds JOIN for JS post-filter", async () => {
     const query = await (FilterTest as any).queryToSPARQL(mockPerspective, { where: { name: "Alice" } });
     const norm = normalizeQuery(query);
-    // SPARQL has the filter
-    expect(norm).toContain("fn::parse_literal(?wTarget_name)");
-    // The join pattern also exists (needed for JS post-filter)
     expect(norm).toContain("?wTarget_name");
   });
 });
