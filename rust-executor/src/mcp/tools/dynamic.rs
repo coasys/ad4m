@@ -878,20 +878,37 @@ impl Ad4mMcpHandler {
 
                 // If a getter exists, execute it as SPARQL
                 if let Some(getter_query) = getter {
-                    let sparql = getter_query.replace("<Base>", &format!("<{}>", expression_address));
+                    let sparql =
+                        getter_query.replace("<Base>", &format!("<{}>", expression_address));
                     match perspective.sparql_query(sparql) {
                         Ok(result_json) => {
-                            if let Ok(rows) = serde_json::from_str::<Vec<serde_json::Map<String, serde_json::Value>>>(&result_json) {
-                                let values: Vec<String> = rows.iter()
-                                    .filter_map(|r| r.get("target").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                            if let Ok(rows) = serde_json::from_str::<
+                                Vec<serde_json::Map<String, serde_json::Value>>,
+                            >(&result_json)
+                            {
+                                let values: Vec<String> = rows
+                                    .iter()
+                                    .filter_map(|r| {
+                                        r.get("target")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string())
+                                    })
                                     .collect();
                                 if is_collection {
                                     data.insert(
                                         prop_name,
-                                        serde_json::Value::Array(values.into_iter().map(serde_json::Value::String).collect()),
+                                        serde_json::Value::Array(
+                                            values
+                                                .into_iter()
+                                                .map(serde_json::Value::String)
+                                                .collect(),
+                                        ),
                                     );
                                 } else if let Some(val) = values.first() {
-                                    data.insert(prop_name, serde_json::Value::String(Self::resolve_literal_value(val)));
+                                    data.insert(
+                                        prop_name,
+                                        serde_json::Value::String(Self::resolve_literal_value(val)),
+                                    );
                                 }
                             }
                         }
