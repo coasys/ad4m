@@ -1,9 +1,9 @@
 /**
  * Batch SPARQL query builder for Ad4mModel eager-loading (includes).
  *
- * Uses direct triple + RDF-star storage model.
- * Each AD4M link is stored as: <source> <predicate> <target>
- * with RDF-star annotations for metadata.
+ * Uses direct triple + named graph storage model.
+ * Each AD4M link is stored as: <source> <predicate> <target> in a named graph
+ * with metadata in the default graph keyed by graph IRI.
  *
  * @module
  */
@@ -153,7 +153,7 @@ function flattenIncludeTree(
  * Build a single SPARQL query that fetches root instances plus all
  * included relations in one query using UNION branches.
  *
- * Uses direct triple patterns with RDF-star annotations.
+ * Uses direct triple patterns in named graphs with metadata in default graph.
  */
 export function buildBatchSPARQLQuery(
   rootMetadata: ModelMetadata,
@@ -228,15 +228,14 @@ export function buildBatchSPARQLQuery(
 
   const unionBranches: string[] = [];
 
-  // Depth 0: root — direct triple pattern with RDF-star
+  // Depth 0: root — direct triple pattern with named graph
   unionBranches.push(`
       {
         ${rootJoinClause}
-        ?source ?predicate ?target .
+        GRAPH ?linkGraph { ?source ?predicate ?target . }
         FILTER(isIRI(?source) && isIRI(?predicate))
-        BIND(<< ?source ?predicate ?target >> AS ?ann)
-        ?ann <ad4m://ontology/author> ?author .
-        ?ann <ad4m://ontology/timestamp> ?timestamp .
+        ?linkGraph <ad4m://ontology/author> ?author .
+        ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
         ${rootFilterClause}
         BIND("0" AS ?depth)
         BIND("" AS ?parentBase)
@@ -262,11 +261,10 @@ export function buildBatchSPARQLQuery(
         # Depth ${branch.depth}: ${branch.relationName} (forward)
         ?parentBase ${iri(branch.parentPredicate)} ?source .
         ${childJoinClause}
-        ?source ?predicate ?target .
+        GRAPH ?linkGraph { ?source ?predicate ?target . }
         FILTER(isIRI(?source) && isIRI(?predicate))
-        BIND(<< ?source ?predicate ?target >> AS ?ann)
-        ?ann <ad4m://ontology/author> ?author .
-        ?ann <ad4m://ontology/timestamp> ?timestamp .
+        ?linkGraph <ad4m://ontology/author> ?author .
+        ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
         ${childFilterClause}
         ${parentJoinClause}
         ${parentFilterClause}
@@ -281,11 +279,10 @@ export function buildBatchSPARQLQuery(
         # Depth ${branch.depth}: ${branch.relationName} (reverse)
         ?source ${iri(branch.parentPredicate)} ?parentBase .
         ${childJoinClause}
-        ?source ?predicate ?target .
+        GRAPH ?linkGraph { ?source ?predicate ?target . }
         FILTER(isIRI(?source) && isIRI(?predicate))
-        BIND(<< ?source ?predicate ?target >> AS ?ann)
-        ?ann <ad4m://ontology/author> ?author .
-        ?ann <ad4m://ontology/timestamp> ?timestamp .
+        ?linkGraph <ad4m://ontology/author> ?author .
+        ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
         ${childFilterClause}
         ${parentJoinClause}
         ${parentFilterClause}
