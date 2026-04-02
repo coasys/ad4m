@@ -20,6 +20,7 @@ mod wallet;
 
 pub mod agent;
 pub mod ai_service;
+pub mod billing;
 mod dapp_server;
 pub mod db;
 pub mod init;

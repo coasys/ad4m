@@ -36,67 +36,45 @@ use base64::prelude::*;
 // Use the shared can_access_perspective function from query_resolvers
 use super::query_resolvers::can_access_perspective;
 
-// Default pricing in HOT (used when no rate is configured in the DB)
-const DEFAULT_TOKEN_RATE: f64 = 12.5; // per token (prompt + completion)
-const DEFAULT_EMBEDDING_TOKEN_RATE: f64 = 1.0; // per input token
-const DEFAULT_LINK_WRITE_RATE: f64 = 0.25; // per link write
-
-/// Look up a rate from the host_rates DB table, falling back to the given default.
-fn get_rate(description: &str, default: f64) -> FieldResult<f64> {
-    match Ad4mDb::with_global_instance(|db| db.get_host_rate(description)) {
-        Ok(Some(rate)) => Ok(rate),
-        Ok(None) => Ok(default),
-        Err(e) => Err(FieldError::new(
-            format!("Failed to read host rate: {}", e),
-            graphql_value!(null),
-        )),
-    }
-}
-
 /// Deduct compute credits for a user after an operation completes.
-/// Uses clamped deduction (credits go to 0, never negative) so that the
-/// pre-check in check_compute_credits will block subsequent operations.
-/// Also inserts a compute log entry with the operation metadata.
-/// Returns Ok(()) if:
-/// - No user email in token (single-user mode, no billing)
-/// - User has free_access enabled
-/// - Credits were successfully deducted (clamped to 0)
-fn reserve_compute_credits(
+/// Only looks up the rate and bills when billing is actually active.
+/// No-ops in single-user mode, free hosting, or free-access users.
+fn deduct_compute_credits(
     auth_token: &str,
-    amount: f64,
+    rate_key: &str,
+    quantity: f64,
     operation: &str,
     summary: Option<&str>,
 ) -> FieldResult<()> {
+    if !is_billing_active(auth_token)? {
+        return Ok(());
+    }
+    let rate = match Ad4mDb::with_global_instance(|db| db.get_host_rate(rate_key)) {
+        Ok(Some(rate)) => rate,
+        Ok(None) => {
+            return Err(FieldError::new(
+                format!("No host rate configured for '{}'", rate_key),
+                graphql_value!(null),
+            ))
+        }
+        Err(e) => {
+            return Err(FieldError::new(
+                format!("Failed to read host rate: {}", e),
+                graphql_value!(null),
+            ))
+        }
+    };
+    let amount = quantity * rate;
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
-        let global_free =
-            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
-        if global_free {
-            return Ok(());
-        }
-        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+        crate::billing::bill_compute(email, amount, operation, summary)
             .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
-        if !free {
-            let (row_id, credits_after) = Ad4mDb::with_global_instance(|db| {
-                db.deduct_credits_and_log(email, amount, operation, summary)
-            })
-            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
-            crate::pubsub::push_compute_log_entry(
-                row_id,
-                email,
-                operation,
-                summary,
-                amount,
-                credits_after,
-            );
-            mark_credits_dirty(email);
-        }
     }
     Ok(())
 }
 
 /// Read-only credit check. Returns Ok(()) if the user can afford compute.
 /// Used as a fast pre-check before expensive operations; the actual deduction
-/// happens after the operation via reserve_compute_credits with the exact cost.
+/// happens after the operation via deduct_compute_credits with the exact cost.
 fn check_compute_credits(auth_token: &str) -> FieldResult<()> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
         let global_free =
@@ -118,6 +96,23 @@ fn check_compute_credits(auth_token: &str) -> FieldResult<()> {
         }
     }
     Ok(())
+}
+
+/// Returns true if billing is active for this user (not free hosting, not free access).
+/// Returns false if there's no user email (single-user / local mode) or if hosting/user is free.
+fn is_billing_active(auth_token: &str) -> FieldResult<bool> {
+    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+        if global_free {
+            return Ok(false);
+        }
+        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+            .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+        Ok(!free)
+    } else {
+        Ok(false)
+    }
 }
 
 // Helper function to get perspective with access control
@@ -1975,7 +1970,6 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        check_compute_credits(&context.auth_token)?;
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let result = perspective
@@ -1987,14 +1981,6 @@ impl Mutation {
             )
             .await?;
 
-        if let Err(e) = reserve_compute_credits(
-            &context.auth_token,
-            get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
-            "link_write",
-            Some(&format!("1 link in perspective {}", uuid)),
-        ) {
-            log::warn!("Call exceeded compute credits (add_link): result returned but future calls will fail. Details: {:?}", e);
-        }
         Ok(result)
     }
 
@@ -2017,9 +2003,10 @@ impl Mutation {
             .add_link_expression(link, link_status_from_input(status)?, batch_id)
             .await?;
 
-        if let Err(e) = reserve_compute_credits(
+        if let Err(e) = deduct_compute_credits(
             &context.auth_token,
-            get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
+            "link write",
+            1.0,
             "link_write",
             Some(&format!("1 link in perspective {}", uuid)),
         ) {
@@ -2040,8 +2027,6 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        check_compute_credits(&context.auth_token)?;
-        let link_count = links.len();
 
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
@@ -2054,14 +2039,6 @@ impl Mutation {
             )
             .await?;
 
-        if let Err(e) = reserve_compute_credits(
-            &context.auth_token,
-            link_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
-            "link_write",
-            Some(&format!("{} links in perspective {}", link_count, uuid)),
-        ) {
-            log::warn!("Call exceeded compute credits (add_links, count={}): result returned but future calls will fail. Details: {:?}", link_count, e);
-        }
         Ok(result)
     }
 
@@ -2076,9 +2053,6 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        check_compute_credits(&context.auth_token)?;
-        // Only charge for additions, not removals
-        let additions_count = mutations.additions.len();
 
         let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
@@ -2086,18 +2060,6 @@ impl Mutation {
             .link_mutations(mutations, link_status_from_input(status)?, &agent_context)
             .await?;
 
-        if let Err(e) = reserve_compute_credits(
-            &context.auth_token,
-            additions_count as f64 * get_rate("link write", DEFAULT_LINK_WRITE_RATE)?,
-            "link_write",
-            Some(&format!(
-                "{} additions in perspective {}",
-                additions_count, uuid
-            )),
-        ) {
-            log::warn!("Call exceeded compute credits (link_mutations, additions={}): result returned but future calls will fail. Details: {:?}", additions_count, e
-            );
-        }
         Ok(result)
     }
 
@@ -2928,9 +2890,10 @@ impl Mutation {
                     String::new()
                 }
             };
-        if let Err(e) = reserve_compute_credits(
+        if let Err(e) = deduct_compute_credits(
             &context.auth_token,
-            total_tokens as f64 * get_rate(&model_name, DEFAULT_TOKEN_RATE)?,
+            &model_name,
+            total_tokens as f64,
             "ai_prompt",
             Some(&format!(
                 "{}: {} prompt + {} completion tokens",
@@ -2957,10 +2920,10 @@ impl Mutation {
             .embed(model_id, text)
             .await?;
 
-        if let Err(e) = reserve_compute_credits(
+        if let Err(e) = deduct_compute_credits(
             &context.auth_token,
-            result.token_count as f64
-                * get_rate("embedding per token", DEFAULT_EMBEDDING_TOKEN_RATE)?,
+            "embedding per token",
+            result.token_count as f64,
             "ai_embed",
             Some(&format!("{} tokens", result.token_count)),
         ) {
@@ -2987,9 +2950,35 @@ impl Mutation {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
         check_compute_credits(&context.auth_token)?;
+
+        // When billing is active, verify a rate is configured for this model
+        // before spinning up the stream (and loading the Whisper model).
+        if is_billing_active(&context.auth_token)? {
+            let rate_key = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+                .ok()
+                .flatten()
+                .map(|m| m.name)
+                .unwrap_or_else(|| model_id.clone());
+            let has_rate = Ad4mDb::with_global_instance(|db| db.get_host_rate(&rate_key))
+                .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
+            if has_rate.is_none() {
+                return Err(FieldError::new(
+                    format!(
+                        "No host rate configured for '{}' — cannot open transcription stream",
+                        rate_key
+                    ),
+                    graphql_value!(null),
+                ));
+            }
+        }
+
         Ok(AIService::global_instance()
             .await?
-            .open_transcription_stream(model_id, params.map(|p| p.into()))
+            .open_transcription_stream(
+                model_id,
+                params.map(|p| p.into()),
+                context.auth_token.clone(),
+            )
             .await?)
     }
 
@@ -3008,7 +2997,7 @@ impl Mutation {
         // Feed each stream individually
         for stream_id in &stream_ids {
             if let Err(e) = service
-                .feed_transcription_stream(stream_id, audio_f32.clone())
+                .feed_transcription_stream(stream_id, audio_f32.clone(), &context.auth_token)
                 .await
             {
                 log::warn!("Error feeding stream {}: {}", stream_id, e);
@@ -3026,7 +3015,7 @@ impl Mutation {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
         AIService::global_instance()
             .await?
-            .close_transcription_stream(&stream_id)
+            .close_transcription_stream(&stream_id, &context.auth_token)
             .await?;
         Ok(String::from("true"))
     }

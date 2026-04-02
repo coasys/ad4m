@@ -3126,9 +3126,10 @@ impl Ad4mDb {
         Self::validate_credit_amount(amount)?;
         let tx = self.conn.unchecked_transaction()?;
 
-        // Deduct credits (fails if insufficient)
+        // Deduct credits, clamped to 0 (never negative).
+        // Any user with credits > 0 is charged; the balance floors at 0.
         let rows = tx.execute(
-            "UPDATE users SET remaining_credits = remaining_credits - ?1 WHERE username = ?2 AND COALESCE(remaining_credits, 0) >= ?1",
+            "UPDATE users SET remaining_credits = MAX(remaining_credits - ?1, 0) WHERE username = ?2 AND COALESCE(remaining_credits, 0) > 0",
             params![amount, email],
         )?;
         if rows == 0 {
