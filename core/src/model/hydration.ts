@@ -719,16 +719,52 @@ export async function hydrateRelations<T>(
     // The link goes target→instance, so we query backwards:
     //   predicate = meta.predicate, target = inst.id  →  source is the related id
     if (meta.kind === 'belongsToOne' || meta.kind === 'belongsToMany') {
-      // Per-instance reverse lookup (can't batch easily across instances)
+      // ── Batch SPARQL for reverse relations ──────────────────────────────
+      // Instead of N per-instance perspective.get() calls, batch with a single
+      // SPARQL VALUES query when querySparql is available.
+      let reverseLinksMap: Map<string, string[]> | null = null;
+
+      if (typeof perspective.querySparql === 'function' && instances.length > 1) {
+        try {
+          const ids = instances.map(i => `<${(i as any).id}>`).join(' ');
+          const sparqlResults = await perspective.querySparql(`
+            SELECT ?target ?source WHERE {
+              VALUES ?target { ${ids} }
+              ?source <${meta.predicate}> ?target .
+            }
+          `);
+          // Group by ?target (the parent instance id)
+          reverseLinksMap = new Map<string, string[]>();
+          if (Array.isArray(sparqlResults)) {
+            for (const row of sparqlResults) {
+              const targetId = row.target || row['?target'];
+              const sourceId = row.source || row['?source'];
+              if (!targetId || !sourceId) continue;
+              if (!reverseLinksMap.has(targetId)) reverseLinksMap.set(targetId, []);
+              reverseLinksMap.get(targetId)!.push(sourceId);
+            }
+          }
+        } catch {
+          // Fallback to per-instance queries below
+          reverseLinksMap = null;
+        }
+      }
+
       for (const inst of instances) {
-        const reverseLinks = await perspective.get(
-          new LinkQuery({ predicate: meta.predicate, target: (inst as any).id })
-        );
-        // Defensive filter: perspective.get may return extra results; ensure
-        // we only use links that genuinely point to this instance.
-        const sourceIds = reverseLinks
-          .filter(l => l.data.target === (inst as any).id)
-          .map(l => l.data.source);
+        let sourceIds: string[];
+
+        if (reverseLinksMap) {
+          // Use batch results
+          sourceIds = reverseLinksMap.get((inst as any).id) || [];
+        } else {
+          // Per-instance fallback (single instance or querySparql unavailable)
+          const reverseLinks = await perspective.get(
+            new LinkQuery({ predicate: meta.predicate, target: (inst as any).id })
+          );
+          sourceIds = reverseLinks
+            .filter(l => l.data.target === (inst as any).id)
+            .map(l => l.data.source);
+        }
 
         if (meta.kind === 'belongsToOne') {
           if (sourceIds.length === 0) {
