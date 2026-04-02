@@ -462,7 +462,12 @@ function convertGetterToSPARQL(getter: string, baseExpression: string): { query:
 
   // Extract the relation predicate: ->link[WHERE predicate = 'PRED']
   const relPredMatch = cleanGetter.match(/->link\[WHERE\s+predicate\s*=\s*'([^']+)'\]/);
-  if (!relPredMatch) return null;
+  if (!relPredMatch) {
+    if (getter.trim().length > 0) {
+      console.warn(`convertGetterToSPARQL: could not parse getter: ${getter.slice(0, 100)}`);
+    }
+    return null;
+  }
   const relationPredicate = relPredMatch[1];
 
   // Check if there's a target filter: .out[WHERE ...]
