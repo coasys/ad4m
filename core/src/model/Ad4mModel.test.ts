@@ -1334,14 +1334,20 @@ describe("SPARQL direct triple pattern generation", () => {
     expect(query).toMatch(/\?source\s+<flux:\/\/name>\s+\?cfTarget_name/);
   });
 
-  it("uses RDF-star annotations for author/timestamp", async () => {
+  it("uses GRAPH ?linkGraph pattern for author/timestamp", async () => {
     const query = await (Channel as any).queryToSPARQL(mockPersp, {});
-    expect(query).toContain("BIND(<< ?source ?predicate ?target >> AS ?ann)");
-    expect(query).toContain("<ad4m://ontology/author>");
-    expect(query).toContain("<ad4m://ontology/timestamp>");
+    expect(query).toContain("GRAPH ?linkGraph { ?source ?predicate ?target . }");
+    expect(query).toContain("?linkGraph <ad4m://ontology/author> ?author");
+    expect(query).toContain("?linkGraph <ad4m://ontology/timestamp> ?timestamp");
   });
 
-  it("uses FILTER(isIRI(?source)) to exclude annotation triples", async () => {
+  it("does NOT contain RDF-star BIND(<< >> AS ?ann) pattern", async () => {
+    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
+    expect(query).not.toContain("BIND(<<");
+    expect(query).not.toContain("?ann ");
+  });
+
+  it("uses FILTER(isIRI(?source)) to exclude non-IRI subjects", async () => {
     const query = await (Channel as any).queryToSPARQL(mockPersp, {});
     expect(query).toContain("FILTER(isIRI(?source)");
   });

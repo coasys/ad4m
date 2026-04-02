@@ -6,6 +6,7 @@ use oxigraph::model::*;
 use oxigraph::sparql::{Query, QueryOptions, QueryResults};
 use oxigraph::store::Store;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 const ONT_AUTHOR: &str = "ad4m://ontology/author";
@@ -105,6 +106,17 @@ pub fn validate_readonly_query(query: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Generate a deterministic graph IRI from link data + timestamp.
+fn make_graph_iri(link: &DecoratedLinkExpression) -> NamedNode {
+    let mut hasher = Sha256::new();
+    hasher.update(link.data.source.as_bytes());
+    hasher.update(link.data.predicate.as_deref().unwrap_or("").as_bytes());
+    hasher.update(link.data.target.as_bytes());
+    hasher.update(link.timestamp.as_bytes());
+    let hash = hex::encode(hasher.finalize());
+    NamedNode::new_unchecked(format!("link:{}", &hash[..32]))
+}
+
 /// Build the direct triple (source, predicate, target as IRIs) for a link.
 fn make_direct_triple(link: &DecoratedLinkExpression) -> (NamedNode, NamedNode, NamedNode) {
     let source_iri = NamedNode::new_unchecked(&link.data.source);
@@ -115,7 +127,7 @@ fn make_direct_triple(link: &DecoratedLinkExpression) -> (NamedNode, NamedNode, 
 }
 
 /// Oxigraph-backed SPARQL store for AD4M link data.
-/// Uses direct triples + RDF-star annotations for metadata.
+/// Uses named graphs for link triples + default graph metadata keyed by graph IRI.
 /// Synchronous API — Oxigraph operations are not async.
 ///
 /// # Thread Safety
@@ -160,23 +172,17 @@ impl SparqlService {
 
     fn insert_link_triples(&self, link: &DecoratedLinkExpression) -> Result<(), Error> {
         let (source_iri, predicate_iri, target_iri) = make_direct_triple(link);
+        let graph = make_graph_iri(link);
 
-        // 1. Insert the direct triple: <source> <predicate> <target>
+        // 1. Insert the direct triple in the link's named graph
         self.store.insert(QuadRef::new(
             source_iri.as_ref(),
             predicate_iri.as_ref(),
             TermRef::NamedNode(target_iri.as_ref()),
-            GraphNameRef::DefaultGraph,
+            GraphNameRef::NamedNode(graph.as_ref()),
         ))?;
 
-        // 2. Insert RDF-star annotations on the quoted triple
-        let quoted = Triple::new(
-            source_iri.clone(),
-            predicate_iri.clone(),
-            target_iri.clone(),
-        );
-        let quoted_subject: Subject = quoted.into();
-
+        // 2. Insert metadata in default graph, keyed by graph IRI
         let proof = &link.proof;
         let valid_str = proof.valid.unwrap_or(false).to_string();
 
@@ -192,9 +198,8 @@ impl SparqlService {
         for (pred_uri, value) in annotations {
             let pred = NamedNodeRef::new_unchecked(pred_uri);
             let lit = literal(value);
-            let subj_ref: SubjectRef = quoted_subject.as_ref();
             self.store.insert(QuadRef::new(
-                subj_ref,
+                graph.as_ref(),
                 pred,
                 TermRef::Literal(lit.as_ref()),
                 GraphNameRef::DefaultGraph,
@@ -211,52 +216,58 @@ impl SparqlService {
 
     /// Remove all triples for a link from the store.
     pub fn remove_link(&self, link: &DecoratedLinkExpression) -> Result<(), Error> {
-        let (source_iri, predicate_iri, target_iri) = make_direct_triple(link);
+        let graph = make_graph_iri(link);
 
-        // 1. Remove the direct triple
-        self.store.remove(QuadRef::new(
-            source_iri.as_ref(),
-            predicate_iri.as_ref(),
-            TermRef::NamedNode(target_iri.as_ref()),
-            GraphNameRef::DefaultGraph,
-        ))?;
-
-        // 2. Remove RDF-star annotation triples
-        let quoted = Triple::new(
-            source_iri.clone(),
-            predicate_iri.clone(),
-            target_iri.clone(),
-        );
-        let quoted_subject: Subject = quoted.into();
-
-        let annotation_quads: Vec<_> = self
+        // 1. Remove all quads in the named graph
+        let graph_quads: Vec<_> = self
             .store
-            .quads_for_pattern(Some(quoted_subject.as_ref().into()), None, None, None)
+            .quads_for_pattern(
+                None,
+                None,
+                None,
+                Some(GraphNameRef::NamedNode(graph.as_ref())),
+            )
             .collect::<Result<Vec<_>, _>>()?;
-        for quad in annotation_quads {
+        for quad in graph_quads {
+            self.store.remove(&quad)?;
+        }
+
+        // 2. Remove all metadata triples in default graph with graph IRI as subject
+        let meta_quads: Vec<_> = self
+            .store
+            .quads_for_pattern(
+                Some(graph.as_ref().into()),
+                None,
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .collect::<Result<Vec<_>, _>>()?;
+        for quad in meta_quads {
             self.store.remove(&quad)?;
         }
         Ok(())
     }
 
-    /// Return all links in the store by querying via SPARQL-star.
+    /// Return all links in the store by querying via named graphs.
     pub fn get_all_links(&self) -> Result<Vec<DecoratedLinkExpression>, Error> {
         let query = r#"
             SELECT ?source ?predicate ?target ?author ?timestamp ?proofKey ?proofSig ?proofValid ?status WHERE {
-                ?source ?predicate ?target .
+                GRAPH ?g { ?source ?predicate ?target . }
                 FILTER(isIRI(?source))
-                BIND(<< ?source ?predicate ?target >> AS ?ann)
-                ?ann <ad4m://ontology/author> ?author .
-                ?ann <ad4m://ontology/timestamp> ?timestamp .
-                OPTIONAL { ?ann <ad4m://ontology/proofKey> ?proofKey . }
-                OPTIONAL { ?ann <ad4m://ontology/proofSignature> ?proofSig . }
-                OPTIONAL { ?ann <ad4m://ontology/proofValid> ?proofValid . }
-                OPTIONAL { ?ann <ad4m://ontology/status> ?status . }
+                ?g <ad4m://ontology/author> ?author .
+                ?g <ad4m://ontology/timestamp> ?timestamp .
+                OPTIONAL { ?g <ad4m://ontology/proofKey> ?proofKey . }
+                OPTIONAL { ?g <ad4m://ontology/proofSignature> ?proofSig . }
+                OPTIONAL { ?g <ad4m://ontology/proofValid> ?proofValid . }
+                OPTIONAL { ?g <ad4m://ontology/status> ?status . }
             }
         "#;
 
         let options = self.query_options();
-        let results = self.store.query_opt(query, options)?;
+        let mut parsed_query = Query::parse(query, None)
+            .map_err(|e| anyhow!("Failed to parse get_all_links query: {}", e))?;
+        parsed_query.dataset_mut().set_default_graph_as_union();
+        let results = self.store.query_opt(parsed_query, options)?;
 
         match results {
             QueryResults::Solutions(solutions) => {
@@ -300,108 +311,115 @@ impl SparqlService {
         let ont_proof_valid = NamedNodeRef::new_unchecked(ONT_PROOF_VALID);
         let ont_status = NamedNodeRef::new_unchecked(ONT_STATUS);
 
-        for quad_result in self.store.quads_for_pattern(s_ref, p_ref, t_ref, None) {
-            let quad = quad_result?;
-
-            // Skip non-IRI subjects (RDF-star annotation triples have quoted triple subjects)
-            let (src_raw, src) = match &quad.subject {
-                Subject::NamedNode(n) => (n.as_str().to_string(), n.as_str().to_string()),
-                _ => continue,
-            };
-            let (pred_raw, pred) = (
-                quad.predicate.as_str().to_string(),
-                quad.predicate.as_str().to_string(),
-            );
-            let (tgt_raw, tgt) = match &quad.object {
-                Term::NamedNode(n) => (n.as_str().to_string(), n.as_str().to_string()),
-                _ => continue,
+        // Iterate over all named graphs to find matching triples
+        for graph_name in self.store.named_graphs() {
+            let graph_name = graph_name?;
+            let graph_ref = match &graph_name {
+                NamedOrBlankNode::NamedNode(n) => GraphNameRef::NamedNode(n.as_ref()),
+                NamedOrBlankNode::BlankNode(b) => GraphNameRef::BlankNode(b.as_ref()),
             };
 
-            // Skip annotation predicates
-            if pred.starts_with("ad4m://ontology/") {
-                continue;
-            }
+            // Each named graph contains exactly one direct triple
+            for quad_result in self
+                .store
+                .quads_for_pattern(s_ref, p_ref, t_ref, Some(graph_ref))
+            {
+                let quad = quad_result?;
 
-            // Get RDF-star annotations using raw (stored) IRIs
-            let quoted = Triple::new(
-                NamedNode::new_unchecked(&src_raw),
-                NamedNode::new_unchecked(&pred_raw),
-                NamedNode::new_unchecked(&tgt_raw),
-            );
-            let quoted_subject: Subject = quoted.into();
+                let src = match &quad.subject {
+                    Subject::NamedNode(n) => n.as_str().to_string(),
+                    _ => continue,
+                };
+                let pred = quad.predicate.as_str().to_string();
+                let tgt = match &quad.object {
+                    Term::NamedNode(n) => n.as_str().to_string(),
+                    _ => continue,
+                };
 
-            let get_annotation = |pred_node: NamedNodeRef| -> String {
-                self.store
-                    .quads_for_pattern(
-                        Some(quoted_subject.as_ref().into()),
-                        Some(pred_node),
-                        None,
-                        None,
-                    )
-                    .next()
-                    .and_then(|r| r.ok())
-                    .and_then(|q| match &q.object {
-                        Term::Literal(l) => Some(l.value().to_string()),
-                        _ => None,
-                    })
-                    .unwrap_or_default()
-            };
-
-            let author = get_annotation(ont_author);
-            let timestamp = get_annotation(ont_timestamp);
-
-            // Skip links without required metadata (annotations not yet synced)
-            if author.is_empty() || timestamp.is_empty() {
-                continue;
-            }
-
-            // Apply date filters
-            if let Some(from) = from_date {
-                if timestamp.as_str() < from {
+                // Skip annotation predicates (shouldn't be in named graphs, but safety check)
+                if pred.starts_with("ad4m://ontology/") {
                     continue;
                 }
-            }
-            if let Some(until) = until_date {
-                if timestamp.as_str() > until {
+
+                // Get metadata from default graph using graph IRI as subject
+                let graph_subject: SubjectRef = match &graph_name {
+                    NamedOrBlankNode::NamedNode(n) => n.as_ref().into(),
+                    NamedOrBlankNode::BlankNode(b) => b.as_ref().into(),
+                };
+
+                let get_annotation = |pred_node: NamedNodeRef| -> String {
+                    self.store
+                        .quads_for_pattern(
+                            Some(graph_subject),
+                            Some(pred_node),
+                            None,
+                            Some(GraphNameRef::DefaultGraph),
+                        )
+                        .next()
+                        .and_then(|r| r.ok())
+                        .and_then(|q| match &q.object {
+                            Term::Literal(l) => Some(l.value().to_string()),
+                            _ => None,
+                        })
+                        .unwrap_or_default()
+                };
+
+                let author = get_annotation(ont_author);
+                let timestamp = get_annotation(ont_timestamp);
+
+                // Skip links without required metadata
+                if author.is_empty() || timestamp.is_empty() {
                     continue;
                 }
-            }
 
-            let proof_key = get_annotation(ont_proof_key);
-            let proof_sig = get_annotation(ont_proof_sig);
-            let proof_valid_str = get_annotation(ont_proof_valid);
-            let proof_valid = if proof_valid_str.is_empty() {
-                None
-            } else {
-                Some(proof_valid_str == "true")
-            };
-            let status_val = get_annotation(ont_status);
-            let status = match status_val.as_str() {
-                "Local" => Some(LinkStatus::Local),
-                "Shared" => Some(LinkStatus::Shared),
-                _ => None,
-            };
+                // Apply date filters
+                if let Some(from) = from_date {
+                    if timestamp.as_str() < from {
+                        continue;
+                    }
+                }
+                if let Some(until) = until_date {
+                    if timestamp.as_str() > until {
+                        continue;
+                    }
+                }
 
-            links.push(DecoratedLinkExpression {
-                author,
-                timestamp,
-                data: Link {
-                    source: src,
-                    predicate: if pred.is_empty() { None } else { Some(pred) },
-                    target: tgt,
-                },
-                proof: DecoratedExpressionProof {
-                    key: proof_key,
-                    signature: proof_sig,
-                    valid: proof_valid,
-                    invalid: proof_valid.map(|v| !v),
-                },
-                status,
-            });
+                let proof_key = get_annotation(ont_proof_key);
+                let proof_sig = get_annotation(ont_proof_sig);
+                let proof_valid_str = get_annotation(ont_proof_valid);
+                let proof_valid = if proof_valid_str.is_empty() {
+                    None
+                } else {
+                    Some(proof_valid_str == "true")
+                };
+                let status_val = get_annotation(ont_status);
+                let status = match status_val.as_str() {
+                    "Local" => Some(LinkStatus::Local),
+                    "Shared" => Some(LinkStatus::Shared),
+                    _ => None,
+                };
 
-            if let Some(lim) = limit {
-                if links.len() >= lim {
-                    break;
+                links.push(DecoratedLinkExpression {
+                    author,
+                    timestamp,
+                    data: Link {
+                        source: src,
+                        predicate: if pred.is_empty() { None } else { Some(pred) },
+                        target: tgt,
+                    },
+                    proof: DecoratedExpressionProof {
+                        key: proof_key,
+                        signature: proof_sig,
+                        valid: proof_valid,
+                        invalid: proof_valid.map(|v| !v),
+                    },
+                    status,
+                });
+
+                if let Some(lim) = limit {
+                    if links.len() >= lim {
+                        return Ok(links);
+                    }
                 }
             }
         }
@@ -543,8 +561,14 @@ impl SparqlService {
     pub fn query(&self, query_string: &str) -> Result<String, Error> {
         validate_readonly_query(query_string)?;
 
+        let mut parsed_query = Query::parse(query_string, None)
+            .map_err(|e| anyhow!("Failed to parse SPARQL query: {}", e))?;
+        // Include all named graphs in the default dataset so unscoped
+        // triple patterns find triples stored in named graphs.
+        parsed_query.dataset_mut().set_default_graph_as_union();
+
         let options = self.query_options();
-        let results = self.store.query_opt(query_string, options).map_err(|e| {
+        let results = self.store.query_opt(parsed_query, options).map_err(|e| {
             let truncated = &query_string[..query_string.len().min(500)];
             anyhow!("SPARQL query failed: {}\nQuery: {}", e, truncated)
         })?;
@@ -686,11 +710,13 @@ mod tests {
         let link = make_link("ad4m://source1", "ad4m://predicate1", "ad4m://target1");
         svc.add_link(&link).unwrap();
 
+        // Direct triple should be findable via GRAPH pattern or unscoped (with union default graph)
         let result = svc
-            .query("SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(isIRI(?s) && isIRI(?o)) }")
+            .query(
+                "SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } . FILTER(isIRI(?s) && isIRI(?o)) }",
+            )
             .unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
-        // Should have at least the direct triple
         let direct = rows.iter().find(|r| {
             r["s"].as_str() == Some("ad4m://source1")
                 && r["p"].as_str() == Some("ad4m://predicate1")
@@ -700,16 +726,18 @@ mod tests {
     }
 
     #[test]
-    fn test_add_link_creates_rdf_star_annotations() {
+    fn test_add_link_creates_metadata_in_default_graph() {
         let svc = new_service();
         let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
         svc.add_link(&link).unwrap();
 
-        // Query for annotations on the quoted triple
+        // Query for metadata on the graph IRI in default graph
         let result = svc
             .query(
-                r#"SELECT ?p ?v WHERE {
-                << <ad4m://src> <ad4m://pred> <ad4m://tgt> >> ?p ?v .
+                r#"SELECT ?g ?p ?v WHERE {
+                GRAPH ?g { <ad4m://src> <ad4m://pred> <ad4m://tgt> . }
+                ?g ?p ?v .
+                FILTER(STRSTARTS(STR(?p), "ad4m://ontology/"))
             }"#,
             )
             .unwrap();
@@ -752,7 +780,7 @@ mod tests {
         svc.remove_link(&link).unwrap();
 
         let result = svc
-            .query("SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(isIRI(?s)) }")
+            .query("SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } . FILTER(isIRI(?s)) }")
             .unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert!(
@@ -763,25 +791,22 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_link_removes_annotations() {
+    fn test_remove_link_removes_metadata() {
         let svc = new_service();
         let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
         svc.add_link(&link).unwrap();
+        let graph = make_graph_iri(&link);
         svc.remove_link(&link).unwrap();
 
+        // Check no metadata triples remain for the graph IRI
         let result = svc
-            .query(
-                r#"SELECT ?p ?v WHERE {
-                << <ad4m://src> <ad4m://pred> <ad4m://tgt> >> ?p ?v .
-            }"#,
-            )
+            .query(&format!(
+                r#"SELECT ?p ?v WHERE {{ <{}> ?p ?v . }}"#,
+                graph.as_str()
+            ))
             .unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
-        assert!(
-            rows.is_empty(),
-            "Annotation triples still exist: {}",
-            result
-        );
+        assert!(rows.is_empty(), "Metadata triples still exist: {}", result);
     }
 
     #[test]
@@ -1361,5 +1386,164 @@ mod tests {
     #[test]
     fn test_accepts_describe_query() {
         assert!(validate_readonly_query("DESCRIBE <http://example.org>").is_ok());
+    }
+
+    // ── Named Graph Tests ──
+
+    #[test]
+    fn test_named_graph_iri_is_deterministic() {
+        let link = make_link("ad4m://a", "ad4m://p", "ad4m://t");
+        let iri1 = make_graph_iri(&link);
+        let iri2 = make_graph_iri(&link);
+        assert_eq!(iri1, iri2, "Same link data should produce same graph IRI");
+    }
+
+    #[test]
+    fn test_named_graph_iri_differs_for_different_timestamps() {
+        let link1 = make_link_with_ts(
+            "ad4m://a",
+            "ad4m://p",
+            "ad4m://t",
+            "2024-01-01T00:00:00Z",
+            "did:key:z6Mk1",
+        );
+        let link2 = make_link_with_ts(
+            "ad4m://a",
+            "ad4m://p",
+            "ad4m://t",
+            "2024-01-02T00:00:00Z",
+            "did:key:z6Mk1",
+        );
+        let iri1 = make_graph_iri(&link1);
+        let iri2 = make_graph_iri(&link2);
+        assert_ne!(
+            iri1, iri2,
+            "Different timestamps should produce different graph IRIs"
+        );
+    }
+
+    #[test]
+    fn test_link_stored_in_named_graph() {
+        let svc = new_service();
+        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        svc.add_link(&link).unwrap();
+
+        // The direct triple should NOT be in the default graph
+        let default_quads: Vec<_> = svc
+            .store
+            .quads_for_pattern(None, None, None, Some(GraphNameRef::DefaultGraph))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        // Default graph should only have metadata triples (with link: IRI subjects)
+        for quad in &default_quads {
+            match &quad.subject {
+                Subject::NamedNode(n) => {
+                    assert!(
+                        n.as_str().starts_with("link:"),
+                        "Default graph should only have graph IRI subjects, found: {}",
+                        n.as_str()
+                    );
+                }
+                _ => panic!("Unexpected non-NamedNode subject in default graph"),
+            }
+        }
+
+        // The direct triple should be in a named graph
+        let graph = make_graph_iri(&link);
+        let named_quads: Vec<_> = svc
+            .store
+            .quads_for_pattern(
+                None,
+                None,
+                None,
+                Some(GraphNameRef::NamedNode(graph.as_ref())),
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            named_quads.len(),
+            1,
+            "Expected exactly 1 triple in named graph"
+        );
+    }
+
+    #[test]
+    fn test_metadata_in_default_graph() {
+        let svc = new_service();
+        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        svc.add_link(&link).unwrap();
+
+        let graph = make_graph_iri(&link);
+        let meta_quads: Vec<_> = svc
+            .store
+            .quads_for_pattern(
+                Some(graph.as_ref().into()),
+                None,
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(meta_quads.len(), 6, "Expected 6 metadata triples (author, timestamp, proofKey, proofSig, proofValid, status)");
+    }
+
+    #[test]
+    fn test_remove_cleans_both_graph_and_metadata() {
+        let svc = new_service();
+        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        svc.add_link(&link).unwrap();
+        let graph = make_graph_iri(&link);
+
+        svc.remove_link(&link).unwrap();
+
+        // Named graph should be empty
+        let named_quads: Vec<_> = svc
+            .store
+            .quads_for_pattern(
+                None,
+                None,
+                None,
+                Some(GraphNameRef::NamedNode(graph.as_ref())),
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            named_quads.is_empty(),
+            "Named graph still has triples after removal"
+        );
+
+        // Default graph metadata should be empty
+        let meta_quads: Vec<_> = svc
+            .store
+            .quads_for_pattern(
+                Some(graph.as_ref().into()),
+                None,
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            meta_quads.is_empty(),
+            "Default graph still has metadata after removal"
+        );
+    }
+
+    #[test]
+    fn test_unscoped_query_finds_named_graph_triples() {
+        let svc = new_service();
+        svc.add_link(&make_link("ad4m://src", "ad4m://pred", "ad4m://tgt"))
+            .unwrap();
+
+        // Unscoped query (no GRAPH wrapper) should still find the triple
+        // because we set default_graph_as_union
+        let result = svc.query(
+            "SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(?s = <ad4m://src> && ?p = <ad4m://pred>) }"
+        ).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert!(
+            !rows.is_empty(),
+            "Unscoped query should find named graph triples via union default graph"
+        );
     }
 }

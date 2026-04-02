@@ -1,9 +1,8 @@
 /**
  * SPARQL query building utilities for Ad4mModel.
  *
- * Uses the direct triple + RDF-star storage model where each AD4M link
- * is stored as: <source> <predicate> <target> with RDF-star annotations
- * for metadata (author, timestamp, proof, status).
+ * Uses the direct triple + named graph storage model where each AD4M link
+ * is stored in a named graph (keyed by link hash) with metadata in the default graph.
  *
  * All AD4M URIs (source, predicate, target) become RDF IRIs.
  *
@@ -91,7 +90,7 @@ function iri(value: string): string {
  * the given model class, optionally filtered by `where` conditions.
  *
  * Uses direct triple patterns: ?source ?predicate ?target
- * with RDF-star annotations for metadata.
+ * with named graph storage and metadata keyed by graph IRI.
  */
 export function buildSPARQLQuery(
   metadata: ModelMetadata,
@@ -171,8 +170,8 @@ export function buildSPARQLQuery(
   filterExpressions.push(...userFilters);
 
   // Main triple pattern — fetches all links for matched sources
-  // The direct triple pattern: ?source ?predicate ?target
-  // FILTER(isIRI(?source)) excludes RDF-star annotation triples
+  // The direct triple in named graph: GRAPH ?linkGraph { ?source ?predicate ?target }
+  // FILTER(isIRI(?source)) excludes non-IRI subjects
   const joinClause = joinPatterns.join("\n");
   const filterClause = filterExpressions.length > 0
     ? `FILTER(\n      ${filterExpressions.join(" &&\n      ")}\n    )`
@@ -180,11 +179,10 @@ export function buildSPARQLQuery(
 
   return `
     SELECT ?source ?predicate ?target ?author ?timestamp WHERE {${joinClause}
-      ?source ?predicate ?target .
+      GRAPH ?linkGraph { ?source ?predicate ?target . }
       FILTER(isIRI(?source) && isIRI(?predicate))
-      BIND(<< ?source ?predicate ?target >> AS ?ann)
-      ?ann <ad4m://ontology/author> ?author .
-      ?ann <ad4m://ontology/timestamp> ?timestamp .
+      ?linkGraph <ad4m://ontology/author> ?author .
+      ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
       ${filterClause}
     }
     ${buildSPARQLOrderLimitOffset(metadata, query)}
@@ -204,12 +202,11 @@ function buildSPARQLOrderLimitOffset(_metadata: ModelMetadata, _query: Query): s
 export function buildSPARQLGetDataQuery(baseExpression: string): string {
   return `
     SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
-      ${iri(baseExpression)} ?predicate ?target .
+      GRAPH ?linkGraph { ${iri(baseExpression)} ?predicate ?target . }
       FILTER(isIRI(?predicate))
       BIND(${iri(baseExpression)} AS ?source)
-      BIND(<< ${iri(baseExpression)} ?predicate ?target >> AS ?ann)
-      ?ann <ad4m://ontology/author> ?author .
-      ?ann <ad4m://ontology/timestamp> ?timestamp .
+      ?linkGraph <ad4m://ontology/author> ?author .
+      ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
     }
   `.trim();
 }
