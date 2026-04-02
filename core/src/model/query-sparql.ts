@@ -315,9 +315,18 @@ function buildSPARQLWhereFilters(
         }
         // NOT filters: no SPARQL-level filtering — handled in JS
       } else {
-        // Simple equality or IN — add join for conformance, filter in JS
+        // Simple equality or IN — add join for conformance, plus push-down FILTER optimization.
+        // JS post-filter remains as safety net; this just reduces the SPARQL result set.
         joins.push(`
       ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
+        if (!Array.isArray(condition) && (typeof condition !== 'object' || condition === null)) {
+          // Simple equality — push down fn::parse_literal FILTER
+          filters.push(`fn::parse_literal(?wTarget_${propertyName}) = ${formatSPARQLValue(condition)}`);
+        } else if (Array.isArray(condition)) {
+          // IN clause — push down fn::parse_literal IN FILTER
+          const values = (condition as any[]).map(v => formatSPARQLValue(v)).join(', ');
+          filters.push(`fn::parse_literal(?wTarget_${propertyName}) IN (${values})`);
+        }
       }
     } else if (Array.isArray(condition)) {
       const formatted = (condition as any[]).map(v => iri(v)).join(", ");
