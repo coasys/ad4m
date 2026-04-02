@@ -856,7 +856,7 @@ impl Ad4mMcpHandler {
                 };
 
                 // Check for a conformance getter (ad4m://getter)
-                let _getter = match perspective
+                let getter = match perspective
                     .get_links(&LinkQuery {
                         source: Some(prop_uri.clone()),
                         predicate: Some("ad4m://getter".to_string()),
@@ -876,8 +876,30 @@ impl Ad4mMcpHandler {
                     _ => None,
                 };
 
-                // Use get_links for collection values
-                if is_collection {
+                // If a getter exists, execute it as SPARQL
+                if let Some(getter_query) = getter {
+                    let sparql = getter_query.replace("<Base>", &format!("<{}>", expression_address));
+                    match perspective.sparql_query(sparql) {
+                        Ok(result_json) => {
+                            if let Ok(rows) = serde_json::from_str::<Vec<serde_json::Map<String, serde_json::Value>>>(&result_json) {
+                                let values: Vec<String> = rows.iter()
+                                    .filter_map(|r| r.get("target").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                                    .collect();
+                                if is_collection {
+                                    data.insert(
+                                        prop_name,
+                                        serde_json::Value::Array(values.into_iter().map(serde_json::Value::String).collect()),
+                                    );
+                                } else if let Some(val) = values.first() {
+                                    data.insert(prop_name, serde_json::Value::String(Self::resolve_literal_value(val)));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to execute getter SPARQL for {}: {}", prop_name, e);
+                        }
+                    }
+                } else if is_collection {
                     {
                         let value_links = match perspective
                             .get_links(&LinkQuery {
