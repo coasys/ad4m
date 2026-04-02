@@ -1311,7 +1311,9 @@ mod tests {
     #[test]
     fn test_error_includes_query_text() {
         let svc = new_service();
-        let bad_query = "SELECT ?s WHERE { INVALID SPARQL HERE }";
+        // Use a query that passes parse validation but fails at execution
+        // (references a non-existent custom function)
+        let bad_query = "SELECT ?s WHERE { BIND(fn::nonexistent(?s) AS ?x) }";
         let result = svc.query(bad_query);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -1327,7 +1329,11 @@ mod tests {
         let svc = new_service();
         // Build a query longer than 500 chars
         let long_part = "x".repeat(600);
-        let bad_query = format!("SELECT ?s WHERE {{ {} }}", long_part);
+        // Build a valid-parse but execution-failing query longer than 500 chars
+        let bad_query = format!(
+            "SELECT ?s WHERE {{ BIND(fn::nonexistent(\"{}\") AS ?x) }}",
+            long_part
+        );
         let result = svc.query(&bad_query);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -1363,7 +1369,7 @@ mod tests {
     #[test]
     fn test_rejects_insert_in_comment() {
         // "INSERT" in a comment should NOT cause rejection — the parser handles this correctly
-        let query = "SELECT * WHERE { ?s ?p ?o # INSERT } ";
+        let query = "SELECT * WHERE { ?s ?p ?o }\n# INSERT is just a comment here";
         // This is valid SPARQL (comment doesn't affect parsing)
         assert!(validate_readonly_query(query).is_ok());
     }
