@@ -382,8 +382,7 @@ pub async fn generate_capability_token(request_id: String, rand: String) -> Resu
         .await
         .publish(
             &APPS_CHANGED,
-            &serde_json::to_string(&Some(apps_changed))
-                .unwrap_or_else(|_| "null".to_string()),
+            &serde_json::to_string(&Some(apps_changed)).unwrap_or_else(|_| "null".to_string()),
         )
         .await;
 
