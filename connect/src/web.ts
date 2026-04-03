@@ -212,6 +212,7 @@ export class Ad4mConnectElement extends LitElement {
   @state() private lowCredit = false;
   @state() private requestingPayment = false;
   @state() private paymentError: string | null = null;
+  private openedDueToCreditDepletion = false;
 
   connectedCallback() {
     super.connectedCallback();
@@ -242,10 +243,15 @@ export class Ad4mConnectElement extends LitElement {
 
     this.core.addEventListener('creditdepleted', () => {
       this.lowCredit = true;
-      // Auto-open the dashboard so the user sees the top-up options
-      if (this.core.connectedHost && !this.modalOpen) {
-        this.currentView = "logged-in-dashboard";
-        this.modalOpen = true;
+      if (this.core.connectedHost) {
+        // Always record depletion state so .forceOpen can act on it later
+        this.openedDueToCreditDepletion = true;
+        try { this.core.options.onCreditsDepleted?.(); } catch (e) { console.error('[Ad4m Connect] onCreditsDepleted callback error:', e); }
+        // Auto-open the dashboard so the user sees the top-up options
+        if (!this.modalOpen) {
+          this.currentView = "logged-in-dashboard";
+          this.modalOpen = true;
+        }
       }
       this.requestUpdate();
     });
@@ -585,7 +591,13 @@ export class Ad4mConnectElement extends LitElement {
           .userInfo=${this.userInfo}
           .requestingPayment=${this.requestingPayment}
           .paymentError=${this.paymentError}
-          @close=${() => { this.modalOpen = false; }}
+          .forceOpen=${this.openedDueToCreditDepletion}
+          @close=${() => { this.openedDueToCreditDepletion = false; this.modalOpen = false; }}
+          @use-app=${() => {
+            this.openedDueToCreditDepletion = false;
+            try { this.core.options.onUseApp?.(); } catch (e) { console.error('[Ad4m Connect] onUseApp callback error:', e); }
+            this.modalOpen = false;
+          }}
           @disconnect=${this.disconnect}
           @request-top-up=${this.handleRequestTopUp}
           @set-wallet-address=${this.handleSetWalletAddress}
