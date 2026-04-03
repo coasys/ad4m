@@ -584,39 +584,29 @@ impl LanguageController {
             let perspective_language =
                 RuntimeService::with_global_instance(|rs| rs.get_perspective_language());
 
-            // Install agent language
-            info!("Installing agent language: {}", agent_language);
-            if let Err(e) = self
-                .install_language_from_address(&agent_language, true)
-                .await
-            {
+            // Install agent, neighbourhood, and perspective languages in parallel
+            info!(
+                "Installing system languages in parallel: agent={}, neighbourhood={}, perspective={}",
+                agent_language, neighbourhood_language, perspective_language
+            );
+            let (agent_result, neighbourhood_result, perspective_result) = tokio::join!(
+                self.install_language_from_address(&agent_language, true),
+                self.install_language_from_address(&neighbourhood_language, true),
+                self.install_language_from_address(&perspective_language, true),
+            );
+            if let Err(e) = agent_result {
                 error!(
                     "Failed to install agent language {}: {}",
                     &agent_language, e
                 );
             }
-
-            // Install neighbourhood language
-            info!(
-                "Installing neighbourhood language: {}",
-                neighbourhood_language
-            );
-            if let Err(e) = self
-                .install_language_from_address(&neighbourhood_language, true)
-                .await
-            {
+            if let Err(e) = neighbourhood_result {
                 error!(
                     "Failed to install neighbourhood language {}: {}",
                     &neighbourhood_language, e
                 );
             }
-
-            // Install perspective language
-            info!("Installing perspective language: {}", perspective_language);
-            if let Err(e) = self
-                .install_language_from_address(&perspective_language, true)
-                .await
-            {
+            if let Err(e) = perspective_result {
                 error!(
                     "Failed to install perspective language {}: {}",
                     &perspective_language, e
@@ -645,18 +635,24 @@ impl LanguageController {
                 info!("Registered language aliases: {:?}", *aliases);
             }
 
-            // Step 3: Preload known link languages
+            // Step 3: Preload known link languages in parallel
             let known_link_languages =
                 RuntimeService::with_global_instance(|rs| rs.get_know_link_languages());
-            for lang_address in known_link_languages {
-                if let Err(e) = self
-                    .install_language_from_address(&lang_address, true)
-                    .await
-                {
-                    warn!(
-                        "Failed to preload known link language {}: {}",
-                        lang_address, e
-                    );
+            if !known_link_languages.is_empty() {
+                info!(
+                    "Installing {} known link languages in parallel",
+                    known_link_languages.len()
+                );
+                let results = futures::future::join_all(
+                    known_link_languages
+                        .iter()
+                        .map(|addr| self.install_language_from_address(addr, true)),
+                )
+                .await;
+                for (addr, result) in known_link_languages.iter().zip(results) {
+                    if let Err(e) = result {
+                        warn!("Failed to preload known link language {}: {}", addr, e);
+                    }
                 }
             }
 
