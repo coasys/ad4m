@@ -2196,7 +2196,7 @@ describe("Native SPARQL getter evaluation", () => {
     expect(instance.tags).toEqual(["tag:a", "tag:b"]);
   });
 
-  it("should warn for unsupported SurrealDB-style getter syntax", async () => {
+  it("should auto-convert legacy SurrealDB-style getter syntax to SPARQL", async () => {
     const metadata = {
       properties: {
         legacy: {
@@ -2208,12 +2208,18 @@ describe("Native SPARQL getter evaluation", () => {
       relations: {},
     };
 
-    const consoleSpy = jest.spyOn(console, "warn").mockImplementation();
+    // Mock querySparql to return a result for the converted SPARQL query
+    mockPerspective.querySparql = jest.fn().mockResolvedValue([
+      { target: { value: "test://result1" } }
+    ]);
+
     const instance = { id: "test://msg1", legacy: undefined };
     await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
-    expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Unsupported getter syntax")
+    
+    // Should have called querySparql with the converted SPARQL
+    expect(mockPerspective.querySparql).toHaveBeenCalledWith(
+      expect.stringContaining("SELECT ?target WHERE")
     );
-    consoleSpy.mockRestore();
+    expect(instance.legacy).toBe("test://result1");
   });
 });
