@@ -2038,3 +2038,182 @@ describe("Lightweight fingerprint optimization", () => {
     expect(fp1).toBe(fp2);
   });
 });
+
+// ── Native SPARQL getter evaluation ──────────────────────────────────────────
+describe("Native SPARQL getter evaluation", () => {
+  const { evaluateCustomGettersForInstance } = require("./hydration");
+
+  const mockPerspective = {
+    getLinks: jest.fn().mockResolvedValue([]),
+    querySparql: jest.fn(),
+    get: jest.fn().mockResolvedValue([]),
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("should execute SELECT getter directly via querySparql", async () => {
+    const metadata = {
+      properties: {
+        replyingTo: {
+          predicate: "flux://has_reply",
+          getter: 'SELECT ?target WHERE { ?target <flux://has_reply> ?source . } LIMIT 1',
+          type: "string",
+        }
+      },
+      relations: {},
+    };
+
+    mockPerspective.querySparql.mockResolvedValue([
+      { target: { value: "literal:string:msg123" } }
+    ]);
+
+    const instance = { id: "test://msg1", replyingTo: undefined };
+    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
+
+    expect(mockPerspective.querySparql).toHaveBeenCalledWith(
+      expect.stringContaining("SELECT ?target WHERE")
+    );
+    expect(instance.replyingTo).toBe("literal:string:msg123");
+  });
+
+  it("should execute ASK getter and return boolean", async () => {
+    const metadata = {
+      properties: {
+        isPopular: {
+          predicate: "flux://is_popular",
+          getter: 'ASK WHERE { SELECT (COUNT(DISTINCT ?reactor) AS ?count) WHERE { ?reactor <flux://reaction> ?source . } HAVING(?count > 5) }',
+          type: "boolean",
+          readOnly: true,
+        }
+      },
+      relations: {},
+    };
+
+    mockPerspective.querySparql.mockResolvedValue(true);
+
+    const instance = { id: "test://msg1", isPopular: false };
+    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
+
+    expect(mockPerspective.querySparql).toHaveBeenCalledWith(
+      expect.stringContaining("ASK WHERE")
+    );
+    expect(instance.isPopular).toBe(true);
+  });
+
+  it("should replace ?source with instance ID in SPARQL getter", async () => {
+    const metadata = {
+      properties: {
+        author: {
+          predicate: "test://author",
+          getter: 'SELECT ?target WHERE { ?source <test://author> ?target . }',
+          type: "string",
+        }
+      },
+      relations: {},
+    };
+
+    mockPerspective.querySparql.mockResolvedValue([
+      { target: { value: "did:key:abc123" } }
+    ]);
+
+    const instance = { id: "test://post1", author: undefined };
+    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
+
+    expect(mockPerspective.querySparql).toHaveBeenCalledWith(
+      expect.stringContaining("<test://post1>")
+    );
+    expect(mockPerspective.querySparql).not.toHaveBeenCalledWith(
+      expect.stringContaining("?source")
+    );
+  });
+
+  it("should handle empty SPARQL results gracefully", async () => {
+    const metadata = {
+      properties: {
+        replyingTo: {
+          predicate: "flux://has_reply",
+          getter: 'SELECT ?target WHERE { ?target <flux://has_reply> ?source . } LIMIT 1',
+          type: "string",
+        }
+      },
+      relations: {},
+    };
+
+    mockPerspective.querySparql.mockResolvedValue([]);
+
+    const instance = { id: "test://msg1", replyingTo: "original" };
+    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
+
+    // Should not overwrite with undefined
+    expect(instance.replyingTo).toBe("original");
+  });
+
+  it("should handle SPARQL getter errors without crashing", async () => {
+    const metadata = {
+      properties: {
+        broken: {
+          predicate: "test://broken",
+          getter: 'SELECT ?target WHERE { INVALID SPARQL }',
+          type: "string",
+        }
+      },
+      relations: {},
+    };
+
+    mockPerspective.querySparql.mockRejectedValue(new Error("SPARQL parse error"));
+
+    const instance = { id: "test://msg1", broken: undefined };
+    const consoleSpy = jest.spyOn(console, "warn").mockImplementation();
+    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
+    consoleSpy.mockRestore();
+
+    // Should not throw, should warn
+    expect(instance.broken).toBeUndefined();
+  });
+
+  it("should execute SPARQL getter for relations", async () => {
+    const metadata = {
+      properties: {},
+      relations: {
+        tags: {
+          predicate: "test://has_tag",
+          getter: 'SELECT ?target WHERE { ?source <test://has_tag> ?target . }',
+          direction: "forward",
+        }
+      },
+    };
+
+    mockPerspective.querySparql.mockResolvedValue([
+      { target: { value: "tag:a" } },
+      { target: { value: "tag:b" } },
+    ]);
+
+    const instance = { id: "test://post1", tags: [] };
+    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
+
+    expect(instance.tags).toEqual(["tag:a", "tag:b"]);
+  });
+
+  it("should warn for unsupported SurrealDB-style getter syntax", async () => {
+    const metadata = {
+      properties: {
+        legacy: {
+          predicate: "test://legacy",
+          getter: "(<-link[WHERE predicate = 'test://legacy'].in.uri)[0]",
+          type: "string",
+        }
+      },
+      relations: {},
+    };
+
+    const consoleSpy = jest.spyOn(console, "warn").mockImplementation();
+    const instance = { id: "test://msg1", legacy: undefined };
+    await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Unsupported getter syntax")
+    );
+    consoleSpy.mockRestore();
+  });
+});

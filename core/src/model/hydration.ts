@@ -2,7 +2,7 @@
  * hydration.ts — Instance hydration helpers extracted from Ad4mModel.
  *
  * Pure / stateless functions that populate Ad4mModel instances from
- * raw link arrays, Prolog tuples, or SurrealDB rows.  None of these
+ * raw link arrays, Prolog tuples, or query results.  None of these
  * functions depend on the `Ad4mModel` class at runtime — they accept
  * the instance, metadata, or perspective as explicit parameters.
  */
@@ -129,7 +129,7 @@ export async function hydratePropertyValue(
       propMeta.resolveLanguage != null &&
       propMeta.resolveLanguage !== 'literal' &&
       typeof target === 'string' &&
-      !target.startsWith('literal://')
+      !target.startsWith('literal:')
     ) {
       try {
         const expression = await perspective.getExpression(target);
@@ -144,7 +144,7 @@ export async function hydratePropertyValue(
     else if (
       propMeta.resolveLanguage === 'literal' &&
       typeof target === 'string' &&
-      target.startsWith('literal://')
+      target.startsWith('literal:')
     ) {
       try {
         const parsed = Literal.fromUrl(target).get();
@@ -411,11 +411,11 @@ export async function assignValuesToInstance(
 }
 
 // ──────────────────────────────────────────────────────────
-//  SurrealQL custom getter evaluation
+//  SPARQL custom getter evaluation
 // ──────────────────────────────────────────────────────────
 
 /**
- * Builds a SurrealQL conformance getter for a relation whose `target` model
+ * Builds a SPARQL conformance getter for a relation whose `target` model
  * is known but no explicit `getter` string was supplied.
  *
  * The generated getter traverses outgoing links matching the relation's
@@ -427,7 +427,7 @@ export async function assignValuesToInstance(
  *
  * @param relationPredicate - The relation's predicate URI (e.g. "flux://entry_type")
  * @param targetClass       - The target model class (result of calling the `target()` thunk)
- * @returns A SurrealQL expression string, or `undefined` if no conformance
+ * @returns A SPARQL expression string, or `undefined` if no conformance
  *          conditions could be derived from the target model.
  */
 export function buildConformanceGetter(
