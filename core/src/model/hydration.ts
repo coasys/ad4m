@@ -2,7 +2,7 @@
  * hydration.ts — Instance hydration helpers extracted from Ad4mModel.
  *
  * Pure / stateless functions that populate Ad4mModel instances from
- * raw link arrays, Prolog tuples, or query results.  None of these
+ * raw link arrays, Prolog tuples, or SurrealDB rows.  None of these
  * functions depend on the `Ad4mModel` class at runtime — they accept
  * the instance, metadata, or perspective as explicit parameters.
  */
@@ -12,7 +12,6 @@ import { LinkQuery } from "../perspectives/LinkQuery";
 import type { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { getPropertiesMetadata, getRelationsMetadata, buildConformanceFilter } from "./decorators";
 import type { RelationMetadataEntry } from "./decorators";
-import { escapeQueryString } from "../utils";
 import type {
   PropertyMetadata, RelationMetadata, ModelMetadata,
   ValueTuple, WhereCondition, IncludeMap, RelationSubQuery,
@@ -130,7 +129,7 @@ export async function hydratePropertyValue(
       propMeta.resolveLanguage != null &&
       propMeta.resolveLanguage !== 'literal' &&
       typeof target === 'string' &&
-      !target.startsWith('literal:')
+      !target.startsWith('literal://')
     ) {
       try {
         const expression = await perspective.getExpression(target);
@@ -145,7 +144,7 @@ export async function hydratePropertyValue(
     else if (
       propMeta.resolveLanguage === 'literal' &&
       typeof target === 'string' &&
-      (target.startsWith('literal:'))
+      target.startsWith('literal://')
     ) {
       try {
         const parsed = Literal.fromUrl(target).get();
@@ -412,11 +411,11 @@ export async function assignValuesToInstance(
 }
 
 // ──────────────────────────────────────────────────────────
-//  SPARQL custom getter evaluation
+//  SurrealQL custom getter evaluation
 // ──────────────────────────────────────────────────────────
 
 /**
- * Builds a SPARQL conformance getter for a relation whose `target` model
+ * Builds a SurrealQL conformance getter for a relation whose `target` model
  * is known but no explicit `getter` string was supplied.
  *
  * The generated getter traverses outgoing links matching the relation's
@@ -428,7 +427,7 @@ export async function assignValuesToInstance(
  *
  * @param relationPredicate - The relation's predicate URI (e.g. "flux://entry_type")
  * @param targetClass       - The target model class (result of calling the `target()` thunk)
- * @returns A SPARQL expression string, or `undefined` if no conformance
+ * @returns A SurrealQL expression string, or `undefined` if no conformance
  *          conditions could be derived from the target model.
  */
 export function buildConformanceGetter(
@@ -445,83 +444,10 @@ export function buildConformanceGetter(
 }
 
 /**
- * Execute a SPARQL getter string by replacing <Base> with the instance URI
- * and running it against the perspective.
- *
- * Getters are native SPARQL SELECT queries with `<Base>` as a placeholder.
- * A `LIMIT 1` suffix indicates a scalar result.
- *
- * Also supports legacy SurrealDB-style getters for backward compatibility,
- * converting them to SPARQL on the fly.
- */
-function prepareGetterQuery(getter: string, baseExpression: string): { query: string; isScalar: boolean } | null {
-  // New format: native SPARQL with <Base> placeholder
-  if (getter.includes('SELECT') && getter.includes('WHERE')) {
-    const isScalar = getter.includes('LIMIT 1');
-    const query = getter.replace(/<Base>/g, `<${baseExpression}>`);
-    return { query, isScalar };
-  }
-
-  // Legacy format: SurrealDB-style getter — convert to SPARQL
-  const isScalar = getter.trimEnd().endsWith('[0]');
-  const cleanGetter = getter.replace(/\)\s*\[\d+\]\s*$/, ')');
-
-  // Extract the relation predicate: ->link[WHERE predicate = 'PRED']
-  const relPredMatch = cleanGetter.match(/->link\[WHERE\s+predicate\s*=\s*'([^']+)'\]/);
-  if (!relPredMatch) {
-    // Try as backward relation: <-link[WHERE predicate = 'PRED']
-    const backRelMatch = cleanGetter.match(/<-link\[WHERE\s+predicate\s*=\s*'([^']+)'\]/);
-    if (backRelMatch) {
-      return {
-        query: `SELECT ?target WHERE { ?target <${backRelMatch[1]}> <${baseExpression}> . }`,
-        isScalar,
-      };
-    }
-    return null;
-  }
-  const relationPredicate = relPredMatch[1];
-
-  // Check for target filter: .out[WHERE ...]
-  const outFilterMatch = cleanGetter.match(/\.out\[WHERE\s+(.+?)\]\.uri/);
-  if (!outFilterMatch) {
-    return {
-      query: `SELECT ?target WHERE { <${baseExpression}> <${relationPredicate}> ?target . }`,
-      isScalar,
-    };
-  }
-
-  // Parse conformance conditions from the legacy WHERE clause
-  const whereClause = outFilterMatch[1];
-  const conditions: string[] = [];
-
-  const flagPattern = /count\(->link\[WHERE\s+predicate\s*=\s*'([^']+)'\s+AND\s+out\.uri\s*=\s*'([^']+)'\]\)\s*>\s*0/g;
-  let match;
-  while ((match = flagPattern.exec(whereClause)) !== null) {
-    conditions.push(`?target <${match[1]}> <${match[2]}> .`);
-  }
-
-  const requiredPattern = /count\(->link\[WHERE\s+predicate\s*=\s*'([^']+)'\]\)\s*>\s*0/g;
-  while ((match = requiredPattern.exec(whereClause)) !== null) {
-    const alreadyCaptured = conditions.some(c => c.includes(`<${match[1]}>`));
-    if (!alreadyCaptured) {
-      conditions.push(`?target <${match[1]}> ?_req_${conditions.length} .`);
-    }
-  }
-
-  const conformanceClause = conditions.length > 0 ? ' ' + conditions.join(' ') : '';
-  return {
-    query: `SELECT ?target WHERE { <${baseExpression}> <${relationPredicate}> ?target .${conformanceClause} }`,
-    isScalar,
-  };
-}
-
-/**
- * Evaluates custom SPARQL getters for properties and relations on a specific instance.
+ * Evaluates custom SurrealQL getters for properties and relations on a specific instance.
  *
  * For relations that declare a `target` but no explicit `getter`, a conformance
  * getter is auto-generated from the target model's metadata (unless `filter: false`).
- * 
- * SurrealDB-style getters are automatically converted to proper SPARQL queries.
  */
 export async function evaluateCustomGettersForInstance(
   instance: any,
@@ -529,7 +455,7 @@ export async function evaluateCustomGettersForInstance(
   metadata: ModelMetadata,
   options?: { requestedProperties?: string[]; include?: Record<string, any> }
 ): Promise<void> {
-  const baseExpression = instance.id;
+  const safeBaseExpression = `'${instance.id}'`;
 
   // Build projection filter — when requestedProperties is active, only
   // evaluate getters for fields that are requested (or included).
@@ -541,27 +467,28 @@ export async function evaluateCustomGettersForInstance(
     if (projectionSet && !projectionSet.has(propName)) continue;
     if ((propMeta as any).getter) {
       try {
-        const getterStr = (propMeta as any).getter;
-        const converted = prepareGetterQuery(getterStr, baseExpression);
-        if (converted) {
-          const result = await perspective.querySparql(converted.query);
-          if (result && result.length > 0 && result[0].target !== undefined && result[0].target !== null && result[0].target !== 'None' && result[0].target !== '') {
-            if (converted.isScalar) {
-              instance[propName] = result[0].target;
-            } else {
-              instance[propName] = result.map((r: any) => r.target).filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None');
+        const rawGetter = (propMeta as any).getter;
+        const getterWithBase = rawGetter.replace(/\?source\b/g, `<${instance.id}>`);
+        
+        // If the getter is already SPARQL (starts with SELECT/ASK/CONSTRUCT), execute directly
+        const trimmed = getterWithBase.trim().toUpperCase();
+        if (trimmed.startsWith('SELECT') || trimmed.startsWith('ASK') || trimmed.startsWith('CONSTRUCT')) {
+          const result = await perspective.querySparql(getterWithBase);
+          if (trimmed.startsWith('ASK')) {
+            instance[propName] = result === true || result === 'true';
+          } else if (result && result.length > 0) {
+            // Get first binding's first value
+            const firstRow = result[0];
+            const firstKey = Object.keys(firstRow)[0];
+            const val = firstRow[firstKey]?.value ?? firstRow[firstKey];
+            if (val !== undefined && val !== null && val !== 'None' && val !== '') {
+              instance[propName] = val;
             }
           }
         } else {
-          // Fallback: try as raw SPARQL (for genuinely SPARQL-syntax getters)
-          try {
-            const result = await perspective.querySparql(getterStr);
-            if (result && result.length > 0) {
-              instance[propName] = result[0].value ?? result[0].target;
-            }
-          } catch {
-            console.warn(`Failed to evaluate getter for property ${propName}: unsupported getter syntax`);
-          }
+          // Legacy SurrealDB-style getter — convert or use querySurrealDB
+          const query = rawGetter.replace(/Base/g, safeBaseExpression);
+          console.warn(`Unsupported getter syntax for property ${propName} — use native SPARQL (SELECT/ASK): ${query.slice(0, 100)}`);
         }
       } catch (error) {
         console.warn(`Failed to evaluate getter for ${propName}:`, error);
@@ -575,94 +502,54 @@ export async function evaluateCustomGettersForInstance(
     if (projectionSet && !projectionSet.has(relName) && !(options?.include && relName in options.include)) continue;
     const meta = relMeta as RelationMetadata;
 
-    // For explicit getters, use the SPARQL getter path
-    if (meta.getter) {
+    // Determine the getter to execute:
+    // 1. Explicit `getter` always wins
+    // 2. `where` clause → compile DSL to SurrealQL getter
+    // 3. If `target` is set and `filter !== false`, auto-generate from target metadata
+    //    BUT skip auto-generation for reverse relations (belongsToMany / belongsToOne)
+    //    because buildConformanceGetter traverses outgoing links (->link) which is
+    //    wrong for reverse relations. Their values are already populated by the
+    //    reverse link lookup in instancesFromSurrealResult / getData.
+    let getter = meta.getter;
+    if (!getter && meta.where && meta.direction !== 'reverse') {
+          // NOTE: compileWhereClause generates SurrealDB syntax — disabled on SPARQL branch.
+    // Relations with where clauses should use native SPARQL getters instead.
+    }
+    if (!getter && meta.target && meta.filter !== false && meta.direction !== 'reverse') {
       try {
-        const getterStr = meta.getter;
-        const converted = prepareGetterQuery(getterStr, baseExpression);
-        if (converted) {
-          const result = await perspective.querySparql(converted.query);
+        const TargetClass = meta.target();
+        getter = buildConformanceGetter(meta.predicate, TargetClass);
+        if (!getter) {
+          console.warn(`[Ad4mModel] buildConformanceGetter returned undefined for relation "${relName}" (predicate: "${meta.predicate}")`);
+        }
+      } catch (e) {
+        console.warn(`[Ad4mModel] auto-generation failed for relation "${relName}":`, e);
+      }
+    }
+
+    if (getter) {
+      try {
+        const getterWithBase = getter.replace(/\?source\b/g, `<${instance.id}>`).replace(/Base/g, safeBaseExpression);
+        const trimmed = getterWithBase.trim().toUpperCase();
+        
+        if (trimmed.startsWith('SELECT') || trimmed.startsWith('ASK') || trimmed.startsWith('CONSTRUCT')) {
+          // Native SPARQL getter — execute directly
+          const result = await perspective.querySparql(getterWithBase);
           if (result && result.length > 0) {
-            const values = result
-              .map((r: any) => r.target)
-              .filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None');
-            instance[relName] = converted.isScalar
-              ? (values.length > 0 ? values[0] : null)
-              : values;
+            const values = result.map((r: any) => {
+              const firstKey = Object.keys(r)[0];
+              return r[firstKey]?.value ?? r[firstKey];
+            }).filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None');
+            instance[relName] = values;
           }
         } else {
-          try {
-            const result = await perspective.querySparql(getterStr);
-            if (result && result.length > 0) {
-              const value = result[0].value ?? result[0].target;
-              instance[relName] = Array.isArray(value)
-                ? value.filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None')
-                : value;
-            }
-          } catch {
-            console.warn(`Failed to evaluate getter for relation ${relName}: unsupported getter syntax`);
-          }
+          // Legacy SurrealDB-style getter — convert to SPARQL
+          const query = getter.replace(/Base/g, safeBaseExpression);
+          console.warn(`Unsupported getter syntax for relation ${relName} — use native SPARQL (SELECT/ASK): ${query.slice(0, 100)}`);
         }
       } catch (error) {
         console.warn(`Failed to evaluate getter for ${relName}:`, error);
       }
-      continue;
-    }
-
-    // For relations without explicit getter that weren't populated by hydrateFromLinks
-    // (e.g. predicate collision with another relation), or that need where filtering,
-    // resolve via perspective.get + findAll.
-    if (meta.direction === 'reverse') continue; // reverse relations handled separately
-
-    // Check if this relation needs population (empty array from collision or default)
-    const currentVal = instance[relName];
-    const needsPopulation = !currentVal || (Array.isArray(currentVal) && currentVal.length === 0);
-    const needsWhereFilter = meta.where != null;
-    // Relations with a target class need conformance filtering — even if already
-    // populated by hydrateFromLinks, the raw IDs may include non-conforming nodes.
-    const needsConformanceFilter = meta.target != null && !needsPopulation;
-
-    if (!needsPopulation && !needsWhereFilter && !needsConformanceFilter) continue;
-
-    // Get linked IDs from the perspective directly
-    let rawIds: string[] = [];
-    if (needsPopulation) {
-      try {
-        const links = await perspective.get(
-          new LinkQuery({ source: baseExpression, predicate: meta.predicate })
-        );
-        rawIds = links
-          .filter(l => l.data.source === baseExpression && l.data.predicate === meta.predicate)
-          .map(l => l.data.target);
-      } catch { /* ignore */ }
-    } else {
-      // Already have IDs from hydrateFromLinks
-      rawIds = Array.isArray(currentVal) ? currentVal.filter((v: any) => typeof v === 'string') : [];
-    }
-
-    if (rawIds.length === 0) continue;
-
-    if (needsWhereFilter && meta.target) {
-      // Use findAll with where to filter by both conformance and where conditions
-      try {
-        const TargetClass = meta.target();
-        const linkedInstances = await (TargetClass as any).findAll(perspective, {
-          where: { id: rawIds, ...meta.where } as any,
-        });
-        instance[relName] = linkedInstances.map((inst: any) => inst.id);
-      } catch { /* keep existing value */ }
-    } else if ((needsPopulation || needsConformanceFilter) && meta.target) {
-      // Use findAll with id filter for conformance checking
-      try {
-        const TargetClass = meta.target();
-        const linkedInstances = await (TargetClass as any).findAll(perspective, {
-          where: { id: rawIds } as any,
-        });
-        instance[relName] = linkedInstances.map((inst: any) => inst.id);
-      } catch { /* keep existing value */ }
-    } else if (needsPopulation) {
-      // No target class — just use raw IDs
-      instance[relName] = rawIds;
     }
   }
 }
@@ -710,52 +597,16 @@ export async function hydrateRelations<T>(
     // The link goes target→instance, so we query backwards:
     //   predicate = meta.predicate, target = inst.id  →  source is the related id
     if (meta.kind === 'belongsToOne' || meta.kind === 'belongsToMany') {
-      // ── Batch SPARQL for reverse relations ──────────────────────────────
-      // Instead of N per-instance perspective.get() calls, batch with a single
-      // SPARQL VALUES query when querySparql is available.
-      let reverseLinksMap: Map<string, string[]> | null = null;
-
-      if (typeof perspective.querySparql === 'function' && instances.length > 1) {
-        try {
-          const ids = instances.map(i => `<${(i as any).id}>`).join(' ');
-          const sparqlResults = await perspective.querySparql(`
-            SELECT ?target ?source WHERE {
-              VALUES ?target { ${ids} }
-              ?source <${meta.predicate}> ?target .
-            }
-          `);
-          // Group by ?target (the parent instance id)
-          reverseLinksMap = new Map<string, string[]>();
-          if (Array.isArray(sparqlResults)) {
-            for (const row of sparqlResults) {
-              const targetId = row.target || row['?target'];
-              const sourceId = row.source || row['?source'];
-              if (!targetId || !sourceId) continue;
-              if (!reverseLinksMap.has(targetId)) reverseLinksMap.set(targetId, []);
-              reverseLinksMap.get(targetId)!.push(sourceId);
-            }
-          }
-        } catch {
-          // Fallback to per-instance queries below
-          reverseLinksMap = null;
-        }
-      }
-
+      // Per-instance reverse lookup (can't batch easily across instances)
       for (const inst of instances) {
-        let sourceIds: string[];
-
-        if (reverseLinksMap) {
-          // Use batch results
-          sourceIds = reverseLinksMap.get((inst as any).id) || [];
-        } else {
-          // Per-instance fallback (single instance or querySparql unavailable)
-          const reverseLinks = await perspective.get(
-            new LinkQuery({ predicate: meta.predicate, target: (inst as any).id })
-          );
-          sourceIds = reverseLinks
-            .filter(l => l.data.target === (inst as any).id)
-            .map(l => l.data.source);
-        }
+        const reverseLinks = await perspective.get(
+          new LinkQuery({ predicate: meta.predicate, target: (inst as any).id })
+        );
+        // Defensive filter: perspective.get may return extra results; ensure
+        // we only use links that genuinely point to this instance.
+        const sourceIds = reverseLinks
+          .filter(l => l.data.target === (inst as any).id)
+          .map(l => l.data.source);
 
         if (meta.kind === 'belongsToOne') {
           if (sourceIds.length === 0) {
