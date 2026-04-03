@@ -486,7 +486,7 @@ export async function evaluateCustomGettersForInstance(
             }
           }
         } else {
-          // Legacy SurrealDB-style getter — convert or use querySurrealDB
+          // Legacy SurrealDB-style getter — not supported, warn
           const query = rawGetter.replace(/Base/g, safeBaseExpression);
           console.warn(`Unsupported getter syntax for property ${propName} — use native SPARQL (SELECT/ASK): ${query.slice(0, 100)}`);
         }
@@ -504,15 +504,14 @@ export async function evaluateCustomGettersForInstance(
 
     // Determine the getter to execute:
     // 1. Explicit `getter` always wins
-    // 2. `where` clause → compile DSL to SurrealQL getter
-    // 3. If `target` is set and `filter !== false`, auto-generate from target metadata
+    // 2. If `target` is set and `filter !== false`, auto-generate conformance getter
     //    BUT skip auto-generation for reverse relations (belongsToMany / belongsToOne)
-    //    because buildConformanceGetter traverses outgoing links (->link) which is
-    //    wrong for reverse relations. Their values are already populated by the
-    //    reverse link lookup in instancesFromSurrealResult / getData.
+    //    because buildConformanceGetter traverses outgoing links which is wrong for
+    //    reverse relations. Their values are already populated by the reverse link
+    //    lookup in instancesFromQueryResult / getData.
     let getter = meta.getter;
     if (!getter && meta.where && meta.direction !== 'reverse') {
-          // NOTE: compileWhereClause generates SurrealDB syntax — disabled on SPARQL branch.
+          // NOTE: where-clause getter compilation requires SPARQL rewrite — skipped for now.
     // Relations with where clauses should use native SPARQL getters instead.
     }
     if (!getter && meta.target && meta.filter !== false && meta.direction !== 'reverse') {
@@ -543,7 +542,7 @@ export async function evaluateCustomGettersForInstance(
             instance[relName] = values;
           }
         } else {
-          // Legacy SurrealDB-style getter — convert to SPARQL
+          // Legacy SurrealDB-style getter — not supported, warn
           const query = getter.replace(/Base/g, safeBaseExpression);
           console.warn(`Unsupported getter syntax for relation ${relName} — use native SPARQL (SELECT/ASK): ${query.slice(0, 100)}`);
         }
