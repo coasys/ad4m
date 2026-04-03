@@ -455,7 +455,7 @@ export async function evaluateCustomGettersForInstance(
   metadata: ModelMetadata,
   options?: { requestedProperties?: string[]; include?: Record<string, any> }
 ): Promise<void> {
-  const safeBaseExpression = `'${instance.id}'`;
+  const safeBaseExpression = `<${instance.id}>`;
 
   // Build projection filter — when requestedProperties is active, only
   // evaluate getters for fields that are requested (or included).
@@ -468,7 +468,7 @@ export async function evaluateCustomGettersForInstance(
     if ((propMeta as any).getter) {
       try {
         const rawGetter = (propMeta as any).getter;
-        const getterWithBase = rawGetter.replace(/\?source\b/g, `<${instance.id}>`);
+        const getterWithBase = rawGetter.replace(/\?source\b/g, `<${instance.id}>`).replace(/<Base>/g, `<${instance.id}>`).replace(/Base/g, `<${instance.id}>`);
         
         // If the getter is already SPARQL (starts with SELECT/ASK/CONSTRUCT), execute directly
         const trimmed = getterWithBase.trim().toUpperCase();
@@ -528,7 +528,7 @@ export async function evaluateCustomGettersForInstance(
 
     if (getter) {
       try {
-        const getterWithBase = getter.replace(/\?source\b/g, `<${instance.id}>`).replace(/Base/g, safeBaseExpression);
+        const getterWithBase = getter.replace(/\?source\b/g, `<${instance.id}>`).replace(/<Base>/g, `<${instance.id}>`).replace(/\bBase\b/g, `<${instance.id}>`);
         const trimmed = getterWithBase.trim().toUpperCase();
         
         if (trimmed.startsWith('SELECT') || trimmed.startsWith('ASK') || trimmed.startsWith('CONSTRUCT')) {
