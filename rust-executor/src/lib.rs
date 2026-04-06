@@ -569,7 +569,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             }
 
             // Drain and publish pending compute log entries
-            let pending_entries: Vec<crate::graphql::graphql_types::ComputeLogEntry> = {
+            let pending_entries: Vec<crate::types::domain::ComputeLogEntry> = {
                 match PENDING_COMPUTE_LOG_ENTRIES.lock() {
                     Ok(mut vec) => vec.drain(..).collect(),
                     Err(e) => {
