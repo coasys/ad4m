@@ -153,7 +153,7 @@ pub fn mark_credits_dirty(email: &str) {
 /// Buffer a compute log entry for async publication.
 /// The flush loop will drain these and publish to the subscription topic.
 pub static PENDING_COMPUTE_LOG_ENTRIES: LazyLock<
-    std::sync::Mutex<Vec<crate::graphql::graphql_types::ComputeLogEntry>>,
+    std::sync::Mutex<Vec<crate::types::domain::ComputeLogEntry>>,
 > = LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
 
 pub fn push_compute_log_entry(
@@ -164,7 +164,7 @@ pub fn push_compute_log_entry(
     cost: f64,
     credits_after: f64,
 ) {
-    let entry = crate::graphql::graphql_types::ComputeLogEntry {
+    let entry = crate::types::domain::ComputeLogEntry {
         id: id as i32,
         user_email: email.to_owned(),
         timestamp: chrono::Utc::now().to_rfc3339(),

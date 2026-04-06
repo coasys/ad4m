@@ -708,7 +708,7 @@ pub struct PaymentRequestResult {
     pub message: String,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputeLogEntry {
     pub id: i32,
