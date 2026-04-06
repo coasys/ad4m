@@ -31,7 +31,7 @@ export function removeLocal(key: string): void {
 /** Convert a WebSocket URL to an HTTP base URL. */
 export function wsUrlToHttpBase(wsUrl: string): string {
   let url = wsUrl.replace(/^ws(s?):\/\//, (_, s) => `http${s}://`);
-  url = url.replace(/\/graphql\/?$/, '').replace(/^ws(s?):///, 'http$1://');
+    url = url.replace(/\/graphql\/?$/, '').replace(/^ws(s?):\/\//, 'http$1://');
   return url;
 }
 
