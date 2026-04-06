@@ -37,5 +37,5 @@ git-fetch-with-cli = true
 # CI must select Xcode 15.4 (has ld-classic binary).
 [target.aarch64-apple-darwin]
 rustflags = [
-    "-C", "link-arg=-fuse-ld=/Library/Developer/CommandLineTools/usr/bin/ld-classic",
+    "-C", "link-arg=-fuse-ld=/Applications/Xcode_15.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld-classic",
 ]
