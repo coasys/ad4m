@@ -65,7 +65,7 @@ class ParentWithRelations extends Ad4mModel {
   unfilteredItems: string[] = [];
 
   @HasMany({
-    getter: "(<-link[WHERE predicate = 'test://custom'].in.uri)",
+    getter: "SELECT ?target WHERE { ?target <test://custom> ?source . }",
   })
   customItems: string[] = [];
 }
@@ -130,7 +130,7 @@ describe("buildConformanceFilter()", () => {
       @Property({
         through: "test://computed",
         required: true,
-        getter: "(<-link[WHERE predicate = 'test://custom'].in.uri)[0]",
+        getter: "SELECT ?target WHERE { ?target <test://custom> ?source . } LIMIT 1",
       })
       computed: string = "";
     }
@@ -338,7 +338,7 @@ describe("Ad4mModel.getModelMetadata() relation filtering fields", () => {
 
     // Explicit getter provided via decorator (getter-only, no predicate)
     expect(metadata.relations.customItems.getter).toBe(
-      "(<-link[WHERE predicate = 'test://custom'].in.uri)"
+      "SELECT ?target WHERE { ?target <test://custom> ?source . }"
     );
     expect(metadata.relations.customItems.predicate).toBe("");
 
@@ -388,7 +388,7 @@ describe("Relation decorator validation", () => {
       @Model({ name: "InvalidGetterTarget" })
       class _Invalid extends Ad4mModel {
         @HasMany({
-          getter: "(<-link.in.uri)",
+          getter: "SELECT ?target WHERE { ?target ?p ?source . }",
           target: () => FlaggedTarget,
         })
         items: string[] = [];
@@ -401,7 +401,7 @@ describe("Relation decorator validation", () => {
       @Model({ name: "InvalidGetterThrough" })
       class _Invalid extends Ad4mModel {
         @HasMany({
-          getter: "(<-link.in.uri)",
+          getter: "SELECT ?target WHERE { ?target ?p ?source . }",
           through: "test://pred",
         })
         items: string[] = [];
@@ -414,7 +414,7 @@ describe("Relation decorator validation", () => {
       @Model({ name: "ValidGetterOnly" })
       class _Valid extends Ad4mModel {
         @HasMany({
-          getter: "(<-link.in.uri)",
+          getter: "SELECT ?target WHERE { ?target ?p ?source . }",
         })
         items: string[] = [];
       }
@@ -551,7 +551,7 @@ describe("where clause validation", () => {
       class _Invalid extends Ad4mModel {
         @HasMany({
           where: { status: "active" },
-          getter: "(<-link.in.uri)",
+          getter: "SELECT ?target WHERE { ?target ?p ?source . }",
         })
         items: string[] = [];
       }

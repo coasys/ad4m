@@ -12,6 +12,8 @@ import { LinkQuery } from "../perspectives/LinkQuery";
 import type { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { getPropertiesMetadata, getRelationsMetadata, buildConformanceFilter } from "./decorators";
 import type { RelationMetadataEntry } from "./decorators";
+import { compileWhereClause } from "./query-utils";
+import { escapeQueryString } from "../utils";
 import type {
   PropertyMetadata, RelationMetadata, ModelMetadata,
   ValueTuple, WhereCondition, IncludeMap, RelationSubQuery,
@@ -449,95 +451,6 @@ export function buildConformanceGetter(
  * For relations that declare a `target` but no explicit `getter`, a conformance
  * getter is auto-generated from the target model's metadata (unless `filter: false`).
  */
-/**
- * Attempts to convert a legacy SurrealDB-style getter expression into a SPARQL query.
- * Returns the SPARQL string if conversion succeeds, or null if the pattern is unrecognized.
- *
- * Supported patterns:
- * - `(<-link[WHERE predicate = 'P'].in.uri)[0]` → `SELECT ?target WHERE { ?target <P> <Base> . } LIMIT 1`
- * - `(<-link[WHERE predicate = 'P'].in.uri)` → `SELECT ?target WHERE { ?target <P> <Base> . }`
- * - `(->link[WHERE predicate = 'P'].out.uri)[0]` → `SELECT ?target WHERE { <Base> <P> ?target . } LIMIT 1`
- * - `(->link[WHERE predicate = 'P'].out.uri)` → `SELECT ?target WHERE { <Base> <P> ?target . }`
- * - `count(<-link[WHERE predicate = 'P' AND out.uri = 'V']) > N` → boolean via ASK-style COUNT
- * - `count(->link[WHERE predicate = 'P' AND out.uri = 'V']) > N` → boolean via ASK-style COUNT
- */
-function convertLegacyGetterToSparql(getter: string, baseUri: string): { sparql: string; isBoolean: boolean } | null {
-  const base = `<${baseUri}>`;
-
-  // Pattern: count(<-link[WHERE predicate = 'P' AND out.uri = 'V']) > N  (boolean)
-  // Also handles count(->link[...]) variants
-  const countMatch = getter.match(
-    /count\((<-|->)link\[WHERE\s+predicate\s*=\s*'([^']+)'(?:\s+AND\s+out\.uri\s*=\s*'([^']+)')?\]\)\s*(>|>=|<|<=|=|==)\s*(\d+)/
-  );
-  if (countMatch) {
-    const [, direction, predicate, targetValue, operator, threshold] = countMatch;
-    const isReverse = direction === '<-';
-    let whereClause: string;
-    if (isReverse) {
-      whereClause = `?s <${predicate}> ${base}`;
-      if (targetValue) {
-        whereClause += ` . ?s <${predicate}> <${targetValue}>`;
-      }
-    } else {
-      whereClause = `${base} <${predicate}> ?s`;
-      if (targetValue) {
-        whereClause += ` . ${base} <${predicate}> <${targetValue}>`;
-      }
-    }
-    // For reaction count: count links where the target (out.uri) matches
-    // The pattern `count(<-link[WHERE predicate = 'P' AND out.uri = 'V']) > N` means:
-    // count links pointing TO Base with predicate P whose target (out) is V
-    if (isReverse && targetValue) {
-      // Actually for reverse links: source->predicate->target, where target=Base
-      // AND out.uri = V means the link's out (target) is V, but the link points to Base...
-      // In SurrealDB: <-link means incoming links. predicate=P, out.uri=V
-      // This means: links where target=Base, predicate=P, and... out.uri is confusing in reverse context
-      // Looking at the Flux usage: count(<-link[WHERE predicate='flux://reaction' AND out.uri='emoji://1f44d']) > 5
-      // This counts links where: some node has a 'flux://reaction' link to 'emoji://1f44d', and that node links to Base
-      // Actually in SurrealDB graph: <-link means links pointing TO this node
-      // So: links where target = Base, predicate = 'flux://reaction', out.uri = 'emoji://1f44d'
-      // But that's contradictory... out.uri on an incoming link would be the target = Base
-      // In SurrealDB, a link record has: in (source), out (target), predicate
-      // <-link means links where out = Base (links pointing to Base)
-      // So predicate = 'flux://reaction', out = Base, and we also filter on out.uri = 'emoji://1f44d'??
-      // That doesn't make sense. Let me re-read the Flux model:
-      // @HasMany({through: REACTION}) reactions: string[]  -- links FROM this message TO emoji URIs
-      // So reactions are: source=messageId, predicate=REACTION, target=emoji://1f44d
-      // The getter `count(<-link[WHERE predicate='REACTION' AND out.uri='emoji://1f44d']) > 5`
-      // In SurrealDB: <-link means traversing incoming links... but reactions are outgoing from the message
-      // This might actually be using ->link semantics despite the <- prefix, or the model is inconsistent
-      // Let's just count: links from Base with predicate P to target V
-      whereClause = `${base} <${predicate}> <${targetValue}>`;
-    }
-
-    const op = operator === '==' ? '=' : operator;
-    const sparql = `SELECT (COUNT(*) AS ?count) WHERE { ${whereClause} . }`;
-    // We'll handle this as a count comparison
-    return { sparql: `__COUNT_COMPARE__${op}${threshold}__${sparql}`, isBoolean: true };
-  }
-
-  // Pattern: (<-link[WHERE predicate = 'P'].in.uri)[0]  or  (<-link[WHERE predicate = 'P'].in.uri)
-  const reverseMatch = getter.match(
-    /\(?<-link\[WHERE\s+predicate\s*=\s*'([^']+)'\]\.in\.uri\)?\s*(?:\[(\d+)\])?/
-  );
-  if (reverseMatch) {
-    const [, predicate, index] = reverseMatch;
-    const limit = index !== undefined ? ' LIMIT 1' : '';
-    return { sparql: `SELECT ?target WHERE { ?target <${predicate}> ${base} . }${limit}`, isBoolean: false };
-  }
-
-  // Pattern: (->link[WHERE predicate = 'P'].out.uri)[0]  or  (->link[WHERE predicate = 'P'].out.uri)
-  const forwardMatch = getter.match(
-    /\(?->link\[WHERE\s+predicate\s*=\s*'([^']+)'\]\.out\.uri\)?\s*(?:\[(\d+)\])?/
-  );
-  if (forwardMatch) {
-    const [, predicate, index] = forwardMatch;
-    const limit = index !== undefined ? ' LIMIT 1' : '';
-    return { sparql: `SELECT ?target WHERE { ${base} <${predicate}> ?target . }${limit}`, isBoolean: false };
-  }
-
-  return null;
-}
 
 export async function evaluateCustomGettersForInstance(
   instance: any,
@@ -576,44 +489,8 @@ export async function evaluateCustomGettersForInstance(
             }
           }
         } else {
-          // Legacy SurrealDB-style getter — attempt automatic conversion
-          const converted = convertLegacyGetterToSparql(rawGetter, instance.id);
-          if (converted) {
-            if (converted.sparql.startsWith('__COUNT_COMPARE__')) {
-              // Parse: __COUNT_COMPARE__>5__SELECT ...
-              const match = converted.sparql.match(/^__COUNT_COMPARE__(>|>=|<|<=|=)(\d+)__(.+)$/);
-              if (match) {
-                const [, op, thresholdStr, countQuery] = match;
-                const threshold = parseInt(thresholdStr, 10);
-                const result = await perspective.querySparql(countQuery);
-                const count = result && result.length > 0
-                  ? parseInt(result[0].count?.value ?? result[0].count ?? '0', 10)
-                  : 0;
-                switch (op) {
-                  case '>': instance[propName] = count > threshold; break;
-                  case '>=': instance[propName] = count >= threshold; break;
-                  case '<': instance[propName] = count < threshold; break;
-                  case '<=': instance[propName] = count <= threshold; break;
-                  case '=': instance[propName] = count === threshold; break;
-                }
-              }
-            } else {
-              const result = await perspective.querySparql(converted.sparql);
-              if (result && result.length > 0) {
-                const firstRow = result[0];
-                const firstKey = Object.keys(firstRow)[0];
-                const val = firstRow[firstKey]?.value ?? firstRow[firstKey];
-                if (val !== undefined && val !== null && val !== 'None' && val !== '') {
-                  instance[propName] = converted.sparql.includes('LIMIT 1') ? val : result.map((r: any) => {
-                    const k = Object.keys(r)[0];
-                    return r[k]?.value ?? r[k];
-                  }).filter((v: any) => v != null && v !== '' && v !== 'None');
-                }
-              }
-            }
-          } else {
-            console.warn(`Unsupported getter syntax for property ${propName} — use native SPARQL (SELECT/ASK): ${rawGetter.slice(0, 100)}`);
-          }
+          // Legacy SurrealDB-style getter — no longer supported
+          console.warn(`Unsupported legacy getter syntax for property ${propName} — use native SPARQL (SELECT/ASK): ${rawGetter.slice(0, 100)}`);
         }
       } catch (error) {
         console.warn(`Failed to evaluate getter for ${propName}:`, error);
@@ -636,8 +513,19 @@ export async function evaluateCustomGettersForInstance(
     //    lookup in instancesFromQueryResult / getData.
     let getter = meta.getter;
     if (!getter && meta.where && meta.direction !== 'reverse') {
-          // NOTE: where-clause getter compilation requires SPARQL rewrite — skipped for now.
-    // Relations with where clauses should use native SPARQL getters instead.
+      try {
+        const TargetClass = meta.target?.();
+        const targetMetadata = TargetClass
+          ? (TargetClass as any).getModelMetadata?.() ?? null
+          : null;
+        const conditions = compileWhereClause(meta.where, targetMetadata);
+        if (conditions.length > 0) {
+          const escapedPredicate = escapeQueryString(meta.predicate);
+          getter = `SELECT ?target WHERE { <Base> <${escapedPredicate}> ?target . ${conditions.join(' ')} }`;
+        }
+      } catch (e) {
+        console.warn(`[Ad4mModel] where-clause compilation failed for relation "${relName}":`, e);
+      }
     }
     if (!getter && meta.target && meta.filter !== false && meta.direction !== 'reverse') {
       try {
@@ -667,20 +555,8 @@ export async function evaluateCustomGettersForInstance(
             instance[relName] = values;
           }
         } else {
-          // Legacy SurrealDB-style getter — attempt automatic conversion
-          const converted = convertLegacyGetterToSparql(getter, instance.id);
-          if (converted) {
-            const result = await perspective.querySparql(converted.sparql);
-            if (result && result.length > 0) {
-              const values = result.map((r: any) => {
-                const firstKey = Object.keys(r)[0];
-                return r[firstKey]?.value ?? r[firstKey];
-              }).filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None');
-              instance[relName] = values;
-            }
-          } else {
-            console.warn(`Unsupported getter syntax for relation ${relName} — use native SPARQL (SELECT/ASK): ${getter.slice(0, 100)}`);
-          }
+          // Legacy SurrealDB-style getter — no longer supported
+          console.warn(`Unsupported legacy getter syntax for relation ${relName} — use native SPARQL (SELECT/ASK): ${getter.slice(0, 100)}`);
         }
       } catch (error) {
         console.warn(`Failed to evaluate getter for ${relName}:`, error);

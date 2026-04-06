@@ -307,9 +307,17 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   private async executeSparqlQuery(): Promise<T[]> {
     const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
     const rawResult = await this.perspective.querySparql(sparqlQuery);
-    const grouped = groupSPARQLResults(rawResult);
-    const { results } = await this.ctor.instancesFromQueryResult(this.perspective, this.queryParams, grouped) as { results: T[] };
+    const { results } = await this.processSparqlResult(rawResult);
     return results;
+  }
+
+  /**
+   * Groups raw SPARQL results and hydrates them into model instances.
+   * Centralises the repeated groupSPARQLResults → instancesFromQueryResult pipeline.
+   */
+  private async processSparqlResult(rawResult: any): Promise<{ results: T[], totalCount: number }> {
+    const grouped = groupSPARQLResults(Array.isArray(rawResult) ? rawResult : []);
+    return await this.ctor.instancesFromQueryResult(this.perspective, this.queryParams, grouped) as { results: T[], totalCount: number };
   }
 
   /**
@@ -394,8 +402,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
         };
 
         const processResults = async (result: any) => {
-            const grouped = groupSPARQLResults(Array.isArray(result) ? result : []);
-            const { results } = await ctor.instancesFromQueryResult(this.perspective, this.queryParams, grouped);
+            const { results } = await this.processSparqlResult(result);
             const fp = buildFingerprint(results);
             if (fp === lastResultFingerprint) return; // filtered set unchanged — skip callback
             lastResultFingerprint = fp;
@@ -405,12 +412,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
         this.currentSubscription.onResult(processResults);
         
         // Process initial result
-        const initialGrouped = groupSPARQLResults(Array.isArray(this.currentSubscription.result) ? this.currentSubscription.result : []);
-        const { results } = await ctor.instancesFromQueryResult(
-            this.perspective, 
-            this.queryParams, 
-            initialGrouped
-        );
+        const { results } = await this.processSparqlResult(this.currentSubscription.result);
         lastResultFingerprint = buildFingerprint(results);
         // Also invoke callback with initial results so subscribers see them
         callback(results as T[]);
@@ -446,19 +448,13 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
 
     const processResults = async (result: any) => {
-      const grouped = groupSPARQLResults(Array.isArray(result) ? result : []);
-      const { results } = await this.ctor.instancesFromQueryResult(this.perspective, this.queryParams, grouped);
+      const { results } = await this.processSparqlResult(result);
       callback(results as T[]);
     };
 
     this.currentSubscription.onResult(processResults);
 
-    const initialGrouped = groupSPARQLResults(Array.isArray(this.currentSubscription.result) ? this.currentSubscription.result : []);
-    const { results } = await this.ctor.instancesFromQueryResult(
-      this.perspective,
-      this.queryParams,
-      initialGrouped
-    );
+    const { results } = await this.processSparqlResult(this.currentSubscription.result);
     callback(results as T[]);
     return results as T[];
   }
@@ -479,8 +475,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     if (this.engineFlag === 'sparql') {
       const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
       const rawResult = await this.perspective.querySparql(sparqlQuery);
-      const grouped = groupSPARQLResults(rawResult);
-      const { totalCount } = await this.ctor.instancesFromQueryResult(this.perspective, this.queryParams, grouped);
+      const { totalCount } = await this.processSparqlResult(rawResult);
       return totalCount;
     } else {
       const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
@@ -495,8 +490,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   async countSparql(): Promise<number> {
     const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
     const rawResult = await this.perspective.querySparql(sparqlQuery);
-    const grouped = groupSPARQLResults(rawResult);
-    const { totalCount } = await this.ctor.instancesFromQueryResult(this.perspective, this.queryParams, grouped);
+    const { totalCount } = await this.processSparqlResult(rawResult);
     return totalCount;
   }
 
@@ -540,18 +534,12 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
 
       const processResults = async (result: any) => {
-        const grouped = groupSPARQLResults(Array.isArray(result) ? result : []);
-        const { totalCount } = await this.ctor.instancesFromQueryResult(this.perspective, this.queryParams, grouped);
+        const { totalCount } = await this.processSparqlResult(result);
         callback(totalCount);
       };
 
       this.currentSubscription.onResult(processResults);
-      const initialGrouped = groupSPARQLResults(Array.isArray(this.currentSubscription.result) ? this.currentSubscription.result : []);
-      const { totalCount } = await this.ctor.instancesFromQueryResult(
-        this.perspective, 
-        this.queryParams, 
-        initialGrouped
-      );
+      const { totalCount } = await this.processSparqlResult(this.currentSubscription.result);
       callback(totalCount);
       return totalCount;
     } else {
@@ -580,18 +568,12 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
 
     const processResults = async (result: any) => {
-      const grouped = groupSPARQLResults(Array.isArray(result) ? result : []);
-      const { totalCount } = await this.ctor.instancesFromQueryResult(this.perspective, this.queryParams, grouped);
+      const { totalCount } = await this.processSparqlResult(result);
       callback(totalCount);
     };
 
     this.currentSubscription.onResult(processResults);
-    const initialGrouped = groupSPARQLResults(Array.isArray(this.currentSubscription.result) ? this.currentSubscription.result : []);
-    const { totalCount } = await this.ctor.instancesFromQueryResult(
-      this.perspective,
-      this.queryParams,
-      initialGrouped
-    );
+    const { totalCount } = await this.processSparqlResult(this.currentSubscription.result);
     callback(totalCount);
     return totalCount;
   }
@@ -616,8 +598,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     if (this.engineFlag === 'sparql') {
       const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, paginationQuery);
       const result = await this.perspective.querySparql(sparqlQuery);
-      const grouped = groupSPARQLResults(Array.isArray(result) ? result : []);
-      const { results, totalCount } = (await this.ctor.instancesFromQueryResult(this.perspective, paginationQuery, grouped)) as ResultsWithTotalCount<T>;
+      const { results, totalCount } = await this.processSparqlResult(result) as ResultsWithTotalCount<T>;
       return { results, totalCount, pageSize, pageNumber };
     } else {
       const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);
@@ -634,8 +615,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, paginationQuery);
     const rawResult = await this.perspective.querySparql(sparqlQuery);
-    const grouped = groupSPARQLResults(rawResult);
-    const { results, totalCount } = (await this.ctor.instancesFromQueryResult(this.perspective, paginationQuery, grouped)) as ResultsWithTotalCount<T>;
+    const { results, totalCount } = await this.processSparqlResult(rawResult) as ResultsWithTotalCount<T>;
     return { results, totalCount, pageSize, pageNumber };
   }
 
@@ -687,14 +667,12 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
 
       const processResults = async (result: any) => {
-        const grouped = groupSPARQLResults(Array.isArray(result) ? result : []);
-        const { results, totalCount } = (await this.ctor.instancesFromQueryResult(this.perspective, paginationQuery, grouped)) as ResultsWithTotalCount<T>;
+        const { results, totalCount } = await this.processSparqlResult(result) as ResultsWithTotalCount<T>;
         callback({ results, totalCount, pageSize, pageNumber });
       };
 
       this.currentSubscription.onResult(processResults);
-      const initialGrouped = groupSPARQLResults(Array.isArray(this.currentSubscription.result) ? this.currentSubscription.result : []);
-      const { results, totalCount } = (await this.ctor.instancesFromQueryResult(this.perspective, paginationQuery, initialGrouped)) as ResultsWithTotalCount<T>;
+      const { results, totalCount } = await this.processSparqlResult(this.currentSubscription.result) as ResultsWithTotalCount<T>;
       const initialPage = { results, totalCount, pageSize, pageNumber };
       callback(initialPage);
       return initialPage;
@@ -730,14 +708,12 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
 
     const processResults = async (result: any) => {
-      const grouped = groupSPARQLResults(Array.isArray(result) ? result : []);
-      const { results, totalCount } = (await this.ctor.instancesFromQueryResult(this.perspective, paginationQuery, grouped)) as ResultsWithTotalCount<T>;
+      const { results, totalCount } = await this.processSparqlResult(result) as ResultsWithTotalCount<T>;
       callback({ results, totalCount, pageSize, pageNumber });
     };
 
     this.currentSubscription.onResult(processResults);
-    const initialGrouped = groupSPARQLResults(Array.isArray(this.currentSubscription.result) ? this.currentSubscription.result : []);
-    const { results, totalCount } = (await this.ctor.instancesFromQueryResult(this.perspective, paginationQuery, initialGrouped)) as ResultsWithTotalCount<T>;
+    const { results, totalCount } = await this.processSparqlResult(this.currentSubscription.result) as ResultsWithTotalCount<T>;
     const initialPage = { results, totalCount, pageSize, pageNumber };
     callback(initialPage);
     return initialPage;

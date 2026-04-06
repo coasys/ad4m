@@ -316,10 +316,11 @@ export default function runtimeTests(testContext: TestContext) {
                 appName: "Flux Mentions",
                 appUrl: "https://flux.app",
                 appIconPath: "/flux-icon.png",
-                // Extract multiple data points from the match
-                // Use fn::parse_literal to decode literal:// targets and extract just the
-                // data content (not metadata like author/timestamp in signed expressions).
-                trigger: `SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <rdf://content>) FILTER(CONTAINS(LCASE(STR(<ad4m://fn/parse_literal>(?target))), "${agentDid!.toLowerCase()}")) }`,
+                // Use fn::parse_literal to decode the literal:json:{...} target,
+                // extract the `data` field from the signed expression, and check
+                // if the agent's DID appears in the HTML content — matching how
+                // Flux stores and detects mentions in real messages.
+                trigger: `SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <flux://has_message>) FILTER(CONTAINS(LCASE(STR(<ad4m://fn/parse_literal>(?target))), "${agentDid!.toLowerCase()}")) }`,
                 perspectiveIds: [notificationPerspective.uuid],
                 webhookUrl: "https://test.webhook",
                 webhookAuth: "test-auth"
@@ -333,21 +334,24 @@ export default function runtimeTests(testContext: TestContext) {
             const mockFunction = sinon.stub();
             await ad4mClient.runtime.addNotificationTriggeredCallback(mockFunction)
 
-            // Add a message that doesn't mention the agent
+            // Create a message expression that doesn't mention the agent
+            const noMentionContent = "Hello world, nice day!"
+            const noMentionExprUrl = await ad4mClient.expression.create(noMentionContent, "literal")
             await notificationPerspective.add(new Link({
-                source: "message://1",
-                predicate: "rdf://content",
-                target: "literal:string:Hello%20world"
+                source: "channel://general",
+                predicate: "flux://has_message",
+                target: noMentionExprUrl
             }))
             await sleep(2000)
             expect(mockFunction.called).to.be.false
 
-            // Add a message that mentions the agent (with HTML formatting)
-            const messageWithMention = `<p>Hey <strong>${agentDid!}</strong>, how are you?</p>`
+            // Create a message expression that mentions the agent (with HTML formatting like Flux)
+            const mentionContent = `Hey <a href="${agentDid!}">@agent</a>, check this out!`
+            const mentionExprUrl = await ad4mClient.expression.create(mentionContent, "literal")
             await notificationPerspective.add(new Link({
-                source: "message://2",
-                predicate: "rdf://content",
-                target: `literal:string:${encodeURIComponent(messageWithMention)}`
+                source: "channel://general",
+                predicate: "flux://has_message",
+                target: mentionExprUrl
             }))
             await sleep(7000)
             expect(mockFunction.called).to.be.true
@@ -357,14 +361,14 @@ export default function runtimeTests(testContext: TestContext) {
             let triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
             expect(triggerMatch.length).to.equal(1)
 
-            // Verify extracted data points (SPARQL returns source/predicate/target variable names)
+            // Verify extracted data points
             //@ts-ignore
-            expect(triggerMatch[0].source).to.equal("message://2")
+            expect(triggerMatch[0].source).to.equal("channel://general")
             //@ts-ignore
-            expect(triggerMatch[0].predicate).to.equal("rdf://content")
-            // Target is the raw literal:// IRI with URL-encoded content
+            expect(triggerMatch[0].predicate).to.equal("flux://has_message")
+            // Target is the literal expression URL
             //@ts-ignore
-            expect(decodeURIComponent(triggerMatch[0].target)).to.include(agentDid)
+            expect(triggerMatch[0].target).to.equal(mentionExprUrl)
         })
 
         it("can export and import database", async () => {

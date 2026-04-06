@@ -58,16 +58,23 @@ export function buildWhereCondition(
     const escapedPredicate = escapeQueryString(predicate);
     // For literal-resolved properties, we match against the raw IRI (which is a literal: URI)
     // For language-resolved properties, we match against the plain URI
-    const useParseLiteral = !opts?.resolveLanguage || opts.resolveLanguage === 'literal';
+    // For literal-resolved properties, values are stored as IRIs like <literal:string:VALUE>
+    // For language-resolved properties, values are plain URIs
+    const isLiteral = !opts?.resolveLanguage || opts.resolveLanguage === 'literal';
+
+    function formatValue(v: any): string {
+        if (typeof v === 'string') {
+            return isLiteral
+                ? `<literal:string:${escapeQueryString(v)}>`
+                : `<${escapeQueryString(v)}>`;
+        }
+        // Numbers/booleans — also stored as literal:string: in AD4M
+        return `<literal:string:${v}>`;
+    }
 
     if (Array.isArray(condition)) {
         // Array values → FILTER IN
-        const formattedValues = (condition as any[]).map(v => {
-            if (typeof v === 'string') {
-                return useParseLiteral ? `"${escapeQueryString(v)}"` : `<${escapeQueryString(v)}>`;
-            }
-            return `"${v}"`;
-        }).join(', ');
+        const formattedValues = (condition as any[]).map(formatValue).join(', ');
         return `FILTER EXISTS { ?target <${escapedPredicate}> ?_val . FILTER(?_val IN (${formattedValues})) }`;
     } else if (typeof condition === 'object' && condition !== null) {
         // Operator object
@@ -76,21 +83,13 @@ export function buildWhereCondition(
 
         if (ops.not !== undefined) {
             if (Array.isArray(ops.not)) {
-                const formattedValues = ops.not.map((v: any) => {
-                    if (typeof v === 'string') {
-                        return useParseLiteral ? `"${escapeQueryString(v)}"` : `<${escapeQueryString(v)}>`;
-                    }
-                    return `"${v}"`;
-                }).join(', ');
+                const formattedValues = ops.not.map((v: any) => formatValue(v)).join(', ');
                 parts.push(
                     `FILTER NOT EXISTS { ?target <${escapedPredicate}> ?_nval . FILTER(?_nval IN (${formattedValues})) }`,
                 );
             } else {
-                const val = typeof ops.not === 'string'
-                    ? (useParseLiteral ? `"${escapeQueryString(ops.not)}"` : `<${escapeQueryString(ops.not)}>`)
-                    : `"${ops.not}"`;
                 parts.push(
-                    `FILTER NOT EXISTS { ?target <${escapedPredicate}> ${val} }`,
+                    `FILTER NOT EXISTS { ?target <${escapedPredicate}> ${formatValue(ops.not)} }`,
                 );
             }
         }
@@ -109,10 +108,7 @@ export function buildWhereCondition(
         return parts.join(' ');
     } else {
         // Simple equality
-        const val = typeof condition === 'string'
-            ? (useParseLiteral ? `"${escapeQueryString(condition)}"` : `<${escapeQueryString(condition)}>`)
-            : `"${condition}"`;
-        return `?target <${escapedPredicate}> ${val} .`;
+        return `?target <${escapedPredicate}> ${formatValue(condition)} .`;
     }
 }
 

@@ -2196,7 +2196,7 @@ describe("Native SPARQL getter evaluation", () => {
     expect(instance.tags).toEqual(["tag:a", "tag:b"]);
   });
 
-  it("should auto-convert legacy SurrealDB-style getter syntax to SPARQL", async () => {
+  it("should warn for legacy SurrealDB-style getter syntax instead of converting", async () => {
     const metadata = {
       properties: {
         legacy: {
@@ -2208,18 +2208,20 @@ describe("Native SPARQL getter evaluation", () => {
       relations: {},
     };
 
-    // Mock querySparql to return a result for the converted SPARQL query
-    mockPerspective.querySparql = jest.fn().mockResolvedValue([
-      { target: { value: "test://result1" } }
-    ]);
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
     const instance = { id: "test://msg1", legacy: undefined };
     await evaluateCustomGettersForInstance(instance, mockPerspective, metadata);
     
-    // Should have called querySparql with the converted SPARQL
-    expect(mockPerspective.querySparql).toHaveBeenCalledWith(
-      expect.stringContaining("SELECT ?target WHERE")
+    // Should NOT call querySparql — legacy getters are no longer converted
+    expect(mockPerspective.querySparql).not.toHaveBeenCalled();
+    // Should warn about unsupported syntax
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Unsupported legacy getter syntax")
     );
-    expect(instance.legacy).toBe("test://result1");
+    // Value should remain undefined
+    expect(instance.legacy).toBeUndefined();
+
+    warnSpy.mockRestore();
   });
 });
