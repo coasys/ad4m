@@ -9,7 +9,7 @@ import {
   EntanglementProofInput,
   UserCreationResult,
 } from "./Agent";
-import { HostingUserInfo, PaymentRequestResult } from "../runtime/RuntimeResolver";
+import { HostingUserInfo, PaymentRequestResult, ComputeLogEntry } from "../runtime/RuntimeResolver";
 import { AgentStatus } from "./AgentStatus";
 import { LinkMutations } from "../links/Links";
 import { PerspectiveClient } from "../perspectives/PerspectiveClient";
@@ -26,6 +26,7 @@ export type AgentUpdatedCallback = (agent: Agent) => null;
 export type AgentStatusChangedCallback = (agent: Agent) => null;
 export type AgentAppsUpdatedCallback = () => null;
 export type HostingUserInfoChangedCallback = (info: HostingUserInfo) => void;
+export type ComputeLogUpdatedCallback = (entry: ComputeLogEntry) => void;
 
 /**
  * Provides access to all functions regarding the local agent,
@@ -41,6 +42,7 @@ export class AgentClient {
   #agentStatusChangedCallbacks: AgentStatusChangedCallback[];
   #hostingUserInfoChangedCallbacks: HostingUserInfoChangedCallback[];
   #unsubscribers: (() => void)[];
+  #computeLogUpdatedCallbacks: ComputeLogUpdatedCallback[];
 
   constructor(baseUrl: string, token?: string, subscribe: boolean = true) {
     this.#baseUrl = baseUrl;
@@ -51,6 +53,7 @@ export class AgentClient {
     this.#appsChangedCallback = [];
     this.#hostingUserInfoChangedCallbacks = [];
     this.#unsubscribers = [];
+    this.#computeLogUpdatedCallbacks = [];
 
     if (subscribe) {
       this.subscribeAgentUpdated();
@@ -210,6 +213,19 @@ export class AgentClient {
     this.#unsubscribers.push(unsub);
   }
 
+  addComputeLogUpdatedListener(listener: ComputeLogUpdatedCallback) {
+    this.#computeLogUpdatedCallbacks.push(listener);
+  }
+
+  subscribeComputeLogUpdated() {
+    const unsub = this.#restClient.subscribe('/api/v1/events/agent', (data) => {
+      if (data.type === 'compute-log-updated') {
+        this.#computeLogUpdatedCallbacks.forEach((cb) => cb(data.entry));
+      }
+    });
+    this.#unsubscribers.push(unsub);
+  }
+
   async requestCapability(authInfo: AuthInfoInput): Promise<string> {
     return this.#restClient.post<string>('/api/v1/agent/capability/request', { authInfo });
   }
@@ -262,6 +278,15 @@ export class AgentClient {
   // Hosting methods
   async hostingUserInfo(): Promise<HostingUserInfo> {
     return this.#restClient.get<HostingUserInfo>('/api/v1/runtime/hosting/user-info');
+  }
+
+  async computeLog(since?: string, limit?: number, userEmail?: string): Promise<ComputeLogEntry[]> {
+    const params = new URLSearchParams();
+    if (since) params.set('since', since);
+    if (limit !== undefined) params.set('limit', String(limit));
+    if (userEmail) params.set('userEmail', userEmail);
+    const query = params.toString();
+    return this.#restClient.get<ComputeLogEntry[]>(`/api/v1/runtime/compute-log${query ? '?' + query : ''}`);
   }
 
   async setHotWalletAddress(address: string): Promise<boolean> {

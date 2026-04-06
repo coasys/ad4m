@@ -708,6 +708,18 @@ pub struct PaymentRequestResult {
     pub message: String,
 }
 
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputeLogEntry {
+    pub id: i32,
+    pub user_email: String,
+    pub timestamp: String,
+    pub operation: String,
+    pub summary: Option<String>,
+    pub cost: f64,
+    pub credits_after: f64,
+}
+
 #[derive(Default, Debug, Deserialize, Serialize)]
 pub struct NeighbourhoodSignalFilter {
     pub perspective: PerspectiveHandle,
@@ -1193,6 +1205,20 @@ impl GetValue for HostingUserInfo {
 impl GetFilter for HostingUserInfo {
     fn get_filter(&self) -> Option<String> {
         Some(self.email.clone())
+    }
+}
+
+impl GetValue for ComputeLogEntry {
+    type Value = ComputeLogEntry;
+
+    fn get_value(&self) -> Self::Value {
+        self.clone()
+    }
+}
+
+impl GetFilter for ComputeLogEntry {
+    fn get_filter(&self) -> Option<String> {
+        Some(self.user_email.clone())
     }
 }
 

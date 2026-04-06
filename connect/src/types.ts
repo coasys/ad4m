@@ -26,6 +26,9 @@ export type Ad4mConnectOptions = {
   // Hosting options
   hostIndexUrl?: string;     // URL of the central host index REST API
   lowCreditThreshold?: number; // Credits level at which to warn the user (default: 10)
+  // Credit lifecycle callbacks
+  onCreditsDepleted?: () => void; // Called once when credits reach zero and the modal is opened
+  onUseApp?: () => void;          // Called when the user clicks "Use App" after a credit-depletion session
 };
 
 export type ConfigStates = "port" | "url" | "token";
@@ -57,4 +60,15 @@ export type UserInfo = {
   remainingCredits: number;  // in wHOT equivalent
   hotWalletAddress: string | null;  // user's wHOT public address (null until set)
   freeAccess: boolean;
+};
+
+/** A single compute activity log entry */
+export type ComputeLogEntryData = {
+  id: number;
+  userEmail: string;
+  timestamp: string;
+  operation: string;
+  summary: string | null;
+  cost: number;
+  creditsAfter: number;
 };
