@@ -3904,11 +3904,9 @@ mod tests {
 
     #[test]
     fn test_export_import_all_tables() {
-        use crate::types::DecoratedExpressionProof;
         use crate::types::domain::{Neighbourhood, Perspective};
-        use crate::types::{
-            DecoratedNeighbourhoodExpression, PerspectiveState,
-        };
+        use crate::types::DecoratedExpressionProof;
+        use crate::types::{DecoratedNeighbourhoodExpression, PerspectiveState};
 
         // Initialize test database
         let db = Ad4mDb::new(":memory:").unwrap();
