@@ -518,11 +518,32 @@ export async function evaluateCustomGettersForInstance(
         const targetMetadata = TargetClass
           ? (TargetClass as any).getModelMetadata?.() ?? null
           : null;
-        const conditions = compileWhereClause(meta.where, targetMetadata);
-        if (conditions.length > 0) {
-          const escapedPredicate = escapeQueryString(meta.predicate);
-          getter = `SELECT ?target WHERE { <Base> <${escapedPredicate}> ?target . ${conditions.join(' ')} }`;
+
+        // Check if all where conditions can be SPARQL-filtered.
+        // literal-resolved properties store signed expressions (literal:json:{…}),
+        // not raw literal:string: IRIs, so SPARQL exact-match fails for them.
+        let allSparqlFilterable = true;
+        if (targetMetadata) {
+          for (const propName of Object.keys(meta.where)) {
+            if (['id', 'author', 'timestamp'].includes(propName)) continue;
+            const propMeta = targetMetadata.properties[propName];
+            if (propMeta && (!propMeta.resolveLanguage || propMeta.resolveLanguage === 'literal')) {
+              allSparqlFilterable = false;
+              break;
+            }
+          }
+        } else {
+          allSparqlFilterable = false;
         }
+
+        if (allSparqlFilterable) {
+          const conditions = compileWhereClause(meta.where, targetMetadata);
+          if (conditions.length > 0) {
+            const escapedPredicate = escapeQueryString(meta.predicate);
+            getter = `SELECT ?target WHERE { <Base> <${escapedPredicate}> ?target . ${conditions.join(' ')} }`;
+          }
+        }
+        // If not filterable, fall through to buildConformanceGetter + JS post-filter below
       } catch (e) {
         console.warn(`[Ad4mModel] where-clause compilation failed for relation "${relName}":`, e);
       }
@@ -560,6 +581,31 @@ export async function evaluateCustomGettersForInstance(
         }
       } catch (error) {
         console.warn(`Failed to evaluate getter for ${relName}:`, error);
+      }
+    }
+
+    // JS post-filter for where conditions that couldn't be SPARQL-filtered
+    // (e.g. literal-resolved properties storing signed expressions)
+    const currentValues = instance[relName];
+    if (meta.where && Array.isArray(currentValues) && currentValues.length > 0) {
+      const TargetClass = meta.target?.();
+      if (TargetClass) {
+        const filtered: string[] = [];
+        for (const targetId of currentValues) {
+          try {
+            const inst = new (TargetClass as any)(perspective, targetId);
+            await inst.get();
+            let matches = true;
+            for (const [prop, expected] of Object.entries(meta.where)) {
+              if ((inst as any)[prop] !== expected) { matches = false; break; }
+            }
+            if (matches) filtered.push(targetId);
+          } catch {
+            // If we can't hydrate, keep the value (conservative)
+            filtered.push(targetId);
+          }
+        }
+        instance[relName] = filtered;
       }
     }
   }
