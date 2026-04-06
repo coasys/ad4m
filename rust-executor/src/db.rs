@@ -3905,8 +3905,9 @@ mod tests {
     #[test]
     fn test_export_import_all_tables() {
         use crate::types::DecoratedExpressionProof;
+        use crate::types::domain::{Neighbourhood, Perspective};
         use crate::types::{
-            DecoratedNeighbourhoodExpression, Neighbourhood, Perspective, PerspectiveState,
+            DecoratedNeighbourhoodExpression, PerspectiveState,
         };
 
         // Initialize test database
