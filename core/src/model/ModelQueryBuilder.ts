@@ -486,12 +486,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /**
    * Gets the total count of matching entities using SPARQL.
+   * Delegates to count() with SPARQL engine forced.
    */
   async countSparql(): Promise<number> {
-    const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, this.queryParams);
-    const rawResult = await this.perspective.querySparql(sparqlQuery);
-    const { totalCount } = await this.processSparqlResult(rawResult);
-    return totalCount;
+    const prev = this.engineFlag;
+    this.engineFlag = 'sparql';
+    try {
+      return await this.count();
+    } finally {
+      this.engineFlag = prev;
+    }
   }
 
   /**
@@ -610,13 +614,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /**
    * Gets a page of results using SPARQL.
+   * Delegates to paginate() with SPARQL engine forced.
    */
   async paginateSparql(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
-    const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, paginationQuery);
-    const rawResult = await this.perspective.querySparql(sparqlQuery);
-    const { results, totalCount } = await this.processSparqlResult(rawResult) as ResultsWithTotalCount<T>;
-    return { results, totalCount, pageSize, pageNumber };
+    const prev = this.engineFlag;
+    this.engineFlag = 'sparql';
+    try {
+      return await this.paginate(pageSize, pageNumber);
+    } finally {
+      this.engineFlag = prev;
+    }
   }
 
   /**
@@ -695,27 +702,19 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /**
    * Subscribes to paginated results updates using SPARQL.
+   * Delegates to paginateSubscribe() with SPARQL engine forced.
    */
   async paginateSubscribeSparql(
     pageSize: number,
     pageNumber: number,
     callback: (results: PaginationResult<T>) => void
   ): Promise<PaginationResult<T>> {
-    this.dispose();
-
-    const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, paginationQuery);
-    this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
-
-    const processResults = async (result: any) => {
-      const { results, totalCount } = await this.processSparqlResult(result) as ResultsWithTotalCount<T>;
-      callback({ results, totalCount, pageSize, pageNumber });
-    };
-
-    this.currentSubscription.onResult(processResults);
-    const { results, totalCount } = await this.processSparqlResult(this.currentSubscription.result) as ResultsWithTotalCount<T>;
-    const initialPage = { results, totalCount, pageSize, pageNumber };
-    callback(initialPage);
-    return initialPage;
+    const prev = this.engineFlag;
+    this.engineFlag = 'sparql';
+    try {
+      return await this.paginateSubscribe(pageSize, pageNumber, callback);
+    } finally {
+      this.engineFlag = prev;
+    }
   }
 }

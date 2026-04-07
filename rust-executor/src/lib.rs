@@ -405,12 +405,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         init_prolog_service().await;
     }
 
-    {
-        info!("Initializing SPARQL service...");
-        perspectives::sparql_store::init_sparql_store(config.app_data_path.as_deref())
-            .expect("Failed to initialize SPARQL service");
-    }
-
     find_and_set_port(&mut config.gql_port, 4000, "GraphQL");
     find_and_set_port(&mut config.hc_admin_port, 2000, "Holochain admin");
     find_and_set_port(&mut config.hc_app_port, 1337, "Holochain app");

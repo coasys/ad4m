@@ -1,7 +1,6 @@
 use crate::graphql::graphql_types::LinkStatus;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
 use deno_core::anyhow::{anyhow, Error};
-use lazy_static::lazy_static;
 use oxigraph::model::*;
 use oxigraph::sparql::{Query, QueryOptions, QueryResults};
 use oxigraph::store::Store;
@@ -638,24 +637,6 @@ impl SparqlStore {
         }
         Ok(())
     }
-}
-
-lazy_static! {
-    static ref SPARQL_SERVICE: Arc<std::sync::RwLock<Option<SparqlStore>>> =
-        Arc::new(std::sync::RwLock::new(None));
-}
-
-pub fn init_sparql_store(data_path: Option<&str>) -> Result<(), Error> {
-    let service = SparqlStore::new(data_path)?;
-    let mut lock = SPARQL_SERVICE.write().unwrap();
-    *lock = Some(service);
-    Ok(())
-}
-
-pub fn get_sparql_store() -> SparqlStore {
-    let lock = SPARQL_SERVICE.read().unwrap();
-    lock.clone()
-        .expect("SparqlStore not initialized. Call init_sparql_store() first.")
 }
 
 #[cfg(test)]
