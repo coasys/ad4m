@@ -128,8 +128,22 @@ impl LanguageRuntime {
         // Note: execute() wraps scripts in `return (expr)`, so this must be
         // a single expression, not statements.
         let capture_script = format!(
-            r#"import("{}").then(m => {{ globalThis.languageConstructor = m.default && m.default.default ? m.default.default : m.default || m; }})"#,
-            specifier
+            r#"import("{}").then(m => {{
+                const mod = m.default && m.default.default ? m.default.default : m.default || m;
+                if (typeof mod === "function") {{
+                    // Legacy: default export is create(context) function
+                    globalThis.languageConstructor = mod;
+                    globalThis.__language_pattern__ = "legacy";
+                }} else if (mod && typeof mod.init === "function") {{
+                    // New flat export pattern
+                    globalThis.languageModule = mod;
+                    globalThis.__language_pattern__ = "flat";
+                }} else {{
+                    // Fallback: assume legacy (object with callable default)
+                    globalThis.languageConstructor = mod;
+                    globalThis.__language_pattern__ = "legacy";
+                }}
+            }})"#, specifier
         );
         self.js_core
             .execute(&capture_script)

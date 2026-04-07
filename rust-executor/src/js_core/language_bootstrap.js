@@ -300,7 +300,7 @@ async function initLanguage(contextJson) {
         }));
 
         // Build language instance from flat exports
-        language = { name: mod.name || "unknown" };
+        language = { name: mod.name || "unknown", version: mod.version };
 
         // Map adapter exports to adapter slots
         if (mod.expressionCreate || mod.expressionGet) {
@@ -328,6 +328,7 @@ async function initLanguage(contextJson) {
                 writable: mod.linkSyncWritable,
                 public: mod.linkSyncPublic,
                 addCallback: mod.linkSyncAddCallback,
+                removeCallback: mod.linkSyncRemoveCallback,
                 addSyncStateChangeCallback: mod.linkSyncAddSyncStateChangeCallback,
                 setLocalAgents: mod.linkSyncSetLocalAgents,
             };

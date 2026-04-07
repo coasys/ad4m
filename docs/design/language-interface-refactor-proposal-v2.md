@@ -43,7 +43,7 @@ Language Module (JS or future WASM)
 │   │   ├── linkSyncWritable(): boolean
 │   │   ├── linkSyncPublic(): boolean
 │   │   └── linkSyncAddCallback(callback): void
-│   │
+│   │   └── linkSyncRemoveCallback?(callback): void
 │   ├── EXPRESSION CAPABILITY (if expressionGet exists)
 │   │   ├── expressionGet(address: Address): Promise<Expression | null>
 │   │   ├── expressionCreatePublic(content: object): Promise<Address>
@@ -92,7 +92,7 @@ const hasExpression = typeof module.expressionGet === 'function';
 
 | Interface | Required Functions |
 |-----------|-------------------|
-| LinkSyncAdapter | `linkSyncSync`, `linkSyncCommit`, `linkSyncRender`, `linkSyncCurrentRevision`, `linkSyncOthers`, `linkSyncWritable`, `linkSyncPublic`, `linkSyncAddCallback` |
+| LinkSyncAdapter | `linkSyncSync`, `linkSyncCommit`, `linkSyncRender`, `linkSyncCurrentRevision`, `linkSyncOthers`, `linkSyncWritable`, `linkSyncPublic`, `linkSyncAddCallback`, `linkSyncRemoveCallback` |
 | ExpressionAdapter | `expressionGet`, `expressionCreatePublic` |
 | TelepresenceAdapter | `telepresenceSetOnlineStatus`, `telepresenceGetOnlineAgents`, `telepresenceSendSignal`, `telepresenceRegisterSignalCallback` |
 | DirectMessageAdapter | `directMessageRecipient`, `directMessageStatus`, `directMessageSendP2P`, `directMessageSendInbox`, `directMessageSetStatus`, `directMessageInbox`, `directMessageAddMessageCallback` |
