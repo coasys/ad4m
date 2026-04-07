@@ -193,7 +193,7 @@ pub struct PerspectiveInstance {
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
-    sparql_store: Arc<crate::perspectives::sparql_store::SparqlStore>,
+    pub(crate) sparql_store: Arc<crate::perspectives::sparql_store::SparqlStore>,
 }
 
 impl PerspectiveInstance {

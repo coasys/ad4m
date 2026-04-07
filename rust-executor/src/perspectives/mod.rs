@@ -88,6 +88,23 @@ pub fn initialize_from_db() {
         tokio::spawn(async move {
             let p = PerspectiveInstance::new(handle_clone.clone(), None);
 
+            // Run literal:// → literal: URI migration (idempotent)
+            match migration::migrate_links_from_rusqlite_to_sparql(
+                &handle_clone.uuid,
+                &p.sparql_store,
+            ) {
+                Ok(result) if result.migrated > 0 => {
+                    log::info!(
+                        "🔄 Migration for {}: {} migrated, {} literal conversions",
+                        handle_clone.uuid,
+                        result.migrated,
+                        result.literal_conversions
+                    );
+                }
+                Ok(_) => {} // Already migrated or nothing to migrate
+                Err(e) => log::warn!("Migration check for {}: {}", handle_clone.uuid, e),
+            }
+
             // Rebuild SPARQL index from existing links
             match p.get_links(&LinkQuery::default()).await {
                 Ok(links) => {
