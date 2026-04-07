@@ -273,6 +273,25 @@ export function sleep(ms: number) {
 }
 
 /**
+ * Poll a condition until it returns true, checking every 100ms.
+ * Throws after timeoutMs with a descriptive error.
+ * Condition can be sync or async.
+ */
+export async function waitFor(
+  condition: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+  description: string
+) {
+  const start = Date.now();
+  while (!(await condition())) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`Timed out waiting for: ${description} (after ${timeoutMs}ms)`);
+    }
+    await sleep(100);
+  }
+}
+
+/**
  * Clears all links in a perspective in a single removeLinks() batch call.
  * Import from here or from helpers/assertions to get a clean slate before each test.
  */

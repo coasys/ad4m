@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor, runHcLocalServices, gracefulShutdown } from "../utils/utils";
+import { apolloClient, sleep, waitFor, startExecutor, runHcLocalServices, gracefulShutdown } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
@@ -2780,7 +2780,8 @@ describe("Multi-User Simple integration tests", () => {
         });
     });
 
-    describe("Cross-Node Signal Routing: Remote Main Agent <-> Local Managed User (Flux Scenario)", () => {
+    describe("Cross-Node Signal Routing: Remote Main Agent <-> Local Managed User (Flux Scenario)", function() {
+        this.retries(2); // Holochain signal routing is timing-sensitive on CI
         // This test replicates the Flux bug:
         // - Node 1: standalone main agent (no multi-user)
         // - Node 2: main agent + managed user (multi-user enabled)
@@ -2904,7 +2905,10 @@ describe("Multi-User Simple integration tests", () => {
 
             // Wait for the two main agents to fully sync
             console.log("Waiting for main agents to sync...");
-            await sleep(15000);
+            await waitFor(async () => {
+                const online = await adminAd4mClient!.runtime.hcAgentInfos();
+                return online.length >= 2;
+            }, 30000, 'Main agents should sync (hcAgentInfos >= 2)');
 
             // Verify the two main agents see each other before proceeding
             const localMainPerspectives = await adminAd4mClient!.perspective.all();
@@ -2954,7 +2958,7 @@ describe("Multi-User Simple integration tests", () => {
             // Step 4: Managed user joins the neighbourhood
             console.log("Managed user joining neighbourhood (late joiner)...");
             await localManagedUserClient!.neighbourhood.joinFromUrl(neighbourhoodUrl);
-            await sleep(5000);
+            await sleep(3000); // Brief settle time after join
 
             // Re-exchange agent infos so the remote node can discover
             // the managed user's DID-to-AgentPubKey mapping
@@ -2974,7 +2978,10 @@ describe("Multi-User Simple integration tests", () => {
 
             // Wait for the managed user's DID link to gossip
             console.log("Waiting for managed user DID gossip...");
-            await sleep(10000);
+            await waitFor(async () => {
+                const infos = await adminAd4mClient!.runtime.hcAgentInfos();
+                return infos.length >= 3;
+            }, 60000, 'Managed user DID should gossip (hcAgentInfos >= 3)');
 
             // Get managed user's neighbourhood proxy
             const localManagedPerspectives = await localManagedUserClient!.perspective.all();

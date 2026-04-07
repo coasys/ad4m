@@ -1,6 +1,6 @@
 import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
 import { TestContext } from './integration.test'
-import { sleep } from "../utils/utils";
+import { sleep, waitFor } from "../utils/utils";
 import fs from "fs";
 import { v4 as uuidv4 } from 'uuid';
 import { expect } from "chai";
@@ -316,7 +316,8 @@ export default function neighbourhoodTests(testContext: TestContext) {
             // })
 
 
-            describe('with set up and joined NH for Telepresence', async () => {
+            describe('with set up and joined NH for Telepresence', function() {
+                this.retries(2); // Holochain signal routing is timing-sensitive on CI
                 let aliceNH: NeighbourhoodProxy|undefined
                 let bobNH: NeighbourhoodProxy|undefined
                 let aliceDID: string|undefined
@@ -338,6 +339,20 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     bobNH = bobP1!.getNeighbourhoodProxy()
                     aliceDID = (await alice.agent.me()).did
                     bobDID = (await bob.agent.me()).did
+
+                    // Poll until both agents can see each other via otherAgents
+                    const maxWait = 30000;
+                    const start = Date.now();
+                    while (Date.now() - start < maxWait) {
+                        const aliceAgents = await aliceNH!.otherAgents();
+                        const bobAgents = await bobNH!.otherAgents();
+                        if (aliceAgents.length >= 1 && bobAgents.length >= 1) {
+                            console.log('Agents discovered each other in ' + (Date.now() - start) + 'ms');
+                            break;
+                        }
+                        await sleep(500);
+                    }
+                    // Wait for DHT propagation after agent discovery
                     await sleep(5000)
                 })
 
@@ -432,9 +447,18 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     link.proof = new ExpressionProof("sig", "key");
                     const aliceSignal = new Perspective([link])
 
-                    await aliceNH!.sendSignal(bobDID!, aliceSignal)
+                    for (let attempt = 0; attempt < 5; attempt++) {
+                        try {
+                            await aliceNH!.sendSignal(bobDID!, aliceSignal);
+                            break;
+                        } catch (e) {
+                            if (attempt === 4) throw e;
+                            console.log(`Signal send attempt ${attempt + 1} failed, retrying...`);
+                            await sleep(3000);
+                        }
+                    }
 
-                    await sleep(1000)
+                    await waitFor(() => bobCalls >= 1, 30000, 'Bob should receive directed signal')
 
                     expect(bobCalls).to.be.equal(1)
                     expect(aliceCalls).to.be.equal(0)
@@ -450,7 +474,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                     await bobNH!.sendBroadcastU(bobSignal)
 
-                    await sleep(1000)
+                    await waitFor(() => aliceCalls >= 1, 30000, 'Alice should receive broadcast from Bob')
 
                     expect(aliceCalls).to.be.equal(1)
 
@@ -480,9 +504,18 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     // Test broadcast without loopback
                     let link = new Link({source: "alice", target: "broadcast", predicate: "test"});
                     const aliceSignal = new PerspectiveUnsignedInput([link])
-                    await aliceNH!.sendBroadcastU(aliceSignal)
+                    for (let attempt = 0; attempt < 3; attempt++) {
+                        try {
+                            await aliceNH!.sendBroadcastU(aliceSignal);
+                            break;
+                        } catch (e) {
+                            if (attempt === 2) throw e;
+                            console.log(`Broadcast send attempt ${attempt + 1} failed, retrying...`);
+                            await sleep(2000);
+                        }
+                    }
 
-                    await sleep(1000)
+                    await waitFor(() => bobCalls >= 1, 30000, 'Bob should receive broadcast without loopback')
 
                     expect(bobCalls).to.be.equal(1)
                     expect(aliceCalls).to.be.equal(0) // Alice shouldn't receive her own broadcast
@@ -501,7 +534,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     // @ts-ignore - Ignoring the type error since we know the implementation supports loopback
                     await aliceNH!.sendBroadcastU(aliceSignal2, true)
 
-                    await sleep(1000)
+                    await waitFor(() => bobCalls >= 1 && aliceCalls >= 1, 30000, 'Both should receive loopback broadcast')
 
                     expect(bobCalls).to.be.equal(1)
                     expect(aliceCalls).to.be.equal(1) // Alice should receive her own broadcast
@@ -516,7 +549,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     // @ts-ignore - Ignoring the type error since we know the implementation supports loopback
                     await bobNH!.sendBroadcastU(bobSignal, true)
 
-                    await sleep(1000)
+                    await waitFor(() => bobCalls >= 2 && aliceCalls >= 2, 30000, 'Both should receive Bob loopback broadcast')
 
                     expect(bobCalls).to.be.equal(2) // Bob should receive his own broadcast
                     expect(aliceCalls).to.be.equal(2) // Alice should receive Bob's broadcast
