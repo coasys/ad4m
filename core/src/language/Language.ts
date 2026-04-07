@@ -7,11 +7,53 @@ import { InputType, Field, ObjectType } from "type-graphql";
 import { PerspectiveState } from '../perspectives/PerspectiveHandle';
 import { LinkQuery } from '../perspectives/LinkQuery';
 
+/**
+ * # AD4M Language Module Formats
+ * 
+ * AD4M languages can be written in two formats:
+ * 
+ * ## 1. Legacy Format (create() factory)
+ * 
+ * ```javascript
+ * export default async function create(context) {
+ *     return {
+ *         name: "my-language",
+ *         expressionAdapter: { get, putAdapter: { createPublic } },
+ *         // ...
+ *     };
+ * }
+ * ```
+ * 
+ * ## 2. Flat Export Format (recommended)
+ * 
+ * ```javascript
+ * export const name = "my-language";
+ * export const version = "0.1.0";
+ * 
+ * export async function init(contextJson) {
+ *     // contextJson is a JSON string containing:
+ *     // { storageDirectory, customSettings, languageAddress }
+ *     // Delegates (agent, holochain) available via globalThis:
+ *     //   globalThis.__agentProxy__
+ *     //   globalThis.__holochainDelegate__
+ *     //   globalThis.__ad4mSignal__
+ * }
+ * 
+ * // Capability functions (presence = capability):
+ * export async function expressionGet(address) { /* ... *\/ }
+ * export async function expressionCreate(content) { /* ... *\/ }
+ * export async function linkSyncSync() { /* ... *\/ }
+ * // etc.
+ * ```
+ * 
+ * The flat export format is converted to the internal `Language` interface
+ * by the language_bootstrap.js adapter wrapper.
+ */
+
 /** Interface of AD4M Languages
  * 
- * Any JavaScript module that implements a create() function that returns an object that implements this interface
- * is a valid AD4M language.
- * So the AD4M-internal representation of a language is an object that implements this interface.
+ * The AD4M-internal representation of a language (after adapter wrapper conversion).
+ * This is what the executor works with internally.
  * 
  * Since there are a few different kinds of languages, this interface is split into optional sub-interfaces.
  * The only required property is the name of the language.

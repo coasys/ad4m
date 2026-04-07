@@ -282,7 +282,118 @@ async function initLanguage(contextJson) {
         ad4mSignal: ad4mSignal,
     };
 
-    const language = await globalThis.languageConstructor(fullContext);
+    let language;
+
+    if (globalThis.__language_pattern__ === "flat") {
+        const mod = globalThis.languageModule;
+
+        // Set globals for non-serializable delegates (WASM languages access these via globalThis)
+        globalThis.__holochainDelegate__ = holochainDelegate;
+        globalThis.__ad4mSignal__ = ad4mSignal;
+        globalThis.__agentProxy__ = agentProxy;
+
+        // init() receives serializable context as JSON string
+        await mod.init(JSON.stringify({
+            storageDirectory: fullContext.storageDirectory,
+            customSettings: fullContext.customSettings,
+            languageAddress: languageAddress,
+        }));
+
+        // Build language instance from flat exports
+        language = { name: mod.name || "unknown" };
+
+        // Map adapter exports to adapter slots
+        if (mod.expressionCreate || mod.expressionGet) {
+            const putAdapter = mod.expressionCreate ? { createPublic: mod.expressionCreate } : undefined;
+            // Support both expressionAddressOf (design name) and addressOf (TypeScript name)
+            const addressOf = mod.expressionAddressOf || mod.addressOf;
+            if (addressOf && putAdapter) {
+                // ReadOnlyLanguage style: putAdapter also has addressOf
+                putAdapter.addressOf = addressOf;
+            }
+            language.expressionAdapter = {
+                putAdapter,
+                get: mod.expressionGet,
+            };
+        }
+
+        // Map LinkSync functions
+        if (mod.linkSyncSync) {
+            language.linksAdapter = {
+                sync: mod.linkSyncSync,
+                commit: mod.linkSyncCommit,
+                render: mod.linkSyncRender,
+                currentRevision: mod.linkSyncCurrentRevision,
+                others: mod.linkSyncOthers,
+                writable: mod.linkSyncWritable,
+                public: mod.linkSyncPublic,
+                addCallback: mod.linkSyncAddCallback,
+                addSyncStateChangeCallback: mod.linkSyncAddSyncStateChangeCallback,
+                setLocalAgents: mod.linkSyncSetLocalAgents,
+            };
+        }
+
+        // Map Telepresence functions
+        if (mod.telepresenceSetOnlineStatus) {
+            language.telepresenceAdapter = {
+                setOnlineStatus: mod.telepresenceSetOnlineStatus,
+                getOnlineAgents: mod.telepresenceGetOnlineAgents,
+                sendSignal: mod.telepresenceSendSignal,
+                sendBroadcast: mod.telepresenceSendBroadcast,
+                registerSignalCallback: mod.telepresenceRegisterSignalCallback,
+            };
+        }
+
+        // Map DirectMessage functions
+        if (mod.directMessageRecipient) {
+            language.directMessageAdapter = {
+                recipient: mod.directMessageRecipient,
+                status: mod.directMessageStatus,
+                sendP2P: mod.directMessageSendP2P,
+                sendInbox: mod.directMessageSendInbox,
+                setStatus: mod.directMessageSetStatus,
+                inbox: mod.directMessageInbox,
+                addMessageCallback: mod.directMessageAddMessageCallback,
+            };
+        }
+
+        // Other optional adapters
+        if (mod.languageGetSource) {
+            language.languageAdapter = { getLanguageSource: mod.languageGetSource };
+        }
+        if (mod.getByAuthor) {
+            language.getByAuthorAdapter = { getByAuthor: mod.getByAuthor };
+        }
+        if (mod.getAll) {
+            language.getAllAdapter = { getAll: mod.getAll };
+        }
+        if (mod.expressionIcon) {
+            language.expressionUI = {
+                icon: mod.expressionIcon,
+                constructorIcon: mod.expressionConstructorIcon,
+            };
+        }
+        if (mod.settingsIcon) {
+            language.settingsUI = { settingsIcon: mod.settingsIcon };
+        }
+        if (mod.isImmutableExpression) {
+            language.isImmutableExpression = mod.isImmutableExpression;
+        }
+
+        // Interactions
+        if (mod.interactions) {
+            language.interactions = mod.interactions;
+        }
+        // Teardown
+        if (mod.teardown) {
+            language.teardown = mod.teardown;
+        }
+
+    } else {
+        // Legacy: create() factory pattern
+        language = await globalThis.languageConstructor(fullContext);
+    }
+
     globalThis.__ad4m_language_instance__ = language;
     globalThis.language = language;
     return language;
