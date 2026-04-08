@@ -518,7 +518,11 @@ fn camel_case_deserialization() {
 #[test]
 fn snake_case_rejected() {
     // snake_case should NOT work (camelCase is enforced)
-    let json = json!({"perspective_uuid": "uuid-1", "link_language": "Qm123", "meta": {"links": []}});
+    let json =
+        json!({"perspective_uuid": "uuid-1", "link_language": "Qm123", "meta": {"links": []}});
     let result = serde_json::from_value::<PublishNeighbourhoodRequest>(json);
-    assert!(result.is_err(), "snake_case should be rejected when rename_all=camelCase");
+    assert!(
+        result.is_err(),
+        "snake_case should be rejected when rename_all=camelCase"
+    );
 }

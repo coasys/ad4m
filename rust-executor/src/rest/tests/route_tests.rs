@@ -74,7 +74,11 @@ async fn route_get_agent_status() {
 #[tokio::test]
 async fn route_agent_is_locked() {
     let s = route_status(Method::GET, "/api/v1/agent/is-locked").await;
-    assert!(is_route_registered(s), "GET /agent/is-locked returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /agent/is-locked returned {}",
+        s
+    );
 }
 
 #[tokio::test]
@@ -86,19 +90,31 @@ async fn route_get_apps() {
 #[tokio::test]
 async fn route_get_agent_by_did() {
     let s = route_status(Method::GET, "/api/v1/agent/by-did/did:test:123").await;
-    assert!(is_route_registered(s), "GET /agent/by-did/:did returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /agent/by-did/:did returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_update_profile() {
     let s = route_status(Method::PATCH, "/api/v1/agent/profile").await;
-    assert!(is_route_registered(s), "PATCH /agent/profile returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "PATCH /agent/profile returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_generate_agent() {
     let s = route_status(Method::POST, "/api/v1/agent/generate").await;
-    assert!(is_route_registered(s), "POST /agent/generate returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /agent/generate returned {}",
+        s
+    );
 }
 
 #[tokio::test]
@@ -122,31 +138,51 @@ async fn route_sign_message() {
 #[tokio::test]
 async fn route_remove_app() {
     let s = route_status(Method::DELETE, "/api/v1/agent/apps/test-id").await;
-    assert!(is_route_registered(s), "DELETE /agent/apps/:id returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "DELETE /agent/apps/:id returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_request_capability() {
     let s = route_status(Method::POST, "/api/v1/agent/auth/request").await;
-    assert!(is_route_registered(s), "POST /agent/auth/request returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /agent/auth/request returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_permit_capability() {
     let s = route_status(Method::POST, "/api/v1/agent/auth/permit").await;
-    assert!(is_route_registered(s), "POST /agent/auth/permit returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /agent/auth/permit returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_generate_jwt() {
     let s = route_status(Method::POST, "/api/v1/agent/auth/jwt").await;
-    assert!(is_route_registered(s), "POST /agent/auth/jwt returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /agent/auth/jwt returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_revoke_token() {
     let s = route_status(Method::DELETE, "/api/v1/agent/auth/token/test-token").await;
-    assert!(is_route_registered(s), "DELETE /agent/auth/token/:token returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "DELETE /agent/auth/token/:token returned {}",
+        s
+    );
 }
 
 #[tokio::test]
@@ -164,25 +200,41 @@ async fn route_trusted_agents_put() {
 #[tokio::test]
 async fn route_trusted_agents_delete() {
     let s = route_status(Method::DELETE, "/api/v1/agent/trusted").await;
-    assert!(is_route_registered(s), "DELETE /agent/trusted returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "DELETE /agent/trusted returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_entanglement_proofs_get() {
     let s = route_status(Method::GET, "/api/v1/agent/entanglement-proofs").await;
-    assert!(is_route_registered(s), "GET /agent/entanglement-proofs returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /agent/entanglement-proofs returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_entanglement_proofs_post() {
     let s = route_status(Method::POST, "/api/v1/agent/entanglement-proofs").await;
-    assert!(is_route_registered(s), "POST /agent/entanglement-proofs returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /agent/entanglement-proofs returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_entanglement_proofs_delete() {
     let s = route_status(Method::DELETE, "/api/v1/agent/entanglement-proofs").await;
-    assert!(is_route_registered(s), "DELETE /agent/entanglement-proofs returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "DELETE /agent/entanglement-proofs returned {}",
+        s
+    );
 }
 
 // ── Language routes ──
@@ -196,43 +248,71 @@ async fn route_list_languages() {
 #[tokio::test]
 async fn route_publish_language() {
     let s = route_status(Method::POST, "/api/v1/languages/publish").await;
-    assert!(is_route_registered(s), "POST /languages/publish returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /languages/publish returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_apply_template() {
     let s = route_status(Method::POST, "/api/v1/languages/apply-template").await;
-    assert!(is_route_registered(s), "POST /languages/apply-template returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /languages/apply-template returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_get_language() {
     let s = route_status(Method::GET, "/api/v1/languages/Qm12345").await;
-    assert!(is_route_registered(s), "GET /languages/:address returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /languages/:address returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_remove_language() {
     let s = route_status(Method::DELETE, "/api/v1/languages/Qm12345").await;
-    assert!(is_route_registered(s), "DELETE /languages/:address returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "DELETE /languages/:address returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_get_language_meta() {
     let s = route_status(Method::GET, "/api/v1/languages/Qm12345/meta").await;
-    assert!(is_route_registered(s), "GET /languages/:address/meta returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /languages/:address/meta returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_get_language_source() {
     let s = route_status(Method::GET, "/api/v1/languages/Qm12345/source").await;
-    assert!(is_route_registered(s), "GET /languages/:address/source returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /languages/:address/source returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_write_settings() {
     let s = route_status(Method::PUT, "/api/v1/languages/Qm12345/settings").await;
-    assert!(is_route_registered(s), "PUT /languages/:address/settings returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "PUT /languages/:address/settings returned {}",
+        s
+    );
 }
 
 // ── Perspective routes ──
@@ -252,55 +332,91 @@ async fn route_create_perspective() {
 #[tokio::test]
 async fn route_get_perspective() {
     let s = route_status(Method::GET, "/api/v1/perspectives/test-uuid").await;
-    assert!(is_route_registered(s), "GET /perspectives/:uuid returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /perspectives/:uuid returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_update_perspective() {
     let s = route_status(Method::PUT, "/api/v1/perspectives/test-uuid").await;
-    assert!(is_route_registered(s), "PUT /perspectives/:uuid returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "PUT /perspectives/:uuid returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_delete_perspective() {
     let s = route_status(Method::DELETE, "/api/v1/perspectives/test-uuid").await;
-    assert!(is_route_registered(s), "DELETE /perspectives/:uuid returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "DELETE /perspectives/:uuid returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_get_snapshot() {
     let s = route_status(Method::GET, "/api/v1/perspectives/test-uuid/snapshot").await;
-    assert!(is_route_registered(s), "GET /perspectives/:uuid/snapshot returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /perspectives/:uuid/snapshot returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_query_links() {
     let s = route_status(Method::GET, "/api/v1/perspectives/test-uuid/links").await;
-    assert!(is_route_registered(s), "GET /perspectives/:uuid/links returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /perspectives/:uuid/links returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_mutate_links() {
     let s = route_status(Method::POST, "/api/v1/perspectives/test-uuid/links").await;
-    assert!(is_route_registered(s), "POST /perspectives/:uuid/links returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /perspectives/:uuid/links returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_query_perspective() {
     let s = route_status(Method::POST, "/api/v1/perspectives/test-uuid/query").await;
-    assert!(is_route_registered(s), "POST /perspectives/:uuid/query returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /perspectives/:uuid/query returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_add_sdna() {
     let s = route_status(Method::POST, "/api/v1/perspectives/test-uuid/sdna").await;
-    assert!(is_route_registered(s), "POST /perspectives/:uuid/sdna returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /perspectives/:uuid/sdna returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_execute_commands() {
     let s = route_status(Method::POST, "/api/v1/perspectives/test-uuid/commands").await;
-    assert!(is_route_registered(s), "POST /perspectives/:uuid/commands returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /perspectives/:uuid/commands returned {}",
+        s
+    );
 }
 
 // ── Neighbourhood routes ──
@@ -308,49 +424,93 @@ async fn route_execute_commands() {
 #[tokio::test]
 async fn route_join_neighbourhood() {
     let s = route_status(Method::POST, "/api/v1/neighbourhoods/join").await;
-    assert!(is_route_registered(s), "POST /neighbourhoods/join returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /neighbourhoods/join returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_publish_neighbourhood() {
     let s = route_status(Method::POST, "/api/v1/neighbourhoods/publish").await;
-    assert!(is_route_registered(s), "POST /neighbourhoods/publish returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /neighbourhoods/publish returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_send_broadcast() {
     let s = route_status(Method::POST, "/api/v1/neighbourhoods/test-uuid/broadcast").await;
-    assert!(is_route_registered(s), "POST /neighbourhoods/:uuid/broadcast returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /neighbourhoods/:uuid/broadcast returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_send_signal() {
     let s = route_status(Method::POST, "/api/v1/neighbourhoods/test-uuid/signal").await;
-    assert!(is_route_registered(s), "POST /neighbourhoods/:uuid/signal returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /neighbourhoods/:uuid/signal returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_set_online_status() {
-    let s = route_status(Method::PUT, "/api/v1/neighbourhoods/test-uuid/online-status").await;
-    assert!(is_route_registered(s), "PUT /neighbourhoods/:uuid/online-status returned {}", s);
+    let s = route_status(
+        Method::PUT,
+        "/api/v1/neighbourhoods/test-uuid/online-status",
+    )
+    .await;
+    assert!(
+        is_route_registered(s),
+        "PUT /neighbourhoods/:uuid/online-status returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_online_agents() {
-    let s = route_status(Method::GET, "/api/v1/neighbourhoods/test-uuid/online-agents").await;
-    assert!(is_route_registered(s), "GET /neighbourhoods/:uuid/online-agents returned {}", s);
+    let s = route_status(
+        Method::GET,
+        "/api/v1/neighbourhoods/test-uuid/online-agents",
+    )
+    .await;
+    assert!(
+        is_route_registered(s),
+        "GET /neighbourhoods/:uuid/online-agents returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_other_agents() {
     let s = route_status(Method::GET, "/api/v1/neighbourhoods/test-uuid/other-agents").await;
-    assert!(is_route_registered(s), "GET /neighbourhoods/:uuid/other-agents returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /neighbourhoods/:uuid/other-agents returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_has_telepresence() {
-    let s = route_status(Method::GET, "/api/v1/neighbourhoods/test-uuid/has-telepresence").await;
-    assert!(is_route_registered(s), "GET /neighbourhoods/:uuid/has-telepresence returned {}", s);
+    let s = route_status(
+        Method::GET,
+        "/api/v1/neighbourhoods/test-uuid/has-telepresence",
+    )
+    .await;
+    assert!(
+        is_route_registered(s),
+        "GET /neighbourhoods/:uuid/has-telepresence returned {}",
+        s
+    );
 }
 
 // ── Expression routes ──
@@ -364,25 +524,41 @@ async fn route_create_expression() {
 #[tokio::test]
 async fn route_get_many_expressions() {
     let s = route_status(Method::POST, "/api/v1/expressions/many").await;
-    assert!(is_route_registered(s), "POST /expressions/many returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /expressions/many returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_get_expression() {
     let s = route_status(Method::GET, "/api/v1/expressions/lang://Qm123%2F%2Fhash123").await;
-    assert!(is_route_registered(s), "GET /expressions/:url returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /expressions/:url returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_get_interactions() {
     let s = route_status(Method::GET, "/api/v1/expressions/lang://Qm123/interactions").await;
-    assert!(is_route_registered(s), "GET /expressions/:url/interactions returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /expressions/:url/interactions returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_interact_expression() {
     let s = route_status(Method::POST, "/api/v1/expressions/lang://Qm123/interact").await;
-    assert!(is_route_registered(s), "POST /expressions/:url/interact returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /expressions/:url/interact returned {}",
+        s
+    );
 }
 
 // ── Runtime routes ──
@@ -408,145 +584,241 @@ async fn route_set_status() {
 #[tokio::test]
 async fn route_open_link() {
     let s = route_status(Method::POST, "/api/v1/runtime/open-link").await;
-    assert!(is_route_registered(s), "POST /runtime/open-link returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /runtime/open-link returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_export_data() {
     let s = route_status(Method::POST, "/api/v1/runtime/export").await;
-    assert!(is_route_registered(s), "POST /runtime/export returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /runtime/export returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_import_data() {
     let s = route_status(Method::POST, "/api/v1/runtime/import").await;
-    assert!(is_route_registered(s), "POST /runtime/import returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /runtime/import returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_restart_holochain() {
     let s = route_status(Method::POST, "/api/v1/runtime/holochain/restart").await;
-    assert!(is_route_registered(s), "POST /runtime/holochain/restart returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /runtime/holochain/restart returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_verify_signature() {
     let s = route_status(Method::POST, "/api/v1/runtime/verify-signature").await;
-    assert!(is_route_registered(s), "POST /runtime/verify-signature returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /runtime/verify-signature returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_list_friends() {
     let s = route_status(Method::GET, "/api/v1/runtime/friends").await;
-    assert!(is_route_registered(s), "GET /runtime/friends returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /runtime/friends returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_add_friends() {
     let s = route_status(Method::PUT, "/api/v1/runtime/friends").await;
-    assert!(is_route_registered(s), "PUT /runtime/friends returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "PUT /runtime/friends returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_remove_friends() {
     let s = route_status(Method::DELETE, "/api/v1/runtime/friends").await;
-    assert!(is_route_registered(s), "DELETE /runtime/friends returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "DELETE /runtime/friends returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_get_friend_status() {
     let s = route_status(Method::GET, "/api/v1/runtime/friends/did:test:123").await;
-    assert!(is_route_registered(s), "GET /runtime/friends/:did returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /runtime/friends/:did returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_send_friend_message() {
     let s = route_status(Method::POST, "/api/v1/runtime/friends/did:test:123/message").await;
-    assert!(is_route_registered(s), "POST /runtime/friends/:did/message returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /runtime/friends/:did/message returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_get_inbox() {
     let s = route_status(Method::GET, "/api/v1/runtime/messages/inbox").await;
-    assert!(is_route_registered(s), "GET /runtime/messages/inbox returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /runtime/messages/inbox returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_get_outbox() {
     let s = route_status(Method::GET, "/api/v1/runtime/messages/outbox").await;
-    assert!(is_route_registered(s), "GET /runtime/messages/outbox returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /runtime/messages/outbox returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_list_notifications() {
     let s = route_status(Method::GET, "/api/v1/runtime/notifications").await;
-    assert!(is_route_registered(s), "GET /runtime/notifications returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /runtime/notifications returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_create_notification() {
     let s = route_status(Method::POST, "/api/v1/runtime/notifications").await;
-    assert!(is_route_registered(s), "POST /runtime/notifications returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /runtime/notifications returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_update_notification() {
     let s = route_status(Method::PATCH, "/api/v1/runtime/notifications/test-id").await;
-    assert!(is_route_registered(s), "PATCH /runtime/notifications/:id returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "PATCH /runtime/notifications/:id returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_delete_notification() {
     let s = route_status(Method::DELETE, "/api/v1/runtime/notifications/test-id").await;
-    assert!(is_route_registered(s), "DELETE /runtime/notifications/:id returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "DELETE /runtime/notifications/:id returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_get_link_language_templates() {
     let s = route_status(Method::GET, "/api/v1/runtime/link-language-templates").await;
-    assert!(is_route_registered(s), "GET /runtime/link-language-templates returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /runtime/link-language-templates returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_add_link_language_templates() {
     let s = route_status(Method::PUT, "/api/v1/runtime/link-language-templates").await;
-    assert!(is_route_registered(s), "PUT /runtime/link-language-templates returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "PUT /runtime/link-language-templates returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_remove_link_language_templates() {
     let s = route_status(Method::DELETE, "/api/v1/runtime/link-language-templates").await;
-    assert!(is_route_registered(s), "DELETE /runtime/link-language-templates returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "DELETE /runtime/link-language-templates returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_get_hc_agent_infos() {
     let s = route_status(Method::GET, "/api/v1/runtime/hc/agent-infos").await;
-    assert!(is_route_registered(s), "GET /runtime/hc/agent-infos returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /runtime/hc/agent-infos returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_add_hc_agent_infos() {
     let s = route_status(Method::POST, "/api/v1/runtime/hc/agent-infos").await;
-    assert!(is_route_registered(s), "POST /runtime/hc/agent-infos returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /runtime/hc/agent-infos returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_get_network_metrics() {
     let s = route_status(Method::GET, "/api/v1/runtime/network-metrics").await;
-    assert!(is_route_registered(s), "GET /runtime/network-metrics returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /runtime/network-metrics returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_get_free_hosting_enabled() {
     let s = route_status(Method::GET, "/api/v1/runtime/free-hosting-enabled").await;
-    assert!(is_route_registered(s), "GET /runtime/free-hosting-enabled returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /runtime/free-hosting-enabled returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_set_free_hosting_enabled() {
     let s = route_status(Method::PUT, "/api/v1/runtime/free-hosting-enabled").await;
-    assert!(is_route_registered(s), "PUT /runtime/free-hosting-enabled returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "PUT /runtime/free-hosting-enabled returned {}",
+        s
+    );
 }
 
 // ── User routes ──
@@ -554,13 +826,21 @@ async fn route_set_free_hosting_enabled() {
 #[tokio::test]
 async fn route_get_multi_user_enabled() {
     let s = route_status(Method::GET, "/api/v1/users/multi-user-enabled").await;
-    assert!(is_route_registered(s), "GET /users/multi-user-enabled returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /users/multi-user-enabled returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_set_multi_user_enabled() {
     let s = route_status(Method::PUT, "/api/v1/users/multi-user-enabled").await;
-    assert!(is_route_registered(s), "PUT /users/multi-user-enabled returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "PUT /users/multi-user-enabled returned {}",
+        s
+    );
 }
 
 #[tokio::test]
@@ -584,13 +864,21 @@ async fn route_login_user() {
 #[tokio::test]
 async fn route_verify_email() {
     let s = route_status(Method::POST, "/api/v1/users/verify-email").await;
-    assert!(is_route_registered(s), "POST /users/verify-email returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /users/verify-email returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_email_test() {
     let s = route_status(Method::POST, "/api/v1/dev/email-test").await;
-    assert!(is_route_registered(s), "POST /dev/email-test returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "POST /dev/email-test returned {}",
+        s
+    );
 }
 
 // ── Hosting routes ──
@@ -610,7 +898,11 @@ async fn route_get_hosting_wallet() {
 #[tokio::test]
 async fn route_get_hosting_wallet_history() {
     let s = route_status(Method::GET, "/api/v1/hosting/wallet/history").await;
-    assert!(is_route_registered(s), "GET /hosting/wallet/history returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /hosting/wallet/history returned {}",
+        s
+    );
 }
 
 // ── AI routes ──
@@ -636,13 +928,21 @@ async fn route_update_model() {
 #[tokio::test]
 async fn route_remove_model() {
     let s = route_status(Method::DELETE, "/api/v1/ai/models/test-id").await;
-    assert!(is_route_registered(s), "DELETE /ai/models/:id returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "DELETE /ai/models/:id returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_set_default_model() {
     let s = route_status(Method::PUT, "/api/v1/ai/models/test-id/default").await;
-    assert!(is_route_registered(s), "PUT /ai/models/:id/default returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "PUT /ai/models/:id/default returned {}",
+        s
+    );
 }
 
 #[tokio::test]
@@ -666,7 +966,11 @@ async fn route_update_task() {
 #[tokio::test]
 async fn route_remove_task() {
     let s = route_status(Method::DELETE, "/api/v1/ai/tasks/test-id").await;
-    assert!(is_route_registered(s), "DELETE /ai/tasks/:id returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "DELETE /ai/tasks/:id returned {}",
+        s
+    );
 }
 
 #[tokio::test]
@@ -692,19 +996,35 @@ async fn route_agent_events() {
 #[tokio::test]
 async fn route_perspective_lifecycle_events() {
     let s = route_status(Method::GET, "/api/v1/events/perspectives").await;
-    assert!(is_route_registered(s), "GET /events/perspectives returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /events/perspectives returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_perspective_link_events() {
     let s = route_status(Method::GET, "/api/v1/events/perspectives/test-uuid/links").await;
-    assert!(is_route_registered(s), "GET /events/perspectives/:uuid/links returned {}", s);
+    assert!(
+        is_route_registered(s),
+        "GET /events/perspectives/:uuid/links returned {}",
+        s
+    );
 }
 
 #[tokio::test]
 async fn route_neighbourhood_signal_events() {
-    let s = route_status(Method::GET, "/api/v1/events/neighbourhoods/test-uuid/signals").await;
-    assert!(is_route_registered(s), "GET /events/neighbourhoods/:uuid/signals returned {}", s);
+    let s = route_status(
+        Method::GET,
+        "/api/v1/events/neighbourhoods/test-uuid/signals",
+    )
+    .await;
+    assert!(
+        is_route_registered(s),
+        "GET /events/neighbourhoods/:uuid/signals returned {}",
+        s
+    );
 }
 
 #[tokio::test]
@@ -725,7 +1045,11 @@ async fn route_ai_events() {
 async fn wrong_method_returns_405() {
     // GET on a POST-only endpoint
     let s = route_status(Method::GET, "/api/v1/agent/generate").await;
-    assert_eq!(s, StatusCode::METHOD_NOT_ALLOWED, "GET /agent/generate should be 405");
+    assert_eq!(
+        s,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "GET /agent/generate should be 405"
+    );
 }
 
 #[tokio::test]
