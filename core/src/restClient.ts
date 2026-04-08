@@ -10,6 +10,9 @@ declare var EventSource: {
 export class RestClient {
     constructor(private baseUrl: string, private token?: string) {}
 
+    getBaseUrl(): string { return this.baseUrl; }
+    getToken(): string | undefined { return this.token; }
+
     setToken(token: string) {
         this.token = token
     }

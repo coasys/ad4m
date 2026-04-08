@@ -7,6 +7,7 @@ import { ModelInput, Model, ModelType } from "./AITypes"
 export class AIClient {
     #restClient: RestClient;
     #transcriptionUnsubscribers: Map<string, () => void> = new Map();
+    #audioWs: WebSocket | null = null;
 
     constructor(baseUrl: string, token?: string, subscribe: boolean = true) {
         this.#restClient = new RestClient(baseUrl, token);
@@ -101,10 +102,14 @@ export class AIClient {
 
         this.#transcriptionUnsubscribers.set(streamId, unsub);
 
+        // Connect binary WebSocket for efficient audio transport
+        this.connectAudioWs([streamId]);
+
         return streamId;
     }
 
     async closeTranscriptionStream(streamId: string): Promise<void> {
+        this.disconnectAudioWs();
         await this.#restClient.post<void>('/api/v1/ai/transcription/close', { streamId });
 
         const unsub = this.#transcriptionUnsubscribers.get(streamId);
@@ -115,9 +120,47 @@ export class AIClient {
     }
 
     async feedTranscriptionStream(streamIds: string | string[], audio: Float32Array): Promise<void> {
+        const ids = Array.isArray(streamIds) ? streamIds : [streamIds];
+
+        // Use WebSocket if connected (binary, efficient — no JSON serialisation)
+        if (this.#audioWs && this.#audioWs.readyState === WebSocket.OPEN) {
+            this.#audioWs.send(audio.buffer);
+            return;
+        }
+
+        // Fallback to REST POST (JSON, less efficient)
         return this.#restClient.post<void>('/api/v1/ai/transcription/feed', {
-            streamIds: Array.isArray(streamIds) ? streamIds : [streamIds],
+            streamIds: ids,
             audio: Array.from(audio)
         });
+    }
+
+    private connectAudioWs(streamIds: string[]): void {
+        const baseUrl = this.#restClient.getBaseUrl().replace(/^http/, 'ws');
+        const token = this.#restClient.getToken();
+        if (!token) return;
+
+        const idsParam = encodeURIComponent(streamIds.join(','));
+        const tokenParam = encodeURIComponent(token);
+
+        this.#audioWs = new WebSocket(
+            `${baseUrl}/api/v1/ws/audio?token=${tokenParam}&stream_ids=${idsParam}`
+        );
+        this.#audioWs.binaryType = 'arraybuffer';
+
+        this.#audioWs.onerror = () => {
+            this.#audioWs = null;
+        };
+
+        this.#audioWs.onclose = () => {
+            this.#audioWs = null;
+        };
+    }
+
+    private disconnectAudioWs(): void {
+        if (this.#audioWs) {
+            this.#audioWs.close();
+            this.#audioWs = null;
+        }
     }
 }
