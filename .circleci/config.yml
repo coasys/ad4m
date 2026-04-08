@@ -98,7 +98,7 @@ jobs:
           command: cargo clippy --all --exclude ad4m-launcher
       - run:
           name: Rust unit tests
-          command: cargo test --workspace --exclude ad4m-launcher
+          command: cargo test --workspace --exclude ad4m-launcher -- --test-threads=1
           no_output_timeout: 15m
       - run:
           name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
