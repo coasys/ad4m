@@ -3,13 +3,15 @@ import { Ad4mClient } from './Ad4mClient';
 import { Perspective } from './perspectives/Perspective';
 import { LinkQuery } from './perspectives/LinkQuery';
 
-// Mock EventSource for SSE subscriptions in Node.js test environment
-(global as any).EventSource = class MockEventSource {
+// Save original EventSource so we can restore it after the suite
+const originalEventSource = (global as any).EventSource;
+
+class MockEventSource {
     onmessage: any = null;
     onerror: any = null;
     close() {}
     constructor(_url: string) {}
-};
+}
 
 let app: ReturnType<typeof express>;
 let httpServer: any;
@@ -30,6 +32,8 @@ function trackRequest(req: express.Request) {
 }
 
 beforeAll(async () => {
+    (global as any).EventSource = MockEventSource as any;
+
     app = express();
     app.use(express.json());
 
@@ -364,6 +368,7 @@ beforeAll(async () => {
 
 afterAll(() => {
     httpServer?.close();
+    (global as any).EventSource = originalEventSource;
 });
 
 beforeEach(() => {
