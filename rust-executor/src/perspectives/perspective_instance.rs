@@ -2640,10 +2640,11 @@ impl PerspectiveInstance {
                     }
                     Err(e) => {
                         log::error!(
-                            "Failed to query notification for user {:?} in perspective {}: {:?}. Skipping this notification.",
+                            "Failed to query notification for user {:?} in perspective {}: {:?}. Query: {}. Skipping this notification.",
                             n.user_email,
                             uuid,
-                            e
+                            e,
+                            n.trigger
                         );
                         // Skip this notification but continue processing others
                     }
