@@ -42,12 +42,24 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
 
+        // Try Authorization header first, then fall back to ?token= query param
+        // (needed for SSE/EventSource which doesn't support custom headers)
         let auth_header = parts
             .headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                parts
+                    .uri
+                    .query()
+                    .and_then(|q| {
+                        url::form_urlencoded::parse(q.as_bytes())
+                            .find(|(k, _)| k == "token")
+                            .map(|(_, v)| v.to_string())
+                    })
+                    .unwrap_or_default()
+            });
 
         // Track last_seen for multi-user mode
         crate::agent::capabilities::track_last_seen_from_token(auth_header.clone()).await;

@@ -172,7 +172,7 @@ pub async fn runtime_events(
         .map(|msg| Ok(Event::default().event("notification-triggered").data(msg)));
     let s3 = BroadcastStream::new(exc_rx)
         .filter_map(|r| async { r.ok() })
-        .map(|msg| Ok(Event::default().event("exception").data(msg)));
+        .map(|msg| Ok(Event::default().event("exception-occurred").data(msg)));
 
     let merged = stream::select(s1, stream::select(s2, s3));
     Sse::new(merged).keep_alive(KeepAlive::default())

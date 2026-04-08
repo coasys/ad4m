@@ -3,7 +3,7 @@
 //! 10 harmonised endpoints including unified link mutations and query.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
 
@@ -163,7 +163,7 @@ pub async fn query_links(
     State(_state): State<AppState>,
     auth: AuthContext,
     Path(uuid): Path<String>,
-    Json(query): Json<LinkQuery>,
+    Query(query): Query<LinkQuery>,
 ) -> Result<Json<Vec<DecoratedLinkExpression>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(
@@ -374,7 +374,11 @@ pub async fn mutate_links(
     // Deduct compute credits
     let total_ops = response.additions.len() + response.removals.len() + response.updates.len();
     if total_ops > 0 {
-        let _ = reserve_compute_credits(&context.auth_token, total_ops as f64 * DEFAULT_LINK_WRITE);
+        if let Err(e) =
+            reserve_compute_credits(&context.auth_token, total_ops as f64 * DEFAULT_LINK_WRITE)
+        {
+            log::warn!("Failed to reserve compute credits: {:?}", e);
+        }
     }
 
     Ok(Json(response))
