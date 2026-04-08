@@ -985,6 +985,44 @@ async fn route_ai_embed() {
     assert!(is_route_registered(s), "POST /ai/embed returned {}", s);
 }
 
+// ── AI Transcription routes ──
+
+#[tokio::test]
+async fn route_ai_transcription_open() {
+    let s = route_status(Method::POST, "/api/v1/ai/transcription/open").await;
+    assert!(
+        is_route_registered(s),
+        "POST /ai/transcription/open returned {}",
+        s
+    );
+}
+
+#[tokio::test]
+async fn route_ai_transcription_feed() {
+    let s = route_status(Method::POST, "/api/v1/ai/transcription/feed").await;
+    assert!(
+        is_route_registered(s),
+        "POST /ai/transcription/feed returned {}",
+        s
+    );
+}
+
+#[tokio::test]
+async fn route_ai_transcription_close() {
+    let s = route_status(Method::POST, "/api/v1/ai/transcription/close").await;
+    assert!(
+        is_route_registered(s),
+        "POST /ai/transcription/close returned {}",
+        s
+    );
+}
+
+#[tokio::test]
+async fn route_ws_audio() {
+    let s = route_status(Method::GET, "/api/v1/ws/audio").await;
+    assert!(is_route_registered(s), "GET /ws/audio returned {}", s);
+}
+
 // ── Event (SSE) routes ──
 
 #[tokio::test]

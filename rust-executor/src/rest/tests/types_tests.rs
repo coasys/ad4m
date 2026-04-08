@@ -526,3 +526,62 @@ fn snake_case_rejected() {
         "snake_case should be rejected when rename_all=camelCase"
     );
 }
+
+// ── AI Transcription request types ──
+
+use crate::rest::ai::{
+    CloseTranscriptionRequest, FeedTranscriptionRequest, OpenTranscriptionRequest,
+};
+use crate::rest::audio_ws::AudioWsParams;
+
+#[test]
+fn parse_open_transcription_request() {
+    let json = json!({"modelId": "whisper-small"});
+    let req: OpenTranscriptionRequest = serde_json::from_value(json).unwrap();
+    assert_eq!(req.model_id, "whisper-small");
+    assert!(req.params.is_none());
+}
+
+#[test]
+fn parse_open_transcription_request_with_params() {
+    let json = json!({
+        "modelId": "whisper-medium",
+        "params": {
+            "startThreshold": 0.5,
+            "startWindow": 5,
+            "endThreshold": 0.3,
+            "endWindow": 10,
+            "timeBeforeSpeech": 2
+        }
+    });
+    let req: OpenTranscriptionRequest = serde_json::from_value(json).unwrap();
+    assert_eq!(req.model_id, "whisper-medium");
+    let p = req.params.unwrap();
+    assert_eq!(p.start_threshold, Some(0.5));
+    assert_eq!(p.start_window, Some(5));
+}
+
+#[test]
+fn parse_feed_transcription_request() {
+    let json = json!({
+        "streamIds": ["s1", "s2"],
+        "audio": [0.1, 0.2, -0.5, 1.0]
+    });
+    let req: FeedTranscriptionRequest = serde_json::from_value(json).unwrap();
+    assert_eq!(req.stream_ids.len(), 2);
+    assert_eq!(req.audio.len(), 4);
+}
+
+#[test]
+fn parse_close_transcription_request() {
+    let json = json!({"streamId": "abc-123"});
+    let req: CloseTranscriptionRequest = serde_json::from_value(json).unwrap();
+    assert_eq!(req.stream_id, "abc-123");
+}
+
+#[test]
+fn parse_audio_ws_params() {
+    let json = json!({"stream_ids": "s1,s2"});
+    let params: AudioWsParams = serde_json::from_value(json).unwrap();
+    assert_eq!(params.stream_ids, "s1,s2");
+}
