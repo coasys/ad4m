@@ -5,6 +5,7 @@ pub mod language_context;
 pub mod language_runtime;
 pub mod language_runtime_handle;
 pub mod literal;
+pub mod wasm_delegate;
 
 pub use literal::{literal_decode, literal_encode};
 
