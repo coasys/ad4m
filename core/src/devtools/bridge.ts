@@ -11,6 +11,7 @@ const MAX_LANGUAGES = 100;
 let nextGetterTraceId = 1;
 
 export function initDevToolsBridge(client: any): void {
+  console.log("[AD4M DevTools] initDevToolsBridge called");
   if (typeof globalThis === 'undefined') return;
   if ((globalThis as any).__AD4M_DEVTOOLS__) return;
 
@@ -171,6 +172,8 @@ export function initDevToolsBridge(client: any): void {
   };
 
   (globalThis as any).__AD4M_DEVTOOLS__ = devtools;
+  (globalThis as any).window && ((globalThis as any).window.__AD4M_DEVTOOLS__ = devtools);
+  console.log("[AD4M DevTools] Bridge initialized on globalThis and window", Object.keys(devtools));
 }
 
 export type { AD4MDevTools, DevToolsState } from './types';
