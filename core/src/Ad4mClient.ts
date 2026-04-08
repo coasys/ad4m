@@ -6,6 +6,7 @@ import { RuntimeClient } from './runtime/RuntimeClient'
 import { ExpressionClient } from './expression/ExpressionClient'
 import { AIClient } from './ai/AIClient'
 import { RestClient } from './restClient'
+import { initDevToolsBridge } from './devtools/bridge';
 
 /**
  * Client for the Ad4m interface wrapping REST API calls
@@ -42,6 +43,15 @@ export class Ad4mClient {
         this.#perspectiveClient.setNeighbourhoodClient(this.#neighbourhoodClient)
         this.#perspectiveClient.setAIClient(this.#aiClient)
         this.#runtimeClient = new RuntimeClient(baseUrl, token, subscribe, this.#restClient)
+
+        // Initialize DevTools bridge in non-production browser environments
+        if (typeof globalThis !== "undefined" && typeof (globalThis as any).window !== "undefined" && (
+          typeof process === 'undefined' || process.env?.NODE_ENV !== 'production'
+        )) {
+          try {
+            initDevToolsBridge(this);
+          } catch {}
+        }
     }
 
     get agent(): AgentClient {

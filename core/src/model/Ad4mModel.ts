@@ -725,7 +725,18 @@ export class Ad4mModel {
   public static async queryToSPARQL(perspective: PerspectiveProxy, query: Query): Promise<string> {
     const metadata = this.getModelMetadata();
     const allRelMeta = getRelationsMetadata(this as any);
-    return buildSPARQLQuery(metadata, allRelMeta, query, this);
+    const sparql = await buildSPARQLQuery(metadata, allRelMeta, query, this);
+
+    // Log to DevTools if available
+    if (typeof window !== 'undefined' && (window as any).__AD4M_DEVTOOLS__) {
+      (window as any).__AD4M_DEVTOOLS__.logSparqlQuery({
+        query: sparql,
+        modelName: this.name,
+        perspectiveUUID: perspective?.uuid || '',
+      });
+    }
+
+    return sparql;
   }
 
   public static async instancesFromPrologResult<T extends Ad4mModel>(

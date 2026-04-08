@@ -12,7 +12,6 @@ import type {
   AllInstancesResult, ResultsWithTotalCount, PaginationResult,
 } from "./types";
 import { groupSPARQLResults } from "./query-sparql";
-import { pooledSubscribe } from "./subscription-pool";
 
 /** Query builder for Ad4mModel queries.
  * Allows building queries with a fluent interface and either running them once
@@ -316,9 +315,9 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * Groups raw SPARQL results and hydrates them into model instances.
    * Centralises the repeated groupSPARQLResults → instancesFromQueryResult pipeline.
    */
-  private async processSparqlResult(rawResult: any, queryOverride?: Query): Promise<{ results: T[], totalCount: number }> {
+  private async processSparqlResult(rawResult: any): Promise<{ results: T[], totalCount: number }> {
     const grouped = groupSPARQLResults(Array.isArray(rawResult) ? rawResult : []);
-    return await this.ctor.instancesFromQueryResult(this.perspective, queryOverride || this.queryParams, grouped) as { results: T[], totalCount: number };
+    return await this.ctor.instancesFromQueryResult(this.perspective, this.queryParams, grouped) as { results: T[], totalCount: number };
   }
 
   /**
@@ -378,13 +377,40 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
     const ctor = this.ctor;
 
+    // Track subscription in DevTools
+    let devtoolsSubId: number | undefined;
+    if (typeof window !== 'undefined' && window.__AD4M_DEVTOOLS__) {
+      devtoolsSubId = window.__AD4M_DEVTOOLS__.trackSubscription({
+        query: '',
+        perspectiveUUID: this.perspective?.uuid || '',
+        modelName: ctor?.name || '',
+      });
+    }
+
     if (this.engineFlag === 'sparql') {
         const sparqlQuery = await ctor.queryToSPARQL(this.perspective, this.queryParams);
 
+        // Update DevTools with actual query
+        if (devtoolsSubId !== undefined && window.__AD4M_DEVTOOLS__) {
+          window.__AD4M_DEVTOOLS__.updateSubscription(devtoolsSubId, { query: sparqlQuery });
+        }
+
+        // TODO (3.6 - Subscription predicate filtering): Extract predicates used in the
+        // SPARQL query and pass them as hints to subscribeQuery so the Rust-side
+        // subscription can filter link-change notifications by predicate, avoiding
+        // unnecessary re-queries for unrelated link changes. This requires Rust-side
+        // support in PerspectiveProxy.subscribeQuery to accept a predicate whitelist.
+        this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
+
         // Track last emitted result fingerprint to suppress duplicate callbacks
+        // when the raw SPARQL result changes but the JS-filtered set doesn't
+        // (e.g. a non-matching record was added/removed).
         let lastResultFingerprint: string | null = null;
 
         const buildFingerprint = (results: any[]) => {
+            // Lightweight fingerprint: IDs + count + timestamps.
+            // Avoids JSON.stringify of all properties for performance.
+            // Catches additions, removals, and timestamp-based updates.
             if (results.length === 0) return '0:';
             // Must include relation data (e.g. tags) — not just id/timestamp.
             // Otherwise @HasMany changes on existing instances are suppressed as duplicates.
@@ -393,29 +419,21 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
             );
         };
 
-        const hydrate = async (rawResult: any) => {
-            const { results } = await this.processSparqlResult(rawResult);
-            return results;
+        const processResults = async (result: any) => {
+            const { results } = await this.processSparqlResult(result);
+            const fp = buildFingerprint(results);
+            if (fp === lastResultFingerprint) return; // filtered set unchanged — skip callback
+            lastResultFingerprint = fp;
+            callback(results as T[]);
         };
 
-        const pooled = await pooledSubscribe(
-            this.perspective,
-            sparqlQuery,
-            hydrate,
-            (hydratedResults: T[]) => {
-                const fp = buildFingerprint(hydratedResults);
-                if (fp === lastResultFingerprint) return;
-                lastResultFingerprint = fp;
-                callback(hydratedResults);
-            },
-        );
-
-        // Store dispose function as subscription
-        this.currentSubscription = { dispose: pooled.dispose };
-
-        const initialResults = pooled.initialResult as T[];
-        lastResultFingerprint = buildFingerprint(initialResults);
-        return initialResults;
+        this.currentSubscription.onResult(processResults);
+        
+        // Process initial result
+        const { results } = await this.processSparqlResult(this.currentSubscription.result);
+        lastResultFingerprint = buildFingerprint(results);
+        // Initial results returned via Promise only — callback is for subsequent updates
+        return results as T[];
     } else {
         const query = await ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
         this.currentSubscription = await this.perspective.subscribeInfer(query);
@@ -600,7 +618,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     if (this.engineFlag === 'sparql') {
       const sparqlQuery = await this.ctor.queryToSPARQL(this.perspective, paginationQuery);
       const result = await this.perspective.querySparql(sparqlQuery);
-      const { results, totalCount } = await this.processSparqlResult(result, paginationQuery) as ResultsWithTotalCount<T>;
+      const { results, totalCount } = await this.processSparqlResult(result) as ResultsWithTotalCount<T>;
       return { results, totalCount, pageSize, pageNumber };
     } else {
       const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);
@@ -672,12 +690,12 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
 
       const processResults = async (result: any) => {
-        const { results, totalCount } = await this.processSparqlResult(result, paginationQuery) as ResultsWithTotalCount<T>;
+        const { results, totalCount } = await this.processSparqlResult(result) as ResultsWithTotalCount<T>;
         callback({ results, totalCount, pageSize, pageNumber });
       };
 
       this.currentSubscription.onResult(processResults);
-      const { results, totalCount } = await this.processSparqlResult(this.currentSubscription.result, paginationQuery) as ResultsWithTotalCount<T>;
+      const { results, totalCount } = await this.processSparqlResult(this.currentSubscription.result) as ResultsWithTotalCount<T>;
       const initialPage = { results, totalCount, pageSize, pageNumber };
       // Initial page returned via Promise — callback for subsequent updates only
       return initialPage;

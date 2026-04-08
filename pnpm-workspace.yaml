@@ -8,6 +8,7 @@ packages:
   - 'tests/js'
   - 'rust-executor'
   - 'cli'
+  - 'packages/ad4m-devtools'
   - 'dapp'
   - 'ad4m-hooks/react'
   - 'ad4m-hooks/vue'
