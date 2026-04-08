@@ -48,8 +48,7 @@ pub fn set_app_data_path(path: String) {
 /// # Returns
 /// * `Some(String)` - The configured app data path if set
 /// * `None` - No app data path configured (will use in-memory storage)
-#[allow(dead_code)]
-fn get_app_data_path() -> Option<String> {
+pub(crate) fn get_app_data_path() -> Option<String> {
     APP_DATA_PATH.read().unwrap().clone()
 }
 
@@ -106,29 +105,37 @@ pub fn initialize_from_db() {
             }
 
             // Rebuild SPARQL index from existing links
-            match p.get_links(&LinkQuery::default()).await {
-                Ok(links) => {
-                    if !links.is_empty() {
-                        log::info!(
-                            "🔄 SPARQL REBUILD: Syncing {} links for perspective {}",
-                            links.len(),
-                            handle_clone.uuid
-                        );
-                        if let Err(e) = p.sync_existing_links_to_sparql(&links) {
-                            log::error!(
-                                "Failed to sync links to SPARQL for perspective {}: {}",
-                                handle_clone.uuid,
-                                e
+            // Skip SPARQL rebuild if persistent store already has data
+            if p.sparql_store.has_data() {
+                log::info!(
+                    "✅ SPARQL store for perspective {} already has data, skipping rebuild",
+                    handle_clone.uuid
+                );
+            } else {
+                match p.get_links(&LinkQuery::default()).await {
+                    Ok(links) => {
+                        if !links.is_empty() {
+                            log::info!(
+                                "🔄 SPARQL REBUILD: Syncing {} links for perspective {}",
+                                links.len(),
+                                handle_clone.uuid
                             );
+                            if let Err(e) = p.sync_existing_links_to_sparql(&links) {
+                                log::error!(
+                                    "Failed to sync links to SPARQL for perspective {}: {}",
+                                    handle_clone.uuid,
+                                    e
+                                );
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    log::error!(
-                        "Failed to get links for SPARQL sync in perspective {}: {}",
-                        handle_clone.uuid,
-                        e
-                    );
+                    Err(e) => {
+                        log::error!(
+                            "Failed to get links for SPARQL sync in perspective {}: {}",
+                            handle_clone.uuid,
+                            e
+                        );
+                    }
                 }
             }
 

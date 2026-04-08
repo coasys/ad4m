@@ -145,17 +145,30 @@ impl SparqlStore {
     /// If `data_path` is `Some`, opens a persistent RocksDB-backed store at that path.
     /// If `data_path` is `None`, creates an in-memory store (useful for tests).
     ///
-    /// Note: Persistence requires the `rocksdb` feature on oxigraph, which is not currently
-    /// enabled (we use `default-features = false`). Until enabled, all stores are in-memory
-    /// and `data_path` is ignored. TODO: Enable `rocksdb` feature once build compatibility
-    /// is confirmed, then wire up `Store::open(path)` here.
-    pub fn new(_data_path: Option<&str>) -> Result<Self, Error> {
-        // TODO: When rocksdb feature is enabled, use:
-        // if let Some(path) = _data_path {
-        //     let store = Store::open(path)?;
-        //     return Ok(SparqlStore { store: Arc::new(store) });
-        // }
-        let store = Store::new()?;
+    /// Create a new SparqlStore. If `data_path` is provided, uses Oxigraph's persistent
+    /// RocksDB-backed store at `{data_path}/sparql_store/`. If `None`, creates an in-memory store.
+    pub fn new(data_path: Option<&str>) -> Result<Self, Error> {
+        let store = match data_path {
+            Some(path) => {
+                let store_path = std::path::PathBuf::from(path).join("sparql_store");
+                std::fs::create_dir_all(&store_path).map_err(|e| {
+                    anyhow!(
+                        "Failed to create SPARQL store directory {:?}: {}",
+                        store_path,
+                        e
+                    )
+                })?;
+                log::info!("Opening persistent SPARQL store at {:?}", store_path);
+                Store::open(&store_path).map_err(|e| {
+                    anyhow!(
+                        "Failed to open persistent SPARQL store at {:?}: {}",
+                        store_path,
+                        e
+                    )
+                })?
+            }
+            None => Store::new()?,
+        };
         Ok(SparqlStore {
             store: Arc::new(store),
         })
@@ -1514,5 +1527,80 @@ mod tests {
             !rows.is_empty(),
             "Unscoped query should find named graph triples via union default graph"
         );
+    }
+
+    #[test]
+    fn test_persistent_store_survives_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        // Create store, add data, drop
+        {
+            let store = SparqlStore::new(Some(path)).unwrap();
+            store
+                .add_link(&make_link("ad4m://src", "ad4m://pred", "ad4m://tgt"))
+                .unwrap();
+            assert!(store.has_data());
+        }
+
+        // Reopen — data should still be there
+        {
+            let store = SparqlStore::new(Some(path)).unwrap();
+            assert!(
+                store.has_data(),
+                "Persistent store should retain data after drop"
+            );
+            let links = store.get_all_links().unwrap();
+            assert_eq!(links.len(), 1);
+            assert_eq!(links[0].data.source, "ad4m://src");
+            assert_eq!(links[0].data.predicate.as_deref(), Some("ad4m://pred"));
+            assert_eq!(links[0].data.target, "ad4m://tgt");
+        }
+    }
+
+    #[test]
+    fn test_inmemory_store_loses_data_on_drop() {
+        {
+            let store = SparqlStore::new(None).unwrap();
+            store
+                .add_link(&make_link("ad4m://src", "ad4m://pred", "ad4m://tgt"))
+                .unwrap();
+            assert!(store.has_data());
+        }
+
+        let store2 = SparqlStore::new(None).unwrap();
+        assert!(
+            !store2.has_data(),
+            "In-memory store should lose data after drop"
+        );
+    }
+
+    #[test]
+    fn test_has_data_skips_rebuild_for_persistent_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        // First "startup": no data, rebuild needed
+        {
+            let store = SparqlStore::new(Some(path)).unwrap();
+            assert!(
+                !store.has_data(),
+                "Fresh persistent store should have no data"
+            );
+            // Simulate rebuild
+            store
+                .add_link(&make_link("ad4m://a", "ad4m://b", "ad4m://c"))
+                .unwrap();
+            assert!(store.has_data());
+        }
+
+        // Second "startup": data persisted, skip rebuild
+        {
+            let store = SparqlStore::new(Some(path)).unwrap();
+            assert!(
+                store.has_data(),
+                "Persistent store should have data on second open — rebuild should be skipped"
+            );
+        }
     }
 }

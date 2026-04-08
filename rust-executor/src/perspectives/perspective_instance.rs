@@ -198,6 +198,14 @@ pub struct PerspectiveInstance {
 
 impl PerspectiveInstance {
     pub fn new(handle: PerspectiveHandle, created_from_join: Option<bool>) -> Self {
+        // Build per-perspective data path for persistent SPARQL store
+        let sparql_data_path = crate::perspectives::get_app_data_path().map(|base| {
+            let p = std::path::PathBuf::from(&base)
+                .join("perspectives")
+                .join(&handle.uuid);
+            p.to_string_lossy().to_string()
+        });
+
         PerspectiveInstance {
             persisted: Arc::new(Mutex::new(handle.clone())),
 
@@ -217,7 +225,7 @@ impl PerspectiveInstance {
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
             fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
             sparql_store: Arc::new(
-                crate::perspectives::sparql_store::SparqlStore::new(None)
+                crate::perspectives::sparql_store::SparqlStore::new(sparql_data_path.as_deref())
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
         }

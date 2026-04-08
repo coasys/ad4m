@@ -156,6 +156,7 @@ dependencies = [
  "signal-hook",
  "sodoken 0.1.0",
  "sys_traits",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls 0.26.4",
@@ -14142,6 +14143,7 @@ dependencies = [
  "oxiri",
  "oxrdf",
  "oxrdfio",
+ "oxrocksdb-sys",
  "oxsdatatypes",
  "rand 0.8.5",
  "rustc-hash 2.1.1",
@@ -14216,6 +14218,17 @@ dependencies = [
  "oxrdf",
  "quick-xml 0.37.5",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "oxrocksdb-sys"
+version = "0.4.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16430f45934d678cb6f9823e7c1bfdbdce9025f670ad85b642e46ffe5609e6ff"
+dependencies = [
+ "bindgen 0.70.1",
+ "cc",
+ "libc",
 ]
 
 [[package]]
