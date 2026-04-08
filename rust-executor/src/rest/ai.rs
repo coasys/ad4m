@@ -11,8 +11,9 @@ use crate::agent::capabilities::*;
 use crate::ai_service::AIService;
 use crate::db::Ad4mDb;
 use crate::pubsub::mark_credits_dirty;
-use crate::types::{AITask, AITaskInput, Model, ModelInput, ModelType};
+use crate::types::{AITask, AITaskInput, Model, ModelInput, ModelType, VoiceActivityParamsInput};
 use base64::Engine;
+use serde::Deserialize;
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
@@ -329,4 +330,132 @@ pub async fn ai_embed(
     Ok(Json(
         base64::prelude::BASE64_STANDARD.encode(&compressed_bytes),
     ))
+}
+
+// ── Transcription endpoints ──
+
+/// Check whether billing is active for the given auth token.
+fn is_billing_active(auth_token: &str) -> bool {
+    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+        let global_free =
+            Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+        if global_free {
+            return false;
+        }
+        let free =
+            Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)).unwrap_or(false);
+        !free
+    } else {
+        false
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenTranscriptionRequest {
+    pub model_id: String,
+    pub params: Option<VoiceActivityParamsInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedTranscriptionRequest {
+    pub stream_ids: Vec<String>,
+    pub audio: Vec<f64>, // f64 for JSON compat, cast to f32
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseTranscriptionRequest {
+    pub stream_id: String,
+}
+
+/// POST /ai/transcription/open — open a Whisper transcription stream
+pub async fn open_transcription_stream(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Json(body): Json<OpenTranscriptionRequest>,
+) -> Result<Json<String>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+    check_compute_credits(&context.auth_token)?;
+
+    // When billing is active, verify a rate is configured for this model
+    if is_billing_active(&context.auth_token) {
+        let rate_key = Ad4mDb::with_global_instance(|db| db.get_model(body.model_id.clone()))
+            .ok()
+            .flatten()
+            .map(|m| m.name)
+            .unwrap_or_else(|| body.model_id.clone());
+        let has_rate = Ad4mDb::with_global_instance(|db| db.get_host_rate(&rate_key))
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        if has_rate.is_none() {
+            return Err(ApiError::BadRequest(format!(
+                "No host rate configured for '{}' — cannot open transcription stream",
+                rate_key
+            )));
+        }
+    }
+
+    let stream_id = AIService::global_instance()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .open_transcription_stream(
+            body.model_id,
+            body.params.map(|p| p.into()),
+            context.auth_token.clone(),
+        )
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(stream_id))
+}
+
+/// POST /ai/transcription/feed — feed audio samples to transcription streams
+pub async fn feed_transcription_stream(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Json(body): Json<FeedTranscriptionRequest>,
+) -> Result<Json<String>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+    check_compute_credits(&context.auth_token)?;
+
+    let audio_f32: Vec<f32> = body.audio.into_iter().map(|x| x as f32).collect();
+    let service = AIService::global_instance()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    for stream_id in &body.stream_ids {
+        if let Err(e) = service
+            .feed_transcription_stream(stream_id, audio_f32.clone(), &context.auth_token)
+            .await
+        {
+            log::warn!("Error feeding stream {}: {}", stream_id, e);
+        }
+    }
+
+    Ok(Json("true".to_string()))
+}
+
+/// POST /ai/transcription/close — close a transcription stream
+pub async fn close_transcription_stream(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Json(body): Json<CloseTranscriptionRequest>,
+) -> Result<Json<String>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    AIService::global_instance()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .close_transcription_stream(&body.stream_id, &context.auth_token)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json("true".to_string()))
 }

@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod ai;
+pub mod audio_ws;
 pub mod auth;
 pub mod errors;
 pub mod events;
@@ -277,6 +278,21 @@ pub fn rest_router(state: AppState) -> Router {
             )
             .route("/ai/prompt", post(ai::ai_prompt))
             .route("/ai/embed", post(ai::ai_embed))
+            // ── AI Transcription (3 endpoints) ──
+            .route(
+                "/ai/transcription/open",
+                post(ai::open_transcription_stream),
+            )
+            .route(
+                "/ai/transcription/feed",
+                post(ai::feed_transcription_stream),
+            )
+            .route(
+                "/ai/transcription/close",
+                post(ai::close_transcription_stream),
+            )
+            // ── WebSocket (1 endpoint) ──
+            .route("/ws/audio", get(audio_ws::audio_websocket))
             // ── SSE Events (6 endpoints) ──
             .route("/events/agent", get(events::agent_events))
             .route(
