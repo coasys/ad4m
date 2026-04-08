@@ -51,7 +51,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * 
    * This method:
    * 1. Stops the keepalive signals to the subscription
-   * 2. Unsubscribes from GraphQL subscription updates
+   * 2. Unsubscribes from subscription updates
    * 3. Notifies the backend to clean up subscription resources
    * 4. Clears the subscription reference
    * 

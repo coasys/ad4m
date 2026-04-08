@@ -12,7 +12,7 @@ import { LinkQuery } from "./LinkQuery";
 *
 * The types PerspectiveProxy and PerspectiveHandle are used when dealing 
 * with an instantiated mutable perspective as is done through most of 
-* the GraphQL mutations.
+* the REST mutations.
 */
 export class Perspective {
     /** The content of the perspective, a list/graph of links */

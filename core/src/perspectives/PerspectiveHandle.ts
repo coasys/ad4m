@@ -8,7 +8,7 @@ export enum PerspectiveState {
     LinkLanguageInstalledButNotSynced = "LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED",
     Synced = "SYNCED",
 }
-// This type is used in the GraphQL interface to reference a mutable
+// This type is used in the REST interface to reference a mutable
 // prespective that is implemented locally by the Ad4m runtime.
 // The UUID is used in mutations to identify the perspective that gets mutated.
 export class PerspectiveHandle {

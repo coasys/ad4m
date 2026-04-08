@@ -16,6 +16,9 @@ pub mod runtime;
 pub mod types;
 pub mod users;
 
+#[cfg(test)]
+mod tests;
+
 use crate::Ad4mConfig;
 use auth::AppState;
 use axum::{
