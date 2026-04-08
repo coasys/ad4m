@@ -14,6 +14,7 @@ export default defineConfig({
           'src/extension/manifest.json',
           'src/extension/devtools.html',
           'src/extension/panel.html',
+          'src/styles/panel.css',
         ];
         for (const f of staticFiles) {
           const name = f.split('/').pop()!;
