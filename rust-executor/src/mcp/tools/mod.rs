@@ -220,7 +220,7 @@ impl Ad4mMcpHandler {
         }
 
         // 4. No admin credential configured and no token → single-user local mode
-        //    (mirrors GraphQL localhost trust model)
+        //    (mirrors REST localhost trust model)
         if admin_cred.is_none() && session_token.is_empty() && http_header_value.is_none() {
             return true;
         }
@@ -369,7 +369,7 @@ impl Ad4mMcpHandler {
         }
     }
 
-    /// Get capabilities from the stored auth token (reuses same logic as GraphQL RequestContext)
+    /// Get capabilities from the stored auth token (reuses same logic as REST RequestContext)
     pub(crate) async fn get_capabilities(&self) -> Result<Vec<Capability>, String> {
         let token = self.get_auth_token().await;
         let admin_cred = self.context.admin_credential.clone();
@@ -448,7 +448,7 @@ impl Ad4mMcpHandler {
     /// perspective ownership. This prevents unauthenticated clients from reading main-agent
     /// perspectives by exploiting the "no JWT → main agent context" fallback.
     ///
-    /// In single-user mode (no admin_credential), behaviour mirrors GraphQL: local trust model,
+    /// In single-user mode (no admin_credential), behaviour mirrors REST: local trust model,
     /// unauthenticated access is allowed (same as GQL localhost behaviour).
     pub(crate) async fn get_readable_perspective(
         &self,

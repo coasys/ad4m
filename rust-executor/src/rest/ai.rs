@@ -18,7 +18,7 @@ use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
 use super::types::*;
 
-// Default pricing (matches GraphQL)
+// Default pricing
 const DEFAULT_TOKEN_RATE: f64 = 12.5;
 const DEFAULT_EMBEDDING_TOKEN_RATE: f64 = 0.1;
 
@@ -322,7 +322,7 @@ pub async fn ai_embed(
     let json_string = serde_json::to_string(&result.embeddings)
         .map_err(|e| ApiError::Internal(format!("Failed to serialize vector: {}", e)))?;
 
-    // Compress with zlib like GraphQL does
+    // Compress with zlib
     let compressed_bytes = deflate::deflate_bytes_zlib(json_string.as_bytes());
     Ok(Json(
         base64::prelude::BASE64_STANDARD.encode(&compressed_bytes),

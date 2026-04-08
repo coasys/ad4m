@@ -1,14 +1,8 @@
 import type { Address } from '../Address';
 import { LanguageRef } from '../language/LanguageRef';
-import { Field, ObjectType } from "type-graphql";
-
 // Expression address + unique Language ID = global expression URL
-@ObjectType()
 export class ExpressionRef {
-    @Field()
     language: LanguageRef;
-    
-    @Field()
     expression: Address;
 
     constructor(lang: LanguageRef, expr: Address) {

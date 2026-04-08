@@ -358,7 +358,7 @@ pub async fn lock_agent(
     _auth: AuthContext,
     Json(body): Json<LockAgentRequest>,
 ) -> Result<Json<AgentStatus>, ApiError> {
-    // GraphQL resolver has no capability check for lock
+    // No capability check for lock
     let agent = AgentService::with_mutable_global_instance(|agent_service| {
         agent_service.lock(body.passphrase.clone());
         agent_service.dump().clone()

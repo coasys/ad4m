@@ -1,4 +1,3 @@
-import { Field, ObjectType, InputType } from "type-graphql";
 import { ExpressionGeneric } from "../expression/Expression";
 import { Link, LinkExpression, LinkExpressionInput, LinkInput } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
@@ -15,10 +14,8 @@ import { LinkQuery } from "./LinkQuery";
 * with an instantiated mutable perspective as is done through most of 
 * the GraphQL mutations.
 */
-@ObjectType()
 export class Perspective {
     /** The content of the perspective, a list/graph of links */
-    @Field(type => [LinkExpression])
     links: LinkExpression[]
 
     constructor(links?: LinkExpression[]) {
@@ -88,16 +85,10 @@ export class Perspective {
     }
     
 }
-
-@InputType()
 export class PerspectiveInput {
-    @Field(type => [LinkExpressionInput])
     links: LinkExpressionInput[]
 }
-
-@InputType()
 export class PerspectiveUnsignedInput {
-    @Field(type => [LinkInput])
     links: LinkInput[]
 
     constructor(links?: LinkInput[]) {
@@ -113,6 +104,4 @@ export class PerspectiveUnsignedInput {
         return obj
     }
 }
-
-@ObjectType()
 export class PerspectiveExpression extends ExpressionGeneric(Perspective) {};

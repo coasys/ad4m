@@ -9,11 +9,11 @@ import {
   EntanglementProofInput,
   UserCreationResult,
 } from "./Agent";
-import { HostingUserInfo, PaymentRequestResult, ComputeLogEntry } from "../runtime/RuntimeResolver";
+import { HostingUserInfo, PaymentRequestResult, ComputeLogEntry } from "../runtime/RuntimeTypes";
 import { AgentStatus } from "./AgentStatus";
 import { LinkMutations } from "../links/Links";
 import { PerspectiveClient } from "../perspectives/PerspectiveClient";
-import { VerificationRequestResult } from "../runtime/RuntimeResolver";
+import { VerificationRequestResult } from "../runtime/RuntimeTypes";
 
 export interface InitializeArgs {
   did: string;

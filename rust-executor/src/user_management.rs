@@ -1,6 +1,6 @@
-//! Shared user management functions for MCP and GraphQL auth flows.
+//! Shared user management functions for MCP and REST auth flows.
 //!
-//! Extracted to avoid code duplication between MCP tools and GraphQL mutation resolvers.
+//! Extracted to avoid code duplication between MCP tools and REST handlers.
 
 use crate::agent::capabilities::{
     get_user_default_capabilities, token::generate_jwt as generate_jwt_token, AuthInfo,

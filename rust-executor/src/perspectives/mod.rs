@@ -492,7 +492,7 @@ pub fn handle_telepresence_signal_from_link_language(
     }
 }
 
-/// Publish a telepresence signal to PubSub for delivery to GraphQL subscribers
+/// Publish a telepresence signal to PubSub for delivery to REST subscribers
 pub(crate) async fn publish_telepresence_signal(
     handle: PerspectiveHandle,
     signal: PerspectiveExpression,

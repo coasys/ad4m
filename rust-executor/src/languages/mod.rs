@@ -2311,7 +2311,7 @@ impl LanguageController {
             Ok(None)
         } else {
             // The result is JSON-encoded (via JSON.stringify). If it's a JSON string,
-            // unwrap the outer quotes so the GraphQL layer returns the raw value.
+            // unwrap the outer quotes so the REST layer returns the raw value.
             if let Ok(serde_json::Value::String(s)) =
                 serde_json::from_str::<serde_json::Value>(trimmed)
             {

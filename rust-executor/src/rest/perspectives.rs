@@ -80,7 +80,7 @@ fn reserve_compute_credits(auth_token: &str, amount: f64) -> Result<(), ApiError
     Ok(())
 }
 
-// Default pricing (matches GraphQL)
+// Default pricing
 const DEFAULT_LINK_WRITE: f64 = 0.25;
 
 // ── Endpoints ──

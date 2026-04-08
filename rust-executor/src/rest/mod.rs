@@ -1,6 +1,6 @@
 //! REST API module — `/api/v1/*`
 //!
-//! Axum-based REST API that replaces the former warp/GraphQL server.
+//! Axum-based REST API server.
 
 pub mod agent;
 pub mod ai;
@@ -296,7 +296,7 @@ pub fn rest_router(state: AppState) -> Router {
     .layer(cors)
 }
 
-/// Start the REST API server (replaces the old warp/GraphQL server).
+/// Start the REST API server.
 pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     // Set global SMTP config for email verification
     crate::config::set_smtp_config(config.smtp_config.clone())?;

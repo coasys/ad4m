@@ -5,7 +5,7 @@ use crate::agent::capabilities::{capabilities_from_token, is_admin_credential_to
 use crate::types::RequestContext;
 
 /// Auth context extracted from the Authorization header.
-/// Mirrors the GraphQL RequestContext construction.
+/// Constructs the RequestContext from auth headers.
 #[derive(Clone)]
 pub struct AuthContext {
     pub capabilities: Result<Vec<Capability>, String>,
