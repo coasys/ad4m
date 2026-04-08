@@ -316,11 +316,13 @@ export default function runtimeTests(testContext: TestContext) {
                 appName: "Flux Mentions",
                 appUrl: "https://flux.app",
                 appIconPath: "/flux-icon.png",
-                // Use fn::parse_literal to decode the literal:json:{...} target,
-                // extract the `data` field from the signed expression, and check
-                // if the agent's DID appears in the HTML content — matching how
-                // Flux stores and detects mentions in real messages.
-                trigger: `SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <flux://has_message>) FILTER(CONTAINS(LCASE(STR(<ad4m://fn/parse_literal>(?target))), "${agentDid!.toLowerCase()}")) }`,
+                // Realistic Flux mention-detection query:
+                // - fn::parse_literal decodes the literal:json:{...} target and extracts the `data` field
+                // - fn::strip_html strips HTML tags for a plain-text copy
+                // - All intermediate values are bound as named variables so the
+                //   notification trigger payload exposes message_id, message_content,
+                //   plain_text, mentioned_agent, and perspective_id.
+                trigger: `SELECT ?message_id ?message_content ?plain_text ?mentioned_agent ?perspective_id WHERE { ?message_id <flux://has_message> ?target . BIND(<ad4m://fn/parse_literal>(?target) AS ?message_content) BIND(<ad4m://fn/strip_html>(?message_content) AS ?plain_text) FILTER(CONTAINS(LCASE(STR(?message_content)), "${agentDid!.toLowerCase()}")) BIND("${agentDid}" AS ?mentioned_agent) BIND("${notificationPerspective.uuid}" AS ?perspective_id) }`,
                 perspectiveIds: [notificationPerspective.uuid],
                 webhookUrl: "https://test.webhook",
                 webhookAuth: "test-auth"
@@ -338,7 +340,7 @@ export default function runtimeTests(testContext: TestContext) {
             const noMentionContent = "Hello world, nice day!"
             const noMentionExprUrl = await ad4mClient.expression.create(noMentionContent, "literal")
             await notificationPerspective.add(new Link({
-                source: "channel://general",
+                source: "message://1",
                 predicate: "flux://has_message",
                 target: noMentionExprUrl
             }))
@@ -346,10 +348,10 @@ export default function runtimeTests(testContext: TestContext) {
             expect(mockFunction.called).to.be.false
 
             // Create a message expression that mentions the agent (with HTML formatting like Flux)
-            const mentionContent = `Hey <a href="${agentDid!}">@agent</a>, check this out!`
+            const mentionContent = `Hey <strong>${agentDid!}</strong>, check this out!`
             const mentionExprUrl = await ad4mClient.expression.create(mentionContent, "literal")
             await notificationPerspective.add(new Link({
-                source: "channel://general",
+                source: "message://2",
                 predicate: "flux://has_message",
                 target: mentionExprUrl
             }))
@@ -361,14 +363,20 @@ export default function runtimeTests(testContext: TestContext) {
             let triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
             expect(triggerMatch.length).to.equal(1)
 
-            // Verify extracted data points
             //@ts-ignore
-            expect(triggerMatch[0].source).to.equal("channel://general")
+            expect(triggerMatch[0].message_id).to.equal("message://2")
             //@ts-ignore
-            expect(triggerMatch[0].predicate).to.equal("flux://has_message")
-            // Target is the literal expression URL
+            expect(triggerMatch[0].message_content).to.include(agentDid)
             //@ts-ignore
-            expect(triggerMatch[0].target).to.equal(mentionExprUrl)
+            expect(triggerMatch[0].message_content).to.include("<strong>")
+            //@ts-ignore
+            expect(triggerMatch[0].plain_text).to.include(agentDid)
+            //@ts-ignore
+            expect(triggerMatch[0].plain_text).to.not.include("<strong>")
+            //@ts-ignore
+            expect(triggerMatch[0].mentioned_agent).to.equal(agentDid)
+            //@ts-ignore
+            expect(triggerMatch[0].perspective_id).to.equal(notificationPerspective.uuid)
         })
 
         it("can export and import database", async () => {
