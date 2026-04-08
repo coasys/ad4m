@@ -1,8 +1,12 @@
 # AD4M Language Development Kit — Interface Spec
 
-**Version:** 0.1.0-draft  
+**Version:** 0.2.0-draft  
 **Date:** 2026-04-08  
 **Status:** Draft — for discussion
+
+> **Change log v0.2:** Everything is a flat function import/export. No JSON parameters to `init()`.
+> Context is accessed via `language_*()` function imports. Delegates are flat functions, not objects.
+> Same function names in JavaScript and Rust/WASM.
 
 ---
 
@@ -10,129 +14,110 @@
 
 | Decision | Choice |
 |----------|--------|
-| Runtime → Language delegation | Explicit import from `ad4m:runtime` |
-| Language → Runtime exports | Flat function exports (single namespace) |
+| Runtime → Language | Flat function imports (same in JS and Rust/WASM) |
+| Language → Runtime | Flat function exports (single namespace) |
+| Context access | Flat function imports (`language_*()`) — no JSON params to `init()` |
 | JS language authoring | Class or `defineLanguage()` with defaults |
 | Rust language authoring | Trait + `#[ad4m_language]` proc macro |
-| Init parameter | JSON string (`&str` in Rust) |
 | Required functions | Only `name`, `version`, `init`, `teardown` |
 | Capability completeness | Enforced at load time (throws if partial) |
 | WASM export mapping | Trait methods → `extern "C"` flat functions |
 
 ---
 
-## 2. Delegate API — What the Runtime Provides to the Language
+## 2. Function Imports — What the Runtime Provides to the Language
 
-### 2.1 Magic Module Path: `ad4m:runtime`
+All function imports are **identical in JavaScript and Rust/WASM**. Both get the same flat function names.
+Import from `ad4m:runtime` in JavaScript. In Rust/WASM they become `extern "C"` declarations that the WASM module links against.
 
-The runtime provides three delegate objects via an explicit import.
-Both JavaScript and WASM languages import from the same magic module path.
+### 2.1 Agent Identity & Signing
+
+| Function | Returns | Description |
+|---------|---------|-------------|
+| `agent_did()` | `string` | Current agent's DID |
+| `agent_signing_key_id()` | `string` | Current signing key ID |
+| `agent_sign(data: Uint8Array)` | `Uint8Array` | Sign arbitrary bytes |
+| `agent_sign_string_hex(data: string)` | `string` | Sign a hex string |
+| `agent_create_signed_expression(data)` | `object` | Create a signed expression |
+| `agent_get_all_local_user_dids()` | `string[]` | All local user DIDs (main + managed) |
+| `agent_did_for_user(email: string)` | `string` | Get DID for a specific user |
+| `agent_create_signed_expression_for_user(email, data)` | `object` | Signed expression for a specific user |
+
+### 2.2 Holochain
+
+| Function | Returns | Description |
+|---------|---------|-------------|
+| `holochain_register_dnas(dnas)` | `void` | Register DNA bundles with the conductor |
+| `holochain_call(dnaNick, zome, fnName, params)` | `unknown` | Sync zome call |
+| `holochain_call_async(calls, timeoutMs?)` | `unknown[]` | Async batch zome calls |
+
+### 2.3 Signals
+
+| Function | Returns | Description |
+|---------|---------|-------------|
+| `signal_emit(data)` | `void` | Emit a signal to the AD4M signal bus |
+
+### 2.4 Language Context
+
+These give the language access to its own context. Call them inside `init()`.
+
+| Function | Returns | Description |
+|---------|---------|-------------|
+| `language_storage_directory()` | `string` | Persistent storage path for this language instance |
+| `language_address()` | `string` | This language's address on the network |
+| `language_settings()` | `string` | User's custom settings for this language (raw JSON — caller parses) |
+
+### 2.5 JavaScript Usage
 
 ```javascript
-// JavaScript
-import { agent, holochain, signals } from 'ad4m:runtime';
+import {
+    agent_did, agent_sign, holochain_call, holochain_register_dnas,
+    signal_emit, language_storage_directory, language_address, language_settings
+} from 'ad4m:runtime';
+
+export async function init() {
+    const storage = language_storage_directory();
+    const langAddr = language_address();
+    const settings = JSON.parse(language_settings());  // custom settings as JSON
+    const did = agent_did();
+
+    await holochain_register_dnas([{ nick: "my-dna", bundle: myDnaBundle }]);
+}
+
+export async function teardown() { }
+
+export async function expressionCreate(content) {
+    const sig = await agent_sign(content);
+    // ...
+}
 ```
+
+### 2.6 Rust/WASM Usage
 
 ```rust
-// Rust/WASM (compiled source — imports become extern "C" linkage)
-use ad4m_ldk::prelude::*;
+// These are extern "C" imports — the WASM module links against them at runtime.
+extern "C" {
+    fn agent_did() -> *mut c_char;
+    fn agent_sign(payload: *const u8, len: usize) -> *mut c_char;
+    fn holochain_call(dna_nick: *const c_char, zome: *const c_char, fn_name: *const c_char, params: *const c_char) -> *mut c_char;
+    fn holochain_register_dnas(dnas_json: *const c_char);
+    fn signal_emit(data: *const c_char);
+    fn language_storage_directory() -> *mut c_char;
+    fn language_address() -> *mut c_char;
+    fn language_settings() -> *mut c_char;
+}
 
-fn example() {
-    let did = agent_did();
-    let sig = agent_sign(&payload_bytes);
-    holochain_call("my-dna", "zome", "fn", &params_json);
-    signals_emit(&data_json);
+fn example_init() {
+    let storage = unsafe { ptr_to_string(language_storage_directory()) };
+    let lang_addr = unsafe { ptr_to_string(language_address()) };
+    let settings_json = unsafe { ptr_to_string(language_settings()) };
+    let did = unsafe { ptr_to_string(agent_did()) };
 }
 ```
 
-### 2.2 `agent` — Agent Identity & Signing
-
-```typescript
-// TypeScript type
-interface Agent {
-  did: string;                                          // this agent's DID
-  signingKeyId: string;                                  // current signing key ID
-
-  sign(data: Uint8Array): Promise<Uint8Array>;         // sign arbitrary bytes
-  signStringHex(data: string): Promise<string>;        // sign a hex string
-
-  createSignedExpression(data: unknown): Promise<SignedExpression>;
-  // Convenience: creates a signed expression with the given data
-
-  getAllLocalUserDids(): string[];
-  // All local user DIDs (main agent + managed users)
-
-  didForUser(email: string): string;
-  // Get DID for a specific user by email
-
-  createSignedExpressionForUser(email: string, data: unknown): Promise<SignedExpression>;
-}
-```
-
-```rust
-// Rust WASM imports
-fn agent_did() -> String;
-fn agent_signing_key_id() -> String;
-fn agent_sign(payload: &[u8]) -> Vec<u8>;
-fn agent_sign_string_hex(payload: &str) -> String;
-fn agent_create_signed_expression(data: &JsValue) -> JsValue;
-fn agent_get_all_local_user_dids() -> Vec<String>;
-fn agent_did_for_user(email: &str) -> String;
-fn agent_create_signed_expression_for_user(email: &str, data: &JsValue) -> JsValue;
-```
-
-### 2.3 `holochain` — Holochain DNA Registration & Zome Calls
-
-```typescript
-interface HolochainDelegate {
-  /**
-   * Register one or more DNA bundles with the Holochain conductor.
-   * Must be called before any zome calls for that DNA.
-   */
-  registerDNAs(dnas: { nick: string; bundle: Uint8Array }[]): Promise<void>;
-
-  /**
-   * Synchronous call to a zome function.
-   */
-  call(dnaNick: string, zome: string, fnName: string, params: unknown): Promise<unknown>;
-
-  /**
-   * Asynchronous batch call to multiple zome functions.
-   */
-  callAsync(calls: ZomeCall[], timeoutMs?: number): Promise<unknown[]>;
-}
-
-interface ZomeCall {
-  dnaNick: string;
-  zomeName: string;
-  fnName: string;
-  params: unknown;
-}
-```
-
-```rust
-// Rust WASM imports
-fn holochain_register_dnas(dnas: &JsValue) -> JsValue;  // returns Vec<RegisteredDna>
-fn holochain_call(dna_nick: &str, zome: &str, fn_name: &str, params: &JsValue) -> JsValue;
-fn holochain_call_async(calls: &JsValue, timeout_ms: u32) -> JsValue;  // returns JsFuture
-```
-
-### 2.4 `signals` — Signal Emission
-
-```typescript
-interface Signals {
-  /**
-   * Emit a signal to the AD4M signal bus.
-   * Forwarded to the runtime's signal handler.
-   */
-  emit(data: unknown): void;
-}
-```
-
-```rust
-// Rust WASM import
-fn signal_emit(data: &JsValue);
-```
+> **Note on ownership:** Rust functions that return strings return `*mut c_char` (owned pointer).
+> The WASM module must free the pointer after use. The ALDK provides a utility (`ptr_to_string`)
+> that copies the string and frees the pointer.
 
 ---
 
@@ -146,8 +131,8 @@ Every language must export these:
 // JavaScript
 export const name = "@coasys/my-language";     // string — unique name
 export const version = "1.0.0";                 // string — semver
-export async function init(contextJson) { }     // string parameter
-export async function teardown() { }            // no parameters
+export async function init() { }               // no parameters — use language_*() imports inside
+export async function teardown() { }           // no parameters
 ```
 
 ```rust
@@ -156,35 +141,42 @@ impl Language for MyLanguage {
     const NAME: &'static str = "@coasys/my-language";
     const VERSION: &'static str = "1.0.0";
 
-    fn init(&mut self, context_json: &str) { }
+    fn init(&mut self) { }      // no parameters — use language_*() imports inside
     fn teardown(&mut self) { }
 }
 ```
 
-### 3.2 Context Passed to `init`
+### 3.2 Getting Context Inside `init()`
 
-```typescript
-// The JSON string passed to init() contains:
-interface LanguageContext {
-  storageDirectory: string;    // persistent storage path for this language instance
-  customSettings: object;      // user's custom settings for this language
-  languageAddress: string;      // this language's address on the network
-}
-```
+Call the `language_*()` function imports to get context. Call them inside `init()` and store what you need in the language's state.
 
-Example:
 ```javascript
-export async function init(contextJson) {
-    const ctx = JSON.parse(contextJson);
-    console.log("Language installed at:", ctx.storageDirectory);
-    console.log("Language address:", ctx.languageAddress);
+export const name = "@coasys/my-language";
+const myStorage = language_storage_directory();  // captured at init time
+const myAddress = language_address();
+const mySettings = JSON.parse(language_settings());
+
+export async function init() {
+    // Call language_*() imports here — they work from init() onward
 }
 ```
 
 ```rust
-fn init(&mut self, context_json: &str) {
-    let ctx: LanguageContext = serde_json::from_str(context_json).unwrap();
-    println!("Storage: {}", ctx.storage_directory);
+struct MyLanguage {
+    storage: String,
+    address: String,
+}
+
+impl Language for MyLanguage {
+    const NAME: &'static str = "@coasys/my-language";
+    const VERSION: &'static str = "1.0.0";
+
+    fn init(&mut self) {
+        self.storage = language_storage_directory();
+        self.address = language_address();
+    }
+
+    fn teardown(&mut self) { }
 }
 ```
 
@@ -371,8 +363,8 @@ class MyLanguage extends Language {
     static name = "@coasys/my-language";
     static version = "1.0.0";
 
-    async init(contextJson) {
-        // Use this.agent, this.holochain, this.signals
+    async init() {
+        // Use language_*() imports from 'ad4m:runtime'
     }
 
     async teardown() { }
@@ -390,8 +382,9 @@ export default defineLanguage({
     name: "@coasys/my-language",
     version: "1.0.0",
 
-    async init(contextJson) {
-        const { agent, holochain, signals } = await import('ad4m:runtime');
+    async init() {
+        // Use language_*() imports to get context
+        const storage = language_storage_directory();
     },
 
     async expressionCreate(content) { /* ... */ }
@@ -407,7 +400,7 @@ class Language {
     static name = "unnamed-language";
     static version = "0.0.0";
 
-    async init(contextJson) { }  // no-op
+    async init() { }  // no-op — use language_*() imports to get context
     async teardown() { }         // no-op
 
     // Expression capability — default throws "not implemented"
@@ -556,16 +549,6 @@ ad4m-ldk/
 
 ```rust
 use wasm_bindgen::JsValue;
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct LanguageContext {
-    #[serde(rename = "storageDirectory")]
-    pub storage_directory: String,
-    pub custom_settings: JsValue,
-    #[serde(rename = "languageAddress")]
-    pub language_address: String,
-}
 
 #[derive(Debug)]
 pub struct LdkError {
@@ -586,9 +569,11 @@ pub trait Language: Sized {
     const NAME: &'static str;
     const VERSION: &'static str;
 
-    fn init(&mut self, context_json: &str) -> Result<(), LdkError>;
+    /// Initialize the language. Call language_*() imports inside this function
+    /// to get storage directory, language address, and settings.
+    fn init(&mut self) { }
 
-    fn teardown(&mut self) {}
+    fn teardown(&mut self) { }
 }
 ```
 
@@ -735,25 +720,31 @@ impl<T: Language> DirectMessageCapability for T {
 ```rust
 // These are provided by the AD4M runtime (Rust executor or Deno).
 // The WASM module links against them at runtime.
+// All return owned *mut c_char strings — caller must free the pointer.
 
 extern "C" {
     // Agent
-    pub fn agent_did() -> String;
-    pub fn agent_signing_key_id() -> String;
-    pub fn agent_sign(payload: &[u8]) -> Vec<u8>;
-    pub fn agent_sign_string_hex(payload: &str) -> String;
-    pub fn agent_create_signed_expression(data: &JsValue) -> JsValue;
-    pub fn agent_get_all_local_user_dids() -> Vec<String>;
-    pub fn agent_did_for_user(email: &str) -> String;
-    pub fn agent_create_signed_expression_for_user(email: &str, data: &JsValue) -> JsValue;
+    fn agent_did() -> *mut c_char;
+    fn agent_signing_key_id() -> *mut c_char;
+    fn agent_sign(payload: *const u8, len: usize) -> *mut c_char;
+    fn agent_sign_string_hex(payload: *const c_char) -> *mut c_char;
+    fn agent_create_signed_expression(data: *const c_char) -> *mut c_char;
+    fn agent_get_all_local_user_dids() -> *mut c_char;
+    fn agent_did_for_user(email: *const c_char) -> *mut c_char;
+    fn agent_create_signed_expression_for_user(email: *const c_char, data: *const c_char) -> *mut c_char;
 
     // Holochain
-    pub fn holochain_register_dnas(dnas_json: &JsValue) -> JsValue;
-    pub fn holochain_call(dna_nick: &str, zome: &str, fn_name: &str, params: &JsValue) -> JsValue;
-    pub fn holochain_call_async(calls: &JsValue, timeout_ms: u32) -> JsValue;
+    fn holochain_register_dnas(dnas_json: *const c_char);
+    fn holochain_call(dna_nick: *const c_char, zome: *const c_char, fn_name: *const c_char, params: *const c_char) -> *mut c_char;
+    fn holochain_call_async(calls: *const c_char, timeout_ms: u32) -> *mut c_char;
 
     // Signals
-    pub fn signal_emit(data: &JsValue);
+    fn signal_emit(data: *const c_char);
+
+    // Language context
+    fn language_storage_directory() -> *mut c_char;
+    fn language_address() -> *mut c_char;
+    fn language_settings() -> *mut c_char;
 }
 ```
 
@@ -766,37 +757,38 @@ extern "C" {
 // impl Language for MyLanguage {
 //     const NAME: &'static str = "@coasys/my-language";
 //     const VERSION: &'static str = "1.0.0";
-//     fn init(&mut self, ctx: &str) { }
+//     fn init(&mut self) { }
 //     fn expression_create(&mut self, content: &JsValue) -> Result<String, LdkError> { ... }
 //     fn link_sync_sync(&mut self) -> JsValue { ... }
 // }
 //
 
 #[proc_macro_attribute]
-pub fn ad4m_language(attr: TokenStream, item: TokenStream) -> TokenStream {
-    // Parses the impl block, extracts trait methods, generates flat extern "C" exports:
+pub fn ad4m_language(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // Parses the impl block, extracts NAME, VERSION, and trait methods,
+    // generates flat extern "C" WASM exports:
     //
     // #[no_mangle]
-    // pub extern "C" fn name() -> *mut std::ffi::c_char {
+    // pub extern "C" fn name() -> *mut c_char {
     //     Cow::Borrowed("my-language").into()
     // }
     //
     // #[no_mangle]
-    // pub extern "C" fn version() -> *mut std::ffi::c_char {
+    // pub extern "C" fn version() -> *mut c_char {
     //     Cow::Borrowed("1.0.0").into()
     // }
     //
     // #[no_mangle]
-    // pub async fn init(context_json: &str) {
-    //     // calls LanguageImpl::init(...)
+    // pub extern "C" async fn init() {
+    //     // calls MyLanguage::init(...)
     // }
     //
     // #[no_mangle]
-    // pub async fn expression_create(content: JsValue) -> JsValue {
-    //     // calls LanguageImpl::expression_create(...)
+    // pub extern "C" async fn expression_create(content: JsValue) -> JsValue {
+    //     // calls MyLanguage::expression_create(...) and serializes Result
     // }
     //
-    // ... etc for every trait method
+    // ... etc for every trait method with underscore naming
 }
 ```
 
@@ -809,7 +801,7 @@ use ad4m_ldk::prelude::*;
 #[wasm_bindgen]
 pub struct MyLanguage {
     storage_dir: String,
-    // ... state
+    lang_address: String,
 }
 
 #[wasm_bindgen]
@@ -818,6 +810,7 @@ impl MyLanguage {
     pub fn new() -> Self {
         Self {
             storage_dir: String::new(),
+            lang_address: String::new(),
         }
     }
 }
@@ -826,11 +819,10 @@ impl Language for MyLanguage {
     const NAME: &'static str = "@coasys/my-language";
     const VERSION: &'static str = "0.1.0";
 
-    fn init(&mut self, context_json: &str) -> Result<(), LdkError> {
-        let ctx: LanguageContext = serde_json::from_str(context_json)
-            .map_err(|e| LdkError::new(e.to_string()))?;
-        self.storage_dir = ctx.storage_directory;
-        Ok(())
+    fn init(&mut self) {
+        // Use language_*() imports to get context
+        self.storage_dir = language_storage_directory();
+        self.lang_address = language_address();
     }
 
     fn teardown(&mut self) { }
@@ -838,12 +830,11 @@ impl Language for MyLanguage {
 
 impl ExpressionCapability for MyLanguage {
     fn expression_create(&mut self, content: &JsValue) -> Result<String, LdkError> {
-        // ... implementation
-        Ok("generated-address".to_string())
+        let address = format!("address-for-{:?}", content);
+        Ok(address)
     }
 
     fn expression_get(&mut self, address: &str) -> JsValue {
-        // ... implementation
         JsValue::NULL
     }
 }
@@ -851,6 +842,8 @@ impl ExpressionCapability for MyLanguage {
 #[ad4m_language]
 impl Language for MyLanguage { }
 ```
+
+The macro generates flat `extern "C"` WASM exports from the trait implementation. The developer writes clean trait methods with `&JsValue` parameters and `Result<T, LdkError>` returns; the macro handles the WASM ABI.
 
 The macro generates flat `extern "C"` WASM exports from the trait implementation. The developer writes clean trait methods; the macro handles the WASM ABI.
 
@@ -913,14 +906,14 @@ interface SignedExpression {
 
 ## 7. Open Questions
 
-1. **`defineLanguage()` merging:** Should `name` and `version` be static properties on the class (Option A) or properties of the passed object (Option B)? Current spec uses Option B (object property).
+1. **Signal routing for WASM:** How does the runtime call `handleHolochainSignal()` on a WASM module? The signal callback needs to be registered during init, and the WASM module needs a way to receive async callbacks from the host. This needs more design.
 
-2. **Signal routing for WASM:** How does the runtime call `handleHolochainSignal()` on a WASM module? The signal callback needs to be registered during init, and the WASM module needs a way to receive async callbacks. This needs more design.
+2. **`directMessageStatus` type:** What is `DMStatus`? Needs concrete definition.
 
-3. **`directMessageStatus` type:** What is `DMStatus`? Needs definition.
+3. **`perspective-diff-sync` as reference:** The actual p-diff-sync language has many internal details (gossip protocol, mutex, peer tracking). A minimal link language would be much simpler. Should we write a minimal stub language as the reference instead?
 
-4. **`perspective-diff-sync` as reference:** The actual p-diff-sync language has many internal details (gossip protocol, mutex, peer tracking). A minimal link language would be much simpler. Should we write a minimal stub language as the reference instead?
+4. **Adapter objects in Rust:** The `PerspectiveDiff`, `Expression` etc. types — should they live in the ALDK crate or in `core`? Currently in `core` as TypeScript types. Rust equivalents should probably be in `ad4m-ldk`.
 
-5. **Adapter objects in Rust:** The `PerspectiveDiff`, `Expression` etc. types — should they live in the ALDK crate or in `core`? Currently in `core` as TypeScript types. Rust equivalents should probably be in `ad4m-ldk`.
+5. **WASM memory management:** Who frees `*mut c_char` strings returned from WASM? The current spec says "caller must free the pointer" — the ALDK should provide a `ptr_to_string()` utility that copies and frees. Need to ensure this is safe in the macro-generated code.
 
-6. **WASM memory management:** Who frees JSValue strings returned from WASM? Need to define ownership rules for `String` return types in the macro.
+6. **`holochain_call_async` return type in JS:** Should this return a `Promise` in JS (natural async) or a plain value (matching the WASM sync signature)? Currently spec shows it returns `unknown[]` in JS (treated as async by the runtime), but the WASM version is sync. Need to confirm the JS interface.
