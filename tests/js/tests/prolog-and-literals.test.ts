@@ -1925,10 +1925,8 @@ describe("Prolog + Literals", () => {
                         updateCount++;
                     });
 
-                    // Initially no results
+                    // Initially no results (returned via Promise, callback not fired)
                     expect(initialResults.length).to.equal(0);
-                    // Reset updateCount since subscribe() fires the callback once with initial results
-                    updateCount = 0;
 
                     // Add matching task - should trigger subscription
                     const task1 = new Task(perspective!);
@@ -2278,18 +2276,18 @@ describe("Prolog + Literals", () => {
                         await model1.save();
 
                         // Wait for subscription update with proper condition checking
-                        // subscribe() fires callback once immediately with initial results (callCount=1),
-                        // so we wait for callCount >= 2 to capture the real update after model save
+                        // subscribe() returns initial results via Promise only — callback
+                        // fires only for subsequent updates (to avoid double-setState in Preact)
                         await waitForCondition(
-                            () => callback1.callCount >= 2,
-                            { 
-                                timeoutMs: 5000, 
-                                errorMessage: 'First callback was not called after model save' 
+                            () => callback1.callCount >= 1,
+                            {
+                                timeoutMs: 5000,
+                                errorMessage: 'First callback was not called after model save'
                             }
                         );
 
                         // Verify callback was called with the saved model
-                        expect(callback1.callCount).to.be.at.least(2);
+                        expect(callback1.callCount).to.be.at.least(1);
                         expect(callback1.lastCall.args[0]).to.be.an('array');
                         expect(callback1.lastCall.args[0].length).to.equal(1);
                         expect(callback1.lastCall.args[0][0].name).to.equal("Test 1");
@@ -2306,20 +2304,18 @@ describe("Prolog + Literals", () => {
                         await model2.save();
 
                         // Wait for subscription update with proper condition checking
-                        // subscribe() fires callback2 once immediately (callCount=1),
-                        // so we wait for callCount >= 2 to capture the update after model2 save
                         await waitForCondition(
-                            () => callback2.callCount >= 2,
-                            { 
-                                timeoutMs: 5000, 
-                                errorMessage: 'Second callback was not called after model save' 
+                            () => callback2.callCount >= 1,
+                            {
+                                timeoutMs: 5000,
+                                errorMessage: 'Second callback was not called after model save'
                             }
                         );
 
                         // Verify only second callback was called (callback1 was disposed)
-                        // callback1: 1 (subscribe initial) + 1 (model1 save) = 2, no more after that
-                        expect(callback1.callCount).to.equal(2);
-                        expect(callback2.callCount).to.be.at.least(2);
+                        // callback1: 1 (model1 save only), no more after dispose
+                        expect(callback1.callCount).to.equal(1);
+                        expect(callback2.callCount).to.be.at.least(1);
                         expect(callback2.lastCall.args[0]).to.be.an('array');
                         expect(callback2.lastCall.args[0].length).to.equal(2);
 
@@ -2336,10 +2332,10 @@ describe("Prolog + Literals", () => {
                         await sleep(1000);
 
                         // Verify no new callbacks after dispose
-                        // callback1: 2 (subscribe initial + model1 save)
-                        // callback2: 2 (subscribe initial + model2 save)
-                        expect(callback1.callCount).to.equal(2);
-                        expect(callback2.callCount).to.equal(2);
+                        // callback1: 1 (model1 save only)
+                        // callback2: 1 (model2 save only)
+                        expect(callback1.callCount).to.equal(1);
+                        expect(callback2.callCount).to.equal(1);
                     });
 
                     it('handles count subscriptions and disposal', async () => {
@@ -2360,10 +2356,10 @@ describe("Prolog + Literals", () => {
                         await model.save();
 
                         // Wait for subscription update with proper condition checking
-                        // countSubscribe() fires callback once immediately with initial count (0),
-                        // so we wait for callCount >= 2 to capture the update after model save
+                        // countSubscribe() returns initial count via Promise only —
+                        // callback fires only for subsequent updates
                         await waitForCondition(
-                            () => countCallback.callCount >= 2,
+                            () => countCallback.callCount >= 1,
                             {
                                 timeoutMs: 15000,
                                 errorMessage: 'Count callback was not called after model save'
@@ -2371,7 +2367,7 @@ describe("Prolog + Literals", () => {
                         );
 
                         // Verify callback was called with new count
-                        expect(countCallback.callCount).to.be.at.least(2);
+                        expect(countCallback.callCount).to.be.at.least(1);
                         expect(countCallback.lastCall.args[0]).to.equal(1);
                         let count = countCallback.callCount
 
