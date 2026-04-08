@@ -50,6 +50,147 @@ import { LinkQuery } from '../perspectives/LinkQuery';
  * by the language_bootstrap.js adapter wrapper.
  */
 
+// ============================================================================
+// FLAT EXPORT INTERFACE TYPES
+// ============================================================================
+// These types define the flat export pattern for AD4M languages.
+// Languages export functions directly (flat) instead of via a create() factory.
+// The language_bootstrap.js adapter wrapper converts flat exports to the
+// internal Language interface.
+
+// ----- Context passed via init() -----
+
+/** Context passed to flat-export languages via init(contextJson: string).
+ * This is the only serializable data that crosses the WASM/JS boundary.
+ */
+export interface LanguageInitContext {
+    /** Directory path for language-specific file storage */
+    storageDirectory: string;
+    /** Language-specific settings configured by the agent */
+    customSettings: Record<string, unknown>;
+    /** This language's address in the Holochain network */
+    languageAddress: string;
+}
+
+// ----- Delegates available via globalThis -----
+
+/** Agent delegate — available via globalThis.__agentProxy__ in flat-export languages.
+ * Handles identity, signing, and expression creation.
+ */
+export interface AgentDelegate {
+    did: string;
+    signingKeyId: string;
+    createSignedExpression(data: unknown): Expression;
+    sign(payload: string): string;
+    signStringHex(payload: string): string;
+    getAllLocalUserDids(): string[];
+    createSignedExpressionForUser(userEmail: string, data: unknown): Expression;
+    didForUser(userEmail: string): string;
+}
+
+/** Holochain delegate — available via globalThis.__holochainDelegate__ in flat-export languages.
+ * Provides access to DNA calls and DNA registration.
+ */
+export interface HolochainDelegate {
+    registerDNAs(dnas: DnaSpec[]): AppInfo[];
+    call(dnaNick: string, zome: string, fnName: string, params: unknown): unknown;
+    callAsync(dnaNick: string, zome: string, fnName: string, params: unknown): Promise<unknown>;
+}
+
+/** Signal delegate — available via globalThis.__ad4mSignal__ in flat-export languages.
+ * Emits signals to the AD4M signal bus.
+ */
+export type SignalDelegate = (signal: unknown) => void;
+
+// ----- Supporting types for delegates -----
+
+/** Specification for registering a DNA with the Holochain delegate */
+export interface DnaSpec {
+    nick: string;
+    source: DnaSource;
+}
+
+/** Source of a DNA bundle */
+export interface DnaSource {
+    type: 'path' | 'bundle' | 'bytes';
+    value: string | Uint8Array;
+}
+
+/** Result of DNA registration */
+export interface AppInfo {
+    appId: string;
+    dnaHash: string;
+    cellId: string;
+}
+
+// ----- Flat export function signatures -----
+// These signatures match the flat export functions that languages can provide.
+// All are optional — languages only implement the capabilities they need.
+
+/** Minimal required exports for a flat-export language */
+export interface FlatLanguageBase {
+    name: string;
+    version?: string;
+    init(contextJson: string): Promise<void>;
+    teardown?(): void;
+}
+
+/** Expression language flat exports (expressionAdapter) */
+export interface FlatExpressionLanguage extends FlatLanguageBase {
+    /** ExpressionAdapter.get */
+    expressionGet?(address: string): Promise<unknown | null>;
+    /** ExpressionAdapter.putAdapter.createPublic */
+    expressionCreate?(content: object): Promise<string>;
+    /** ExpressionAdapter.putAdapter.addressOf (ReadOnlyLanguage) */
+    expressionAddressOf?(content: object): Promise<string>;
+    /** Language.isImmutableExpression */
+    isImmutableExpression?(address: string): boolean;
+    /** ExpressionUI.icon */
+    expressionIcon?(): string;
+    /** ExpressionUI.constructorIcon */
+    expressionConstructorIcon?(): string;
+}
+
+/** Link/sync language flat exports (perspectiveSyncAdapter) */
+export interface FlatLinkLanguage extends FlatLanguageBase {
+    /** PerspectiveSyncAdapter.sync */
+    linkSyncSync?(): Promise<PerspectiveDiff>;
+    /** PerspectiveSyncAdapter.commit */
+    linkSyncCommit?(diff: PerspectiveDiff): Promise<string>;
+    /** PerspectiveSyncAdapter.render */
+    linkSyncRender?(address: string): Promise<string>;
+    /** PerspectiveSyncAdapter.currentRevision */
+    linkSyncCurrentRevision?(): Promise<string | null>;
+    /** PerspectiveSyncAdapter.others */
+    linkSyncOthers?(): Promise<Expression[]>;
+    /** PerspectiveSyncAdapter.writable */
+    linkSyncWritable?(): Promise<boolean>;
+    /** PerspectiveSyncAdapter.public */
+    linkSyncPublic?(): Promise<boolean>;
+    /** PerspectiveSyncAdapter.addCallback */
+    linkSyncAddCallback?(callback: PerspectiveDiffObserver): void;
+    /** PerspectiveSyncAdapter.removeCallback */
+    linkSyncRemoveCallback?(callback: PerspectiveDiffObserver): void;
+    /** PerspectiveSyncAdapter.addSyncStateChangeCallback */
+    linkSyncAddSyncStateChangeCallback?(callback: SyncStateChangeObserver): void;
+    /** PerspectiveSyncAdapter.setLocalAgents */
+    linkSyncSetLocalAgents?(agents: string[]): void;
+}
+
+/** Interaction-capable flat language exports */
+export interface FlatInteractionLanguage {
+    /** Language.interactions */
+    interactions?(address: string): Interaction[];
+}
+
+// ----- Union type for all flat exports -----
+// Languages can extend FlatExpressionLanguage, FlatLinkLanguage, or both.
+
+export type FlatLanguageExports = FlatLanguageBase &
+    Partial<FlatExpressionLanguage> &
+    Partial<FlatLinkLanguage> &
+    Partial<FlatInteractionLanguage>;
+
 /** Interface of AD4M Languages
  * 
  * The AD4M-internal representation of a language (after adapter wrapper conversion).
