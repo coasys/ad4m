@@ -35,3 +35,4 @@ export * from './shacl/SHACLShape'
 export { SHACLFlow, FlowState, FlowTransition, LinkPattern, FlowableCondition } from './shacl/SHACLFlow'
 export * from "./generated/rest";
 export type { AD4MDevTools, DevToolsState, OperationRecord, SubscriptionRecord, NotificationRecord, PerformanceState } from "./devtools/types"
+export { initDevToolsBridge } from "./devtools/bridge";

@@ -1,5 +1,5 @@
 import { isEmbedded, setLocal, getLocal, removeLocal, checkConnection, wsUrlToHttpBase } from './utils';
-import { Ad4mClient, VerificationRequestResult } from "@coasys/ad4m";
+import { Ad4mClient, initDevToolsBridge, VerificationRequestResult } from "@coasys/ad4m";
 import autoBind from "auto-bind";
 
 import { Ad4mConnectOptions, ConnectionStates, AuthStates, ConfigStates, RemoteHost, UserInfo } from './types';
@@ -134,6 +134,13 @@ export default class Ad4mConnect extends EventTarget {
 
     this.ad4mClient = new Ad4mClient(this.baseUrl, this.token);
     this.notifyConnectionChange("connected");
+
+    // Initialize DevTools bridge after client creation
+    try {
+      if (typeof window !== 'undefined') {
+        initDevToolsBridge(this.ad4mClient);
+      }
+    } catch {}
 
     return this.ad4mClient;
   }

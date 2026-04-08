@@ -4,16 +4,25 @@
   "version": "0.1.0",
   "description": "Chrome DevTools panel for debugging AD4M applications",
   "devtools_page": "devtools.html",
-  "permissions": ["activeTab"],
+  "permissions": [
+    "activeTab"
+  ],
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content-script.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content-script.js"
+      ],
       "run_at": "document_start"
     }
   ],
   "background": {
     "service_worker": "background.js"
   },
-  "icons": {}
+  "icons": {},
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
 }

@@ -39,8 +39,8 @@ function evalInPage(expr: string): Promise<any> {
   return new Promise((resolve) => {
     if (typeof chrome !== 'undefined' && chrome.devtools?.inspectedWindow) {
       chrome.devtools.inspectedWindow.eval(expr, (result: any, err: any) => {
-        if (err) resolve(null);
-        else resolve(result);
+        if (err) { console.log('[AD4M DevTools Panel] eval error:', err); resolve(null); }
+        else { if (result) console.log('[AD4M DevTools Panel] got data, length:', typeof result === 'string' ? result.length : typeof result); resolve(result); }
       });
     } else {
       try { resolve(eval(expr)); } catch { resolve(null); }
@@ -85,6 +85,27 @@ export function App() {
     const raw = await evalInPage(
       'window.__AD4M_DEVTOOLS__ ? JSON.stringify(window.__AD4M_DEVTOOLS__.getState()) : null'
     );
+    console.log('[AD4M DevTools Panel] raw:', raw ? 'got data' : 'null');
+    if (!raw) {
+      // Diagnostic: check what's available on the page
+      const diag = await evalInPage(`(function() {
+        var r = {};
+        r.windowDevtools = typeof window.__AD4M_DEVTOOLS__;
+        r.globalDevtools = typeof globalThis.__AD4M_DEVTOOLS__;
+        var el = document.querySelector('ad4m-connect');
+        r.connectEl = !!el;
+        if (el) {
+          r.connectClient = typeof el.getClient;
+          r.connectState = el.state || 'unknown';
+          r.connectConnected = el.connected || false;
+        }
+        var keys = [];
+        for (var k in window) { if (k.indexOf('AD4M') > -1 || k.indexOf('ad4m') > -1) keys.push(k); }
+        r.ad4mKeys = keys;
+        return JSON.stringify(r);
+      })()`);
+      console.log('[AD4M DevTools Panel] diagnostic:', diag);
+    }
     if (raw) {
       const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
       setState(parsed);
