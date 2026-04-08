@@ -110,7 +110,10 @@ pub async fn get_agent_by_did(
     let did_match = {
         let agent_instance = AgentService::global_instance();
         let agent_service = agent_instance.lock().expect("agent lock");
-        let agent_ref = agent_service.as_ref().expect("agent instance");
+        let agent_ref = match agent_service.as_ref() {
+            Some(a) => a,
+            None => return Err(ApiError::NotFound("Agent not initialized".into())),
+        };
         match &agent_ref.did {
             Some(existing) => &did == existing,
             None => false,

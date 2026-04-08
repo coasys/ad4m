@@ -116,6 +116,8 @@ pub async fn export_data(
         "db" => {
             let json_data = Ad4mDb::with_global_instance(|db| db.export_all_to_json())
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
+            // SECURITY TODO: constrain file paths to ad4m data directory.
+            // This is pre-existing behaviour from the GraphQL mutation.
             std::fs::write(&body.file_path, serde_json::to_string_pretty(&json_data)?)
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
         }
@@ -152,6 +154,8 @@ pub async fn import_data(
 
     match body.import_type.as_str() {
         "db" => {
+            // SECURITY TODO: constrain file paths to ad4m data directory.
+            // This is pre-existing behaviour from the GraphQL mutation.
             let data = std::fs::read_to_string(&body.file_path)
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             let json_data: serde_json::Value =
@@ -512,7 +516,7 @@ pub async fn get_hc_agent_infos(
 pub async fn add_hc_agent_infos(
     State(_state): State<AppState>,
     auth: AuthContext,
-    Json(infos): Json<String>,
+    Json(body): Json<AddAgentInfosRequest>,
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
     check_capability(
@@ -523,7 +527,7 @@ pub async fn add_hc_agent_infos(
 
     let hc = get_holochain_service().await;
 
-    hc.add_agent_infos(vec![infos])
+    hc.add_agent_infos(vec![body.agent_infos])
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 

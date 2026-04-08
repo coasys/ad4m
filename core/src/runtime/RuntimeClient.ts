@@ -31,7 +31,7 @@ export class RuntimeClient {
     }
 
     async info(): Promise<RuntimeInfo> {
-        return this.#restClient.get<RuntimeInfo>('/api/v1/runtime')
+        return this.#restClient.get<RuntimeInfo>('/api/v1/runtime/info')
     }
 
     async tlsDomain(): Promise<string | null> {
@@ -47,27 +47,27 @@ export class RuntimeClient {
     }
 
     async addTrustedAgents(agents: string[]): Promise<string[]> {
-        return this.#restClient.post<string[]>('/api/v1/runtime/trusted-agents', { agents })
+        return this.#restClient.post<string[]>('/api/v1/agent/trusted', { agents })
     }
 
     async deleteTrustedAgents(agents: string[]): Promise<string[]> {
-        return this.#restClient.delete<string[]>('/api/v1/runtime/trusted-agents', { agents })
+        return this.#restClient.delete<string[]>('/api/v1/agent/trusted', { agents })
     }
 
     async getTrustedAgents(): Promise<string[]> {
-        return this.#restClient.get<string[]>('/api/v1/runtime/trusted-agents')
+        return this.#restClient.get<string[]>('/api/v1/agent/trusted')
     }
 
     async addKnownLinkLanguageTemplates(addresses: string[]): Promise<string[]> {
-        return this.#restClient.post<string[]>('/api/v1/runtime/known-link-language-templates', { addresses })
+        return this.#restClient.post<string[]>('/api/v1/runtime/link-language-templates', { addresses })
     }
 
     async removeKnownLinkLanguageTemplates(addresses: string[]): Promise<string[]> {
-        return this.#restClient.delete<string[]>('/api/v1/runtime/known-link-language-templates', { addresses })
+        return this.#restClient.delete<string[]>('/api/v1/runtime/link-language-templates', { addresses })
     }
 
     async knownLinkLanguageTemplates(): Promise<string[]> {
-        return this.#restClient.get<string[]>('/api/v1/runtime/known-link-language-templates')
+        return this.#restClient.get<string[]>('/api/v1/runtime/link-language-templates')
     }
 
     async addFriends(dids: string[]): Promise<string[]> {
@@ -83,7 +83,7 @@ export class RuntimeClient {
     }
 
     async hcAgentInfos(): Promise<string> {
-        return this.#restClient.get<string>('/api/v1/runtime/hc-agent-infos')
+        return this.#restClient.get<string>('/api/v1/runtime/hc/agent-infos')
     }
 
     async getNetworkMetrics(): Promise<string> {
@@ -91,15 +91,15 @@ export class RuntimeClient {
     }
 
     async restartHolochain(): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/restart-holochain')
+        return this.#restClient.post<boolean>('/api/v1/runtime/holochain/restart')
     }
 
     async hcAddAgentInfos(agentInfos: String): Promise<void> {
-        return this.#restClient.post<void>('/api/v1/runtime/hc-agent-infos', { agentInfos })
+        return this.#restClient.post<void>('/api/v1/runtime/hc/agent-infos', { agentInfos })
     }
 
     async verifyStringSignedByDid(did: string, didSigningKeyId: string, data: string, signedData: string): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/verify-string-signed-by-did', { did, didSigningKeyId, data, signedData })
+        return this.#restClient.post<boolean>('/api/v1/runtime/verify-signature', { did, didSigningKeyId, data, signedData })
     }
 
     async setStatus(perspective: Perspective): Promise<boolean> {
@@ -125,19 +125,19 @@ export class RuntimeClient {
     }
 
     async requestInstallNotification(notification: NotificationInput) {
-        return this.#restClient.post('/api/v1/runtime/notifications/request', { notification })
+        return this.#restClient.post('/api/v1/runtime/notifications', { notification })
     }
 
     async grantNotification(id: string): Promise<boolean> {
-        return this.#restClient.post<boolean>(`/api/v1/runtime/notifications/${encodeURIComponent(id)}/grant`)
+        return this.#restClient.patch<boolean>(`/api/v1/runtime/notifications/${encodeURIComponent(id)}`, { granted: true })
     }
 
     async exportDb(filePath: string): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/export-db', { filePath })
+        return this.#restClient.post<boolean>('/api/v1/runtime/export', { filePath })
     }
 
     async importDb(filePath: string): Promise<ImportResult> {
-        return this.#restClient.post<ImportResult>('/api/v1/runtime/import-db', { filePath })
+        return this.#restClient.post<ImportResult>('/api/v1/runtime/import', { filePath })
     }
 
     async notifications(): Promise<Notification[]> {

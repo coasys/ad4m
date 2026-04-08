@@ -25,6 +25,8 @@ use crate::pubsub::{
 use super::auth::{AppState, AuthContext};
 
 /// GET /events/agent — SSE: status-changed, apps-changed, updated
+/// TODO: SSE endpoints authenticate the caller but don't enforce per-resource access control.
+/// Consider adding capability checks (e.g. AGENT_READ_CAPABILITY) before opening the stream.
 pub async fn agent_events(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -53,6 +55,7 @@ pub async fn agent_events(
 }
 
 /// GET /events/perspectives — SSE: added, removed, updated, sync-state
+/// TODO: enforce per-perspective access control before opening SSE stream.
 pub async fn perspective_lifecycle_events(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -82,6 +85,7 @@ pub async fn perspective_lifecycle_events(
 }
 
 /// GET /events/perspectives/:uuid/links — SSE: link-added, link-removed, link-updated
+/// TODO: verify caller has read access to this perspective before opening SSE stream.
 pub async fn perspective_link_events(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -126,6 +130,7 @@ pub async fn perspective_link_events(
 }
 
 /// GET /events/neighbourhoods/:uuid/signals — SSE: signal
+/// TODO: verify caller has read access to this neighbourhood before opening SSE stream.
 pub async fn neighbourhood_signal_events(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -146,6 +151,7 @@ pub async fn neighbourhood_signal_events(
 }
 
 /// GET /events/runtime — SSE: message-received, notification-triggered, exception
+/// TODO: enforce capability checks before opening SSE stream.
 pub async fn runtime_events(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -173,6 +179,7 @@ pub async fn runtime_events(
 }
 
 /// GET /events/ai — SSE: transcription-text, model-loading-status
+/// TODO: enforce capability checks before opening SSE stream.
 pub async fn ai_events(
     State(_state): State<AppState>,
     auth: AuthContext,

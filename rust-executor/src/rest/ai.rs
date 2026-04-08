@@ -23,6 +23,8 @@ const DEFAULT_TOKEN_RATE: f64 = 12.5;
 const DEFAULT_EMBEDDING_TOKEN_RATE: f64 = 0.1;
 
 /// Read-only credit check.
+// TODO: implement proper credit pre-estimation — currently only rejects at zero balance,
+// allowing calls that exceed remaining credits. This is pre-existing behaviour from GraphQL.
 fn check_compute_credits(auth_token: &str) -> Result<(), ApiError> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))

@@ -46,6 +46,16 @@ export class RestClient {
         return res.json() as Promise<T>
     }
 
+    async patch<T>(path: string, body?: any): Promise<T> {
+        const res = await fetch(`${this.baseUrl}${path}`, {
+            method: 'PATCH',
+            headers: this.headers(),
+            body: body !== undefined ? JSON.stringify(body) : undefined
+        })
+        if (!res.ok) throw new Error(await res.text())
+        return res.json() as Promise<T>
+    }
+
     async delete<T>(path: string, body?: any): Promise<T> {
         const res = await fetch(`${this.baseUrl}${path}`, {
             method: 'DELETE',

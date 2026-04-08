@@ -252,6 +252,9 @@ pub async fn delete_perspective(
     )
     .map_err(|e| ApiError::Forbidden(e))?;
 
+    // Verify caller has access to this perspective before deleting
+    let _perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+
     remove_perspective(&uuid).await;
     Ok(Json(true))
 }
@@ -271,6 +274,8 @@ pub async fn mutate_links(
     .map_err(|e| ApiError::Forbidden(e))?;
 
     // Check compute credits (pre-check)
+    // TODO: implement proper credit pre-estimation for link mutations — currently only rejects
+    // at zero balance, allowing operations that exceed remaining credits. Pre-existing from GraphQL.
     check_compute_credits(&context.auth_token)?;
 
     let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;

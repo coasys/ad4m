@@ -95,7 +95,7 @@ export class AgentClient {
   }
 
   async byDID(did: string): Promise<Agent> {
-    return this.#restClient.get<Agent>(`/api/v1/agent/byDID/${encodeURIComponent(did)}`);
+    return this.#restClient.get<Agent>(`/api/v1/agent/by-did/${encodeURIComponent(did)}`);
   }
 
   async updatePublicPerspective(perspective: PerspectiveInput): Promise<Agent> {
@@ -108,7 +108,7 @@ export class AgentClient {
       delete link.status;
     });
 
-    const a = await this.#restClient.put<any>('/api/v1/agent/perspective', { perspective: cleanedPerspective });
+    const a = await this.#restClient.patch<any>('/api/v1/agent/profile', { publicPerspective: cleanedPerspective });
     const agent = new Agent(a.did, a.perspective);
     agent.directMessageLanguage = a.directMessageLanguage;
     return agent;
@@ -139,7 +139,7 @@ export class AgentClient {
   }
 
   async updateDirectMessageLanguage(directMessageLanguage: string): Promise<Agent> {
-    const a = await this.#restClient.put<any>('/api/v1/agent/directMessageLanguage', { directMessageLanguage });
+    const a = await this.#restClient.patch<any>('/api/v1/agent/profile', { dmLanguage: directMessageLanguage });
     const agent = new Agent(a.did, a.perspective);
     agent.directMessageLanguage = a.directMessageLanguage;
     return agent;
@@ -227,15 +227,15 @@ export class AgentClient {
   }
 
   async requestCapability(authInfo: AuthInfoInput): Promise<string> {
-    return this.#restClient.post<string>('/api/v1/agent/capability/request', { authInfo });
+    return this.#restClient.post<string>('/api/v1/agent/auth/request', { authInfo });
   }
 
   async permitCapability(auth: string): Promise<string> {
-    return this.#restClient.post<string>('/api/v1/agent/capability/permit', { auth });
+    return this.#restClient.post<string>('/api/v1/agent/auth/permit', { auth });
   }
 
   async generateJwt(requestId: string, rand: string): Promise<string> {
-    return this.#restClient.post<string>('/api/v1/agent/jwt', { requestId, rand });
+    return this.#restClient.post<string>('/api/v1/agent/auth/jwt', { requestId, rand });
   }
 
   async getApps(): Promise<Apps[]> {
@@ -247,11 +247,11 @@ export class AgentClient {
   }
 
   async revokeToken(requestId: string): Promise<Apps[]> {
-    return this.#restClient.post<Apps[]>(`/api/v1/agent/apps/${encodeURIComponent(requestId)}/revoke`);
+    return this.#restClient.delete<Apps[]>(`/api/v1/agent/auth/token/${encodeURIComponent(requestId)}`);
   }
 
   async isLocked(): Promise<boolean> {
-    return this.#restClient.get<boolean>('/api/v1/agent/isLocked');
+    return this.#restClient.get<boolean>('/api/v1/agent/is-locked');
   }
 
   async signMessage(message: string): Promise<string> {
@@ -260,11 +260,11 @@ export class AgentClient {
 
   // Multi-user methods
   async createUser(email: string, password: string, appInfo?: AuthInfoInput): Promise<UserCreationResult> {
-    return this.#restClient.post<UserCreationResult>('/api/v1/runtime/users', { email, password, appInfo });
+    return this.#restClient.post<UserCreationResult>('/api/v1/users', { email, password, appInfo });
   }
 
   async loginUser(email: string, password: string): Promise<string> {
-    return this.#restClient.post<string>('/api/v1/runtime/users/login', { email, password });
+    return this.#restClient.post<string>('/api/v1/users/login', { email, password });
   }
 
   async requestLoginVerification(email: string, appInfo?: AuthInfoInput): Promise<VerificationRequestResult> {
@@ -272,7 +272,7 @@ export class AgentClient {
   }
 
   async verifyEmailCode(email: string, code: string, verificationType: string): Promise<string> {
-    return this.#restClient.post<string>('/api/v1/runtime/users/verify-email', { email, code, verificationType });
+    return this.#restClient.post<string>('/api/v1/users/verify-email', { email, code, verificationType });
   }
 
   // Hosting methods
