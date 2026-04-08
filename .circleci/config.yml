@@ -97,6 +97,10 @@ jobs:
           no_output_timeout: 30m
           command: cargo clippy --all --exclude ad4m-launcher
       - run:
+          name: Rust unit tests
+          command: cargo test --workspace --exclude ad4m-launcher
+          no_output_timeout: 15m
+      - run:
           name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
           command: |
             mkdir -p /tmp/circleci-artifacts/${CIRCLE_WORKFLOW_ID}
