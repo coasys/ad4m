@@ -1,151 +1,122 @@
 # AD4M Language Development Kit — Interface Spec
 
-**Version:** 0.4.0-draft  
+**Version:** 0.4.1-draft  
 **Date:** 2026-04-09  
 **Status:** Draft — for discussion
 
-> **Change log v0.4:**
-> - Unified two-direction naming: `linksReceiveDiff`, `linksPublish`, `dmReceiveMessage`, `dmPublish`
-> - Callbacks are just runtime→language exports (the language calls back via imports)
-> - No callback registration IDs — runtime knows the caller's language instance
-> - Holochain signal: `handleHolochainSignal(dnaNick, data)` — needs dnaNick to route to correct language
-> - `linksPublish(diff)` / `dmPublish(msg)` / `signalEmit(data)` for language→runtime data pushes
-> - Clean separation: exports = runtime calls language, imports = language calls runtime
-
 ---
 
-## 1. Design: Two Directions
+## The Two Directions
 
 Every cross-boundary call is either:
 
 ```
-RUNTIME → LANGUAGE     (runtime calls an exported function)
+LANGUAGE EXPORTS ← RUNTIME CALLS          (runtime → language)
+    The runtime calls a function that the language provides.
     Example: handleHolochainSignal(dnaNick, data)
-    The runtime has received an event from outside and calls the language.
+    Example: linkSyncSync()
 
-LANGUAGE → RUNTIME     (language calls an imported function)
-    Example: linksPublish(diff)
-    The language has new data and pushes it to the runtime.
+LANGUAGE IMPORTS ← RUNTIME PROVIDES        (language → runtime)
+    The language calls a function that the runtime provides.
+    Example: agentDid()
+    Example: linksTriggerCallback(diff)      ← language fires this to notify runtime
+    Example: holochainCall(dnaNick, zome, fnName, params)
 ```
 
-**There are no special "callback" mechanisms.** The language stores the callback function from the runtime in its own state (JS) or calls a runtime trigger function (WASM). Both are just function calls.
+No special "callback" naming. No separate registration step. Just function calls in both directions.
 
 ---
 
-## 2. Runtime → Language: What the Language Exports
+## Runtime Calls Language (Exports)
 
-The runtime calls these when external events arrive.
+The runtime calls these functions that the language exports.
 
-### 2.1 Holochain Signal
+### Required
 
-```
-Holochain DNA emits a signal
-        ↓
-  AD4M runtime receives it
-        ↓
-  calls language.handleHolochainSignal(dnaNick, signalData)
-```
+| Export | Parameters | Description |
+|--------|-----------|-------------|
+| `name` | — | `string` — language name |
+| `version` | — | `string` — semver |
+| `init()` | — | `Promise<void>` — initialize. Use `language_*()` imports inside. |
+| `teardown()` | — | `Promise<void>` — clean up |
 
-The `dnaNick` identifies which DNA sent the signal (since a language can manage multiple DNAs).
+### Holochain Signal Arrived
+
+When a Holochain DNA emits a signal, the runtime calls this. The `dnaNick` identifies which DNA (a language can manage multiple DNAs).
 
 | Export | Parameters | Description |
 |--------|-----------|-------------|
 | `handleHolochainSignal(dnaNick, signalData)` | `string, unknown` | Holochain DNA emitted a signal |
 
-### 2.2 Link Diff Received
+### Link Sync
 
-When the runtime has received link diff data from the network through a non-signal channel (e.g. runtime-level gossip, cache invalidation), it can push it to the language via this export.
+| Export | Parameters | Returns | Description |
+|--------|-----------|---------|-------------|
+| `linkSyncSync()` | — | `PerspectiveDiff` | Sync with network, return current diff |
+| `linkSyncCommit(diff)` | `PerspectiveDiff` | `string` | Commit a diff, return new revision hash |
+| `linkSyncRender()` | — | `{links: LinkExpression[]}` | Full link snapshot |
+| `linkSyncCurrentRevision()` | — | `string\|null` | Current revision hash |
+| `linkSyncOthers()` | — | `string[]` | Other synced agent DIDs |
+| `linkSyncWritable()` | — | `boolean` | Whether accepting new links |
+| `linkSyncPublic()` | — | `boolean` | Whether links are publicly readable |
+| `linkSyncSetLocalAgents(agents)` | `string[]` | `Promise<void>` | Register local agent DIDs |
 
-| Export | Parameters | Description |
-|--------|-----------|-------------|
-| `linksReceiveDiff(diff)` | `PerspectiveDiff` | Runtime delivers a diff to the language |
+### Expression
 
-> **Note:** In many languages (e.g. p-diff-sync), link data arrives exclusively through `handleHolochainSignal`. The `linksReceiveDiff` export exists for cases where the runtime receives link data through other means and needs to deliver it to the language.
+| Export | Parameters | Returns | Description |
+|--------|-----------|---------|-------------|
+| `expressionCreate(content)` | `object` | `Promise<string>` | Store expression, return address |
+| `expressionGet(address)` | `string` | `Promise<Expression\|null>` | Retrieve expression |
+| `expressionAddressOf(data)` | `object` | `string` | Deterministic address for data |
+| `expressionIcon()` | — | `string` | Icon (base64 SVG or URL) |
+| `expressionConstructorIcon()` | — | `string` | Constructor icon |
+| `settingsIcon()` | — | `string` | Settings icon |
 
-### 2.3 Direct Message Received
+### Telepresence
 
-| Export | Parameters | Description |
-|--------|-----------|-------------|
-| `dmReceiveMessage(message)` | `PerspectiveExpression` | Runtime delivers a DM to the language |
+| Export | Parameters | Returns | Description |
+|--------|-----------|---------|-------------|
+| `telepresenceSetOnlineStatus(status)` | `PerspectiveExpression` | `Promise<void>` | Set online status |
+| `telepresenceGetOnlineAgents()` | — | `Promise<OnlineAgent[]>` | Get online agents |
+| `telepresenceSendSignal(agentDid, payload)` | `string, PerspectiveExpression` | `Promise<object>` | Send signal to agent |
+| `telepresenceSendBroadcast(payload)` | `PerspectiveExpression` | `Promise<object>` | Broadcast to all |
 
----
+### Direct Message
 
-## 3. Language → Runtime: What the Language Imports
+| Export | Parameters | Returns | Description |
+|--------|-----------|---------|-------------|
+| `directMessageRecipient()` | — | `string` | This agent's DID |
+| `directMessageStatus()` | — | `Promise<PerspectiveExpression\|void>` | Get DM status |
+| `directMessageSendP2P(recipient, message)` | `string, PerspectiveExpression` | `Promise<PerspectiveExpression\|void>` | Send P2P DM |
+| `directMessageSendInbox(recipient, message)` | `string, PerspectiveExpression` | `Promise<PerspectiveExpression\|void>` | Send inbox DM |
+| `directMessageSetStatus(status)` | `PerspectiveExpression` | `Promise<void>` | Set DM status |
+| `directMessageInbox(filter?)` | `string?` | `Promise<PerspectiveExpression[]>` | Get inbox |
 
-The language calls these to push data to the runtime.
+### Language Source
 
-### 3.1 Link Diff Published
+| Export | Parameters | Returns |
+|--------|-----------|---------|
+| `languageGetSource()` | — | `Promise<LanguageSource>` |
 
-The language has a new diff (from local commit, sync, or Holochain signal processing) and pushes it to the runtime.
+### Query
 
-| Import | Parameters | Description |
-|--------|-----------|-------------|
-| `linksPublish(diff)` | `PerspectiveDiff` | Push a diff to the runtime |
-| `linksPublishSyncState(state)` | `string` | Notify sync state change ("Synced", "NotSynced", etc.) |
+| Export | Parameters | Returns |
+|--------|-----------|---------|
+| `getByAuthor(author, count, page)` | `string, number, number` | `Promise<Expression[]\|null>` |
+| `getAll(filter?, count, page)` | `any?, number, number` | `Promise<Expression[]\|null>` |
+| `isImmutableExpression(address)` | `string` | `boolean` |
 
-The runtime stores the diff and invokes any registered JS callback (set via `linksSetCallback`).
+### Interactions
 
-### 3.2 Signal Emitted
-
-| Import | Parameters | Description |
-|--------|-----------|-------------|
-| `signalEmit(data)` | `unknown` | Emit a signal to the AD4M signal bus |
-
-### 3.3 Direct Message Published
-
-| Import | Parameters | Description |
-|--------|-----------|-------------|
-| `dmPublish(message)` | `PerspectiveExpression` | Push a DM to the runtime |
-
----
-
-## 4. Callback Registration (Runtime → Language Direction)
-
-The runtime registers a callback with the language. The language stores it and calls the appropriate runtime import to fire it.
-
-### 4.1 JavaScript
-
-```javascript
-// Runtime registers a callback with the language:
-export function linksSetCallback(callback) {
-    this._linkCallback = callback;  // store the JS function
-}
-
-// When links change inside the language:
-if (this._linkCallback) {
-    this._linkCallback(diff);  // call it directly
-}
-```
-
-### 4.2 Rust/WASM
-
-The language can't store `JsValue`. Instead, the runtime registers a callback and the language fires it via an import.
-
-```
-Runtime                        WASM Language                     Callback map
-    │                                  │                                │
-    │──── linksSetCallback(cbID) ──────►│  runtime stores cbID           │
-    │                                  │  language stores cbID internally │
-    │                                  │                                │
-    │  [links change in WASM]          │                                │
-    │                                  │──── linksTriggerCallback(cbID, diffJson) ──►│  runtime looks up cbID → calls JS fn
-```
-
-| Import | Parameters | Description |
-|--------|-----------|-------------|
-| `linksSetCallback(callbackId)` | `i32` | Register a callback by ID (runtime assigns ID) |
-| `linksTriggerCallback(callbackId, diffJson)` | `i32, string` | Fire the registered callback with diff |
-| `linksPublishSyncState(callbackId, state)` | `i32, string` | Fire sync state callback |
-| `dmSetCallback(callbackId)` | `i32` | Register a DM callback by ID |
-| `dmTriggerCallback(callbackId, msgJson)` | `i32, string` | Fire the registered DM callback |
-
-In Rust, the language stores `i32` callback IDs. When it needs to fire, it calls `linksTriggerCallback(id, json)` and the WASM host looks up the actual JS function.
+| Export | Parameters | Returns |
+|--------|-----------|---------|
+| `interactions(address)` | `string` | `Interaction[]` |
 
 ---
 
-## 5. Complete Import List (Runtime → Language / Language Calls)
+## Language Calls Runtime (Imports)
 
-All are flat function imports, same names in JS and Rust/WASM.
+The language calls these functions that the runtime provides. Import from `ad4m:runtime` in JavaScript. In Rust/WASM they are `extern "C"` declarations.
 
 ### Agent Identity
 
@@ -153,8 +124,8 @@ All are flat function imports, same names in JS and Rust/WASM.
 |--------|---------|-------------|
 | `agentDid()` | `string` | Current agent's DID |
 | `agentSigningKeyId()` | `string` | Current signing key ID |
-| `agentSign(data: Uint8Array)` | `Uint8Array` | Sign bytes |
-| `agentSignStringHex(data: string)` | `string` | Sign hex string |
+| `agentSign(data: Uint8Array)` | `Uint8Array` | Sign arbitrary bytes |
+| `agentSignStringHex(data: string)` | `string` | Sign a hex string |
 | `agentCreateSignedExpression(data)` | `object` | Create a signed expression |
 | `agentGetAllLocalUserDids()` | `string[]` | All local user DIDs |
 | `agentDidForUser(email: string)` | `string` | Get DID for a user |
@@ -164,7 +135,7 @@ All are flat function imports, same names in JS and Rust/WASM.
 
 | Import | Returns | Description |
 |--------|---------|-------------|
-| `holochainRegisterDnas(dnas)` | `void` | Register DNA bundles |
+| `holochainRegisterDnas(dnas)` | `void` | Register DNA bundles with the conductor |
 | `holochainCall(dnaNick, zome, fnName, params)` | `unknown` | Sync zome call |
 | `holochainCallAsync(calls, timeoutMs?)` | `unknown[]` | Async batch zome calls |
 
@@ -172,231 +143,387 @@ All are flat function imports, same names in JS and Rust/WASM.
 
 | Import | Returns | Description |
 |--------|---------|-------------|
-| `languageStorageDirectory()` | `string` | Persistent storage path |
-| `languageAddress()` | `string` | This language's network address |
-| `languageSettings()` | `string` | Custom settings (raw JSON) |
+| `languageStorageDirectory()` | `string` | Persistent storage path for this language instance |
+| `languageAddress()` | `string` | This language's address on the network |
+| `languageSettings()` | `string` | Custom settings (raw JSON — caller parses) |
 
-### Data Pushes (Language → Runtime)
+### Notify Runtime of Events
+
+When the language produces data that the runtime needs to handle, it calls these.
 
 | Import | Parameters | Description |
 |--------|-----------|-------------|
-| `linksPublish(diff)` | `PerspectiveDiff` | Push a link diff |
-| `linksPublishSyncState(state)` | `string` | Push sync state |
-| `dmPublish(message)` | `PerspectiveExpression` | Push a DM |
+| `linksTriggerCallback(diff)` | `PerspectiveDiff` | Notify runtime of new/received links |
+| `linksTriggerSyncState(state)` | `string` | Notify runtime of sync state change ("Synced", "NotSynced", etc.) |
+| `dmTriggerCallback(message)` | `PerspectiveExpression` | Notify runtime of new DM |
 | `signalEmit(data)` | `unknown` | Emit to the AD4M signal bus |
 
-### Callback Triggers (Language → Runtime, for WASM)
-
-| Import | Parameters | Description |
-|--------|-----------|-------------|
-| `linksSetCallback(callbackId)` | `i32` | Register link callback ID |
-| `linksTriggerCallback(callbackId, diffJson)` | `i32, string` | Fire link callback |
-| `linksSetSyncStateCallback(callbackId)` | `i32` | Register sync state callback ID |
-| `linksTriggerSyncStateCallback(callbackId, state)` | `i32, string` | Fire sync state callback |
-| `dmSetCallback(callbackId)` | `i32` | Register DM callback ID |
-| `dmTriggerCallback(callbackId, msgJson)` | `i32, string` | Fire DM callback |
-| `signalSetCallback(callbackId)` | `i32` | Register signal callback ID |
-| `signalTriggerCallback(callbackId, dataJson)` | `i32, string` | Fire signal callback |
+> **Note:** The runtime handles `linksTriggerCallback` by invoking the perspective's registered link callback (set by the perspective proxy). The language doesn't need a separate registration step — when it calls `linksTriggerCallback`, the runtime delivers the diff to whoever is listening.
 
 ---
 
-## 6. Complete Export List (Language → Runtime / Runtime Calls)
-
-### Required
-
-| Export | Type | Description |
-|--------|------|-------------|
-| `name` | `string` | Language name |
-| `version` | `string` | Semver version |
-| `init()` | `Promise<void>` | Initialize (use `language_*()` imports inside) |
-| `teardown()` | `Promise<void>` | Clean up |
-
-### External Event Handlers (Runtime → Language)
-
-| Export | Parameters | Description |
-|--------|-----------|-------------|
-| `handleHolochainSignal(dnaNick, signalData)` | `string, unknown` | Holochain DNA emitted a signal |
-| `linksReceiveDiff(diff)` | `PerspectiveDiff` | Runtime delivered a diff from external source |
-| `dmReceiveMessage(message)` | `PerspectiveExpression` | Runtime delivered a DM |
-
-### Expression Capability
-
-| Export | Returns | Notes |
-|--------|---------|-------|
-| `expressionCreate(content)` | `Promise<string>` | Store expression |
-| `expressionGet(address)` | `Promise<Expression\|null>` | Retrieve |
-| `expressionAddressOf(data)` | `string` | Deterministic address |
-| `expressionIcon()` | `string` | Icon (base64 SVG or URL) |
-| `expressionConstructorIcon()` | `string` | Constructor icon |
-| `settingsIcon()` | `string` | Settings icon |
-
-### Link Sync Capability
-
-| Export | Returns | Notes |
-|--------|---------|-------|
-| `linkSyncSync()` | `Promise<PerspectiveDiff>` | Sync with network |
-| `linkSyncCommit(diff)` | `Promise<string>` | Commit a diff |
-| `linkSyncRender()` | `Promise<{links: LinkExpression[]}>` | Full link snapshot |
-| `linkSyncCurrentRevision()` | `string\|null` | Current revision |
-| `linkSyncOthers()` | `Promise<string[]>` | Other synced agents |
-| `linkSyncWritable()` | `boolean` | Is writable |
-| `linkSyncPublic()` | `boolean` | Is public |
-| `linkSyncSetLocalAgents(agents)` | `Promise<void>` | Register local agents |
-
-### Telepresence Capability
-
-| Export | Returns | Notes |
-|--------|---------|-------|
-| `telepresenceSetOnlineStatus(status)` | `Promise<void>` | Set online status |
-| `telepresenceGetOnlineAgents()` | `Promise<OnlineAgent[]>` | Get online agents |
-| `telepresenceSendSignal(agentDid, payload)` | `Promise<object>` | Send signal to agent |
-| `telepresenceSendBroadcast(payload)` | `Promise<object>` | Broadcast |
-
-### Direct Message Capability
-
-| Export | Returns | Notes |
-|--------|---------|-------|
-| `directMessageRecipient()` | `string` | This agent's DID |
-| `directMessageStatus()` | `Promise<PerspectiveExpression\|void>` | Get DM status |
-| `directMessageSendP2P(recipient, message)` | `Promise<PerspectiveExpression\|void>` | Send P2P DM |
-| `directMessageSendInbox(recipient, message)` | `Promise<PerspectiveExpression\|void>` | Send inbox DM |
-| `directMessageSetStatus(status)` | `Promise<void>` | Set DM status |
-| `directMessageInbox(filter?)` | `Promise<PerspectiveExpression[]>` | Get inbox |
-
-### Language Source
-
-| Export | Returns |
-|--------|---------|
-| `languageGetSource()` | `Promise<LanguageSource>` |
-
-### Query
-
-| Export | Returns |
-|--------|---------|
-| `getByAuthor(author, count, page)` | `Promise<Expression[]\|null>` |
-| `getAll(filter?, count, page)` | `Promise<Expression[]\|null>` |
-| `isImmutableExpression(address)` | `boolean` |
-
-### Interactions
-
-| Export | Returns |
-|--------|---------|
-| `interactions(address)` | `Interaction[]` |
-
----
-
-## 7. Callback Registration Detail
-
-The runtime registers callbacks with the language. The language stores the callback and fires it via the runtime trigger imports.
+## How It Works
 
 ### JavaScript — Direct Function Storage
+
+In JavaScript, the language stores callback functions directly in its own state. The runtime doesn't need to register anything — when the language calls `linksTriggerCallback(diff)`, the runtime delivers the diff.
 
 ```javascript
 class MyLanguage {
     _linkCallback = null;
-    _syncStateCallback = null;
-    _dmCallback = null;
-    _signalCallback = null;
 
-    // Runtime registers
-    linksSetCallback(callback) { this._linkCallback = callback; }
-    linksSetSyncStateCallback(callback) { this._syncStateCallback = callback; }
-    dmSetCallback(callback) { this._dmCallback = callback; }
-    signalSetCallback(callback) { this._signalCallback = callback; }
-
-    // Language fires — calls the stored function directly
-    _fireLinkCallback(diff) {
-        if (this._linkCallback) this._linkCallback(diff);
+    // Runtime calls this during perspective setup to give the language a callback
+    linkSyncAddCallback(callback) {
+        this._linkCallback = callback;
     }
-    _fireSyncStateCallback(state) {
-        if (this._syncStateCallback) this._syncStateCallback(state);
+
+    // When links change, the language notifies the runtime
+    async linkSyncSync() {
+        const diff = await this.fetchFromHolochain();
+        if (diff && this._linkCallback) {
+            this._linkCallback(diff);  // notify runtime
+        }
+        return diff;
     }
 }
 ```
 
 ### Rust/WASM — i32 ID + Trigger Import
 
+In WASM, the language can't store `JsValue`. Instead, the runtime registers a callback by passing an i32 ID. The language stores the ID and calls `linksTriggerCallback(diff)` when it has new links. The WASM host looks up the ID and invokes the actual JS function.
+
 ```rust
 struct MyLanguage {
     link_cb_id: Option<i32>,
-    sync_state_cb_id: Option<i32>,
-    dm_cb_id: Option<i32>,
-    signal_cb_id: Option<i32>,
 }
 
 impl MyLanguage {
-    // Runtime registers — language stores the i32 ID
-    fn links_set_callback(&mut self, callback_id: i32) {
+    // Runtime calls this to register a callback by ID
+    fn linkSyncAddCallback(&mut self, callback_id: i32) {
         self.link_cb_id = Some(callback_id);
     }
 
-    // Language fires — calls trigger import, passes ID so runtime can look up JS fn
-    fn fire_link_callback(&self, diff: &PerspectiveDiff) {
-        let json = serde_json::to_string(diff).unwrap();
-        unsafe {
-            let c_str = std::ffi::CString::new(json).unwrap();
-            links_trigger_callback(
-                self.link_cb_id.unwrap(),
-                c_str.as_ptr()
-            );
-            std::mem::forget(c_str); // Don't free — host owns it now
+    fn linkSyncSync(&mut self) -> JsValue {
+        // When links change:
+        let diff_json = serde_json::to_string(&diff).unwrap();
+        // Language calls the trigger import → runtime invokes the JS callback
+        self.link_cb_manager.trigger_links(&diff_json);
+        JsValue::NULL
+    }
+}
+```
+
+The WASM host implements `linksTriggerCallback(diffJson)` by calling the JS callback that was registered with the same callback ID.
+
+---
+
+## Complete Data Flow: p-diff-sync Pattern
+
+### Periodic sync (runtime → language → runtime)
+
+```
+1. Runtime timer fires, calls: language.linkSyncSync()
+2. Language calls: holochainCall("sync", myDid)
+3. Holochain returns diff
+4. Language calls: linksTriggerCallback(diff)    ← language → runtime notification
+5. Runtime delivers diff to perspective's link callback
+```
+
+### Holochain signal arrives (external → runtime → language → runtime)
+
+```
+1. Holochain DNA emits WebSocket signal
+2. Runtime receives it, calls: language.handleHolochainSignal(dnaNick, signalData)
+3. Language processes signal, may call: linksTriggerCallback(diff)
+4. Runtime delivers diff to perspective's link callback
+```
+
+---
+
+## JavaScript ALDK — `@ad4m/ldk`
+
+### `defineLanguage()` — Nested Object Support
+
+```javascript
+import { defineLanguage } from '@ad4m/ldk';
+
+export default defineLanguage({
+    name: "@coasys/my-language",
+    version: "1.0.0",
+
+    init() {
+        const storage = languageStorageDirectory();
+        const langAddr = languageAddress();
+    },
+
+    // Lifecycle
+    teardown() { },
+
+    // Expression — nested
+    expression: {
+        async create(content) { /* ... */ },
+        async get(address) { /* ... */ },
+        addressOf(data) { /* ... */ },
+    },
+
+    // Link sync — nested
+    links: {
+        async sync() { /* ... */ },
+        async commit(diff) { /* ... */ },
+        async render() { return { links: [] }; },
+        currentRevision() { return null; },
+        others() { return []; },
+        writable() { return true; },
+        public() { return false; },
+        setLocalAgents(agents) { /* ... */ },
+        // Callback: runtime passes function directly, language stores it
+        addCallback(cb) { this._linkCb = cb; },
+        removeCallback(cb) { if (this._linkCb === cb) this._linkCb = null; },
+        addSyncStateChangeCallback(cb) { this._stateCb = cb; },
+    },
+
+    // Telepresence — nested
+    telepresence: {
+        async setOnlineStatus(status) { /* ... */ },
+        async getOnlineAgents() { return []; },
+        async sendSignal(agentDid, payload) { /* ... */ },
+        async sendBroadcast(payload) { /* ... */ },
+        registerSignalCallback(cb) { this._signalCb = cb; },
+    },
+
+    // Direct message — nested
+    dm: {
+        recipient() { return agentDid(); },
+        async status() { /* ... */ },
+        async sendP2P(recipient, message) { /* ... */ },
+        async sendInbox(recipient, message) { /* ... */ },
+        async setStatus(status) { /* ... */ },
+        async inbox() { return []; },
+        addMessageCallback(cb) { this._dmCb = cb; },
+        removeMessageCallback(cb) { /* ... */ },
+    },
+
+    // Flat exports
+    expressionIcon() { return ""; },
+    expressionConstructorIcon() { return ""; },
+    settingsIcon() { return ""; },
+    interactions() { return []; },
+
+    // External event handlers (runtime → language)
+    handleHolochainSignal(dnaNick, signalData) { /* ... */ },
+});
+```
+
+---
+
+## Rust ALDK — `ad4m-ldk` Crate
+
+### Capability Traits
+
+```rust
+use wasm_bindgen::JsValue;
+
+pub trait Language: Sized {
+    const NAME: &'static str;
+    const VERSION: &'static str;
+    fn init(&mut self) { }
+    fn teardown(&mut self) { }
+}
+
+// Callback registration traits — language stores i32 IDs
+pub trait LinkSyncCallbacks: Language {
+    fn linkSyncAddCallback(&mut self, callback_id: i32);
+    fn linkSyncRemoveCallback(&mut self, callback_id: i32);
+    fn linkSyncAddSyncStateChangeCallback(&mut self, callback_id: i32);
+}
+
+pub trait DirectMessageCallbacks: Language {
+    fn dmAddMessageCallback(&mut self, callback_id: i32);
+    fn dmRemoveMessageCallback(&mut self, callback_id: i32);
+}
+
+pub trait SignalCallbacks: Language {
+    fn signalSetCallback(&mut self, callback_id: i32);
+}
+
+// Capability traits with default implementations
+pub trait LinkSyncCapability: Language + LinkSyncCallbacks {
+    fn linkSyncSync(&mut self) -> JsValue { JsValue::NULL }
+    fn linkSyncCommit(&mut self, diff: &JsValue) -> Result<String, LdkError> {
+        Err(LdkError::new("not implemented"))
+    }
+    fn linkSyncRender(&mut self) -> JsValue {
+        JsValue::from_serde(&serde_json::json!({ "links": [] })).unwrap()
+    }
+    fn linkSyncCurrentRevision(&self) -> String { String::new() }
+    fn linkSyncOthers(&mut self) -> Vec<String> { vec![] }
+    fn linkSyncWritable(&self) -> bool { false }
+    fn linkSyncPublic(&self) -> bool { false }
+    fn linkSyncSetLocalAgents(&mut self, agents: &JsValue) { }
+}
+
+pub trait TelepresenceCapability: Language + SignalCallbacks {
+    fn telepresenceSetOnlineStatus(&mut self, status: &JsValue) -> Result<(), LdkError> {
+        Err(LdkError::new("not implemented"))
+    }
+    fn telepresenceGetOnlineAgents(&mut self) -> Result<Vec<JsValue>, LdkError> {
+        Err(LdkError::new("not implemented"))
+    }
+    fn telepresenceSendSignal(&mut self, agent: &str, payload: &JsValue) -> Result<JsValue, LdkError> {
+        Err(LdkError::new("not implemented"))
+    }
+    fn telepresenceSendBroadcast(&mut self, payload: &JsValue) -> Result<JsValue, LdkError> {
+        Err(LdkError::new("not implemented"))
+    }
+}
+
+pub trait DirectMessageCapability: Language + DirectMessageCallbacks {
+    fn directMessageRecipient(&self) -> String { String::new() }
+    fn directMessageStatus(&mut self) -> Result<JsValue, LdkError> {
+        Err(LdkError::new("not implemented"))
+    }
+    fn directMessageSendP2P(&mut self, recipient: &str, data: &JsValue) -> Result<(), LdkError> {
+        Err(LdkError::new("not implemented"))
+    }
+    fn directMessageSendInbox(&mut self, recipient: &str, data: &JsValue) -> Result<(), LdkError> {
+        Err(LdkError::new("not implemented"))
+    }
+    fn directMessageSetStatus(&mut self, status: &JsValue) -> Result<(), LdkError> {
+        Err(LdkError::new("not implemented"))
+    }
+    fn directMessageInbox(&mut self) -> Result<Vec<JsValue>, LdkError> {
+        Err(LdkError::new("not implemented"))
+    }
+}
+
+pub trait ExpressionCapability: Language {
+    fn expressionCreate(&mut self, content: &JsValue) -> Result<String, LdkError>;
+    fn expressionGet(&mut self, address: &str) -> JsValue;
+    fn expressionAddressOf(&mut self, data: &JsValue) -> String;
+}
+```
+
+### Callback Manager (Rust)
+
+```rust
+// The language stores i32 IDs. When it needs to fire a callback,
+// it calls the trigger import and the WASM host dispatches to the JS function.
+
+extern "C" {
+    fn linksTriggerCallback(callback_id: i32, diff_json: *const c_char);
+    fn linksTriggerSyncState(callback_id: i32, state: *const c_char);
+    fn dmTriggerCallback(callback_id: i32, msg_json: *const c_char);
+    fn signalTriggerCallback(callback_id: i32, data_json: *const c_char);
+}
+
+pub struct CallbackManager {
+    ids: std::collections::HashMap<String, i32>,
+}
+
+impl CallbackManager {
+    pub fn new() -> Self { Self { ids: std::collections::HashMap::new() } }
+
+    pub fn set(&mut self, key: &str, id: i32) { self.ids.insert(key.to_string(), id); }
+    pub fn get(&self, key: &str) -> Option<i32> { self.ids.get(key).copied() }
+
+    pub fn trigger_links(&self, diff: &str) {
+        if let Some(id) = self.get("link") {
+            unsafe {
+                let cstr = std::ffi::CString::new(diff).unwrap();
+                linksTriggerCallback(id, cstr.as_ptr());
+                std::ffi::CString::from_raw(cstr.into_raw());
+            }
         }
     }
 }
 ```
 
-The WASM host implements `links_trigger_callback(id, json)` by looking up `id` in its callback map and calling the stored JS function.
+### Complete Rust Example
+
+```rust
+use wasm_bindgen::prelude::*;
+use ad4m_ldk::prelude::*;
+
+#[wasm_bindgen]
+pub struct MyLanguage {
+    link_cbs: CallbackManager,
+}
+
+#[wasm_bindgen]
+impl MyLanguage {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self { Self { link_cbs: CallbackManager::new() } }
+}
+
+impl Language for MyLanguage {
+    const NAME: &'static str = "@coasys/my-language";
+    const VERSION: &'static str = "0.1.0";
+    fn init(&mut self) {
+        let storage = languageStorageDirectory();
+    }
+}
+
+impl LinkSyncCallbacks for MyLanguage {
+    fn linkSyncAddCallback(&mut self, callback_id: i32) {
+        self.link_cbs.set("link", callback_id);
+    }
+    fn linkSyncRemoveCallback(&mut self, _callback_id: i32) {
+        self.link_cbs.set("link", -1);
+    }
+    fn linkSyncAddSyncStateChangeCallback(&mut self, callback_id: i32) {
+        self.link_cbs.set("sync_state", callback_id);
+    }
+}
+
+impl LinkSyncCapability for MyLanguage {
+    fn linkSyncSync(&mut self) -> JsValue {
+        let diff = self.do_sync();
+        self.link_cbs.trigger_links(&serde_json::to_string(&diff).unwrap());
+        JsValue::NULL
+    }
+}
+
+#[ad4m_language]
+impl Language for MyLanguage { }
+```
 
 ---
 
-## 8. Data Flow Examples
+## Rust WASM Imports (what the runtime provides)
 
-### Example 1: Holochain DNA emits a link signal (p-diff-sync pattern)
+```rust
+extern "C" {
+    // Agent
+    fn agentDid() -> *mut c_char;
+    fn agentSign(payload: *const u8, len: usize) -> *mut c_char;
+    fn agentSignStringHex(payload: *const c_char) -> *mut c_char;
+    fn agentCreateSignedExpression(data: *const c_char) -> *mut c_char;
+    fn agentGetAllLocalUserDids() -> *mut c_char;
+    fn agentDidForUser(email: *const c_char) -> *mut c_char;
+    fn agentCreateSignedExpressionForUser(email: *const c_char, data: *const c_char) -> *mut c_char;
 
-```
-1. Holochain DNA emits signal via WebSocket
-2. AD4M runtime (Rust) receives it
-3. Runtime calls: language.handleHolochainSignal("perspective-diff-sync", signalData)
-4. Language processes signal, has new links
-5. Language calls: linksPublish(diff)  ← pushes diff to runtime
-6. Runtime calls registered JS callback with diff
-7. AD4M runtime updates perspectives, emits signals to UI
-```
+    // Holochain
+    fn holochainRegisterDnas(dnas_json: *const c_char);
+    fn holochainCall(dna_nick: *const c_char, zome: *const c_char, fn_name: *const c_char, params: *const c_char) -> *mut c_char;
+    fn holochainCallAsync(calls: *const c_char, timeout_ms: u32) -> *mut c_char;
 
-### Example 2: Periodic sync (p-diff-sync pattern)
+    // Language context
+    fn languageStorageDirectory() -> *mut c_char;
+    fn languageAddress() -> *mut c_char;
+    fn languageSettings() -> *mut c_char;
 
-```
-1. Runtime timer fires, calls: language.linkSyncSync()
-2. Language calls holochainCall("sync", myDid) → Holochain
-3. Holochain returns diff
-4. Language processes diff, calls: linksPublish(diff)
-5. Runtime invokes registered JS callback
-```
-
-### Example 3: DM sent (p2p messaging)
-
-```
-1. User calls runtime.sendDM(recipient, content)
-2. Runtime calls: language.directMessageSendP2P(recipient, message)
-3. Language calls holochainCall("send_dm", ...) → Holochain
-4. Recipient's Holochain DNA signals
-5. Recipient's runtime calls: language.handleHolochainSignal(dnaNick, signalData)
-6. Recipient's language processes, calls: dmPublish(message)
-7. Recipient's runtime invokes registered DM callback
+    // Notify runtime (language → runtime)
+    fn linksTriggerCallback(callback_id: i32, diff_json: *const c_char);
+    fn linksTriggerSyncState(callback_id: i32, state: *const c_char);
+    fn dmTriggerCallback(callback_id: i32, msg_json: *const c_char);
+    fn signalEmit(data: *const c_char);
+}
 ```
 
 ---
 
-## 9. Open Questions
+## Open Questions
 
-1. **`linksReceiveDiff` vs `handleHolochainSignal`:** In p-diff-sync, link data always arrives through `handleHolochainSignal`. Is `linksReceiveDiff` ever needed? Or can all link data flow through `handleHolochainSignal`? If yes, remove `linksReceiveDiff`.
+1. **`linksPublish` vs `linksTriggerCallback`:** In the current p-diff-sync, the language fires the callback DIRECTLY from within `sync()` — it doesn't go through a trigger import. Does the WASM path need a separate `linksTriggerCallback` import, or can the language just call `linkSyncSync()` which internally triggers the callback? Current thinking: `linkSyncSync()` returns the diff. For WASM, the runtime gets the diff from the return value. The callback trigger is only needed if the language receives data ASYNCHRONOUSLY (e.g., from a Holochain signal) and needs to notify the runtime outside of a direct function call.
 
-2. **`dmReceiveMessage` vs `handleHolochainSignal`:** Same question for DMs. Can all DM data arrive through `handleHolochainSignal`?
-
-3. **`TelepresenceAdapter` signals:** The current `TelepresenceAdapter.registerSignalCallback` registers a callback for telepresence signals from OTHER agents. How does this map to the new design? Does the language receive these via `handleHolochainSignal` or via a separate `telepresenceReceiveSignal`?
-
-4. **`DMStatus` type:** Not yet concretely defined.
-
-5. **Sync state callback:** Separate trigger (`linksTriggerSyncStateCallback`) or folded into `linksTriggerCallback` with a different JSON structure? Current thinking: separate is cleaner.
-
-6. **Multiple DNAs per language:** If one language manages multiple DNAs, `handleHolochainSignal(dnaNick, data)` identifies which DNA. But for `linksPublish` / `dmPublish` — does the language need to specify which DNA the data is for? Probably not — the runtime knows which language instance is calling.
+2. **`TelepresenceAdapter` signals:** The current `registerSignalCallback` receives signals from OTHER agents. Does this map to `handleHolochainSignal`, or a separate `telepresenceReceiveSignal` export?
