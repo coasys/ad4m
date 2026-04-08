@@ -1,0 +1,233 @@
+/**
+ * # Flat WASM Import Wrapper (JS/Deno side)
+ * 
+ * Provides JavaScript/Deno implementations of the flat WASM import functions.
+ * A WASM-compiled language links against these — the same signatures exist on the Rust side.
+ * 
+ * ## Usage
+ * 
+ * A WASM language (compiled via wasm-bindgen) declares these as imports:
+ * 
+ * ```rust
+ * #[wasm_bindgen]
+ * extern "C" {
+ *     fn __agent_did() -> String;
+ *     fn __agent_sign(payload: &[u8]) -> Vec<u8>;
+ *     fn __holochain_call(dna: &str, zome: &str, fn_name: &str, params: JsValue) -> JsValue;
+ *     fn __signal_emit(data: JsValue);
+ * }
+ * ```
+ * 
+ * ## Architecture
+ * 
+ * ```
+ * WASM Language (compiled from Rust)
+ *     │
+ *     │ calls __agent_did(), __signal_emit(), etc.
+ *     ▼
+ * flat_wasm_imports.js (this file — globalThis functions)
+ *     │
+ *     │ imports from ext:core/ops
+ *     ▼
+ * Deno extension ops (agent_extension.rs, languages_extension.rs, signature_extension.rs)
+ * ```
+ * 
+ * ## Bootstrap integration
+ * 
+ * In language_bootstrap.js, for flat-pattern languages, setupFlatWasmImports()
+ * is called before init() to make the import functions available on globalThis.
+ */
+
+// ============================================================================
+// Import Deno extension ops
+// ============================================================================
+// These come from ext:core/ops — the built-in Deno ops registered by the
+// deno_core extension system. They are plain functions when imported.
+
+import {
+    agent_did,
+    agent_signing_key_id,
+    agent_sign,
+    agent_sign_string_hex,
+    agent_create_signed_expression,
+    agent_get_all_local_user_dids,
+    agent_create_signed_expression_for_user,
+    agent_did_for_user,
+} from 'ext:core/ops';
+
+import {
+    holochain_register_dnas,
+    holochain_call,
+    holochain_call_async,
+    ad4m_signal_emitted,
+} from 'ext:core/ops';
+
+// ============================================================================
+// Agent Imports — bridge to agent_extension.rs ops
+// ============================================================================
+
+/**
+ * Returns the current agent's DID.
+ * Rust: `agent_extension::agent_did()`
+ */
+export function __agent_did(): string {
+    return agent_did() as string;
+}
+
+/**
+ * Returns the signing key ID for the current agent.
+ * Rust: `agent_extension::agent_signing_key_id()`
+ */
+export function __agent_signing_key_id(): string {
+    return agent_signing_key_id() as string;
+}
+
+/**
+ * Signs arbitrary bytes with the current agent's signing key.
+ * Rust: `agent_extension::agent_sign()`
+ */
+export function __agent_sign(payload: Uint8Array): Uint8Array {
+    const result = agent_sign(payload) as Uint8Array;
+    return result;
+}
+
+/**
+ * Signs a hex string with the current agent's signing key.
+ * Rust: `agent_extension::agent_sign_string_hex()`
+ */
+export function __agent_sign_string_hex(payload: string): string {
+    return agent_sign_string_hex(payload) as string;
+}
+
+/**
+ * Creates a signed expression with the given data using the current agent.
+ * Rust: `agent_extension::agent_create_signed_expression()`
+ */
+export function __agent_create_signed_expression(data: unknown): object {
+    return agent_create_signed_expression(data) as object;
+}
+
+/**
+ * Gets all local user DIDs (main agent + managed users).
+ * Rust: `agent_extension::agent_get_all_local_user_dids()`
+ */
+export function __agent_get_all_local_user_dids(): string[] {
+    return agent_get_all_local_user_dids() as string[];
+}
+
+/**
+ * Creates a signed expression for a specific user (by email).
+ * Rust: `agent_extension::agent_create_signed_expression_for_user()`
+ */
+export function __agent_create_signed_expression_for_user(userEmail: string, data: unknown): object {
+    return agent_create_signed_expression_for_user(userEmail, data) as object;
+}
+
+/**
+ * Gets the DID for a specific user (by email).
+ * Rust: `agent_extension::agent_did_for_user()`
+ */
+export function __agent_did_for_user(userEmail: string): string {
+    return agent_did_for_user(userEmail) as string;
+}
+
+// ============================================================================
+// Holochain Imports — bridge to languages_extension.rs ops
+// ============================================================================
+
+/**
+ * Registers one or more DNAs with the Holochain conductor.
+ * Rust: `languages_extension::holochain_register_dnas()`
+ */
+export function __holochain_register_dnas(dnas: object[]): object[] {
+    return holochain_register_dnas(dnas) as object[];
+}
+
+/**
+ * Synchronous call to a zome function.
+ * Rust: `languages_extension::holochain_call()`
+ */
+export function __holochain_call(
+    dnaNick: string,
+    zome: string,
+    fnName: string,
+    params: unknown
+): unknown {
+    return holochain_call(dnaNick, zome, fnName, params) as unknown;
+}
+
+/**
+ * Asynchronous call to a zome function.
+ * Rust: `languages_extension::holochain_call_async()`
+ */
+export function __holochain_call_async(
+    dnaNick: string,
+    zome: string,
+    fnName: string,
+    params: unknown
+): Promise<unknown> {
+    return holochain_call_async(dnaNick, zome, fnName, params) as Promise<unknown>;
+}
+
+// ============================================================================
+// Signal Imports — emits to the AD4M signal bus
+// ============================================================================
+
+/**
+ * Emits a signal to the AD4M signal bus.
+ * Rust: `languages_extension::ad4m_signal_emitted()`
+ */
+export function __signal_emit(data: unknown): void {
+    ad4m_signal_emitted(data);
+}
+
+// ============================================================================
+// Bootstrap helper — set up globals for WASM language
+// ============================================================================
+
+/**
+ * Sets up the globalThis import functions for a flat WASM language.
+ * Call this in language_bootstrap.js for flat-pattern languages,
+ * before calling the language's init() function.
+ * 
+ * After this, the WASM module can call the import functions directly.
+ */
+export function setupFlatWasmImports(): void {
+    // Agent imports
+    (globalThis as any).__agent_did = __agent_did;
+    (globalThis as any).__agent_signing_key_id = __agent_signing_key_id;
+    (globalThis as any).__agent_sign = __agent_sign;
+    (globalThis as any).__agent_sign_string_hex = __agent_sign_string_hex;
+    (globalThis as any).__agent_create_signed_expression = __agent_create_signed_expression;
+    (globalThis as any).__agent_get_all_local_user_dids = __agent_get_all_local_user_dids;
+    (globalThis as any).__agent_create_signed_expression_for_user = __agent_create_signed_expression_for_user;
+    (globalThis as any).__agent_did_for_user = __agent_did_for_user;
+
+    // Holochain imports
+    (globalThis as any).__holochain_register_dnas = __holochain_register_dnas;
+    (globalThis as any).__holochain_call = __holochain_call;
+    (globalThis as any).__holochain_call_async = __holochain_call_async;
+
+    // Signal imports
+    (globalThis as any).__signal_emit = __signal_emit;
+}
+
+/**
+ * Cleans up the globalThis import functions.
+ * Call this during language teardown() to avoid leaks.
+ */
+export function teardownFlatWasmImports(): void {
+    const g = globalThis as any;
+    delete g.__agent_did;
+    delete g.__agent_signing_key_id;
+    delete g.__agent_sign;
+    delete g.__agent_sign_string_hex;
+    delete g.__agent_create_signed_expression;
+    delete g.__agent_get_all_local_user_dids;
+    delete g.__agent_create_signed_expression_for_user;
+    delete g.__agent_did_for_user;
+    delete g.__holochain_register_dnas;
+    delete g.__holochain_call;
+    delete g.__holochain_call_async;
+    delete g.__signal_emit;
+}
