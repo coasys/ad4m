@@ -5,6 +5,7 @@
 
 // Polyfill Node.js Buffer on globalThis – many language bundles depend on it.
 import { Buffer } from "node:buffer";
+import { setupFlatWasmImports, teardownFlatWasmImports } from "./flat_wasm_imports.ts";
 globalThis.Buffer = Buffer;
 
 // Minimal DOM stubs – language bundles that include Svelte Icon components
@@ -292,6 +293,9 @@ async function initLanguage(contextJson) {
         globalThis.__ad4mSignal__ = ad4mSignal;
         globalThis.__agentProxy__ = agentProxy;
 
+        // Set up flat WASM import functions on globalThis (needed before init())
+        setupFlatWasmImports();
+
         // init() receives serializable context as JSON string
         await mod.init(JSON.stringify({
             storageDirectory: fullContext.storageDirectory,
@@ -387,7 +391,11 @@ async function initLanguage(contextJson) {
         }
         // Teardown
         if (mod.teardown) {
-            language.teardown = mod.teardown;
+            const originalTeardown = mod.teardown;
+            language.teardown = async () => {
+                teardownFlatWasmImports();
+                return originalTeardown();
+            };
         }
 
     } else {
