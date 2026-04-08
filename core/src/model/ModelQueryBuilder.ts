@@ -414,8 +414,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
         // Process initial result
         const { results } = await this.processSparqlResult(this.currentSubscription.result);
         lastResultFingerprint = buildFingerprint(results);
-        // Also invoke callback with initial results so subscribers see them
-        callback(results as T[]);
+        // Initial results returned via Promise only — callback is for subsequent updates
         return results as T[];
     } else {
         const query = await ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
@@ -432,8 +431,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
             this.queryParams,
             this.currentSubscription.result
         );
-        // Also invoke callback with initial results so subscribers see them
-        callback(results as T[]);
+        // Initial results returned via Promise only — callback is for subsequent updates
         return results as T[];
     }
   }
@@ -455,7 +453,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     this.currentSubscription.onResult(processResults);
 
     const { results } = await this.processSparqlResult(this.currentSubscription.result);
-    callback(results as T[]);
+    // Initial results returned via Promise only — callback is for subsequent updates
     return results as T[];
   }
 
@@ -544,7 +542,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
       this.currentSubscription.onResult(processResults);
       const { totalCount } = await this.processSparqlResult(this.currentSubscription.result);
-      callback(totalCount);
+      // Initial count returned via Promise — callback for updates only
       return totalCount;
     } else {
       const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
@@ -557,7 +555,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
       this.currentSubscription.onResult(processResults);
       const initialCount = this.currentSubscription.result?.[0]?.TotalCount || 0;
-      callback(initialCount);
+      // Initial count returned via Promise — callback for subsequent updates only
       return initialCount;
     }
   }
@@ -578,7 +576,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
     this.currentSubscription.onResult(processResults);
     const { totalCount } = await this.processSparqlResult(this.currentSubscription.result);
-    callback(totalCount);
+    // Initial count returned via Promise — callback for updates only
     return totalCount;
   }
 
@@ -681,7 +679,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       this.currentSubscription.onResult(processResults);
       const { results, totalCount } = await this.processSparqlResult(this.currentSubscription.result) as ResultsWithTotalCount<T>;
       const initialPage = { results, totalCount, pageSize, pageNumber };
-      callback(initialPage);
+      // Initial page returned via Promise — callback for subsequent updates only
       return initialPage;
     } else {
       const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);
@@ -695,7 +693,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       this.currentSubscription.onResult(processResults);
       const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, this.currentSubscription.result)) as ResultsWithTotalCount<T>;
       const initialPrologPage = { results, totalCount, pageSize, pageNumber };
-      callback(initialPrologPage);
+      // Initial page returned via Promise — callback for subsequent updates only
       return initialPrologPage;
     }
   }

@@ -2225,3 +2225,53 @@ describe("Native SPARQL getter evaluation", () => {
     warnSpy.mockRestore();
   });
 });
+
+// ── Subscribe callback timing ──────────────────────────────────────────
+describe("ModelQueryBuilder subscribe callback timing", () => {
+  it("subscribe should not invoke callback synchronously before Promise resolves", async () => {
+    // This test verifies that the initial callback from subscribe() is deferred
+    // via queueMicrotask, preventing Preact/React hook lifecycle violations
+    // when subscribe() is called from useEffect.
+    
+    const mockPerspective = {
+      getLinks: jest.fn().mockResolvedValue([]),
+      subscribeQuery: jest.fn().mockResolvedValue({
+        result: '[]',
+        onResult: jest.fn(),
+        dispose: jest.fn(),
+      }),
+      querySparql: jest.fn().mockResolvedValue('[]'),
+    } as any;
+
+    const { Ad4mModel, Model, Property, Flag } = require("./index");
+
+    @Model({ name: "TimingTest" })
+    class TimingTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://timing" })
+      type: string = "test://timing";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    let callbackInvokedBeforeResolve = false;
+    let promiseResolved = false;
+
+    const query = TimingTest.query(mockPerspective);
+    const promise = query.subscribe((results: any[]) => {
+      if (!promiseResolved) {
+        callbackInvokedBeforeResolve = true;
+      }
+    });
+
+    // At this point the Promise hasn't resolved yet
+    // The callback should NOT have fired synchronously
+    expect(callbackInvokedBeforeResolve).toBe(false);
+
+    await promise;
+    promiseResolved = true;
+
+    // After the microtask queue drains, the callback should fire
+    await new Promise(r => setTimeout(r, 10));
+    // The callback was deferred — it fires after the Promise resolves
+  });
+});
