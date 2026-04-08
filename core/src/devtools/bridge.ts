@@ -5,8 +5,8 @@ import { SubscriptionTracker } from './subscription-tracker';
 import { NotificationMonitor } from './notification-monitor';
 
 export function initDevToolsBridge(client: any): void {
-  if (typeof window === 'undefined') return;
-  if (window.__AD4M_DEVTOOLS__) return; // already initialized
+  if (typeof globalThis === 'undefined') return;
+  if ((globalThis as any).__AD4M_DEVTOOLS__) return; // already initialized
 
   const perf = new PerformanceTracker();
   const interceptor = new OperationInterceptor(perf);
@@ -71,7 +71,7 @@ export function initDevToolsBridge(client: any): void {
     },
   };
 
-  window.__AD4M_DEVTOOLS__ = devtools;
+  (globalThis as any).__AD4M_DEVTOOLS__ = devtools;
 }
 
 export type { AD4MDevTools, DevToolsState } from './types';

@@ -728,8 +728,8 @@ export class Ad4mModel {
     const sparql = await buildSPARQLQuery(metadata, allRelMeta, query, this);
 
     // Log to DevTools if available
-    if (typeof window !== 'undefined' && (window as any).__AD4M_DEVTOOLS__) {
-      (window as any).__AD4M_DEVTOOLS__.logSparqlQuery({
+    if (typeof globalThis !== 'undefined' && typeof (globalThis as any).document !== 'undefined' && (globalThis as any).__AD4M_DEVTOOLS__) {
+      (globalThis as any).__AD4M_DEVTOOLS__.logSparqlQuery({
         query: sparql,
         modelName: this.name,
         perspectiveUUID: perspective?.uuid || '',

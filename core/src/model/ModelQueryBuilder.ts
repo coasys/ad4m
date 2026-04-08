@@ -379,8 +379,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
     // Track subscription in DevTools
     let devtoolsSubId: number | undefined;
-    if (typeof window !== 'undefined' && window.__AD4M_DEVTOOLS__) {
-      devtoolsSubId = window.__AD4M_DEVTOOLS__.trackSubscription({
+    if (typeof globalThis !== 'undefined' && typeof (globalThis as any).document !== 'undefined' && (globalThis as any).__AD4M_DEVTOOLS__) {
+      devtoolsSubId = (globalThis as any).__AD4M_DEVTOOLS__.trackSubscription({
         query: '',
         perspectiveUUID: this.perspective?.uuid || '',
         modelName: ctor?.name || '',
@@ -391,8 +391,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
         const sparqlQuery = await ctor.queryToSPARQL(this.perspective, this.queryParams);
 
         // Update DevTools with actual query
-        if (devtoolsSubId !== undefined && window.__AD4M_DEVTOOLS__) {
-          window.__AD4M_DEVTOOLS__.updateSubscription(devtoolsSubId, { query: sparqlQuery });
+        if (devtoolsSubId !== undefined && (globalThis as any).__AD4M_DEVTOOLS__) {
+          (globalThis as any).__AD4M_DEVTOOLS__.updateSubscription(devtoolsSubId, { query: sparqlQuery });
         }
 
         // TODO (3.6 - Subscription predicate filtering): Extract predicates used in the
