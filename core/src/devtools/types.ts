@@ -5,13 +5,20 @@ export interface OperationRecord {
   query: string;
   variables?: Record<string, any>;
   response?: any;
-  errors?: any[];
+  errors?: ErrorDetail[];
   startTime: number;
   endTime?: number;
   duration?: number;
   payloadSize?: number;
   sparqlQuery?: string;
   sparqlResult?: any;
+}
+
+export interface ErrorDetail {
+  message: string;
+  type?: string;
+  stack?: string;
+  nested?: ErrorDetail[];
 }
 
 export interface SubscriptionRecord {
@@ -27,6 +34,14 @@ export interface SubscriptionRecord {
   active: boolean;
 }
 
+export interface SubscriptionUpdateRecord {
+  subscriptionId: number;
+  rawResultCount: number;
+  processedCount: number;
+  fingerprintChanged: boolean;
+  timestamp: number;
+}
+
 export interface NotificationRecord {
   id: string;
   triggerQuery: string;
@@ -34,6 +49,27 @@ export interface NotificationRecord {
   lastError?: string;
   matchHistory: Array<{ timestamp: number; matched: boolean }>;
   registered: number;
+}
+
+export interface GetterTraceRecord {
+  id: number;
+  property: string;
+  getterType: 'sparql' | 'legacy';
+  query: string;
+  result: any;
+  error: string | null;
+  duration: number;
+  instanceId: string;
+  timestamp: number;
+}
+
+export interface LanguageRecord {
+  name: string;
+  address: string;
+  loadStatus: 'loading' | 'loaded' | 'error';
+  loadTime?: number;
+  error?: string;
+  timestamp: number;
 }
 
 export interface PerformanceState {
@@ -53,8 +89,11 @@ export interface PerformanceState {
 export interface DevToolsState {
   operations: OperationRecord[];
   subscriptions: SubscriptionRecord[];
+  subscriptionUpdates: SubscriptionUpdateRecord[];
   notifications: NotificationRecord[];
   performance: PerformanceState;
+  getterTraces: GetterTraceRecord[];
+  languages: LanguageRecord[];
   connection: {
     wsConnected: boolean;
     url: string;
@@ -71,6 +110,13 @@ export interface AD4MDevTools {
   completeOperation(id: number, result: any, errors?: any[]): void;
   registerNotification(notification: NotificationRecord): void;
   updateNotification(id: string, update: Partial<NotificationRecord>): void;
+  logSubscriptionUpdate(update: SubscriptionUpdateRecord): void;
+  logGetterTrace(trace: Omit<GetterTraceRecord, 'id' | 'timestamp'>): void;
+  logLanguageEvent(lang: LanguageRecord): void;
+  testNotificationTrigger(notificationId: string, perspectiveId: string): Promise<any>;
+  queryLinks(perspectiveId: string, filter?: { source?: string; predicate?: string; target?: string }): Promise<any[]>;
+  getSubjectClasses(perspectiveId: string): Promise<any[]>;
+  getLanguages(): Promise<any[]>;
   _client?: any;
   _version: string;
 }

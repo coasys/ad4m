@@ -11,14 +11,18 @@ type Tab = 'connection' | 'perspectives' | 'queries' | 'notifications' | 'agent'
 interface DevToolsState {
   operations: any[];
   subscriptions: any[];
+  subscriptionUpdates: any[];
   notifications: any[];
   performance: any;
   connection: any;
+  getterTraces: any[];
+  languages: any[];
 }
 
 const EMPTY_STATE: DevToolsState = {
   operations: [],
   subscriptions: [],
+  subscriptionUpdates: [],
   notifications: [],
   performance: {
     totalQueries: 0, totalErrors: 0, avgRTT: 0, peakRTT: 0,
@@ -27,6 +31,8 @@ const EMPTY_STATE: DevToolsState = {
     estimatedMemory: 0,
   },
   connection: { wsConnected: false, url: '', authenticated: false },
+  getterTraces: [],
+  languages: [],
 };
 
 function evalInPage(expr: string): Promise<any> {
@@ -37,14 +43,37 @@ function evalInPage(expr: string): Promise<any> {
         else resolve(result);
       });
     } else {
-      // Dev mode — direct access
-      try {
-        resolve(eval(expr));
-      } catch {
-        resolve(null);
-      }
+      try { resolve(eval(expr)); } catch { resolve(null); }
     }
   });
+}
+
+function hasNotificationErrors(notifications: any[]): boolean {
+  const surrealPatterns = ['FROM link', 'fn::', 'in.uri', 'out.uri'];
+  return notifications.some(n => {
+    const q = n.triggerQuery || '';
+    return surrealPatterns.some(p => q.includes(p)) || n.lastError;
+  });
+}
+
+function exportState(state: DevToolsState) {
+  const exportData = {
+    operations: state.operations,
+    subscriptions: state.subscriptions,
+    subscriptionUpdates: state.subscriptionUpdates,
+    notifications: state.notifications,
+    performance: state.performance,
+    getterTraces: state.getterTraces,
+    languages: state.languages,
+    timestamp: Date.now(),
+  };
+  const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `ad4m-devtools-export-${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export function App() {
@@ -71,11 +100,13 @@ export function App() {
     return () => clearInterval(timer);
   }, [refresh]);
 
-  const tabs: { id: Tab; label: string }[] = [
+  const notifHasErrors = hasNotificationErrors(state.notifications);
+
+  const tabs: { id: Tab; label: string; badge?: boolean }[] = [
     { id: 'connection', label: 'Connection' },
     { id: 'perspectives', label: 'Perspectives' },
     { id: 'queries', label: 'Queries' },
-    { id: 'notifications', label: 'Notifications' },
+    { id: 'notifications', label: 'Notifications', badge: notifHasErrors },
     { id: 'agent', label: 'Agent' },
   ];
 
@@ -90,15 +121,26 @@ export function App() {
             onClick={() => setTab(t.id)}
           >
             {t.label}
+            {t.badge && <span class="error-badge">!</span>}
           </button>
         ))}
+        <button class="tab-btn export-btn" onClick={() => exportState(state)} title="Export DevTools state as JSON">
+          ⬇ Export
+        </button>
       </div>
       <div class="tab-content">
         {tab === 'connection' && <ConnectionTab state={state} connected={connected} />}
         {tab === 'perspectives' && <PerspectivesTab />}
-        {tab === 'queries' && <QueriesTab operations={state.operations} />}
+        {tab === 'queries' && (
+          <QueriesTab
+            operations={state.operations}
+            subscriptions={state.subscriptions}
+            subscriptionUpdates={state.subscriptionUpdates || []}
+            getterTraces={state.getterTraces || []}
+          />
+        )}
         {tab === 'notifications' && <NotificationsTab notifications={state.notifications} />}
-        {tab === 'agent' && <AgentTab />}
+        {tab === 'agent' && <AgentTab languages={state.languages || []} />}
       </div>
     </div>
   );
