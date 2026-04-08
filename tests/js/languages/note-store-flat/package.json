@@ -1,5 +1,8 @@
 {
   "name": "note-store-flat",
   "version": "0.1.0",
-  "type": "module"
+  "type": "module",
+  "scripts": {
+    "build": "deno run --allow-all esbuild.ts"
+  }
 }
