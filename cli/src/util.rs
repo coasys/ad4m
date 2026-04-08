@@ -91,7 +91,7 @@ pub async fn string_2_perspective_snapshot(
         .add_link(
             temp_perspective.clone(),
             "ad4m://self".to_string(),
-            format!("literal://string:{}", urlencoding::encode(&string)),
+            format!("literal:string:{}", urlencoding::encode(&string)),
             None,
             None,
         )
