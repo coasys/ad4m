@@ -1,76 +1,67 @@
-//! # WASM Language Delegate Interface
+//! # WASM Language Delegate Interface (Flat Import Pattern)
 //!
-//! Defines the traits that WASM-compiled languages use to interact with the AD4M host.
-//! These mirror the JS flat-export delegate interface (agentProxy, holochainDelegate, ad4mSignal)
-//! but expressed as Rust traits suitable for wasm-bindgen.
+//! Defines plain function signatures that WASM-compiled languages use to interact
+//! with the AD4M host. No trait objects — just `extern "C"` declarations that
+//! a WASM module links against via wasm-bindgen.
 //!
 //! ## Usage
 //!
-//! Languages compiled to WASM (via wasm-bindgen) import these as extern "C" functions:
+//! Languages compiled to WASM (via wasm-bindgen) declare these as imports:
 //!
 //! ```ignore
+//! // In the WASM language's Rust source (with wasm-bindgen):
 //! #[wasm_bindgen]
 //! extern "C" {
-//!     fn __agent_create_signed_expression(data: JsValue) -> JsValue;
-//!     fn __agent_sign(payload: &[u8]) -> Vec<u8>;
 //!     fn __agent_did() -> String;
+//!     fn __agent_sign(payload: &[u8]) -> Vec<u8>;
+//!     fn __agent_create_signed_expression(data: JsValue) -> JsValue;
 //!     fn __holochain_call(dna: &str, zome: &str, fn_name: &str, params: JsValue) -> JsValue;
 //!     fn __signal_emit(data: JsValue);
 //! }
 //! ```
 //!
-//! The flat export init() receives a JSON context with serializable data.
-//! Non-serializable delegates (agent, holochain, signal) are available via the import functions above.
+//! Both the Rust host and the JS/Deno host implement the same function signatures.
+//! The language doesn't care which one — it just calls the imports.
+//!
+//! ## Context
+//!
+//! `init()` receives serializable context as a JSON string. Non-serializable
+//! delegates (agent identity, Holochain, signals) are only available via
+//! the import functions above.
 
 use serde::{Deserialize, Serialize};
 
+// ============================================================================
+// Context (serializable — crosses WASM boundary as JSON)
+// ============================================================================
+
 /// Serializable context passed to flat-export languages via init(contextJson: string).
-/// This is the only data that needs to cross the WASM boundary as JSON.
+/// This is the only data that crosses the WASM boundary as JSON.
+/// All other delegates are available via the flat import functions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LanguageInitContext {
-    /// Directory path for language-specific storage
+    /// Directory path for language-specific file storage
     pub storage_directory: String,
-    /// Language-specific custom settings from the agent
+    /// Language-specific settings configured by the agent
     #[serde(rename = "customSettings")]
     pub custom_settings: serde_json::Value,
-    /// This language's address in the HC network
+    /// This language's address in the Holochain network
     #[serde(rename = "languageAddress")]
     pub language_address: String,
 }
 
-/// Agent delegate — handles identity and signing for expressions.
-/// Mirrors the JS agentProxy: { did, signingKeyId, createSignedExpression, sign, ... }
-pub trait AgentDelegate: Send + Sync {
-    /// Get the DID of the current agent
-    fn did(&self) -> String;
-    /// Get the signing key ID for the current agent
-    fn signing_key_id(&self) -> String;
-    /// Create a signed expression with the given data
-    fn create_signed_expression(&self, data: serde_json::Value) -> serde_json::Value;
-    /// Sign arbitrary payload bytes, return signature
-    fn sign(&self, payload: &[u8]) -> Vec<u8>;
-    /// Sign a hex string, return hex signature
-    fn sign_string_hex(&self, payload: &str) -> String;
-    /// Get all local user DIDs (for multi-user contexts)
-    fn get_all_local_user_dids(&self) -> Vec<String>;
-    /// Create signed expression for a specific user (by email)
-    fn create_signed_expression_for_user(
-        &self,
-        user_email: &str,
-        data: serde_json::Value,
-    ) -> serde_json::Value;
-    /// Get DID for a specific user (by email)
-    fn did_for_user(&self, user_email: &str) -> String;
-}
+// ============================================================================
+// Supporting types (for import function signatures)
+// ============================================================================
 
-/// Holochain delegate — provides access to DNA calls and DNA registration.
-/// Mirrors the JS holochainDelegate: { registerDNAs, call, callAsync }
+/// Specification for registering a DNA with the Holochain delegate
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnaSpec {
     pub nick: String,
     pub source: DnaSource,
 }
 
+/// Source of a DNA bundle
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DnaSource {
@@ -82,6 +73,7 @@ pub enum DnaSource {
     Bytes { value: Vec<u8> },
 }
 
+/// Result of DNA registration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppInfo {
     pub app_id: String,
@@ -89,41 +81,34 @@ pub struct AppInfo {
     pub cell_id: String,
 }
 
-pub trait HolochainDelegate: Send + Sync {
-    /// Register one or more DNAs for this language.
-    /// The signal_callback is called when the DNA emits a signal.
-    fn register_dnas(&self, dnas: Vec<DnaSpec>) -> Vec<AppInfo>;
-    /// Synchronous call to a zome function
-    fn call(
-        &self,
-        dna_nick: &str,
-        zome: &str,
-        fn_name: &str,
-        params: serde_json::Value,
-    ) -> serde_json::Value;
-    /// Async call to a zome function
-    fn call_async(
-        &self,
-        dna_nick: &str,
-        zome: &str,
-        fn_name: &str,
-        params: serde_json::Value,
-    ) -> serde_json::Value;
-}
-
-/// Signal delegate — emits signals to the AD4M signal bus.
-/// Mirrors the JS ad4mSignal: (signal) => LANGUAGE_CONTROLLER.ad4mSignalEmitted(signal, languageAddress)
-pub trait SignalDelegate: Send + Sync {
-    fn emit(&self, signal: serde_json::Value);
-}
+// ============================================================================
+// Flat import function signatures
+//
+// These are the function signatures that the WASM host MUST implement.
+// The Rust executor and JS/Deno bootstrap both expose the same functions.
+// WASM languages call them as `extern "C"` imports.
+// ============================================================================
+//
+// ## Agent imports
+//
+// `fn __agent_did() -> String` — returns the current agent's DID
+// `fn __agent_sign(payload: &[u8]) -> Vec<u8>` — signs bytes, returns signature
+// `fn __agent_sign_string_hex(payload: &str) -> String` — signs hex string
+// `fn __agent_create_signed_expression(data: JsValue) -> JsValue` — creates signed expression
+// `fn __agent_signing_key_id() -> String` — returns signing key ID
+// `fn __agent_get_all_local_user_dids() -> Vec<String>` — all local user DIDs
+// `fn __agent_create_signed_expression_for_user(email: &str, data: JsValue) -> JsValue`
+// `fn __agent_did_for_user(email: &str) -> String`
+//
+// ## Holochain imports
+//
+// `fn __holochain_register_dnas(dnas: JsValue) -> JsValue` — register DNAs, returns Vec<AppInfo>
+// `fn __holochain_call(dna: &str, zome: &str, fn_name: &str, params: JsValue) -> JsValue` — sync call
+// `fn __holochain_call_async(...) -> JsValue` — async call
+//
+// ## Signal imports
+//
+// `fn __signal_emit(data: JsValue)` — emits a signal to the AD4M signal bus
 
 /// Flat export language interface version marker
 pub const FLAT_EXPORT_VERSION: &str = "1.0";
-
-/// Minimal set of exports a flat-export WASM language must provide
-pub trait FlatExportLanguage {
-    fn name(&self) -> &str;
-    fn version(&self) -> &str;
-    fn init(&mut self, context: LanguageInitContext);
-    fn teardown(&mut self);
-}

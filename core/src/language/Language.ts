@@ -51,7 +51,67 @@ import { LinkQuery } from '../perspectives/LinkQuery';
  */
 
 // ============================================================================
-// FLAT EXPORT INTERFACE TYPES
+// FLAT WASM IMPORT INTERFACE TYPES (for WASM-compiled languages)
+// ============================================================================
+// When a language is compiled to WASM (instead of running in JS/Deno), it cannot
+// access the globalThis delegates directly. Instead, the WASM host exposes
+// flat import functions that the WASM module links against.
+//
+// Both the Rust executor AND the JS/Deno bootstrap implement the same functions.
+// The language doesn't know or care which one it's running on.
+//
+// Usage (in WASM language Rust source with wasm-bindgen):
+// ```rust
+// #[wasm_bindgen]
+// extern "C" {
+//     fn __agent_did() -> String;
+//     fn __agent_sign(payload: &[u8]) -> Vec<u8>;
+//     fn __holochain_call(dna: &str, zome: &str, fn_name: &str, params: JsValue) -> JsValue;
+//     fn __signal_emit(data: JsValue);
+// }
+// ```
+
+/** Agent flat import functions — these map to AgentDelegate methods */
+export interface AgentWasmImports {
+    /** Returns the current agent's DID */
+    __agent_did(): string;
+    /** Returns the signing key ID */
+    __agent_signing_key_id(): string;
+    /** Signs arbitrary bytes, returns signature bytes */
+    __agent_sign(payload: Uint8Array): Uint8Array;
+    /** Signs a hex string, returns hex signature */
+    __agent_sign_string_hex(payload: string): string;
+    /** Creates a signed expression with the given data */
+    __agent_create_signed_expression(data: unknown): Expression;
+    /** Gets all local user DIDs */
+    __agent_get_all_local_user_dids(): string[];
+    /** Creates a signed expression for a specific user (by email) */
+    __agent_create_signed_expression_for_user(userEmail: string, data: unknown): Expression;
+    /** Gets DID for a specific user (by email) */
+    __agent_did_for_user(userEmail: string): string;
+}
+
+/** Holochain flat import functions — these map to HolochainDelegate methods */
+export interface HolochainWasmImports {
+    /** Registers DNAs, returns AppInfo array */
+    __holochain_register_dnas(dnas: DnaSpec[]): AppInfo[];
+    /** Synchronous call to a zome function */
+    __holochain_call(dnaNick: string, zome: string, fnName: string, params: unknown): unknown;
+    /** Asynchronous call to a zome function */
+    __holochain_call_async(dnaNick: string, zome: string, fnName: string, params: unknown): Promise<unknown>;
+}
+
+/** Signal flat import function — emits signals to the AD4M signal bus */
+export type SignalWasmImport = (data: unknown) => void;
+
+/** All flat WASM import functions combined */
+export interface FlatWasmImports extends AgentWasmImports, HolochainWasmImports {
+    /** Emits a signal to the signal bus */
+    __signal_emit: SignalWasmImport;
+}
+
+// ============================================================================
+// FLAT EXPORT LANGUAGE INTERFACE TYPES (for JS/Deno languages)
 // ============================================================================
 // These types define the flat export pattern for AD4M languages.
 // Languages export functions directly (flat) instead of via a create() factory.
