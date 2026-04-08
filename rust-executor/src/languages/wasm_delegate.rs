@@ -54,7 +54,11 @@ pub trait AgentDelegate: Send + Sync {
     /// Get all local user DIDs (for multi-user contexts)
     fn get_all_local_user_dids(&self) -> Vec<String>;
     /// Create signed expression for a specific user (by email)
-    fn create_signed_expression_for_user(&self, user_email: &str, data: serde_json::Value) -> serde_json::Value;
+    fn create_signed_expression_for_user(
+        &self,
+        user_email: &str,
+        data: serde_json::Value,
+    ) -> serde_json::Value;
     /// Get DID for a specific user (by email)
     fn did_for_user(&self, user_email: &str) -> String;
 }
@@ -90,9 +94,21 @@ pub trait HolochainDelegate: Send + Sync {
     /// The signal_callback is called when the DNA emits a signal.
     fn register_dnas(&self, dnas: Vec<DnaSpec>) -> Vec<AppInfo>;
     /// Synchronous call to a zome function
-    fn call(&self, dna_nick: &str, zome: &str, fn_name: &str, params: serde_json::Value) -> serde_json::Value;
+    fn call(
+        &self,
+        dna_nick: &str,
+        zome: &str,
+        fn_name: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value;
     /// Async call to a zome function
-    fn call_async(&self, dna_nick: &str, zome: &str, fn_name: &str, params: serde_json::Value) -> serde_json::Value;
+    fn call_async(
+        &self,
+        dna_nick: &str,
+        zome: &str,
+        fn_name: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value;
 }
 
 /// Signal delegate — emits signals to the AD4M signal bus.

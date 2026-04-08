@@ -143,7 +143,8 @@ impl LanguageRuntime {
                     globalThis.languageConstructor = mod;
                     globalThis.__language_pattern__ = "legacy";
                 }}
-            }})"#, specifier
+            }})"#,
+            specifier
         );
         self.js_core
             .execute(&capture_script)
