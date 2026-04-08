@@ -8,46 +8,46 @@ import { PerspectiveState } from '../perspectives/PerspectiveHandle';
 import { LinkQuery } from '../perspectives/LinkQuery';
 
 /**
- * # AD4M Language Module Formats
+ * # AD4M Language Interface
  * 
- * AD4M languages can be written in two formats:
+ * All AD4M languages use the **flat export format** — direct function exports,
+ * no factory, no wrapper object. This is the single interface for both JS/Deno
+ * and WASM-compiled languages.
  * 
- * ## 1. Legacy Format (create() factory)
- * 
- * ```javascript
- * export default async function create(context) {
- *     return {
- *         name: "my-language",
- *         expressionAdapter: { get, putAdapter: { createPublic } },
- *         // ...
- *     };
- * }
- * ```
- * 
- * ## 2. Flat Export Format (recommended)
+ * ## Flat Export Format (primary interface)
  * 
  * ```javascript
  * export const name = "my-language";
  * export const version = "0.1.0";
  * 
  * export async function init(contextJson) {
- *     // contextJson is a JSON string containing:
- *     // { storageDirectory, customSettings, languageAddress }
- *     // Delegates (agent, holochain) available via globalThis:
- *     //   globalThis.__agentProxy__
- *     //   globalThis.__holochainDelegate__
- *     //   globalThis.__ad4mSignal__
+ *     // contextJson: JSON string with { storageDirectory, customSettings, languageAddress }
+ *     // Non-serializable delegates available via globalThis:
+ *     //   globalThis.__agentProxy__      — agent identity & signing
+ *     //   globalThis.__holochainDelegate__ — Holochain DNA registration & zome calls
+ *     //   globalThis.__ad4mSignal__      — signal emission
  * }
  * 
  * // Capability functions (presence = capability):
  * export async function expressionGet(address) { /* ... *\/ }
- * export async function expressionCreate(content) { /* ... *\/ }
- * export async function linkSyncSync() { /* ... *\/ }
+ * export async function expressionCreate(content) { /* returns address *\/ }
+ * export function interactions(expressionAddress) { /* returns interaction spec *\/ }
+ * export async function linkQuery(query) { /* ... *\/ }
  * // etc.
  * ```
  * 
  * The flat export format is converted to the internal `Language` interface
- * by the language_bootstrap.js adapter wrapper.
+ * by the `language_bootstrap.js` adapter. The internal `Language` interface
+ * is an implementation detail — languages only need to export flat functions.
+ * 
+ * ## Legacy Languages (create() factory) — adapter shim
+ * 
+ * Legacy languages that use the `create(context) -> Language` factory pattern
+ * are supported via a thin shim in `language_bootstrap.js`. This shim wraps
+ * the legacy factory and exposes flat exports internally.
+ * 
+ * **Migration:** All languages should migrate to flat exports. Once migrated,
+ * the legacy adapter shim can be removed.
  */
 
 // ============================================================================
