@@ -572,7 +572,9 @@ pub async fn import_data(
             let snapshot: serde_json::Value =
                 serde_json::from_str(&data).map_err(|e| ApiError::BadRequest(e.to_string()))?;
             // TODO: implement perspective import from snapshot
-            Ok(Json(serde_json::json!({"success": true, "snapshot": snapshot})))
+            Ok(Json(
+                serde_json::json!({"success": true, "snapshot": snapshot}),
+            ))
         }
         other => Err(ApiError::BadRequest(format!(
             "Unknown import type: {}. Use 'db' or 'perspective'.",
@@ -602,18 +604,20 @@ pub async fn get_compute_log(
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let user_email = params.get("userEmail").cloned().or_else(|| {
-        user_email_from_token(context.auth_token.clone())
-    });
+    let user_email = params
+        .get("userEmail")
+        .cloned()
+        .or_else(|| user_email_from_token(context.auth_token.clone()));
 
     let email = user_email.unwrap_or_default();
     let since = params.get("since").map(|s| s.as_str());
-    let limit = params.get("limit").and_then(|l| l.parse::<i64>().ok()).unwrap_or(100);
+    let limit = params
+        .get("limit")
+        .and_then(|l| l.parse::<i64>().ok())
+        .unwrap_or(100);
 
-    let logs = Ad4mDb::with_global_instance(|db| {
-        db.get_compute_log(&email, since, limit)
-    })
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let logs = Ad4mDb::with_global_instance(|db| db.get_compute_log(&email, since, limit))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(serde_json::to_value(logs).unwrap_or_default()))
 }

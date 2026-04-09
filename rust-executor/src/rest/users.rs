@@ -205,5 +205,7 @@ pub async fn request_verification(
     Json(body): Json<RequestVerificationRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // TODO: implement request_login_verification
-    Err(ApiError::Internal("request_verification not yet implemented".into()))
+    Err(ApiError::Internal(
+        "request_verification not yet implemented".into(),
+    ))
 }

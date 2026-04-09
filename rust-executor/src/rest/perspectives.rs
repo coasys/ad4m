@@ -165,7 +165,9 @@ pub async fn publish_snapshot(
 
     let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     // TODO: implement publish_snapshot in PerspectiveInstance
-    Err(ApiError::Internal("publish_snapshot not yet implemented".into()))
+    Err(ApiError::Internal(
+        "publish_snapshot not yet implemented".into(),
+    ))
 }
 
 /// GET /perspectives/:uuid/links
@@ -639,9 +641,7 @@ pub async fn create_batch(
     .map_err(|e| ApiError::Forbidden(e))?;
 
     let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
-    let batch_id = perspective
-        .create_batch()
-        .await;
+    let batch_id = perspective.create_batch().await;
 
     Ok(Json(batch_id))
 }
@@ -723,7 +723,9 @@ pub async fn subscribe_surreal_query(
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
     // TODO: implement surreal query subscription
-    Err(ApiError::Internal("subscribe_surreal_query not yet implemented".into()))
+    Err(ApiError::Internal(
+        "subscribe_surreal_query not yet implemented".into(),
+    ))
 }
 
 /// POST /perspectives/:uuid/keep-alive-query
@@ -817,8 +819,14 @@ pub async fn create_subject(
     let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
-    let subject_class = crate::perspectives::perspective_instance::SubjectClassOption { class_name: Some(body.subject_class.clone()), query: None };
-    let initial_values: Option<serde_json::Value> = body.initial_values.as_ref().and_then(|s| serde_json::from_str(s).ok());
+    let subject_class = crate::perspectives::perspective_instance::SubjectClassOption {
+        class_name: Some(body.subject_class.clone()),
+        query: None,
+    };
+    let initial_values: Option<serde_json::Value> = body
+        .initial_values
+        .as_ref()
+        .and_then(|s| serde_json::from_str(s).ok());
     perspective
         .create_subject(
             subject_class,
@@ -850,9 +858,16 @@ pub async fn get_subject_data(
     let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
-    let subject_class = crate::perspectives::perspective_instance::SubjectClassOption { class_name: Some(body.subject_class.clone()), query: None };
+    let subject_class = crate::perspectives::perspective_instance::SubjectClassOption {
+        class_name: Some(body.subject_class.clone()),
+        query: None,
+    };
     let data = perspective
-        .get_subject_data(subject_class, body.expression_address.clone(), &agent_context)
+        .get_subject_data(
+            subject_class,
+            body.expression_address.clone(),
+            &agent_context,
+        )
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 

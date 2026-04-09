@@ -806,7 +806,9 @@ pub async fn import_agent(
         .map_err(|e| ApiError::Forbidden(e))?;
 
     // TODO: implement agent import from keystore
-    Err(ApiError::Internal("Agent import not yet implemented in REST API".into()))
+    Err(ApiError::Internal(
+        "Agent import not yet implemented in REST API".into(),
+    ))
 }
 
 /// POST /agent/entanglement-proof-preflight — pre-flight check

@@ -326,7 +326,10 @@ pub fn rest_router(state: AppState) -> Router {
             .route("/users/{email}/wallet", get(users::get_user_wallet))
             .route("/users/login", post(users::login_user))
             .route("/users/verify-email", post(users::verify_email))
-            .route("/users/request-verification", post(users::request_verification))
+            .route(
+                "/users/request-verification",
+                post(users::request_verification),
+            )
             .route("/dev/email-test", post(users::email_test))
             // ── Hosting (3 endpoints) ──
             .route("/hosting", get(hosting::get_hosting_info))
@@ -339,10 +342,7 @@ pub fn rest_router(state: AppState) -> Router {
                 "/hosting/wallet/hot-wallet-address",
                 put(hosting::set_hot_wallet_address),
             )
-            .route(
-                "/hosting/request-payment",
-                post(hosting::request_payment),
-            )
+            .route("/hosting/request-payment", post(hosting::request_payment))
             // ── AI (8+ endpoints) ──
             .route("/ai/models", get(ai::list_models).post(ai::add_model))
             .route(
@@ -351,7 +351,10 @@ pub fn rest_router(state: AppState) -> Router {
             )
             .route("/ai/models/{id}/default", put(ai::set_default_model))
             .route("/ai/models/default", get(ai::get_default_model))
-            .route("/ai/model-loading-status", get(ai::get_model_loading_status))
+            .route(
+                "/ai/model-loading-status",
+                get(ai::get_model_loading_status),
+            )
             .route("/ai/tasks", get(ai::list_tasks).post(ai::add_task))
             .route(
                 "/ai/tasks/{id}",

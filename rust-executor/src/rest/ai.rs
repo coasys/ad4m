@@ -227,8 +227,7 @@ pub async fn list_tasks(
     check_capability(&context.capabilities, &AI_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let tasks = AIService::get_tasks()
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let tasks = AIService::get_tasks().map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(tasks))
 }
 
