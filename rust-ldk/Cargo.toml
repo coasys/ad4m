@@ -1,0 +1,28 @@
+[package]
+name = "ad4m-ldk"
+version = "0.13.0-test-1"
+edition = "2021"
+authors = ["Nicolas Luck <nicolas.luck@coasys.org>"]
+description = "AD4M Language Development Kit for Rust/WASM"
+keywords = ["ad4m", "perspect3vism", "wasm", "ldk"]
+license = "CAL-1.0"
+homepage = "https://ad4m.dev"
+repository = "https://github.com/perspect3vism/ad4m"
+documentation = "https://docs.ad4m.dev"
+readme = "README.md"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = { version = "0.2", features = ["serde-serialize"] }
+js-sys = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.21"
+
+# Use wee_alloc for smaller WASM binary size
+wee_alloc = { version = "0.4.5", optional = true }
+
+[features]
+default = ["wee_alloc"]

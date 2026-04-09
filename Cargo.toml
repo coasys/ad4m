@@ -4,6 +4,8 @@ members = [
     "cli",
     "rust-client",
     "rust-executor",
+    "rust-ldk",
+    "test-wasm-language",
     "ui/src-tauri"
 ]
 
