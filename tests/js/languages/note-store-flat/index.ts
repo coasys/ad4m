@@ -20,10 +20,10 @@ let storagePath = "";
 let agent: any = null;
 
 export async function init(): Promise<void> {
-    // NEW: Get language context via flat import functions
-    storagePath = languageStorageDirectory();
-    const languageAddress = languageAddress();
-    const settingsJson = languageSettings();
+    // Get language context via globalThis (flat export pattern - ESM modules don't auto-access globalThis)
+    storagePath = globalThis.languageStorageDirectory();
+    const languageAddress = globalThis.languageAddress();
+    const settingsJson = globalThis.languageSettings();
     const settings = settingsJson ? JSON.parse(settingsJson) : {};
     
     // Agent available via globalThis (set by bootstrap before init)
