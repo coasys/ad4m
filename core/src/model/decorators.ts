@@ -124,16 +124,6 @@ export function getMemoizedSHACL(target: Function, compute: () => any): any {
     return result;
 }
 
-/**
- * Invalidate all memoisation caches (useful for testing).
- */
-export function clearMetadataCaches(): void {
-    // WeakMaps don't have a clear() method, so we reassign module-level references.
-    // However, since we're using const, we just note that WeakMap entries will be
-    // GC'd when class references are GC'd. For testing, we expose this as a no-op
-    // since tests create fresh classes each time.
-}
-
 
 /**
  * Programmatically register property metadata for a given constructor.
