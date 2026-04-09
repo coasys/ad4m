@@ -34,7 +34,8 @@ export function QueriesTab({ operations, subscriptions, subscriptionUpdates, get
       </div>
 
       {subTab === 'operations' && (
-        <>
+        <div class="queries-split">
+          <div class="queries-left">
           <input
             class="filter-input"
             placeholder="Filter by operation name..."
@@ -56,7 +57,9 @@ export function QueriesTab({ operations, subscriptions, subscriptionUpdates, get
               </div>
             ))}
           </div>
-          {selected && (
+          </div>
+          <div class="queries-right">
+          {selected ? (
             <div class="operation-detail">
               <h3>{selected.operationName}</h3>
               <div class="info-grid">
@@ -113,8 +116,11 @@ export function QueriesTab({ operations, subscriptions, subscriptionUpdates, get
                 </div>
               )}
             </div>
+          ) : (
+            <div class="empty">Select an operation to view details</div>
           )}
-        </>
+          </div>
+        </div>
       )}
 
       {subTab === 'subscriptions' && (

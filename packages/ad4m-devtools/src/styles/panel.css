@@ -344,3 +344,33 @@ body {
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* Queries tab split layout */
+.queries-split {
+  display: flex;
+  flex-direction: row;
+  height: calc(100vh - 100px); /* subtract perf bar + tab bar + sub-tab bar */
+  overflow: hidden;
+}
+.queries-left {
+  width: 45%;
+  min-width: 300px;
+  border-right: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.queries-right {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+}
+.operations-list {
+  flex: 1;
+  overflow-y: auto !important;
+  max-height: none !important;
+}
+.operation-detail {
+  max-height: none !important;
+  overflow-y: visible !important;
+}
