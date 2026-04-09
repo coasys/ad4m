@@ -71,3 +71,7 @@ docs-src/pages/jsdoc
 .worktrees/
 CUSTOM_DENO_SNAPSHOT.bin
 waker-bridge/package-lock.json
+
+# Benchmark results
+benchmarks/results/
+ui/src-tauri/gen/schemas/macOS-schema.json

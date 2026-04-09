@@ -516,7 +516,7 @@ impl Ad4mMcpHandler {
         use ad4m_client::literal::Literal;
         Literal::from_string(value.to_string())
             .to_url()
-            .unwrap_or_else(|_| format!("literal://string:{}", value))
+            .unwrap_or_else(|_| format!("literal:string:{}", value))
     }
 
     /// Get the SHACL name literal for a class, trying both encoded and raw formats.
@@ -525,7 +525,7 @@ impl Ad4mMcpHandler {
     /// "literal://string:shacl%3A%2F%2FClass". Returns (encoded, raw).
     pub(crate) fn shacl_name_variants(class_name: &str) -> (String, String) {
         let encoded = Self::encode_literal(&format!("shacl://{}", class_name));
-        let raw = format!("literal://string:shacl://{}", class_name);
+        let raw = format!("literal:string:shacl://{}", class_name);
         (encoded, raw)
     }
 

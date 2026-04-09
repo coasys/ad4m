@@ -1591,7 +1591,7 @@ impl Ad4mDb {
         Ok(links?)
     }
 
-    /// Check if a perspective's links have been migrated from Rusqlite to SurrealDB
+    /// Check if a perspective's links have been migrated from Rusqlite
     ///
     /// # Arguments
     /// * `perspective_uuid` - UUID of the perspective to check
@@ -1607,7 +1607,7 @@ impl Ad4mDb {
         Ok(count > 0)
     }
 
-    /// Mark a perspective as having been migrated from Rusqlite to SurrealDB
+    /// Mark a perspective as having been migrated from Rusqlite
     ///
     /// This function is idempotent - calling it multiple times for the same perspective is safe.
     ///
@@ -1624,7 +1624,7 @@ impl Ad4mDb {
 
     /// Delete all links for a perspective from Rusqlite storage
     ///
-    /// This should only be called after successfully migrating links to SurrealDB.
+    /// This should only be called after successfully migrating links.
     ///
     /// # Arguments
     /// * `perspective_uuid` - UUID of the perspective whose links should be deleted
@@ -3126,9 +3126,10 @@ impl Ad4mDb {
         Self::validate_credit_amount(amount)?;
         let tx = self.conn.unchecked_transaction()?;
 
-        // Deduct credits (fails if insufficient)
+        // Deduct credits, clamped to 0 (never negative).
+        // Any user with credits > 0 is charged; the balance floors at 0.
         let rows = tx.execute(
-            "UPDATE users SET remaining_credits = remaining_credits - ?1 WHERE username = ?2 AND COALESCE(remaining_credits, 0) >= ?1",
+            "UPDATE users SET remaining_credits = MAX(remaining_credits - ?1, 0) WHERE username = ?2 AND COALESCE(remaining_credits, 0) > 0",
             params![amount, email],
         )?;
         if rows == 0 {

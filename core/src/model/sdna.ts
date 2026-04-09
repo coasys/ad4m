@@ -89,7 +89,7 @@ export function buildSDNA(
         // Optional properties (required: false) are excluded — they should
         // remain unset (undefined) until explicitly assigned.
         const effectiveInitial = initial
-            ?? (required && writable && !flag && through ? "literal://string:" : undefined);
+            ?? (required && writable && !flag && through ? "literal:string:" : undefined);
 
         if (effectiveInitial) {
             constructorActions.push({

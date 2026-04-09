@@ -1,0 +1,21 @@
+{
+  "name": "ad4m-benchmarks",
+  "version": "1.0.0",
+  "description": "Benchmark tool comparing Oxigraph/SPARQL vs Baseline AD4M executors",
+  "private": true,
+  "scripts": {
+    "bench": "tsx src/index.ts",
+    "bench:write": "tsx src/index.ts --suite write",
+    "bench:query": "tsx src/index.ts --suite query",
+    "bench:sparql": "tsx src/index.ts --suite sparql",
+    "bench:subject": "tsx src/index.ts --suite subject",
+    "bench:scale": "tsx src/index.ts --suite scale",
+    "perf-test": "tsx src/performance-regression.ts",
+    "integration-test": "tsx src/integration-test.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "tsx": "^4.7.0",
+    "@types/node": "^20.0.0"
+  }
+}

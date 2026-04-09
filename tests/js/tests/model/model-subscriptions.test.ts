@@ -1,11 +1,11 @@
 /**
  * Ad4mModel — subscription integration tests
  *
- * Covers: ModelQueryBuilder.subscribe() initial callback, SurrealDB live-query
+ * Covers: ModelQueryBuilder.subscribe() initial callback, SPARQL live-query
  * re-fire on link-added and link-removed, dispose() stopping callbacks,
  * countSubscribe(), and parent-scoped subscriptions.
  *
- * Adapted from PR #694 subscription tests for our SurrealDB-based subscription
+ * Adapted from PR #694 subscription tests for our SPARQL-based subscription
  * system (ModelQueryBuilder.subscribe / countSubscribe / dispose).
  *
  * Run with:
@@ -21,7 +21,7 @@ import { TestComment, TestPost, TestTag, TestChannel } from "./models.js";
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-describe("Ad4mModel — Subscriptions (SurrealDB)", function () {
+describe("Ad4mModel — Subscriptions (SPARQL)", function () {
   this.timeout(120_000);
 
   let ownStop: (() => Promise<void>) | null = null;
@@ -70,10 +70,8 @@ describe("Ad4mModel — Subscriptions (SurrealDB)", function () {
   it("subscribe() calls callback when a relevant link is added", async () => {
     const all: TestPost[][] = [];
     const builder = TestPost.query(perspective);
+    // Initial results returned via Promise only — callback fires for subsequent updates
     await builder.subscribe((r) => all.push(r));
-
-    // Wait for at least one callback (initial)
-    await waitUntil(() => all.length >= 1, 6000, "initial callback");
 
     const post = new TestPost(perspective);
     post.title = "New For Sub";
@@ -87,7 +85,7 @@ describe("Ad4mModel — Subscriptions (SurrealDB)", function () {
     );
     builder.dispose();
 
-    expect(all.length).to.be.at.least(2);
+    expect(all.length).to.be.at.least(1);
     expect(all.some((batch) => batch.some((p) => p.id === post.id))).to.be.true;
   });
 
@@ -102,17 +100,13 @@ describe("Ad4mModel — Subscriptions (SurrealDB)", function () {
 
     const all: TestPost[][] = [];
     const builder = TestPost.query(perspective);
-    await builder.subscribe((r) => all.push(r));
-
-    await waitUntil(
-      () => all.some((batch) => batch.some((p) => p.id === postId)),
-      8000,
-      "initial callback contains the post",
-    );
+    // Initial results returned via Promise — callback fires for subsequent updates only
+    const initialResults = await builder.subscribe((r) => all.push(r));
+    expect(initialResults.some((p: any) => p.id === postId)).to.be.true;
 
     await post.delete();
 
-    // Small settling delay — under load the SurrealDB live-query notification
+    // Small settling delay — under load the SPARQL live-query notification
     // can lag slightly before the subscription re-fires.
     await new Promise((r) => setTimeout(r, 300));
 
@@ -126,7 +120,7 @@ describe("Ad4mModel — Subscriptions (SurrealDB)", function () {
     );
     builder.dispose();
 
-    expect(all.length).to.be.at.least(2);
+    expect(all.length).to.be.at.least(1);
     expect(all.at(-1)!.some((p) => p.id === postId)).to.be.false;
   });
 
@@ -178,15 +172,9 @@ describe("Ad4mModel — Subscriptions (SurrealDB)", function () {
 
     const all: TestPost[][] = [];
     const builder = TestPost.query(perspective);
-    await builder.subscribe((r) => all.push(r));
-
-    // Wait for the initial callback that contains the post
-    await waitUntil(
-      () => all.some((batch) => batch.some((p) => p.id === post.id)),
-      8000,
-      "initial callback contains the post",
-    );
-    const initialTagCount = (all.at(-1)!.find((p) => p.id === post.id)?.tags ?? []).length;
+    // Initial results returned via Promise — callback fires for subsequent updates only
+    const initialResults = await builder.subscribe((r) => all.push(r));
+    const initialTagCount = (initialResults.find((p: any) => p.id === post.id)?.tags ?? []).length;
 
     // Add a tag — this is a @HasMany relation change, not a property change
     const tag = await TestTag.create(perspective, { label: "rust" });
@@ -217,11 +205,9 @@ describe("Ad4mModel — Subscriptions (SurrealDB)", function () {
     const all: TestPost[][] = [];
     const builder = TestPost.query(perspective)
       .parent(channel.id, TestChannel, { field: "posts" });
-    await builder.subscribe((r) => all.push(r));
-
-    // Wait for initial (empty) callback
-    await waitUntil(() => all.length >= 1, 6000, "initial callback");
-    expect(all[0]).to.have.length(0);
+    // Initial results returned via Promise — callback fires for subsequent updates only
+    const initialResults = await builder.subscribe((r) => all.push(r));
+    expect(initialResults).to.have.length(0);
 
     // Link the post to the channel
     await channel.addPosts(post.id);
@@ -245,14 +231,9 @@ describe("Ad4mModel — Subscriptions (SurrealDB)", function () {
     const all: TestPost[][] = [];
     const builder = TestPost.query(perspective)
       .parent(channel.id, TestChannel, { field: "posts" });
-    await builder.subscribe((r) => all.push(r));
-
-    // Wait until initial callback contains the post
-    await waitUntil(
-      () => all.some((batch) => batch.some((p) => p.id === post.id)),
-      8000,
-      "initial callback contains the post",
-    );
+    // Initial results returned via Promise — callback fires for subsequent updates only
+    const initialResults = await builder.subscribe((r) => all.push(r));
+    expect(initialResults.some((p: any) => p.id === post.id)).to.be.true;
 
     // Remove the link
     await channel.removePosts(post.id);
@@ -280,9 +261,8 @@ describe("Ad4mModel — Subscriptions (SurrealDB)", function () {
       .parent(channelA.id, TestChannel, { field: "posts" });
     await builder.subscribe((r) => all.push(r));
 
-    // Wait for initial (empty) callback
-    await waitUntil(() => all.length >= 1, 6000, "initial callback");
-    const countAfterInitial = all.length;
+    // Initial results returned via Promise — callback fires for subsequent updates only
+    const countAfterInitial = all.length; // should be 0 since no initial callback
 
     // Add a post to channel B — should not trigger channel A's subscription
     const post = await TestPost.create(perspective, { title: "Wrong Chan", body: "" });

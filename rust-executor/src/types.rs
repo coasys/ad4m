@@ -332,15 +332,22 @@ impl TryFrom<String> for ExpressionRef {
     type Error = AnyError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if let Some(stripped) = value.strip_prefix("literal://") {
+        // Handle both legacy literal:// and new literal: prefix
+        let literal_content = if let Some(stripped) = value.strip_prefix("literal://") {
+            Some(stripped)
+        } else if let Some(stripped) = value.strip_prefix("literal:") {
+            Some(stripped)
+        } else {
+            None
+        };
+        if let Some(content) = literal_content {
             let language_ref = LanguageRef {
                 address: "literal".to_string(),
                 name: "literal".to_string(),
             };
-            let content = stripped.to_string();
             return Ok(ExpressionRef {
                 language: language_ref,
-                expression: content,
+                expression: content.to_string(),
             });
         }
 

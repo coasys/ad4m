@@ -9,9 +9,9 @@ pub mod graphql;
 pub mod holochain_service;
 pub mod js_core;
 pub mod mcp;
+pub mod perspectives;
 mod prolog_service;
 pub mod runtime_service;
-mod surreal_service;
 pub mod unyt_service;
 pub mod user_management;
 pub mod utils;
@@ -19,13 +19,13 @@ mod wallet;
 
 pub mod agent;
 pub mod ai_service;
+pub mod billing;
 mod dapp_server;
 pub mod db;
 pub mod init;
 pub mod languages;
 pub mod logging;
 mod neighbourhoods;
-pub mod perspectives;
 mod pubsub;
 use rustls::crypto::aws_lc_rs;
 #[cfg(test)]
@@ -37,10 +37,10 @@ use std::thread::JoinHandle;
 use log::{error, info, warn};
 use tokio::sync::oneshot;
 
+use crate::prolog_service::init_prolog_service;
 use crate::{
     agent::AgentService, ai_service::AIService, dapp_server::serve_dapp, db::Ad4mDb,
-    languages::LanguageController, prolog_service::init_prolog_service,
-    runtime_service::RuntimeService, utils::find_port,
+    languages::LanguageController, runtime_service::RuntimeService, utils::find_port,
 };
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
@@ -400,8 +400,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         warn!("adminCredential is not set or empty, empty token will possess admin capabilities.");
     }
 
-    info!("Initializing Prolog service...");
-    init_prolog_service().await;
+    {
+        info!("Initializing Prolog service...");
+        init_prolog_service().await;
+    }
 
     find_and_set_port(&mut config.gql_port, 4000, "GraphQL");
     find_and_set_port(&mut config.hc_admin_port, 2000, "Holochain admin");
@@ -425,7 +427,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     // NOTE: load_system_languages() is called directly from Rust in
     // agent_generate/agent_unlock mutation resolvers.
 
-    // Set app data path for perspectives module (needed for file-based SurrealDB)
+    // Set app data path for perspectives module
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
 
     perspectives::initialize_from_db();

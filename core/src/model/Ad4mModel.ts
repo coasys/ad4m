@@ -5,12 +5,15 @@ import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomId } from "./util";
 import { getPropertiesMetadata, getRelationsMetadata } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
-import { formatSurrealValue } from "./surreal-utils";
+import { formatQueryValue } from "./query-utils";
 import { resolveParentPredicate } from "./query-common";
 import { buildParentQuery, buildAuthorAndTimestampQuery, buildPropertiesQuery, buildWhereQuery, buildCountQuery, buildOrderQuery, buildOffsetQuery, buildLimitQuery } from "./query-prolog";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
-import { buildSurrealQLQuery } from "./query-surreal";
+
+import { buildSPARQLQuery, buildSPARQLGetDataQuery, groupSPARQLResults } from "./query-sparql";
+import { buildBatchSPARQLQuery } from "./query-sparql-batch";
+import { hydrateBatchResult } from "./hydration-batch";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
 import {
   normalizeValue, matchesCondition, hydrateFromLinks,
@@ -341,7 +344,7 @@ export class Ad4mModel {
    * const recipe = new Recipe(perspective);
    * 
    * // Create with specific base expression
-   * const recipe = new Recipe(perspective, "literal://...");
+   * const recipe = new Recipe(perspective, "literal:...");
    * ```
    */
   constructor(perspective: PerspectiveProxy, baseExpression?: string) {
@@ -601,20 +604,14 @@ export class Ad4mModel {
 
   private async getData(opts?: GetOptions) {
     // Builds an object with the author, timestamp, all properties, & all relations on the Ad4mModel and saves it to the instance
-    // Use SurrealDB for data queries
+    // Use SPARQL for data queries
     try {
       const ctor = this.constructor as typeof Ad4mModel;
       const metadata = ctor.getModelMetadata();
 
       // Query for all links from this specific node (base expression)
-      const safeBaseExpression = formatSurrealValue(this._baseExpression);
-      const linksQuery = `
-        SELECT id, predicate, out.uri AS target, author, timestamp
-        FROM link
-        WHERE in.uri = ${safeBaseExpression}
-        ORDER BY timestamp ASC
-      `;
-      const links = await this._perspective.querySurrealDB(linksQuery);
+      const linksQuery = buildSPARQLGetDataQuery(this._baseExpression);
+      const links = await this._perspective.querySparql(linksQuery);
 
       if (links && links.length > 0) {
         // Core hydration: properties (latest-wins), relations, timestamps/author
@@ -641,7 +638,7 @@ export class Ad4mModel {
         }
       }
 
-      // Evaluate SurrealQL getters
+      // Evaluate SPARQL getters
       const getterOpts = opts?.properties || opts?.include
         ? { requestedProperties: opts?.properties, include: opts?.include }
         : undefined;
@@ -652,7 +649,7 @@ export class Ad4mModel {
         await hydrateRelations(ctor, [this], this._perspective, opts.include);
       }
     } catch (e) {
-      console.error(`SurrealDB getData also failed for ${this._baseExpression}:`, e);
+      console.error(`SPARQL getData also failed for ${this._baseExpression}:`, e);
     }
 
     this.takeSnapshot();
@@ -690,13 +687,13 @@ export class Ad4mModel {
   }
 
   /**
-   * Generates a SurrealQL query from a Query object.
+   * Generates a SPARQL query from a Query object.
    * 
    * @description
-   * This method translates high-level query parameters into a SurrealQL query string
-   * that can be executed against the SurrealDB backend. Unlike Prolog queries which
-   * operate on SDNA-aware predicates, SurrealQL queries operate directly on raw links
-   * stored in SurrealDB.
+   * This method translates high-level query parameters into a SPARQL query string
+   * that can be executed against the SPARQL backend. Unlike Prolog queries which
+   * operate on SDNA-aware predicates, SPARQL queries operate directly on raw links
+   * stored in SPARQL.
    * 
    * The generated query uses a CTE (Common Table Expression) pattern:
    * 1. First, identify candidate base expressions by filtering links based on where conditions
@@ -704,7 +701,7 @@ export class Ad4mModel {
    * 3. Finally, apply ordering, pagination (LIMIT/START) at the SQL level
    * 
    * Key architectural notes:
-   * - SurrealDB stores only raw links (source, predicate, target, author, timestamp)
+   * - SPARQL stores only raw links (source, predicate, target, author, timestamp)
    * - No SDNA knowledge at the database level
    * - Properties are resolved via subqueries that look for links with specific predicates
    * - Relations are similar but return multiple values instead of one
@@ -712,11 +709,11 @@ export class Ad4mModel {
    * 
    * @param perspective - The perspective to query (used for metadata extraction)
    * @param query - Query parameters (where, order, limit, offset, properties, relations)
-   * @returns Complete SurrealQL query string ready for execution
+   * @returns Complete SPARQL query string ready for execution
    * 
    * @example
    * ```typescript
-   * const query = Recipe.queryToSurrealQL(perspective, {
+   * const query = Recipe.queryToSPARQL(perspective, {
    *   where: { name: "Pasta", rating: { gt: 4 } },
    *   order: { timestamp: "DESC" },
    *   limit: 10
@@ -725,10 +722,10 @@ export class Ad4mModel {
    * //          FROM link WHERE ... GROUP BY source ORDER BY timestamp DESC LIMIT 10
    * ```
    */
-  public static async queryToSurrealQL(perspective: PerspectiveProxy, query: Query): Promise<string> {
+  public static async queryToSPARQL(perspective: PerspectiveProxy, query: Query): Promise<string> {
     const metadata = this.getModelMetadata();
     const allRelMeta = getRelationsMetadata(this as any);
-    return buildSurrealQLQuery(metadata, allRelMeta, query, this);
+    return buildSPARQLQuery(metadata, allRelMeta, query, this);
   }
 
   public static async instancesFromPrologResult<T extends Ad4mModel>(
@@ -783,16 +780,16 @@ export class Ad4mModel {
   }
 
   /**
-   * Converts SurrealDB query results to Ad4mModel instances.
+   * Converts SPARQL query results to Ad4mModel instances.
    * 
    * @param perspective - The perspective context
    * @param query - The query parameters used
-   * @param result - Array of result objects from SurrealDB
+   * @param result - Array of result objects from SPARQL
    * @returns Promise resolving to results with total count
    * 
    * @internal
    */
-  public static async instancesFromSurrealResult<T extends Ad4mModel>(
+  public static async instancesFromQueryResult<T extends Ad4mModel>(
     this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy,
     query: Query,
@@ -824,34 +821,26 @@ export class Ad4mModel {
         
         const instance = new this(perspective, base) as any;
 
-        // Core hydration via unified helper (pass requestedProperties for sparse fieldset)
-        await hydrateFromLinks(instance, links, metadata, perspective, requestedProperties.length > 0 ? requestedProperties : undefined);
-        
-        // When specific properties are requested, delete unrequested properties
-        // so they return undefined instead of their constructor defaults (e.g. 0, [])
-        if (requestedProperties.length > 0) {
-          const requested = new Set(requestedProperties);
-          for (const propName of Object.keys(metadata.properties)) {
-            if (!requested.has(propName)) {
-              delete instance[propName];
-            }
-          }
-          for (const relName of Object.keys(metadata.relations)) {
-            if (!requested.has(relName) && !(query.include && relName in query.include)) {
-              delete instance[relName];
-            }
-          }
-          // Also strip metadata fields unless explicitly requested
-          for (const metaField of ['author', 'createdAt', 'updatedAt'] as const) {
-            if (!requested.has(metaField)) {
-              delete instance[metaField];
+        // Core hydration via unified helper (pass requestedProperties for sparse fieldset).
+        // Also hydrate any properties referenced in `where` so the JS post-filter can match them,
+        // even if they're not in the user's `properties` projection.
+        let hydrationProps = requestedProperties.length > 0 ? [...requestedProperties] : undefined;
+        if (hydrationProps && query.where) {
+          for (const key of Object.keys(query.where)) {
+            if (!hydrationProps.includes(key)) {
+              hydrationProps.push(key);
             }
           }
         }
+        await hydrateFromLinks(instance, links, metadata, perspective, hydrationProps);
+        
+        // NOTE: Property deletion for sparse fieldsets is deferred until AFTER
+        // where-filtering so that where conditions can reference any property,
+        // even ones not in the `properties` projection.
 
         instances.push(instance);
       } catch (error) {
-        console.error(`Failed to process SurrealDB instance ${base}:`, error);
+        console.error(`Failed to process SPARQL instance ${base}:`, error);
       }
     }
 
@@ -893,17 +882,19 @@ export class Ad4mModel {
       await evaluateCustomGettersForInstance(instance, perspective, metadata, getterOpts);
     }
     
-    // Filter by where conditions that couldn't be filtered in SQL
+    // Filter by where conditions that couldn't be filtered in SPARQL
     // This includes:
     // - author/timestamp (computed from grouped links)
     // - Properties with comparison operators (gt, gte, lt, lte, between, contains)
-    //   because fn::parse_literal() comparisons in SurrealDB subqueries don't work reliably
+    //   because fn::parse_literal() comparisons in SPARQL subqueries don't work reliably
+    // - Relation-based where clauses (e.g., { post: postId } for @BelongsToOne)
+    //   which require reverse-link resolution before filtering
     let filteredInstances = instances;
     if (query.where) {
       filteredInstances = instances.filter(instance => {
         for (const [propertyName, condition] of Object.entries(query.where!)) {
-          // Skip 'base' as it's filtered in SQL
-          if (propertyName === 'base') continue;
+          // Skip 'base'/'id' as it's filtered in SPARQL
+          if (propertyName === 'base' || propertyName === 'id') continue;
 
           // For author and timestamp, always filter in JS
           if (propertyName === 'author' || propertyName === 'timestamp') {
@@ -913,19 +904,22 @@ export class Ad4mModel {
             continue;
           }
 
-          // For regular properties, only filter comparison operators in JS
-          // Simple equality and NOT are handled in SQL, but gt/gte/lt/lte/between/contains need JS
-          if (typeof condition === 'object' && condition !== null && !Array.isArray(condition)) {
-            const ops = condition as any;
-            // Check if any comparison operators are present
-            const hasComparisonOps = ops.gt !== undefined || ops.gte !== undefined ||
-                                     ops.lt !== undefined || ops.lte !== undefined ||
-                                     ops.between !== undefined || ops.contains !== undefined;
-            if (hasComparisonOps) {
-              if (!matchesCondition(instance[propertyName], condition)) {
-                return false;
-              }
+          // Check if this is a relation field (not in properties metadata)
+          const isPropField = propertyName in metadata.properties;
+
+          if (!isPropField) {
+            // Relation-based where — filter in JS against the populated field
+            if (!matchesCondition(instance[propertyName], condition)) {
+              return false;
             }
+            continue;
+          }
+
+          // Filter ALL property conditions in JS (equality, NOT, IN, comparison operators).
+          // SPARQL-level filtering with parse_literal is unreliable across environments,
+          // so we do all property filtering here after hydration resolves values.
+          if (!matchesCondition(instance[propertyName], condition)) {
+            return false;
           }
         }
         return true;
@@ -981,6 +975,29 @@ export class Ad4mModel {
       paginatedInstances = filteredInstances.slice(start, end);
     }
 
+    // Now that where-filtering is done, strip unrequested properties for sparse fieldsets.
+    // This must happen AFTER where-filtering so conditions can reference any property.
+    if (requestedProperties.length > 0) {
+      const requested = new Set(requestedProperties);
+      for (const inst of paginatedInstances) {
+        for (const propName of Object.keys(metadata.properties)) {
+          if (!requested.has(propName)) {
+            delete (inst as any)[propName];
+          }
+        }
+        for (const relName of Object.keys(metadata.relations)) {
+          if (!requested.has(relName) && !(query.include && relName in query.include)) {
+            delete (inst as any)[relName];
+          }
+        }
+        for (const metaField of ['author', 'createdAt', 'updatedAt'] as const) {
+          if (!requested.has(metaField)) {
+            delete (inst as any)[metaField];
+          }
+        }
+      }
+    }
+
     // Eager-load relations if requested (BEFORE snapshot so dirty tracking is accurate)
     if (query.include && paginatedInstances.length > 0) {
       await hydrateRelations(this, paginatedInstances, perspective, query.include);
@@ -1008,15 +1025,15 @@ export class Ad4mModel {
    * 
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSurrealDB - Whether to use SurrealDB (default: true, 10-100x faster) or Prolog (legacy)
+   * @param useSPARQL - Whether to use SPARQL (default: true, 10-100x faster) or Prolog (legacy)
    * @returns Array of matching models
    * 
    * @example
    * ```typescript
-   * // Get all recipes (uses SurrealDB by default)
+   * // Get all recipes (uses SPARQL by default)
    * const allRecipes = await Recipe.findAll(perspective);
    * 
-   * // Get recipes with specific criteria (uses SurrealDB)
+   * // Get recipes with specific criteria (uses SPARQL)
    * const recipes = await Recipe.findAll(perspective, {
    *   where: { 
    *     name: "Pasta",
@@ -1034,15 +1051,26 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy, 
     query: Query = {},
-    useSurrealDB: boolean = true
+    engine: 'sparql' | 'prolog' | boolean = 'sparql'
   ): Promise<T[]> {
     if (query.properties && query.properties.length === 0) {
       throw new Error("properties[] must not be empty — omit the field to return all properties, or specify at least one field name");
     }
-    if (useSurrealDB) {
-      const surrealQuery = await this.queryToSurrealQL(perspective, query);
-      const result = await perspective.querySurrealDB(surrealQuery);
-      const { results } = await this.instancesFromSurrealResult(perspective, query, result);
+
+    // Backward compatibility: boolean maps to sparql (true) or prolog (false)
+    const resolvedEngine = typeof engine === 'boolean'
+      ? (engine ? 'sparql' : 'prolog')
+      : engine;
+
+    if (resolvedEngine === 'sparql') {
+      // Always use the regular SPARQL path + JS-level hydrateRelations for includes.
+      // The batch SPARQL approach had issues with sub-queries (where/order/limit on includes),
+      // non-conforming node filtering, and parse_literal compatibility.
+      // hydrateRelations handles all of these correctly via per-relation findAll calls.
+      const sparqlQuery = await this.queryToSPARQL(perspective, query);
+      const rawResult = await perspective.querySparql(sparqlQuery);
+      const grouped = groupSPARQLResults(rawResult);
+      const { results } = await this.instancesFromQueryResult(perspective, query, grouped);
       return results;
     } else {
       const prologQuery = await this.queryToProlog(perspective, query);
@@ -1059,7 +1087,7 @@ export class Ad4mModel {
    *
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSurrealDB - Whether to use SurrealDB (default: true) or Prolog (legacy)
+   * @param useSPARQL - Whether to use SPARQL (default: true) or Prolog (legacy)
    * @returns The first matching instance, or `null`
    *
    * @example
@@ -1076,10 +1104,10 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query: Query = {},
-    useSurrealDB: boolean = true,
+    engine: 'sparql' | 'prolog' | boolean = 'sparql',
   ): Promise<T | null> {
     const limitedQuery = { ...query, limit: 1 };
-    const results = await this.findAll(perspective, limitedQuery, useSurrealDB);
+    const results = await this.findAll(perspective, limitedQuery, engine);
     return results[0] ?? null;
   }
 
@@ -1088,7 +1116,7 @@ export class Ad4mModel {
    * 
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSurrealDB - Whether to use SurrealDB (default: true, 10-100x faster) or Prolog (legacy)
+   * @param useSPARQL - Whether to use SPARQL (default: true, 10-100x faster) or Prolog (legacy)
    * @returns Object containing results array and total count
    * 
    * @example
@@ -1107,12 +1135,17 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy, 
     query: Query = {},
-    useSurrealDB: boolean = true
+    engine: 'sparql' | 'prolog' | boolean = 'sparql'
   ): Promise<ResultsWithTotalCount<T>> {
-    if (useSurrealDB) {
-      const surrealQuery = await this.queryToSurrealQL(perspective, query);
-      const result = await perspective.querySurrealDB(surrealQuery);
-      return await this.instancesFromSurrealResult(perspective, query, result);
+    const resolvedEngine = typeof engine === 'boolean'
+      ? (engine ? 'sparql' : 'prolog')
+      : engine;
+
+    if (resolvedEngine === 'sparql') {
+      const sparqlQuery = await this.queryToSPARQL(perspective, query);
+      const rawResult = await perspective.querySparql(sparqlQuery);
+      const grouped = groupSPARQLResults(rawResult);
+      return await this.instancesFromQueryResult(perspective, query, grouped);
     } else {
       const prologQuery = await this.queryToProlog(perspective, query);
       const result = await perspective.infer(prologQuery);
@@ -1127,7 +1160,7 @@ export class Ad4mModel {
    * @param pageSize - Number of items per page
    * @param pageNumber - Which page to retrieve (1-based)
    * @param query - Optional additional query parameters
-   * @param useSurrealDB - Whether to use SurrealDB (default: true, 10-100x faster) or Prolog (legacy)
+   * @param useSPARQL - Whether to use SPARQL (default: true, 10-100x faster) or Prolog (legacy)
    * @returns Paginated results with metadata
    * 
    * @example
@@ -1147,13 +1180,18 @@ export class Ad4mModel {
     pageSize: number, 
     pageNumber: number, 
     query?: Query,
-    useSurrealDB: boolean = true
+    engine: 'sparql' | 'prolog' | boolean = 'sparql'
   ): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(query || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    if (useSurrealDB) {
-      const surrealQuery = await this.queryToSurrealQL(perspective, paginationQuery);
-      const result = await perspective.querySurrealDB(surrealQuery);
-      const { results, totalCount } = await this.instancesFromSurrealResult(perspective, paginationQuery, result);
+    const resolvedEngine = typeof engine === 'boolean'
+      ? (engine ? 'sparql' : 'prolog')
+      : engine;
+
+    if (resolvedEngine === 'sparql') {
+      const sparqlQuery = await this.queryToSPARQL(perspective, paginationQuery);
+      const rawResult = await perspective.querySparql(sparqlQuery);
+      const grouped = groupSPARQLResults(rawResult);
+      const { results, totalCount } = await this.instancesFromQueryResult(perspective, paginationQuery, grouped);
       return { results, totalCount, pageSize, pageNumber };
     } else {
       const prologQuery = await this.queryToProlog(perspective, paginationQuery);
@@ -1185,21 +1223,21 @@ export class Ad4mModel {
   }
 
   /**
-   * Generates a SurrealQL COUNT query for the model.
+   * Generates a SPARQL COUNT query for the model.
    * 
    * @param perspective - The perspective context
    * @param query - Query parameters to filter the count
-   * @returns SurrealQL COUNT query string
+   * @returns SPARQL COUNT query string
    * 
    * @private
    */
-  public static async countQueryToSurrealQL(perspective: PerspectiveProxy, query: Query): Promise<string> {
+  public static async countQueryToSPARQL(perspective: PerspectiveProxy, query: Query): Promise<string> {
     // Use the same query as the main query (with GROUP BY), just without LIMIT/OFFSET
     // We'll count the number of rows returned (one row per source)
     const countQuery = { ...query };
     delete countQuery.limit;
     delete countQuery.offset;
-    return await this.queryToSurrealQL(perspective, countQuery);
+    return await this.queryToSPARQL(perspective, countQuery);
   }
 
   /**
@@ -1207,7 +1245,7 @@ export class Ad4mModel {
    * 
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @param useSurrealDB - Whether to use SurrealDB (default: true, 10-100x faster) or Prolog (legacy)
+   * @param useSPARQL - Whether to use SPARQL (default: true, 10-100x faster) or Prolog (legacy)
    * @returns Total count of matching entities
    * 
    * @example
@@ -1221,14 +1259,16 @@ export class Ad4mModel {
    * const countProlog = await Recipe.count(perspective, {}, false);
    * ```
    */
-  static async count(perspective: PerspectiveProxy, query: Query = {}, useSurrealDB: boolean = true) {
-    if (useSurrealDB) {
-      const surrealQuery = await this.queryToSurrealQL(perspective, query);
-      const result = await perspective.querySurrealDB(surrealQuery);
-      // Use instancesFromSurrealResult to apply JS-level filtering for advanced where conditions
-      // (e.g., gt, gte, lt, lte, between, contains on properties and author/timestamp)
-      // This ensures count() returns the same number as findAll().length
-      const { totalCount } = await this.instancesFromSurrealResult(perspective, query, result);
+  static async count(perspective: PerspectiveProxy, query: Query = {}, engine: 'sparql' | 'prolog' | boolean = 'sparql') {
+    const resolvedEngine = typeof engine === 'boolean'
+      ? (engine ? 'sparql' : 'prolog')
+      : engine;
+
+    if (resolvedEngine === 'sparql') {
+      const sparqlQuery = await this.queryToSPARQL(perspective, query);
+      const rawResult = await perspective.querySparql(sparqlQuery);
+      const grouped = groupSPARQLResults(rawResult);
+      const { totalCount } = await this.instancesFromQueryResult(perspective, query, grouped);
       return totalCount;
     } else {
       const result = await perspective.infer(await this.countQueryToProlog(perspective, query));
@@ -1249,7 +1289,7 @@ export class Ad4mModel {
     // Get resolve language from metadata (replaces Prolog query)
     let resolveLanguage = metadata.resolveLanguage;
 
-    // Skip storing empty/null/undefined values to avoid invalid empty literals (e.g. literal://string:)
+    // Skip storing empty/null/undefined values to avoid invalid empty literals (e.g. literal:string:)
     if (value === undefined || value === null || value === "") {
       return;
     }

@@ -1,6 +1,6 @@
 //! Subscription / waker query tools
 //!
-//! Tools for generating SurrealQL queries for external waker processes.
+//! Tools for generating SPARQL queries for external waker processes.
 //! Queries are derived from SHACL class definitions when available,
 //! avoiding hardcoded type-specific predicates.
 
@@ -52,7 +52,7 @@ pub struct MentionWakerConfigParams {
 impl Ad4mMcpHandler {
     /// Generate a waker query config for watching model changes in a perspective
     #[tool(
-        description = "Generate a SurrealQL query config for watching changes to a subject class in a perspective. This does NOT create a live subscription — it returns a query and config that you pass to an external waker process. The waker uses perspectiveSubscribeSurrealQuery (same mechanism as Flux UI) for live updates. Flow: 1) Call this tool to get the query config, 2) Store subscription_id + context in memory, 3) Add waker_config to the waker's config file and restart it, 4) When woken, use MCP tools to fetch the latest data. The query is derived from the SHACL class definition — no hardcoded type predicates."
+        description = "Generate a SPARQL query config for watching changes to a subject class in a perspective. This does NOT create a live subscription — it returns a query and config that you pass to an external waker process. The waker uses perspective query subscriptions for live updates. Flow: 1) Call this tool to get the query config, 2) Store subscription_id + context in memory, 3) Add waker_config to the waker's config file and restart it, 4) When woken, use MCP tools to fetch the latest data. The query is derived from the SHACL class definition — no hardcoded type predicates."
     )]
     pub async fn generate_waker_query(&self, params: Parameters<SubscribeToModelParams>) -> String {
         let _capabilities = match self.get_capabilities().await {
@@ -69,29 +69,29 @@ impl Ad4mMcpHandler {
 
         let query = if let Some(ref parent) = p.parent_address {
             // Scope to children of a specific parent
-            // Use the same encoding logic as add_child/message_create: leave URIs as-is
             let parent_encoded = if parent.contains("://") {
                 parent.clone()
             } else {
                 Self::encode_literal(parent)
             };
             format!(
-                "SELECT * FROM link WHERE source = '{}' AND predicate = 'ad4m://has_child'",
+                "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?source) = \"{}\" && STR(?predicate) = \"ad4m://has_child\") }}",
                 parent_encoded
             )
         } else if let Some(ref predicate) = p.predicate {
-            // Explicit predicate filter
             if let Some(ref target) = p.target_value {
                 format!(
-                    "SELECT * FROM link WHERE predicate = '{}' AND target = '{}'",
+                    "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) = \"{}\" && STR(?target) = \"{}\") }}",
                     predicate, target
                 )
             } else {
-                format!("SELECT * FROM link WHERE predicate = '{}'", predicate)
+                format!(
+                    "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) = \"{}\") }}",
+                    predicate
+                )
             }
         } else {
-            // Derive query from SHACL definition: watch for links matching
-            // any predicate defined on the subject class's properties.
+            // Derive query from SHACL definition
             let shacl_class = shacl::load_class(&perspective, &p.class_name).await;
             if let Some(class) = shacl_class {
                 let predicates: Vec<String> = class
@@ -101,21 +101,25 @@ impl Ad4mMcpHandler {
                     .collect();
 
                 if predicates.is_empty() {
-                    // No SHACL predicates found — fall back to broad query
-                    "SELECT * FROM link ORDER BY timestamp DESC LIMIT 50".to_string()
+                    "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) } LIMIT 50".to_string()
                 } else if predicates.len() == 1 {
-                    format!("SELECT * FROM link WHERE predicate = '{}'", predicates[0])
+                    format!(
+                        "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) = \"{}\") }}",
+                        predicates[0]
+                    )
                 } else {
-                    let predicate_list = predicates
+                    let filter_conditions = predicates
                         .iter()
-                        .map(|p| format!("'{}'", p))
+                        .map(|p| format!("STR(?predicate) = \"{}\"", p))
                         .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("SELECT * FROM link WHERE predicate IN [{}]", predicate_list)
+                        .join(" || ");
+                    format!(
+                        "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER({}) }}",
+                        filter_conditions
+                    )
                 }
             } else {
-                // No SHACL definition found — fall back to broad query
-                "SELECT * FROM link ORDER BY timestamp DESC LIMIT 50".to_string()
+                "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) } LIMIT 50".to_string()
             }
         };
 
@@ -128,14 +132,9 @@ impl Ad4mMcpHandler {
             "parent_address": p.parent_address,
             "predicate": p.predicate,
             "target_value": p.target_value,
-            "surreal_query": query,
-            "waker_config": {
-                "id": subscription_id,
-                "perspective": p.perspective_id,
-                "query": query,
-            },
+            "query": query,
             "message": format!(
-                "Subscription {} created for {} changes{}. Add the waker_config entry to your waker's config file and restart it. The waker uses perspectiveSubscribeSurrealQuery (same as Flux UI) for live change detection. Store this subscription_id in your memory with its context so you know what to do when woken.",
+                "Subscription {} created for {} changes{}.",
                 subscription_id,
                 p.class_name,
                 p.parent_address.as_ref().map(|a| format!(" under parent {}", a)).unwrap_or_default()
@@ -145,7 +144,7 @@ impl Ad4mMcpHandler {
 
     /// Generate a single waker subscription config for mention tracking
     #[tool(
-        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. Watches for any link whose target contains a mention term (using fn::contains + fn::parse_literal for literal decoding). The waker plugin resolves parent channels in a second query when the subscription fires. Returns one subscription ORing all profile names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
+        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. Watches for any link whose target contains a mention term (using SPARQL CONTAINS for substring matching). The waker plugin resolves parent channels in a second query when the subscription fires. Returns one subscription ORing all profile names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
     )]
     pub async fn get_mention_waker_config(
         &self,
@@ -202,44 +201,34 @@ impl Ad4mMcpHandler {
 
         let perspective_id = &params.0.perspective_id;
 
-        // Build the SurrealQL query using fn::contains + fn::parse_literal.
+        // Build the SPARQL query using CONTAINS for mention matching.
         //
-        // fn::parse_literal(target) handles all target types:
-        //   - literal://json: targets (Flux message bodies): parses the expression
-        //     shape and returns only the .data field — e.g. "Hey @Marvin!" — so the
-        //     author DID embedded in the surrounding JSON is never seen by fn::contains,
-        //     preventing false-positive wakes on every message the agent sends.
-        //   - literal://string: targets (profile names etc.): returns the decoded string.
-        //   - Non-literal strings (raw DIDs, URIs): returned unchanged, so explicit
-        //     DID-as-target mention/follow links are still matched correctly.
-        //
-        // fn::contains(parsed, term) → substring check (str.includes).
-        //
-        // Both functions are already defined in SurrealDBService::new().
-        // Case-insensitive matching via string::lowercase() (SurrealDB built-in):
-        //   string::lowercase(<string> fn::parse_literal(target)) casts to string then
-        //   lowercases; the <string> cast is needed because fn::parse_literal can return
-        //   booleans/numbers for literal://boolean: and literal://number: URLs, and
-        //   string::lowercase() throws on non-string input.
-        //   Search terms are also lowercased in Rust before embedding in the query.
-        //   DIDs are already lowercase so .to_lowercase() is a no-op for them.
+        // The SPARQL CONTAINS function performs substring matching on the target IRI/literal.
+        // Case-insensitive matching via LCASE().
+        // Search terms are lowercased in Rust before embedding in the query.
         let all_terms: Vec<String> = names
             .iter()
             .map(|n| n.to_lowercase())
             .chain(std::iter::once(did.to_lowercase()))
             .collect();
 
+        // Build CONTAINS conditions for mention matching.
+        // Use fn::parse_literal to decode literal:// targets:
+        // - literal:string: targets are URL-decoded to plain text
+        // - literal:json: signed expressions are decoded and only the "data"
+        //   field is returned, so author/timestamp metadata doesn't match
+        // This ensures we match against the actual message content, not metadata.
         let mention_conditions: Vec<String> = all_terms
             .iter()
             .map(|t| {
                 format!(
-                    "fn::contains(string::lowercase(<string> fn::parse_literal(target)), '{}')",
+                    "CONTAINS(LCASE(STR(<ad4m://fn/parse_literal>(?target))), \"{}\")",
                     t
                 )
             })
             .collect();
 
-        let mention_predicate = format!("({})", mention_conditions.join(" OR "));
+        let mention_predicate = format!("({})", mention_conditions.join(" || "));
 
         // Discover the body property predicate from SHACL to scope the query.
         // Without this, the query scans ALL links which is very slow on large perspectives.
@@ -257,19 +246,17 @@ impl Ad4mMcpHandler {
             None
         };
 
-        // Direct body-link query: watch for body links whose target contains a mention term.
-        // Each result has `source` = message address (the base expression).
-        // Parent resolution (finding which channel the message belongs to) is done by the
-        // waker plugin in a second query after the subscription fires.
         let query = if let Some(ref pred) = body_predicate {
             format!(
-                "SELECT * FROM link WHERE predicate = '{}' AND {}",
+                "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) = \"{}\") FILTER({}) }}",
                 pred, mention_predicate
             )
         } else {
-            // Fallback: no SHACL body predicate found, scan all links
             log::warn!("get_mention_waker_config: no body predicate found in SHACL for Message class, falling back to unscoped query");
-            format!("SELECT * FROM link WHERE {}", mention_predicate)
+            format!(
+                "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER({}) }}",
+                mention_predicate
+            )
         };
 
         let sub_id = format!("mention-{}", &did[did.len().saturating_sub(12)..]);

@@ -26,6 +26,9 @@ export type Ad4mConnectOptions = {
   // Hosting options
   hostIndexUrl?: string;     // URL of the central host index REST API
   lowCreditThreshold?: number; // Credits level at which to warn the user (default: 10)
+  // Credit lifecycle callbacks
+  onCreditsDepleted?: () => void; // Called once when credits reach zero and the modal is opened
+  onUseApp?: () => void;          // Called when the user clicks "Use App" after a credit-depletion session
 };
 
 export type ConfigStates = "port" | "url" | "token";
@@ -47,7 +50,7 @@ export type RemoteHost = {
 
 /** Flexible pricing item — avoids locking the interface to a specific pricing model */
 export type PricingItem = {
-  description: string;       // e.g. "gpt-4o per token", "link write", "SurrealDB query"
+  description: string;       // e.g. "gpt-4o per token", "link write", "SPARQL query"
   priceInHOT: number;        // e.g. 0.000001
 };
 

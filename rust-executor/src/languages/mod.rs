@@ -1711,6 +1711,9 @@ impl LanguageController {
         if let Some(rest) = url.strip_prefix("literal://") {
             return Ok(("literal".to_string(), rest.to_string()));
         }
+        if let Some(rest) = url.strip_prefix("literal:") {
+            return Ok(("literal".to_string(), rest.to_string()));
+        }
 
         // DID URLs: "did:key:z6Mk..." -> language alias "did", expression address is the full DID
         if url.starts_with("did:") {
@@ -2182,7 +2185,7 @@ impl LanguageController {
             })?;
 
             let expression_part = literal_encode(&signed_expr_json);
-            return Ok(format!("literal://{}", expression_part));
+            return Ok(format!("literal:{}", expression_part));
         }
 
         // Resolve aliases in both directions:

@@ -12,12 +12,15 @@ import { AIClient } from "../ai/AIClient";
 import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
 import { gql } from "@apollo/client/core";
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
+import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
-import { escapeSurrealString } from "../utils";
+
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
 
 type QueryCallback = (result: AllInstancesResult) => void;
+
+
 
 // Generic subscription interface that matches Apollo's Subscription
 interface Unsubscribable {
@@ -71,7 +74,6 @@ export class QuerySubscriptionProxy {
     #initReject?: (reason?: any) => void;
     #initTimeoutId?: NodeJS.Timeout;
     #query: string;
-    isSurrealDB: boolean = false;
 
     /** Creates a new query subscription
      * @param uuid - The UUID of the perspective
@@ -114,11 +116,7 @@ export class QuerySubscriptionProxy {
         try {
             // Initialize the query subscription
             let initialResult;
-            if (this.isSurrealDB) {
-                initialResult = await this.#client.perspectiveSubscribeSurrealQuery(this.#uuid, this.#query);
-            } else {
-                initialResult = await this.#client.subscribeQuery(this.#uuid, this.#query);
-            }
+            initialResult = await this.#client.subscribeQuery(this.#uuid, this.#query);
             this.#subscriptionId = initialResult.subscriptionId;
 
             // Process the initial result immediately for fast UX
@@ -180,11 +178,7 @@ export class QuerySubscriptionProxy {
             if (this.#disposed) return;
             
             try {
-                if (this.isSurrealDB) {
-                    await this.#client.perspectiveKeepAliveSurrealQuery(this.#uuid, this.#subscriptionId);
-                } else {
-                    await this.#client.keepAliveQuery(this.#uuid, this.#subscriptionId);
-                }
+                await this.#client.keepAliveQuery(this.#uuid, this.#subscriptionId);
             } catch (e) {
                 console.error('Error in keepalive:', e);
                 // try to reinitialize the subscription
@@ -308,13 +302,8 @@ export class QuerySubscriptionProxy {
 
         // Tell the backend to dispose of the subscription
         if (this.#subscriptionId) {
-            if (this.isSurrealDB) {
-                this.#client.perspectiveDisposeSurrealQuerySubscription(this.#uuid, this.#subscriptionId)
-                    .catch(e => console.error('Error disposing surreal query subscription:', e));
-            } else {
-                this.#client.disposeQuerySubscription(this.#uuid, this.#subscriptionId)
-                    .catch(e => console.error('Error disposing query subscription:', e));
-            }
+            this.#client.disposeQuerySubscription(this.#uuid, this.#subscriptionId)
+                .catch(e => console.error('Error disposing query subscription:', e));
         }
     }
 }
@@ -391,6 +380,7 @@ export class PerspectiveProxy {
     #perspectiveLinkRemovedCallbacks: LinkCallback[]
     #perspectiveLinkUpdatedCallbacks: LinkCallback[]
     #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
+    #ensuredSubjectClasses = new Set<string>()
 
     /**
      * Creates a new PerspectiveProxy instance.
@@ -489,7 +479,9 @@ export class PerspectiveProxy {
      * @param batchId - Optional batch ID to group this operation with others
      */
     async executeAction(actions, expression, parameters: Parameter[], batchId?: string) {
-        return await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId)
+        const result = await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId)
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result
     }
 
     /**
@@ -545,34 +537,27 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Executes a SurrealQL query against the perspective's link cache.
-     * This allows powerful SQL-like queries on the link data stored in SurrealDB.
+     * Executes a SPARQL query against the perspective's link cache.
+     * This allows powerful SQL-like queries on the link data stored in SPARQL.
      * 
      * **Security Note:** Only read-only queries (SELECT, RETURN, etc.) are permitted.
      * Mutating operations (DELETE, UPDATE, INSERT, CREATE, DROP, DEFINE, etc.) are
      * blocked for security reasons. Use the perspective's add/remove methods to modify links.
      * 
-     * @param query - SurrealQL query string (read-only operations only)
+     * @param query - SPARQL query string (read-only operations only)
      * @returns Query results as parsed JSON
      * 
-     * @example
-     * ```typescript
-     * // Get all links
-     * const links = await perspective.querySurrealDB('SELECT * FROM link');
-     * 
-     * // Filter links by predicate
-     * const follows = await perspective.querySurrealDB(
-     *   "SELECT * FROM link WHERE predicate = 'follows'"
-     * );
-     * 
-     * // Complex aggregation query
-     * const stats = await perspective.querySurrealDB(
-     *   "SELECT predicate, count() as total FROM link GROUP BY predicate"
-     * );
-     * ```
+     * Executes a SPARQL query against the perspective's RDF (Oxigraph) store.
+     *
+     * @param query - SPARQL query string
+     * @returns Query results as parsed JSON
      */
-    async querySurrealDB(query: string): Promise<any> {
-        return await this.#client.querySurrealDB(this.#handle.uuid, query)
+    async querySparql(query: string): Promise<any> {
+        const cached = getCachedResult(this.#handle.uuid, query);
+        if (cached !== undefined) return cached;
+        const result = await this.#client.querySparql(this.#handle.uuid, query);
+        setCachedResult(this.#handle.uuid, query, result);
+        return result;
     }
 
     /**
@@ -601,7 +586,9 @@ export class PerspectiveProxy {
      * ```
      */
     async add(link: Link, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
-        return await this.#client.addLink(this.#handle.uuid, link, status, batchId)
+        const result = await this.#client.addLink(this.#handle.uuid, link, status, batchId)
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result;
     }
 
     /**
@@ -614,7 +601,9 @@ export class PerspectiveProxy {
      * @returns Array of created LinkExpressions
      */
     async addLinks(links: Link[], status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression[]> {
-        return await this.#client.addLinks(this.#handle.uuid, links, status, batchId)
+        const result = await this.#client.addLinks(this.#handle.uuid, links, status, batchId)
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result;
     }
 
     /**
@@ -625,7 +614,9 @@ export class PerspectiveProxy {
      * @returns Array of removed LinkExpressions
      */
     async removeLinks(links: LinkExpressionInput[], batchId?: string): Promise<LinkExpression[]> {
-        return await this.#client.removeLinks(this.#handle.uuid, links, batchId)
+        const result = await this.#client.removeLinks(this.#handle.uuid, links, batchId)
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result;
     }
 
     /**
@@ -637,7 +628,9 @@ export class PerspectiveProxy {
      * @returns Object containing results of the mutations
      */
     async linkMutations(mutations: LinkMutations, status: LinkStatus = 'shared'): Promise<LinkExpressionMutations> {
-        return await this.#client.linkMutations(this.#handle.uuid, mutations, status)
+        const result = await this.#client.linkMutations(this.#handle.uuid, mutations, status)
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result;
     }
 
         /**
@@ -660,7 +653,9 @@ export class PerspectiveProxy {
      * @param batchId - Optional batch ID to group this operation with others
      */
     async update(oldLink: LinkExpressionInput, newLink: Link, batchId?: string): Promise<LinkExpression> {
-        return await this.#client.updateLink(this.#handle.uuid, oldLink, newLink, batchId)
+        const result = await this.#client.updateLink(this.#handle.uuid, oldLink, newLink, batchId)
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result;
     }
 
     /**
@@ -670,7 +665,9 @@ export class PerspectiveProxy {
      * @param batchId - Optional batch ID to group this operation with others
      */
     async remove(link: LinkExpressionInput, batchId?: string): Promise<boolean> {
-        return await this.#client.removeLink(this.#handle.uuid, link, batchId)
+        const result = await this.#client.removeLink(this.#handle.uuid, link, batchId)
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result;
     }
 
     /** Creates a new batch for grouping operations */
@@ -680,9 +677,9 @@ export class PerspectiveProxy {
 
     /** Commits a batch of operations */
     async commitBatch(batchId: string): Promise<LinkExpressionMutations> {
-        return await this.#client.commitBatch(this.#handle.uuid, batchId)
-
-        
+        const result = await this.#client.commitBatch(this.#handle.uuid, batchId)
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result;
     }
     /**
      * Retrieves and renders an Expression referenced in this perspective.
@@ -1076,6 +1073,14 @@ export class PerspectiveProxy {
     }
 
     /**
+     * Adds a subject class to the perspective.
+     * Alias for addSdna() with sdnaType='subject_class'.
+     */
+    async addSubjectClass(name: string, shaclJson: string) {
+        return this.addSdna(name, '', 'subject_class', shaclJson);
+    }
+
+    /**
      * **Recommended way to add SDNA schemas.**
      * 
      * Store a SHACL shape in this Perspective using the type-safe `SHACLShape` class.
@@ -1107,7 +1112,7 @@ export class PerspectiveProxy {
         const shapeLinks = shape.toLinks();
         
         // Create name -> shape mapping links
-        const nameMapping = Literal.fromUrl(`literal://string:shacl://${name}`);
+        const nameMapping = Literal.fromUrl(`literal:string:shacl://${name}`);
         const allLinks: Link[] = [
             ...shapeLinks.map(l => new Link({
                 source: l.source,
@@ -1135,7 +1140,7 @@ export class PerspectiveProxy {
      */
     async getShacl(name: string): Promise<SHACLShape | null> {
         // Find the shape URI from the name mapping
-        const nameMapping = Literal.fromUrl(`literal://string:shacl://${name}`);
+        const nameMapping = Literal.fromUrl(`literal:string:shacl://${name}`);
         const shapeUriLinks = await this.get(new LinkQuery({
             source: nameMapping.toUrl(),
             predicate: "ad4m://shacl_shape_uri"
@@ -1146,7 +1151,6 @@ export class PerspectiveProxy {
         }
         
         const shapeUri = shapeUriLinks[0].data.target;
-        const escapedShapeUri = escapeSurrealString(shapeUri);
         
         // First get property shape URIs so we can query everything in one go
         const propertyLinks = await this.get(new LinkQuery({
@@ -1154,18 +1158,21 @@ export class PerspectiveProxy {
             predicate: "sh://property"
         }));
         
-        // Build a single surreal query that fetches all relevant links
+        // Fetch all links from the shape and its property shapes
         const sourceUris = [shapeUri, ...propertyLinks.map(l => l.data.target)];
-        const escapedSources = sourceUris.map(u => `'${escapeSurrealString(u)}'`).join(', ');
+        const allLinks: Array<{source: string, predicate: string, target: string}> = [];
+        for (const uri of sourceUris) {
+            const links = await this.get(new LinkQuery({ source: uri }));
+            for (const l of links) {
+                allLinks.push({
+                    source: l.data.source,
+                    predicate: l.data.predicate,
+                    target: l.data.target
+                });
+            }
+        }
         
-        const query = `SELECT in.uri AS source, predicate, out.uri AS target FROM link WHERE in.uri IN [${escapedSources}]`;
-        const result = await this.querySurrealDB(query);
-        
-        const shapeLinks = (result || []).map((r: any) => ({
-            source: r.source,
-            predicate: r.predicate,
-            target: r.target
-        }));
+        const shapeLinks = allLinks;
         
         return SHACLShape.fromLinks(shapeLinks, shapeUri);
     }
@@ -1279,22 +1286,22 @@ export class PerspectiveProxy {
         }
         
         const flowUri = flowUriLinks[0].data.target;
-        const escapedFlowUri = escapeSurrealString(flowUri);
-        
         // Compute alternate prefix for state/transition URIs
         const alternatePrefix = flowUri.endsWith('Flow') 
             ? flowUri.slice(0, -4) + '.'
             : flowUri + '.';
-        const escapedAltPrefix = escapeSurrealString(alternatePrefix);
         
-        // Single surreal query to get all flow-related links
-        const query = `SELECT in.uri AS source, predicate, out.uri AS target FROM link WHERE in.uri = '${escapedFlowUri}' OR string::starts_with(in.uri, '${escapedAltPrefix}')`;
-        const result = await this.querySurrealDB(query);
+        // Fetch flow links using SPARQL to match flowUri source OR alternatePrefix sources
+        const sparqlQuery = `SELECT ?s ?p ?o WHERE {
+            ?s ?p ?o .
+            FILTER(?s = <${flowUri}> || STRSTARTS(STR(?s), "${alternatePrefix}"))
+        }`;
+        const sparqlResult = await this.querySparql(sparqlQuery);
         
-        const flowLinks = (result || []).map((r: any) => ({
-            source: r.source,
-            predicate: r.predicate,
-            target: r.target
+        const flowLinks = (sparqlResult || []).map((r: any) => ({
+            source: r.s,
+            predicate: r.p,
+            target: r.o
         }));
         
         return SHACLFlow.fromLinks(flowLinks, flowUri);
@@ -1427,8 +1434,8 @@ export class PerspectiveProxy {
 
         for (const link of links) {
             if (shapePattern.test(link.data.source)) {
-                // Parse actions from literal://string:{json}
-                const prefix = "literal://string:";
+                // Parse actions from literal:string:{json}
+                const prefix = "literal:string:";
                 if (link.data.target.startsWith(prefix)) {
                     const jsonStr = link.data.target.slice(prefix.length);
                     // Decode URL-encoded JSON if needed, with fallback for raw % characters
@@ -1488,38 +1495,21 @@ export class PerspectiveProxy {
 
         // If no required triples, any expression with links is an instance
         if (metadata.requiredTriples.length === 0) {
-            const escapedExpression = escapeSurrealString(expression);
-            const checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${escapedExpression}'`;
-            const result = await this.querySurrealDB(checkQuery);
-            const count = result[0]?.count ?? 0;
-            const countValue = typeof count === 'object' && count?.Int !== undefined ? count.Int : count;
-            return countValue > 0;
+            const links = await this.get(new LinkQuery({ source: expression }));
+            return links.length > 0;
         }
 
         // Check if the expression has all required triples (predicate + optional exact target)
         for (const triple of metadata.requiredTriples) {
-            const escapedExpression = escapeSurrealString(expression);
-            const escapedPredicate = escapeSurrealString(triple.predicate);
-            let checkQuery: string;
+            let query: LinkQuery;
             if (triple.target) {
-                // Flag: must match both predicate AND exact target value
-                const escapedTarget = escapeSurrealString(triple.target);
-                checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${escapedExpression}' AND predicate = '${escapedPredicate}' AND out.uri = '${escapedTarget}'`;
+                query = new LinkQuery({ source: expression, predicate: triple.predicate, target: triple.target });
             } else {
-                // Property: just check predicate exists
-                checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${escapedExpression}' AND predicate = '${escapedPredicate}'`;
+                query = new LinkQuery({ source: expression, predicate: triple.predicate });
             }
-            const result = await this.querySurrealDB(checkQuery);
+            const links = await this.get(query);
 
-            if (!result || result.length === 0) {
-                return false;
-            }
-
-            const count = result[0]?.count ?? 0;
-            // Handle potential object response like {Int: 0}
-            const countValue = typeof count === 'object' && count?.Int !== undefined ? count.Int : count;
-
-            if (countValue === 0) {
+            if (!links || links.length === 0) {
                 return false;
             }
         }
@@ -1551,6 +1541,16 @@ export class PerspectiveProxy {
      * Gets subject class metadata from SHACL links using SHACLShape.fromLinks().
      * Retrieves the SHACL shape and extracts metadata for instance queries.
      */
+    async getSubjectClassMetadata(className: string): Promise<{
+        requiredPredicates: string[],
+        requiredTriples: Array<{predicate: string, target?: string}>,
+        properties: Map<string, { predicate: string, resolveLanguage?: string }>,
+        relations: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
+    } | null> {
+        return this.getSubjectClassMetadataFromSDNA(className);
+    }
+
+    /** @deprecated Use getSubjectClassMetadata() */
     async getSubjectClassMetadataFromSDNA(className: string): Promise<{
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
@@ -1612,40 +1612,61 @@ export class PerspectiveProxy {
         }
     }
     /**
-     * Generates a SurrealDB query to find instances based on class metadata.
+     * Generates a SPARQL query to find instances based on class metadata.
      */
-    private generateSurrealInstanceQuery(metadata: {
+    /**
+     * Finds all instances matching subject class metadata by querying links.
+     * Returns base URIs of matching instances.
+     */
+    private async findInstancesByMetadata(metadata: {
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
         properties: Map<string, { predicate: string, resolveLanguage?: string }>,
         relations: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
-    }): string {
+    }): Promise<Array<{base: string}>> {
         if (metadata.requiredTriples.length === 0) {
-            // No required triples - any node with links is an instance
-            return `SELECT DISTINCT uri AS base FROM node WHERE count(->link) > 0`;
+            // No required triples - return all unique sources that have any link
+            const allLinks = await this.get(new LinkQuery({}));
+            const sources = new Set(allLinks.map(l => l.data.source));
+            return Array.from(sources).map(s => ({ base: s }));
         }
 
-        // Generate WHERE conditions for each required triple (predicate + optional exact target)
-        const whereConditions = metadata.requiredTriples.map(triple => {
-            const escapedPredicate = escapeSurrealString(triple.predicate);
-            if (triple.target) {
-                // Flag: must match both predicate AND exact target value
-                const escapedTarget = escapeSurrealString(triple.target);
-                return `count(->link[WHERE predicate = '${escapedPredicate}' AND out.uri = '${escapedTarget}']) > 0`;
-            } else {
-                // Property: just check predicate exists
-                return `count(->link[WHERE predicate = '${escapedPredicate}']) > 0`;
-            }
-        }).join(' AND ');
+        // Use first required triple to get candidate set, then filter by rest
+        const first = metadata.requiredTriples[0];
+        let query: LinkQuery;
+        if (first.target) {
+            query = new LinkQuery({ predicate: first.predicate, target: first.target });
+        } else {
+            query = new LinkQuery({ predicate: first.predicate });
+        }
+        const candidateLinks = await this.get(query);
+        let candidates = [...new Set(candidateLinks.map(l => l.data.source))];
 
-        return `SELECT uri AS base FROM node WHERE ${whereConditions}`;
+        // Filter by remaining required triples
+        for (let i = 1; i < metadata.requiredTriples.length; i++) {
+            const triple = metadata.requiredTriples[i];
+            const remaining: string[] = [];
+            for (const expr of candidates) {
+                let q: LinkQuery;
+                if (triple.target) {
+                    q = new LinkQuery({ source: expr, predicate: triple.predicate, target: triple.target });
+                } else {
+                    q = new LinkQuery({ source: expr, predicate: triple.predicate });
+                }
+                const links = await this.get(q);
+                if (links.length > 0) remaining.push(expr);
+            }
+            candidates = remaining;
+        }
+
+        return candidates.map(c => ({ base: c }));
     }
 
     /**
-     * Gets a property value using SurrealDB when Prolog fails.
+     * Gets a property value using SPARQL when Prolog fails.
      * This is used as a fallback in SdnaOnly mode where link data isn't in Prolog.
      */
-    async getPropertyValueViaSurreal(baseExpression: string, className: string, propertyName: string): Promise<any> {
+    async getPropertyValueViaSparql(baseExpression: string, className: string, propertyName: string): Promise<any> {
         const metadata = await this.getSubjectClassMetadataFromSDNA(className);
         if (!metadata) {
             return undefined;
@@ -1656,16 +1677,13 @@ export class PerspectiveProxy {
             return undefined;
         }
 
-        const escapedBaseExpression = escapeSurrealString(baseExpression);
-        const escapedPredicate = escapeSurrealString(propMeta.predicate);
-        const query = `SELECT out.uri AS value FROM link WHERE in.uri = '${escapedBaseExpression}' AND predicate = '${escapedPredicate}' LIMIT 1`;
-        const result = await this.querySurrealDB(query);
+        const links = await this.get(new LinkQuery({ source: baseExpression, predicate: propMeta.predicate }));
 
-        if (!result || result.length === 0) {
+        if (!links || links.length === 0) {
             return undefined;
         }
 
-        const value = result[0].value;
+        const value = links[0].data.target;
 
         // Handle expression resolution if needed
         if (propMeta.resolveLanguage && value) {
@@ -1685,11 +1703,11 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Gets relation values using SurrealDB when Prolog fails.
+     * Gets relation values using SPARQL when Prolog fails.
      * This is used as a fallback in SdnaOnly mode where link data isn't in Prolog.
      * Note: This is used by Subject.ts (legacy pattern). Ad4mModel.ts uses getModelMetadata() instead.
      */
-    async getRelationValuesViaSurreal(baseExpression: string, className: string, relationName: string): Promise<any[]> {
+    async getRelationValuesViaSparql(baseExpression: string, className: string, relationName: string): Promise<any[]> {
         const metadata = await this.getSubjectClassMetadataFromSDNA(className);
         if (!metadata) {
             return [];
@@ -1700,16 +1718,16 @@ export class PerspectiveProxy {
             return [];
         }
 
-        const escapedBaseExpression = escapeSurrealString(baseExpression);
-        const escapedPredicate = escapeSurrealString(relMeta.predicate);
-        const query = `SELECT out.uri AS value, timestamp FROM link WHERE in.uri = '${escapedBaseExpression}' AND predicate = '${escapedPredicate}' ORDER BY timestamp ASC`;
-        const result = await this.querySurrealDB(query);
+        const links = await this.get(new LinkQuery({ source: baseExpression, predicate: relMeta.predicate }));
 
-        if (!result || result.length === 0) {
+        if (!links || links.length === 0) {
             return [];
         }
 
-        let values = result.map(r => r.value).filter(v => v !== "" && v !== '');
+        // Sort by timestamp ascending
+        links.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+        let values = links.map(l => l.data.target).filter(v => v !== "" && v !== '');
         
         // Apply condition filtering if present
         if (relMeta.condition && values.length > 0) {
@@ -1722,14 +1740,26 @@ export class PerspectiveProxy {
                         .replace(/\$base/g, `'${baseExpression}'`)
                         .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
                     
-                    // If condition starts with WHERE, wrap in array length check
-                    if (condition.trim().startsWith('WHERE')) {
-                        condition = `array::len(SELECT * FROM link ${condition}) > 0`;
-                    }
+                    // Parse condition to extract link query parameters
+                    // Conditions typically look like: WHERE in.uri = 'X' AND predicate = 'Y' AND out.uri = 'Z'
+                    // or: array::len(SELECT * FROM link WHERE ...) > 0
+                    // Convert to queryLinks calls
+                    const sourceMatch = condition.match(/in\.uri\s*=\s*'([^']+)'/);
+                    const predicateMatch = condition.match(/predicate\s*=\s*'([^']+)'/);
+                    const targetMatch = condition.match(/out\.uri\s*=\s*'([^']+)'/);
                     
-                    const filterResult = await this.querySurrealDB(`RETURN ${condition}`);
-                    const isTrue = filterResult === true || (Array.isArray(filterResult) && filterResult.length > 0 && filterResult[0] === true);
-                    if (isTrue) {
+                    if (sourceMatch || predicateMatch || targetMatch) {
+                        const linkQuery: any = {};
+                        if (sourceMatch) linkQuery.source = sourceMatch[1];
+                        if (predicateMatch) linkQuery.predicate = predicateMatch[1];
+                        if (targetMatch) linkQuery.target = targetMatch[1];
+                        
+                        const matchingLinks = await this.get(new LinkQuery(linkQuery));
+                        if (matchingLinks.length > 0) {
+                            filteredValues.push(value);
+                        }
+                    } else {
+                        // Can't parse condition, include by default
                         filteredValues.push(value);
                     }
                 }
@@ -1760,7 +1790,7 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Batch-checks multiple expressions against subject class metadata using a single or limited SurrealDB queries.
+     * Batch-checks multiple expressions against subject class metadata using a single or limited SPARQL queries.
      * This avoids N+1 query problems by checking all values at once.
      */
     async batchCheckSubjectInstances(
@@ -1778,33 +1808,30 @@ export class PerspectiveProxy {
 
         // If no required triples, check which expressions have any links
         if (metadata.requiredTriples.length === 0) {
-            const escapedExpressions = expressions.map(e => `'${escapeSurrealString(e)}'`).join(', ');
-            const checkQuery = `SELECT in.uri AS uri FROM link WHERE in.uri IN [${escapedExpressions}] GROUP BY in.uri HAVING count() > 0`;
-            const result = await this.querySurrealDB(checkQuery);
-            return result.map(r => r.uri);
+            const results: string[] = [];
+            for (const expr of expressions) {
+                const links = await this.get(new LinkQuery({ source: expr }));
+                if (links.length > 0) results.push(expr);
+            }
+            return results;
         }
 
-        // For each required triple, build a query that finds matching expressions
+        // For each required triple, find which expressions match
         const validExpressionSets: Set<string>[] = [];
         
         for (const triple of metadata.requiredTriples) {
-            const escapedExpressions = expressions.map(e => `'${escapeSurrealString(e)}'`).join(', ');
-            const escapedPredicate = escapeSurrealString(triple.predicate);
-            
-            let checkQuery: string;
-            if (triple.target) {
-                // Flag: must match both predicate AND exact target value
-                const escapedTarget = escapeSurrealString(triple.target);
-                // Note: Removed GROUP BY because it was causing SurrealDB to only return one result
-                checkQuery = `SELECT in.uri AS uri FROM link WHERE in.uri IN [${escapedExpressions}] AND predicate = '${escapedPredicate}' AND out.uri = '${escapedTarget}'`;
-            } else {
-                // Property: just check predicate exists
-                // Note: Removed GROUP BY because it was causing SurrealDB to only return one result
-                checkQuery = `SELECT in.uri AS uri FROM link WHERE in.uri IN [${escapedExpressions}] AND predicate = '${escapedPredicate}'`;
+            const matchingExprs = new Set<string>();
+            for (const expr of expressions) {
+                let query: LinkQuery;
+                if (triple.target) {
+                    query = new LinkQuery({ source: expr, predicate: triple.predicate, target: triple.target });
+                } else {
+                    query = new LinkQuery({ source: expr, predicate: triple.predicate });
+                }
+                const links = await this.get(query);
+                if (links.length > 0) matchingExprs.add(expr);
             }
-            
-            const result = await this.querySurrealDB(checkQuery);
-            validExpressionSets.push(new Set(result.map(r => r.uri)));
+            validExpressionSets.push(matchingExprs);
         }
 
         // Find intersection: expressions that passed ALL required triple checks
@@ -1860,13 +1887,13 @@ export class PerspectiveProxy {
         let instances = []
         for(let className of classes) {
             //console.log(`getAllSubjectInstances: Processing class ${className}`);
-            // Query SDNA for metadata, then query SurrealDB for instances
+            // Query SDNA for metadata, then query SPARQL for instances
             const metadata = await this.getSubjectClassMetadataFromSDNA(className);
             //console.log(`getAllSubjectInstances: Got metadata for ${className}:`, metadata);
             if (metadata) {
-                const surrealQuery = this.generateSurrealInstanceQuery(metadata);
-                const results = await this.querySurrealDB(surrealQuery);
-               // console.log(`getAllSubjectInstances: SurrealDB returned ${results?.length || 0} results`);
+                const results = await this.findInstancesByMetadata(metadata);
+                
+               // console.log(`getAllSubjectInstances: SPARQL returned ${results?.length || 0} results`);
 
                 for (const result of results || []) {
                     //console.log(`getAllSubjectInstances: Creating subject for base ${result.base}`);
@@ -1912,11 +1939,11 @@ export class PerspectiveProxy {
 
         let instances = []
         for(let className of classes) {
-            // Query SDNA for metadata, then query SurrealDB for instances
+            // Query SDNA for metadata, then query SPARQL for instances
             const metadata = await this.getSubjectClassMetadataFromSDNA(className);
             if (metadata) {
-                const surrealQuery = this.generateSurrealInstanceQuery(metadata);
-                const results = await this.querySurrealDB(surrealQuery);
+                const results = await this.findInstancesByMetadata(metadata);
+                
 
                 for (const result of results || []) {
                     try {
@@ -1967,16 +1994,16 @@ export class PerspectiveProxy {
             return null;
         }
 
-        // Single SurrealDB query to find all classes and their properties/relations
-        const query = `SELECT 
-            in.uri AS shape_source, 
-            predicate, 
-            out.uri AS target 
-        FROM link 
-        WHERE predicate IN ['rdf://type', 'sh://property', 'sh://collection']`;
-        
-        const results = await this.querySurrealDB(query);
-        if (!results || results.length === 0) return null;
+        // Query links for class shapes using queryLinks
+        const typeLinks = await this.get(new LinkQuery({ predicate: 'rdf://type', target: 'ad4m://SubjectClass' }));
+        const propLinks = await this.get(new LinkQuery({ predicate: 'sh://property' }));
+        const collLinks = await this.get(new LinkQuery({ predicate: 'sh://collection' }));
+        const results = [
+            ...typeLinks.map(l => ({ shape_source: l.data.source, predicate: l.data.predicate, target: l.data.target })),
+            ...propLinks.map(l => ({ shape_source: l.data.source, predicate: l.data.predicate, target: l.data.target })),
+            ...collLinks.map(l => ({ shape_source: l.data.source, predicate: l.data.predicate, target: l.data.target })),
+        ];
+        if (results.length === 0) return null;
 
         // Build a map of className -> { properties, relations }
         const classShapes: Map<string, { shapeUri: string, properties: string[], relations: string[] }> = new Map();
@@ -2076,9 +2103,17 @@ export class PerspectiveProxy {
      * static generateSDNA() function and adds it to the perspective's SDNA.
      */
     async ensureSDNASubjectClass(jsClass: any): Promise<void> {
+        return this.ensureSubjectClass(jsClass);
+    }
+
+    /** Takes a JS class (its constructor) and ensures the SHACL subject class exists. */
+    async ensureSubjectClass(jsClass: any): Promise<void> {
         // Get the class name from the JS class
         const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
         
+        // Skip if already registered for this perspective instance
+        if (this.#ensuredSubjectClasses.has(className)) return;
+
         // Note: Duplicate checking is handled on the Rust side in add_sdna
         
         // Generate SHACL SDNA (Prolog-free)
@@ -2095,6 +2130,16 @@ export class PerspectiveProxy {
         // Pass SHACL JSON to backend (Prolog-free)
         // Backend stores SHACL links directly
         await this.addSdna(className, '', 'subject_class', shaclJson);
+        
+        // Mark as registered for this perspective instance
+        this.#ensuredSubjectClasses.add(className);
+    }
+
+    /** Clear the per-instance ensured subject class cache.
+     * Call this after wiping a perspective's links so that
+     * subsequent register() calls re-add SHACL definitions. */
+    clearEnsuredSubjectClasses(): void {
+        this.#ensuredSubjectClasses.clear();
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {
@@ -2175,7 +2220,7 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Creates a subscription for a SurrealQL query that updates in real-time.
+     * Creates a subscription for a SPARQL query that updates in real-time.
      * 
      * This method:
      * 1. Creates the subscription on the Rust side
@@ -2190,16 +2235,16 @@ export class PerspectiveProxy {
      * when dispose() is called. Make sure to call dispose() when you're done to
      * prevent memory leaks and ensure proper cleanup of resources.
      * 
-     * @param query - SurrealQL query string
+    /** Subscribe to a query with live updates via the SPARQL subscription endpoint.
+     * @param query - Query string
      * @returns Initialized QuerySubscriptionProxy instance
      */
-    async subscribeSurrealDB(query: string): Promise<QuerySubscriptionProxy> {
+    async subscribeQuery(query: string): Promise<QuerySubscriptionProxy> {
         const subscriptionProxy = new QuerySubscriptionProxy(
             this.uuid,
             query,
             this.#client
         );
-        subscriptionProxy.isSurrealDB = true;
 
         // Start the subscription on the Rust side first to get the real subscription ID
         await subscriptionProxy.subscribe();

@@ -1,5 +1,5 @@
 /**
- * Shared query helpers used by both the Prolog and SurrealQL query pipelines.
+ * Shared query helpers used by both the Prolog and SPARQL query pipelines.
  */
 
 import type { ParentScope } from "./types";

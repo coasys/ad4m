@@ -10,6 +10,8 @@ export class LoggedInDashboard extends LitElement {
   @property({ type: Object }) userInfo: UserInfo | null = null;
   @property({ type: Boolean }) requestingPayment: boolean = false;
   @property({ type: String }) paymentError: string | null = null;
+  /** When true (credit-depletion session), the X close button is hidden — the only exits are "Use App" or "Disconnect" */
+  @property({ type: Boolean }) forceOpen: boolean = false;
 
   @state() private walletInput = "";
   @state() private editingWallet = false;
@@ -313,6 +315,11 @@ export class LoggedInDashboard extends LitElement {
         color: #c4a8ff;
       }
 
+      .activity-log-entry .op-badge.ai_transcription {
+        background: rgba(168, 130, 255, 0.2);
+        color: #c4a8ff;
+      }
+
       .activity-log-entry .op-badge.ai_embed {
         background: rgba(130, 200, 255, 0.2);
         color: #a8d8ff;
@@ -356,6 +363,10 @@ export class LoggedInDashboard extends LitElement {
 
   private close() {
     this.dispatchEvent(new CustomEvent("close", { bubbles: true, composed: true }));
+  }
+
+  private _useApp() {
+    this.dispatchEvent(new CustomEvent("use-app", { bubbles: true, composed: true }));
   }
 
   private disconnect() {
@@ -425,6 +436,7 @@ export class LoggedInDashboard extends LitElement {
     switch (op) {
       case 'ai_prompt': return 'AI Prompt';
       case 'ai_embed': return 'AI Embed';
+      case 'ai_transcription': return 'AI Transcription';
       case 'link_write': return 'Link Write';
       default: return op;
     }
@@ -481,9 +493,7 @@ export class LoggedInDashboard extends LitElement {
 
     return html`
       <div class="container">
-        <div class="close-button" @click=${this.close}>
-          ${CrossIcon()}
-        </div>
+        ${this.forceOpen ? '' : html`<div class="close-button" @click=${this.close}>${CrossIcon()}</div>`}
 
         <div class="dashboard-header">
           <h1>Dashboard</h1>
@@ -636,7 +646,7 @@ export class LoggedInDashboard extends LitElement {
         ` : ''}
 
         <div class="footer-actions">
-          <button class="primary" ?disabled=${this.isDepleted && !this.isFreeAccess} @click=${this.close}>
+          <button class="primary" ?disabled=${this.isDepleted && !this.isFreeAccess} @click=${this._useApp}>
             Use app
           </button>
           <button class="danger-secondary" @click=${this.disconnect}>

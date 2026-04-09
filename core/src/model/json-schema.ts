@@ -353,7 +353,7 @@ export function buildModelFromJSONSchema(
 
         // Default resolveLanguage to 'literal' for all remaining property types,
         // matching the @Property decorator behaviour. Without this, string values
-        // stored as literal:// URLs are returned unparsed.
+        // stored as literal: URLs are returned unparsed.
         if (resolveLanguage === undefined || resolveLanguage === null) {
           resolveLanguage = 'literal';
         }
@@ -361,7 +361,7 @@ export function buildModelFromJSONSchema(
         // If property is required, ensure it has an initial value
         if (isRequired && !initial) {
           if (isObjectType(propertySchema)) {
-            initial = 'literal://json:{}';
+            initial = 'literal:json:{}';
           } else {
             initial = "ad4m://undefined";
           }
