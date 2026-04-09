@@ -479,7 +479,9 @@ export class PerspectiveProxy {
      * @param batchId - Optional batch ID to group this operation with others
      */
     async executeAction(actions, expression, parameters: Parameter[], batchId?: string) {
-        return await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId)
+        const result = await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId)
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result
     }
 
     /**
