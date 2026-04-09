@@ -26,6 +26,7 @@ export type AgentUpdatedCallback = (agent: Agent) => null;
 export type AgentStatusChangedCallback = (agent: Agent) => null;
 export type AgentAppsUpdatedCallback = () => null;
 export type HostingUserInfoChangedCallback = (info: HostingUserInfo) => void;
+export type ComputeLogUpdatedCallback = (entry: any) => void;
 
 /**
  * Provides access to all functions regarding the local agent,
@@ -40,6 +41,7 @@ export class AgentClient {
   #updatedCallbacks: AgentUpdatedCallback[];
   #agentStatusChangedCallbacks: AgentStatusChangedCallback[];
   #hostingUserInfoChangedCallbacks: HostingUserInfoChangedCallback[];
+  #computeLogUpdatedCallbacks: ComputeLogUpdatedCallback[];
   #unsubscribers: (() => void)[];
 
   constructor(baseUrl: string, token?: string, subscribe: boolean = true) {
@@ -50,6 +52,7 @@ export class AgentClient {
     this.#agentStatusChangedCallbacks = [];
     this.#appsChangedCallback = [];
     this.#hostingUserInfoChangedCallbacks = [];
+    this.#computeLogUpdatedCallbacks = [];
     this.#unsubscribers = [];
 
     if (subscribe) {
@@ -208,6 +211,28 @@ export class AgentClient {
       }
     });
     this.#unsubscribers.push(unsub);
+  }
+
+  addComputeLogUpdatedListener(listener: ComputeLogUpdatedCallback) {
+    this.#computeLogUpdatedCallbacks.push(listener);
+  }
+
+  subscribeComputeLogUpdated() {
+    const unsub = this.#restClient.subscribe('/api/v1/events/agent', (data) => {
+      if (data.type === 'compute-log-updated') {
+        this.#computeLogUpdatedCallbacks.forEach((cb) => cb(data.entry));
+      }
+    });
+    this.#unsubscribers.push(unsub);
+  }
+
+  async computeLog(since?: string, limit?: number, userEmail?: string): Promise<any[]> {
+    const params = new URLSearchParams();
+    if (since) params.set('since', since);
+    if (limit !== undefined) params.set('limit', String(limit));
+    if (userEmail) params.set('userEmail', userEmail);
+    const qs = params.toString();
+    return this.#restClient.get<any[]>(`/api/v1/runtime/compute-log${qs ? '?' + qs : ''}`);
   }
 
   async requestCapability(authInfo: AuthInfoInput): Promise<string> {
