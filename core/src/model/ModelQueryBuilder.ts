@@ -381,6 +381,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     let devtoolsSubId: number | undefined;
     if (typeof globalThis !== 'undefined' && typeof (globalThis as any).document !== 'undefined' && (globalThis as any).__AD4M_DEVTOOLS__) {
       devtoolsSubId = (globalThis as any).__AD4M_DEVTOOLS__.trackSubscription({
+        stackTrace: new Error().stack?.split('\n').slice(1).join('\n'),
         query: '',
         perspectiveUUID: this.perspective?.uuid || '',
         modelName: ctor?.name || '',

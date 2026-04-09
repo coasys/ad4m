@@ -17,7 +17,7 @@ export function QueriesTab({ operations, subscriptions, subscriptionUpdates, get
 
   const filtered = operations
     .filter(op => !filter || op.operationName?.toLowerCase().includes(filter.toLowerCase()))
-    .reverse();
+    .sort((a, b) => (b.startTime || 0) - (a.startTime || 0));
 
   return (
     <div class="tab-panel">
@@ -48,9 +48,11 @@ export function QueriesTab({ operations, subscriptions, subscriptionUpdates, get
                 class={`operation-item ${selected?.id === op.id ? 'selected' : ''} ${op.errors?.length ? 'has-error' : ''}`}
                 onClick={() => setSelected(op)}
               >
+                <span class="op-time">{new Date(op.startTime).toLocaleTimeString('en-GB', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3})}</span>
                 <span class={`op-type op-${op.type}`}>{op.type?.toUpperCase()?.slice(0, 3)}</span>
                 <span class="op-name">{op.operationName}</span>
-                <span class="op-duration">{op.duration != null ? `${op.duration}ms` : '...'}</span>
+                <span class="op-duration">{op.duration != null ? `${op.duration}ms` : '⏳'}</span>
+                {op.errors?.length > 0 && <span class="op-error-badge">❌</span>}
               </div>
             ))}
           </div>
@@ -58,6 +60,7 @@ export function QueriesTab({ operations, subscriptions, subscriptionUpdates, get
             <div class="operation-detail">
               <h3>{selected.operationName}</h3>
               <div class="info-grid">
+                <div class="info-row"><span class="info-label">Timestamp</span><span>{new Date(selected.startTime).toLocaleTimeString('en-GB', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3})}</span></div>
                 <div class="info-row"><span class="info-label">Type</span><span>{selected.type}</span></div>
                 <div class="info-row"><span class="info-label">Duration</span><span>{selected.duration ?? '-'}ms</span></div>
                 <div class="info-row"><span class="info-label">Payload Size</span><span>{selected.payloadSize ?? '-'} bytes</span></div>
@@ -79,6 +82,12 @@ export function QueriesTab({ operations, subscriptions, subscriptionUpdates, get
               )}
               {selected.response && (
                 <div><h4>Response</h4><JsonViewer data={selected.response} /></div>
+              )}
+              {selected.stackTrace && (
+                <div>
+                  <h4>Call Stack</h4>
+                  <pre class="code-block stack-trace">{selected.stackTrace}</pre>
+                </div>
               )}
               {selected.errors?.length > 0 && (
                 <div class="error-detail-panel">
@@ -124,6 +133,12 @@ export function QueriesTab({ operations, subscriptions, subscriptionUpdates, get
                 <div class="info-row"><span class="info-label">Last Update</span><span>{sub.lastUpdateTimestamp ? new Date(sub.lastUpdateTimestamp).toLocaleTimeString() : '-'}</span></div>
               </div>
               {sub.query && <pre class="code-block">{sub.query}</pre>}
+              {sub.stackTrace && (
+                <details>
+                  <summary>Call Stack</summary>
+                  <pre class="code-block stack-trace">{sub.stackTrace}</pre>
+                </details>
+              )}
               {/* Show recent updates for this subscription */}
               {(() => {
                 const updates = subscriptionUpdates.filter((u: any) => u.subscriptionId === sub.id).slice(-5).reverse();

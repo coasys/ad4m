@@ -14,6 +14,16 @@ export class OperationInterceptor {
 
   log(op: Partial<OperationRecord>): number {
     const id = nextOpId++;
+    // Capture stack trace to show where the query originates
+    let stackTrace: string | undefined;
+    try {
+      const err = new Error();
+      if (err.stack) {
+        // Remove the first 2 lines (Error + this log method)
+        // and clean up the trace to show the caller chain
+        stackTrace = err.stack.split('\n').slice(2).join('\n');
+      }
+    } catch {}
     const record: OperationRecord = {
       id,
       type: op.type || 'query',
@@ -22,6 +32,7 @@ export class OperationInterceptor {
       variables: op.variables,
       startTime: op.startTime || Date.now(),
       sparqlQuery: op.sparqlQuery,
+      stackTrace,
     };
     this.operations.push(record);
     if (this.operations.length > MAX_OPERATIONS) {

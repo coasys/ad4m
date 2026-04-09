@@ -322,3 +322,25 @@ body {
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #555; }
+
+/* Timestamps */
+.op-time {
+  color: #888;
+  font-size: 11px;
+  font-family: monospace;
+  min-width: 90px;
+}
+.op-error-badge {
+  font-size: 12px;
+}
+
+/* Stack traces */
+.stack-trace {
+  font-size: 11px;
+  line-height: 1.4;
+  color: #aaa;
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

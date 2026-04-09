@@ -12,6 +12,7 @@ export interface OperationRecord {
   payloadSize?: number;
   sparqlQuery?: string;
   sparqlResult?: any;
+  stackTrace?: string;
 }
 
 export interface ErrorDetail {
@@ -22,6 +23,7 @@ export interface ErrorDetail {
 }
 
 export interface SubscriptionRecord {
+  stackTrace?: string;
   id: number;
   query: string;
   perspectiveUUID: string;
