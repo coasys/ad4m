@@ -1,15 +1,24 @@
 # AD4M Language Development Kit — Interface Spec
 
-**Version:** 0.6-draft
+**Version:** 0.7-draft
 **Date:** 2026-04-09
 **Status:** Draft — for discussion
 
-> **Major rewrite from 0.5.** Removed all callback registration (`addCallback`,
-> `registerSignalCallback`, callback ids). Replaced with `emit*` imports the
-> language calls to push events to the runtime. Pinned the per-perspective
-> instance lifecycle. Documented Holochain signal routing. Removed JS class
-> examples. Added explicit capability-discovery section. JS and WASM now use
-> exactly the same conceptual model — only the marshalling differs.
+> **Canonical interface definition lives in [`ad4m-lang.wit`](./ad4m-lang.wit).**
+> That file is the normative source of truth — the type signatures, the
+> operation names, the request/response shapes. This document explains the
+> *why* and the *how*: lifecycle, semantics, examples, ALDK ergonomics,
+> Holochain routing. Where prose and WIT disagree, the WIT wins.
+>
+> **Changes from 0.6:**
+> - Coalesced all query operations into a single `query` capability with a
+>   tagged `request` / `response` variant. SPARQL is now the recommended
+>   query language; Prolog is supported for back-compat but optional.
+>   `getByAuthor`, `getAll`, `linkQuery`, `prologQuery`, `infer`, and
+>   `supportsPrologQueries` are gone — folded into `query.run`.
+> - Replaced `isImmutableExpression(address)` with `expression.character`
+>   (deterministic / immutable / mutable, whole-Language).
+> - Pointed at the WIT file as the source of truth.
 
 ---
 
@@ -119,17 +128,26 @@ would falsely advertise capability.
 
 ### 5.1 Expression
 
-Implement these to be an Expression Language. Either `expressionCreate` (for
-languages that can mint new expressions) **or** `expressionAddressOf` (for
-read-only languages that map content deterministically to an address) is
-required; implement both only if you really mean it.
+Implement these to be an Expression Language. A Language exports **either**
+`expressionCreate` (for Languages that mint new content) **or**
+`expressionAddressOf` (for read-only Languages where addresses are
+deterministically derived from content), or both. Capability presence
+distinguishes the two — no separate flag.
 
 | Export | Parameters | Returns |
 |---|---|---|
 | `expressionGet(address)` | `string` | `Promise<Expression \| null>` |
 | `expressionCreate(content)` | `object` | `Promise<string>` (address) |
 | `expressionAddressOf(content)` | `object` | `Promise<string>` |
-| `isImmutableExpression(address)` | `string` | `boolean` |
+| `isImmutableExpression(address)` | `string` | `boolean` (per-expression cache hint) |
+
+`isImmutableExpression` is a **per-expression cache hint**: if a Language
+returns `true` for an address, the runtime caches that Expression
+aggressively and bypasses subsequent `expressionGet` calls. Languages MAY
+omit this export entirely (the host treats it as always-`false` and never
+caches), MAY return `true` only for addresses it can prove immutable, or
+MAY blanket-return `true` for content-addressed Languages where addresses
+encode content hashes.
 
 ### 5.2 Link Sync (PerspectiveSyncAdapter)
 
@@ -197,29 +215,39 @@ peer.
 Incoming DMs are pushed to the runtime via `emitDirectMessage(message)` (§7),
 typically from inside `handleHolochainSignal`.
 
-### 5.5 Perspective Query (linkQuery / Prolog)
+### 5.5 Query (coalesced)
 
-For Languages that allow other Languages and the runtime to read links without
-forcing a full sync — used for back-links and Prolog queries.
+For Languages that allow other Languages and the runtime to read links and
+expressions without forcing a full sync. **All read operations live behind a
+single `query.run` entry point** taking a tagged request and returning a
+tagged response. `getByAuthor`, `getAll`, `linkQuery`, `prologQuery`, `infer`,
+and `supportsPrologQueries` from earlier drafts are all coalesced here.
+
+In v1.0:
+- **SPARQL 1.1 is the recommended query language** for graph queries against
+  the link store. Returns SPARQL 1.1 JSON Results.
+- **Structured `link-pattern`** queries are first-class for simple
+  source/predicate/target/timestamp filtering — every Link Language can
+  trivially implement them.
+- **Expression queries** (`by-author`, `all`) are for Expression Languages
+  with searchable backing stores.
+- **Prolog** is still accepted for backwards compatibility but Languages
+  MAY omit it; runtimes SHOULD prefer SPARQL where both are available.
 
 | Export | Parameters | Returns |
 |---|---|---|
-| `linkQuery(query)` | `LinkQuery` | `Promise<Perspective>` |
-| `supportsPrologQueries()` | — | `boolean` |
-| `infer(prologQuery)` | `string` | `Promise<any>` |
-| `prologQuery(query)` | `string` | `Promise<Perspective>` |
+| `querySupportedKinds()` | — | `QueryKind[]` (statically advertises which kinds the Language serves) |
+| `query(request)` | `QueryRequest` | `Promise<QueryResponse>` |
 
-If `supportsPrologQueries()` returns `false`, the runtime falls back to
-running its own Prolog over the result of an all-`linkQuery`.
+`QueryRequest` is a tagged variant: `by-author` / `all` / `link-pattern` /
+`sparql` / `prolog`. `QueryResponse` is the matching variant: `expressions`
+/ `links` / `perspective` / `sparql-results` / `prolog-bindings`. See
+[`ad4m-lang.wit`](./ad4m-lang.wit) `interface query` for the exact shapes.
 
-### 5.6 Get-By-Author / Get-All
+A Language MUST return an error with code `not-implemented` for any kind it
+did not advertise via `querySupportedKinds`.
 
-| Export | Parameters | Returns |
-|---|---|---|
-| `getByAuthor(author, count, page)` | `string, number, number` | `Promise<Expression[] \| null>` |
-| `getAll(filter?, count, page)` | `any?, number, number` | `Promise<Expression[] \| null>` |
-
-### 5.7 Language Source
+### 5.6 Language Source
 
 For Languages that store other languages (the Language Language).
 
@@ -227,7 +255,7 @@ For Languages that store other languages (the Language Language).
 |---|---|---|
 | `languageGetSource(address)` | `string` | `Promise<string>` |
 
-### 5.8 Icons & Settings UI
+### 5.7 Icons & Settings UI
 
 | Export | Returns |
 |---|---|
@@ -235,7 +263,7 @@ For Languages that store other languages (the Language Language).
 | `expressionConstructorIcon()` | `string` |
 | `settingsIcon()` | `string` |
 
-### 5.9 Interactions
+### 5.8 Interactions
 
 | Export | Parameters | Returns |
 |---|---|---|
@@ -249,32 +277,32 @@ These are how the runtime delivers asynchronous events from the outside world
 to the language. They are pure exports — no registration needed; the language
 just defines them.
 
-### 6.1 Holochain signal
+Extension-specific event handlers live alongside their extension, not in
+the core. `handleHolochainSignal` is part of the **Holochain extension**
+(see §8) and is only meaningful for Languages that import `holochain-ext`.
 
-| Export | Parameters | Description |
-|---|---|---|
-| `handleHolochainSignal(dnaNick, agentDid, signalData)` | `string, string, unknown` | A signal arrived from a Holochain DNA the language registered. |
-
-`dnaNick` identifies which DNA inside the language (a single language can
-register multiple DNAs). `agentDid` identifies which **local** agent the
-signal arrived for (matters for multi-user setups where one node holds several
-local agents on the same neighbourhood). The language usually parses
-`signalData` and forwards via `emitPerspectiveDiff`, `emitDirectMessage`, or
-`emitTelepresenceSignal` depending on what kind of signal it was.
-
-See §8 for how the runtime knows *which* language to deliver a given Holochain
-signal to.
-
-### 6.2 Telepresence signal
+### 6.1 Telepresence signal
 
 | Export | Parameters | Description |
 |---|---|---|
 | `handleTelepresenceSignal(payload, recipientDid?)` | `PerspectiveExpression, string?` | Incoming telepresence signal from another agent. `recipientDid` is set for directed signals; absent/null for broadcasts. |
 
-(Note: most language implementations will receive these via Holochain and
-actually fire them from inside `handleHolochainSignal` → `emitTelepresenceSignal`.
-This export exists for languages whose transport delivers telepresence signals
-through a separate runtime path.)
+Most Languages will receive incoming telepresence signals via their
+underlying transport (e.g. inside `handleHolochainSignal` for Holochain
+Languages) and forward them with `emitTelepresenceSignal`. This export
+exists for Languages whose transport delivers telepresence signals through
+a separate runtime path.
+
+### 6.2 Lifecycle hooks (optional)
+
+Resource-constrained hosts (browser, mobile) MAY call these to let the
+Language pause work, release caches, etc.
+
+| Export | Description |
+|---|---|
+| `onPause()` | Host is suspending the Language; release timers and connections. |
+| `onResume()` | Host is resuming the Language. |
+| `onMemoryPressure()` | Host is under memory pressure; release caches. |
 
 ---
 
@@ -331,7 +359,12 @@ runtime has enqueued the event for fan-out.
 
 ---
 
-## 8. Holochain signal routing
+## 8. Holochain signal routing (Holochain extension)
+
+`handleHolochainSignal` is **not** a core event handler. It is exported by
+Languages that use the Holochain extension (`holochain-events` interface in
+the WIT, exported from the `ad4m-language-holochain` world). Languages that
+don't touch Holochain never implement it.
 
 Per-DNA signal delivery is built without per-call callbacks.
 
