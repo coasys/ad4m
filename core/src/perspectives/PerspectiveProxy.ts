@@ -12,7 +12,7 @@ import { AIClient } from "../ai/AIClient";
 import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
 import { gql } from "@apollo/client/core";
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
-import { getCachedResult, setCachedResult } from "../model/query-cache";
+import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
 
 import { SHACLShape } from "../shacl/SHACLShape";
@@ -589,7 +589,9 @@ export class PerspectiveProxy {
      * ```
      */
     async add(link: Link, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
-        return await this.#client.addLink(this.#handle.uuid, link, status, batchId)
+        const result = await this.#client.addLink(this.#handle.uuid, link, status, batchId)
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result;
     }
 
     /**
@@ -602,7 +604,9 @@ export class PerspectiveProxy {
      * @returns Array of created LinkExpressions
      */
     async addLinks(links: Link[], status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression[]> {
-        return await this.#client.addLinks(this.#handle.uuid, links, status, batchId)
+        const result = await this.#client.addLinks(this.#handle.uuid, links, status, batchId)
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result;
     }
 
     /**
@@ -613,7 +617,9 @@ export class PerspectiveProxy {
      * @returns Array of removed LinkExpressions
      */
     async removeLinks(links: LinkExpressionInput[], batchId?: string): Promise<LinkExpression[]> {
-        return await this.#client.removeLinks(this.#handle.uuid, links, batchId)
+        const result = await this.#client.removeLinks(this.#handle.uuid, links, batchId)
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result;
     }
 
     /**
@@ -625,7 +631,9 @@ export class PerspectiveProxy {
      * @returns Object containing results of the mutations
      */
     async linkMutations(mutations: LinkMutations, status: LinkStatus = 'shared'): Promise<LinkExpressionMutations> {
-        return await this.#client.linkMutations(this.#handle.uuid, mutations, status)
+        const result = await this.#client.linkMutations(this.#handle.uuid, mutations, status)
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result;
     }
 
         /**
@@ -648,7 +656,9 @@ export class PerspectiveProxy {
      * @param batchId - Optional batch ID to group this operation with others
      */
     async update(oldLink: LinkExpressionInput, newLink: Link, batchId?: string): Promise<LinkExpression> {
-        return await this.#client.updateLink(this.#handle.uuid, oldLink, newLink, batchId)
+        const result = await this.#client.updateLink(this.#handle.uuid, oldLink, newLink, batchId)
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result;
     }
 
     /**
@@ -658,7 +668,9 @@ export class PerspectiveProxy {
      * @param batchId - Optional batch ID to group this operation with others
      */
     async remove(link: LinkExpressionInput, batchId?: string): Promise<boolean> {
-        return await this.#client.removeLink(this.#handle.uuid, link, batchId)
+        const result = await this.#client.removeLink(this.#handle.uuid, link, batchId)
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result;
     }
 
     /** Creates a new batch for grouping operations */
@@ -668,9 +680,9 @@ export class PerspectiveProxy {
 
     /** Commits a batch of operations */
     async commitBatch(batchId: string): Promise<LinkExpressionMutations> {
-        return await this.#client.commitBatch(this.#handle.uuid, batchId)
-
-        
+        const result = await this.#client.commitBatch(this.#handle.uuid, batchId)
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result;
     }
     /**
      * Retrieves and renders an Expression referenced in this perspective.

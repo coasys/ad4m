@@ -42,6 +42,17 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 use tokio::{join, time};
 use urlencoding;
+
+/// Tracks which predicates have changed since the last subscription check.
+#[derive(Debug, Clone)]
+enum ChangedPredicates {
+    /// No changes recorded yet (initial state)
+    NoneRecorded,
+    /// A predicate-less diff was seen — must check ALL subscriptions
+    CheckAll,
+    /// Only specific predicates changed
+    Specific(HashSet<String>),
+}
 use uuid;
 use uuid::Uuid;
 
@@ -205,8 +216,7 @@ pub struct PerspectiveInstance {
     trigger_notification_check: Arc<Mutex<bool>>,
     trigger_prolog_subscription_check: Arc<Mutex<bool>>,
     /// Predicates of links changed since last subscription check.
-    /// Empty set means "all predicates" (check everything).
-    changed_predicates: Arc<Mutex<Option<HashSet<String>>>>,
+    changed_predicates: Arc<Mutex<ChangedPredicates>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
@@ -239,7 +249,7 @@ impl PerspectiveInstance {
             link_language: Arc::new(RwLock::new(None)),
             trigger_notification_check: Arc::new(Mutex::new(false)),
             trigger_prolog_subscription_check: Arc::new(Mutex::new(false)),
-            changed_predicates: Arc::new(Mutex::new(None)),
+            changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
@@ -2466,28 +2476,35 @@ impl PerspectiveInstance {
     /// `None` means "all predicates changed" (check everything).
     async fn record_changed_predicates(&self, diff: &DecoratedPerspectiveDiff) {
         let mut changed = self.changed_predicates.lock().await;
-        // If already None (= check-all), nothing to do
-        if changed.is_none() {
-            // First change: start with a concrete set
-            let mut preds = HashSet::new();
-            for link in diff.additions.iter().chain(diff.removals.iter()) {
-                if let Some(ref pred) = link.data.predicate {
-                    preds.insert(pred.clone());
-                } else {
-                    // A link with no predicate — must check all subscriptions
-                    *changed = None;
-                    return;
-                }
+
+        // If already CheckAll, it's sticky — nothing to do
+        if matches!(*changed, ChangedPredicates::CheckAll) {
+            return;
+        }
+
+        // Collect predicates from the diff
+        let mut new_preds = HashSet::new();
+        let mut has_predicate_less = false;
+        for link in diff.additions.iter().chain(diff.removals.iter()) {
+            if let Some(ref pred) = link.data.predicate {
+                new_preds.insert(pred.clone());
+            } else {
+                has_predicate_less = true;
+                break;
             }
-            *changed = Some(preds);
-        } else if let Some(ref mut existing) = *changed {
-            for link in diff.additions.iter().chain(diff.removals.iter()) {
-                if let Some(ref pred) = link.data.predicate {
-                    existing.insert(pred.clone());
-                } else {
-                    *changed = None;
-                    return;
+        }
+
+        if has_predicate_less {
+            *changed = ChangedPredicates::CheckAll;
+        } else {
+            match &mut *changed {
+                ChangedPredicates::NoneRecorded => {
+                    *changed = ChangedPredicates::Specific(new_preds);
                 }
+                ChangedPredicates::Specific(existing) => {
+                    existing.extend(new_preds);
+                }
+                ChangedPredicates::CheckAll => unreachable!(),
             }
         }
     }
@@ -3909,7 +3926,7 @@ impl PerspectiveInstance {
         }
     }
 
-    async fn check_subscribed_queries(&self, changed_predicates: Option<HashSet<String>>) {
+    async fn check_subscribed_queries(&self, changed_predicates: ChangedPredicates) {
         let mut queries_to_remove = Vec::new();
         let mut query_futures = Vec::new();
         let now = Instant::now();
@@ -3942,13 +3959,18 @@ impl PerspectiveInstance {
 
             // Skip subscription if its predicates don't overlap with changed predicates
             // sub_predicates empty => always check (variable predicate in query)
-            // changed_predicates None => always check (couldn't determine changed predicates)
+            // ChangedPredicates::CheckAll => always check (couldn't determine changed predicates)
+            // ChangedPredicates::NoneRecorded => should not happen here, but skip if it does
             if !sub_predicates.is_empty() {
-                if let Some(ref changed) = changed_predicates {
+                if let ChangedPredicates::Specific(ref changed) = changed_predicates {
                     if sub_predicates.is_disjoint(changed) {
                         continue; // No overlap — skip this subscription
                     }
+                } else if matches!(changed_predicates, ChangedPredicates::NoneRecorded) {
+                    continue;
                 }
+            } else if matches!(changed_predicates, ChangedPredicates::NoneRecorded) {
+                continue;
             }
 
             // Spawn query check future
@@ -4047,7 +4069,10 @@ impl PerspectiveInstance {
 
                 // Reset trigger and take the accumulated changed predicates
                 *self.trigger_prolog_subscription_check.lock().await = false;
-                let changed_preds = self.changed_predicates.lock().await.take();
+                let changed_preds = std::mem::replace(
+                    &mut *self.changed_predicates.lock().await,
+                    ChangedPredicates::NoneRecorded,
+                );
 
                 self.check_subscribed_queries(changed_preds).await;
             }
@@ -4994,5 +5019,52 @@ mod tests {
         let changed: HashSet<String> = ["flux://has_reaction".to_string()].into();
         // Empty set is disjoint with everything, but our code checks !sub_predicates.is_empty() first
         assert!(sub_predicates.is_empty()); // so this subscription would NOT be skipped
+    }
+
+    #[test]
+    fn test_changed_predicates_enum_check_all_is_sticky() {
+        let mut state = ChangedPredicates::NoneRecorded;
+
+        // NoneRecorded + specific → Specific
+        state = match state {
+            ChangedPredicates::NoneRecorded => {
+                ChangedPredicates::Specific(["p1".to_string()].into())
+            }
+            other => other,
+        };
+        assert!(matches!(state, ChangedPredicates::Specific(_)));
+
+        // Specific + more specific → Specific (union)
+        if let ChangedPredicates::Specific(ref mut set) = state {
+            set.insert("p2".to_string());
+        }
+        if let ChangedPredicates::Specific(ref set) = state {
+            assert!(set.contains("p1"));
+            assert!(set.contains("p2"));
+        }
+
+        // Specific + predicate-less → CheckAll
+        state = ChangedPredicates::CheckAll;
+        assert!(matches!(state, ChangedPredicates::CheckAll));
+
+        // CheckAll + anything → CheckAll (sticky)
+        state = match state {
+            ChangedPredicates::CheckAll => ChangedPredicates::CheckAll,
+            other => other,
+        };
+        assert!(matches!(state, ChangedPredicates::CheckAll));
+    }
+
+    #[test]
+    fn test_changed_predicates_none_recorded_to_check_all() {
+        // NoneRecorded + no predicates → CheckAll
+        let state = ChangedPredicates::NoneRecorded;
+        let has_predicate_less = true;
+        let result = if has_predicate_less {
+            ChangedPredicates::CheckAll
+        } else {
+            state
+        };
+        assert!(matches!(result, ChangedPredicates::CheckAll));
     }
 }

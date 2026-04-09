@@ -39,8 +39,29 @@ export function getCachedResult(perspectiveUUID: string, queryText: string): any
  * Store a query result in the cache with TTL.
  */
 export function setCachedResult(perspectiveUUID: string, queryText: string, result: any, ttlMs: number = DEFAULT_TTL_MS): void {
-    const key = makeKey(perspectiveUUID, queryText);
-    cache.set(key, { result, expiry: Date.now() + ttlMs });
+    // Lazy eviction of expired entries
+    const now = Date.now();
+    for (const [key, entry] of cache) {
+        if (now > entry.expiry) {
+            cache.delete(key);
+        }
+    }
+
+    const cacheKey = makeKey(perspectiveUUID, queryText);
+    cache.set(cacheKey, { result, expiry: now + ttlMs });
+}
+
+/**
+ * Invalidate all cache entries for a given perspective.
+ * Called after write operations to ensure stale data isn't served.
+ */
+export function invalidatePerspectiveCache(perspectiveUUID: string): void {
+    const prefix = perspectiveUUID + ':';
+    for (const [key] of cache) {
+        if (key.startsWith(prefix)) {
+            cache.delete(key);
+        }
+    }
 }
 
 /**
