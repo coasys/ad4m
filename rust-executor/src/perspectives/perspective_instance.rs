@@ -20,7 +20,6 @@ use crate::pubsub::{
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
     RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
-use crate::surreal_service::SurrealDBService;
 use crate::types::{
     DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter,
     OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
@@ -165,9 +164,9 @@ pub struct PorpertyValue {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct SubjectClassOption {
     #[serde(rename = "className")]
-    class_name: Option<String>,
+    pub class_name: Option<String>,
     #[serde(rename = "query")]
-    query: Option<String>,
+    pub query: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]

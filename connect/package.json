@@ -48,11 +48,7 @@
     "email": "nicolas@coasys.org"
   },
   "devDependencies": {
-<<<<<<< HEAD
-    "@coasys/ad4m": "workspace:*",
-=======
     "@coasys/ad4m": "workspace:0.13.0-test-1",
->>>>>>> origin/feat/audio-transport-optimisation
     "@types/node": "^16.11.11",
     "esbuild": "^0.15.5",
     "esbuild-plugin-lit": "^0.0.10",

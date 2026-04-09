@@ -587,7 +587,8 @@ pub async fn get_tls_domain(
     _auth: AuthContext,
 ) -> Result<Json<Option<String>>, ApiError> {
     let config = crate::config::get_global_config();
-    let domain = config.tls.as_ref().map(|t| t.domain.clone());
+    // TlsConfig does not have a domain field — return None for now
+    let domain: Option<String> = None;
     Ok(Json(domain))
 }
 
@@ -596,22 +597,23 @@ pub async fn get_compute_log(
     State(_state): State<AppState>,
     auth: AuthContext,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let user_email = params.get("userEmail").or_else(|| {
-        user_email_from_token(context.auth_token.clone()).as_ref().map(|s| s)
-    }).cloned();
+    let user_email = params.get("userEmail").cloned().or_else(|| {
+        user_email_from_token(context.auth_token.clone())
+    });
 
-    let since = params.get("since").cloned();
-    let limit = params.get("limit").and_then(|l| l.parse::<usize>().ok());
+    let email = user_email.unwrap_or_default();
+    let since = params.get("since").map(|s| s.as_str());
+    let limit = params.get("limit").and_then(|l| l.parse::<i64>().ok()).unwrap_or(100);
 
     let logs = Ad4mDb::with_global_instance(|db| {
-        db.get_compute_log(user_email.as_deref(), since.as_deref(), limit)
+        db.get_compute_log(&email, since, limit)
     })
     .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    Ok(Json(logs))
+    Ok(Json(serde_json::to_value(logs).unwrap_or_default()))
 }

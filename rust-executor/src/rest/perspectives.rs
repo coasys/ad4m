@@ -164,11 +164,8 @@ pub async fn publish_snapshot(
     .map_err(|e| ApiError::Forbidden(e))?;
 
     let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
-    let snapshot_url = perspective
-        .publish_snapshot()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(Json(snapshot_url))
+    // TODO: implement publish_snapshot in PerspectiveInstance
+    Err(ApiError::Internal("publish_snapshot not yet implemented".into()))
 }
 
 /// GET /perspectives/:uuid/links
@@ -297,7 +294,7 @@ pub async fn add_link(
         .unwrap_or(LinkStatus::Shared);
 
     let result = perspective
-        .add_link(body.link, status, &agent_context, body.batch_id)
+        .add_link(Link::from(body.link), status, body.batch_id, &agent_context)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -452,7 +449,7 @@ pub async fn add_link_expression(
         .unwrap_or(LinkStatus::Shared);
 
     let result = perspective
-        .add_link_expression(body.link, status, &agent_context)
+        .add_link_expression(body.link, status, body.batch_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -507,8 +504,9 @@ pub async fn remove_link(
     let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
+    let link_expr = LinkExpression::from_input_without_proof(body.link);
     perspective
-        .remove_link(body.link, &agent_context)
+        .remove_link(link_expr, body.batch_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -547,11 +545,10 @@ pub async fn query_perspective(
             serde_json::to_value(res).unwrap_or_default()
         }
         "surreal" => {
-            let res = perspective
-                .surreal_query(body.query)
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            serde_json::to_value(res).unwrap_or_default()
+            // SurrealDB support removed — use prolog or sparql
+            return Err(ApiError::BadRequest(
+                "SurrealDB query engine not available. Use 'prolog' or 'sparql'.".into(),
+            ));
         }
         other => {
             return Err(ApiError::BadRequest(format!(
@@ -644,8 +641,7 @@ pub async fn create_batch(
     let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     let batch_id = perspective
         .create_batch()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .await;
 
     Ok(Json(batch_id))
 }
@@ -668,7 +664,7 @@ pub async fn commit_batch(
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
     let diff = perspective
-        .commit_batch(&body.batch_id, &agent_context)
+        .commit_batch(body.batch_id.clone(), &agent_context)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -696,8 +692,10 @@ pub async fn subscribe_query(
     let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
+    let user_email = user_email_from_token(context.auth_token.clone());
+
     let (subscription_id, result) = perspective
-        .subscribe_prolog_query(body.query, &agent_context)
+        .subscribe_and_query(body.query, user_email)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -724,15 +722,8 @@ pub async fn subscribe_surreal_query(
     let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
-    let (subscription_id, result) = perspective
-        .subscribe_surreal_query(body.query, &agent_context)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(SubscribeQueryResponse {
-        subscription_id,
-        result,
-    }))
+    // TODO: implement surreal query subscription
+    Err(ApiError::Internal("subscribe_surreal_query not yet implemented".into()))
 }
 
 /// POST /perspectives/:uuid/keep-alive-query
@@ -746,7 +737,7 @@ pub async fn keep_alive_query(
     let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
 
     perspective
-        .keep_alive_query(&body.subscription_id)
+        .keepalive_query(body.subscription_id.clone())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -763,8 +754,9 @@ pub async fn keep_alive_surreal_query(
     let context = auth.to_request_context();
     let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
 
+    // Reuse the same keepalive mechanism
     perspective
-        .keep_alive_surreal_query(&body.subscription_id)
+        .keepalive_query(body.subscription_id.clone())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -782,7 +774,7 @@ pub async fn dispose_query_subscription(
     let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
 
     perspective
-        .dispose_query_subscription(&body.subscription_id)
+        .dispose_query_subscription(body.subscription_id.clone())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -799,8 +791,9 @@ pub async fn dispose_surreal_query_subscription(
     let context = auth.to_request_context();
     let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
 
+    // Reuse same disposal mechanism
     perspective
-        .dispose_surreal_query_subscription(&body.subscription_id)
+        .dispose_query_subscription(body.subscription_id.clone())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -824,12 +817,14 @@ pub async fn create_subject(
     let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
+    let subject_class = crate::perspectives::perspective_instance::SubjectClassOption { class_name: Some(body.subject_class.clone()), query: None };
+    let initial_values: Option<serde_json::Value> = body.initial_values.as_ref().and_then(|s| serde_json::from_str(s).ok());
     perspective
         .create_subject(
-            &body.subject_class,
-            &body.expression_address,
-            body.initial_values.as_deref(),
-            body.batch_id.as_deref(),
+            subject_class,
+            body.expression_address.clone(),
+            initial_values,
+            body.batch_id.clone(),
             &agent_context,
         )
         .await
@@ -852,11 +847,12 @@ pub async fn get_subject_data(
     )
     .map_err(|e| ApiError::Forbidden(e))?;
 
-    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
+    let subject_class = crate::perspectives::perspective_instance::SubjectClassOption { class_name: Some(body.subject_class.clone()), query: None };
     let data = perspective
-        .get_subject_data(&body.subject_class, &body.expression_address, &agent_context)
+        .get_subject_data(subject_class, body.expression_address.clone(), &agent_context)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 

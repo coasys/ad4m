@@ -38,11 +38,6 @@
     "reflect-metadata": "^0.1.13"
   },
   "devDependencies": {
-<<<<<<< HEAD
-    "@apollo/client": "3.7.10",
-    "@apollo/server": "^4.9.4",
-=======
->>>>>>> origin/feat/audio-transport-optimisation
     "@rollup/plugin-alias": "^3.1.5",
     "@rollup/plugin-commonjs": "^20.0.0",
     "@rollup/plugin-node-resolve": "^13.0.4",
@@ -51,11 +46,6 @@
     "@types/yargs": "*",
     "concat-md": "^0.5.0",
     "cross-fetch": "^3.1.4",
-<<<<<<< HEAD
-    "graphql": "15.7.2",
-    "graphql-ws": "5.12.0",
-=======
->>>>>>> origin/feat/audio-transport-optimisation
     "honkit": "^4.0.0",
     "jest": "^29",
     "patch-package": "^8.0.0",

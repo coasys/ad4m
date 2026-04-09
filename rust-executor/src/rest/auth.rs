@@ -42,6 +42,11 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
 
+        let auth_header = parts
+            .headers
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.strip_prefix("Bearer ").unwrap_or(s))
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
                 parts

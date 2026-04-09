@@ -805,27 +805,8 @@ pub async fn import_agent(
     check_capability(&context.capabilities, &AGENT_CREATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let status = AgentService::with_mutable_global_instance(|agent_service| {
-        agent_service
-            .initialize_from_keystore(
-                body.did.clone(),
-                body.did_document.clone(),
-                body.keystore.clone(),
-                body.passphrase.clone(),
-            )
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-        Ok::<AgentStatus, ApiError>(agent_service.dump().clone())
-    })?;
-
-    get_global_pubsub()
-        .await
-        .publish(
-            &AGENT_STATUS_CHANGED_TOPIC,
-            &serde_json::to_string(&status).unwrap(),
-        )
-        .await;
-
-    Ok(Json(status))
+    // TODO: implement agent import from keystore
+    Err(ApiError::Internal("Agent import not yet implemented in REST API".into()))
 }
 
 /// POST /agent/entanglement-proof-preflight — pre-flight check

@@ -103,7 +103,10 @@ pub async fn set_hot_wallet_address(
     check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    Ad4mDb::with_global_instance(|db| db.set_hot_wallet_address(&body.address))
+    let email = user_email_from_token(context.auth_token.clone())
+        .ok_or_else(|| ApiError::Forbidden("User email required".into()))?;
+
+    Ad4mDb::with_global_instance(|db| db.set_user_hot_wallet(&email, &body.address))
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(true))

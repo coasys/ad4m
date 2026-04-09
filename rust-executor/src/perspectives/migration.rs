@@ -492,9 +492,9 @@ mod tests {
 
     // ── Full migration flow tests ─────────────────────────────────────
 
-        // Use a unique UUID to avoid conflicts with other tests
-        let unique_name = format!("Test Full Migration {}", uuid::Uuid::new_v4());
-        let handle = crate::types::PerspectiveHandle::new_from_name(unique_name);
+    #[test]
+    fn test_migrate_empty_perspective_sparql() {
+        ensure_db();
 
         let handle = crate::types::PerspectiveHandle::new_from_name(
             "Test Empty Migration SPARQL".to_string(),
