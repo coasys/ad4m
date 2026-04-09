@@ -240,6 +240,12 @@ pub struct ImportRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AddAgentInfosRequest {
+    pub agent_infos: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FriendSendMessageRequest {
     pub message: String,
 }

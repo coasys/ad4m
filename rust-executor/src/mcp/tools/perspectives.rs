@@ -177,7 +177,7 @@ impl Ad4mMcpHandler {
             return format!("Capability error: {}", e);
         }
 
-        // In multi-user mode, set the creating user as owner (reuses GraphQL pattern)
+        // In multi-user mode, set the creating user as owner (reuses REST pattern)
         let user_email = self.get_user_email().await;
         let owner_did = if let Some(email) = &user_email {
             crate::agent::AgentService::get_user_did_by_email(email).ok()

@@ -1,204 +1,150 @@
 use std::sync::Arc;
 
-use crate::{util::query, ClientInfo};
-use anyhow::{Context, Result};
-use graphql_client::GraphQLQuery;
-use serde::{Deserialize, Serialize};
+use anyhow::Result;
+use serde::Serialize;
 
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "schema.gql",
-    query_path = "src/languages.gql",
-    response_derives = "Debug"
-)]
-pub struct ByFilter;
+use crate::types::*;
+use crate::util;
+use crate::ClientInfo;
+
+// ── Request types ──
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishLanguageBody {
+    pub language_path: String,
+    pub language_meta: LanguageMetaInputBody,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LanguageMetaInputBody {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub possible_template_params: Option<Vec<String>>,
+    pub source_code_link: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplyTemplateBody {
+    pub source_language_hash: String,
+    pub template_data: String,
+}
+
+// ── Free functions ──
 
 pub async fn by_filter(
     executor_url: String,
     cap_token: String,
-    filter: String,
-) -> Result<Vec<by_filter::ByFilterLanguages>> {
-    let response_data: by_filter::ResponseData = query(
-        executor_url,
-        cap_token,
-        ByFilter::build_query(by_filter::Variables { filter }),
-    )
-    .await
-    .with_context(|| "Failed to run languages->all query")?;
-    Ok(response_data.languages)
+    filter: Option<String>,
+) -> Result<Vec<LanguageHandle>> {
+    let query = filter
+        .map(|f| format!("?filter={}", urlencoding::encode(&f)))
+        .unwrap_or_default();
+    util::get(&executor_url, &cap_token, &format!("/languages{}", query)).await
 }
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "schema.gql",
-    query_path = "src/languages.gql",
-    response_derives = "Debug"
-)]
-pub struct ByAddress;
 
 pub async fn by_address(
     executor_url: String,
     cap_token: String,
     address: String,
-) -> Result<Option<by_address::ByAddressLanguage>> {
-    let response_data: by_address::ResponseData = query(
-        executor_url,
-        cap_token,
-        ByAddress::build_query(by_address::Variables { address }),
+) -> Result<LanguageHandle> {
+    util::get(
+        &executor_url,
+        &cap_token,
+        &format!("/languages/{}", address),
     )
     .await
-    .with_context(|| "Failed to run languages -> by-address query")?;
-    Ok(response_data.language)
 }
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "schema.gql",
-    query_path = "src/languages.gql",
-    response_derives = "Debug"
-)]
-pub struct WriteSettings;
 
 pub async fn write_settings(
     executor_url: String,
     cap_token: String,
-    language_address: String,
+    address: String,
     settings: String,
-) -> Result<write_settings::ResponseData> {
-    query(
-        executor_url,
-        cap_token,
-        WriteSettings::build_query(write_settings::Variables {
-            language_address,
-            settings,
-        }),
+) -> Result<serde_json::Value> {
+    util::put(
+        &executor_url,
+        &cap_token,
+        &format!("/languages/{}/settings", address),
+        &serde_json::json!({ "settings": settings }),
     )
     .await
-    .with_context(|| "Failed to run languages -> write-settings query")
 }
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "schema.gql",
-    query_path = "src/languages.gql",
-    response_derives = "Debug"
-)]
-pub struct ApplyTemplateAndPublish;
 
 pub async fn apply_template_and_publish(
     executor_url: String,
     cap_token: String,
-    source: String,
+    source_language_hash: String,
     template_data: String,
-) -> Result<apply_template_and_publish::ApplyTemplateAndPublishLanguageApplyTemplateAndPublish> {
-    let response_data: apply_template_and_publish::ResponseData = query(
-        executor_url,
-        cap_token,
-        ApplyTemplateAndPublish::build_query(apply_template_and_publish::Variables {
-            source_language_hash: source,
-            template_data,
-        }),
+) -> Result<LanguageRef> {
+    let body = ApplyTemplateBody {
+        source_language_hash,
+        template_data,
+    };
+    util::post(
+        &executor_url,
+        &cap_token,
+        "/languages/apply-template",
+        &body,
     )
     .await
-    .with_context(|| "Failed to run languages -> apply-template-and-publish")?;
-    Ok(response_data.language_apply_template_and_publish)
 }
-
-#[derive(GraphQLQuery, Debug, Serialize, Deserialize)]
-#[graphql(
-    schema_path = "schema.gql",
-    query_path = "src/languages.gql",
-    response_derives = "Debug"
-)]
-pub struct Meta;
 
 pub async fn meta(
     executor_url: String,
     cap_token: String,
     address: String,
-) -> Result<meta::MetaLanguageMeta> {
-    let response_data: meta::ResponseData = query(
-        executor_url,
-        cap_token,
-        Meta::build_query(meta::Variables { address }),
+) -> Result<LanguageMeta> {
+    util::get(
+        &executor_url,
+        &cap_token,
+        &format!("/languages/{}/meta", address),
     )
     .await
-    .with_context(|| "Failed to run languages -> meta")?;
-    Ok(response_data.language_meta)
 }
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "schema.gql",
-    query_path = "src/languages.gql",
-    response_derives = "Debug"
-)]
-pub struct Publish;
 
 pub async fn publish(
     executor_url: String,
     cap_token: String,
     language_path: String,
-    name: String,
+    name: Option<String>,
     description: Option<String>,
     possible_template_params: Option<Vec<String>>,
     source_code_link: Option<String>,
-) -> Result<publish::PublishLanguagePublish> {
-    let response_data: publish::ResponseData = query(
-        executor_url,
-        cap_token,
-        Publish::build_query(publish::Variables {
-            language_path,
-            language_meta: publish::LanguageMetaInput {
-                name,
-                description,
-                possible_template_params,
-                source_code_link,
-            },
-        }),
-    )
-    .await
-    .with_context(|| "Failed to run languages -> publish")?;
-    Ok(response_data.language_publish)
+) -> Result<LanguageMeta> {
+    let body = PublishLanguageBody {
+        language_path,
+        language_meta: LanguageMetaInputBody {
+            name,
+            description,
+            possible_template_params,
+            source_code_link,
+        },
+    };
+    util::post(&executor_url, &cap_token, "/languages/publish", &body).await
 }
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "schema.gql",
-    query_path = "src/languages.gql",
-    response_derives = "Debug"
-)]
-pub struct Source;
 
 pub async fn source(executor_url: String, cap_token: String, address: String) -> Result<String> {
-    let response_data: source::ResponseData = query(
-        executor_url,
-        cap_token,
-        Source::build_query(source::Variables { address }),
+    util::get(
+        &executor_url,
+        &cap_token,
+        &format!("/languages/{}/source", address),
     )
     .await
-    .with_context(|| "Failed to run languages -> source")?;
-    Ok(response_data.language_source)
 }
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "schema.gql",
-    query_path = "src/languages.gql",
-    response_derives = "Debug"
-)]
-pub struct Remove;
 
 pub async fn remove(executor_url: String, cap_token: String, address: String) -> Result<()> {
-    query::<_, ()>(
-        executor_url,
-        cap_token,
-        Remove::build_query(remove::Variables { address }),
+    util::delete_no_response(
+        &executor_url,
+        &cap_token,
+        &format!("/languages/{}", address),
     )
     .await
-    .with_context(|| "Failed to run languages -> remove")?;
-    Ok(())
 }
+
+// ── LanguagesClient ──
 
 pub struct LanguagesClient {
     info: Arc<ClientInfo>,
@@ -209,22 +155,16 @@ impl LanguagesClient {
         Self { info }
     }
 
-    pub async fn by_filter(
-        &self,
-        filter: Option<String>,
-    ) -> Result<Vec<by_filter::ByFilterLanguages>> {
+    pub async fn by_filter(&self, filter: Option<String>) -> Result<Vec<LanguageHandle>> {
         by_filter(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),
-            filter.unwrap_or_default(),
+            filter,
         )
         .await
     }
 
-    pub async fn by_address(
-        &self,
-        address: String,
-    ) -> Result<Option<by_address::ByAddressLanguage>> {
+    pub async fn by_address(&self, address: String) -> Result<LanguageHandle> {
         by_address(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),
@@ -235,13 +175,13 @@ impl LanguagesClient {
 
     pub async fn write_settings(
         &self,
-        language_address: String,
+        address: String,
         settings: String,
-    ) -> Result<write_settings::ResponseData> {
+    ) -> Result<serde_json::Value> {
         write_settings(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),
-            language_address,
+            address,
             settings,
         )
         .await
@@ -249,20 +189,19 @@ impl LanguagesClient {
 
     pub async fn apply_template_and_publish(
         &self,
-        source: String,
+        source_language_hash: String,
         template_data: String,
-    ) -> Result<apply_template_and_publish::ApplyTemplateAndPublishLanguageApplyTemplateAndPublish>
-    {
+    ) -> Result<LanguageRef> {
         apply_template_and_publish(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),
-            source,
+            source_language_hash,
             template_data,
         )
         .await
     }
 
-    pub async fn meta(&self, address: String) -> Result<meta::MetaLanguageMeta> {
+    pub async fn meta(&self, address: String) -> Result<LanguageMeta> {
         meta(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),
@@ -274,11 +213,11 @@ impl LanguagesClient {
     pub async fn publish(
         &self,
         language_path: String,
-        name: String,
+        name: Option<String>,
         description: Option<String>,
         possible_template_params: Option<Vec<String>>,
         source_code_link: Option<String>,
-    ) -> Result<publish::PublishLanguagePublish> {
+    ) -> Result<LanguageMeta> {
         publish(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),

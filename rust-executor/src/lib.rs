@@ -190,7 +190,7 @@ async fn holochain_signal_receiver() {
     }
 }
 
-/// Runs the GraphQL server and the deno core runtime
+/// Runs the REST server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     #[cfg(unix)]
     unsafe {
@@ -406,7 +406,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         init_prolog_service().await;
     }
 
-    find_and_set_port(&mut config.gql_port, 4000, "GraphQL");
+    find_and_set_port(&mut config.gql_port, 4000, "REST API");
     find_and_set_port(&mut config.hc_admin_port, 2000, "Holochain admin");
     find_and_set_port(&mut config.hc_app_port, 1337, "Holochain app");
 
@@ -589,9 +589,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         }
     });
 
-    // Check if MCP mode is enabled — run MCP server alongside GraphQL
+    // Check if MCP mode is enabled — run MCP server alongside REST API
     if config.enable_mcp == Some(true) {
-        info!("Starting MCP server alongside GraphQL...");
+        info!("Starting MCP server alongside REST API...");
         let admin_credential = config.admin_credential.clone();
 
         std::thread::spawn(move || {

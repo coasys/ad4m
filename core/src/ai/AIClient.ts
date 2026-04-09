@@ -2,11 +2,15 @@ import { RestClient } from "../restClient";
 import base64js from 'base64-js';
 import pako from 'pako'
 import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
-import { ModelInput, Model, ModelType } from "./AIResolver"
+import { ModelInput, Model, ModelType } from "./AITypes"
 
 export class AIClient {
     #restClient: RestClient;
     #transcriptionUnsubscribers: Map<string, () => void> = new Map();
+<<<<<<< HEAD
+=======
+    #audioWs: WebSocket | null = null;
+>>>>>>> origin/feat/audio-transport-optimisation
 
     constructor(baseUrl: string, token?: string, subscribe: boolean = true) {
         this.#restClient = new RestClient(baseUrl, token);
@@ -101,10 +105,20 @@ export class AIClient {
 
         this.#transcriptionUnsubscribers.set(streamId, unsub);
 
+<<<<<<< HEAD
+=======
+        // Connect binary WebSocket for efficient audio transport
+        this.connectAudioWs([streamId]);
+
+>>>>>>> origin/feat/audio-transport-optimisation
         return streamId;
     }
 
     async closeTranscriptionStream(streamId: string): Promise<void> {
+<<<<<<< HEAD
+=======
+        this.disconnectAudioWs();
+>>>>>>> origin/feat/audio-transport-optimisation
         await this.#restClient.post<void>('/api/v1/ai/transcription/close', { streamId });
 
         const unsub = this.#transcriptionUnsubscribers.get(streamId);
@@ -115,9 +129,55 @@ export class AIClient {
     }
 
     async feedTranscriptionStream(streamIds: string | string[], audio: Float32Array): Promise<void> {
+<<<<<<< HEAD
         return this.#restClient.post<void>('/api/v1/ai/transcription/feed', {
             streamIds: Array.isArray(streamIds) ? streamIds : [streamIds],
             audio: Array.from(audio)
         });
     }
+=======
+        const ids = Array.isArray(streamIds) ? streamIds : [streamIds];
+
+        // Use WebSocket if connected (binary, efficient — no JSON serialisation)
+        if (this.#audioWs && this.#audioWs.readyState === WebSocket.OPEN) {
+            this.#audioWs.send(audio.buffer);
+            return;
+        }
+
+        // Fallback to REST POST (JSON, less efficient)
+        return this.#restClient.post<void>('/api/v1/ai/transcription/feed', {
+            streamIds: ids,
+            audio: Array.from(audio)
+        });
+    }
+
+    private connectAudioWs(streamIds: string[]): void {
+        const baseUrl = this.#restClient.getBaseUrl().replace(/^http/, 'ws');
+        const token = this.#restClient.getToken();
+        if (!token) return;
+
+        const idsParam = encodeURIComponent(streamIds.join(','));
+        const tokenParam = encodeURIComponent(token);
+
+        this.#audioWs = new WebSocket(
+            `${baseUrl}/api/v1/ws/audio?token=${tokenParam}&stream_ids=${idsParam}`
+        );
+        this.#audioWs.binaryType = 'arraybuffer';
+
+        this.#audioWs.onerror = () => {
+            this.#audioWs = null;
+        };
+
+        this.#audioWs.onclose = () => {
+            this.#audioWs = null;
+        };
+    }
+
+    private disconnectAudioWs(): void {
+        if (this.#audioWs) {
+            this.#audioWs.close();
+            this.#audioWs = null;
+        }
+    }
+>>>>>>> origin/feat/audio-transport-optimisation
 }

@@ -3,7 +3,6 @@ import { DID } from '../DID';
 import type { Expression } from '../expression/Expression'
 import { Perspective, PerspectiveExpression } from '../perspectives/Perspective';
 import { PerspectiveDiff } from '../perspectives/PerspectiveDiff';
-import { InputType, Field, ObjectType } from "type-graphql";
 import { PerspectiveState } from '../perspectives/PerspectiveHandle';
 import { LinkQuery } from '../perspectives/LinkQuery';
 
@@ -221,25 +220,13 @@ export interface DirectMessageAdapter {
     inbox(filter?: string): Promise<PerspectiveExpression[]>
     addMessageCallback(callback: MessageCallback);
 }
-
-@ObjectType()
 export class InteractionParameter {
-    @Field()
     name: string
-
-    @Field()
     type: string
 }
-
-@ObjectType()
 export class InteractionMeta {
-    @Field()
     label: string;
-
-    @Field()
     name: string;
-
-    @Field(type => [InteractionParameter])
     parameters: InteractionParameter[]
 }
 export interface Interaction {
@@ -248,12 +235,8 @@ export interface Interaction {
     readonly parameters: InteractionParameter[];
     execute(parameters: object): Promise<string|null>;
 }
-
-@InputType()
 export class InteractionCall {
-    @Field()
     name: string;
-    @Field()
     parametersStringified: string;
 
     public get parameters(): object {
@@ -265,12 +248,8 @@ export class InteractionCall {
         this.parametersStringified = JSON.stringify(parameters)
     }
 }
-
-@ObjectType()
 export class OnlineAgent {
-    @Field()
     did: DID
-    @Field()
     status: PerspectiveExpression
 }
 

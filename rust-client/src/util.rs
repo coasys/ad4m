@@ -1,90 +1,183 @@
 use anyhow::{anyhow, Result};
-use async_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
-use futures::StreamExt;
-use graphql_client::{QueryBody, Response};
-use graphql_ws_client::{graphql::GraphQLClient, AsyncWebsocketClient, GraphQLClientClientBuilder};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::de::DeserializeOwned;
 
-pub async fn query<Q, R>(executor_url: String, cap_token: String, query: QueryBody<Q>) -> Result<R>
-where
-    Q: Serialize,
-    R: DeserializeOwned,
-{
-    let response_body: Response<R> = reqwest::Client::new()
-        .post(executor_url)
+/// Helper to make authenticated GET requests to the REST API.
+pub async fn get<R: DeserializeOwned>(
+    executor_url: &str,
+    cap_token: &str,
+    path: &str,
+) -> Result<R> {
+    let url = format!("{}/api/v1{}", executor_url.trim_end_matches('/'), path);
+    let response = reqwest::Client::new()
+        .get(&url)
         .header("authorization", cap_token)
-        .json(&query)
         .send()
-        .await?
-        .json()
         .await?;
-    let response_data = response_body
-        .data
-        .ok_or_else(|| anyhow!("No data in response! Errors: {:?}", response_body.errors))?;
-    Ok(response_data)
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!("GET {} failed ({}): {}", path, status, body));
+    }
+    Ok(response.json().await?)
 }
 
-pub async fn query_raw<Q, R>(
-    executor_url: String,
-    cap_token: String,
-    query: QueryBody<Q>,
-) -> Result<Response<R>>
-where
-    Q: Serialize,
-    R: DeserializeOwned,
-{
-    Ok(reqwest::Client::new()
-        .post(executor_url)
+/// Helper to make authenticated POST requests to the REST API.
+pub async fn post<B: serde::Serialize, R: DeserializeOwned>(
+    executor_url: &str,
+    cap_token: &str,
+    path: &str,
+    body: &B,
+) -> Result<R> {
+    let url = format!("{}/api/v1{}", executor_url.trim_end_matches('/'), path);
+    let response = reqwest::Client::new()
+        .post(&url)
         .header("authorization", cap_token)
-        .json(&query)
+        .json(body)
         .send()
-        .await?
-        .json()
-        .await?)
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(anyhow!("POST {} failed ({}): {}", path, status, body_text));
+    }
+    Ok(response.json().await?)
 }
 
-struct TokioSpawner(tokio::runtime::Handle);
-
-impl TokioSpawner {
-    pub fn new(handle: tokio::runtime::Handle) -> Self {
-        TokioSpawner(handle)
+/// Helper to make authenticated PUT requests to the REST API.
+pub async fn put<B: serde::Serialize, R: DeserializeOwned>(
+    executor_url: &str,
+    cap_token: &str,
+    path: &str,
+    body: &B,
+) -> Result<R> {
+    let url = format!("{}/api/v1{}", executor_url.trim_end_matches('/'), path);
+    let response = reqwest::Client::new()
+        .put(&url)
+        .header("authorization", cap_token)
+        .json(body)
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(anyhow!("PUT {} failed ({}): {}", path, status, body_text));
     }
-
-    pub fn current() -> Self {
-        TokioSpawner::new(tokio::runtime::Handle::current())
-    }
+    Ok(response.json().await?)
 }
 
-impl futures::task::Spawn for TokioSpawner {
-    fn spawn_obj(
-        &self,
-        obj: futures::task::FutureObj<'static, ()>,
-    ) -> Result<(), futures::task::SpawnError> {
-        self.0.spawn(obj);
-        Ok(())
+/// Helper to make authenticated PATCH requests to the REST API.
+pub async fn patch<B: serde::Serialize, R: DeserializeOwned>(
+    executor_url: &str,
+    cap_token: &str,
+    path: &str,
+    body: &B,
+) -> Result<R> {
+    let url = format!("{}/api/v1{}", executor_url.trim_end_matches('/'), path);
+    let response = reqwest::Client::new()
+        .patch(&url)
+        .header("authorization", cap_token)
+        .json(body)
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(anyhow!("PATCH {} failed ({}): {}", path, status, body_text));
     }
+    Ok(response.json().await?)
 }
 
-pub async fn create_websocket_client(
-    executor_url: String,
-    cap_token: String,
-) -> Result<AsyncWebsocketClient<GraphQLClient, Message>> {
-    let url = executor_url.replace("http", "ws");
-    let mut request = url.into_client_request().unwrap();
-    request.headers_mut().insert(
-        "Sec-WebSocket-Protocol",
-        HeaderValue::from_str("graphql-transport-ws").unwrap(),
-    );
-    request
-        .headers_mut()
-        .insert("authorization", HeaderValue::from_str(&cap_token).unwrap());
-    let (connection, _) = async_tungstenite::tokio::connect_async(request).await?;
+/// Helper to make authenticated DELETE requests to the REST API.
+pub async fn delete<R: DeserializeOwned>(
+    executor_url: &str,
+    cap_token: &str,
+    path: &str,
+) -> Result<R> {
+    let url = format!("{}/api/v1{}", executor_url.trim_end_matches('/'), path);
+    let response = reqwest::Client::new()
+        .delete(&url)
+        .header("authorization", cap_token)
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "DELETE {} failed ({}): {}",
+            path,
+            status,
+            body_text
+        ));
+    }
+    Ok(response.json().await?)
+}
 
-    let (sink, stream) = connection.split();
-    let client = GraphQLClientClientBuilder::new()
-        .build(stream, sink, TokioSpawner::current())
-        .await
-        .unwrap();
+/// Helper to make authenticated DELETE requests with a JSON body.
+pub async fn delete_with_body<B: serde::Serialize, R: DeserializeOwned>(
+    executor_url: &str,
+    cap_token: &str,
+    path: &str,
+    body: &B,
+) -> Result<R> {
+    let url = format!("{}/api/v1{}", executor_url.trim_end_matches('/'), path);
+    let response = reqwest::Client::new()
+        .delete(&url)
+        .header("authorization", cap_token)
+        .json(body)
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "DELETE {} failed ({}): {}",
+            path,
+            status,
+            body_text
+        ));
+    }
+    Ok(response.json().await?)
+}
 
-    Ok(client)
+/// Helper for POST requests that return no body (204 etc) — returns ()
+pub async fn post_no_response<B: serde::Serialize>(
+    executor_url: &str,
+    cap_token: &str,
+    path: &str,
+    body: &B,
+) -> Result<()> {
+    let url = format!("{}/api/v1{}", executor_url.trim_end_matches('/'), path);
+    let response = reqwest::Client::new()
+        .post(&url)
+        .header("authorization", cap_token)
+        .json(body)
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(anyhow!("POST {} failed ({}): {}", path, status, body_text));
+    }
+    Ok(())
+}
+
+/// Helper for DELETE requests that return no body.
+pub async fn delete_no_response(executor_url: &str, cap_token: &str, path: &str) -> Result<()> {
+    let url = format!("{}/api/v1{}", executor_url.trim_end_matches('/'), path);
+    let response = reqwest::Client::new()
+        .delete(&url)
+        .header("authorization", cap_token)
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "DELETE {} failed ({}): {}",
+            path,
+            status,
+            body_text
+        ));
+    }
+    Ok(())
 }

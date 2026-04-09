@@ -116,6 +116,11 @@ pub async fn export_data(
         "db" => {
             let json_data = Ad4mDb::with_global_instance(|db| db.export_all_to_json())
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
+<<<<<<< HEAD
+=======
+            // SECURITY TODO: constrain file paths to ad4m data directory.
+            // This is pre-existing behaviour from the GraphQL mutation.
+>>>>>>> origin/feat/audio-transport-optimisation
             std::fs::write(&body.file_path, serde_json::to_string_pretty(&json_data)?)
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
         }
@@ -152,6 +157,11 @@ pub async fn import_data(
 
     match body.import_type.as_str() {
         "db" => {
+<<<<<<< HEAD
+=======
+            // SECURITY TODO: constrain file paths to ad4m data directory.
+            // This is pre-existing behaviour from the GraphQL mutation.
+>>>>>>> origin/feat/audio-transport-optimisation
             let data = std::fs::read_to_string(&body.file_path)
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             let json_data: serde_json::Value =
@@ -512,7 +522,11 @@ pub async fn get_hc_agent_infos(
 pub async fn add_hc_agent_infos(
     State(_state): State<AppState>,
     auth: AuthContext,
+<<<<<<< HEAD
     Json(infos): Json<String>,
+=======
+    Json(body): Json<AddAgentInfosRequest>,
+>>>>>>> origin/feat/audio-transport-optimisation
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
     check_capability(
@@ -523,7 +537,11 @@ pub async fn add_hc_agent_infos(
 
     let hc = get_holochain_service().await;
 
+<<<<<<< HEAD
     hc.add_agent_infos(vec![infos])
+=======
+    hc.add_agent_infos(vec![body.agent_infos])
+>>>>>>> origin/feat/audio-transport-optimisation
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -551,3 +569,34 @@ pub async fn get_network_metrics(
 
     Ok(Json(metrics))
 }
+<<<<<<< HEAD
+=======
+
+pub async fn get_free_hosting_enabled(
+    State(_state): State<AppState>,
+    _auth: AuthContext,
+) -> Result<Json<bool>, ApiError> {
+    let enabled = Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(enabled))
+}
+
+pub async fn set_free_hosting_enabled(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<bool>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &RUNTIME_QUIT_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    let enabled = body["enabled"]
+        .as_bool()
+        .ok_or_else(|| ApiError::BadRequest("'enabled' boolean required".into()))?;
+
+    Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(enabled))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(enabled))
+}
+>>>>>>> origin/feat/audio-transport-optimisation

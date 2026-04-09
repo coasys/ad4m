@@ -3,8 +3,12 @@ pub mod perspective_instance;
 pub mod sdna;
 pub mod shacl_parser;
 pub mod shacl_to_prolog;
+<<<<<<< HEAD
 pub mod sparql_store;
 pub mod utils;
+=======
+pub mod utils; // TODO: Remove this module after all users have migrated to SurrealDB
+>>>>>>> origin/feat/audio-transport-optimisation
 use crate::types::{
     LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveExpression, PerspectiveHandle,
     PerspectiveRemovedWithOwner, PerspectiveState, PerspectiveWithOwner,
@@ -469,7 +473,7 @@ pub fn handle_telepresence_signal_from_link_language(
     }
 }
 
-/// Publish a telepresence signal to PubSub for delivery to GraphQL subscribers
+/// Publish a telepresence signal to PubSub for delivery to REST subscribers
 pub(crate) async fn publish_telepresence_signal(
     handle: PerspectiveHandle,
     signal: PerspectiveExpression,

@@ -615,7 +615,7 @@ pub struct RuntimeInfo {
 #[derive(Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadinessStatus {
-    /// GraphQL server is accepting requests (always true if you can call this query)
+    /// REST server is accepting requests (always true if you can call this query)
     pub gql_ready: bool,
     /// Holochain conductor is running and connected
     pub holochain_ready: bool,
@@ -632,8 +632,8 @@ pub struct SentMessage {
     pub recipient: String,
 }
 
-// Public UserInfo struct for GraphQL - only contains non-sensitive fields
-// Note: last_seen uses f64 for GraphQL compatibility (GraphQL Int is limited to i32)
+// Public UserInfo struct for REST API - only contains non-sensitive fields
+// Note: last_seen uses f64 for JSON compatibility
 // f64 can safely represent integer timestamps up to 2^53 without precision loss
 #[derive(Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]

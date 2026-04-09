@@ -3,7 +3,11 @@
 //! 10 harmonised endpoints including unified link mutations and query.
 
 use axum::{
+<<<<<<< HEAD
     extract::{Path, State},
+=======
+    extract::{Path, Query, State},
+>>>>>>> origin/feat/audio-transport-optimisation
     Json,
 };
 
@@ -80,7 +84,11 @@ fn reserve_compute_credits(auth_token: &str, amount: f64) -> Result<(), ApiError
     Ok(())
 }
 
+<<<<<<< HEAD
 // Default pricing (matches GraphQL)
+=======
+// Default pricing
+>>>>>>> origin/feat/audio-transport-optimisation
 const DEFAULT_LINK_WRITE: f64 = 0.25;
 
 // ── Endpoints ──
@@ -163,7 +171,11 @@ pub async fn query_links(
     State(_state): State<AppState>,
     auth: AuthContext,
     Path(uuid): Path<String>,
+<<<<<<< HEAD
     Json(query): Json<LinkQuery>,
+=======
+    Query(query): Query<LinkQuery>,
+>>>>>>> origin/feat/audio-transport-optimisation
 ) -> Result<Json<Vec<DecoratedLinkExpression>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(
@@ -252,6 +264,12 @@ pub async fn delete_perspective(
     )
     .map_err(|e| ApiError::Forbidden(e))?;
 
+<<<<<<< HEAD
+=======
+    // Verify caller has access to this perspective before deleting
+    let _perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+
+>>>>>>> origin/feat/audio-transport-optimisation
     remove_perspective(&uuid).await;
     Ok(Json(true))
 }
@@ -271,6 +289,11 @@ pub async fn mutate_links(
     .map_err(|e| ApiError::Forbidden(e))?;
 
     // Check compute credits (pre-check)
+<<<<<<< HEAD
+=======
+    // TODO: implement proper credit pre-estimation for link mutations — currently only rejects
+    // at zero balance, allowing operations that exceed remaining credits. Pre-existing from GraphQL.
+>>>>>>> origin/feat/audio-transport-optimisation
     check_compute_credits(&context.auth_token)?;
 
     let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
@@ -369,7 +392,15 @@ pub async fn mutate_links(
     // Deduct compute credits
     let total_ops = response.additions.len() + response.removals.len() + response.updates.len();
     if total_ops > 0 {
+<<<<<<< HEAD
         let _ = reserve_compute_credits(&context.auth_token, total_ops as f64 * DEFAULT_LINK_WRITE);
+=======
+        if let Err(e) =
+            reserve_compute_credits(&context.auth_token, total_ops as f64 * DEFAULT_LINK_WRITE)
+        {
+            log::warn!("Failed to reserve compute credits: {:?}", e);
+        }
+>>>>>>> origin/feat/audio-transport-optimisation
     }
 
     Ok(Json(response))
@@ -400,15 +431,26 @@ pub async fn query_perspective(
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             serde_json::to_value(prolog_resolution_to_string(res)).unwrap_or_default()
         }
+<<<<<<< HEAD
         "sparql" => {
             let res = perspective
                 .sparql_query(body.query)
+=======
+        "surreal" => {
+            let res = perspective
+                .surreal_query(body.query)
+                .await
+>>>>>>> origin/feat/audio-transport-optimisation
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             serde_json::to_value(res).unwrap_or_default()
         }
         other => {
             return Err(ApiError::BadRequest(format!(
+<<<<<<< HEAD
                 "Unknown query engine: {}. Use 'prolog' or 'sparql'.",
+=======
+                "Unknown query engine: {}. Use 'prolog' or 'surreal'.",
+>>>>>>> origin/feat/audio-transport-optimisation
                 other
             )));
         }

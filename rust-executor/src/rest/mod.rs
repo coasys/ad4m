@@ -1,9 +1,17 @@
 //! REST API module — `/api/v1/*`
 //!
+<<<<<<< HEAD
 //! Axum-based REST API that replaces the former warp/GraphQL server.
 
 pub mod agent;
 pub mod ai;
+=======
+//! Axum-based REST API server.
+
+pub mod agent;
+pub mod ai;
+pub mod audio_ws;
+>>>>>>> origin/feat/audio-transport-optimisation
 pub mod auth;
 pub mod errors;
 pub mod events;
@@ -16,6 +24,12 @@ pub mod runtime;
 pub mod types;
 pub mod users;
 
+<<<<<<< HEAD
+=======
+#[cfg(test)]
+mod tests;
+
+>>>>>>> origin/feat/audio-transport-optimisation
 use crate::Ad4mConfig;
 use auth::AppState;
 use axum::{
@@ -239,6 +253,13 @@ pub fn rest_router(state: AppState) -> Router {
                 "/runtime/network-metrics",
                 get(runtime::get_network_metrics),
             )
+<<<<<<< HEAD
+=======
+            .route(
+                "/runtime/free-hosting-enabled",
+                get(runtime::get_free_hosting_enabled).put(runtime::set_free_hosting_enabled),
+            )
+>>>>>>> origin/feat/audio-transport-optimisation
             // ── Users (7 endpoints + dev email test) ──
             .route(
                 "/users/multi-user-enabled",
@@ -270,6 +291,24 @@ pub fn rest_router(state: AppState) -> Router {
             )
             .route("/ai/prompt", post(ai::ai_prompt))
             .route("/ai/embed", post(ai::ai_embed))
+<<<<<<< HEAD
+=======
+            // ── AI Transcription (3 endpoints) ──
+            .route(
+                "/ai/transcription/open",
+                post(ai::open_transcription_stream),
+            )
+            .route(
+                "/ai/transcription/feed",
+                post(ai::feed_transcription_stream),
+            )
+            .route(
+                "/ai/transcription/close",
+                post(ai::close_transcription_stream),
+            )
+            // ── WebSocket (1 endpoint) ──
+            .route("/ws/audio", get(audio_ws::audio_websocket))
+>>>>>>> origin/feat/audio-transport-optimisation
             // ── SSE Events (6 endpoints) ──
             .route("/events/agent", get(events::agent_events))
             .route(
@@ -292,7 +331,11 @@ pub fn rest_router(state: AppState) -> Router {
     .layer(cors)
 }
 
+<<<<<<< HEAD
 /// Start the REST API server (replaces the old warp/GraphQL server).
+=======
+/// Start the REST API server.
+>>>>>>> origin/feat/audio-transport-optimisation
 pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     // Set global SMTP config for email verification
     crate::config::set_smtp_config(config.smtp_config.clone())?;

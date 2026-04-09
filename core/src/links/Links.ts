@@ -1,16 +1,8 @@
-import { Field, InputType, ObjectType } from "type-graphql";
 import { ExpressionGeneric, ExpressionGenericInput } from '../expression/Expression';
 import { LinkStatus } from "../perspectives/PerspectiveProxy";
-
-@ObjectType()
 export class Link {
-    @Field()
     source: string;
-    
-    @Field()
     target: string;
-    
-    @Field({nullable: true})
     predicate?: string;
 
     constructor(obj) {
@@ -19,21 +11,12 @@ export class Link {
         this.predicate = obj.predicate ? obj.predicate : ''
     }
 }
-
-@InputType()
 export class LinkMutations {
-    @Field(type => [LinkInput])
     additions: LinkInput[];
-
-    @Field(type => [LinkExpressionInput])
     removals: LinkExpressionInput[];
 }
-@ObjectType()
 export class LinkExpressionMutations {
-    @Field(type => [LinkExpression])
     additions: LinkExpression[];
-
-    @Field(type => [LinkExpression])
     removals: LinkExpression[];
 
     constructor(additions: LinkExpression[], removals: LinkExpression[]) {
@@ -41,20 +24,11 @@ export class LinkExpressionMutations {
         this.removals = removals
     }
 }
-
-@InputType()
 export class LinkInput {
-    @Field()
     source: string;
-    
-    @Field()
     target: string;
-    
-    @Field({nullable: true})
     predicate?: string;
 }
-
-@ObjectType()
 export class LinkExpression extends ExpressionGeneric(Link) {
     hash(): number {
         const mash = JSON.stringify(this.data, Object.keys(this.data).sort()) +
@@ -67,16 +41,10 @@ export class LinkExpression extends ExpressionGeneric(Link) {
         }
         return hash;
     }
-
-    @Field({ nullable: true, defaultValue: 'shared' })
     status?: LinkStatus;
 };
-
-@InputType()
 export class LinkExpressionInput extends ExpressionGenericInput(LinkInput) {
     hash: () => number;
-
-    @Field({ nullable: true, defaultValue: 'shared' })
     status?: LinkStatus;
 };
 
@@ -91,13 +59,8 @@ export function linkEqual(l1: LinkExpression, l2: LinkExpression): boolean {
 export function isLink(l: any): boolean {
     return l && l.source && l.target
 }
-
-@ObjectType()
 export class LinkExpressionUpdated {
-    @Field(type => LinkExpression)
     oldLink: LinkExpression;
-
-    @Field(type => LinkExpression)
     newLink: LinkExpression;
 
     constructor(oldLink: LinkExpression, newLink: LinkExpression) {

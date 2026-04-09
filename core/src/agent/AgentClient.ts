@@ -9,11 +9,19 @@ import {
   EntanglementProofInput,
   UserCreationResult,
 } from "./Agent";
+<<<<<<< HEAD
 import { HostingUserInfo, PaymentRequestResult } from "../runtime/RuntimeResolver";
 import { AgentStatus } from "./AgentStatus";
 import { LinkMutations } from "../links/Links";
 import { PerspectiveClient } from "../perspectives/PerspectiveClient";
 import { VerificationRequestResult } from "../runtime/RuntimeResolver";
+=======
+import { HostingUserInfo, PaymentRequestResult, ComputeLogEntry } from "../runtime/RuntimeTypes";
+import { AgentStatus } from "./AgentStatus";
+import { LinkMutations } from "../links/Links";
+import { PerspectiveClient } from "../perspectives/PerspectiveClient";
+import { VerificationRequestResult } from "../runtime/RuntimeTypes";
+>>>>>>> origin/feat/audio-transport-optimisation
 
 export interface InitializeArgs {
   did: string;
@@ -26,7 +34,11 @@ export type AgentUpdatedCallback = (agent: Agent) => null;
 export type AgentStatusChangedCallback = (agent: Agent) => null;
 export type AgentAppsUpdatedCallback = () => null;
 export type HostingUserInfoChangedCallback = (info: HostingUserInfo) => void;
+<<<<<<< HEAD
 export type ComputeLogUpdatedCallback = (entry: any) => void;
+=======
+export type ComputeLogUpdatedCallback = (entry: ComputeLogEntry) => void;
+>>>>>>> origin/feat/audio-transport-optimisation
 
 /**
  * Provides access to all functions regarding the local agent,
@@ -41,6 +53,7 @@ export class AgentClient {
   #updatedCallbacks: AgentUpdatedCallback[];
   #agentStatusChangedCallbacks: AgentStatusChangedCallback[];
   #hostingUserInfoChangedCallbacks: HostingUserInfoChangedCallback[];
+  #unsubscribers: (() => void)[];
   #computeLogUpdatedCallbacks: ComputeLogUpdatedCallback[];
   #unsubscribers: (() => void)[];
 
@@ -52,6 +65,7 @@ export class AgentClient {
     this.#agentStatusChangedCallbacks = [];
     this.#appsChangedCallback = [];
     this.#hostingUserInfoChangedCallbacks = [];
+    this.#unsubscribers = [];
     this.#computeLogUpdatedCallbacks = [];
     this.#unsubscribers = [];
 
@@ -95,7 +109,11 @@ export class AgentClient {
   }
 
   async byDID(did: string): Promise<Agent> {
+<<<<<<< HEAD
     return this.#restClient.get<Agent>(`/api/v1/agent/byDID/${encodeURIComponent(did)}`);
+=======
+    return this.#restClient.get<Agent>(`/api/v1/agent/by-did/${encodeURIComponent(did)}`);
+>>>>>>> origin/feat/audio-transport-optimisation
   }
 
   async updatePublicPerspective(perspective: PerspectiveInput): Promise<Agent> {
@@ -108,7 +126,11 @@ export class AgentClient {
       delete link.status;
     });
 
+<<<<<<< HEAD
     const a = await this.#restClient.put<any>('/api/v1/agent/perspective', { perspective: cleanedPerspective });
+=======
+    const a = await this.#restClient.patch<any>('/api/v1/agent/profile', { publicPerspective: cleanedPerspective });
+>>>>>>> origin/feat/audio-transport-optimisation
     const agent = new Agent(a.did, a.perspective);
     agent.directMessageLanguage = a.directMessageLanguage;
     return agent;
@@ -139,7 +161,11 @@ export class AgentClient {
   }
 
   async updateDirectMessageLanguage(directMessageLanguage: string): Promise<Agent> {
+<<<<<<< HEAD
     const a = await this.#restClient.put<any>('/api/v1/agent/directMessageLanguage', { directMessageLanguage });
+=======
+    const a = await this.#restClient.patch<any>('/api/v1/agent/profile', { dmLanguage: directMessageLanguage });
+>>>>>>> origin/feat/audio-transport-optimisation
     const agent = new Agent(a.did, a.perspective);
     agent.directMessageLanguage = a.directMessageLanguage;
     return agent;
@@ -224,6 +250,7 @@ export class AgentClient {
       }
     });
     this.#unsubscribers.push(unsub);
+<<<<<<< HEAD
   }
 
   async computeLog(since?: string, limit?: number, userEmail?: string): Promise<any[]> {
@@ -245,6 +272,20 @@ export class AgentClient {
 
   async generateJwt(requestId: string, rand: string): Promise<string> {
     return this.#restClient.post<string>('/api/v1/agent/jwt', { requestId, rand });
+=======
+  }
+
+  async requestCapability(authInfo: AuthInfoInput): Promise<string> {
+    return this.#restClient.post<string>('/api/v1/agent/auth/request', { authInfo });
+  }
+
+  async permitCapability(auth: string): Promise<string> {
+    return this.#restClient.post<string>('/api/v1/agent/auth/permit', { auth });
+  }
+
+  async generateJwt(requestId: string, rand: string): Promise<string> {
+    return this.#restClient.post<string>('/api/v1/agent/auth/jwt', { requestId, rand });
+>>>>>>> origin/feat/audio-transport-optimisation
   }
 
   async getApps(): Promise<Apps[]> {
@@ -256,11 +297,19 @@ export class AgentClient {
   }
 
   async revokeToken(requestId: string): Promise<Apps[]> {
+<<<<<<< HEAD
     return this.#restClient.post<Apps[]>(`/api/v1/agent/apps/${encodeURIComponent(requestId)}/revoke`);
   }
 
   async isLocked(): Promise<boolean> {
     return this.#restClient.get<boolean>('/api/v1/agent/isLocked');
+=======
+    return this.#restClient.delete<Apps[]>(`/api/v1/agent/auth/token/${encodeURIComponent(requestId)}`);
+  }
+
+  async isLocked(): Promise<boolean> {
+    return this.#restClient.get<boolean>('/api/v1/agent/is-locked');
+>>>>>>> origin/feat/audio-transport-optimisation
   }
 
   async signMessage(message: string): Promise<string> {
@@ -269,11 +318,19 @@ export class AgentClient {
 
   // Multi-user methods
   async createUser(email: string, password: string, appInfo?: AuthInfoInput): Promise<UserCreationResult> {
+<<<<<<< HEAD
     return this.#restClient.post<UserCreationResult>('/api/v1/runtime/users', { email, password, appInfo });
   }
 
   async loginUser(email: string, password: string): Promise<string> {
     return this.#restClient.post<string>('/api/v1/runtime/users/login', { email, password });
+=======
+    return this.#restClient.post<UserCreationResult>('/api/v1/users', { email, password, appInfo });
+  }
+
+  async loginUser(email: string, password: string): Promise<string> {
+    return this.#restClient.post<string>('/api/v1/users/login', { email, password });
+>>>>>>> origin/feat/audio-transport-optimisation
   }
 
   async requestLoginVerification(email: string, appInfo?: AuthInfoInput): Promise<VerificationRequestResult> {
@@ -281,12 +338,28 @@ export class AgentClient {
   }
 
   async verifyEmailCode(email: string, code: string, verificationType: string): Promise<string> {
+<<<<<<< HEAD
     return this.#restClient.post<string>('/api/v1/runtime/users/verify-email', { email, code, verificationType });
+=======
+    return this.#restClient.post<string>('/api/v1/users/verify-email', { email, code, verificationType });
+>>>>>>> origin/feat/audio-transport-optimisation
   }
 
   // Hosting methods
   async hostingUserInfo(): Promise<HostingUserInfo> {
     return this.#restClient.get<HostingUserInfo>('/api/v1/runtime/hosting/user-info');
+<<<<<<< HEAD
+=======
+  }
+
+  async computeLog(since?: string, limit?: number, userEmail?: string): Promise<ComputeLogEntry[]> {
+    const params = new URLSearchParams();
+    if (since) params.set('since', since);
+    if (limit !== undefined) params.set('limit', String(limit));
+    if (userEmail) params.set('userEmail', userEmail);
+    const query = params.toString();
+    return this.#restClient.get<ComputeLogEntry[]>(`/api/v1/runtime/compute-log${query ? '?' + query : ''}`);
+>>>>>>> origin/feat/audio-transport-optimisation
   }
 
   async setHotWalletAddress(address: string): Promise<boolean> {

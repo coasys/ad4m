@@ -110,7 +110,14 @@ pub async fn get_agent_by_did(
     let did_match = {
         let agent_instance = AgentService::global_instance();
         let agent_service = agent_instance.lock().expect("agent lock");
+<<<<<<< HEAD
         let agent_ref = agent_service.as_ref().expect("agent instance");
+=======
+        let agent_ref = match agent_service.as_ref() {
+            Some(a) => a,
+            None => return Err(ApiError::NotFound("Agent not initialized".into())),
+        };
+>>>>>>> origin/feat/audio-transport-optimisation
         match &agent_ref.did {
             Some(existing) => &did == existing,
             None => false,
@@ -358,7 +365,11 @@ pub async fn lock_agent(
     _auth: AuthContext,
     Json(body): Json<LockAgentRequest>,
 ) -> Result<Json<AgentStatus>, ApiError> {
+<<<<<<< HEAD
     // GraphQL resolver has no capability check for lock
+=======
+    // No capability check for lock
+>>>>>>> origin/feat/audio-transport-optimisation
     let agent = AgentService::with_mutable_global_instance(|agent_service| {
         agent_service.lock(body.passphrase.clone());
         agent_service.dump().clone()

@@ -586,7 +586,7 @@ pub struct Model {
     pub model_type: ModelType,
 }
 
-// Internal User struct - NOT exposed via GraphQL
+// Internal User struct - NOT exposed via REST API
 // Contains sensitive data like password_hash that should never be returned to clients
 #[derive(Default, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]

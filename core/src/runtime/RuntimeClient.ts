@@ -1,6 +1,10 @@
 import { RestClient } from "../restClient"
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
+<<<<<<< HEAD
 import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult, UserStatistics } from "./RuntimeResolver"
+=======
+import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult, UserStatistics } from "./RuntimeTypes"
+>>>>>>> origin/feat/audio-transport-optimisation
 
 export type MessageCallback = (message: PerspectiveExpression) => null
 export type ExceptionCallback = (info: ExceptionInfo) => null
@@ -31,7 +35,11 @@ export class RuntimeClient {
     }
 
     async info(): Promise<RuntimeInfo> {
+<<<<<<< HEAD
         return this.#restClient.get<RuntimeInfo>('/api/v1/runtime')
+=======
+        return this.#restClient.get<RuntimeInfo>('/api/v1/runtime/info')
+>>>>>>> origin/feat/audio-transport-optimisation
     }
 
     async tlsDomain(): Promise<string | null> {
@@ -47,6 +55,7 @@ export class RuntimeClient {
     }
 
     async addTrustedAgents(agents: string[]): Promise<string[]> {
+<<<<<<< HEAD
         return this.#restClient.post<string[]>('/api/v1/runtime/trusted-agents', { agents })
     }
 
@@ -68,6 +77,29 @@ export class RuntimeClient {
 
     async knownLinkLanguageTemplates(): Promise<string[]> {
         return this.#restClient.get<string[]>('/api/v1/runtime/known-link-language-templates')
+=======
+        return this.#restClient.post<string[]>('/api/v1/agent/trusted', { agents })
+    }
+
+    async deleteTrustedAgents(agents: string[]): Promise<string[]> {
+        return this.#restClient.delete<string[]>('/api/v1/agent/trusted', { agents })
+    }
+
+    async getTrustedAgents(): Promise<string[]> {
+        return this.#restClient.get<string[]>('/api/v1/agent/trusted')
+    }
+
+    async addKnownLinkLanguageTemplates(addresses: string[]): Promise<string[]> {
+        return this.#restClient.post<string[]>('/api/v1/runtime/link-language-templates', { addresses })
+    }
+
+    async removeKnownLinkLanguageTemplates(addresses: string[]): Promise<string[]> {
+        return this.#restClient.delete<string[]>('/api/v1/runtime/link-language-templates', { addresses })
+    }
+
+    async knownLinkLanguageTemplates(): Promise<string[]> {
+        return this.#restClient.get<string[]>('/api/v1/runtime/link-language-templates')
+>>>>>>> origin/feat/audio-transport-optimisation
     }
 
     async addFriends(dids: string[]): Promise<string[]> {
@@ -83,7 +115,11 @@ export class RuntimeClient {
     }
 
     async hcAgentInfos(): Promise<string> {
+<<<<<<< HEAD
         return this.#restClient.get<string>('/api/v1/runtime/hc-agent-infos')
+=======
+        return this.#restClient.get<string>('/api/v1/runtime/hc/agent-infos')
+>>>>>>> origin/feat/audio-transport-optimisation
     }
 
     async getNetworkMetrics(): Promise<string> {
@@ -91,6 +127,7 @@ export class RuntimeClient {
     }
 
     async restartHolochain(): Promise<boolean> {
+<<<<<<< HEAD
         return this.#restClient.post<boolean>('/api/v1/runtime/restart-holochain')
     }
 
@@ -100,6 +137,17 @@ export class RuntimeClient {
 
     async verifyStringSignedByDid(did: string, didSigningKeyId: string, data: string, signedData: string): Promise<boolean> {
         return this.#restClient.post<boolean>('/api/v1/runtime/verify-string-signed-by-did', { did, didSigningKeyId, data, signedData })
+=======
+        return this.#restClient.post<boolean>('/api/v1/runtime/holochain/restart')
+    }
+
+    async hcAddAgentInfos(agentInfos: String): Promise<void> {
+        return this.#restClient.post<void>('/api/v1/runtime/hc/agent-infos', { agentInfos })
+    }
+
+    async verifyStringSignedByDid(did: string, didSigningKeyId: string, data: string, signedData: string): Promise<boolean> {
+        return this.#restClient.post<boolean>('/api/v1/runtime/verify-signature', { did, didSigningKeyId, data, signedData })
+>>>>>>> origin/feat/audio-transport-optimisation
     }
 
     async setStatus(perspective: Perspective): Promise<boolean> {
@@ -125,6 +173,7 @@ export class RuntimeClient {
     }
 
     async requestInstallNotification(notification: NotificationInput) {
+<<<<<<< HEAD
         return this.#restClient.post('/api/v1/runtime/notifications/request', { notification })
     }
 
@@ -138,6 +187,21 @@ export class RuntimeClient {
 
     async importDb(filePath: string): Promise<ImportResult> {
         return this.#restClient.post<ImportResult>('/api/v1/runtime/import-db', { filePath })
+=======
+        return this.#restClient.post('/api/v1/runtime/notifications', { notification })
+    }
+
+    async grantNotification(id: string): Promise<boolean> {
+        return this.#restClient.patch<boolean>(`/api/v1/runtime/notifications/${encodeURIComponent(id)}`, { granted: true })
+    }
+
+    async exportDb(filePath: string): Promise<boolean> {
+        return this.#restClient.post<boolean>('/api/v1/runtime/export', { filePath })
+    }
+
+    async importDb(filePath: string): Promise<ImportResult> {
+        return this.#restClient.post<ImportResult>('/api/v1/runtime/import', { filePath })
+>>>>>>> origin/feat/audio-transport-optimisation
     }
 
     async notifications(): Promise<Notification[]> {

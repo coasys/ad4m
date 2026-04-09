@@ -31,7 +31,7 @@ interface Unsubscribable {
  * This class handles:
  * - Keeping the subscription alive by sending periodic keepalive signals
  * - Managing callbacks for result updates
- * - Subscribing to query updates via GraphQL subscriptions
+ * - Subscribing to query updates via SSE subscriptions
  * - Maintaining the latest query result
  * - Ensuring subscription is fully initialized before allowing access
  * - Cleaning up resources when disposed
@@ -280,7 +280,7 @@ export class QuerySubscriptionProxy {
      * 
      * This method:
      * 1. Stops the keepalive timer
-     * 2. Unsubscribes from GraphQL subscription updates
+     * 2. Unsubscribes from subscription updates
      * 3. Clears all registered callbacks
      * 4. Cleans up any pending initialization timeout
      * 
@@ -1051,7 +1051,7 @@ export class PerspectiveProxy {
      * Adds Social DNA code to the perspective.
      * 
      * **Recommended:** Use {@link addShacl} instead, which accepts the `SHACLShape` type directly.
-     * This method is primarily for the GraphQL layer and legacy Prolog code.
+     * This method is primarily for the REST API layer and legacy Prolog code.
      * 
      * @param name - Unique name for this SDNA definition
      * @param sdnaCode - Prolog SDNA code (legacy, can be empty string if shaclJson provided)
@@ -1312,7 +1312,7 @@ export class PerspectiveProxy {
      */
     async subjectClasses(): Promise<string[]> {
         try {
-            // Query SHACL class links directly — no need for a separate GraphQL endpoint
+            // Query SHACL class links directly — no need for a separate REST endpoint
             const classLinks = await this.get(new LinkQuery({
                 predicate: "rdf://type",
                 target: "ad4m://SubjectClass"
