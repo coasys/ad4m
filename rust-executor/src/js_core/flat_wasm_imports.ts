@@ -182,6 +182,57 @@ export function __signal_emit(data: unknown): void {
 }
 
 // ============================================================================
+// Language context imports — set by runtime before calling init()
+// ============================================================================
+
+import {
+    language_storage_directory,
+    language_address,
+    language_settings,
+} from 'ext:core/ops';
+
+/**
+ * Returns the storage directory for this language instance.
+ * Rust: `js_core/mod.rs op_language_storage_directory()`
+ */
+export function __language_storage_directory(): string {
+    return language_storage_directory() as string;
+}
+
+/**
+ * Returns the address (DID) of this language instance.
+ * Rust: `js_core/mod.rs op_language_address()`
+ */
+export function __language_address(): string {
+    return language_address() as string;
+}
+
+/**
+ * Returns the settings JSON for this language instance.
+ * Rust: `js_core/mod.rs op_language_settings()`
+ */
+export function __language_settings(): string {
+    return language_settings() as string;
+}
+
+// ============================================================================
+// Language context imports — camelCase versions for languages to call
+// Per spec: languageStorageDirectory(), languageAddress(), languageSettings()
+// ============================================================================
+
+export function languageStorageDirectory(): string {
+    return language_storage_directory() as string;
+}
+
+export function languageAddress(): string {
+    return language_address() as string;
+}
+
+export function languageSettings(): string {
+    return language_settings() as string;
+}
+
+// ============================================================================
 // Bootstrap helper — set up globals for WASM language
 // ============================================================================
 
@@ -210,6 +261,14 @@ export function setupFlatWasmImports(): void {
 
     // Signal imports
     (globalThis as any).__signal_emit = __signal_emit;
+
+    // Language context imports (camelCase per spec)
+    (globalThis as any).__language_storage_directory = __language_storage_directory;
+    (globalThis as any).__language_address = __language_address;
+    (globalThis as any).__language_settings = __language_settings;
+    (globalThis as any).languageStorageDirectory = languageStorageDirectory;
+    (globalThis as any).languageAddress = languageAddress;
+    (globalThis as any).languageSettings = languageSettings;
 }
 
 /**
@@ -230,4 +289,10 @@ export function teardownFlatWasmImports(): void {
     delete g.__holochain_call;
     delete g.__holochain_call_async;
     delete g.__signal_emit;
+    delete g.__language_storage_directory;
+    delete g.__language_address;
+    delete g.__language_settings;
+    delete g.languageStorageDirectory;
+    delete g.languageAddress;
+    delete g.languageSettings;
 }

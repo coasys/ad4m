@@ -1,13 +1,17 @@
 use deno_core::op2;
 use serde_json::Value as JsonValue;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::{
     graphql::graphql_types::{PerspectiveExpression, PerspectiveState},
+    js_core::error::AnyhowWrapperError,
     types::PerspectiveDiff,
 };
+
+use super::IsolateState;
 
 lazy_static::lazy_static! {
     /// Global registry mapping cell_id hex key ("dnaHash:agentPubkey") → language_address.
@@ -71,9 +75,76 @@ fn ad4m_signal_emitted(#[serde] signal: JsonValue, #[string] language_address: S
     });
 }
 
+// ============================================================================
+// Language context getters — set by JsCore before calling init()
+// ============================================================================
+
+thread_local! {
+    static ISOLATE_STATE: RefCell<Option<IsolateState>> = RefCell::new(None);
+}
+
+/// Initialize the thread-local isolate state with the language context.
+/// Must be called by LanguageRuntime before init_for_language().
+pub fn init_isolate_state(state: IsolateState) {
+    ISOLATE_STATE.with(|cell| {
+        *cell.borrow_mut() = Some(state);
+    });
+}
+
+/// Read the current isolate state (for use in op functions).
+pub fn with_isolate_state<R>(f: impl FnOnce(&IsolateState) -> R) -> R {
+    ISOLATE_STATE.with(|cell| {
+        let borrowed = cell.borrow();
+        let state = borrowed.as_ref().expect("IsolateState not set");
+        f(state)
+    })
+}
+
+#[op2]
+#[string]
+fn language_storage_directory() -> Result<String, AnyhowWrapperError> {
+    with_isolate_state(|state| {
+        state
+            .language_storage_directory
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("languageStorageDirectory not set yet").into())
+    })
+}
+
+#[op2]
+#[string]
+fn language_address() -> Result<String, AnyhowWrapperError> {
+    with_isolate_state(|state| {
+        state
+            .language_address
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("languageAddress not set yet").into())
+    })
+}
+
+#[op2]
+#[string]
+fn language_settings() -> Result<String, AnyhowWrapperError> {
+    with_isolate_state(|state| {
+        state
+            .language_settings
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("languageSettings not set yet").into())
+    })
+}
+
 deno_core::extension!(
     language_service,
-    ops = [perspective_diff_received, sync_state_changed, telepresence_signal_received, register_holochain_signal_handler, ad4m_signal_emitted],
+    ops = [
+        perspective_diff_received,
+        sync_state_changed,
+        telepresence_signal_received,
+        register_holochain_signal_handler,
+        ad4m_signal_emitted,
+        language_storage_directory,
+        language_address,
+        language_settings,
+    ],
     esm_entry_point = "ext:language_service/languages_extension.js",
     esm = [dir "src/js_core", "languages_extension.js"]
 );

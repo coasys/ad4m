@@ -8,7 +8,10 @@
  * ## How to write a flat export language
  * 
  * 1. Export `name` and `version` — required metadata
- * 2. Export `init(contextJson)` — receives JSON with { storageDirectory, customSettings, languageAddress }
+ * 2. Export `init()` — NEW: takes NO arguments. Context is accessed via:
+ *    - globalThis.languageStorageDirectory() — returns storage directory path
+ *    - globalThis.languageAddress() — returns this language's address
+ *    - globalThis.languageSettings() — returns settings JSON string
  *    Delegates are on globalThis before init is called:
  *    - `globalThis.__agentProxy__` — agent identity & signing
  *    - `globalThis.__holochainDelegate__` — Holochain DNA registration & zome calls
@@ -72,9 +75,23 @@ let gossipRound = 0;
 
 // =============================================================================
 // init — required lifecycle function
+// NEW INTERFACE: init() takes NO arguments.
+// Context is accessed via flat import functions:
+// - languageStorageDirectory() — returns storage directory path
+// - languageAddress() — returns this language's address (DID)
+// - languageSettings() — returns settings JSON string
+// Agent & Holochain are available on globalThis:
+// - __agentProxy__ — agent identity & signing (legacy, still works)
+// - __holochainDelegate__ — Holochain DNA registration & calls (legacy)
 // =============================================================================
 
-export async function init(contextJson: string): Promise<void> {
+export async function init(): Promise<void> {
+    // NEW: Get language context via flat import functions
+    const storageDir = languageStorageDirectory();
+    const languageAddress = languageAddress();
+    const languageSettingsJson = languageSettings();
+    const languageSettings = languageSettingsJson ? JSON.parse(languageSettingsJson) : {};
+
     // Delegates are already on globalThis — grab them once here
     const agent: any = (globalThis as any).__agentProxy__;
     const holochain: any = (globalThis as any).__holochainDelegate__;

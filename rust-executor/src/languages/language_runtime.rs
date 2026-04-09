@@ -1,5 +1,6 @@
 use crate::agent::AgentContext;
 use crate::js_core::JsCore;
+use crate::languages::LanguageContext;
 use log::{debug, error, info, warn};
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
@@ -68,7 +69,7 @@ pub(crate) struct LanguageRuntimeRequest {
 #[derive(Debug)]
 pub(crate) enum LanguageOperation {
     Execute(String, AgentContext),
-    LoadModule(String),
+    LoadModule(String, LanguageContext),
     LoadLanguage(JsonValue),
     RegisterCallbacks,
     Teardown,
@@ -115,10 +116,19 @@ impl LanguageRuntime {
     /// Load a language bundle from source code directly (no file I/O in JS).
     /// The bundle is loaded as an ES module via Deno's runtime API and its
     /// default export is captured as `globalThis.languageConstructor`.
-    pub async fn load_module(&self, source: &str) -> Result<(), String> {
+    pub async fn load_module(&self, source: &str, language_context: &LanguageContext) -> Result<(), String> {
         // Use a synthetic URL unique to this language so Deno's module map
         // doesn't collide if multiple languages are loaded in the same runtime.
         let specifier = format!("https://ad4m.language/{}/bundle.js", self.language_address);
+
+        // Set the language context into the thread-local BEFORE loading the module
+        // This makes language_*() ops available to the language's init()
+        self.js_core.set_language_context(
+            language_context.storage_directory.to_string_lossy().to_string(),
+            language_context.language_address.clone(),
+            language_context.custom_settings.as_ref().map(|s| s.to_string()).unwrap_or_default(),
+        );
+
         self.js_core
             .load_module_from_source(&specifier, source.to_string())
             .await
@@ -298,8 +308,8 @@ impl LanguageRuntime {
                                         set_runtime_agent_context(&AgentContext::main_agent());
                                         r
                                     }
-                                    LanguageOperation::LoadModule(path) => {
-                                        self.load_module(&path).await.map(|_| String::new())
+                                    LanguageOperation::LoadModule(path, context) => {
+                                        self.load_module(&path, &context).await.map(|_| String::new())
                                     }
                                     LanguageOperation::LoadLanguage(context) => {
                                         self.load_language(context).await.map(|_| String::new())

@@ -8,6 +8,7 @@ use tokio::sync::{
 };
 
 use crate::agent::AgentContext;
+use crate::languages::LanguageContext;
 
 use super::language_runtime::{LanguageOperation, LanguageRuntime, LanguageRuntimeRequest};
 
@@ -117,8 +118,8 @@ impl LanguageRuntimeHandle {
             .await
     }
 
-    pub async fn load_module(&self, path: String) -> Result<(), String> {
-        self.send(LanguageOperation::LoadModule(path))
+    pub async fn load_module(&self, path: String, context: LanguageContext) -> Result<(), String> {
+        self.send(LanguageOperation::LoadModule(path, context))
             .await
             .map(|_| ())
     }

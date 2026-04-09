@@ -194,8 +194,11 @@ impl LanguageController {
                 message: format!("Failed to read language bundle {:?}: {}", bundle_path, e),
             })?;
         info!("Loading module for language {}", language_address);
+        // Get JSON representation BEFORE moving language_context
+        let language_context_json = language_context.to_json();
+
         runtime_handle
-            .load_module(bundle_source)
+            .load_module(bundle_source, language_context)
             .await
             .map_err(|e| LanguageError::LoadError {
                 address: language_address.clone(),
@@ -206,7 +209,7 @@ impl LanguageController {
         // Initialize the language with context
         info!("Initializing language {}", language_address);
         runtime_handle
-            .load_language(language_context.to_json())
+            .load_language(language_context_json)
             .await
             .map_err(|e| LanguageError::LoadError {
                 address: language_address.clone(),

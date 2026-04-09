@@ -294,14 +294,14 @@ async function initLanguage(contextJson) {
         globalThis.__agentProxy__ = agentProxy;
 
         // Set up flat WASM import functions on globalThis (needed before init())
+        // These provide: languageStorageDirectory(), languageAddress(), languageSettings(),
+        // plus agentDid(), agentSign(), holochainCall(), signalEmit(), etc.
         setupFlatWasmImports();
 
-        // init() receives serializable context as JSON string
-        await mod.init(JSON.stringify({
-            storageDirectory: fullContext.storageDirectory,
-            customSettings: fullContext.customSettings,
-            languageAddress: languageAddress,
-        }));
+        // NEW INTERFACE: init() takes NO arguments — context is accessed via flat import functions
+        // The language calls languageStorageDirectory(), languageAddress(), languageSettings()
+        // to get its storage dir, address, and settings from the runtime.
+        await mod.init();
 
         // Build language instance from flat exports
         language = { name: mod.name || "unknown", version: mod.version };
