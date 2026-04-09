@@ -5,7 +5,6 @@
 
 // Polyfill Node.js Buffer on globalThis – many language bundles depend on it.
 import { Buffer } from "node:buffer";
-import { setupFlatWasmImports, teardownFlatWasmImports } from "./flat_wasm_imports.ts";
 globalThis.Buffer = Buffer;
 
 // Minimal DOM stubs – language bundles that include Svelte Icon components
@@ -293,14 +292,9 @@ async function initLanguage(contextJson) {
         globalThis.__ad4mSignal__ = ad4mSignal;
         globalThis.__agentProxy__ = agentProxy;
 
-        // Set up flat WASM import functions on globalThis (needed before init())
-        // These provide: languageStorageDirectory(), languageAddress(), languageSettings(),
-        // plus agentDid(), agentSign(), holochainCall(), signalEmit(), etc.
-        setupFlatWasmImports();
-
-        // NEW INTERFACE: init() takes NO arguments — context is accessed via flat import functions
+        // NEW INTERFACE: init() takes NO arguments — context is accessed via globalThis
         // The language calls languageStorageDirectory(), languageAddress(), languageSettings()
-        // to get its storage dir, address, and settings from the runtime.
+        // which must be set up by the runtime before calling init().
         await mod.init();
 
         // Build language instance from flat exports
@@ -391,11 +385,7 @@ async function initLanguage(contextJson) {
         }
         // Teardown
         if (mod.teardown) {
-            const originalTeardown = mod.teardown;
-            language.teardown = async () => {
-                teardownFlatWasmImports();
-                return originalTeardown();
-            };
+            language.teardown = mod.teardown;
         }
 
     } else {

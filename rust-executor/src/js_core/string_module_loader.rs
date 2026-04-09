@@ -59,12 +59,14 @@ pub struct StringModuleLoader {
 
 impl StringModuleLoader {
     pub fn new() -> Self {
+        eprintln!("DATADEBUG: StringModuleLoader::new() called");
         StringModuleLoader {
             modules: HashMap::new(),
         }
     }
 
     pub fn add_module(&mut self, specifier: &str, code: &str) {
+        eprintln!("DATADEBUG: add_module called: {}", specifier);
         self.modules.insert(specifier.to_string(), code.to_string());
     }
 }
@@ -76,7 +78,9 @@ impl ModuleLoader for StringModuleLoader {
         referrer: &str,
         _kind: ResolutionKind,
     ) -> Result<ModuleSpecifier, ModuleLoaderError> {
+        eprintln!("DATADEBUG: resolve() called: specifier={}, referrer={}", specifier, referrer);
         let module_specifier = deno_core::resolve_import(specifier, referrer)?;
+        eprintln!("DATADEBUG: resolve() succeeded: {}", module_specifier);
         Ok(module_specifier)
     }
 
@@ -87,6 +91,13 @@ impl ModuleLoader for StringModuleLoader {
         _is_dyn_import: bool,
         _request_module_type: RequestedModuleType,
     ) -> ModuleLoadResponse {
+        let specifier_str = module_specifier.to_string();
+        eprintln!("DATADEBUG: load() called for: {}", specifier_str);
+        eprintln!("DATADEBUG: load() self.modules has {} entries", self.modules.len());
+        for (k, v) in self.modules.iter() {
+            eprintln!("DATADEBUG:   module in loader: {} (len={})", k, v.len());
+        }
+
         match module_specifier.to_file_path() {
             Ok(path) => match std::fs::read_to_string(path) {
                 Ok(code) => ModuleLoadResponse::Sync(maybe_transpile(module_specifier, code)),
@@ -96,14 +107,12 @@ impl ModuleLoader for StringModuleLoader {
                 }
             },
             Err(_err) => {
-                let module_code = self.modules.get(module_specifier.as_str()).cloned();
+                let module_code = self.modules.get(specifier_str.as_str()).cloned();
+                eprintln!("DATADEBUG: load() looking up in modules dict, found={}", module_code.is_some());
 
                 ModuleLoadResponse::Sync(match module_code {
                     Some(code) => {
-                        // Check if the module specifier ends with .ts or .tsx
-                        if module_specifier.as_str().ends_with(".ts")
-                            || module_specifier.as_str().ends_with(".tsx")
-                        {
+                        if specifier_str.ends_with(".ts") || specifier_str.ends_with(".tsx") {
                             maybe_transpile(module_specifier, code)
                         } else {
                             Ok(ModuleSource::new(
@@ -114,7 +123,10 @@ impl ModuleLoader for StringModuleLoader {
                             ))
                         }
                     }
-                    None => Err(ModuleLoaderError::NotFound),
+                    None => {
+                        eprintln!("DATADEBUG: load() module NOT found in StringModuleLoader");
+                        Err(ModuleLoaderError::NotFound)
+                    }
                 })
             }
         }

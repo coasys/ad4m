@@ -159,6 +159,49 @@ impl LanguageRuntime {
                     // New flat export pattern
                     globalThis.languageModule = mod;
                     globalThis.__language_pattern__ = "flat";
+                    // Set up globalThis for flat pattern - these are accessed by WASM languages
+                    // via the __ import mechanism before init() is called
+                    // Wait for LANGUAGE_CONTROLLER and AGENT to be available (loaded from extensions)
+                    const checkGlobals = () => {{
+                        console.log("[checkGlobals] Checking LANGUAGE_CONTROLLER:", typeof LANGUAGE_CONTROLLER);
+                        if (typeof LANGUAGE_CONTROLLER !== "undefined") {{
+                            console.log("[checkGlobals] LANGUAGE_CONTROLLER keys:", Object.keys(LANGUAGE_CONTROLLER));
+                            console.log("[checkGlobals] languageStorageDirectory:", typeof LANGUAGE_CONTROLLER.languageStorageDirectory);
+                        }}
+                        console.log("[checkGlobals] Checking AGENT:", typeof AGENT);
+                        if (typeof LANGUAGE_CONTROLLER !== "undefined" && typeof AGENT !== "undefined") {{
+                            globalThis.languageStorageDirectory = () => LANGUAGE_CONTROLLER.languageStorageDirectory();
+                            globalThis.languageAddress = () => LANGUAGE_CONTROLLER.languageAddress();
+                            globalThis.languageSettings = () => LANGUAGE_CONTROLLER.languageSettings();
+                            // Agent globals for flat pattern
+                            globalThis.__agent_did = () => AGENT.did();
+                            globalThis.__agent_signing_key_id = () => AGENT.signingKeyId();
+                            globalThis.__agent_sign = (payload) => AGENT.sign(payload);
+                            globalThis.__agent_sign_string_hex = (payload) => AGENT.signStringHex(payload);
+                            globalThis.__agent_create_signed_expression = (data) => AGENT.createSignedExpression(data);
+                            globalThis.__agent_get_all_local_user_dids = () => AGENT.getAllLocalUserDIDs();
+                            globalThis.__agent_create_signed_expression_for_user = (userEmail, data) => AGENT.createSignedExpressionForUser(userEmail, data);
+                            globalThis.__agent_did_for_user = (userEmail) => AGENT.didForUser(userEmail);
+                            console.log("[capture_script] Set up flat pattern globals");
+                            return true;
+                        }}
+                        return false;
+                    }};
+                    // If not available yet, set up polling
+                    if (!checkGlobals()) {{
+                        console.log("[capture_script] Waiting for LANGUAGE_CONTROLLER/AGENT extensions...");
+                        let retries = 0;
+                        const waitForGlobals = () => {{
+                            if (checkGlobals()) return;
+                            retries++;
+                            if (retries < 50) {{
+                                setTimeout(waitForGlobals, 100);
+                            }} else {{
+                                console.error("[capture_script] Timeout waiting for globals");
+                            }}
+                        }};
+                        waitForGlobals();
+                    }}
                 }} else {{
                     // Fallback: assume legacy (object with callable default)
                     globalThis.languageConstructor = mod;

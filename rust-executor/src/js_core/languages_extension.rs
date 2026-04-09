@@ -146,5 +146,9 @@ deno_core::extension!(
         language_settings,
     ],
     esm_entry_point = "ext:language_service/languages_extension.js",
-    esm = [dir "src/js_core", "languages_extension.js"]
+    esm = [
+        dir "src/js_core",
+        "languages_extension.js",
+        "flat_wasm_imports.js"
+    ]
 );

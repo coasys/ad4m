@@ -6,6 +6,7 @@ use super::agent_extension::agent_service;
 use super::languages_extension::language_service;
 use super::pubsub_extension::pubsub_service;
 use super::signature_extension::signature_service;
+// use super::flat_wasm_imports_extension::flat_wasm_imports_service;
 use super::string_module_loader::StringModuleLoader;
 use super::utils_extension::utils_service;
 use super::wallet_extension::wallet_service;
@@ -54,6 +55,7 @@ pub fn language_worker_options() -> WorkerOptions {
             entanglement_service::init(),
             runtime_service::init(),
             language_service::init(),
+            
         ],
         ..Default::default()
     }

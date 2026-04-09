@@ -27,6 +27,7 @@ mod options;
 pub mod pubsub_extension;
 pub mod signature_extension;
 mod string_module_loader;
+pub mod flat_wasm_imports_extension;  // ASCII-only JS extension - integrated into language_service extension
 pub mod utils;
 pub mod utils_extension;
 pub mod wallet_extension;
@@ -142,6 +143,7 @@ impl JsCore {
         let permissions = Permissions::from_options(&*permission_desc_parser, &permissions_opts)
             .expect("Failed to create sandboxed permissions for language runtime");
         let container = PermissionsContainer::new(permission_desc_parser, permissions);
+        eprintln!("DATADEBUG: JsCore::new_for_language() - about to call new_with_options()");
 
         Self::new_with_options(
             options::language_main_module_url(),
@@ -157,6 +159,7 @@ impl JsCore {
         worker_options: WorkerOptions,
         permissions: PermissionsContainer,
     ) -> Self {
+        eprintln!("DATADEBUG: new_with_options() called with module_url: {}", module_url);
         let fs = Arc::new(RealFs);
 
         let worker = MainWorker::bootstrap_from_options(
