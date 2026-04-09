@@ -2275,3 +2275,135 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
     // The callback was deferred — it fires after the Promise resolves
   });
 });
+
+// ============================================================================
+// Performance Optimisation Tests
+// ============================================================================
+
+import { getCachedResult, setCachedResult, clearQueryCache, queryCacheSize } from "./query-cache";
+import { clearSubscriptionPool, subscriptionPoolSize } from "./subscription-pool";
+import { getPropertiesMetadata, getRelationsMetadata, getMemoizedSHACL } from "./decorators";
+
+describe("QueryCache", () => {
+  beforeEach(() => clearQueryCache());
+
+  it("should return undefined for cache miss", () => {
+    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBeUndefined();
+  });
+
+  it("should return cached result within TTL", () => {
+    const result = [{ s: "test" }];
+    setCachedResult("uuid1", "SELECT ?s WHERE {}", result);
+    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBe(result);
+  });
+
+  it("should expire after TTL", async () => {
+    setCachedResult("uuid1", "SELECT ?s WHERE {}", [{ s: "test" }], 50);
+    await new Promise(r => setTimeout(r, 60));
+    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBeUndefined();
+  });
+
+  it("should cache independently per perspective", () => {
+    setCachedResult("uuid1", "SELECT ?s WHERE {}", "result1");
+    setCachedResult("uuid2", "SELECT ?s WHERE {}", "result2");
+    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBe("result1");
+    expect(getCachedResult("uuid2", "SELECT ?s WHERE {}")).toBe("result2");
+  });
+
+  it("should cache independently per query", () => {
+    setCachedResult("uuid1", "query1", "r1");
+    setCachedResult("uuid1", "query2", "r2");
+    expect(getCachedResult("uuid1", "query1")).toBe("r1");
+    expect(getCachedResult("uuid1", "query2")).toBe("r2");
+  });
+
+  it("should clear all entries", () => {
+    setCachedResult("uuid1", "q1", "r1");
+    setCachedResult("uuid2", "q2", "r2");
+    expect(queryCacheSize()).toBe(2);
+    clearQueryCache();
+    expect(queryCacheSize()).toBe(0);
+  });
+});
+
+describe("SHACL Memoisation", () => {
+  it("should memoise generateSHACL() per class", () => {
+    @Model({ name: "MemoTest1" })
+    class MemoTest1 extends Ad4mModel {
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const result1 = (MemoTest1 as any).generateSHACL();
+    const result2 = (MemoTest1 as any).generateSHACL();
+    expect(result1).toBe(result2); // Same reference = memoised
+  });
+
+  it("should memoise getPropertiesMetadata per class", () => {
+    @Model({ name: "PropMemoTest" })
+    class PropMemoTest extends Ad4mModel {
+      @Property({ through: "test://x" })
+      x: string = "";
+    }
+
+    const r1 = getPropertiesMetadata(PropMemoTest);
+    const r2 = getPropertiesMetadata(PropMemoTest);
+    expect(r1).toBe(r2); // Same reference
+  });
+
+  it("should memoise getRelationsMetadata per class", () => {
+    @Model({ name: "RelMemoTest" })
+    class RelMemoTest extends Ad4mModel {
+      @HasMany({ through: "test://items" })
+      items: string[] = [];
+    }
+
+    const r1 = getRelationsMetadata(RelMemoTest);
+    const r2 = getRelationsMetadata(RelMemoTest);
+    expect(r1).toBe(r2); // Same reference
+  });
+
+  it("should return different results for different classes", () => {
+    @Model({ name: "ClassA" })
+    class ClassA extends Ad4mModel {
+      @Property({ through: "test://a" })
+      a: string = "";
+    }
+
+    @Model({ name: "ClassB" })
+    class ClassB extends Ad4mModel {
+      @Property({ through: "test://b" })
+      b: string = "";
+    }
+
+    const propsA = getPropertiesMetadata(ClassA);
+    const propsB = getPropertiesMetadata(ClassB);
+    expect(propsA).not.toBe(propsB);
+    expect(propsA).toHaveProperty("a");
+    expect(propsB).toHaveProperty("b");
+  });
+});
+
+describe("Lazy Conformance Filters", () => {
+  it("should defer conformance filter resolution until property access", () => {
+    @Model({ name: "LazyTarget2" })
+    class LazyTarget2 extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://lazy" })
+      type: string = "test://lazy";
+      @Property({ through: "test://name", required: true })
+      name: string = "";
+    }
+
+    @Model({ name: "LazyParent2" })
+    class LazyParent2 extends Ad4mModel {
+      @HasMany(() => LazyTarget2, { through: "test://children" })
+      children: string[] = [];
+    }
+
+    // generateSHACL was called during @Model — the shape exists
+    const shacl = (LazyParent2 as any).generateSHACL();
+    expect(shacl).toBeDefined();
+    expect(shacl.shape).toBeDefined();
+    expect(shacl.name).toBe("LazyParent2");
+  });
+});

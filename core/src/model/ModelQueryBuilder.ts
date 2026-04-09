@@ -12,6 +12,7 @@ import type {
   AllInstancesResult, ResultsWithTotalCount, PaginationResult,
 } from "./types";
 import { groupSPARQLResults } from "./query-sparql";
+import { pooledSubscribe } from "./subscription-pool";
 
 /** Query builder for Ad4mModel queries.
  * Allows building queries with a fluent interface and either running them once
@@ -379,43 +380,40 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
     if (this.engineFlag === 'sparql') {
         const sparqlQuery = await ctor.queryToSPARQL(this.perspective, this.queryParams);
-        // TODO (3.6 - Subscription predicate filtering): Extract predicates used in the
-        // SPARQL query and pass them as hints to subscribeQuery so the Rust-side
-        // subscription can filter link-change notifications by predicate, avoiding
-        // unnecessary re-queries for unrelated link changes. This requires Rust-side
-        // support in PerspectiveProxy.subscribeQuery to accept a predicate whitelist.
-        this.currentSubscription = await this.perspective.subscribeQuery(sparqlQuery);
 
         // Track last emitted result fingerprint to suppress duplicate callbacks
-        // when the raw SPARQL result changes but the JS-filtered set doesn't
-        // (e.g. a non-matching record was added/removed).
         let lastResultFingerprint: string | null = null;
 
         const buildFingerprint = (results: any[]) => {
-            // Lightweight fingerprint: IDs + count + timestamps.
-            // Avoids JSON.stringify of all properties for performance.
-            // Catches additions, removals, and timestamp-based updates.
             if (results.length === 0) return '0:';
             const ids = results.map((r: any) => r.id || '').sort().join(',');
             const ts = results.map((r: any) => r.updatedAt || r.timestamp || '').join(',');
             return `${results.length}:${ids}:${ts}`;
         };
 
-        const processResults = async (result: any) => {
-            const { results } = await this.processSparqlResult(result);
-            const fp = buildFingerprint(results);
-            if (fp === lastResultFingerprint) return; // filtered set unchanged — skip callback
-            lastResultFingerprint = fp;
-            callback(results as T[]);
+        const hydrate = async (rawResult: any) => {
+            const { results } = await this.processSparqlResult(rawResult);
+            return results;
         };
 
-        this.currentSubscription.onResult(processResults);
-        
-        // Process initial result
-        const { results } = await this.processSparqlResult(this.currentSubscription.result);
-        lastResultFingerprint = buildFingerprint(results);
-        // Initial results returned via Promise only — callback is for subsequent updates
-        return results as T[];
+        const pooled = await pooledSubscribe(
+            this.perspective,
+            sparqlQuery,
+            hydrate,
+            (hydratedResults: T[]) => {
+                const fp = buildFingerprint(hydratedResults);
+                if (fp === lastResultFingerprint) return;
+                lastResultFingerprint = fp;
+                callback(hydratedResults);
+            },
+        );
+
+        // Store dispose function as subscription
+        this.currentSubscription = { dispose: pooled.dispose };
+
+        const initialResults = pooled.initialResult as T[];
+        lastResultFingerprint = buildFingerprint(initialResults);
+        return initialResults;
     } else {
         const query = await ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
         this.currentSubscription = await this.perspective.subscribeInfer(query);

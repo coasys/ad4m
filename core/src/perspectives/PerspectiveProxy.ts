@@ -12,12 +12,21 @@ import { AIClient } from "../ai/AIClient";
 import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
 import { gql } from "@apollo/client/core";
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
+import { getCachedResult, setCachedResult } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
 
 type QueryCallback = (result: AllInstancesResult) => void;
+
+/** Module-level cache of perspective:className pairs already registered via ensureSubjectClass */
+const ensuredSubjectClasses = new Set<string>();
+
+/** Clear the ensured subject class cache (for testing). */
+export function clearEnsuredSubjectClasses(): void {
+    ensuredSubjectClasses.clear();
+}
 
 // Generic subscription interface that matches Apollo's Subscription
 interface Unsubscribable {
@@ -547,7 +556,11 @@ export class PerspectiveProxy {
      * @returns Query results as parsed JSON
      */
     async querySparql(query: string): Promise<any> {
-        return await this.#client.querySparql(this.#handle.uuid, query)
+        const cached = getCachedResult(this.#handle.uuid, query);
+        if (cached !== undefined) return cached;
+        const result = await this.#client.querySparql(this.#handle.uuid, query);
+        setCachedResult(this.#handle.uuid, query, result);
+        return result;
     }
 
     /**
@@ -2089,6 +2102,10 @@ export class PerspectiveProxy {
         // Get the class name from the JS class
         const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
         
+        // Skip if already registered for this perspective
+        const cacheKey = `${this.#handle.uuid}:${className}`;
+        if (ensuredSubjectClasses.has(cacheKey)) return;
+
         // Note: Duplicate checking is handled on the Rust side in add_sdna
         
         // Generate SHACL SDNA (Prolog-free)
@@ -2105,6 +2122,9 @@ export class PerspectiveProxy {
         // Pass SHACL JSON to backend (Prolog-free)
         // Backend stores SHACL links directly
         await this.addSdna(className, '', 'subject_class', shaclJson);
+        
+        // Mark as registered for this perspective
+        ensuredSubjectClasses.add(cacheKey);
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {

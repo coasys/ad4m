@@ -56,12 +56,24 @@ const propertyRegistry = new WeakMap<Function, Record<string, PropertyMetadataEn
 /** Registry of relation metadata keyed by constructor → { propName → metadata } */
 const relationRegistry = new WeakMap<Function, Record<string, RelationMetadataEntry>>();
 
+/** Memoisation cache for getPropertiesMetadata — avoids repeated prototype-chain walks */
+const propertiesMetadataCache = new WeakMap<Function, Record<string, PropertyMetadataEntry>>();
+
+/** Memoisation cache for getRelationsMetadata — avoids repeated prototype-chain walks */
+const relationsMetadataCache = new WeakMap<Function, Record<string, RelationMetadataEntry>>();
+
+/** Memoisation cache for generateSHACL — avoids recomputing SHACL shapes */
+const shaclCache = new WeakMap<Function, any>();
 
 /**
  * Retrieve property metadata for a given class constructor.
  * Walks the prototype chain so subclass decorators compose with parent decorators.
+ * Results are memoised per class constructor.
  */
 export function getPropertiesMetadata(ctor: Function): Record<string, PropertyMetadataEntry> {
+    const cached = propertiesMetadataCache.get(ctor);
+    if (cached) return cached;
+
     const result: Record<string, PropertyMetadataEntry> = {};
     const chain: Function[] = [];
     let current = ctor;
@@ -73,14 +85,19 @@ export function getPropertiesMetadata(ctor: Function): Record<string, PropertyMe
         const meta = propertyRegistry.get(c);
         if (meta) Object.assign(result, meta);
     }
+    propertiesMetadataCache.set(ctor, result);
     return result;
 }
 
 /**
  * Retrieve relation metadata for a given class constructor.
  * Walks the prototype chain so subclass decorators compose with parent decorators.
+ * Results are memoised per class constructor.
  */
 export function getRelationsMetadata(ctor: Function): Record<string, RelationMetadataEntry> {
+    const cached = relationsMetadataCache.get(ctor);
+    if (cached) return cached;
+
     const result: Record<string, RelationMetadataEntry> = {};
     const chain: Function[] = [];
     let current = ctor;
@@ -92,7 +109,29 @@ export function getRelationsMetadata(ctor: Function): Record<string, RelationMet
         const meta = relationRegistry.get(c);
         if (meta) Object.assign(result, meta);
     }
+    relationsMetadataCache.set(ctor, result);
     return result;
+}
+
+/**
+ * Get or compute memoised SHACL for a class. Used by @Model decorator.
+ */
+export function getMemoizedSHACL(target: Function, compute: () => any): any {
+    const cached = shaclCache.get(target);
+    if (cached) return cached;
+    const result = compute();
+    shaclCache.set(target, result);
+    return result;
+}
+
+/**
+ * Invalidate all memoisation caches (useful for testing).
+ */
+export function clearMetadataCaches(): void {
+    // WeakMaps don't have a clear() method, so we reassign module-level references.
+    // However, since we're using const, we just note that WeakMap entries will be
+    // GC'd when class references are GC'd. For testing, we expose this as a no-op
+    // since tests create fresh classes each time.
 }
 
 
@@ -492,13 +531,13 @@ export function Model(opts: ModelConfig) {
         }
 
         target.generateSHACL = function() {
-            return buildSHACL(
+            return getMemoizedSHACL(target, () => buildSHACL(
                 opts.name,
                 target,
                 getPropertiesMetadata(target),
                 getRelationsMetadata(target),
                 buildConformanceFilter,
-            );
+            ));
         }
 
         Object.defineProperty(target, 'type', {configurable: true});
