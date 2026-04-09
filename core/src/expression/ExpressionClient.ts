@@ -22,16 +22,15 @@ export class ExpressionClient {
             } catch(e) {}
         }
 
-        return this.#restClient.get<ExpressionRendered>(`/api/v1/expressions?url=${encodeURIComponent(url)}`)
+        return this.#restClient.get<ExpressionRendered>(`/api/v1/expressions/${encodeURIComponent(url)}`)
     }
 
     async getMany(urls: string[]): Promise<ExpressionRendered[]> {
-        const params = urls.map(u => `urls=${encodeURIComponent(u)}`).join('&')
-        return this.#restClient.get<ExpressionRendered[]>(`/api/v1/expressions/many?${params}`)
+        return this.#restClient.post<ExpressionRendered[]>('/api/v1/expressions/many', { urls })
     }
 
     async getRaw(url: string): Promise<string> {
-        return this.#restClient.get<string>(`/api/v1/expressions/raw?url=${encodeURIComponent(url)}`)
+        return this.#restClient.get<string>(`/api/v1/expressions/${encodeURIComponent(url)}?raw=true`)
     }
 
     async create(content: any, languageAddress: string): Promise<string> {
@@ -40,10 +39,10 @@ export class ExpressionClient {
     }
 
     async interactions(url: string): Promise<InteractionMeta[]> {
-        return this.#restClient.get<InteractionMeta[]>(`/api/v1/expressions/interactions?url=${encodeURIComponent(url)}`)
+        return this.#restClient.get<InteractionMeta[]>(`/api/v1/expressions/${encodeURIComponent(url)}/interactions`)
     }
 
     async interact(url: string, interactionCall: InteractionCall): Promise<string|null> {
-        return this.#restClient.post<string|null>(`/api/v1/expressions/interact`, { url, interactionCall })
+        return this.#restClient.post<string|null>(`/api/v1/expressions/${encodeURIComponent(url)}/interact`, { interactionCall })
     }
 }

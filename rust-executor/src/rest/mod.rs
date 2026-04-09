@@ -1,17 +1,10 @@
 //! REST API module — `/api/v1/*`
 //!
-<<<<<<< HEAD
-//! Axum-based REST API that replaces the former warp/GraphQL server.
-
-pub mod agent;
-pub mod ai;
-=======
 //! Axum-based REST API server.
 
 pub mod agent;
 pub mod ai;
 pub mod audio_ws;
->>>>>>> origin/feat/audio-transport-optimisation
 pub mod auth;
 pub mod errors;
 pub mod events;
@@ -24,12 +17,9 @@ pub mod runtime;
 pub mod types;
 pub mod users;
 
-<<<<<<< HEAD
-=======
 #[cfg(test)]
 mod tests;
 
->>>>>>> origin/feat/audio-transport-optimisation
 use crate::Ad4mConfig;
 use auth::AppState;
 use axum::{
@@ -90,6 +80,7 @@ pub fn rest_router(state: AppState) -> Router {
             .route("/agent/by-did/{did}", get(agent::get_agent_by_did))
             .route("/agent/profile", patch(agent::update_profile))
             .route("/agent/generate", post(agent::generate_agent))
+            .route("/agent/import", post(agent::import_agent))
             .route("/agent/lock", post(agent::lock_agent))
             .route("/agent/unlock", post(agent::unlock_agent))
             .route("/agent/sign", post(agent::sign_message))
@@ -109,6 +100,10 @@ pub fn rest_router(state: AppState) -> Router {
                 get(agent::get_entanglement)
                     .post(agent::add_entanglement)
                     .delete(agent::delete_entanglement),
+            )
+            .route(
+                "/agent/entanglement-proof-preflight",
+                post(agent::entanglement_proof_preflight),
             )
             // ── Languages (6 endpoints) ──
             .route("/languages", get(languages::list_languages))
@@ -133,7 +128,7 @@ pub fn rest_router(state: AppState) -> Router {
                 "/languages/{address}/settings",
                 put(languages::write_settings),
             )
-            // ── Perspectives (10 endpoints) ──
+            // ── Perspectives (15+ endpoints) ──
             .route(
                 "/perspectives",
                 get(perspectives::list_perspectives).post(perspectives::create_perspective),
@@ -149,8 +144,31 @@ pub fn rest_router(state: AppState) -> Router {
                 get(perspectives::get_snapshot),
             )
             .route(
+                "/perspectives/{uuid}/publish-snapshot",
+                post(perspectives::publish_snapshot),
+            )
+            .route(
                 "/perspectives/{uuid}/links",
-                get(perspectives::query_links).post(perspectives::mutate_links),
+                get(perspectives::query_links)
+                    .post(perspectives::add_link)
+                    .put(perspectives::update_link)
+                    .delete(perspectives::remove_link),
+            )
+            .route(
+                "/perspectives/{uuid}/links/bulk",
+                post(perspectives::add_links_bulk),
+            )
+            .route(
+                "/perspectives/{uuid}/links/remove-bulk",
+                post(perspectives::remove_links_bulk),
+            )
+            .route(
+                "/perspectives/{uuid}/links/mutations",
+                post(perspectives::link_mutations),
+            )
+            .route(
+                "/perspectives/{uuid}/links/expression",
+                post(perspectives::add_link_expression),
             )
             .route(
                 "/perspectives/{uuid}/query",
@@ -160,6 +178,46 @@ pub fn rest_router(state: AppState) -> Router {
             .route(
                 "/perspectives/{uuid}/commands",
                 post(perspectives::execute_commands),
+            )
+            .route(
+                "/perspectives/{uuid}/batch",
+                post(perspectives::create_batch),
+            )
+            .route(
+                "/perspectives/{uuid}/batch/commit",
+                post(perspectives::commit_batch),
+            )
+            .route(
+                "/perspectives/{uuid}/subscribe-query",
+                post(perspectives::subscribe_query),
+            )
+            .route(
+                "/perspectives/{uuid}/subscribe-surreal-query",
+                post(perspectives::subscribe_surreal_query),
+            )
+            .route(
+                "/perspectives/{uuid}/keep-alive-query",
+                post(perspectives::keep_alive_query),
+            )
+            .route(
+                "/perspectives/{uuid}/keep-alive-surreal-query",
+                post(perspectives::keep_alive_surreal_query),
+            )
+            .route(
+                "/perspectives/{uuid}/dispose-query-subscription",
+                post(perspectives::dispose_query_subscription),
+            )
+            .route(
+                "/perspectives/{uuid}/dispose-surreal-query-subscription",
+                post(perspectives::dispose_surreal_query_subscription),
+            )
+            .route(
+                "/perspectives/{uuid}/create-subject",
+                post(perspectives::create_subject),
+            )
+            .route(
+                "/perspectives/{uuid}/get-subject-data",
+                post(perspectives::get_subject_data),
             )
             // ── Neighbourhoods (7 endpoints) ──
             .route(
@@ -206,13 +264,15 @@ pub fn rest_router(state: AppState) -> Router {
                 "/expressions/{url}/interact",
                 post(expressions::interact_expression),
             )
-            // ── Runtime (17 endpoints) ──
+            // ── Runtime (17+ endpoints) ──
             .route("/runtime/info", get(runtime::get_runtime_info))
             .route("/runtime/quit", post(runtime::quit_runtime))
             .route("/runtime/status", put(runtime::set_status))
             .route("/runtime/open-link", post(runtime::open_link))
             .route("/runtime/export", post(runtime::export_data))
             .route("/runtime/import", post(runtime::import_data))
+            .route("/runtime/tls-domain", get(runtime::get_tls_domain))
+            .route("/runtime/compute-log", get(runtime::get_compute_log))
             .route(
                 "/runtime/holochain/restart",
                 post(runtime::restart_holochain),
@@ -253,13 +313,10 @@ pub fn rest_router(state: AppState) -> Router {
                 "/runtime/network-metrics",
                 get(runtime::get_network_metrics),
             )
-<<<<<<< HEAD
-=======
             .route(
                 "/runtime/free-hosting-enabled",
                 get(runtime::get_free_hosting_enabled).put(runtime::set_free_hosting_enabled),
             )
->>>>>>> origin/feat/audio-transport-optimisation
             // ── Users (7 endpoints + dev email test) ──
             .route(
                 "/users/multi-user-enabled",
@@ -269,6 +326,7 @@ pub fn rest_router(state: AppState) -> Router {
             .route("/users/{email}/wallet", get(users::get_user_wallet))
             .route("/users/login", post(users::login_user))
             .route("/users/verify-email", post(users::verify_email))
+            .route("/users/request-verification", post(users::request_verification))
             .route("/dev/email-test", post(users::email_test))
             // ── Hosting (3 endpoints) ──
             .route("/hosting", get(hosting::get_hosting_info))
@@ -277,13 +335,23 @@ pub fn rest_router(state: AppState) -> Router {
                 "/hosting/wallet/history",
                 get(hosting::get_hosting_wallet_history),
             )
-            // ── AI (8 endpoints) ──
+            .route(
+                "/hosting/wallet/hot-wallet-address",
+                put(hosting::set_hot_wallet_address),
+            )
+            .route(
+                "/hosting/request-payment",
+                post(hosting::request_payment),
+            )
+            // ── AI (8+ endpoints) ──
             .route("/ai/models", get(ai::list_models).post(ai::add_model))
             .route(
                 "/ai/models/{id}",
                 put(ai::update_model).delete(ai::remove_model),
             )
             .route("/ai/models/{id}/default", put(ai::set_default_model))
+            .route("/ai/models/default", get(ai::get_default_model))
+            .route("/ai/model-loading-status", get(ai::get_model_loading_status))
             .route("/ai/tasks", get(ai::list_tasks).post(ai::add_task))
             .route(
                 "/ai/tasks/{id}",
@@ -291,8 +359,6 @@ pub fn rest_router(state: AppState) -> Router {
             )
             .route("/ai/prompt", post(ai::ai_prompt))
             .route("/ai/embed", post(ai::ai_embed))
-<<<<<<< HEAD
-=======
             // ── AI Transcription (3 endpoints) ──
             .route(
                 "/ai/transcription/open",
@@ -308,7 +374,6 @@ pub fn rest_router(state: AppState) -> Router {
             )
             // ── WebSocket (1 endpoint) ──
             .route("/ws/audio", get(audio_ws::audio_websocket))
->>>>>>> origin/feat/audio-transport-optimisation
             // ── SSE Events (6 endpoints) ──
             .route("/events/agent", get(events::agent_events))
             .route(
@@ -331,11 +396,7 @@ pub fn rest_router(state: AppState) -> Router {
     .layer(cors)
 }
 
-<<<<<<< HEAD
-/// Start the REST API server (replaces the old warp/GraphQL server).
-=======
 /// Start the REST API server.
->>>>>>> origin/feat/audio-transport-optimisation
 pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     // Set global SMTP config for email verification
     crate::config::set_smtp_config(config.smtp_config.clone())?;
@@ -359,7 +420,6 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
         log::info!("Starting REST API (HTTP) on 127.0.0.1:{}", port);
         log::info!("Starting REST API (HTTPS) on 0.0.0.0:{}", tls_port);
 
-        // TLS server on 0.0.0.0
         let tls_state = AppState {
             admin_credential: admin_credential.clone(),
             auto_permit_cap_requests: auto_permit,
@@ -378,7 +438,6 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
                 .unwrap();
         });
 
-        // Plain HTTP on localhost
         let listener =
             tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
         axum::serve(listener, app.into_make_service()).await?;

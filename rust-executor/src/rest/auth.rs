@@ -5,11 +5,7 @@ use crate::agent::capabilities::{capabilities_from_token, is_admin_credential_to
 use crate::types::RequestContext;
 
 /// Auth context extracted from the Authorization header.
-<<<<<<< HEAD
-/// Mirrors the GraphQL RequestContext construction.
-=======
 /// Constructs the RequestContext from auth headers.
->>>>>>> origin/feat/audio-transport-optimisation
 #[derive(Clone)]
 pub struct AuthContext {
     pub capabilities: Result<Vec<Capability>, String>,
@@ -46,19 +42,6 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
 
-<<<<<<< HEAD
-=======
-        // Try Authorization header first, then fall back to ?token= query param
-        // (needed for SSE/EventSource which doesn't support custom headers)
->>>>>>> origin/feat/audio-transport-optimisation
-        let auth_header = parts
-            .headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-<<<<<<< HEAD
-            .unwrap_or("")
-            .to_string();
-=======
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
                 parts
@@ -71,7 +54,6 @@ where
                     })
                     .unwrap_or_default()
             });
->>>>>>> origin/feat/audio-transport-optimisation
 
         // Track last_seen for multi-user mode
         crate::agent::capabilities::track_last_seen_from_token(auth_header.clone()).await;

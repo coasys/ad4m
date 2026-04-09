@@ -116,52 +116,8 @@ pub async fn export_data(
         "db" => {
             let json_data = Ad4mDb::with_global_instance(|db| db.export_all_to_json())
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-<<<<<<< HEAD
-=======
             // SECURITY TODO: constrain file paths to ad4m data directory.
             // This is pre-existing behaviour from the GraphQL mutation.
->>>>>>> origin/feat/audio-transport-optimisation
-            std::fs::write(&body.file_path, serde_json::to_string_pretty(&json_data)?)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-        }
-        "perspective" => {
-            let uuid = body.perspective_uuid.as_ref().ok_or_else(|| {
-                ApiError::BadRequest("perspectiveUuid required for perspective export".into())
-            })?;
-            let serialized = crate::perspectives::export_perspective(uuid)
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            std::fs::write(&body.file_path, serde_json::to_string_pretty(&serialized)?)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-        }
-        other => {
-            return Err(ApiError::BadRequest(format!(
-                "Unknown export type: {}",
-                other
-            )))
-        }
-    }
-
-    Ok(Json(true))
-}
-
-/// POST /runtime/import — import db or perspective
-pub async fn import_data(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(body): Json<ImportRequest>,
-) -> Result<Json<bool>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
-
-    match body.import_type.as_str() {
-        "db" => {
-<<<<<<< HEAD
-=======
-            // SECURITY TODO: constrain file paths to ad4m data directory.
-            // This is pre-existing behaviour from the GraphQL mutation.
->>>>>>> origin/feat/audio-transport-optimisation
             let data = std::fs::read_to_string(&body.file_path)
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             let json_data: serde_json::Value =
@@ -522,11 +478,7 @@ pub async fn get_hc_agent_infos(
 pub async fn add_hc_agent_infos(
     State(_state): State<AppState>,
     auth: AuthContext,
-<<<<<<< HEAD
-    Json(infos): Json<String>,
-=======
     Json(body): Json<AddAgentInfosRequest>,
->>>>>>> origin/feat/audio-transport-optimisation
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
     check_capability(
@@ -537,11 +489,7 @@ pub async fn add_hc_agent_infos(
 
     let hc = get_holochain_service().await;
 
-<<<<<<< HEAD
-    hc.add_agent_infos(vec![infos])
-=======
     hc.add_agent_infos(vec![body.agent_infos])
->>>>>>> origin/feat/audio-transport-optimisation
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -569,8 +517,6 @@ pub async fn get_network_metrics(
 
     Ok(Json(metrics))
 }
-<<<<<<< HEAD
-=======
 
 pub async fn get_free_hosting_enabled(
     State(_state): State<AppState>,
@@ -599,4 +545,73 @@ pub async fn set_free_hosting_enabled(
 
     Ok(Json(enabled))
 }
->>>>>>> origin/feat/audio-transport-optimisation
+
+/// POST /runtime/import — import data
+pub async fn import_data(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Json(body): Json<ImportRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    match body.import_type.as_str() {
+        "db" => {
+            let data = std::fs::read_to_string(&body.file_path)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            let json_data: serde_json::Value =
+                serde_json::from_str(&data).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+            Ad4mDb::with_global_instance(|db| db.import_from_json(json_data))
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            Ok(Json(serde_json::json!({"success": true})))
+        }
+        "perspective" => {
+            let data = std::fs::read_to_string(&body.file_path)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            let snapshot: serde_json::Value =
+                serde_json::from_str(&data).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+            // TODO: implement perspective import from snapshot
+            Ok(Json(serde_json::json!({"success": true, "snapshot": snapshot})))
+        }
+        other => Err(ApiError::BadRequest(format!(
+            "Unknown import type: {}. Use 'db' or 'perspective'.",
+            other
+        ))),
+    }
+}
+
+/// GET /runtime/tls-domain
+pub async fn get_tls_domain(
+    State(_state): State<AppState>,
+    _auth: AuthContext,
+) -> Result<Json<Option<String>>, ApiError> {
+    let config = crate::config::get_global_config();
+    let domain = config.tls.as_ref().map(|t| t.domain.clone());
+    Ok(Json(domain))
+}
+
+/// GET /runtime/compute-log
+pub async fn get_compute_log(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    let user_email = params.get("userEmail").or_else(|| {
+        user_email_from_token(context.auth_token.clone()).as_ref().map(|s| s)
+    }).cloned();
+
+    let since = params.get("since").cloned();
+    let limit = params.get("limit").and_then(|l| l.parse::<usize>().ok());
+
+    let logs = Ad4mDb::with_global_instance(|db| {
+        db.get_compute_log(user_email.as_deref(), since.as_deref(), limit)
+    })
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(logs))
+}

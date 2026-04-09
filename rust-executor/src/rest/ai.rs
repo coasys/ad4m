@@ -1,9 +1,9 @@
 //! AI REST endpoints: /api/v1/ai/*
 //!
-//! Endpoints for model management, tasks, prompts, and embeddings.
+//! Endpoints for model management, tasks, prompts, embeddings, and transcription.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
 
@@ -11,33 +11,20 @@ use crate::agent::capabilities::*;
 use crate::ai_service::AIService;
 use crate::db::Ad4mDb;
 use crate::pubsub::mark_credits_dirty;
-<<<<<<< HEAD
-use crate::types::{AITask, AITaskInput, Model, ModelInput, ModelType};
-use base64::Engine;
-=======
 use crate::types::{AITask, AITaskInput, Model, ModelInput, ModelType, VoiceActivityParamsInput};
 use base64::Engine;
 use serde::Deserialize;
->>>>>>> origin/feat/audio-transport-optimisation
+use std::collections::HashMap;
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
 use super::types::*;
 
-<<<<<<< HEAD
-// Default pricing (matches GraphQL)
-=======
 // Default pricing
->>>>>>> origin/feat/audio-transport-optimisation
 const DEFAULT_TOKEN_RATE: f64 = 12.5;
 const DEFAULT_EMBEDDING_TOKEN_RATE: f64 = 0.1;
 
 /// Read-only credit check.
-<<<<<<< HEAD
-=======
-// TODO: implement proper credit pre-estimation — currently only rejects at zero balance,
-// allowing calls that exceed remaining credits. This is pre-existing behaviour from GraphQL.
->>>>>>> origin/feat/audio-transport-optimisation
 fn check_compute_credits(auth_token: &str) -> Result<(), ApiError> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
@@ -66,293 +53,6 @@ fn reserve_compute_credits(auth_token: &str, amount: f64) -> Result<(), ApiError
     Ok(())
 }
 
-fn get_rate(description: &str, default: f64) -> Result<f64, ApiError> {
-    match Ad4mDb::with_global_instance(|db| db.get_host_rate(description)) {
-        Ok(Some(rate)) => Ok(rate),
-        Ok(None) => Ok(default),
-        Err(e) => Err(ApiError::Internal(format!(
-            "Failed to read host rate: {}",
-            e
-        ))),
-    }
-}
-
-/// GET /ai/models — list all models
-pub async fn list_models(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-) -> Result<Json<Vec<Model>>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AI_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
-
-    let models = Ad4mDb::with_global_instance(|db| db.get_models())
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(models))
-}
-
-/// POST /ai/models — add model
-pub async fn add_model(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(body): Json<ModelInput>,
-) -> Result<Json<String>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
-
-    let id = AIService::global_instance()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .add_model(body)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(id))
-}
-
-/// PUT /ai/models/:id — update model
-pub async fn update_model(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Path(id): Path<String>,
-    Json(body): Json<ModelInput>,
-) -> Result<Json<bool>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
-
-    AIService::global_instance()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .update_model(id, body)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(true))
-}
-
-/// DELETE /ai/models/:id — remove model
-pub async fn remove_model(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Path(id): Path<String>,
-) -> Result<Json<bool>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
-
-    AIService::global_instance()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .remove_model(id)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(true))
-}
-
-/// PUT /ai/models/:id/default — set default model for a model type
-pub async fn set_default_model(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Path(id): Path<String>,
-    Json(body): Json<SetDefaultModelRequest>,
-) -> Result<Json<bool>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
-
-    // Verify model exists
-    let maybe_model = Ad4mDb::with_global_instance(|db| db.get_model(id.clone()))
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    if maybe_model.is_none() {
-        return Err(ApiError::NotFound(format!("Model not found: {}", id)));
-    }
-
-    AIService::global_instance()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .set_default_model(body.model_type, id)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(true))
-}
-
-/// GET /ai/tasks — list tasks
-pub async fn list_tasks(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-) -> Result<Json<Vec<AITask>>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AI_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
-
-    let tasks = AIService::get_tasks().map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(tasks))
-}
-
-/// POST /ai/tasks — add task
-pub async fn add_task(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(body): Json<AITaskInput>,
-) -> Result<Json<AITask>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
-
-    let task = AIService::global_instance()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .add_task(body)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(task))
-}
-
-/// PUT /ai/tasks/:id — update task
-pub async fn update_task(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Path(id): Path<String>,
-    Json(body): Json<AITaskInput>,
-) -> Result<Json<AITask>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AI_UPDATE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
-
-    let mut task: AITask = body.into();
-    task.task_id = id;
-    let result = AIService::global_instance()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .update_task(task)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(result))
-}
-
-/// DELETE /ai/tasks/:id — remove task
-pub async fn remove_task(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Path(id): Path<String>,
-) -> Result<Json<AITask>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AI_DELETE_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
-
-    let task = AIService::get_tasks()
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .into_iter()
-        .find(|t| t.task_id == id)
-        .ok_or_else(|| ApiError::NotFound(format!("Task not found: {}", id)))?;
-
-    AIService::global_instance()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .delete_task(id)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(task))
-}
-
-/// POST /ai/prompt — send prompt
-pub async fn ai_prompt(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(body): Json<PromptRequest>,
-) -> Result<Json<String>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
-
-    check_compute_credits(&context.auth_token)?;
-
-    let result = AIService::global_instance()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .prompt(body.task_id, body.prompt)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    let total_tokens = result.prompt_tokens + result.completion_tokens;
-    let model_name = match Ad4mDb::with_global_instance(|db| db.get_model(result.model_id.clone()))
-    {
-        Ok(Some(m)) => m.name,
-        _ => String::new(),
-    };
-    if let Err(e) = reserve_compute_credits(
-        &context.auth_token,
-        total_tokens as f64 * get_rate(&model_name, DEFAULT_TOKEN_RATE)?,
-    ) {
-        log::warn!(
-            "Call exceeded compute credits (ai_prompt, model={}, tokens={}): {:?}",
-            model_name,
-            total_tokens,
-            e
-        );
-    }
-
-    Ok(Json(result.text))
-}
-
-/// POST /ai/embed — generate embeddings
-pub async fn ai_embed(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    Json(body): Json<EmbedRequest>,
-) -> Result<Json<String>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
-
-    check_compute_credits(&context.auth_token)?;
-
-    let result = AIService::global_instance()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .embed(body.model_id, body.text)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    if let Err(e) = reserve_compute_credits(
-        &context.auth_token,
-        result.token_count as f64 * get_rate("embedding per token", DEFAULT_EMBEDDING_TOKEN_RATE)?,
-    ) {
-        log::warn!(
-            "Call exceeded compute credits (ai_embed, tokens={}): {:?}",
-            result.token_count,
-            e
-        );
-    }
-
-    let json_string = serde_json::to_string(&result.embeddings)
-        .map_err(|e| ApiError::Internal(format!("Failed to serialize vector: {}", e)))?;
-
-<<<<<<< HEAD
-    // Compress with zlib like GraphQL does
-=======
-    // Compress with zlib
->>>>>>> origin/feat/audio-transport-optimisation
-    let compressed_bytes = deflate::deflate_bytes_zlib(json_string.as_bytes());
-    Ok(Json(
-        base64::prelude::BASE64_STANDARD.encode(&compressed_bytes),
-    ))
-}
-<<<<<<< HEAD
-=======
-
-// ── Transcription endpoints ──
-
-/// Check whether billing is active for the given auth token.
 fn is_billing_active(auth_token: &str) -> bool {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
         let global_free =
@@ -368,6 +68,264 @@ fn is_billing_active(auth_token: &str) -> bool {
     }
 }
 
+// ── Models ──
+
+/// GET /ai/models
+pub async fn list_models(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+) -> Result<Json<Vec<Model>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AI_QUERY_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    let models = Ad4mDb::with_global_instance(|db| db.get_models())
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(models))
+}
+
+/// POST /ai/models
+pub async fn add_model(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<String>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AI_CREATE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    let model: ModelInput = serde_json::from_value(body["model"].clone())
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let id = Ad4mDb::with_global_instance(|db| db.add_model(model))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(id))
+}
+
+/// PUT /ai/models/:id
+pub async fn update_model(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<bool>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AI_CREATE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    let model: ModelInput = serde_json::from_value(body["model"].clone())
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    Ad4mDb::with_global_instance(|db| db.update_model(&id, model))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(true))
+}
+
+/// DELETE /ai/models/:id
+pub async fn remove_model(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<String>,
+) -> Result<Json<bool>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AI_CREATE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    Ad4mDb::with_global_instance(|db| db.remove_model(&id))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(true))
+}
+
+/// PUT /ai/models/:id/default
+pub async fn set_default_model(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<String>,
+    Json(body): Json<SetDefaultModelRequest>,
+) -> Result<Json<bool>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AI_CREATE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    Ad4mDb::with_global_instance(|db| db.set_default_model(body.model_type, &id))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(true))
+}
+
+/// GET /ai/models/default?modelType=...
+pub async fn get_default_model(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Option<Model>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AI_QUERY_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    let model_type_str = params
+        .get("modelType")
+        .ok_or_else(|| ApiError::BadRequest("modelType query parameter required".into()))?;
+
+    let model_type: ModelType = serde_json::from_str(&format!("\"{}\"", model_type_str))
+        .map_err(|e| ApiError::BadRequest(format!("Invalid modelType: {}", e)))?;
+
+    let model = Ad4mDb::with_global_instance(|db| db.get_default_model(model_type))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(model))
+}
+
+/// GET /ai/model-loading-status?model=...
+pub async fn get_model_loading_status(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AI_QUERY_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    let model = params
+        .get("model")
+        .ok_or_else(|| ApiError::BadRequest("model query parameter required".into()))?;
+
+    let status = AIService::global_instance()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .get_model_loading_status(model)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(serde_json::to_value(status).unwrap_or_default()))
+}
+
+// ── Tasks ──
+
+/// GET /ai/tasks
+pub async fn list_tasks(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+) -> Result<Json<Vec<AITask>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AI_QUERY_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(tasks))
+}
+
+/// POST /ai/tasks
+pub async fn add_task(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<AITask>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AI_CREATE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    let task: AITaskInput = serde_json::from_value(body["task"].clone())
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let result = Ad4mDb::with_global_instance(|db| db.add_task(task))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(result))
+}
+
+/// PUT /ai/tasks/:id
+pub async fn update_task(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<AITask>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AI_CREATE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    let task: AITaskInput = serde_json::from_value(body["task"].clone())
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let result = Ad4mDb::with_global_instance(|db| db.update_task(&id, task))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(result))
+}
+
+/// DELETE /ai/tasks/:id
+pub async fn remove_task(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<String>,
+) -> Result<Json<AITask>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AI_CREATE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    let result = Ad4mDb::with_global_instance(|db| db.remove_task(&id))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(result))
+}
+
+// ── Prompt & Embed ──
+
+/// POST /ai/prompt
+pub async fn ai_prompt(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Json(body): Json<PromptRequest>,
+) -> Result<Json<String>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+    check_compute_credits(&context.auth_token)?;
+
+    let result = AIService::global_instance()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .prompt(&body.task_id, &body.prompt, &context.auth_token)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(result))
+}
+
+/// POST /ai/embed
+pub async fn ai_embed(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Json(body): Json<EmbedRequest>,
+) -> Result<Json<String>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AI_EMBED_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+    check_compute_credits(&context.auth_token)?;
+
+    let embedding = AIService::global_instance()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .embed(&body.model_id, &body.text, &context.auth_token)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // Return as base64-encoded zlib-compressed JSON (matching GraphQL format)
+    let json_string = serde_json::to_string(&embedding)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let compressed_bytes = deflate::deflate_bytes_zlib(json_string.as_bytes());
+    Ok(Json(
+        base64::prelude::BASE64_STANDARD.encode(&compressed_bytes),
+    ))
+}
+
+// ── Transcription ──
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenTranscriptionRequest {
@@ -379,7 +337,7 @@ pub struct OpenTranscriptionRequest {
 #[serde(rename_all = "camelCase")]
 pub struct FeedTranscriptionRequest {
     pub stream_ids: Vec<String>,
-    pub audio: Vec<f64>, // f64 for JSON compat, cast to f32
+    pub audio: Vec<f64>,
 }
 
 #[derive(Deserialize)]
@@ -388,7 +346,7 @@ pub struct CloseTranscriptionRequest {
     pub stream_id: String,
 }
 
-/// POST /ai/transcription/open — open a Whisper transcription stream
+/// POST /ai/transcription/open
 pub async fn open_transcription_stream(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -399,7 +357,6 @@ pub async fn open_transcription_stream(
         .map_err(|e| ApiError::Forbidden(e))?;
     check_compute_credits(&context.auth_token)?;
 
-    // When billing is active, verify a rate is configured for this model
     if is_billing_active(&context.auth_token) {
         let rate_key = Ad4mDb::with_global_instance(|db| db.get_model(body.model_id.clone()))
             .ok()
@@ -430,7 +387,7 @@ pub async fn open_transcription_stream(
     Ok(Json(stream_id))
 }
 
-/// POST /ai/transcription/feed — feed audio samples to transcription streams
+/// POST /ai/transcription/feed
 pub async fn feed_transcription_stream(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -458,7 +415,7 @@ pub async fn feed_transcription_stream(
     Ok(Json("true".to_string()))
 }
 
-/// POST /ai/transcription/close — close a transcription stream
+/// POST /ai/transcription/close
 pub async fn close_transcription_stream(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -477,4 +434,3 @@ pub async fn close_transcription_stream(
 
     Ok(Json("true".to_string()))
 }
->>>>>>> origin/feat/audio-transport-optimisation

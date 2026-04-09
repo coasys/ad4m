@@ -97,20 +97,17 @@ export class PerspectiveClient {
     }
 
     async queryProlog(uuid: string, query: string): Promise<any> {
-        const result = await this.#restClient.post<string>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/query/prolog`, { query })
+        const result = await this.#restClient.post<string>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/query`, { engine: 'prolog', query })
         return JSON.parse(result)
     }
 
-<<<<<<< HEAD
     async querySparql(uuid: string, query: string): Promise<any> {
-        const result = await this.#restClient.post<string>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/query/sparql`, { query })
+        const result = await this.#restClient.post<string>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/query`, { engine: 'sparql', query })
         return JSON.parse(result)
     }
 
-=======
->>>>>>> origin/feat/audio-transport-optimisation
     async querySurrealDB(uuid: string, query: string): Promise<any> {
-        const result = await this.#restClient.post<string>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/query/surreal`, { query })
+        const result = await this.#restClient.post<string>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/query`, { engine: 'surreal', query })
         return JSON.parse(result)
     }
 
@@ -289,7 +286,7 @@ export class PerspectiveClient {
 
     async executeCommands(uuid: string, commands: string, expression: string, parameters: string, batchId?: string): Promise<boolean> {
         return this.#restClient.post<boolean>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}/execute-commands`,
+            `/api/v1/perspectives/${encodeURIComponent(uuid)}/commands`,
             { commands, expression, parameters, batchId }
         )
     }
@@ -350,9 +347,9 @@ export class PerspectiveClient {
 
     async addPerspectiveSyncStateChangeListener(uuid: String, cb: SyncStateChangeCallback[]): Promise<void> {
         const unsub = this.#restClient.subscribe(
-            `/api/v1/events/neighbourhood/${encodeURIComponent(uuid as string)}`,
+            `/api/v1/events/perspectives`,
             (data) => {
-                if (data.type === 'sync-state-change') {
+                if (data.type === 'sync-state-change' && data.uuid === uuid) {
                     cb.forEach(c => c(data.state))
                 }
             }
@@ -376,7 +373,7 @@ export class PerspectiveClient {
 
     async addPerspectiveLinkAddedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
         const unsub = this.#restClient.subscribe(
-            `/api/v1/events/links/${encodeURIComponent(uuid as string)}`,
+            `/api/v1/events/perspectives/${encodeURIComponent(uuid as string)}/links`,
             (data) => {
                 if (data.type === 'link-added') {
                     cb.forEach(c => c(data.link))
@@ -391,7 +388,7 @@ export class PerspectiveClient {
 
     async addPerspectiveLinkRemovedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
         const unsub = this.#restClient.subscribe(
-            `/api/v1/events/links/${encodeURIComponent(uuid as string)}`,
+            `/api/v1/events/perspectives/${encodeURIComponent(uuid as string)}/links`,
             (data) => {
                 if (data.type === 'link-removed') {
                     const link = data.link
@@ -410,7 +407,7 @@ export class PerspectiveClient {
 
     async addPerspectiveLinkUpdatedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
         const unsub = this.#restClient.subscribe(
-            `/api/v1/events/links/${encodeURIComponent(uuid as string)}`,
+            `/api/v1/events/perspectives/${encodeURIComponent(uuid as string)}/links`,
             (data) => {
                 if (data.type === 'link-updated') {
                     if (!data.newLink.status) {

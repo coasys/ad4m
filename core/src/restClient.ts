@@ -10,12 +10,9 @@ declare var EventSource: {
 export class RestClient {
     constructor(private baseUrl: string, private token?: string) {}
 
-<<<<<<< HEAD
-=======
     getBaseUrl(): string { return this.baseUrl; }
     getToken(): string | undefined { return this.token; }
 
->>>>>>> origin/feat/audio-transport-optimisation
     setToken(token: string) {
         this.token = token
     }
@@ -52,8 +49,6 @@ export class RestClient {
         return res.json() as Promise<T>
     }
 
-<<<<<<< HEAD
-=======
     async patch<T>(path: string, body?: any): Promise<T> {
         const res = await fetch(`${this.baseUrl}${path}`, {
             method: 'PATCH',
@@ -64,7 +59,6 @@ export class RestClient {
         return res.json() as Promise<T>
     }
 
->>>>>>> origin/feat/audio-transport-optimisation
     async delete<T>(path: string, body?: any): Promise<T> {
         const res = await fetch(`${this.baseUrl}${path}`, {
             method: 'DELETE',

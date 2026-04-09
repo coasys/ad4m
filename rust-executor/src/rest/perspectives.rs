@@ -1,13 +1,7 @@
 //! Perspective REST endpoints: /api/v1/perspectives/*
-//!
-//! 10 harmonised endpoints including unified link mutations and query.
 
 use axum::{
-<<<<<<< HEAD
-    extract::{Path, State},
-=======
     extract::{Path, Query, State},
->>>>>>> origin/feat/audio-transport-optimisation
     Json,
 };
 
@@ -30,13 +24,11 @@ use super::types::*;
 
 // ── Helpers ──
 
-/// Get a perspective, returning ApiError::NotFound if missing
 fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, ApiError> {
     get_perspective(uuid)
         .ok_or_else(|| ApiError::NotFound(format!("Perspective {} not found", uuid)))
 }
 
-/// Get a perspective with access control check (multi-user aware)
 async fn get_perspective_with_access_control(
     uuid: &str,
     auth_token: &str,
@@ -54,7 +46,6 @@ async fn get_perspective_with_access_control(
     Ok(perspective)
 }
 
-/// Read-only credit check. Returns Ok(()) if user can afford compute.
 fn check_compute_credits(auth_token: &str) -> Result<(), ApiError> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
@@ -70,7 +61,6 @@ fn check_compute_credits(auth_token: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Deduct compute credits after an operation.
 fn reserve_compute_credits(auth_token: &str, amount: f64) -> Result<(), ApiError> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
@@ -84,16 +74,11 @@ fn reserve_compute_credits(auth_token: &str, amount: f64) -> Result<(), ApiError
     Ok(())
 }
 
-<<<<<<< HEAD
-// Default pricing (matches GraphQL)
-=======
-// Default pricing
->>>>>>> origin/feat/audio-transport-optimisation
 const DEFAULT_LINK_WRITE: f64 = 0.25;
 
 // ── Endpoints ──
 
-/// GET /perspectives — list all perspectives
+/// GET /perspectives
 pub async fn list_perspectives(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -108,7 +93,6 @@ pub async fn list_perspectives(
     let user_email = user_email_from_token(context.auth_token.clone());
     let all: Vec<PerspectiveInstance> = crate::perspectives::all_perspectives();
 
-    // Filter perspectives based on access
     let mut filtered: Vec<PerspectiveHandle> = Vec::new();
     for p in all {
         let handle = p.persisted.lock().await.clone();
@@ -120,7 +104,7 @@ pub async fn list_perspectives(
     Ok(Json(filtered))
 }
 
-/// GET /perspectives/:uuid — get single perspective
+/// GET /perspectives/:uuid
 pub async fn get_perspective_handler(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -138,7 +122,7 @@ pub async fn get_perspective_handler(
     Ok(Json(handle))
 }
 
-/// GET /perspectives/:uuid/snapshot — get perspective snapshot (all links)
+/// GET /perspectives/:uuid/snapshot
 pub async fn get_snapshot(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -166,16 +150,33 @@ pub async fn get_snapshot(
     Ok(Json(crate::types::domain::Perspective { links }))
 }
 
-/// GET /perspectives/:uuid/links — query links
+/// POST /perspectives/:uuid/publish-snapshot
+pub async fn publish_snapshot(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+) -> Result<Json<String>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e))?;
+
+    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let snapshot_url = perspective
+        .publish_snapshot()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(snapshot_url))
+}
+
+/// GET /perspectives/:uuid/links
 pub async fn query_links(
     State(_state): State<AppState>,
     auth: AuthContext,
     Path(uuid): Path<String>,
-<<<<<<< HEAD
-    Json(query): Json<LinkQuery>,
-=======
     Query(query): Query<LinkQuery>,
->>>>>>> origin/feat/audio-transport-optimisation
 ) -> Result<Json<Vec<DecoratedLinkExpression>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(
@@ -192,7 +193,7 @@ pub async fn query_links(
     Ok(Json(links))
 }
 
-/// POST /perspectives — create a new perspective
+/// POST /perspectives — create
 pub async fn create_perspective(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -202,7 +203,6 @@ pub async fn create_perspective(
     check_capability(&context.capabilities, &PERSPECTIVE_CREATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    // Determine owner DID based on user context
     let user_email_opt = user_email_from_token(context.auth_token.clone());
 
     let owner_did = if let Some(user_email) = user_email_opt {
@@ -227,7 +227,7 @@ pub async fn create_perspective(
     Ok(Json(handle))
 }
 
-/// PUT /perspectives/:uuid — update perspective name
+/// PUT /perspectives/:uuid
 pub async fn update_perspective_handler(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -251,7 +251,7 @@ pub async fn update_perspective_handler(
     Ok(Json(handle))
 }
 
-/// DELETE /perspectives/:uuid — delete perspective
+/// DELETE /perspectives/:uuid
 pub async fn delete_perspective(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -264,46 +264,28 @@ pub async fn delete_perspective(
     )
     .map_err(|e| ApiError::Forbidden(e))?;
 
-<<<<<<< HEAD
-=======
-    // Verify caller has access to this perspective before deleting
     let _perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
-
->>>>>>> origin/feat/audio-transport-optimisation
     remove_perspective(&uuid).await;
     Ok(Json(true))
 }
 
-/// POST /perspectives/:uuid/links — unified link mutations (add, remove, update, set status)
-pub async fn mutate_links(
+/// POST /perspectives/:uuid/links — add single link
+pub async fn add_link(
     State(_state): State<AppState>,
     auth: AuthContext,
     Path(uuid): Path<String>,
-    Json(body): Json<LinkMutationRequest>,
-) -> Result<Json<LinkMutationResponse>, ApiError> {
+    Json(body): Json<AddLinkRequest>,
+) -> Result<Json<DecoratedLinkExpression>, ApiError> {
     let context = auth.to_request_context();
     check_capability(
         &context.capabilities,
         &perspective_update_capability(vec![uuid.clone()]),
     )
     .map_err(|e| ApiError::Forbidden(e))?;
-
-    // Check compute credits (pre-check)
-<<<<<<< HEAD
-=======
-    // TODO: implement proper credit pre-estimation for link mutations — currently only rejects
-    // at zero balance, allowing operations that exceed remaining credits. Pre-existing from GraphQL.
->>>>>>> origin/feat/audio-transport-optimisation
     check_compute_credits(&context.auth_token)?;
 
     let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
-
-    let mut response = LinkMutationResponse {
-        additions: vec![],
-        removals: vec![],
-        updates: vec![],
-    };
 
     let status = body
         .status
@@ -312,101 +294,228 @@ pub async fn mutate_links(
             "shared" => LinkStatus::Shared,
             _ => LinkStatus::Local,
         })
-        .unwrap_or(LinkStatus::Local);
+        .unwrap_or(LinkStatus::Shared);
 
-    // Handle additions and removals via link_mutations
-    let has_additions = body.additions.as_ref().map_or(false, |a| !a.is_empty());
-    let has_removals = body.removals.as_ref().map_or(false, |r| !r.is_empty());
+    let result = perspective
+        .add_link(body.link, status, &agent_context, body.batch_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    if has_additions || has_removals {
-        let mutations = LinkMutations {
-            additions: body.additions.unwrap_or_default(),
-            removals: body
-                .removals
-                .unwrap_or_default()
-                .into_iter()
-                .map(|l| LinkExpressionInput {
-                    author: String::new(),
-                    data: l,
-                    proof: ExpressionProofInput {
-                        key: None,
-                        signature: None,
-                        valid: None,
-                        invalid: None,
-                    },
-                    timestamp: String::new(),
-                    status: None,
-                })
-                .collect(),
-        };
-
-        let diff = perspective
-            .link_mutations(mutations, status.clone(), &agent_context)
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-        response.additions = diff.additions;
-        response.removals = diff.removals;
-    }
-
-    // Handle updates separately
-    if let Some(updates) = body.updates {
-        for update in updates {
-            let old = LinkExpressionInput {
-                author: String::new(),
-                data: update.old_link,
-                proof: ExpressionProofInput {
-                    key: None,
-                    signature: None,
-                    valid: None,
-                    invalid: None,
-                },
-                timestamp: String::new(),
-                status: None,
-            };
-            let new = LinkExpressionInput {
-                author: String::new(),
-                data: update.new_link,
-                proof: ExpressionProofInput {
-                    key: None,
-                    signature: None,
-                    valid: None,
-                    invalid: None,
-                },
-                timestamp: String::new(),
-                status: None,
-            };
-            let result = perspective
-                .update_link(
-                    LinkExpression::from_input_without_proof(old),
-                    Link::from(new.data),
-                    body.batch_id.clone(),
-                    &agent_context,
-                )
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            response.updates.push(result);
-        }
-    }
-
-    // Deduct compute credits
-    let total_ops = response.additions.len() + response.removals.len() + response.updates.len();
-    if total_ops > 0 {
-<<<<<<< HEAD
-        let _ = reserve_compute_credits(&context.auth_token, total_ops as f64 * DEFAULT_LINK_WRITE);
-=======
-        if let Err(e) =
-            reserve_compute_credits(&context.auth_token, total_ops as f64 * DEFAULT_LINK_WRITE)
-        {
-            log::warn!("Failed to reserve compute credits: {:?}", e);
-        }
->>>>>>> origin/feat/audio-transport-optimisation
-    }
-
-    Ok(Json(response))
+    let _ = reserve_compute_credits(&context.auth_token, DEFAULT_LINK_WRITE);
+    Ok(Json(result))
 }
 
-/// POST /perspectives/:uuid/query — query perspective (prolog or surreal)
+/// POST /perspectives/:uuid/links/bulk — add multiple links
+pub async fn add_links_bulk(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+    Json(body): Json<AddLinksBulkRequest>,
+) -> Result<Json<Vec<DecoratedLinkExpression>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e))?;
+    check_compute_credits(&context.auth_token)?;
+
+    let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+
+    let status = body
+        .status
+        .as_deref()
+        .map(|s| match s {
+            "shared" => LinkStatus::Shared,
+            _ => LinkStatus::Local,
+        })
+        .unwrap_or(LinkStatus::Shared);
+
+    let mutations = LinkMutations {
+        additions: body.links,
+        removals: vec![],
+    };
+
+    let diff = perspective
+        .link_mutations(mutations, status, &agent_context)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let count = diff.additions.len();
+    if count > 0 {
+        let _ = reserve_compute_credits(&context.auth_token, count as f64 * DEFAULT_LINK_WRITE);
+    }
+
+    Ok(Json(diff.additions))
+}
+
+/// POST /perspectives/:uuid/links/remove-bulk — remove multiple links
+pub async fn remove_links_bulk(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+    Json(body): Json<RemoveLinksBulkRequest>,
+) -> Result<Json<Vec<DecoratedLinkExpression>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e))?;
+
+    let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+
+    let mutations = LinkMutations {
+        additions: vec![],
+        removals: body.links,
+    };
+
+    let diff = perspective
+        .link_mutations(mutations, LinkStatus::Shared, &agent_context)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(diff.removals))
+}
+
+/// POST /perspectives/:uuid/links/mutations — combined add+remove mutations
+pub async fn link_mutations(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+    Json(body): Json<LinkMutationsRequest>,
+) -> Result<Json<LinkMutationResponse>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e))?;
+    check_compute_credits(&context.auth_token)?;
+
+    let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+
+    let status = body
+        .status
+        .as_deref()
+        .map(|s| match s {
+            "shared" => LinkStatus::Shared,
+            _ => LinkStatus::Local,
+        })
+        .unwrap_or(LinkStatus::Shared);
+
+    let diff = perspective
+        .link_mutations(body.mutations, status, &agent_context)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let total = diff.additions.len() + diff.removals.len();
+    if total > 0 {
+        let _ = reserve_compute_credits(&context.auth_token, total as f64 * DEFAULT_LINK_WRITE);
+    }
+
+    Ok(Json(LinkMutationResponse {
+        additions: diff.additions,
+        removals: diff.removals,
+        updates: vec![],
+    }))
+}
+
+/// POST /perspectives/:uuid/links/expression — add pre-signed link expression
+pub async fn add_link_expression(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+    Json(body): Json<AddLinkExpressionRequest>,
+) -> Result<Json<DecoratedLinkExpression>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e))?;
+    check_compute_credits(&context.auth_token)?;
+
+    let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+
+    let status = body
+        .status
+        .as_deref()
+        .map(|s| match s {
+            "shared" => LinkStatus::Shared,
+            _ => LinkStatus::Local,
+        })
+        .unwrap_or(LinkStatus::Shared);
+
+    let result = perspective
+        .add_link_expression(body.link, status, &agent_context)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let _ = reserve_compute_credits(&context.auth_token, DEFAULT_LINK_WRITE);
+    Ok(Json(result))
+}
+
+/// PUT /perspectives/:uuid/links — update link
+pub async fn update_link(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+    Json(body): Json<UpdateLinkRequest>,
+) -> Result<Json<DecoratedLinkExpression>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e))?;
+
+    let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+
+    let result = perspective
+        .update_link(
+            LinkExpression::from_input_without_proof(body.old_link),
+            Link::from(body.new_link),
+            body.batch_id,
+            &agent_context,
+        )
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(result))
+}
+
+/// DELETE /perspectives/:uuid/links — remove single link
+pub async fn remove_link(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+    Json(body): Json<RemoveLinkRequest>,
+) -> Result<Json<bool>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e))?;
+
+    let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+
+    perspective
+        .remove_link(body.link, &agent_context)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(true))
+}
+
+/// POST /perspectives/:uuid/query — unified query (prolog, surreal, sparql)
 pub async fn query_perspective(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -431,26 +540,22 @@ pub async fn query_perspective(
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             serde_json::to_value(prolog_resolution_to_string(res)).unwrap_or_default()
         }
-<<<<<<< HEAD
         "sparql" => {
             let res = perspective
                 .sparql_query(body.query)
-=======
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            serde_json::to_value(res).unwrap_or_default()
+        }
         "surreal" => {
             let res = perspective
                 .surreal_query(body.query)
                 .await
->>>>>>> origin/feat/audio-transport-optimisation
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             serde_json::to_value(res).unwrap_or_default()
         }
         other => {
             return Err(ApiError::BadRequest(format!(
-<<<<<<< HEAD
-                "Unknown query engine: {}. Use 'prolog' or 'sparql'.",
-=======
-                "Unknown query engine: {}. Use 'prolog' or 'surreal'.",
->>>>>>> origin/feat/audio-transport-optimisation
+                "Unknown query engine: {}. Use 'prolog', 'surreal', or 'sparql'.",
                 other
             )));
         }
@@ -459,7 +564,7 @@ pub async fn query_perspective(
     Ok(Json(result))
 }
 
-/// POST /perspectives/:uuid/sdna — add SDNA
+/// POST /perspectives/:uuid/sdna
 pub async fn add_sdna(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -493,7 +598,7 @@ pub async fn add_sdna(
     Ok(Json(result))
 }
 
-/// POST /perspectives/:uuid/commands — execute commands
+/// POST /perspectives/:uuid/commands
 pub async fn execute_commands(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -508,8 +613,8 @@ pub async fn execute_commands(
     .map_err(|e| ApiError::Forbidden(e))?;
 
     let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
-
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+
     let commands: Vec<crate::perspectives::perspective_instance::Command> =
         serde_json::from_value(serde_json::Value::Array(body.commands))
             .map_err(|e| ApiError::BadRequest(e.to_string()))?;
@@ -521,4 +626,239 @@ pub async fn execute_commands(
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(serde_json::to_value(result).unwrap_or_default()))
+}
+
+/// POST /perspectives/:uuid/batch — create batch
+pub async fn create_batch(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+) -> Result<Json<String>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e))?;
+
+    let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let batch_id = perspective
+        .create_batch()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(batch_id))
+}
+
+/// POST /perspectives/:uuid/batch/commit — commit batch
+pub async fn commit_batch(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+    Json(body): Json<CommitBatchRequest>,
+) -> Result<Json<LinkMutationResponse>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e))?;
+
+    let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+
+    let diff = perspective
+        .commit_batch(&body.batch_id, &agent_context)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(LinkMutationResponse {
+        additions: diff.additions,
+        removals: diff.removals,
+        updates: vec![],
+    }))
+}
+
+/// POST /perspectives/:uuid/subscribe-query — subscribe to prolog query changes
+pub async fn subscribe_query(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+    Json(body): Json<SubscribeQueryRequest>,
+) -> Result<Json<SubscribeQueryResponse>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e))?;
+
+    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+
+    let (subscription_id, result) = perspective
+        .subscribe_prolog_query(body.query, &agent_context)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(SubscribeQueryResponse {
+        subscription_id,
+        result,
+    }))
+}
+
+/// POST /perspectives/:uuid/subscribe-surreal-query
+pub async fn subscribe_surreal_query(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+    Json(body): Json<SubscribeQueryRequest>,
+) -> Result<Json<SubscribeQueryResponse>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e))?;
+
+    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+
+    let (subscription_id, result) = perspective
+        .subscribe_surreal_query(body.query, &agent_context)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(SubscribeQueryResponse {
+        subscription_id,
+        result,
+    }))
+}
+
+/// POST /perspectives/:uuid/keep-alive-query
+pub async fn keep_alive_query(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+    Json(body): Json<KeepAliveQueryRequest>,
+) -> Result<Json<bool>, ApiError> {
+    let context = auth.to_request_context();
+    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+
+    perspective
+        .keep_alive_query(&body.subscription_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(true))
+}
+
+/// POST /perspectives/:uuid/keep-alive-surreal-query
+pub async fn keep_alive_surreal_query(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+    Json(body): Json<KeepAliveQueryRequest>,
+) -> Result<Json<bool>, ApiError> {
+    let context = auth.to_request_context();
+    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+
+    perspective
+        .keep_alive_surreal_query(&body.subscription_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(true))
+}
+
+/// POST /perspectives/:uuid/dispose-query-subscription
+pub async fn dispose_query_subscription(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+    Json(body): Json<DisposeQueryRequest>,
+) -> Result<Json<bool>, ApiError> {
+    let context = auth.to_request_context();
+    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+
+    perspective
+        .dispose_query_subscription(&body.subscription_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(true))
+}
+
+/// POST /perspectives/:uuid/dispose-surreal-query-subscription
+pub async fn dispose_surreal_query_subscription(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+    Json(body): Json<DisposeQueryRequest>,
+) -> Result<Json<bool>, ApiError> {
+    let context = auth.to_request_context();
+    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+
+    perspective
+        .dispose_surreal_query_subscription(&body.subscription_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(true))
+}
+
+/// POST /perspectives/:uuid/create-subject
+pub async fn create_subject(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+    Json(body): Json<CreateSubjectRequest>,
+) -> Result<Json<bool>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e))?;
+
+    let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+
+    perspective
+        .create_subject(
+            &body.subject_class,
+            &body.expression_address,
+            body.initial_values.as_deref(),
+            body.batch_id.as_deref(),
+            &agent_context,
+        )
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(true))
+}
+
+/// POST /perspectives/:uuid/get-subject-data
+pub async fn get_subject_data(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(uuid): Path<String>,
+    Json(body): Json<GetSubjectDataRequest>,
+) -> Result<Json<String>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| ApiError::Forbidden(e))?;
+
+    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+
+    let data = perspective
+        .get_subject_data(&body.subject_class, &body.expression_address, &agent_context)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(data))
 }

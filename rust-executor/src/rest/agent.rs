@@ -110,14 +110,7 @@ pub async fn get_agent_by_did(
     let did_match = {
         let agent_instance = AgentService::global_instance();
         let agent_service = agent_instance.lock().expect("agent lock");
-<<<<<<< HEAD
         let agent_ref = agent_service.as_ref().expect("agent instance");
-=======
-        let agent_ref = match agent_service.as_ref() {
-            Some(a) => a,
-            None => return Err(ApiError::NotFound("Agent not initialized".into())),
-        };
->>>>>>> origin/feat/audio-transport-optimisation
         match &agent_ref.did {
             Some(existing) => &did == existing,
             None => false,
@@ -365,11 +358,7 @@ pub async fn lock_agent(
     _auth: AuthContext,
     Json(body): Json<LockAgentRequest>,
 ) -> Result<Json<AgentStatus>, ApiError> {
-<<<<<<< HEAD
-    // GraphQL resolver has no capability check for lock
-=======
     // No capability check for lock
->>>>>>> origin/feat/audio-transport-optimisation
     let agent = AgentService::with_mutable_global_instance(|agent_service| {
         agent_service.lock(body.passphrase.clone());
         agent_service.dump().clone()
@@ -804,4 +793,47 @@ pub async fn delete_entanglement(
             .map(|p| serde_json::to_value(p).unwrap_or_default())
             .collect(),
     ))
+}
+
+/// POST /agent/import — import agent from keystore
+pub async fn import_agent(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Json(body): Json<ImportAgentRequest>,
+) -> Result<Json<AgentStatus>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AGENT_CREATE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    let status = AgentService::with_mutable_global_instance(|agent_service| {
+        agent_service
+            .initialize_from_keystore(
+                body.did.clone(),
+                body.did_document.clone(),
+                body.keystore.clone(),
+                body.passphrase.clone(),
+            )
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        Ok::<AgentStatus, ApiError>(agent_service.dump().clone())
+    })?;
+
+    get_global_pubsub()
+        .await
+        .publish(
+            &AGENT_STATUS_CHANGED_TOPIC,
+            &serde_json::to_string(&status).unwrap(),
+        )
+        .await;
+
+    Ok(Json(status))
+}
+
+/// POST /agent/entanglement-proof-preflight — pre-flight check
+pub async fn entanglement_proof_preflight(
+    State(_state): State<AppState>,
+    _auth: AuthContext,
+    Json(body): Json<EntanglementProofPreflightRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let signed = sign_device_key(body.device_key, body.device_key_type);
+    Ok(Json(serde_json::to_value(signed).unwrap_or_default()))
 }

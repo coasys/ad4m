@@ -7,10 +7,7 @@ import { ModelInput, Model, ModelType } from "./AITypes"
 export class AIClient {
     #restClient: RestClient;
     #transcriptionUnsubscribers: Map<string, () => void> = new Map();
-<<<<<<< HEAD
-=======
     #audioWs: WebSocket | null = null;
->>>>>>> origin/feat/audio-transport-optimisation
 
     constructor(baseUrl: string, token?: string, subscribe: boolean = true) {
         this.#restClient = new RestClient(baseUrl, token);
@@ -33,7 +30,7 @@ export class AIClient {
     }
 
     async setDefaultModel(modelType: ModelType, modelId: string): Promise<boolean> {
-        return this.#restClient.put<boolean>('/api/v1/ai/models/default', { modelType, modelId });
+        return this.#restClient.put<boolean>(`/api/v1/ai/models/${encodeURIComponent(modelId)}/default`, { modelType });
     }
 
     async getDefaultModel(modelType: ModelType): Promise<Model> {
@@ -94,10 +91,11 @@ export class AIClient {
     ): Promise<string> {
         const streamId = await this.#restClient.post<string>('/api/v1/ai/transcription/open', { modelId, params });
 
+        // Subscribe to AI events and filter for this stream's transcription text
         const unsub = this.#restClient.subscribe(
-            `/api/v1/events/ai/transcription/${encodeURIComponent(streamId)}`,
+            `/api/v1/events/ai`,
             (data) => {
-                if (data.text) {
+                if (data.type === 'transcription-text' && data.streamId === streamId && data.text) {
                     streamCallback(data.text);
                 }
             }
@@ -105,20 +103,14 @@ export class AIClient {
 
         this.#transcriptionUnsubscribers.set(streamId, unsub);
 
-<<<<<<< HEAD
-=======
         // Connect binary WebSocket for efficient audio transport
         this.connectAudioWs([streamId]);
 
->>>>>>> origin/feat/audio-transport-optimisation
         return streamId;
     }
 
     async closeTranscriptionStream(streamId: string): Promise<void> {
-<<<<<<< HEAD
-=======
         this.disconnectAudioWs();
->>>>>>> origin/feat/audio-transport-optimisation
         await this.#restClient.post<void>('/api/v1/ai/transcription/close', { streamId });
 
         const unsub = this.#transcriptionUnsubscribers.get(streamId);
@@ -129,13 +121,6 @@ export class AIClient {
     }
 
     async feedTranscriptionStream(streamIds: string | string[], audio: Float32Array): Promise<void> {
-<<<<<<< HEAD
-        return this.#restClient.post<void>('/api/v1/ai/transcription/feed', {
-            streamIds: Array.isArray(streamIds) ? streamIds : [streamIds],
-            audio: Array.from(audio)
-        });
-    }
-=======
         const ids = Array.isArray(streamIds) ? streamIds : [streamIds];
 
         // Use WebSocket if connected (binary, efficient — no JSON serialisation)
@@ -179,5 +164,4 @@ export class AIClient {
             this.#audioWs = null;
         }
     }
->>>>>>> origin/feat/audio-transport-optimisation
 }

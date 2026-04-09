@@ -1,10 +1,6 @@
 import { RestClient } from "../restClient"
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
-<<<<<<< HEAD
-import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult, UserStatistics } from "./RuntimeResolver"
-=======
 import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult, UserStatistics } from "./RuntimeTypes"
->>>>>>> origin/feat/audio-transport-optimisation
 
 export type MessageCallback = (message: PerspectiveExpression) => null
 export type ExceptionCallback = (info: ExceptionInfo) => null
@@ -35,11 +31,7 @@ export class RuntimeClient {
     }
 
     async info(): Promise<RuntimeInfo> {
-<<<<<<< HEAD
-        return this.#restClient.get<RuntimeInfo>('/api/v1/runtime')
-=======
         return this.#restClient.get<RuntimeInfo>('/api/v1/runtime/info')
->>>>>>> origin/feat/audio-transport-optimisation
     }
 
     async tlsDomain(): Promise<string | null> {
@@ -55,30 +47,7 @@ export class RuntimeClient {
     }
 
     async addTrustedAgents(agents: string[]): Promise<string[]> {
-<<<<<<< HEAD
-        return this.#restClient.post<string[]>('/api/v1/runtime/trusted-agents', { agents })
-    }
-
-    async deleteTrustedAgents(agents: string[]): Promise<string[]> {
-        return this.#restClient.delete<string[]>('/api/v1/runtime/trusted-agents', { agents })
-    }
-
-    async getTrustedAgents(): Promise<string[]> {
-        return this.#restClient.get<string[]>('/api/v1/runtime/trusted-agents')
-    }
-
-    async addKnownLinkLanguageTemplates(addresses: string[]): Promise<string[]> {
-        return this.#restClient.post<string[]>('/api/v1/runtime/known-link-language-templates', { addresses })
-    }
-
-    async removeKnownLinkLanguageTemplates(addresses: string[]): Promise<string[]> {
-        return this.#restClient.delete<string[]>('/api/v1/runtime/known-link-language-templates', { addresses })
-    }
-
-    async knownLinkLanguageTemplates(): Promise<string[]> {
-        return this.#restClient.get<string[]>('/api/v1/runtime/known-link-language-templates')
-=======
-        return this.#restClient.post<string[]>('/api/v1/agent/trusted', { agents })
+        return this.#restClient.put<string[]>('/api/v1/agent/trusted', { agents })
     }
 
     async deleteTrustedAgents(agents: string[]): Promise<string[]> {
@@ -90,7 +59,7 @@ export class RuntimeClient {
     }
 
     async addKnownLinkLanguageTemplates(addresses: string[]): Promise<string[]> {
-        return this.#restClient.post<string[]>('/api/v1/runtime/link-language-templates', { addresses })
+        return this.#restClient.put<string[]>('/api/v1/runtime/link-language-templates', { addresses })
     }
 
     async removeKnownLinkLanguageTemplates(addresses: string[]): Promise<string[]> {
@@ -99,11 +68,10 @@ export class RuntimeClient {
 
     async knownLinkLanguageTemplates(): Promise<string[]> {
         return this.#restClient.get<string[]>('/api/v1/runtime/link-language-templates')
->>>>>>> origin/feat/audio-transport-optimisation
     }
 
     async addFriends(dids: string[]): Promise<string[]> {
-        return this.#restClient.post<string[]>('/api/v1/runtime/friends', { dids })
+        return this.#restClient.put<string[]>('/api/v1/runtime/friends', { dids })
     }
 
     async removeFriends(dids: string[]): Promise<string[]> {
@@ -115,11 +83,7 @@ export class RuntimeClient {
     }
 
     async hcAgentInfos(): Promise<string> {
-<<<<<<< HEAD
-        return this.#restClient.get<string>('/api/v1/runtime/hc-agent-infos')
-=======
         return this.#restClient.get<string>('/api/v1/runtime/hc/agent-infos')
->>>>>>> origin/feat/audio-transport-optimisation
     }
 
     async getNetworkMetrics(): Promise<string> {
@@ -127,17 +91,6 @@ export class RuntimeClient {
     }
 
     async restartHolochain(): Promise<boolean> {
-<<<<<<< HEAD
-        return this.#restClient.post<boolean>('/api/v1/runtime/restart-holochain')
-    }
-
-    async hcAddAgentInfos(agentInfos: String): Promise<void> {
-        return this.#restClient.post<void>('/api/v1/runtime/hc-agent-infos', { agentInfos })
-    }
-
-    async verifyStringSignedByDid(did: string, didSigningKeyId: string, data: string, signedData: string): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/verify-string-signed-by-did', { did, didSigningKeyId, data, signedData })
-=======
         return this.#restClient.post<boolean>('/api/v1/runtime/holochain/restart')
     }
 
@@ -147,7 +100,6 @@ export class RuntimeClient {
 
     async verifyStringSignedByDid(did: string, didSigningKeyId: string, data: string, signedData: string): Promise<boolean> {
         return this.#restClient.post<boolean>('/api/v1/runtime/verify-signature', { did, didSigningKeyId, data, signedData })
->>>>>>> origin/feat/audio-transport-optimisation
     }
 
     async setStatus(perspective: Perspective): Promise<boolean> {
@@ -155,7 +107,7 @@ export class RuntimeClient {
     }
 
     async friendStatus(did: string): Promise<PerspectiveExpression> {
-        return this.#restClient.get<PerspectiveExpression>(`/api/v1/runtime/friends/${encodeURIComponent(did)}/status`)
+        return this.#restClient.get<PerspectiveExpression>(`/api/v1/runtime/friends/${encodeURIComponent(did)}`)
     }
 
     async friendSendMessage(did: string, message: Perspective): Promise<boolean> {
@@ -173,21 +125,6 @@ export class RuntimeClient {
     }
 
     async requestInstallNotification(notification: NotificationInput) {
-<<<<<<< HEAD
-        return this.#restClient.post('/api/v1/runtime/notifications/request', { notification })
-    }
-
-    async grantNotification(id: string): Promise<boolean> {
-        return this.#restClient.post<boolean>(`/api/v1/runtime/notifications/${encodeURIComponent(id)}/grant`)
-    }
-
-    async exportDb(filePath: string): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/export-db', { filePath })
-    }
-
-    async importDb(filePath: string): Promise<ImportResult> {
-        return this.#restClient.post<ImportResult>('/api/v1/runtime/import-db', { filePath })
-=======
         return this.#restClient.post('/api/v1/runtime/notifications', { notification })
     }
 
@@ -196,12 +133,11 @@ export class RuntimeClient {
     }
 
     async exportDb(filePath: string): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/export', { filePath })
+        return this.#restClient.post<boolean>('/api/v1/runtime/export', { type: "db", filePath })
     }
 
     async importDb(filePath: string): Promise<ImportResult> {
-        return this.#restClient.post<ImportResult>('/api/v1/runtime/import', { filePath })
->>>>>>> origin/feat/audio-transport-optimisation
+        return this.#restClient.post<ImportResult>('/api/v1/runtime/import', { type: "db", filePath })
     }
 
     async notifications(): Promise<Notification[]> {
@@ -209,7 +145,7 @@ export class RuntimeClient {
     }
 
     async updateNotification(id: string, notification: NotificationInput): Promise<boolean> {
-        return this.#restClient.put<boolean>(`/api/v1/runtime/notifications/${encodeURIComponent(id)}`, { notification })
+        return this.#restClient.patch<boolean>(`/api/v1/runtime/notifications/${encodeURIComponent(id)}`, { notification })
     }
 
     async removeNotification(id: string): Promise<boolean> {
@@ -217,19 +153,19 @@ export class RuntimeClient {
     }
 
     async exportPerspective(uuid: string, filePath: string): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/export-perspective', { perspectiveUuid: uuid, filePath })
+        return this.#restClient.post<boolean>('/api/v1/runtime/export', { type: "perspective", perspectiveUuid: uuid, filePath })
     }
 
     async importPerspective(filePath: string): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/import-perspective', { filePath })
+        return this.#restClient.post<boolean>('/api/v1/runtime/import', { type: "perspective", filePath })
     }
 
     async multiUserEnabled(): Promise<boolean> {
-        return this.#restClient.get<boolean>('/api/v1/runtime/multi-user-enabled')
+        return this.#restClient.get<boolean>('/api/v1/users/multi-user-enabled')
     }
 
     async setMultiUserEnabled(enabled: boolean): Promise<boolean> {
-        return this.#restClient.put<boolean>('/api/v1/runtime/multi-user-enabled', { enabled })
+        return this.#restClient.put<boolean>('/api/v1/users/multi-user-enabled', { enabled })
     }
 
     async freeHostingEnabled(): Promise<boolean> {
@@ -241,31 +177,31 @@ export class RuntimeClient {
     }
 
     async listUsers(): Promise<UserStatistics[]> {
-        return this.#restClient.get<UserStatistics[]>('/api/v1/runtime/users')
+        return this.#restClient.get<UserStatistics[]>('/api/v1/users')
     }
 
     async userWalletAddress(email: string): Promise<string | null> {
-        return this.#restClient.get<string | null>(`/api/v1/runtime/users/${encodeURIComponent(email)}/wallet-address`)
+        return this.#restClient.get<string | null>(`/api/v1/users/${encodeURIComponent(email)}/wallet`)
     }
 
     async emailTestModeEnable(): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/email-test/enable')
+        return this.#restClient.post<boolean>('/api/v1/dev/email-test', { action: 'enable' })
     }
 
     async emailTestModeDisable(): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/email-test/disable')
+        return this.#restClient.post<boolean>('/api/v1/dev/email-test', { action: 'disable' })
     }
 
     async emailTestGetCode(email: string): Promise<string | null> {
-        return this.#restClient.get<string | null>(`/api/v1/runtime/email-test/code/${encodeURIComponent(email)}`)
+        return this.#restClient.post<string | null>('/api/v1/dev/email-test', { action: 'get-code', email })
     }
 
     async emailTestClearCodes(): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/email-test/clear-codes')
+        return this.#restClient.post<boolean>('/api/v1/dev/email-test', { action: 'clear-codes' })
     }
 
     async emailTestSetExpiry(email: string, verificationType: string, expiresAt: number): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/email-test/set-expiry', { email, verificationType, expiresAt })
+        return this.#restClient.post<boolean>('/api/v1/dev/email-test', { action: 'set-expiry', email, verificationType, expiresAt })
     }
 
     // ---- Unyt / mHOT methods ----
@@ -307,11 +243,11 @@ export class RuntimeClient {
     }
 
     async setUserCredits(email: string, amount: number): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/users/credits', { email, amount })
+        return this.#restClient.post<boolean>('/api/v1/users/credits', { email, amount })
     }
 
     async setUserFreeAccess(email: string, enabled: boolean): Promise<boolean> {
-        return this.#restClient.post<boolean>('/api/v1/runtime/users/free-access', { email, enabled })
+        return this.#restClient.post<boolean>('/api/v1/users/free-access', { email, enabled })
     }
 
     async setHostRates(ratesJson: string): Promise<boolean> {
@@ -333,10 +269,8 @@ export class RuntimeClient {
 
     subscribeNotificationTriggered() {
         const unsub = this.#restClient.subscribe('/api/v1/events/runtime', (data) => {
-            if (data.type === 'notification-triggered') {
-                this.#notificationTriggeredCallbacks.forEach(cb => cb(data.notification))
-            }
-        })
+            this.#notificationTriggeredCallbacks.forEach(cb => cb(data.notification))
+        }, ['notification-triggered'])
         this.#unsubscribers.push(unsub)
     }
 
@@ -346,10 +280,8 @@ export class RuntimeClient {
 
     subscribeMessageReceived() {
         const unsub = this.#restClient.subscribe('/api/v1/events/runtime', (data) => {
-            if (data.type === 'message-received') {
-                this.#messageReceivedCallbacks.forEach(cb => cb(data.message))
-            }
-        })
+            this.#messageReceivedCallbacks.forEach(cb => cb(data.message))
+        }, ['message-received'])
         this.#unsubscribers.push(unsub)
     }
 
@@ -359,10 +291,8 @@ export class RuntimeClient {
 
     subscribeExceptionOccurred() {
         const unsub = this.#restClient.subscribe('/api/v1/events/runtime', (data) => {
-            if (data.type === 'exception-occurred') {
-                this.#exceptionOccurredCallbacks.forEach(cb => cb(data.exception))
-            }
-        })
+            this.#exceptionOccurredCallbacks.forEach(cb => cb(data.exception))
+        }, ['exception'])
         this.#unsubscribers.push(unsub)
     }
 }

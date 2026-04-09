@@ -197,3 +197,19 @@ pub async fn email_test(
         other => Err(ApiError::BadRequest(format!("Unknown action: {}", other))),
     }
 }
+
+/// POST /users/request-verification
+pub async fn request_verification(
+    State(_state): State<AppState>,
+    _auth: AuthContext,
+    Json(body): Json<RequestVerificationRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let result = crate::agent::AgentService::request_login_verification(
+        &body.email,
+        body.app_info.as_ref(),
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(serde_json::to_value(result).unwrap_or_default()))
+}

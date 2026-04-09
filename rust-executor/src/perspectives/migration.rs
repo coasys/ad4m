@@ -210,10 +210,6 @@ pub fn migrate_links_from_rusqlite_to_sparql(
 #[cfg(test)]
 mod tests {
     use super::*;
-<<<<<<< HEAD
-    use crate::perspectives::sparql_store::SparqlStore;
-=======
->>>>>>> origin/feat/audio-transport-optimisation
     use crate::types::LinkStatus;
     use crate::types::{ExpressionProof, Link, LinkExpression};
     use chrono::Utc;
@@ -244,17 +240,12 @@ mod tests {
         assert!(changed);
     }
 
-<<<<<<< HEAD
     #[test]
     fn test_convert_literal_uri_number() {
         let (result, changed) = convert_literal_uri("literal://number:42");
         assert_eq!(result, "literal:number:42");
         assert!(changed);
     }
-=======
-        let handle =
-            crate::types::PerspectiveHandle::new_from_name("Test Delete Links".to_string());
->>>>>>> origin/feat/audio-transport-optimisation
 
     #[test]
     fn test_convert_literal_uri_boolean() {
@@ -501,15 +492,9 @@ mod tests {
 
     // ── Full migration flow tests ─────────────────────────────────────
 
-<<<<<<< HEAD
-    #[test]
-    fn test_migrate_empty_perspective() {
-        ensure_db();
-=======
         // Use a unique UUID to avoid conflicts with other tests
         let unique_name = format!("Test Full Migration {}", uuid::Uuid::new_v4());
         let handle = crate::types::PerspectiveHandle::new_from_name(unique_name);
->>>>>>> origin/feat/audio-transport-optimisation
 
         let handle = crate::types::PerspectiveHandle::new_from_name(
             "Test Empty Migration SPARQL".to_string(),
@@ -621,14 +606,8 @@ mod tests {
     fn test_migrate_idempotent() {
         ensure_db();
 
-<<<<<<< HEAD
-        let handle = crate::types::PerspectiveHandle::new_from_name(
-            "Test Idempotent Migration SPARQL".to_string(),
-        );
-=======
         let handle =
             crate::types::PerspectiveHandle::new_from_name("Test Empty Migration".to_string());
->>>>>>> origin/feat/audio-transport-optimisation
 
         let link = LinkExpression {
             author: "did:test:alice".to_string(),

@@ -3,12 +3,7 @@ pub mod perspective_instance;
 pub mod sdna;
 pub mod shacl_parser;
 pub mod shacl_to_prolog;
-<<<<<<< HEAD
-pub mod sparql_store;
-pub mod utils;
-=======
 pub mod utils; // TODO: Remove this module after all users have migrated to SurrealDB
->>>>>>> origin/feat/audio-transport-optimisation
 use crate::types::{
     LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveExpression, PerspectiveHandle,
     PerspectiveRemovedWithOwner, PerspectiveState, PerspectiveWithOwner,

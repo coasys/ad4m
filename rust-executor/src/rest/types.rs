@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    AITask, Agent, AgentStatus, Apps, AuthInfoInput, DecoratedLinkExpression, InteractionCall,
-    InteractionMeta, LanguageMeta, LanguageMetaInput, Link, LinkExpression, LinkInput,
-    LinkMutations, LinkQuery, LinkStatus, Model, ModelType, Notification, OnlineAgent,
-    PerspectiveHandle, TriggeredNotification,
+    AITask, Agent, AgentStatus, Apps, AuthInfoInput, DecoratedLinkExpression, ExpressionProofInput,
+    InteractionCall, InteractionMeta, LanguageMeta, LanguageMetaInput, Link, LinkExpression,
+    LinkExpressionInput, LinkInput, LinkMutations, LinkQuery, LinkStatus, Model, ModelType,
+    Notification, OnlineAgent, PerspectiveHandle, TriggeredNotification,
 };
 
 // Re-export for use in handler files
@@ -379,4 +379,171 @@ pub struct EmailTestRequest {
     pub to: Option<String>,
     pub email: Option<String>,
     pub expiry_seconds: Option<i64>,
+}
+
+// ── Additional Perspective Types ──
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddLinkRequest {
+    pub link: LinkInput,
+    pub status: Option<String>,
+    pub batch_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddLinksBulkRequest {
+    pub links: Vec<LinkInput>,
+    pub status: Option<String>,
+    pub batch_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveLinksBulkRequest {
+    pub links: Vec<LinkExpressionInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkMutationsRequest {
+    pub mutations: LinkMutations,
+    pub status: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddLinkExpressionRequest {
+    pub link: LinkExpression,
+    pub status: Option<String>,
+    pub batch_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateLinkRequest {
+    pub old_link: LinkExpressionInput,
+    pub new_link: LinkInput,
+    pub batch_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveLinkRequest {
+    pub link: LinkExpressionInput,
+    pub batch_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitBatchRequest {
+    pub batch_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscribeQueryRequest {
+    pub query: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscribeQueryResponse {
+    pub subscription_id: String,
+    pub result: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeepAliveQueryRequest {
+    pub subscription_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisposeQueryRequest {
+    pub subscription_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSubjectRequest {
+    pub subject_class: String,
+    pub expression_address: String,
+    pub initial_values: Option<String>,
+    pub batch_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetSubjectDataRequest {
+    pub subject_class: String,
+    pub expression_address: String,
+}
+
+// ── Agent Import ──
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportAgentRequest {
+    pub did: String,
+    pub did_document: String,
+    pub keystore: String,
+    pub passphrase: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntanglementProofPreflightRequest {
+    pub device_key: String,
+    pub device_key_type: String,
+}
+
+// ── Trusted Agents ──
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedAgentsRequest {
+    pub agents: Vec<String>,
+}
+
+// ── Language Settings ──
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteSettingsRequest {
+    pub settings: String,
+}
+
+// ── Free Hosting ──
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetFreeHostingEnabledRequest {
+    pub enabled: bool,
+}
+
+// ── Hosting wallet ──
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetHotWalletAddressRequest {
+    pub address: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestPaymentRequest {
+    #[serde(rename = "amountHOT")]
+    pub amount_hot: String,
+}
+
+// ── Users: request verification ──
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestVerificationRequest {
+    pub email: String,
+    pub app_info: Option<serde_json::Value>,
 }

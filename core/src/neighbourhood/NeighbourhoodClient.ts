@@ -34,7 +34,7 @@ export class NeighbourhoodClient {
     }
 
     async hasTelepresenceAdapter(perspectiveUUID: string): Promise<boolean> {
-        return this.#restClient.get<boolean>(`/api/v1/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/has-telepresence-adapter`)
+        return this.#restClient.get<boolean>(`/api/v1/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/has-telepresence`)
     }
 
     async onlineAgents(perspectiveUUID: string): Promise<OnlineAgent[]> {
@@ -46,7 +46,7 @@ export class NeighbourhoodClient {
     }
 
     async setOnlineStatusU(perspectiveUUID: string, status: PerspectiveUnsignedInput): Promise<boolean> {
-        return this.#restClient.put<boolean>(`/api/v1/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/online-status-unsigned`, { status })
+        return this.#restClient.put<boolean>(`/api/v1/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/online-status`, { status, signed: false })
     }
 
     async sendSignal(perspectiveUUID: string, remoteAgentDid: string, payload: Perspective): Promise<boolean> {
@@ -56,8 +56,8 @@ export class NeighbourhoodClient {
     }
 
     async sendSignalU(perspectiveUUID: string, remoteAgentDid: string, payload: PerspectiveUnsignedInput): Promise<boolean> {
-        return this.#restClient.post<boolean>(`/api/v1/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/signal-unsigned`, {
-            remoteAgentDid, payload
+        return this.#restClient.post<boolean>(`/api/v1/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/signal`, {
+            remoteAgentDid, payload, signed: false
         })
     }
 
@@ -68,8 +68,8 @@ export class NeighbourhoodClient {
     }
 
     async sendBroadcastU(perspectiveUUID: string, payload: PerspectiveUnsignedInput, loopback: boolean = false): Promise<boolean> {
-        return this.#restClient.post<boolean>(`/api/v1/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/broadcast-unsigned`, {
-            payload, loopback
+        return this.#restClient.post<boolean>(`/api/v1/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/broadcast`, {
+            payload, loopback, signed: false
         })
     }
 
@@ -88,7 +88,7 @@ export class NeighbourhoodClient {
 
     async subscribeToSignals(perspectiveUUID: string): Promise<void> {
         const unsub = this.#restClient.subscribe(
-            `/api/v1/events/neighbourhood/${encodeURIComponent(perspectiveUUID)}`,
+            `/api/v1/events/neighbourhoods/${encodeURIComponent(perspectiveUUID)}/signals`,
             (data) => {
                 if (data.type === 'signal') {
                     this.dispatchSignal(perspectiveUUID, data.signal)

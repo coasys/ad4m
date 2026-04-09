@@ -92,3 +92,36 @@ pub async fn get_hosting_wallet_history(
 
     Ok(Json(history))
 }
+
+/// PUT /hosting/wallet/hot-wallet-address
+pub async fn set_hot_wallet_address(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Json(body): Json<SetHotWalletAddressRequest>,
+) -> Result<Json<bool>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    Ad4mDb::with_global_instance(|db| db.set_hot_wallet_address(&body.address))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(true))
+}
+
+/// POST /hosting/request-payment
+pub async fn request_payment(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Json(body): Json<RequestPaymentRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    // TODO: implement actual payment request logic
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "amountHOT": body.amount_hot
+    })))
+}
