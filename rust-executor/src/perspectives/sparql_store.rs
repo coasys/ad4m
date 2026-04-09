@@ -1,4 +1,4 @@
-use crate::graphql::graphql_types::LinkStatus;
+use crate::types::LinkStatus;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
 use deno_core::anyhow::{anyhow, Error};
 use oxigraph::model::*;

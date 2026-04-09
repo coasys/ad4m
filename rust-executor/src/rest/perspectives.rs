@@ -400,16 +400,15 @@ pub async fn query_perspective(
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             serde_json::to_value(prolog_resolution_to_string(res)).unwrap_or_default()
         }
-        "surreal" => {
+        "sparql" => {
             let res = perspective
-                .surreal_query(body.query)
-                .await
+                .sparql_query(body.query)
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             serde_json::to_value(res).unwrap_or_default()
         }
         other => {
             return Err(ApiError::BadRequest(format!(
-                "Unknown query engine: {}. Use 'prolog' or 'surreal'.",
+                "Unknown query engine: {}. Use 'prolog' or 'sparql'.",
                 other
             )));
         }

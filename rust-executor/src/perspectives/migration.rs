@@ -210,8 +210,8 @@ pub fn migrate_links_from_rusqlite_to_sparql(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::LinkStatus;
     use crate::perspectives::sparql_store::SparqlStore;
+    use crate::types::LinkStatus;
     use crate::types::{ExpressionProof, Link, LinkExpression};
     use chrono::Utc;
 
@@ -439,9 +439,8 @@ mod tests {
     fn test_delete_all_links_for_perspective() {
         ensure_db();
 
-        let handle = crate::types::PerspectiveHandle::new_from_name(
-            "Test Delete Links SPARQL".to_string(),
-        );
+        let handle =
+            crate::types::PerspectiveHandle::new_from_name("Test Delete Links SPARQL".to_string());
 
         let link1 = LinkExpression {
             author: "did:test:alice".to_string(),
