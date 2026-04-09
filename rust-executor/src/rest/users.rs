@@ -202,7 +202,7 @@ pub async fn email_test(
 pub async fn request_verification(
     State(_state): State<AppState>,
     _auth: AuthContext,
-    Json(body): Json<RequestVerificationRequest>,
+    Json(_body): Json<RequestVerificationRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // TODO: implement request_login_verification
     Err(ApiError::Internal(

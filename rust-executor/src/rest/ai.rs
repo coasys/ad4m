@@ -8,7 +8,6 @@ use axum::{
 use crate::agent::capabilities::*;
 use crate::ai_service::AIService;
 use crate::db::Ad4mDb;
-use crate::pubsub::mark_credits_dirty;
 use crate::types::{AITask, AITaskInput, Model, ModelInput, ModelType, VoiceActivityParamsInput};
 use base64::Engine;
 use serde::Deserialize;
@@ -33,6 +32,7 @@ fn check_compute_credits(auth_token: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn is_billing_active(auth_token: &str) -> bool {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
         let global_free =
@@ -59,7 +59,7 @@ pub async fn list_models(
     check_capability(&context.capabilities, &AI_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let service = AIService::global_instance()
+    let _service = AIService::global_instance()
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -260,7 +260,7 @@ pub async fn add_task(
 pub async fn update_task(
     State(_state): State<AppState>,
     auth: AuthContext,
-    Path(id): Path<String>,
+    Path(_id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<AITask>, ApiError> {
     let context = auth.to_request_context();

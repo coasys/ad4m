@@ -44,7 +44,10 @@ pub async fn login_proxy(
 
     let credential = reqwest::get(format!(
         "{}/login/verify?did={}&signature={}&publicKey={}",
-        PROXY_SERVER, subdomain, signed_message.signature, signed_message.public_key
+        PROXY_SERVER,
+        subdomain,
+        signed_message.signature.unwrap_or_default(),
+        signed_message.public_key.unwrap_or_default()
     ))
     .await
     .map_err(|err| {

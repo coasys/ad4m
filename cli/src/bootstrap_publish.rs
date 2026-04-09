@@ -101,7 +101,7 @@ pub async fn start_publishing(
             .languages
             .publish(
                 language.resource,
-                language.meta.name.clone(),
+                Some(language.meta.name.clone()),
                 Some(language.meta.description),
                 Some(language.meta.possible_template_params),
                 Some(language.meta.source_code_link),
@@ -137,7 +137,7 @@ pub async fn start_publishing(
             .languages
             .publish(
                 language.resource,
-                language.meta.name.clone(),
+                Some(language.meta.name.clone()),
                 Some(language.meta.description),
                 Some(language.meta.possible_template_params),
                 Some(language.meta.source_code_link),
@@ -160,7 +160,7 @@ pub async fn start_publishing(
             .languages
             .publish(
                 language.resource,
-                language.meta.name.clone(),
+                Some(language.meta.name.clone()),
                 Some(language.meta.description),
                 Some(language.meta.possible_template_params),
                 Some(language.meta.source_code_link),

@@ -29,7 +29,8 @@
     "inject-language-language": "node scripts/injectLanguageLanguageBundle.js",
     "inject-publishing-agent": "node scripts/injectPublishingAgent.js",
     "publish-test-languages": "node --no-warnings=ExperimentalWarning --experimental-specifier-resolution=node --loader ts-node/esm ./utils/publishTestLangs.ts",
-    "test-single-prepare": "node scripts/cleanTestingData.js && pnpm run prepare-test && node scripts/cleanup.js"
+    "test-single-prepare": "node scripts/cleanTestingData.js && pnpm run prepare-test && node scripts/cleanup.js",
+    "test-rest": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/rest-integration.test.ts"
   },
   "devDependencies": {
     "@apollo/client": "3.7.10",
@@ -70,7 +71,8 @@
     "ts-node": "10.9.1",
     "typescript": "^4.6.2",
     "unzipper": "^0.10.11",
-    "ws": "8.13.0"
+    "ws": "8.13.0",
+    "eventsource": "^3.0.2"
   },
   "dependencies": {
     "fluent-ffmpeg": "^2.1.3",

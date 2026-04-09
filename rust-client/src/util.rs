@@ -66,6 +66,7 @@ pub async fn put<B: serde::Serialize, R: DeserializeOwned>(
 }
 
 /// Helper to make authenticated PATCH requests to the REST API.
+#[allow(dead_code)]
 pub async fn patch<B: serde::Serialize, R: DeserializeOwned>(
     executor_url: &str,
     cap_token: &str,
@@ -140,6 +141,7 @@ pub async fn delete_with_body<B: serde::Serialize, R: DeserializeOwned>(
 }
 
 /// Helper for POST requests that return no body (204 etc) — returns ()
+#[allow(dead_code)]
 pub async fn post_no_response<B: serde::Serialize>(
     executor_url: &str,
     cap_token: &str,

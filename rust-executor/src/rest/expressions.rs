@@ -3,10 +3,9 @@
 //! 5 harmonised endpoints.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     Json,
 };
-use std::collections::HashMap;
 
 use crate::agent::capabilities::*;
 use crate::agent::AgentContext;

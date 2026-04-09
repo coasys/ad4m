@@ -23,7 +23,6 @@ mod perspectives;
 mod repl;
 mod runtime;
 
-use ad4m_client::*;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dev::DevFunctions;

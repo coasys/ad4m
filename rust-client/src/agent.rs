@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::types::*;
 use crate::util;

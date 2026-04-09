@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use colour::{self, green_ln};
-use std::{fs, str::FromStr};
+use std::fs;
 
 use crate::bootstrap_publish::*;
 
@@ -81,7 +81,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     .languages
                     .publish(
                         language_path,
-                        String::from("some-test-lang"),
+                        Some(String::from("some-test-lang")),
                         Some(String::from("some-desc")),
                         None,
                         None,
@@ -96,11 +96,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 println!("Language: {:?}", language);
                 let expression = client
                     .expressions
-                    .expression_create(
-                        language_info.address,
-                        serde_json::Value::from_str(&data)
-                            .expect("could not cast input data to serde_json::Value"),
-                    )
+                    .expression_create(data.clone(), language_info.address)
                     .await;
                 println!("Expression create: {:?}", expression);
                 let expression = client.expressions.expression(expression.unwrap()).await;

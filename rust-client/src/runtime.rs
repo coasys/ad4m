@@ -19,6 +19,7 @@ struct VerifySignatureBody {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 struct FriendSendMessageBody {
     pub message: String,
 }

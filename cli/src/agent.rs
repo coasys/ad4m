@@ -1,5 +1,5 @@
 use crate::{formatting::*, util::readline_masked};
-use ad4m_client::{agent::add_entanglement_proofs::EntanglementProofInput, Ad4mClient};
+use ad4m_client::{types::EntanglementProof, Ad4mClient};
 use anyhow::{bail, Result};
 use clap::Subcommand;
 
@@ -55,8 +55,6 @@ pub enum AgentFunctions {
         request_id: String,
         rand: String,
     },
-    /// Stay connected and print any agent status changed events
-    Watch {},
 }
 
 pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()> {
@@ -140,17 +138,15 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
             device_key,
             device_key_signed_by_did,
             device_key_type,
-            did,
+            did: _did,
             did_signed_by_device_key,
-            did_signing_key_id,
+            did_signing_key_id: _did_signing_key_id,
         } => {
-            let input = EntanglementProofInput {
+            let input = EntanglementProof {
                 device_key,
-                device_key_signed_by_did,
+                device_key_signed_by_did: Some(device_key_signed_by_did),
                 device_key_type,
-                did,
-                did_signed_by_device_key,
-                did_signing_key_id,
+                did_signed_by_device_key: Some(did_signed_by_device_key),
             };
             ad4m_client
                 .agent
@@ -162,17 +158,15 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
             device_key,
             device_key_signed_by_did,
             device_key_type,
-            did,
+            did: _did,
             did_signed_by_device_key,
-            did_signing_key_id,
+            did_signing_key_id: _did_signing_key_id,
         } => {
-            let input = ad4m_client::agent::delete_entanglement_proofs::EntanglementProofInput {
+            let input = EntanglementProof {
                 device_key,
-                device_key_signed_by_did,
+                device_key_signed_by_did: Some(device_key_signed_by_did),
                 device_key_type,
-                did,
-                did_signed_by_device_key,
-                did_signing_key_id,
+                did_signed_by_device_key: Some(did_signed_by_device_key),
             };
             ad4m_client
                 .agent
@@ -196,9 +190,6 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
                 .retrieve_capability(request_id, rand)
                 .await?;
             println!("JWT: {:#?}", result);
-        }
-        AgentFunctions::Watch {} => {
-            ad4m_client.agent.watch().await?;
         }
     };
     Ok(())

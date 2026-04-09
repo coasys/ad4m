@@ -114,7 +114,7 @@ pub async fn export_data(
 
     match body.export_type.as_str() {
         "db" => {
-            let json_data = Ad4mDb::with_global_instance(|db| db.export_all_to_json())
+            let _json_data = Ad4mDb::with_global_instance(|db| db.export_all_to_json())
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             // SECURITY TODO: constrain file paths to ad4m data directory.
             // This is pre-existing behaviour from the GraphQL mutation.
@@ -588,7 +588,7 @@ pub async fn get_tls_domain(
     State(_state): State<AppState>,
     _auth: AuthContext,
 ) -> Result<Json<Option<String>>, ApiError> {
-    let config = crate::config::get_global_config();
+    let _config = crate::config::get_global_config();
     // TlsConfig does not have a domain field — return None for now
     let domain: Option<String> = None;
     Ok(Json(domain))

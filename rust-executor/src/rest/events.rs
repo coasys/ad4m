@@ -10,11 +10,10 @@
 use std::convert::Infallible;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     response::sse::{Event, KeepAlive, Sse},
 };
 use futures::stream::{self, Stream, StreamExt};
-use std::collections::HashMap;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::pubsub::{
@@ -22,8 +21,7 @@ use crate::pubsub::{
     AI_TRANSCRIPTION_TEXT_TOPIC, APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC,
     HOSTING_USER_INFO_CHANGED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC,
     PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
-    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_REMOVED_TOPIC,
-    PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
+    PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
     RUNTIME_MESSAGED_RECEIVED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
 
@@ -51,7 +49,7 @@ fn wrap_event(event_type: &str, raw_json: &str) -> String {
 /// GET /events/agent — SSE: agent-status-changed, apps-changed, agent-updated, hosting-user-info-changed, compute-log-updated
 pub async fn agent_events(
     State(_state): State<AppState>,
-    auth: AuthContext,
+    _auth: AuthContext,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let pubsub = get_global_pubsub().await;
 
@@ -87,7 +85,7 @@ pub async fn agent_events(
 /// GET /events/perspectives — SSE: perspective-added, perspective-removed, perspective-updated, sync-state-change
 pub async fn perspective_lifecycle_events(
     State(_state): State<AppState>,
-    auth: AuthContext,
+    _auth: AuthContext,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let pubsub = get_global_pubsub().await;
 
@@ -116,7 +114,7 @@ pub async fn perspective_lifecycle_events(
 /// GET /events/perspectives/:uuid/links — SSE: link-added, link-removed, link-updated
 pub async fn perspective_link_events(
     State(_state): State<AppState>,
-    auth: AuthContext,
+    _auth: AuthContext,
     Path(uuid): Path<String>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let pubsub = get_global_pubsub().await;
@@ -159,7 +157,7 @@ pub async fn perspective_link_events(
 /// GET /events/neighbourhoods/:uuid/signals — SSE: signal
 pub async fn neighbourhood_signal_events(
     State(_state): State<AppState>,
-    auth: AuthContext,
+    _auth: AuthContext,
     Path(uuid): Path<String>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let pubsub = get_global_pubsub().await;
@@ -179,7 +177,7 @@ pub async fn neighbourhood_signal_events(
 /// GET /events/runtime — SSE: message-received, notification-triggered, exception-occurred
 pub async fn runtime_events(
     State(_state): State<AppState>,
-    auth: AuthContext,
+    _auth: AuthContext,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let pubsub = get_global_pubsub().await;
 
@@ -206,7 +204,7 @@ pub async fn runtime_events(
 /// GET /events/ai — SSE: transcription-text, model-loading-status
 pub async fn ai_events(
     State(_state): State<AppState>,
-    auth: AuthContext,
+    _auth: AuthContext,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let pubsub = get_global_pubsub().await;
 

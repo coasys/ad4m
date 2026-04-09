@@ -1,4 +1,5 @@
 use crate::{formatting::*, repl::repl_loop, util::maybe_parse_datetime};
+use ad4m_client::types::LinkInput;
 use ad4m_client::Ad4mClient;
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
@@ -70,9 +71,6 @@ pub enum PerspectiveFunctions {
     /// Run Prolog / SDNA query on perspective with given uuid
     Infer { id: String, query: String },
 
-    /// Stay connected and print any changes (links added/removed) to the perspective
-    Watch { id: String },
-
     /// Interactive Perspective shell based on Prolog/SDNA runtime
     Repl { id: String },
 
@@ -126,8 +124,8 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
 
     match command.unwrap() {
         PerspectiveFunctions::Add { name } => {
-            let new_perspective_id = ad4m_client.perspectives.add(name).await?;
-            println!("{}", new_perspective_id);
+            let new_perspective = ad4m_client.perspectives.add(name).await?;
+            println!("{}", new_perspective.uuid);
         }
         PerspectiveFunctions::Remove { id } => {
             ad4m_client.perspectives.remove(id).await?;
@@ -137,11 +135,18 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             source,
             target,
             predicate,
-            status,
+            status: _status,
         } => {
             ad4m_client
                 .perspectives
-                .add_link(id, source, target, predicate, status)
+                .add_link(
+                    id,
+                    LinkInput {
+                        source,
+                        target,
+                        predicate,
+                    },
+                )
                 .await?;
         }
         PerspectiveFunctions::QueryLinks(args) => {
@@ -154,9 +159,9 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
                     args.source.filter(|s| s != "_"),
                     args.target.filter(|s| s != "_"),
                     args.predicate,
-                    from_date,
-                    until_date,
-                    args.limit,
+                    from_date.map(|d| d.to_string()),
+                    until_date.map(|d| d.to_string()),
+                    args.limit.map(|l| l as i64),
                 )
                 .await?;
             for link in result {
@@ -167,23 +172,11 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             let results = ad4m_client.perspectives.infer(id, query).await?;
             print_prolog_results(results)?;
         }
-        PerspectiveFunctions::Watch { id } => {
-            ad4m_client
-                .perspectives
-                .watch(
-                    id,
-                    Box::new(|link| {
-                        print_link(link);
-                    }),
-                )
-                .await?;
-        }
         PerspectiveFunctions::Snapshot { id } => {
             let result = ad4m_client.perspectives.snapshot(id).await?;
             println!("{:#?}", result);
         }
         PerspectiveFunctions::Repl { id } => {
-            //let _ = perspectives::run_watch(cap_token, id);
             repl_loop(ad4m_client.perspectives.get(id).await?).await?;
         }
         PerspectiveFunctions::AddDna {
@@ -333,11 +326,12 @@ async fn interactive_perspective_selector(ad4m_client: Ad4mClient) -> Result<()>
                 .iter()
                 .enumerate()
                 .map(|(_i, perspective)| {
+                    let name = perspective
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| "<unnamed>".to_string());
                     let mut spans = vec![
-                        Span::styled(
-                            format!("{}", perspective.name),
-                            Style::default().fg(Color::White),
-                        ),
+                        Span::styled(name, Style::default().fg(Color::White)),
                         Span::styled(
                             format!(" ({})", perspective.uuid),
                             Style::default().fg(Color::Gray),
@@ -430,10 +424,11 @@ async fn interactive_perspective_selector(ad4m_client: Ad4mClient) -> Result<()>
 
                     // Get the selected perspective and start REPL
                     let selected_perspective = &all_perspectives[selected];
-                    println!(
-                        "\x1b[32mSelected perspective: \x1b[97m{}",
-                        selected_perspective.name
-                    );
+                    let name = selected_perspective
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| "<unnamed>".to_string());
+                    println!("\x1b[32mSelected perspective: \x1b[97m{}", name);
                     println!(
                         "\x1b[32mStarting REPL for perspective: \x1b[97m{}",
                         selected_perspective.uuid

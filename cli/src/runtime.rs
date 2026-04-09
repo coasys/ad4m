@@ -1,4 +1,3 @@
-use crate::formatting::{print_message_perspective, print_sent_message_perspective};
 use crate::util::string_2_perspective_snapshot;
 use ad4m_client::Ad4mClient;
 use anyhow::Result;
@@ -36,19 +35,11 @@ pub enum RuntimeFunctions {
     },
     VerifySignature {
         did: String,
-        did_signing_key: String,
         data: String,
         signed_data: String,
     },
     SetStatus {
         status: String,
-    },
-    FriendStatus {
-        agent: String,
-    },
-    FriendSendMessage {
-        agent: String,
-        message: String,
     },
     MessageInbox {
         filter: Option<String>,
@@ -153,45 +144,33 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
         }
         RuntimeFunctions::VerifySignature {
             did,
-            did_signing_key,
             data,
             signed_data,
         } => {
             let result = ad4m_client
                 .runtime
-                .verify_string_signed_by_did(did, did_signing_key, data, signed_data)
+                .verify_string_signed_by_did(did, data, signed_data)
                 .await?;
             println!("{:?}", result);
         }
         RuntimeFunctions::SetStatus { status } => {
             let perspective = string_2_perspective_snapshot(&ad4m_client, status).await?;
-            ad4m_client.runtime.set_status(perspective.into()).await?;
-            println!("Status set!");
-        }
-        RuntimeFunctions::FriendStatus { agent } => {
-            let status = ad4m_client.runtime.friend_status(agent).await?;
-            println!("{:?}", status.runtime_friend_status);
-        }
-        RuntimeFunctions::FriendSendMessage { agent, message } => {
-            let message = string_2_perspective_snapshot(&ad4m_client, message).await?;
             ad4m_client
                 .runtime
-                .friend_send_message(agent, message.into())
+                .set_status(serde_json::to_value(perspective)?)
                 .await?;
-            println!("Message sent!");
+            println!("Status set!");
         }
         RuntimeFunctions::MessageInbox { filter } => {
             let messages = ad4m_client.runtime.message_inbox(filter).await?;
             for message in messages {
-                print_message_perspective(message);
-                println!();
+                println!("{:#?}", message);
             }
         }
         RuntimeFunctions::MessageOutbox { filter } => {
             let messages = ad4m_client.runtime.message_outbox(filter).await?;
             for message in messages {
-                print_sent_message_perspective(message);
-                println!();
+                println!("{:#?}", message);
             }
         }
     };

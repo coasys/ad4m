@@ -1,5 +1,5 @@
-use ad4m_client::{expressions::expression, Ad4mClient};
-use anyhow::{bail, Result};
+use ad4m_client::Ad4mClient;
+use anyhow::Result;
 use clap::Subcommand;
 use serde_json::Value;
 
@@ -23,46 +23,37 @@ pub async fn run(ad4m_client: Ad4mClient, command: ExpressionFunctions) -> Resul
             language_address,
             content,
         } => {
-            let content = serde_json::from_str::<Value>(&content).unwrap_or_else(|_| {
-                serde_json::from_str::<Value>(&format!("\"{}\"", content)).unwrap()
-            });
+            let content_str = serde_json::from_str::<Value>(&content)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|_| format!("\"{}\"", content));
             let expression_url = ad4m_client
                 .expressions
-                .expression_create(language_address, content)
+                .expression_create(content_str, language_address)
                 .await?;
             println!("Expression created with url: {}", expression_url);
         }
         ExpressionFunctions::Get { url } => {
-            let maybe_content: Option<expression::ExpressionExpression> =
-                ad4m_client.expressions.expression(url.clone()).await?;
-            match maybe_content {
-                Some(content) => {
-                    println!("author: {}", content.author);
-                    println!("timestamp: {}", content.timestamp);
-                    if content.proof.valid.unwrap_or(false) {
-                        println!("signature: ✅");
-                    } else {
-                        println!("signature: ❌");
-                    }
-                    println!("data: {}", content.data)
+            let content: Value = ad4m_client.expressions.expression(url.clone()).await?;
+            if content.is_null() {
+                println!("No expression found at url: {}", url);
+            } else {
+                if let Some(author) = content.get("author") {
+                    println!("author: {}", author);
                 }
-                None => println!("No expression found at url: {}", url),
+                if let Some(timestamp) = content.get("timestamp") {
+                    println!("timestamp: {}", timestamp);
+                }
+                if let Some(data) = content.get("data") {
+                    println!("data: {}", data);
+                }
             }
         }
-
         ExpressionFunctions::GetRaw { url } => {
-            let maybe_content: Option<expression::ExpressionExpression> =
-                ad4m_client.expressions.expression(url.clone()).await?;
-            match maybe_content {
-                Some(content) => {
-                    if let Ok(Value::String(content)) = serde_json::from_str::<Value>(&content.data)
-                    {
-                        println!("{}", &content);
-                    } else {
-                        println!("{}", content.data);
-                    }
-                }
-                None => bail!("No expression found at url: {}", url),
+            let content: Value = ad4m_client.expressions.expression(url.clone()).await?;
+            if content.is_null() {
+                println!("No expression found at url: {}", url);
+            } else if let Some(data) = content.get("data") {
+                println!("{}", data);
             }
         }
     };

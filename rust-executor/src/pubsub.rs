@@ -6,7 +6,6 @@ use log::error;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -60,6 +59,7 @@ impl PubSub {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) async fn subscribe_and_process<
     T: DeserializeOwned + Send + 'static + std::fmt::Debug + GetValue + GetFilter,
 >(

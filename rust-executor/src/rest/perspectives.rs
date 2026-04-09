@@ -163,7 +163,7 @@ pub async fn publish_snapshot(
     )
     .map_err(|e| ApiError::Forbidden(e))?;
 
-    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let _perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     // TODO: implement publish_snapshot in PerspectiveInstance
     Err(ApiError::Internal(
         "publish_snapshot not yet implemented".into(),
@@ -439,7 +439,7 @@ pub async fn add_link_expression(
     check_compute_credits(&context.auth_token)?;
 
     let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
-    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+    let _agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
     let status = body
         .status
@@ -504,7 +504,7 @@ pub async fn remove_link(
     .map_err(|e| ApiError::Forbidden(e))?;
 
     let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
-    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+    let _agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
     let link_expr = LinkExpression::from_input_without_proof(body.link);
     perspective
@@ -640,7 +640,7 @@ pub async fn create_batch(
     )
     .map_err(|e| ApiError::Forbidden(e))?;
 
-    let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     let batch_id = perspective.create_batch().await;
 
     Ok(Json(batch_id))
@@ -690,7 +690,7 @@ pub async fn subscribe_query(
     .map_err(|e| ApiError::Forbidden(e))?;
 
     let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
-    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+    let _agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
     let user_email = user_email_from_token(context.auth_token.clone());
 
@@ -710,7 +710,7 @@ pub async fn subscribe_surreal_query(
     State(_state): State<AppState>,
     auth: AuthContext,
     Path(uuid): Path<String>,
-    Json(body): Json<SubscribeQueryRequest>,
+    Json(_body): Json<SubscribeQueryRequest>,
 ) -> Result<Json<SubscribeQueryResponse>, ApiError> {
     let context = auth.to_request_context();
     check_capability(
@@ -719,8 +719,8 @@ pub async fn subscribe_surreal_query(
     )
     .map_err(|e| ApiError::Forbidden(e))?;
 
-    let perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
-    let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+    let _perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
+    let _agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
     // TODO: implement surreal query subscription
     Err(ApiError::Internal(

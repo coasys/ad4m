@@ -32,7 +32,7 @@ impl PerspectiveProxy {
         source: String,
         target: String,
         predicate: Option<String>,
-        status: Option<String>,
+        _status: Option<String>,
     ) -> Result<LinkExpression> {
         let link = LinkInput {
             source,

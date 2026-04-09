@@ -799,7 +799,7 @@ pub async fn delete_entanglement(
 pub async fn import_agent(
     State(_state): State<AppState>,
     auth: AuthContext,
-    Json(body): Json<ImportAgentRequest>,
+    Json(_body): Json<ImportAgentRequest>,
 ) -> Result<Json<AgentStatus>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_CREATE_CAPABILITY)
