@@ -1,8 +1,16 @@
 # AD4M Language Development Kit — Interface Spec
 
-**Version:** 0.4.1-draft  
+**Version:** 0.5-draft  
 **Date:** 2026-04-09  
 **Status:** Draft — for discussion
+
+> **Changes from 0.4.1:** Added PerspectiveQuery exports (linkQuery / prolog).
+> Defined telepresence signal delivery (`handleTelepresenceSignal`). Fixed
+> `directMessageRecipient` semantics. Reconciled sync/async signatures with the
+> existing `PerspectiveSyncAdapter`. Resolved the `linksTriggerCallback`
+> question. Clarified that `holochainCallAsync` is batched. Added
+> remove-callback exports. Documented how the old `LanguageInitContext` is now
+> fetched via imports.
 
 ---
 
@@ -23,7 +31,13 @@ LANGUAGE IMPORTS ← RUNTIME PROVIDES        (language → runtime)
     Example: holochainCall(dnaNick, zome, fnName, params)
 ```
 
-No special "callback" naming. No separate registration step. Just function calls in both directions.
+In JavaScript there is no separate registration step — the runtime hands the
+language a function and the language calls it. In WASM, the language cannot
+hold a `JsValue`, so the runtime registers a callback by passing an `i32`
+identifier (e.g. via `linkSyncAddCallback(id)`); the language stores the id and
+later invokes a `*TriggerCallback(id, …)` import which the host dispatches to
+the JS function. Both flavors are described as plain function calls, not as a
+distinct "callback registration" subsystem.
 
 ---
 
@@ -37,7 +51,7 @@ The runtime calls these functions that the language exports.
 |--------|-----------|-------------|
 | `name` | — | `string` — language name |
 | `version` | — | `string` — semver |
-| `init()` | — | `Promise<void>` — initialize. Use `language_*()` imports inside. |
+| `init()` | — | `Promise<void>` — initialize. No arguments. The context that used to be passed as `LanguageInitContext` (`storageDirectory`, `customSettings`, `languageAddress`) is now fetched lazily via the `languageStorageDirectory()` / `languageSettings()` / `languageAddress()` imports. |
 | `teardown()` | — | `Promise<void>` — clean up |
 
 ### Holochain Signal Arrived
@@ -48,18 +62,36 @@ When a Holochain DNA emits a signal, the runtime calls this. The `dnaNick` ident
 |--------|-----------|-------------|
 | `handleHolochainSignal(dnaNick, signalData)` | `string, unknown` | Holochain DNA emitted a signal |
 
+### Telepresence Signal Arrived
+
+When another agent sends us a telepresence signal (point-to-point or broadcast),
+the runtime calls this. Replaces the old `TelepresenceAdapter.registerSignalCallback`.
+
+| Export | Parameters | Description |
+|--------|-----------|-------------|
+| `handleTelepresenceSignal(payload, recipientDid?)` | `PerspectiveExpression, string?` | Incoming signal from another agent. `recipientDid` is set for directed signals; absent/null for broadcasts. |
+
 ### Link Sync
 
 | Export | Parameters | Returns | Description |
 |--------|-----------|---------|-------------|
-| `linkSyncSync()` | — | `PerspectiveDiff` | Sync with network, return current diff |
-| `linkSyncCommit(diff)` | `PerspectiveDiff` | `string` | Commit a diff, return new revision hash |
-| `linkSyncRender()` | — | `{links: LinkExpression[]}` | Full link snapshot |
-| `linkSyncCurrentRevision()` | — | `string\|null` | Current revision hash |
-| `linkSyncOthers()` | — | `string[]` | Other synced agent DIDs |
+| `linkSyncSync()` | — | `Promise<PerspectiveDiff>` | Sync with network, return current diff |
+| `linkSyncCommit(diff)` | `PerspectiveDiff` | `Promise<string>` | Commit a diff, return new revision hash |
+| `linkSyncRender()` | — | `Promise<Perspective>` | Full perspective snapshot at current revision |
+| `linkSyncCurrentRevision()` | — | `Promise<string\|null>` | Current revision hash |
+| `linkSyncOthers()` | — | `Promise<string[]>` | Other synced agent DIDs |
 | `linkSyncWritable()` | — | `boolean` | Whether accepting new links |
 | `linkSyncPublic()` | — | `boolean` | Whether links are publicly readable |
-| `linkSyncSetLocalAgents(agents)` | `string[]` | `Promise<void>` | Register local agent DIDs |
+| `linkSyncSetLocalAgents(agents)` | `string[]` | `void` | Register local agent DIDs |
+| `linkSyncAddCallback(callbackId)` | `i32` | `void` | **WASM only.** Register a callback id; the language stores it and later invokes `linksTriggerCallback(callbackId, diff)`. In JavaScript, the runtime passes a function directly (see "How It Works"). |
+| `linkSyncRemoveCallback(callbackId)` | `i32` | `void` | Unregister a previously registered link callback. |
+| `linkSyncAddSyncStateChangeCallback(callbackId)` | `i32` | `void` | Register a sync-state-change callback id. |
+
+> **Note on sync vs. async:** signatures match the existing
+> `PerspectiveSyncAdapter` in `core/src/language/Language.ts`. Methods that
+> historically returned `Promise` stay async — the WASM bridge returns a
+> `Promise` from the host side even when the WASM function itself is
+> synchronous.
 
 ### Expression
 
@@ -83,28 +115,48 @@ When a Holochain DNA emits a signal, the runtime calls this. The `dnaNick` ident
 
 ### Direct Message
 
+A DM language instance is configured per peer. `directMessageRecipient()` returns
+the DID of **the other agent** (whom we are DMing) — not the local agent.
+`sendP2P` / `sendInbox` therefore take only the message; the recipient is
+implicit in the language instance.
+
 | Export | Parameters | Returns | Description |
 |--------|-----------|---------|-------------|
-| `directMessageRecipient()` | — | `string` | This agent's DID |
-| `directMessageStatus()` | — | `Promise<PerspectiveExpression\|void>` | Get DM status |
-| `directMessageSendP2P(recipient, message)` | `string, PerspectiveExpression` | `Promise<PerspectiveExpression\|void>` | Send P2P DM |
-| `directMessageSendInbox(recipient, message)` | `string, PerspectiveExpression` | `Promise<PerspectiveExpression\|void>` | Send inbox DM |
-| `directMessageSetStatus(status)` | `PerspectiveExpression` | `Promise<void>` | Set DM status |
+| `directMessageRecipient()` | — | `string` | DID of the peer this DM language is configured for |
+| `directMessageStatus()` | — | `Promise<PerspectiveExpression\|void>` | Get peer's DM status |
+| `directMessageSendP2P(message)` | `PerspectiveExpression` | `Promise<PerspectiveExpression\|void>` | Send P2P DM to the configured recipient |
+| `directMessageSendInbox(message)` | `PerspectiveExpression` | `Promise<PerspectiveExpression\|void>` | Send inbox DM to the configured recipient |
+| `directMessageSetStatus(status)` | `PerspectiveExpression` | `Promise<void>` | Set local DM status |
 | `directMessageInbox(filter?)` | `string?` | `Promise<PerspectiveExpression[]>` | Get inbox |
+| `dmAddMessageCallback(callbackId)` | `i32` | `void` | **WASM only.** Register a DM callback id (JS passes a function directly). |
+| `dmRemoveMessageCallback(callbackId)` | `i32` | `void` | Unregister a DM callback. |
 
 ### Language Source
 
 | Export | Parameters | Returns |
 |--------|-----------|---------|
-| `languageGetSource()` | — | `Promise<LanguageSource>` |
+| `languageGetSource(address)` | `string` | `Promise<string>` |
 
-### Query
+### Get-By-Author / Get-All
 
 | Export | Parameters | Returns |
 |--------|-----------|---------|
 | `getByAuthor(author, count, page)` | `string, number, number` | `Promise<Expression[]\|null>` |
 | `getAll(filter?, count, page)` | `any?, number, number` | `Promise<Expression[]\|null>` |
 | `isImmutableExpression(address)` | `string` | `boolean` |
+
+### Perspective Query (linkQuery / Prolog)
+
+Replaces the old `PerspectiveQueryAdapter`. These let other languages and the
+runtime read links from a Language without forcing a full sync — used for
+back-links and Prolog queries.
+
+| Export | Parameters | Returns | Description |
+|--------|-----------|---------|-------------|
+| `linkQuery(query)` | `LinkQuery` | `Promise<Perspective>` | Same semantic as `PerspectiveProxy.get(LinkQuery)` |
+| `supportsPrologQueries()` | — | `boolean` | If `false`, the runtime falls back to running its own Prolog over the result of an all-`linkQuery`. |
+| `infer(prologQuery)` | `string` | `Promise<any>` | Plain Prolog inference. Only called if `supportsPrologQueries()` is `true`. |
+| `prologQuery(query)` | `string` | `Promise<Perspective>` | Returns a Perspective whose links are solutions to a Prolog query with unbound `Source`/`Predicate`/`Target`/`Author`/`Timestamp`. |
 
 ### Interactions
 
@@ -135,9 +187,9 @@ The language calls these functions that the runtime provides. Import from `ad4m:
 
 | Import | Returns | Description |
 |--------|---------|-------------|
-| `holochainRegisterDnas(dnas)` | `void` | Register DNA bundles with the conductor |
-| `holochainCall(dnaNick, zome, fnName, params)` | `unknown` | Sync zome call |
-| `holochainCallAsync(calls, timeoutMs?)` | `unknown[]` | Async batch zome calls |
+| `holochainRegisterDnas(dnas)` | `AppInfo[]` | Register DNA bundles with the conductor. Holochain signals are delivered to the language via the `handleHolochainSignal` export — no per-registration callback. |
+| `holochainCall(dnaNick, zome, fnName, params)` | `unknown` | Single zome call. Underlying impl puts these into a sync FIFO queue. |
+| `holochainCallAsync(calls, timeoutMs?)` | `unknown[]` | **Batched** parallel zome calls. `calls` is `{dnaNick, zome, fnName, params}[]`. Read-only operations only, to avoid source-chain mutation races. |
 
 ### Language Context
 
@@ -145,7 +197,7 @@ The language calls these functions that the runtime provides. Import from `ad4m:
 |--------|---------|-------------|
 | `languageStorageDirectory()` | `string` | Persistent storage path for this language instance |
 | `languageAddress()` | `string` | This language's address on the network |
-| `languageSettings()` | `string` | Custom settings (raw JSON — caller parses) |
+| `languageSettings()` | `string` | Custom settings as raw JSON. Returned as a string because the WASM boundary cannot pass arbitrary objects; the JS ALDK shim parses this and re-exposes it as an object to JS-authored languages. |
 
 ### Notify Runtime of Events
 
@@ -153,12 +205,12 @@ When the language produces data that the runtime needs to handle, it calls these
 
 | Import | Parameters | Description |
 |--------|-----------|-------------|
-| `linksTriggerCallback(diff)` | `PerspectiveDiff` | Notify runtime of new/received links |
+| `linksTriggerCallback(diff)` | `PerspectiveDiff` | Notify runtime of new/received links. **Required** even though `linkSyncSync()` returns a diff: the language also fires this from inside `handleHolochainSignal` when a remote diff arrives asynchronously, and that path has no return value to thread through. |
 | `linksTriggerSyncState(state)` | `string` | Notify runtime of sync state change ("Synced", "NotSynced", etc.) |
 | `dmTriggerCallback(message)` | `PerspectiveExpression` | Notify runtime of new DM |
 | `signalEmit(data)` | `unknown` | Emit to the AD4M signal bus |
 
-> **Note:** The runtime handles `linksTriggerCallback` by invoking the perspective's registered link callback (set by the perspective proxy). The language doesn't need a separate registration step — when it calls `linksTriggerCallback`, the runtime delivers the diff to whoever is listening.
+> **Note:** The runtime handles `linksTriggerCallback` by invoking the perspective's registered link callback (set by the perspective proxy). In WASM, the callback id was previously handed to the language via `linkSyncAddCallback(id)`; the language passes that same id back through `linksTriggerCallback`, and the host looks it up.
 
 ---
 
@@ -291,14 +343,15 @@ export default defineLanguage({
         registerSignalCallback(cb) { this._signalCb = cb; },
     },
 
-    // Direct message — nested
+    // Direct message — nested. recipient() returns the PEER's DID
+    // (this DM language instance is configured per peer).
     dm: {
-        recipient() { return agentDid(); },
+        recipient() { return this._peerDid; },
         async status() { /* ... */ },
-        async sendP2P(recipient, message) { /* ... */ },
-        async sendInbox(recipient, message) { /* ... */ },
+        async sendP2P(message) { /* ... */ },
+        async sendInbox(message) { /* ... */ },
         async setStatus(status) { /* ... */ },
-        async inbox() { return []; },
+        async inbox(filter) { return []; },
         addMessageCallback(cb) { this._dmCb = cb; },
         removeMessageCallback(cb) { /* ... */ },
     },
@@ -311,6 +364,7 @@ export default defineLanguage({
 
     // External event handlers (runtime → language)
     handleHolochainSignal(dnaNick, signalData) { /* ... */ },
+    handleTelepresenceSignal(payload, recipientDid) { /* ... */ },
 });
 ```
 
@@ -522,8 +576,16 @@ extern "C" {
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **`linksPublish` vs `linksTriggerCallback`:** In the current p-diff-sync, the language fires the callback DIRECTLY from within `sync()` — it doesn't go through a trigger import. Does the WASM path need a separate `linksTriggerCallback` import, or can the language just call `linkSyncSync()` which internally triggers the callback? Current thinking: `linkSyncSync()` returns the diff. For WASM, the runtime gets the diff from the return value. The callback trigger is only needed if the language receives data ASYNCHRONOUSLY (e.g., from a Holochain signal) and needs to notify the runtime outside of a direct function call.
+1. **`linksTriggerCallback` is required.** `linkSyncSync()` returning a diff
+   covers the polled case. The async case — a remote diff arriving via
+   `handleHolochainSignal` — has no return value, so the language must be able
+   to push the diff to the runtime out-of-band. We keep the trigger import for
+   that path.
 
-2. **`TelepresenceAdapter` signals:** The current `registerSignalCallback` receives signals from OTHER agents. Does this map to `handleHolochainSignal`, or a separate `telepresenceReceiveSignal` export?
+2. **Telepresence signals get their own export.** Incoming signals from other
+   agents arrive via `handleTelepresenceSignal(payload, recipientDid?)`, not
+   via `handleHolochainSignal`. The `recipientDid?` parameter distinguishes
+   directed signals (set) from broadcasts (absent), preserving the old
+   `TelepresenceSignalCallback` semantics.
