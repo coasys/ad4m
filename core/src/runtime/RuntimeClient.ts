@@ -269,8 +269,10 @@ export class RuntimeClient {
 
     subscribeNotificationTriggered() {
         const unsub = this.#restClient.subscribe('/api/v1/events/runtime', (data) => {
-            this.#notificationTriggeredCallbacks.forEach(cb => cb(data.notification))
-        }, ['notification-triggered'])
+            if (data.type === 'notification-triggered') {
+                this.#notificationTriggeredCallbacks.forEach(cb => cb(data.notification))
+            }
+        })
         this.#unsubscribers.push(unsub)
     }
 
@@ -280,8 +282,10 @@ export class RuntimeClient {
 
     subscribeMessageReceived() {
         const unsub = this.#restClient.subscribe('/api/v1/events/runtime', (data) => {
-            this.#messageReceivedCallbacks.forEach(cb => cb(data.message))
-        }, ['message-received'])
+            if (data.type === 'message-received') {
+                this.#messageReceivedCallbacks.forEach(cb => cb(data.message))
+            }
+        })
         this.#unsubscribers.push(unsub)
     }
 
@@ -291,8 +295,10 @@ export class RuntimeClient {
 
     subscribeExceptionOccurred() {
         const unsub = this.#restClient.subscribe('/api/v1/events/runtime', (data) => {
-            this.#exceptionOccurredCallbacks.forEach(cb => cb(data.exception))
-        }, ['exception'])
+            if (data.type === 'exception-occurred') {
+                this.#exceptionOccurredCallbacks.forEach(cb => cb(data.exception))
+            }
+        })
         this.#unsubscribers.push(unsub)
     }
 }

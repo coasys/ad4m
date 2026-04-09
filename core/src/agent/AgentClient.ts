@@ -28,11 +28,6 @@ export type AgentAppsUpdatedCallback = () => null;
 export type HostingUserInfoChangedCallback = (info: HostingUserInfo) => void;
 export type ComputeLogUpdatedCallback = (entry: ComputeLogEntry) => void;
 
-/**
- * Provides access to all functions regarding the local agent,
- * such as generating, locking, unlocking, importing the DID keystore,
- * as well as updating the publicly shared Agent expression.
- */
 export class AgentClient {
   #restClient: RestClient;
   #baseUrl: string;
@@ -171,15 +166,19 @@ export class AgentClient {
 
   subscribeAgentUpdated() {
     const unsub = this.#restClient.subscribe('/api/v1/events/agent', (data) => {
-      this.#updatedCallbacks.forEach((cb) => cb(data.agent));
-    }, ['updated']);
+      if (data.type === 'agent-updated') {
+        this.#updatedCallbacks.forEach((cb) => cb(data.agent || data));
+      }
+    });
     this.#unsubscribers.push(unsub);
   }
 
   subscribeAppsChanged() {
     const unsub = this.#restClient.subscribe('/api/v1/events/agent', (data) => {
-      this.#appsChangedCallback.forEach((cb) => cb());
-    }, ['apps-changed']);
+      if (data.type === 'apps-changed') {
+        this.#appsChangedCallback.forEach((cb) => cb());
+      }
+    });
     this.#unsubscribers.push(unsub);
   }
 
@@ -189,8 +188,10 @@ export class AgentClient {
 
   subscribeAgentStatusChanged() {
     const unsub = this.#restClient.subscribe('/api/v1/events/agent', (data) => {
-      this.#agentStatusChangedCallbacks.forEach((cb) => cb(data.agent));
-    }, ['status-changed']);
+      if (data.type === 'agent-status-changed') {
+        this.#agentStatusChangedCallbacks.forEach((cb) => cb(data.agent || data));
+      }
+    });
     this.#unsubscribers.push(unsub);
   }
 
@@ -200,8 +201,10 @@ export class AgentClient {
 
   subscribeHostingUserInfoChanged() {
     const unsub = this.#restClient.subscribe('/api/v1/events/agent', (data) => {
-      this.#hostingUserInfoChangedCallbacks.forEach((cb) => cb(data.info));
-    }, ['hosting-user-info-changed']);
+      if (data.type === 'hosting-user-info-changed') {
+        this.#hostingUserInfoChangedCallbacks.forEach((cb) => cb(data.info || data));
+      }
+    });
     this.#unsubscribers.push(unsub);
   }
 
@@ -211,8 +214,10 @@ export class AgentClient {
 
   subscribeComputeLogUpdated() {
     const unsub = this.#restClient.subscribe('/api/v1/events/agent', (data) => {
-      this.#computeLogUpdatedCallbacks.forEach((cb) => cb(data.entry));
-    }, ['compute-log-updated']);
+      if (data.type === 'compute-log-updated') {
+        this.#computeLogUpdatedCallbacks.forEach((cb) => cb(data.entry || data));
+      }
+    });
     this.#unsubscribers.push(unsub);
   }
 
