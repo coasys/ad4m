@@ -20,17 +20,7 @@ import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
-/** Module-level cache of perspective:className pairs already registered via ensureSubjectClass
- * @deprecated Cache is now per-PerspectiveProxy instance. This module-level Set is unused.
- */
-const ensuredSubjectClasses = new Set<string>();
 
-/** Clear the ensured subject class cache (for testing).
- * @deprecated Cache is now per-PerspectiveProxy instance. Use perspective.clearEnsuredSubjectClasses() instead.
- */
-export function clearEnsuredSubjectClasses(): void {
-    ensuredSubjectClasses.clear();
-}
 
 // Generic subscription interface that matches Apollo's Subscription
 interface Unsubscribable {
