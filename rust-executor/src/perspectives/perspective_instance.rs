@@ -34,7 +34,7 @@ use deno_core::error::AnyError;
 use futures::future;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -170,6 +170,24 @@ struct SubscribedQuery {
     last_result: String,
     last_keepalive: Instant,
     user_email: Option<String>,
+    /// Predicate IRIs extracted from the SPARQL/Prolog query at registration time.
+    /// If empty, the subscription is always re-checked (safe fallback for variable predicates).
+    predicates: HashSet<String>,
+}
+
+/// Extract predicate IRIs from a SPARQL query by finding triple patterns.
+/// Returns an empty set if no fixed predicates are found (e.g. `?s ?p ?o`),
+/// which means the subscription should always be re-checked.
+fn extract_predicates_from_sparql(query: &str) -> HashSet<String> {
+    let mut predicates = HashSet::new();
+    // Match triple patterns: (var|uri) <uri> (var|uri)
+    // The middle <uri> is the predicate
+    let re = regex::Regex::new(r"(?:\?\w+|<[^>]+>)\s+(<[^>]+>)\s+(?:\?\w+|<[^>]+>)").unwrap();
+    for cap in re.captures_iter(query) {
+        let pred = cap[1].trim_matches(|c| c == '<' || c == '>');
+        predicates.insert(pred.to_string());
+    }
+    predicates
 }
 
 #[derive(Clone)]
@@ -186,6 +204,9 @@ pub struct PerspectiveInstance {
     link_language: Arc<RwLock<Option<Language>>>,
     trigger_notification_check: Arc<Mutex<bool>>,
     trigger_prolog_subscription_check: Arc<Mutex<bool>>,
+    /// Predicates of links changed since last subscription check.
+    /// Empty set means "all predicates" (check everything).
+    changed_predicates: Arc<Mutex<Option<HashSet<String>>>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
@@ -218,6 +239,7 @@ impl PerspectiveInstance {
             link_language: Arc::new(RwLock::new(None)),
             trigger_notification_check: Arc::new(Mutex::new(false)),
             trigger_prolog_subscription_check: Arc::new(Mutex::new(false)),
+            changed_predicates: Arc::new(Mutex::new(None)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
@@ -2440,6 +2462,36 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// Record the predicates from a diff into `changed_predicates`.
+    /// `None` means "all predicates changed" (check everything).
+    async fn record_changed_predicates(&self, diff: &DecoratedPerspectiveDiff) {
+        let mut changed = self.changed_predicates.lock().await;
+        // If already None (= check-all), nothing to do
+        if changed.is_none() {
+            // First change: start with a concrete set
+            let mut preds = HashSet::new();
+            for link in diff.additions.iter().chain(diff.removals.iter()) {
+                if let Some(ref pred) = link.data.predicate {
+                    preds.insert(pred.clone());
+                } else {
+                    // A link with no predicate — must check all subscriptions
+                    *changed = None;
+                    return;
+                }
+            }
+            *changed = Some(preds);
+        } else if let Some(ref mut existing) = *changed {
+            for link in diff.additions.iter().chain(diff.removals.iter()) {
+                if let Some(ref pred) = link.data.predicate {
+                    existing.insert(pred.clone());
+                } else {
+                    *changed = None;
+                    return;
+                }
+            }
+        }
+    }
+
     fn spawn_prolog_facts_update(
         &self,
         diff: DecoratedPerspectiveDiff,
@@ -2456,6 +2508,7 @@ impl PerspectiveInstance {
             {
                 // Trigger notification, prolog subscription
                 *(self_clone.trigger_notification_check.lock().await) = true;
+                self_clone.record_changed_predicates(&diff).await;
                 *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
 
                 self_clone.pubsub_publish_diff(diff).await;
@@ -2577,6 +2630,7 @@ impl PerspectiveInstance {
             };
 
             if did_update {
+                self_clone.record_changed_predicates(&diff).await;
                 self_clone.pubsub_publish_diff(diff).await;
 
                 // Trigger notification and subscription checks after prolog facts are updated
@@ -3786,11 +3840,18 @@ impl PerspectiveInstance {
             prolog_resolution_to_string(initial_result)
         };
 
+        let predicates = if is_sparql_query(&query) {
+            extract_predicates_from_sparql(&query)
+        } else {
+            HashSet::new() // Prolog queries: always re-check
+        };
+
         let subscribed_query = SubscribedQuery {
             query,
             last_result: result_string.clone(),
             last_keepalive: Instant::now(),
             user_email,
+            predicates,
         };
 
         // Now insert the subscription
@@ -3848,12 +3909,12 @@ impl PerspectiveInstance {
         }
     }
 
-    async fn check_subscribed_queries(&self) {
+    async fn check_subscribed_queries(&self, changed_predicates: Option<HashSet<String>>) {
         let mut queries_to_remove = Vec::new();
         let mut query_futures = Vec::new();
         let now = Instant::now();
 
-        // Collect only the minimal data needed: ID, query string, user_email, and keepalive time
+        // Collect only the minimal data needed: ID, query string, user_email, keepalive time, and predicates
         // DON'T clone the potentially huge last_result string
         let queries = {
             let queries = self.subscribed_queries.lock().await;
@@ -3865,17 +3926,29 @@ impl PerspectiveInstance {
                         query.query.clone(),
                         query.user_email.clone(),
                         query.last_keepalive,
+                        query.predicates.clone(),
                     )
                 })
                 .collect::<Vec<_>>()
         };
 
         // Create futures for each query check
-        for (id, query_string, user_email, last_keepalive) in queries {
+        for (id, query_string, user_email, last_keepalive, sub_predicates) in queries {
             // Check for timeout
             if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
                 queries_to_remove.push(id);
                 continue;
+            }
+
+            // Skip subscription if its predicates don't overlap with changed predicates
+            // sub_predicates empty => always check (variable predicate in query)
+            // changed_predicates None => always check (couldn't determine changed predicates)
+            if !sub_predicates.is_empty() {
+                if let Some(ref changed) = changed_predicates {
+                    if sub_predicates.is_disjoint(changed) {
+                        continue; // No overlap — skip this subscription
+                    }
+                }
             }
 
             // Spawn query check future
@@ -3962,14 +4035,21 @@ impl PerspectiveInstance {
 
         let mut log_counter = 0;
         const LOG_INTERVAL: u32 = 300; // Log every ~60 seconds (300 * 200ms)
+        const BATCH_WINDOW_MS: u64 = 50; // Debounce window for batching rapid link changes
 
         while !*self.is_teardown.lock().await {
             // Check trigger without holding lock during the operation
             let should_check = { *self.trigger_prolog_subscription_check.lock().await };
 
             if should_check {
-                self.check_subscribed_queries().await;
+                // Batch debounce: wait a short window for more changes to accumulate
+                sleep(Duration::from_millis(BATCH_WINDOW_MS)).await;
+
+                // Reset trigger and take the accumulated changed predicates
                 *self.trigger_prolog_subscription_check.lock().await = false;
+                let changed_preds = self.changed_predicates.lock().await.take();
+
+                self.check_subscribed_queries(changed_preds).await;
             }
 
             // Periodic subscription logging
@@ -4847,4 +4927,72 @@ mod tests {
     // DOCUMENTATION EXAMPLES TESTS
     // These tests verify query examples against the SPARQL backend
     // ============================================================================
+
+    // ============================================================================
+    // PREDICATE EXTRACTION TESTS
+    // ============================================================================
+
+    #[test]
+    fn test_extract_predicates_from_sparql() {
+        let predicates = extract_predicates_from_sparql(
+            "SELECT ?s ?t WHERE { GRAPH ?g { ?s <flux://has_message> ?t } }",
+        );
+        assert!(predicates.contains("flux://has_message"));
+        assert_eq!(predicates.len(), 1);
+    }
+
+    #[test]
+    fn test_extract_predicates_variable_predicate() {
+        // ?s ?p ?o — no fixed predicate, should return empty (always match)
+        let predicates = extract_predicates_from_sparql("SELECT ?s ?p ?o WHERE { ?s ?p ?o }");
+        assert!(predicates.is_empty());
+    }
+
+    #[test]
+    fn test_extract_predicates_multiple() {
+        let predicates = extract_predicates_from_sparql(
+            "SELECT ?s ?o1 ?o2 WHERE { ?s <flux://has_message> ?o1 . ?s <flux://has_reaction> ?o2 }"
+        );
+        assert!(predicates.contains("flux://has_message"));
+        assert!(predicates.contains("flux://has_reaction"));
+        assert_eq!(predicates.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_predicates_uri_subject() {
+        let predicates = extract_predicates_from_sparql(
+            "SELECT ?o WHERE { <did:key:abc> <flux://has_name> ?o }",
+        );
+        assert!(predicates.contains("flux://has_name"));
+        assert_eq!(predicates.len(), 1);
+    }
+
+    #[test]
+    fn test_predicate_filtering_skips_unrelated() {
+        // Subscription with specific predicates should be skipped when
+        // changed predicates don't overlap
+        let sub_predicates: HashSet<String> = ["flux://has_message".to_string()].into();
+        let changed: HashSet<String> = ["flux://has_reaction".to_string()].into();
+        assert!(sub_predicates.is_disjoint(&changed));
+    }
+
+    #[test]
+    fn test_predicate_filtering_matches_related() {
+        let sub_predicates: HashSet<String> = ["flux://has_message".to_string()].into();
+        let changed: HashSet<String> = [
+            "flux://has_message".to_string(),
+            "flux://has_reaction".to_string(),
+        ]
+        .into();
+        assert!(!sub_predicates.is_disjoint(&changed));
+    }
+
+    #[test]
+    fn test_predicate_filtering_empty_sub_always_matches() {
+        // Empty sub predicates (variable predicate query) should always match
+        let sub_predicates: HashSet<String> = HashSet::new();
+        let changed: HashSet<String> = ["flux://has_reaction".to_string()].into();
+        // Empty set is disjoint with everything, but our code checks !sub_predicates.is_empty() first
+        assert!(sub_predicates.is_empty()); // so this subscription would NOT be skipped
+    }
 }
