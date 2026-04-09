@@ -20,10 +20,14 @@ import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
-/** Module-level cache of perspective:className pairs already registered via ensureSubjectClass */
+/** Module-level cache of perspective:className pairs already registered via ensureSubjectClass
+ * @deprecated Cache is now per-PerspectiveProxy instance. This module-level Set is unused.
+ */
 const ensuredSubjectClasses = new Set<string>();
 
-/** Clear the ensured subject class cache (for testing). */
+/** Clear the ensured subject class cache (for testing).
+ * @deprecated Cache is now per-PerspectiveProxy instance. Use perspective.clearEnsuredSubjectClasses() instead.
+ */
 export function clearEnsuredSubjectClasses(): void {
     ensuredSubjectClasses.clear();
 }
@@ -386,6 +390,7 @@ export class PerspectiveProxy {
     #perspectiveLinkRemovedCallbacks: LinkCallback[]
     #perspectiveLinkUpdatedCallbacks: LinkCallback[]
     #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
+    #ensuredSubjectClasses = new Set<string>()
 
     /**
      * Creates a new PerspectiveProxy instance.
@@ -2114,9 +2119,8 @@ export class PerspectiveProxy {
         // Get the class name from the JS class
         const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
         
-        // Skip if already registered for this perspective
-        const cacheKey = `${this.#handle.uuid}:${className}`;
-        if (ensuredSubjectClasses.has(cacheKey)) return;
+        // Skip if already registered for this perspective instance
+        if (this.#ensuredSubjectClasses.has(className)) return;
 
         // Note: Duplicate checking is handled on the Rust side in add_sdna
         
@@ -2135,8 +2139,15 @@ export class PerspectiveProxy {
         // Backend stores SHACL links directly
         await this.addSdna(className, '', 'subject_class', shaclJson);
         
-        // Mark as registered for this perspective
-        ensuredSubjectClasses.add(cacheKey);
+        // Mark as registered for this perspective instance
+        this.#ensuredSubjectClasses.add(className);
+    }
+
+    /** Clear the per-instance ensured subject class cache.
+     * Call this after wiping a perspective's links so that
+     * subsequent register() calls re-add SHACL definitions. */
+    clearEnsuredSubjectClasses(): void {
+        this.#ensuredSubjectClasses.clear();
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {
