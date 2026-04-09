@@ -2551,7 +2551,7 @@ describe("Multi-User Simple integration tests", () => {
                 appName: "User 1 App",
                 appUrl: "https://user1.app",
                 appIconPath: "/user1.png",
-                trigger: `SELECT source, target FROM link WHERE predicate = 'user1://test'`,
+                trigger: `SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <user1://test>) }`,
                 perspectiveIds: [user1Perspective.uuid],
                 webhookUrl: "https://user1.webhook",
                 webhookAuth: "user1-auth"
@@ -2564,7 +2564,7 @@ describe("Multi-User Simple integration tests", () => {
                 appName: "User 2 App",
                 appUrl: "https://user2.app",
                 appIconPath: "/user2.png",
-                trigger: `SELECT source, target FROM link WHERE predicate = 'user2://test'`,
+                trigger: `SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <user2://test>) }`,
                 perspectiveIds: [user2Perspective.uuid],
                 webhookUrl: "https://user2.webhook",
                 webhookAuth: "user2-auth"
@@ -2632,13 +2632,7 @@ describe("Multi-User Simple integration tests", () => {
                 appName: "Mentions for User 1",
                 appUrl: "https://mentions.app",
                 appIconPath: "/mentions.png",
-                trigger: `SELECT
-                    source as message_id,
-                    fn::parse_literal(target) as content,
-                    $agentDid as mentioned_user
-                FROM link
-                WHERE predicate = 'rdf://content'
-                    AND fn::contains(fn::parse_literal(target), $agentDid)`,
+                trigger: `SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <rdf://content>) FILTER(CONTAINS(STR(?target), "$agentDid")) }`,
                 perspectiveIds: [user1Perspective.uuid],
                 webhookUrl: "https://user1.webhook",
                 webhookAuth: "user1-auth"
@@ -2650,13 +2644,7 @@ describe("Multi-User Simple integration tests", () => {
                 appName: "Mentions for User 2",
                 appUrl: "https://mentions.app",
                 appIconPath: "/mentions.png",
-                trigger: `SELECT
-                    source as message_id,
-                    fn::parse_literal(target) as content,
-                    $agentDid as mentioned_user
-                FROM link
-                WHERE predicate = 'rdf://content'
-                    AND fn::contains(fn::parse_literal(target), $agentDid)`,
+                trigger: `SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <rdf://content>) FILTER(CONTAINS(STR(?target), "$agentDid")) }`,
                 perspectiveIds: [user2Perspective.uuid],
                 webhookUrl: "https://user2.webhook",
                 webhookAuth: "user2-auth"
@@ -2713,7 +2701,7 @@ describe("Multi-User Simple integration tests", () => {
                 appName: "Private App",
                 appUrl: "https://private.app",
                 appIconPath: "/private.png",
-                trigger: `SELECT * FROM link WHERE predicate = 'test://private'`,
+                trigger: `SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <test://private>) }`,
                 perspectiveIds: [perspective.uuid],
                 webhookUrl: "https://webhook.test",
                 webhookAuth: "secret-auth"
@@ -2754,7 +2742,7 @@ describe("Multi-User Simple integration tests", () => {
                 appName: "Test App",
                 appUrl: "https://test.app",
                 appIconPath: "/test.png",
-                trigger: `SELECT * FROM link WHERE predicate = 'test://grant'`,
+                trigger: `SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <test://grant>) }`,
                 perspectiveIds: [perspective.uuid],
                 webhookUrl: "https://webhook.test",
                 webhookAuth: "test-auth"

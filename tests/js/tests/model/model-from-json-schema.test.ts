@@ -386,7 +386,7 @@ describe("Ad4mModel.fromJSONSchema", () => {
         namespace: "test://",
         propertyOptions: {
           status: { initial: "test://active" },
-          count: { initial: "literal://number:0" },
+          count: { initial: "literal:number:0" },
         },
       }) as any;
 
@@ -404,7 +404,7 @@ describe("Ad4mModel.fromJSONSchema", () => {
       ).to.be.true;
       expect(
         testShape.constructor_actions!.some(
-          (a: any) => a.target === "literal://number:0",
+          (a: any) => a.target === "literal:number:0",
         ),
       ).to.be.true;
     });

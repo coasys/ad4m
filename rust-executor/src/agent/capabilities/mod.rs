@@ -361,6 +361,8 @@ pub async fn generate_capability_token(request_id: String, rand: String) -> Resu
 
     remove_request(&auth_key)?;
 
+    let auth_for_publish = auth.clone();
+
     apps_map::insert_app(
         request_id.clone(),
         AuthInfoExtended {
@@ -370,9 +372,18 @@ pub async fn generate_capability_token(request_id: String, rand: String) -> Resu
         cap_token.clone(),
     )?;
 
+    let apps_changed = Apps {
+        auth: auth_for_publish,
+        request_id: request_id.clone(),
+        revoked: Some(false),
+        token: cap_token.clone(),
+    };
     get_global_pubsub()
         .await
-        .publish(&APPS_CHANGED, &String::from(""))
+        .publish(
+            &APPS_CHANGED,
+            &serde_json::to_string(&Some(apps_changed)).unwrap_or_else(|_| "null".to_string()),
+        )
         .await;
 
     Ok(cap_token)

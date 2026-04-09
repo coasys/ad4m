@@ -4,13 +4,14 @@ use crate::agent::{capabilities::*, did_document_for_context, signatures, AgentC
 use crate::ai_service::AIService;
 use crate::config::get_global_config;
 use crate::languages::LanguageController;
+use crate::perspectives::utils::prolog_resolution_to_string;
 use crate::types::{AITask, DecoratedExpressionProof, ModelType};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
 use crate::{
     db::Ad4mDb,
     globals::AD4M_VERSION,
     holochain_service::get_holochain_service,
-    perspectives::{all_perspectives, get_perspective, utils::prolog_resolution_to_string},
+    perspectives::{all_perspectives, get_perspective},
     runtime_service::RuntimeService,
     types::{DecoratedLinkExpression, Model, Notification},
 };
@@ -648,8 +649,8 @@ impl Query {
         ))
     }
 
-    /// Get all subject class names from SHACL links (Prolog-free implementation)
-    async fn perspective_query_surreal_db(
+    /// Query using SPARQL (Oxigraph) — the sole query backend.
+    async fn perspective_query_sparql(
         &self,
         context: &RequestContext,
         query: String,
@@ -665,10 +666,9 @@ impl Query {
                 "No perspective found with uuid {}",
                 uuid
             )))?
-            .surreal_query(query)
-            .await?;
+            .sparql_query(query)?;
 
-        Ok(serde_json::to_string(&result)?)
+        Ok(result)
     }
 
     async fn perspective_snapshot(

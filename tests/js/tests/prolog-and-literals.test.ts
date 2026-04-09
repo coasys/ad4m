@@ -216,7 +216,7 @@ describe("Prolog + Literals", () => {
                 expect(stateLinks[0].data.target).to.equal("todo://ready")
 
                 // Check name mapping
-                const nameMappingUrl = Literal.fromUrl(`literal://string:shacl://Todo`).toUrl()
+                const nameMappingUrl = Literal.fromUrl(`literal:string:shacl://Todo`).toUrl()
                 const nameMappingLinks = await perspective!.get(new LinkQuery({source: nameMappingUrl}))
                 nameMappingLinks.forEach(link => console.log("  ", link.data.predicate, "->", link.data.target))
 
@@ -258,7 +258,7 @@ describe("Prolog + Literals", () => {
 
             // REMOVED: InstanceQuery(condition: ..) test - required Prolog-only allSelf method
             // The InstanceQuery with condition parameter required Prolog inference.
-            // Future: Could be reimplemented with SHACL-based query conditions via SurrealDB.
+            // Future: Could be reimplemented with SHACL-based query conditions via SPARQL.
 
             it("can deal with properties that resolve the URI and create Expressions", async () => {
                 let todos = await Todo.all(perspective!)
@@ -324,7 +324,7 @@ describe("Prolog + Literals", () => {
 
             // REMOVED: Custom getter prolog code test - required Prolog-based property getters
             // The isLiked property used custom Prolog code for computed values.
-            // Future: Could be reimplemented with SHACL-based computed properties or SurrealDB queries.
+            // Future: Could be reimplemented with SHACL-based computed properties or SPARQL queries.
 
             describe("with Message subject class registered", () => {
                 before(async () => {
@@ -377,7 +377,7 @@ describe("Prolog + Literals", () => {
                     let message = new Message(perspective!, messageEntry)
                     await message.save()
 
-                    // Allow SurrealDB to index the new type flag
+                    // Allow SPARQL to index the new type flag
                     await sleep(500)
                     
                     // Refresh todo data to apply collection filtering
@@ -575,12 +575,12 @@ describe("Prolog + Literals", () => {
                     expect(updatedRecipies.length).to.equal(2)
                 })
 
-                it("can constrain relation entries through SurrealQL getter", async () => {
+                it("can constrain relation entries through SPARQL getter", async () => {
                     // Define a Recipe model with a getter-based filtered relation.
                     // Both `entries` and `ingredients` share the same predicate ("recipe://entries"),
                     // but `ingredients` uses an explicit getter to filter by an arbitrary link condition.
-                    @Model({ name: "RecipeWithSurrealFilter" })
-                    class RecipeWithSurrealFilter extends Ad4mModel {
+                    @Model({ name: "RecipeWithSparqlFilter" })
+                    class RecipeWithSparqlFilter extends Ad4mModel {
                         @Flag({
                             through: "ad4m://type",
                             value: "recipe://instance"
@@ -597,19 +597,19 @@ describe("Prolog + Literals", () => {
                         entries: string[] = [];
 
                         @HasMany({
-                            getter: `(->link[WHERE predicate = 'recipe://entries'].out[WHERE count(->link[WHERE predicate = 'recipe://has_ingredient' AND out.uri = 'recipe://test']) > 0].uri)`
+                            getter: `SELECT ?target WHERE { <Base> <recipe://entries> ?target . ?target <recipe://has_ingredient> <recipe://test> . }`
                         })
                         ingredients: string[] = [];
                     }
 
                     // Register the class
-                    await perspective!.ensureSDNASubjectClass(RecipeWithSurrealFilter);
+                    await perspective!.ensureSDNASubjectClass(RecipeWithSparqlFilter);
                     
                     // Wait for SHACL metadata to be indexed
                     await sleep(500);
 
-                    let root = Literal.from("Active record surreal condition test").toUrl();
-                    const recipe = new RecipeWithSurrealFilter(perspective!, root);
+                    let root = Literal.from("Active record SPARQL condition test").toUrl();
+                    const recipe = new RecipeWithSparqlFilter(perspective!, root);
 
                     let entry1 = Literal.from("entry with ingredient").toUrl();
                     let entry2 = Literal.from("entry without ingredient").toUrl();
@@ -626,10 +626,10 @@ describe("Prolog + Literals", () => {
                         target: "recipe://test"
                     }));
 
-                    // Small delay for SurrealDB indexing
+                    // Small delay for SPARQL indexing
                     await sleep(500);
 
-                    const recipe2 = new RecipeWithSurrealFilter(perspective!, root);
+                    const recipe2 = new RecipeWithSparqlFilter(perspective!, root);
                     await recipe2.get();
 
                     // Should have 2 entries total
@@ -783,8 +783,8 @@ describe("Prolog + Literals", () => {
                     recipe2.plain = "recipe://findAll_test2";
                     await recipe2.save();
 
-                    // Test findAll
-                    const recipes = await Recipe.findAll(perspective!);
+                    // Test findAll (sort by name — SPARQL result order is non-deterministic)
+                    const recipes = (await Recipe.findAll(perspective!)).sort((a, b) => a.name.localeCompare(b.name));
 
                     expect(recipes.length).to.equal(2);
                     expect(recipes[0].name).to.equal("findAll test 1");
@@ -807,17 +807,23 @@ describe("Prolog + Literals", () => {
                     recipe2.comments = ["recipe://comment/r2/1", "recipe://comment/r2/2"];
                     await recipe2.save();
 
-                    // Test findAll
-                    const recipes = await Recipe.findAll(perspective!);
+                    // Test findAll (sort by id — SPARQL result order is non-deterministic)
+                    const recipes = (await Recipe.findAll(perspective!)).sort((a, b) => a.id.localeCompare(b.id));
 
                     expect(recipes.length).to.equal(2);
-                    expect(recipes[0].comments.length).to.equal(2);
-                    expect(recipes[0].comments).to.include("recipe://comment/r1/1");
-                    expect(recipes[0].comments).to.include("recipe://comment/r1/2");
+                    // Find which recipe is which by matching root expressions
+                    const r1 = recipes.find(r => r.id === root1)!;
+                    const r2 = recipes.find(r => r.id === root2)!;
+                    expect(r1).to.not.be.undefined;
+                    expect(r2).to.not.be.undefined;
 
-                    expect(recipes[1].comments.length).to.equal(2);
-                    expect(recipes[1].comments).to.include("recipe://comment/r2/1");
-                    expect(recipes[1].comments).to.include("recipe://comment/r2/2");
+                    expect(r1.comments.length).to.equal(2);
+                    expect(r1.comments).to.include("recipe://comment/r1/1");
+                    expect(r1.comments).to.include("recipe://comment/r1/2");
+
+                    expect(r2.comments.length).to.equal(2);
+                    expect(r2.comments).to.include("recipe://comment/r2/1");
+                    expect(r2.comments).to.include("recipe://comment/r2/2");
                 })
 
                 it("findAll() returns author & timestamp on instances", async () => {
@@ -1780,7 +1786,7 @@ describe("Prolog + Literals", () => {
                     await notification3.save();
 
                     await sleep(200); // Give it time but don't wait the full second
-                    // With SurrealDB we get 3 updates because we do comparison filtering in the client
+                    // With SPARQL we get 3 updates because we do comparison filtering in the client
                     // and not the query. So the raw query result actually is different, even though
                     // the ultimate result is the same.
                     //expect(updateCount).to.equal(2);
@@ -1919,10 +1925,8 @@ describe("Prolog + Literals", () => {
                         updateCount++;
                     });
 
-                    // Initially no results
+                    // Initially no results (returned via Promise, callback not fired)
                     expect(initialResults.length).to.equal(0);
-                    // Reset updateCount since subscribe() fires the callback once with initial results
-                    updateCount = 0;
 
                     // Add matching task - should trigger subscription
                     const task1 = new Task(perspective!);
@@ -2158,7 +2162,7 @@ describe("Prolog + Literals", () => {
                     expect(notesAfterDelete.length).to.equal(0);
                 });
 
-                describe("SurrealDB vs Prolog Subscriptions", () => {
+                describe("Query Subscriptions", () => {
                     let perspective: PerspectiveProxy;
 
                     @Model({ name: "SubscriptionTestModel" })
@@ -2187,16 +2191,16 @@ describe("Prolog + Literals", () => {
                         }
                     });
 
-                    // REMOVED: SurrealDB vs Prolog parity test
-                    // This test compared SurrealDB and Prolog subscription results.
-                    // With SHACL migration, SurrealDB is now the primary query engine.
+                    // REMOVED: SPARQL vs Prolog parity test
+                    // This test compared SPARQL and Prolog subscription results.
+                    // With SHACL migration, SPARQL is now the primary query engine.
                     // Prolog subscriptions are deprecated - no need for parity testing.
 
-                    it("should demonstrate SurrealDB subscription performance", async () => {
+                    it("should demonstrate subscription performance", async () => {
                         // Measure latency of update
-                        const surrealCallback = sinon.fake();
-                        const surrealBuilder = TestModel.query(perspective).where({ status: "perf-test" });
-                        await surrealBuilder.subscribe(surrealCallback);
+                        const subscriptionCallback = sinon.fake();
+                        const queryBuilder = TestModel.query(perspective).where({ status: "perf-test" });
+                        await queryBuilder.subscribe(subscriptionCallback);
 
                         const start = Date.now();
                         const model = new TestModel(perspective);
@@ -2206,7 +2210,7 @@ describe("Prolog + Literals", () => {
                         const saveTime = Date.now();
 
                         // Poll until callback called
-                        while (!surrealCallback.called) {
+                        while (!subscriptionCallback.called) {
                             await sleep(10);
                             if (Date.now() - saveTime > 5000) throw new Error("Timeout waiting for subscription update");
                         }
@@ -2214,9 +2218,9 @@ describe("Prolog + Literals", () => {
                         const saveLatency = saveTime - start;
                         const subscriptionLatency = Date.now() - saveTime;
                         console.log(`TestModel.save() latency: ${saveLatency}ms`);
-                        console.log(`SurrealDB subscription update latency: ${subscriptionLatency}ms`);
+                        console.log(`Subscription update latency: ${subscriptionLatency}ms`);
 
-                        surrealBuilder.dispose();
+                        queryBuilder.dispose();
                     });
                 });
 
@@ -2272,18 +2276,18 @@ describe("Prolog + Literals", () => {
                         await model1.save();
 
                         // Wait for subscription update with proper condition checking
-                        // subscribe() fires callback once immediately with initial results (callCount=1),
-                        // so we wait for callCount >= 2 to capture the real update after model save
+                        // subscribe() returns initial results via Promise only — callback
+                        // fires only for subsequent updates (to avoid double-setState in Preact)
                         await waitForCondition(
-                            () => callback1.callCount >= 2,
-                            { 
-                                timeoutMs: 5000, 
-                                errorMessage: 'First callback was not called after model save' 
+                            () => callback1.callCount >= 1,
+                            {
+                                timeoutMs: 5000,
+                                errorMessage: 'First callback was not called after model save'
                             }
                         );
 
                         // Verify callback was called with the saved model
-                        expect(callback1.callCount).to.be.at.least(2);
+                        expect(callback1.callCount).to.be.at.least(1);
                         expect(callback1.lastCall.args[0]).to.be.an('array');
                         expect(callback1.lastCall.args[0].length).to.equal(1);
                         expect(callback1.lastCall.args[0][0].name).to.equal("Test 1");
@@ -2300,20 +2304,18 @@ describe("Prolog + Literals", () => {
                         await model2.save();
 
                         // Wait for subscription update with proper condition checking
-                        // subscribe() fires callback2 once immediately (callCount=1),
-                        // so we wait for callCount >= 2 to capture the update after model2 save
                         await waitForCondition(
-                            () => callback2.callCount >= 2,
-                            { 
-                                timeoutMs: 5000, 
-                                errorMessage: 'Second callback was not called after model save' 
+                            () => callback2.callCount >= 1,
+                            {
+                                timeoutMs: 5000,
+                                errorMessage: 'Second callback was not called after model save'
                             }
                         );
 
                         // Verify only second callback was called (callback1 was disposed)
-                        // callback1: 1 (subscribe initial) + 1 (model1 save) = 2, no more after that
-                        expect(callback1.callCount).to.equal(2);
-                        expect(callback2.callCount).to.be.at.least(2);
+                        // callback1: 1 (model1 save only), no more after dispose
+                        expect(callback1.callCount).to.equal(1);
+                        expect(callback2.callCount).to.be.at.least(1);
                         expect(callback2.lastCall.args[0]).to.be.an('array');
                         expect(callback2.lastCall.args[0].length).to.equal(2);
 
@@ -2330,10 +2332,10 @@ describe("Prolog + Literals", () => {
                         await sleep(1000);
 
                         // Verify no new callbacks after dispose
-                        // callback1: 2 (subscribe initial + model1 save)
-                        // callback2: 2 (subscribe initial + model2 save)
-                        expect(callback1.callCount).to.equal(2);
-                        expect(callback2.callCount).to.equal(2);
+                        // callback1: 1 (model1 save only)
+                        // callback2: 1 (model2 save only)
+                        expect(callback1.callCount).to.equal(1);
+                        expect(callback2.callCount).to.equal(1);
                     });
 
                     it('handles count subscriptions and disposal', async () => {
@@ -2354,10 +2356,10 @@ describe("Prolog + Literals", () => {
                         await model.save();
 
                         // Wait for subscription update with proper condition checking
-                        // countSubscribe() fires callback once immediately with initial count (0),
-                        // so we wait for callCount >= 2 to capture the update after model save
+                        // countSubscribe() returns initial count via Promise only —
+                        // callback fires only for subsequent updates
                         await waitForCondition(
-                            () => countCallback.callCount >= 2,
+                            () => countCallback.callCount >= 1,
                             {
                                 timeoutMs: 15000,
                                 errorMessage: 'Count callback was not called after model save'
@@ -2365,7 +2367,7 @@ describe("Prolog + Literals", () => {
                         );
 
                         // Verify callback was called with new count
-                        expect(countCallback.callCount).to.be.at.least(2);
+                        expect(countCallback.callCount).to.be.at.least(1);
                         expect(countCallback.lastCall.args[0]).to.equal(1);
                         let count = countCallback.callCount
 
@@ -2640,12 +2642,12 @@ describe("Prolog + Literals", () => {
 
                     @Optional({
                         through: "blog://parent",
-                        getter: "(->link[WHERE predicate = 'blog://reply_to'].out.uri)[0]"
+                        getter: "SELECT ?target WHERE { <Base> <blog://reply_to> ?target . } LIMIT 1"
                     })
                     parentPost: string | undefined;
 
                     @HasMany({
-                        getter: "(->link[WHERE predicate = 'blog://tagged_with'].out.uri)"
+                        getter: "SELECT ?target WHERE { <Base> <blog://tagged_with> ?target . }"
                     })
                     tags: string[] = [];
                 }
@@ -2811,7 +2813,7 @@ describe("Prolog + Literals", () => {
                     comment2.text = "This is another valid comment";
                     await comment2.save();
 
-                    // Add delay to allow SurrealDB to finish indexing
+                    // Add delay to allow SPARQL to finish indexing
                     await sleep(1500);
 
                     // Add links to article
@@ -2857,7 +2859,7 @@ describe("Prolog + Literals", () => {
                     comment.text = "Valid comment text";
                     await comment.save();
 
-                    // Add delay to allow SurrealDB to finish indexing
+                    // Add delay to allow SPARQL to finish indexing
                     await sleep(1500);
 
                     // Add both to article
@@ -2909,7 +2911,7 @@ describe("Prolog + Literals", () => {
                     c2.text = "Comment 2 text";
                     await c2.save();
 
-                    // Add delay to allow SurrealDB to finish indexing
+                    // Add delay to allow SPARQL to finish indexing
                     await sleep(1500);
 
                     // Add comments to articles (mix of valid and invalid)
@@ -3011,8 +3013,8 @@ describe("Prolog + Literals", () => {
 
     // SKIPPED: Embedding cache tests - only applies to Prolog-pooled mode
     // These tests verify embedding URL post-processing with Prolog infer() queries.
-    // With SHACL migration, embedding queries should use SurrealDB vector search instead.
-    // Keeping as reference for future SurrealDB vector embedding implementation.
+    // With SHACL migration, embedding queries should use SPARQL vector search instead.
+    // Keeping as reference for future SPARQL vector embedding implementation.
     describe.skip('Embedding cache', () => {
         let perspective: PerspectiveProxy | null = null;
         const EMBEDDING_LANG = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";
@@ -3488,7 +3490,7 @@ describe("Prolog + Literals", () => {
                     namespace: "test://",
                     propertyOptions: {
                         "status": { initial: "test://active" },
-                        "count": { initial: "literal://number:0" }
+                        "count": { initial: "literal:number:0" }
                     }
                 })
 
@@ -3501,7 +3503,7 @@ describe("Prolog + Literals", () => {
                 const sdna = TestClass.generateSDNA()
                 expect(sdna.sdna).to.include('constructor(')
                 expect(sdna.sdna).to.include('test://active')
-                expect(sdna.sdna).to.include('literal://number:0')
+                expect(sdna.sdna).to.include('literal:number:0')
             })
 
             it("should handle complex property types with full data storage and retrieval", async () => {

@@ -64,7 +64,6 @@
   "nohoist": [
     "core"
   ],
-  "packageManager": "pnpm@9.15.0",
   "pnpm": {
     "patchedDependencies": {
       "bn.js@4.12.0": "patches/bn.js@4.12.0.patch",
@@ -77,5 +76,6 @@
       "safer-buffer@2.1.2": "patches/safer-buffer@2.1.2.patch"
     }
   },
-  "version": "0.13.0-test-1"
+  "version": "0.13.0-test-1",
+  "packageManager": "pnpm@9.15.0"
 }

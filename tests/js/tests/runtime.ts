@@ -157,7 +157,7 @@ export default function runtimeTests(testContext: TestContext) {
                 appName: "Test App Name",
                 appUrl: "Test App URL",
                 appIconPath: "Test App Icon Path",
-                trigger: "SELECT * FROM link WHERE predicate = 'test://never-matches'",
+                trigger: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <test://never-matches>) }",
                 perspectiveIds: ["Test Perspective ID"],
                 webhookUrl: "Test Webhook URL",
                 webhookAuth: "Test Webhook Auth"
@@ -217,7 +217,7 @@ export default function runtimeTests(testContext: TestContext) {
                 appName: "Test App Name",
                 appUrl: "Test App URL",
                 appIconPath: "Test App Icon Path",
-                trigger: "SELECT * FROM link WHERE predicate = 'test://updated'",
+                trigger: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <test://updated>) }",
                 perspectiveIds: ["Test Perspective ID"],
                 webhookUrl: "Test Webhook URL",
                 webhookAuth: "Test Webhook Auth"
@@ -250,7 +250,7 @@ export default function runtimeTests(testContext: TestContext) {
                 appName: "ADAM tests",
                 appUrl: "Test App URL",
                 appIconPath: "Test App Icon Path",
-                trigger: `SELECT source, target, predicate FROM link WHERE predicate = '${triggerPredicate}'`,
+                trigger: `SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <${triggerPredicate}>) }`,
                 perspectiveIds: [notificationPerspective.uuid],
                 webhookUrl: "Test Webhook URL",
                 webhookAuth: "Test Webhook Auth"
@@ -316,16 +316,13 @@ export default function runtimeTests(testContext: TestContext) {
                 appName: "Flux Mentions",
                 appUrl: "https://flux.app",
                 appIconPath: "/flux-icon.png",
-                // Extract multiple data points from the match
-                trigger: `SELECT
-                    source as message_id,
-                    fn::parse_literal(target) as message_content,
-                    fn::strip_html(fn::parse_literal(target)) as plain_text,
-                    $agentDid as mentioned_agent,
-                    $perspectiveId as perspective_id
-                FROM link
-                WHERE predicate = 'rdf://content'
-                    AND fn::contains(fn::parse_literal(target), $agentDid)`,
+                // Realistic Flux mention-detection query:
+                // - fn::parse_literal decodes the literal:json:{...} target and extracts the `data` field
+                // - fn::strip_html strips HTML tags for a plain-text copy
+                // - All intermediate values are bound as named variables so the
+                //   notification trigger payload exposes message_id, message_content,
+                //   plain_text, mentioned_agent, and perspective_id.
+                trigger: `SELECT ?message_id ?message_content ?plain_text ?mentioned_agent ?perspective_id WHERE { ?message_id <flux://has_message> ?target . BIND(<ad4m://fn/parse_literal>(?target) AS ?message_content) BIND(<ad4m://fn/strip_html>(?message_content) AS ?plain_text) FILTER(CONTAINS(LCASE(STR(?message_content)), "${agentDid!.toLowerCase()}")) BIND("${agentDid}" AS ?mentioned_agent) BIND("${notificationPerspective.uuid}" AS ?perspective_id) }`,
                 perspectiveIds: [notificationPerspective.uuid],
                 webhookUrl: "https://test.webhook",
                 webhookAuth: "test-auth"
@@ -339,21 +336,24 @@ export default function runtimeTests(testContext: TestContext) {
             const mockFunction = sinon.stub();
             await ad4mClient.runtime.addNotificationTriggeredCallback(mockFunction)
 
-            // Add a message that doesn't mention the agent
+            // Create a message expression that doesn't mention the agent
+            const noMentionContent = "Hello world, nice day!"
+            const noMentionExprUrl = await ad4mClient.expression.create(noMentionContent, "literal")
             await notificationPerspective.add(new Link({
                 source: "message://1",
-                predicate: "rdf://content",
-                target: "literal://string:Hello%20world"
+                predicate: "flux://has_message",
+                target: noMentionExprUrl
             }))
             await sleep(2000)
             expect(mockFunction.called).to.be.false
 
-            // Add a message that mentions the agent (with HTML formatting)
-            const messageWithMention = `<p>Hey <strong>${agentDid!}</strong>, how are you?</p>`
+            // Create a message expression that mentions the agent (with HTML formatting like Flux)
+            const mentionContent = `Hey <strong>${agentDid!}</strong>, check this out!`
+            const mentionExprUrl = await ad4mClient.expression.create(mentionContent, "literal")
             await notificationPerspective.add(new Link({
                 source: "message://2",
-                predicate: "rdf://content",
-                target: `literal://string:${encodeURIComponent(messageWithMention)}`
+                predicate: "flux://has_message",
+                target: mentionExprUrl
             }))
             await sleep(7000)
             expect(mockFunction.called).to.be.true
@@ -363,7 +363,6 @@ export default function runtimeTests(testContext: TestContext) {
             let triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
             expect(triggerMatch.length).to.equal(1)
 
-            // Verify all extracted data points
             //@ts-ignore
             expect(triggerMatch[0].message_id).to.equal("message://2")
             //@ts-ignore

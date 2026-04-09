@@ -8,8 +8,8 @@
  */
 import { SHACLShape } from "../shacl/SHACLShape";
 import type { SHACLPropertyShape, ConformanceCondition } from "../shacl/SHACLShape";
-import { escapeSurrealString } from "../utils";
-import { compileWhereClause } from "./surreal-utils";
+import { escapeQueryString } from "../utils";
+import { compileWhereClause } from "./query-utils";
 import { propertyNameToSetterName } from "./util";
 import type { PropertyMetadataEntry, RelationMetadataEntry, Ad4mModelLike } from "./decorators";
 
@@ -163,7 +163,7 @@ export function buildSHACL(
         // ── Constructor / Destructor entries ────────────────────────────
         const effectiveInitial = propMeta.initial
             ?? (propMeta.required && propMeta.writable && !propMeta.flag && propMeta.through
-                ? "literal://string:" : undefined);
+                ? "literal:string:" : undefined);
 
         if (effectiveInitial) {
             constructorActions.push({
@@ -224,7 +224,7 @@ export function buildSHACL(
         // ── Build Getter (conformance filter) ───────────────────────────
         // Priority chain:
         // 1. Explicit getter string → use verbatim
-        // 2. `where` clause → compile DSL to SurrealQL getter
+        // 2. `where` clause → compile DSL to SPARQL getter
         // 3. target + filter !== false → auto-derive from shape
         if (relMeta.getter) {
             relShape.getter = relMeta.getter;
@@ -241,24 +241,49 @@ export function buildSHACL(
                 );
 
                 if (conditions.length > 0) {
-                    const escapedPredicate = escapeSurrealString(relMeta.predicate);
-                    relShape.getter = `(->link[WHERE predicate = '${escapedPredicate}'].out[WHERE ${conditions.join(' AND ')}].uri)`;
+                    const escapedPredicate = escapeQueryString(relMeta.predicate);
+                    relShape.getter = `SELECT ?target WHERE { <Base> <${escapedPredicate}> ?target . ${conditions.join(' ')} }`;
                 }
             } catch (e) {
                 // Target metadata may not be available yet
             }
         } else if (relMeta.target && relMeta.filter !== false) {
-            try {
-                const TargetClass = relMeta.target();
-                const filter = conformanceFilterFn(relMeta.predicate, TargetClass);
-                if (filter) {
-                    relShape.getter = filter.getter;
-                    relShape.conformanceConditions = filter.conformanceConditions;
+            // Lazy conformance filter: store deferred reference,
+            // resolve on first access via a getter on relShape
+            const targetThunk = relMeta.target;
+            const predicate = relMeta.predicate;
+            let resolved = false;
+            let cachedGetter: string | undefined;
+            let cachedConditions: ConformanceCondition[] | undefined;
+            
+            const resolveFilter = () => {
+                if (resolved) return;
+                resolved = true;
+                try {
+                    const TargetClass = targetThunk();
+                    const filter = conformanceFilterFn(predicate, TargetClass);
+                    if (filter) {
+                        cachedGetter = filter.getter;
+                        cachedConditions = filter.conformanceConditions;
+                    }
+                } catch (e) {
+                    // Target class may not be available yet
                 }
-            } catch (e) {
-                // Target class may not be available yet — getter will be
-                // absent and runtime will fall back to unfiltered get_links
-            }
+            };
+
+            // Define lazy getters that resolve on first access
+            Object.defineProperty(relShape, 'getter', {
+                get() { resolveFilter(); return cachedGetter; },
+                set(v: string) { resolved = true; cachedGetter = v; },
+                enumerable: true,
+                configurable: true,
+            });
+            Object.defineProperty(relShape, 'conformanceConditions', {
+                get() { resolveFilter(); return cachedConditions; },
+                set(v: ConformanceCondition[]) { resolved = true; cachedConditions = v; },
+                enumerable: true,
+                configurable: true,
+            });
         }
 
         // ── sh:class — target shape reference ───────────────────────────
@@ -278,7 +303,7 @@ export function buildSHACL(
     }
 
     // Always set constructor and destructor actions on the shape, even
-    // when empty.  An empty array serialises to `literal://string:[]`
+    // when empty.  An empty array serialises to `literal:string:[]`
     // which the Rust executor parses as a valid (no-op) command list,
     // avoiding "No SHACL constructor found" errors for models whose
     // properties are all optional and have no @Flag.

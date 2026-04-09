@@ -186,7 +186,7 @@ export class SHACLFlow {
 
   /**
    * Serialize the flow to AD4M links
-   * These links can be stored in a perspective and queried via SurrealDB
+   * These links can be stored in a perspective and queried via SPARQL
    * 
    * @returns Array of Link objects representing the flow
    */
@@ -219,7 +219,7 @@ export class SHACLFlow {
       links.push({
         source: flowUri,
         predicate: "ad4m://flowable",
-        target: `literal://string:${encodeURIComponent(JSON.stringify(this.flowable))}`
+        target: `literal:string:${encodeURIComponent(JSON.stringify(this.flowable))}`
       });
     }
 
@@ -228,7 +228,7 @@ export class SHACLFlow {
       links.push({
         source: flowUri,
         predicate: "ad4m://startAction",
-        target: `literal://string:${encodeURIComponent(JSON.stringify(this.startAction))}`
+        target: `literal:string:${encodeURIComponent(JSON.stringify(this.startAction))}`
       });
     }
 
@@ -268,7 +268,7 @@ export class SHACLFlow {
       links.push({
         source: stateUri,
         predicate: "ad4m://stateCheck",
-        target: `literal://string:${encodeURIComponent(JSON.stringify(state.stateCheck))}`
+        target: `literal:string:${encodeURIComponent(JSON.stringify(state.stateCheck))}`
       });
     }
 
@@ -317,7 +317,7 @@ export class SHACLFlow {
       links.push({
         source: transitionUri,
         predicate: "ad4m://transitionActions",
-        target: `literal://string:${encodeURIComponent(JSON.stringify(transition.actions))}`
+        target: `literal:string:${encodeURIComponent(JSON.stringify(transition.actions))}`
       });
     }
 
@@ -359,7 +359,7 @@ export class SHACLFlow {
         flow.flowable = "any";
       } else {
         try {
-          const jsonStr = flowableLink.target.replace('literal://string:', '');
+          const jsonStr = flowableLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
           flow.flowable = JSON.parse(decodeURIComponent(jsonStr));
         } catch {
           flow.flowable = "any";
@@ -373,7 +373,7 @@ export class SHACLFlow {
     );
     if (startActionLink) {
       try {
-        const jsonStr = startActionLink.target.replace('literal://string:', '');
+        const jsonStr = startActionLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
         flow.startAction = JSON.parse(decodeURIComponent(jsonStr));
       } catch {
         // Ignore parse errors
@@ -413,7 +413,7 @@ export class SHACLFlow {
       let stateCheck: LinkPattern = { predicate: "", target: "" };
       if (checkLink) {
         try {
-          const jsonStr = checkLink.target.replace('literal://string:', '');
+          const jsonStr = checkLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
           stateCheck = JSON.parse(decodeURIComponent(jsonStr));
         } catch {
           // Ignore parse errors
@@ -458,7 +458,7 @@ export class SHACLFlow {
       let actions: AD4MAction[] = [];
       if (actionsLink) {
         try {
-          const jsonStr = actionsLink.target.replace('literal://string:', '');
+          const jsonStr = actionsLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
           actions = JSON.parse(decodeURIComponent(jsonStr));
         } catch {
           // Ignore parse errors
