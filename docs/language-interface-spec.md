@@ -1,7 +1,7 @@
 # AD4M Language Development Kit — Interface Spec
 
-**Version:** 0.7-draft
-**Date:** 2026-04-09
+**Version:** 0.8-draft
+**Date:** 2026-04-10
 **Status:** Draft — for discussion
 
 > **Canonical interface definition lives in [`ad4m-lang.wit`](./ad4m-lang.wit).**
@@ -10,14 +10,41 @@
 > *why* and the *how*: lifecycle, semantics, examples, ALDK ergonomics,
 > Holochain routing. Where prose and WIT disagree, the WIT wins.
 >
+> **Changes from 0.7:**
+> - **Split `link-sync` into three independent capabilities**:
+>   `perspective-commit` (write), `perspective-query` (read without
+>   requiring a full local replica), `perspective-sync` (bidirectional
+>   full-replica convergence). A Language exports whichever subset it
+>   supports. Full-sync Neighbourhoods export all three; a DM inbox
+>   exports commit (+ typically sync); a read-only DHT-backed knowledge
+>   graph exports only query.
+> - **Extracted `peers` interface** from link-sync. Contains
+>   `peers.set-local` (runtime pushes local agent set) and `peers.remote`
+>   (Language returns remote participant DIDs). Shared by
+>   `perspective-sync` and `telepresence`.
+> - **Deleted the `direct-message` capability.** DM is now just a
+>   link-sync + telepresence composition with the recipient DID baked
+>   into a template clone. See `docs/ad4m-social-conventions.md` for
+>   the DM-as-inbox pattern and friends-as-perspective convention.
+> - **Moved `is-public` to the `lifecycle` interface** as a static
+>   privacy hint. `writable` deleted (redundant with export presence of
+>   `perspective-commit`).
+> - **`commit` is signatureless.** The runtime sets an ambient acting-
+>   agent context before dispatching into any Language export, and the
+>   Language signs via the `agent` import, which consults that context.
+>   New §7 prose note documenting this contract.
+> - Query interface renamed from `query` to `perspective-query` for
+>   consistency with the other perspective capabilities.
+>
 > **Changes from 0.6:**
-> - Coalesced all query operations into a single `query` capability with a
+> - Coalesced all query operations into a single capability with a
 >   tagged `request` / `response` variant. SPARQL is now the recommended
 >   query language; Prolog is supported for back-compat but optional.
 >   `getByAuthor`, `getAll`, `linkQuery`, `prologQuery`, `infer`, and
->   `supportsPrologQueries` are gone — folded into `query.run`.
-> - Replaced `isImmutableExpression(address)` with `expression.character`
->   (deterministic / immutable / mutable, whole-Language).
+>   `supportsPrologQueries` are gone — folded into `perspective-query.run`.
+> - Replaced `isImmutableExpression(address)` with `expression.character`,
+>   then reverted to `isImmutableExpression` as a per-expression cache
+>   hint.
 > - Pointed at the WIT file as the source of truth.
 
 ---
@@ -38,13 +65,14 @@ pointers on the WASM side) and the ergonomic helpers each ALDK provides.
 
 ```
 RUNTIME → LANGUAGE         (the runtime calls a function the language exports)
-    Used for: capability calls (linkSyncSync, expressionCreate, …),
+    Used for: capability calls (perspectiveSyncSync, perspectiveCommit,
+                                 expressionCreate, …),
               lifecycle (init, teardown),
               event delivery (handleHolochainSignal, handleTelepresenceSignal).
 
 LANGUAGE → RUNTIME         (the language calls a function the runtime provides)
-    Used for: services (agentDid, holochainCall, languageStorageDirectory, …),
-              event emission (emitPerspectiveDiff, emitDirectMessage, …).
+    Used for: services (agentDid, agentSign, holochainCall, storageGet, …),
+              event emission (emitPerspectiveDiff, emitTelepresenceSignal, …).
 ```
 
 There is no third "callback registration" subsystem. Whenever the language has
@@ -95,17 +123,21 @@ The runtime determines what kind of language a module is by **looking at which
 functions it exports**. There are no manifest files, no capability flags, no
 `supports_*()` queries.
 
-- **JS:** the runtime checks `typeof module.linkSyncSync === 'function'` etc.
-  The bootstrap accepts both shapes:
-  - Top-level named exports (`export const linkSyncSync = …`).
+- **JS:** the runtime checks `typeof module.perspectiveSyncSync === 'function'`
+  etc. The bootstrap accepts both shapes:
+  - Top-level named exports (`export const perspectiveSyncSync = …`).
   - `export default` of an object whose keys are the flat names (idiomatic
     when using the JS ALDK).
 - **WASM:** the runtime inspects the wasm instance's export table and checks
   for the canonical exported function names.
 
 A capability is "present" if and only if **all** its required exports are
-present. Partial implementations (e.g. `linkSyncSync` without
-`linkSyncCommit`) are a load-time error.
+present. Partial implementations (e.g. `perspectiveSyncSync` without
+`perspectiveSyncRender`) are a load-time error.
+
+Note that the three perspective capabilities (`perspective-commit`,
+`perspective-query`, `perspective-sync`) are independently detected —
+a Language can export any subset.
 
 The Rust ALDK only emits `#[no_mangle] extern "C"` shims for capability traits
 the language actually `impl`s — there are no defaulted no-op exports that
@@ -149,29 +181,151 @@ caches), MAY return `true` only for addresses it can prove immutable, or
 MAY blanket-return `true` for content-addressed Languages where addresses
 encode content hashes.
 
-### 5.2 Link Sync (PerspectiveSyncAdapter)
+### 5.2 Perspective capabilities (commit / query / sync)
 
-Implement these to be a Link Language. The runtime calls `linkSyncSync` on a
-timer; the language fetches new diffs from its underlying transport
-(Holochain or otherwise), returns the most recent one, and **also** calls
-`emitPerspectiveDiff(diff)` for every diff it observes asynchronously
-(e.g. from `handleHolochainSignal`).
+Perspective access is split into **three orthogonal capabilities**, each
+independently exported. A Language exports whichever subset it supports:
+
+| Capability | Purpose | Exports |
+|---|---|---|
+| `perspective-commit` | Write diffs into the shared state | `perspectiveCommit(diff)` |
+| `perspective-query` | Answer reads without requiring a full local replica | `perspectiveQuery(request)`, `perspectiveQuerySupportedKinds()` |
+| `perspective-sync` | Bidirectional full-replica CRDT convergence | `perspectiveSyncSync()`, `perspectiveSyncRender()`, `perspectiveSyncCurrentRevision()` |
+
+And one peer-fabric interface the first and third usually pair with:
+
+| Capability | Purpose | Exports |
+|---|---|---|
+| `peers` | Local-agent membership push-in, remote-agent enumeration pull-out | `peersSetLocal(agents)`, `peersRemote()` |
+
+The three perspective capabilities are genuinely orthogonal:
+
+- **`commit` without `sync`** is a **write-only drop box** — senders push
+  diffs in and never observe the resulting state. The sender-side view
+  of a DM inbox is exactly this.
+- **`query` without `sync`** is a **remote-backed read interface** — a
+  DHT, remote SPARQL endpoint, or archive that answers queries without
+  the client needing a local replica. This is the original
+  PerspectiveQuery intent made honest.
+- **`sync` without `commit`** is a **read-only replicator** — unusual,
+  but possible (e.g., a public broadcast feed that everyone converges
+  on but only the owner writes to).
+
+And composing them gives every real use case:
+
+| Language pattern | Exports |
+|---|---|
+| Current full-sync Neighbourhood (p-diff-sync) | `commit` + `query` + `sync` + `peers` |
+| DM inbox (sender view: drops a message) | `commit` |
+| DM inbox (owner view: multi-device replica) | `commit` + `query` + `sync` + `peers` |
+| Read-only DHT-backed knowledge graph | `query` |
+| Public wiki / forum | `commit` + `query` |
+| Append-only archive / log | `commit` + `query` |
+
+Same source code, same exports — the **owner vs. sender** asymmetry
+for a DM inbox is not spec-level. Both run the same Language; the
+Language's internal logic rejects non-owner attempts to render/sync
+based on the DID check it performs against the template-baked
+recipient. Capability detection via export presence tells the runtime
+what the Language *can* do; runtime behavior enforces *effective*
+permissions per caller.
+
+#### `perspective-commit`
 
 | Export | Parameters | Returns |
 |---|---|---|
-| `linkSyncSync()` | — | `Promise<PerspectiveDiff>` |
-| `linkSyncCommit(diff)` | `PerspectiveDiff` | `Promise<string>` (new revision) |
-| `linkSyncRender()` | — | `Promise<Perspective>` |
-| `linkSyncCurrentRevision()` | — | `Promise<string \| null>` |
-| `linkSyncOthers()` | — | `Promise<string[]>` (other agent DIDs) |
-| `linkSyncWritable()` | — | `boolean` |
-| `linkSyncPublic()` | — | `boolean` |
-| `linkSyncSetLocalAgents(agents)` | `string[]` | `void` |
+| `perspectiveCommit(diff)` | `PerspectiveDiff` | `Promise<void>` |
 
-> **Note on `setLocalAgents`:** temporary hack to support multiple users on
-> one node joining the same neighbourhood. Once each user gets their own
-> language instance per neighbourhood (which the per-perspective lifecycle
-> now enables), this can go away.
+`perspectiveCommit` is fire-and-forget from the caller's point of view.
+No revision is returned — Languages that track a revision expose it
+via `perspectiveSyncCurrentRevision`.
+
+**Signing is implicit.** `perspectiveCommit` takes no signer parameter
+because the runtime sets an ambient "acting agent" context before
+dispatching into any Language export. The Language signs via
+`agentSign` / `agentCreateSignedExpression` imports, which consult
+that context and return values scoped to the current acting agent.
+See §7 for the full contract.
+
+#### `perspective-query`
+
+| Export | Parameters | Returns |
+|---|---|---|
+| `perspectiveQuerySupportedKinds()` | — | `QueryKind[]` (statically advertises which kinds the Language serves) |
+| `perspectiveQuery(request)` | `QueryRequest` | `Promise<QueryResponse>` |
+
+`QueryRequest` is a tagged variant: `by-author` / `all` / `link-pattern` /
+`sparql` / `prolog`. `QueryResponse` is the matching variant. See
+[`ad4m-lang.wit`](./ad4m-lang.wit) `interface perspective-query` for
+the exact shapes.
+
+Crucially, **`perspective-query` does NOT imply the existence of a local
+replica.** A Language can answer queries against a remote DHT/SPARQL
+endpoint without ever replicating state locally. That's the whole
+point of the split: earlier drafts conflated "query a local replica"
+with "query the shared state," and the split makes the distinction
+honest.
+
+A Language that exports `perspective-sync` (and therefore has a local
+replica) typically ALSO exports `perspective-query` to answer queries
+against that replica. A Language that exports `perspective-query`
+without `perspective-sync` is explicitly a remote-backed backend.
+
+A Language MUST return an error with code `not-implemented` for any
+kind it did not advertise via `perspectiveQuerySupportedKinds`. In v1.0
+SPARQL 1.1 is the recommended query language; structured link-pattern
+queries are first-class; Prolog is supported for back-compat.
+
+#### `perspective-sync`
+
+| Export | Parameters | Returns |
+|---|---|---|
+| `perspectiveSyncSync()` | — | `Promise<PerspectiveDiff>` |
+| `perspectiveSyncRender()` | — | `Promise<Perspective>` |
+| `perspectiveSyncCurrentRevision()` | — | `Promise<string \| null>` |
+
+The runtime calls `perspectiveSyncSync` on a timer; the Language
+fetches new diffs from its underlying transport (Holochain or
+otherwise), returns the most recent one, and **also** calls
+`emitPerspectiveDiff(diff)` for every diff it observes asynchronously
+(e.g., from `handleHolochainSignal`).
+
+Note the absence of `commit` here — writing is `perspective-commit`'s
+job. A full-sync Language exports both.
+
+#### `peers`
+
+| Export | Parameters | Returns |
+|---|---|---|
+| `peersSetLocal(agents)` | `string[]` | `Promise<void>` |
+| `peersRemote()` | — | `Promise<string[]>` (remote agent DIDs, excluding all local agents) |
+
+`peers` is the membership fabric that `perspective-sync` and
+`telepresence` both depend on. The runtime pushes the set of local
+agents **in** via `peersSetLocal` and pulls the set of remote
+participants **out** via `peersRemote`.
+
+**`peersSetLocal` is called at instance creation AND whenever a local
+agent joins or leaves the node.** It's not one-shot init — a second
+user logging into the same node after the Language instance is
+already loaded must cause a fresh `peersSetLocal` call. The Language
+uses this for:
+
+- Routing incoming telepresence signals to the right local agent.
+- Advertising local membership to remote peers via `peersRemote`.
+- Excluding all local agents from its own `peersRemote` result.
+
+**`peersSetLocal` is NOT used for commit signing.** That's handled by
+the runtime's ambient acting-agent context (§7). The "local agent
+set" and the "currently acting agent" are distinct concepts.
+
+**Why a separate interface?** Because a pure commit-only drop box or
+pure query-only remote backend doesn't need `peers` at all. Making it
+independent lets those Languages opt out. The spec does not enforce
+that `perspective-sync` or `telepresence` require `peers` — a Language
+can export either without `peers` — but the behavior in that case is
+degenerate (no multi-local-agent support, no remote enumeration).
+Treat `peers` as a de-facto prerequisite for peer-fabric capabilities.
 
 ### 5.3 Telepresence
 
@@ -188,66 +342,33 @@ knows how to actually transport it. **Incoming** signals from other agents
 are delivered separately via the `handleTelepresenceSignal` event handler
 (see §6).
 
-### 5.4 Direct Message
+### 5.4 Direct Messages (NOT a capability)
 
-A DM language is a **template**. Every agent has their own DM language, derived
-by cloning a template and substituting the agent's DID into the source so that
-`directMessageRecipient()` is a hard-coded literal:
+**There is no `direct-message` capability in v1.0.** A DM "inbox" is
+just a Language exporting `perspective-commit` (for senders to drop
+messages) plus, for the owner's multi-device case,
+`perspective-sync` + `peers` (so the owner's other devices pull the
+backlog).
 
-```js
-// In a cloned DM language:
-export const directMessageRecipient = () => "did:key:z6MkjP…";
-```
+A DM inbox Language is a **template**: the owner's DID is baked into
+the source at clone time, so the Language's internal logic knows
+exactly one agent is allowed to `perspectiveSyncSync` / `render`, and
+everyone else gets commit-only behavior. This is enforced inside the
+Language, not at the spec level.
 
-Because the recipient is baked in at clone time, `sendP2P` / `sendInbox` take
-no recipient parameter — the instance is already configured for one specific
-peer.
+**Online fast-path** is handled by `telepresence.sendSignal` — when the
+recipient is online, the sender also (or instead) pushes the message
+through telepresence for instant delivery. **Offline delivery** falls
+through to `perspective-commit`, and the sender's node / friend relay
+/ DHT holds it until the recipient's node runs sync.
 
-| Export | Parameters | Returns |
-|---|---|---|
-| `directMessageRecipient()` | — | `string` (the **peer's** DID, hard-coded) |
-| `directMessageStatus()` | — | `Promise<PerspectiveExpression \| void>` |
-| `directMessageSendP2P(message)` | `PerspectiveExpression` | `Promise<PerspectiveExpression \| void>` |
-| `directMessageSendInbox(message)` | `PerspectiveExpression` | `Promise<PerspectiveExpression \| void>` |
-| `directMessageSetStatus(status)` | `PerspectiveExpression` | `Promise<void>` |
-| `directMessageInbox(filter?)` | `string?` | `Promise<PerspectiveExpression[]>` |
+See `docs/ad4m-social-conventions.md` for the full pattern: the
+well-known `ad4m://inbox` predicate for inbox discovery via the
+agent's public perspective, the `ad4m://friend-of` predicate for
+friends-as-a-perspective, and the friend-relay approach for offline
+delivery.
 
-Incoming DMs are pushed to the runtime via `emitDirectMessage(message)` (§7),
-typically from inside `handleHolochainSignal`.
-
-### 5.5 Query (coalesced)
-
-For Languages that allow other Languages and the runtime to read links and
-expressions without forcing a full sync. **All read operations live behind a
-single `query.run` entry point** taking a tagged request and returning a
-tagged response. `getByAuthor`, `getAll`, `linkQuery`, `prologQuery`, `infer`,
-and `supportsPrologQueries` from earlier drafts are all coalesced here.
-
-In v1.0:
-- **SPARQL 1.1 is the recommended query language** for graph queries against
-  the link store. Returns SPARQL 1.1 JSON Results.
-- **Structured `link-pattern`** queries are first-class for simple
-  source/predicate/target/timestamp filtering — every Link Language can
-  trivially implement them.
-- **Expression queries** (`by-author`, `all`) are for Expression Languages
-  with searchable backing stores.
-- **Prolog** is still accepted for backwards compatibility but Languages
-  MAY omit it; runtimes SHOULD prefer SPARQL where both are available.
-
-| Export | Parameters | Returns |
-|---|---|---|
-| `querySupportedKinds()` | — | `QueryKind[]` (statically advertises which kinds the Language serves) |
-| `query(request)` | `QueryRequest` | `Promise<QueryResponse>` |
-
-`QueryRequest` is a tagged variant: `by-author` / `all` / `link-pattern` /
-`sparql` / `prolog`. `QueryResponse` is the matching variant: `expressions`
-/ `links` / `perspective` / `sparql-results` / `prolog-bindings`. See
-[`ad4m-lang.wit`](./ad4m-lang.wit) `interface query` for the exact shapes.
-
-A Language MUST return an error with code `not-implemented` for any kind it
-did not advertise via `querySupportedKinds`.
-
-### 5.6 Language Source
+### 5.5 Language Source
 
 For Languages that store other languages (the Language Language).
 
@@ -255,7 +376,7 @@ For Languages that store other languages (the Language Language).
 |---|---|---|
 | `languageGetSource(address)` | `string` | `Promise<string>` |
 
-### 5.7 Icons & Settings UI
+### 5.6 Icons & Settings UI
 
 | Export | Returns |
 |---|---|
@@ -263,7 +384,7 @@ For Languages that store other languages (the Language Language).
 | `expressionConstructorIcon()` | `string` |
 | `settingsIcon()` | `string` |
 
-### 5.8 Interactions
+### 5.7 Interactions
 
 | Export | Parameters | Returns |
 |---|---|---|
@@ -325,6 +446,50 @@ as `extern "C"`.
 | `agentDidForUser(email: string)` | `string` |
 | `agentCreateSignedExpressionForUser(email, data)` | `Expression` |
 
+#### Ambient acting-agent contract
+
+`agentDid()` / `agentSign()` / `agentCreateSignedExpression()` return
+values scoped to whichever local agent is **currently acting**. This
+is not visible from the import signatures alone, so the contract is
+stated explicitly here:
+
+> When the runtime calls any Language export, it first sets an internal
+> "acting agent" context to the DID of the local agent on whose behalf
+> the call is being made. Any `agentDid()` / `agentSign()` /
+> `agentCreateSignedExpression()` import calls made during that export
+> invocation consult this context and return values scoped to that
+> agent.
+
+This is how multi-user nodes work. A single Language instance shared by
+a perspective that multiple local agents participate in will see the
+acting agent change from call to call — Alice commits a diff on her
+behalf, then a moment later Bob commits a diff on his, and the same
+`perspectiveCommit` implementation signs each diff with the correct
+key without any signer parameter being threaded through.
+
+**Language implementations MUST NOT cache the result of `agentDid()`
+across export calls.** The acting agent can differ on the next call,
+even for the same instance. If a Language needs to remember "my
+primary agent" for some bootstrapping reason, it should do so during
+`init()` — but per-call operations that produce signed output must
+consult `agentDid()` / `agentSign()` fresh each time.
+
+**`peers.setLocal` is a different concept.** `setLocal` tells the
+Language about the *set of local agents that exist on this node*
+(used for routing and remote membership advertisement). The ambient
+acting agent is *which one of those local agents is currently
+acting*. Both concepts are needed; neither substitutes for the other.
+
+#### Multi-user imports
+
+`agentGetAllLocalUserDids()`, `agentDidForUser(email)`, and
+`agentCreateSignedExpressionForUser(email, data)` are the escape
+hatch for rare cases where a Language needs to act on behalf of a
+*specific* local user by identifier rather than "whoever is
+currently acting." Most Languages never call these — they're for
+server-ish components that batch-process work for multiple local
+users at once.
+
 ### 7.2 Holochain
 
 | Import | Returns | Description |
@@ -348,9 +513,8 @@ doesn't track subscribers and doesn't hold callback references.
 
 | Import | Parameters | Description |
 |---|---|---|
-| `emitPerspectiveDiff(diff)` | `PerspectiveDiff` | A new diff is available. Called on the polled path (from inside `linkSyncSync` if you also want to emit early) and on the async path (from inside `handleHolochainSignal`). |
+| `emitPerspectiveDiff(diff)` | `PerspectiveDiff` | A new diff is available. Called on the polled path (from inside `perspectiveSyncSync` if you also want to emit early) and on the async path (from inside `handleHolochainSignal`). |
 | `emitSyncStateChange(state)` | `string` | Sync state changed (`"Synced"` / `"NotSynced"` / etc.). |
-| `emitDirectMessage(message)` | `PerspectiveExpression` | A new DM arrived (DM language). |
 | `emitTelepresenceSignal(payload, recipientDid?)` | `PerspectiveExpression, string?` | Forward an incoming telepresence signal to AD4M subscribers. |
 | `emitSignal(data)` | `unknown` | General-purpose AD4M signal-bus emission. |
 
@@ -378,8 +542,9 @@ Per-DNA signal delivery is built without per-call callbacks.
    language passed to holochainRegisterDnas; agentDid is the local agent the
    cell belongs to.
 4. The language parses signalData and decides what to emit:
-       emitPerspectiveDiff(...)        if it's a link diff
-       emitDirectMessage(...)          if it's a DM
+       emitPerspectiveDiff(...)        if it's a link diff (including
+                                       DM inbox commits — DMs are just
+                                       diffs in v1.0)
        emitTelepresenceSignal(...)     if it's a telepresence signal
        emitSignal(...)                 anything else worth bus-publishing
 ```
@@ -426,6 +591,8 @@ const lang = defineLanguage({
 
     teardown() { /* ... */ },
 
+    isPublic: () => false,
+
     expression: {
         async create(content) {
             const address = await holochainCall("store", "store_zome", "put", content);
@@ -436,21 +603,28 @@ const lang = defineLanguage({
         },
     },
 
-    links: {
+    // perspective-commit capability
+    commit: {
+        async commit(diff) {
+            await holochainCall("store", "sync_zome", "commit", diff);
+        },
+    },
+
+    // perspective-sync capability
+    sync: {
         async sync() {
             const diff = await holochainCall("store", "sync_zome", "pull", myDid);
             if (diff) emitPerspectiveDiff(diff);
             return diff;
         },
-        async commit(diff) {
-            return await holochainCall("store", "sync_zome", "commit", diff);
-        },
         async render() { /* ... */ },
         currentRevision: async () => null,
-        others: async () => [],
-        writable: () => true,
-        public: () => false,
-        setLocalAgents(agents) { /* ... */ },
+    },
+
+    // peers capability
+    peers: {
+        setLocal(agents) { /* record the local agent set */ },
+        async remote() { return []; },
     },
 
     handleHolochainSignal(dnaNick, signalAgent, data) {
@@ -465,11 +639,11 @@ const lang = defineLanguage({
 
 // (a) Explicit named flat exports — what the runtime introspects directly.
 export const {
-    name, version, init, teardown,
+    name, version, isPublic, init, teardown,
     expressionCreate, expressionGet,
-    linkSyncSync, linkSyncCommit, linkSyncRender,
-    linkSyncCurrentRevision, linkSyncOthers,
-    linkSyncWritable, linkSyncPublic, linkSyncSetLocalAgents,
+    perspectiveCommit,
+    perspectiveSyncSync, perspectiveSyncRender, perspectiveSyncCurrentRevision,
+    peersSetLocal, peersRemote,
     handleHolochainSignal,
 } = lang;
 
@@ -486,9 +660,11 @@ gives identical observable behaviour.
 `defineLanguage(spec)` is a pure transform:
 
 - Takes the grouped object.
-- Walks the known capability sub-objects (`expression`, `links`, `telepresence`,
-  `dm`, `query`) and renames their methods to the flat canonical names
-  (`expression.create` → `expressionCreate`, `links.sync` → `linkSyncSync`, …).
+- Walks the known capability sub-objects (`expression`, `commit`, `query`,
+  `sync`, `peers`, `telepresence`) and renames their methods to the flat
+  canonical names (`expression.create` → `expressionCreate`,
+  `sync.sync` → `perspectiveSyncSync`, `commit.commit` → `perspectiveCommit`,
+  `peers.setLocal` → `peersSetLocal`, …).
 - Passes lifecycle and event-handler exports (`name`, `version`, `init`,
   `teardown`, `handleHolochainSignal`, `handleTelepresenceSignal`) through
   unchanged.
@@ -525,6 +701,7 @@ struct NoteStore;
 impl Language for NoteStore {
     const NAME: &'static str = "@coasys/note-store";
     const VERSION: &'static str = "1.0.0";
+    const IS_PUBLIC: bool = false;
 
     fn init() {
         let storage = language_storage_directory();
@@ -552,25 +729,31 @@ impl ExpressionCapability for NoteStore {
     }
 }
 
-impl LinkSyncCapability for NoteStore {
+impl PerspectiveCommitCapability for NoteStore {
+    fn commit(diff: &PerspectiveDiff) {
+        let _ = holochain_call("store", "sync", "commit", &json!(diff));
+    }
+}
+
+impl PerspectiveSyncCapability for NoteStore {
     fn sync() -> PerspectiveDiff {
         let s = State::get();
         let diff: PerspectiveDiff = holochain_call("store", "sync", "pull", &json!(s.my_did)).into();
         emit_perspective_diff(&diff);
         diff
     }
-    fn commit(diff: &PerspectiveDiff) -> String { /* … */ }
     fn render() -> Perspective { /* … */ }
     fn current_revision() -> Option<String> { None }
-    fn others() -> Vec<String> { vec![] }
-    fn writable() -> bool { true }
-    fn public() -> bool { false }
-    fn set_local_agents(_agents: &[String]) {}
+}
+
+impl PeersCapability for NoteStore {
+    fn set_local(_agents: &[String]) { /* record local agent set */ }
+    fn remote() -> Vec<String> { vec![] }
 }
 
 ad4m_language! {
     NoteStore {
-        capabilities: [Expression, LinkSync],
+        capabilities: [Expression, PerspectiveCommit, PerspectiveSync, Peers],
     }
 }
 ```

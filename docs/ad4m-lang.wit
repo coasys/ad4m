@@ -10,8 +10,8 @@
 //   * Anything more complex than a primitive crosses the boundary as
 //     JSON-encoded `string`. A future v1.1 binding using the WebAssembly
 //     Component Model with rich types is anticipated.
-//   * The "presence = capability" rule (a language is a Link Language iff it
-//     exports the `link-sync` interface, etc.) is enforced by host
+//   * The "presence = capability" rule (a language supports full-replica
+//     sync iff it exports the `perspective-sync` interface, etc.) is enforced by host
 //     introspection of the component's actual export table at load time.
 //     The canonical `ad4m-language` world below lists every capability as an
 //     export; conformant languages fill in only what they implement.
@@ -125,8 +125,9 @@ interface types {
 // ────────────────────────────────────────────────────────────────────────────
 
 /// Required lifecycle exports. Every conformant Language MUST export this
-/// interface. The host invokes `name` and `version` BEFORE `init`, so they
-/// MUST be statically resolvable (no per-instance state may be consulted).
+/// interface. The host invokes `name`, `version`, and `is-public` BEFORE
+/// `init`, so they MUST be statically resolvable (no per-instance state
+/// may be consulted).
 interface lifecycle {
     use types.{error};
 
@@ -135,6 +136,14 @@ interface lifecycle {
 
     /// Statically discoverable semver of the Language implementation.
     version: func() -> string;
+
+    /// Are links/Expressions stored by this Language publicly readable on
+    /// the network? This is a property of the *implementation*, not of
+    /// the caller's permissions — a `true` answer means "don't commit
+    /// anything here you wouldn't want in public." Runtimes and UIs use
+    /// it as a privacy hint (warn before committing, annotate the
+    /// Perspective, etc.). Statically resolvable.
+    is-public: func() -> bool;
 
     /// Initialize per-instance state. The Language SHOULD fetch its context
     /// lazily via the imported `language-context`, `agent`, and `storage`
@@ -178,77 +187,65 @@ interface expression {
     is-immutable: func(address: string) -> bool;
 }
 
-/// Link Sync capability — the protocol layer for Neighbourhoods.
-interface link-sync {
-    use types.{perspective, perspective-diff, did, error};
+// ────────────────────────────────────────────────────────────────────────────
+//  Perspective capabilities: commit, query, sync (all independent)
+// ────────────────────────────────────────────────────────────────────────────
+//
+// The three perspective capabilities are orthogonal. A Language exports
+// whichever subset it supports:
+//
+//   perspective-commit  — write diffs into the shared state
+//   perspective-query   — read via request/response without local replica
+//   perspective-sync    — bidirectional full-replica convergence (CRDT-style)
+//
+// Full-sync Neighbourhoods (today's p-diff-sync) export all three. A DM
+// inbox exports commit (+ typically sync and peers for the owner's
+// multi-device case). A read-only DHT-backed knowledge graph exports only
+// query. A public wiki exports commit + query. And so on.
+//
+// `peers` (separate interface below) is the membership fabric that
+// perspective-sync and telepresence both rely on.
 
-    /// Sync with the network and return any new diff observed since the
-    /// previous call. The Language MAY also push diffs out-of-band by
-    /// calling `event-emission.emit-perspective-diff` (e.g. when an async
-    /// signal arrives via `event-handlers.handle-holochain-signal`).
-    sync: func() -> result<perspective-diff, error>;
-
-    /// Publish a diff to the network. Returns the new revision identifier.
-    commit: func(diff: perspective-diff) -> result<string, error>;
-
-    /// Return the full Perspective at the current revision.
-    render: func() -> result<perspective, error>;
-
-    /// Current revision identifier, if the Language tracks one.
-    current-revision: func() -> result<option<string>, error>;
-
-    /// DIDs of other agents currently sharing this Perspective.
-    others: func() -> result<list<did>, error>;
-
-    /// Whether this Language accepts new commits.
-    writable: func() -> bool;
-
-    /// Whether stored links are publicly readable on the network.
-    public: func() -> bool;
-
-    /// Set the local agents owning this Perspective. Transitional —
-    /// see the prose spec on per-user instance lifecycle.
-    set-local-agents: func(agents: list<did>) -> result<_, error>;
-}
-
-/// Telepresence capability — ephemeral signals between online agents.
-interface telepresence {
-    use types.{did, perspective-expression, online-agent, error};
-
-    set-online-status: func(status: perspective-expression) -> result<_, error>;
-    get-online-agents: func() -> result<list<online-agent>, error>;
-    send-signal: func(recipient: did, payload: perspective-expression) -> result<_, error>;
-    send-broadcast: func(payload: perspective-expression) -> result<_, error>;
-}
-
-/// Direct Message capability — point-to-point messaging. A DM Language
-/// instance is a *template clone*: the recipient DID is hard-coded into
-/// the source at clone time, so `recipient` returns a constant.
-interface direct-message {
-    use types.{did, perspective-expression, error};
-
-    /// DID of the peer this DM Language instance talks to. Hard-coded.
-    recipient: func() -> did;
-
-    status: func() -> result<option<perspective-expression>, error>;
-    send-p2p: func(message: perspective-expression) -> result<option<perspective-expression>, error>;
-    send-inbox: func(message: perspective-expression) -> result<option<perspective-expression>, error>;
-    set-status: func(status: perspective-expression) -> result<_, error>;
-    inbox: func(filter: option<string>) -> result<list<perspective-expression>, error>;
-}
-
-/// Query capability — coalesced read interface for Languages that allow
-/// other Languages and the runtime to read links and expressions without
-/// forcing a full sync.
+/// Write capability — commit diffs into a shared Perspective.
 ///
-/// In v1.0 SPARQL is the recommended query language; structured link-pattern
-/// queries are also first-class for simple cases. Prolog is supported for
-/// backwards compatibility but languages MAY omit it and runtimes SHOULD
-/// prefer SPARQL where both are available.
+/// A Language exporting ONLY this capability is a write-only drop box:
+/// senders commit but do not observe the resulting state. The sender-side
+/// view of an inbox Language (see `docs/ad4m-social-conventions.md`) is
+/// the motivating example.
+///
+/// Signing: `commit` does NOT take a signer parameter. The runtime sets
+/// an ambient "acting agent" context before dispatching any Language
+/// export, and the Language consults that context via the `agent`
+/// import (`agent.sign`, `agent.did`, etc.) when signing the diff. See
+/// the prose spec §7 for the ambient-acting-agent contract.
+interface perspective-commit {
+    use types.{perspective-diff, error};
+
+    /// Commit a diff into the shared Perspective. Fire-and-forget from
+    /// the caller's point of view: no revision or state is returned.
+    /// Languages that track a revision expose it separately via
+    /// `perspective-sync.current-revision`.
+    commit: func(diff: perspective-diff) -> result<_, error>;
+}
+
+/// Read capability — answer queries against a shared Perspective.
+///
+/// Exported by Languages that serve reads WITHOUT requiring a full local
+/// replica: DHT-backed knowledge graphs, remote SPARQL endpoints, large
+/// append-only archives. A Language that replicates locally (exports
+/// `perspective-sync`) typically ALSO exports this interface to answer
+/// queries against the local replica. A Language that answers queries
+/// without any local replica exports this WITHOUT `perspective-sync` —
+/// that's the whole point of the split.
+///
+/// In v1.0 SPARQL 1.1 is the recommended query language; structured
+/// link-pattern queries are first-class for simple cases. Prolog is
+/// supported for backwards compatibility but languages MAY omit it and
+/// runtimes SHOULD prefer SPARQL where both are available.
 ///
 /// The legacy `getByAuthor` / `getAll` / `linkQuery` / `prologQuery` /
 /// `infer` / `supportsPrologQueries` operations are all coalesced here.
-interface query {
+interface perspective-query {
     use types.{did, expression, link-expression, perspective, error};
 
     enum query-kind {
@@ -320,6 +317,87 @@ interface query {
     /// Execute a query.
     run: func(req: request) -> result<response, error>;
 }
+
+/// Full-replica sync capability — bidirectional CRDT-style state
+/// convergence between peers.
+///
+/// Exported by Languages that replicate the full shared Perspective
+/// locally and keep it in sync with remote participants (today's
+/// p-diff-sync is the canonical example). Languages exporting this
+/// capability typically also export `peers` for membership routing.
+///
+/// Note the absence of `commit` here — committing is a separate
+/// capability (`perspective-commit`). A full-sync Language exports
+/// both. A read-only replicator would export `perspective-sync` alone
+/// (though that's unusual).
+interface perspective-sync {
+    use types.{perspective, perspective-diff, error};
+
+    /// Sync with the network and return any new diff observed since
+    /// the previous call. The Language MAY also push diffs out-of-band
+    /// by calling `event-emission.emit-perspective-diff` (e.g. when an
+    /// async signal arrives via a transport-specific event handler).
+    sync: func() -> result<perspective-diff, error>;
+
+    /// Return the full Perspective at the current revision.
+    render: func() -> result<perspective, error>;
+
+    /// Current revision identifier, if the Language tracks one. Useful
+    /// for caching and for detecting whether `sync()` produced new
+    /// state.
+    current-revision: func() -> result<option<string>, error>;
+}
+
+/// Peer fabric membership — in-push and out-pull of the agent set
+/// participating in a shared instance.
+///
+/// Exported by Languages that operate on a multi-agent peer set, i.e.
+/// Languages exporting `perspective-sync` or `telepresence`. Pure
+/// commit-only drop boxes and pure query-only backends don't need it.
+/// The spec does NOT enforce this: a Language could export sync or
+/// telepresence without `peers`, but the behavior in that case is
+/// degenerate (no multi-local-agent support, no way to enumerate
+/// remotes). Treat `peers` as a de-facto prerequisite for peer-fabric
+/// capabilities.
+interface peers {
+    use types.{did, error};
+
+    /// Update the set of local agents participating in this instance.
+    /// Called by the runtime at instance creation and whenever a local
+    /// agent joins or leaves the node. Used for:
+    ///   - routing incoming telepresence signals to the right local
+    ///     agent
+    ///   - advertising local membership to remote peers via `remote`
+    ///     (remote peers see us as "Alice and Bob both live here")
+    ///   - excluding all local agents from `remote()` on the local side
+    /// NOT used for commit signing — that's handled by the runtime's
+    /// ambient acting-agent context consumed by `agent.sign` /
+    /// `agent.did`.
+    set-local: func(agents: list<did>) -> result<_, error>;
+
+    /// DIDs of remote agents currently participating in this instance
+    /// (excludes all local agents from the most recent `set-local`
+    /// call).
+    remote: func() -> result<list<did>, error>;
+}
+
+/// Telepresence capability — ephemeral signals between online agents.
+interface telepresence {
+    use types.{did, perspective-expression, online-agent, error};
+
+    set-online-status: func(status: perspective-expression) -> result<_, error>;
+    get-online-agents: func() -> result<list<online-agent>, error>;
+    send-signal: func(recipient: did, payload: perspective-expression) -> result<_, error>;
+    send-broadcast: func(payload: perspective-expression) -> result<_, error>;
+}
+
+// Direct Message is NOT a first-class capability in v1.0. A DM inbox
+// is just a Language exporting `perspective-commit` (for senders) plus
+// optionally `perspective-sync` + `peers` (for the owner's multi-device
+// case), with the recipient DID baked into the template at clone time.
+// See `docs/ad4m-social-conventions.md` for the DM-as-inbox pattern,
+// the friends-as-perspective convention, and well-known `ad4m://`
+// predicates for inbox discovery.
 
 /// Language-Source capability — implemented by the Language Language, which
 /// stores other Languages' source bundles.
@@ -438,9 +516,6 @@ interface event-emission {
 
     /// Sync state changed.
     emit-sync-state-change: func(state: sync-state);
-
-    /// A new direct message arrived.
-    emit-direct-message: func(message: perspective-expression);
 
     /// Forward an incoming telepresence signal to AD4M subscribers.
     emit-telepresence-signal: func(
@@ -578,10 +653,11 @@ world ad4m-language {
 
     export lifecycle;
     export expression;
-    export link-sync;
+    export perspective-commit;
+    export perspective-query;
+    export perspective-sync;
+    export peers;
     export telepresence;
-    export direct-message;
-    export query;
     export language-source;
     export ui;
     export interactions;
