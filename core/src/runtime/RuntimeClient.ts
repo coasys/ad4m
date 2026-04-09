@@ -169,22 +169,11 @@ export class RuntimeClient {
     }
 
     async freeHostingEnabled(): Promise<boolean> {
-        const { runtimeFreeHostingEnabled } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeFreeHostingEnabled {
-                runtimeFreeHostingEnabled
-            }`
-        }))
-        return runtimeFreeHostingEnabled
+        return this.#restClient.get<boolean>('/api/v1/runtime/free-hosting-enabled')
     }
 
     async setFreeHostingEnabled(enabled: boolean): Promise<boolean> {
-        const { runtimeSetFreeHostingEnabled } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeSetFreeHostingEnabled($enabled: Boolean!) {
-                runtimeSetFreeHostingEnabled(enabled: $enabled)
-            }`,
-            variables: { enabled }
-        }))
-        return runtimeSetFreeHostingEnabled
+        return this.#restClient.put<boolean>('/api/v1/runtime/free-hosting-enabled', { enabled })
     }
 
     async listUsers(): Promise<UserStatistics[]> {

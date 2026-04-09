@@ -101,6 +101,11 @@ export class PerspectiveClient {
         return JSON.parse(result)
     }
 
+    async querySparql(uuid: string, query: string): Promise<any> {
+        const result = await this.#restClient.post<string>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/query/sparql`, { query })
+        return JSON.parse(result)
+    }
+
     async querySurrealDB(uuid: string, query: string): Promise<any> {
         const result = await this.#restClient.post<string>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/query/surreal`, { query })
         return JSON.parse(result)
