@@ -941,14 +941,30 @@ impl LanguageController {
 
         // If we have source, save and load into a per-language runtime
         if let Some(source) = source {
-            // Compute hash and verify it matches the expected address
+            // Compute hash and verify it matches the expected address.
+            //
+            // Previously this returned Ok(()) on mismatch, which left
+            // callers (e.g. `neighbourhood_publish_from_perspective_with_context`
+            // in neighbourhoods.rs) believing the language had been
+            // installed even though nothing was loaded. The neighbourhood
+            // would then be published referencing a link_language that
+            // this node could not actually use, surfacing much later as
+            // a mysterious sync failure. Propagate the hash mismatch as
+            // a hard error so the caller knows the install did not
+            // happen.
             let hash = controller.calculate_language_hash(&source);
             if hash != language {
                 error!("install_language: COULDN'T VERIFY HASH OF LANGUAGE!");
                 error!("install_language: Address: {}", language);
                 error!("install_language: Computed hash: {}", hash);
-                error!("install_language: LANGUAGE WILL BE IGNORED");
-                return Ok(());
+                error!("install_language: LANGUAGE WILL NOT BE INSTALLED");
+                return Err(anyhow::anyhow!(
+                    "install_language: hash mismatch for {} (computed {}). \
+                     The language language returned source that does not match \
+                     the requested content address; refusing to install.",
+                    language,
+                    hash
+                ));
             }
 
             // Save language bundle to disk
