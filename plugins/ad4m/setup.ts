@@ -78,6 +78,15 @@ export async function runSetup(
   if (running) {
     // Branch B: Executor already running
     if (email && password) {
+      if (running !== "mcp") {
+        logger.error("[ad4m-setup] Email/password login requires MCP, but executor was detected via GraphQL. Enable MCP on the executor or use the capability code flow.");
+        printConfigSnippet(logger, "external", {
+          mcpEndpoint: endpoint,
+          token: "<mcp-not-enabled>",
+          wakeToken,
+        });
+        return;
+      }
       // Email/password login — use when connecting to a remote multi-user executor
       await setupExternalModeViaEmail(logger, endpoint, email, password, wakeToken);
     } else {
@@ -464,11 +473,19 @@ async function setupExternalModeViaGraphQL(
 }
 
 
+
 // ---------------------------------------------------------------------------
 // Email/password login — for connecting to a remote multi-user executor
 // ---------------------------------------------------------------------------
 
+function isUserNotFoundError(error: string | undefined): boolean {
+  if (!error) return false;
+  const lower = error.toLowerCase();
+  return lower.includes("user not found") || lower.includes("user does not exist") || lower.includes("account not found");
+}
+
 /**
+
  * External-mode auth flow using email + password.
  *
  * Flow:
@@ -516,7 +533,7 @@ async function setupExternalModeViaEmail(
       return;
     }
 
-    if (loginData?.error?.includes("user not found") || loginData?.error?.includes("Invalid credentials")) {
+    if (isUserNotFoundError(loginData?.error)) {
       // User doesn't exist — try signup first
       logger.info("[ad4m-setup] User not found. Attempting signup...");
 

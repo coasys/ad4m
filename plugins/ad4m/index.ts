@@ -393,7 +393,13 @@ export default function ad4mPlugin(api: any) {
     }
   }
 
-  /**
+  function isUserNotFoundError(error: string | undefined): boolean {
+    if (!error) return false;
+    const lower = error.toLowerCase();
+    return lower.includes("user not found") || lower.includes("user does not exist") || lower.includes("account not found");
+  }
+
+/**
    * Obtain a JWT token from a running executor via MCP capability request.
    * Returns the JWT string or empty string on failure.
    */
@@ -423,7 +429,7 @@ export default function ad4mPlugin(api: any) {
         }
 
         // If user doesn't exist, try signup then login
-        if (loginData?.error?.includes("user not found") || loginData?.error?.includes("Invalid credentials")) {
+        if (isUserNotFoundError(loginData?.error)) {
           logger.info("[ad4m] User not found. Attempting signup...");
           const signupResult = await mcpCallTool(
             endpoint,
@@ -1275,9 +1281,9 @@ Notes:
         .option("--endpoint <url>", "MCP endpoint URL", endpoint)
         .option("--ws <url>", "Executor GraphQL WebSocket URL", executorWsUrl)
         .option("--email <email>", "Email for multi-user login (optional)")
-        .option("--password <password>", "Password for multi-user login (optional)")
         .action(async (opts: any) => {
-          await runSetup(ctx.config, ctx.logger, opts.endpoint, opts.ws, opts.email, opts.password);
+          const password = process.env.AD4M_PASSWORD;
+          await runSetup(ctx.config, ctx.logger, opts.endpoint, opts.ws, opts.email, password);
         });
     },
     { commands: ["ad4m-setup"] },
