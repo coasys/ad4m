@@ -2,8 +2,7 @@ use deno_core::op2;
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use crate::{
     graphql::graphql_types::{PerspectiveExpression, PerspectiveState},
@@ -52,11 +51,29 @@ fn register_holochain_signal_handler(
     #[string] cell_id_key: String,
     #[string] language_address: String,
 ) {
-    let handlers = HOLOCHAIN_SIGNAL_HANDLERS.clone();
-    tokio::spawn(async move {
-        let mut map = handlers.write().await;
-        map.insert(cell_id_key, language_address);
-    });
+    // Synchronous write into the global map. The previous implementation
+    // used a `tokio::sync::RwLock` and a fire-and-forget `tokio::spawn` to
+    // perform the write, which returned from the op before the mapping
+    // was actually installed. Any Holochain signal arriving during that
+    // async gap (e.g. a peer-join from the DNA that was literally just
+    // registered) would miss the handler entry and drop the signal with
+    // only a debug-level log. Using a `std::sync::RwLock` lets us write
+    // synchronously inside the op, so `registerDNAs` has full
+    // happens-before ordering by the time it returns to JS.
+    match HOLOCHAIN_SIGNAL_HANDLERS.write() {
+        Ok(mut map) => {
+            map.insert(cell_id_key, language_address);
+        }
+        Err(poisoned) => {
+            // Recover and proceed — a poisoned lock means some previous
+            // writer panicked, but the map itself is still usable.
+            log::warn!(
+                "HOLOCHAIN_SIGNAL_HANDLERS lock was poisoned; recovering and inserting anyway"
+            );
+            let mut map = poisoned.into_inner();
+            map.insert(cell_id_key, language_address);
+        }
+    }
 }
 
 #[op2]
