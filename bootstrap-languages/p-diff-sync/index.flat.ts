@@ -292,7 +292,7 @@ export function handleHolochainSignal(signal: any): void {
 /** Create a DID anchor link for this agent in the DNA (idempotent). */
 async function ensureDidLink(): Promise<void> {
     try {
-        await hc.call(dnaRole, zomeName, "create_did_link", { did: myDid });
+        await hc.call(dnaRole, zomeName, "create_did_pub_key_link", myDid);
     } catch (_) {
         // Already exists — ignore
     }
@@ -318,9 +318,39 @@ async function gossip(): Promise<void> {
     gossipRound++;
     const release = await syncMutex.acquire();
     try {
-        // Mark stale peers as lost (no heartbeat in 10s)
+        // Call the DNA's sync function which broadcasts our presence and
+        // returns our current revision. This is the primary mechanism for
+        // peer discovery and revision exchange.
+        try {
+            const syncResult: any = await hc.call(dnaRole, zomeName, "sync", myDid);
+            if (syncResult) {
+                myRevision = syncResult;
+            }
+        } catch (e) {
+            console.error("[p-diff-sync] sync zome call error:", e);
+        }
+
+        // Get online agents from the DNA to discover peers
+        try {
+            const activeAgents: any[] = await hc.call(dnaRole, zomeName, "get_online_agents", null);
+            if (activeAgents && activeAgents.length > 0) {
+                for (const agent of activeAgents) {
+                    const did = agent.did || agent.agent;
+                    if (did && did !== myDid) {
+                        peers.set(did, {
+                            currentRevision: agent.current_revision || agent.currentRevision || null,
+                            lastSeen: new Date(),
+                        });
+                    }
+                }
+            }
+        } catch (e) {
+            // get_online_agents may not be available
+        }
+
+        // Mark stale peers as lost (no heartbeat in 30s)
         for (const [did, info] of peers) {
-            if (Date.now() - info.lastSeen.getTime() > 10_000) {
+            if (Date.now() - info.lastSeen.getTime() > 30_000) {
                 peers.delete(did);
             }
         }
@@ -360,6 +390,10 @@ async function gossip(): Promise<void> {
                 const result: any = await hc.call(dnaRole, zomeName, "pull", { hash, is_scribe: isScribe });
                 if (result?.current_revision) {
                     myRevision = result.current_revision;
+                }
+                // After pulling, notify that we received new data
+                if (result?.diff && linkCallback) {
+                    linkCallback(result.diff);
                 }
             } catch (e) {
                 console.error("[p-diff-sync] pull error:", e);
