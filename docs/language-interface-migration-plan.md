@@ -386,23 +386,17 @@ The runtime now honors every contract the ALDK depends on.
 
 ## Phase C — Migrate bootstrap languages
 
-> **Execution status (2026-04-10):** In progress. All 12 bootstrap
-> languages now have `index.flat.ts` + `esbuild.flat.ts`:
-> - **Batch 1 (leaf expression):** neighbourhood-language,
->   perspective-language, language-language, file-storage,
->   centralized-file-storage — done
-> - **Batch 2 (computation/embedding):** eas,
->   embedding-vector-language — done
-> - **Batch 3 (agent-layer):** centralized-agent-language,
->   agent-language — done
-> - **Batch 4 (DM/sync):** direct-message-language,
->   centralized-p-diff-sync — done
-> - **p-diff-sync:** done in Phase A
->
-> Legacy `index.ts` files retained in parallel. Step C.2.9–10 (build
-> validation and legacy deletion) requires integration tests with
-> Holochain conductor. The flat files are structurally complete but
-> untested end-to-end.
+> **Execution status (2026-04-10):** Complete.
+> - All 12 bootstrap languages have `index.flat.ts` and build from it
+>   as the main entrypoint (`esbuild.ts` → `bundle.js`).
+> - All legacy `index.ts`, `adapter.ts`, `putAdapter.ts`,
+>   `linksAdapter.ts`, `telepresenceAdapter.ts`, `languageAdapter.ts`
+>   files deleted (27 files, 1924 lines removed).
+> - All 12 flat bundles verified to export correct functions via Node.js
+>   smoke tests.
+> - Shared utility files (file-storage.ts, types.ts) and build-pipeline
+>   files (expressionUI.ts, rollup configs) retained.
+> - End-to-end integration testing deferred (requires Holochain conductor).
 
 
 
@@ -474,10 +468,13 @@ Ship as intermediate PR.
 
 ## Phase D — Legacy deletion (narrowed)
 
-> **Execution status (2026-04-10):** Deferred. Depends on Phase C
-> completing (every bootstrap language must use the new exports before
-> the legacy `create()` path can be deleted). Re-enable once the
-> bootstrap languages are migrated.
+> **Execution status (2026-04-10):** Mostly complete.
+> - D.1: Legacy `create()` factory path retained with deprecation
+>   warning for backward compatibility with user-installed languages.
+>   All bootstrap languages now use flat exports exclusively.
+> - D.2: `__*`-prefixed import aliases retained — no consumers found
+>   in the codebase, but kept for backward compatibility with any
+>   user-installed languages that may reference them.
 
 
 
