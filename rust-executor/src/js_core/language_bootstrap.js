@@ -365,18 +365,38 @@ async function initLanguage(contextJson) {
         const peersSetLocalFn = mod.peersSetLocal || mod.linkSyncSetLocalAgents;
 
         if (syncFn || commitFn) {
-            // Rust ALDK's `perspectiveCommit` returns `Result<(), JsValue>`
-            // which becomes JS `undefined` on success. The dispatcher in
-            // language.rs does `JSON.stringify(await linksAdapter.commit(...))`,
-            // and `JSON.stringify(undefined)` yields V8 `undefined`, which
-            // `to_rust_string_lossy` then renders as the literal string
-            // "undefined" — not valid JSON, so `parse_revision` explodes.
-            // Coerce undefined → null here so the dispatcher always sees
-            // a JSON-parseable result.
+            // Spec §5.2 splits the legacy single `commit()` (which returned
+            // the new revision string) into two independent capabilities:
+            // `perspective-commit` (write a diff, return nothing) and
+            // `perspective-sync` (read current revision). Rust ALDK and any
+            // new flat language therefore returns `undefined` from
+            // `perspectiveCommit` — but the legacy Rust-side caller in
+            // `perspective_instance::commit()` treats `Ok(None)` as "the
+            // language failed to return a revision, queue this diff as
+            // pending and retry later", which would put every flat-language
+            // commit into a perpetual retry loop and break the pending-diff
+            // commit path entirely (`Ok(None) => Err("No diff returned from
+            // commit")` at perspective_instance.rs:498).
+            //
+            // Bridge the two interfaces here: after a successful commit,
+            // poll `currentRevisionFn` and return its result so the legacy
+            // dispatcher sees a revision string. This keeps the per-language
+            // contract spec-clean (commit returns nothing) while preserving
+            // the runtime's expectation until the retry path is rewritten
+            // around the split capabilities.
             const wrappedCommit = commitFn
                 ? async (diff) => {
                     const r = await commitFn(diff);
-                    return r === undefined ? null : r;
+                    if (r !== undefined && r !== null) return r;
+                    if (currentRevisionFn) {
+                        try {
+                            const rev = await currentRevisionFn();
+                            return rev === undefined ? null : rev;
+                        } catch (_e) {
+                            return null;
+                        }
+                    }
+                    return null;
                 }
                 : undefined;
             language.linksAdapter = {
