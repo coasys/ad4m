@@ -348,6 +348,18 @@ The runtime now honors every contract the ALDK depends on.
 
 ## Phase C — Migrate bootstrap languages
 
+> **Execution status (2026-04-10):** Deferred. Phase C touches 13
+> bootstrap languages with no way to validate any single migration
+> outside the full integration test suite (which requires a Holochain
+> conductor and was unavailable in the autonomous run). The dispatcher
+> in `language_bootstrap.js` already accepts both new and legacy export
+> names (Phase 0.3), so the existing languages keep working unchanged.
+> Each language can be migrated independently to the new naming and
+> ALDK authoring style as a follow-up — see the per-language procedure
+> below.
+
+
+
 Goal: every bootstrap language uses `@coasys/ad4m-ldk` and the new
 capability names.
 
@@ -415,6 +427,13 @@ Ship as intermediate PR.
 ---
 
 ## Phase D — Legacy deletion (narrowed)
+
+> **Execution status (2026-04-10):** Deferred. Depends on Phase C
+> completing (every bootstrap language must use the new exports before
+> the legacy `create()` path can be deleted). Re-enable once the
+> bootstrap languages are migrated.
+
+
 
 Goal: delete the legacy factory-based Language authoring path and the
 temporary Phase 0 compatibility aliases. Social-layer collapse (Agent
