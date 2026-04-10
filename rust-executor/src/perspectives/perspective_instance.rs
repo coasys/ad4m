@@ -684,21 +684,28 @@ impl PerspectiveInstance {
             };
 
             if let Some(mut link_language) = link_language_clone {
-                // Got Link Language reference
-                if link_language.current_revision().await?.is_some() {
-                    // Revision set, we are synced
-                    // we are in a healthy Neighbourhood state and should be able to commit
-                    // but let's make sure we're not DoS'ing the link language in bursts
-                    let mut immediate_commits_remaining =
-                        self.immediate_commits_remaining.lock().await;
-                    if *immediate_commits_remaining > 0 {
-                        *immediate_commits_remaining -= 1;
-                        link_language.commit(diff.clone()).await
-                    } else {
-                        Err(anyhow!("Debouncing commit burst"))
-                    }
+                // Spec §5.2 separates perspective-commit from perspective-sync,
+                // so a commit-only flat language has no meaningful notion of
+                // "current revision" — the previous `current_revision().is_some()`
+                // pre-check would always fail for such a language and force
+                // every commit through the pending-diffs retry queue, which is
+                // (a) slow and (b) architecturally wrong: the retry queue is
+                // for transient failures, not for gating healthy commits.
+                //
+                // Drop the pre-check. The DoS counter still throttles bursts
+                // independently, and link_language.commit() itself is the
+                // authoritative signal for whether the commit succeeded — if
+                // the underlying language isn't ready, it throws and the
+                // error path below queues the diff. Legacy languages that
+                // implement perspective-sync still behave correctly because
+                // they throw from commit() when not synced.
+                let mut immediate_commits_remaining =
+                    self.immediate_commits_remaining.lock().await;
+                if *immediate_commits_remaining > 0 {
+                    *immediate_commits_remaining -= 1;
+                    link_language.commit(diff.clone()).await
                 } else {
-                    Err(anyhow!("Link Language not synced"))
+                    Err(anyhow!("Debouncing commit burst"))
                 }
             } else {
                 Err(anyhow!("LinkLanguage not available"))
@@ -710,16 +717,25 @@ impl PerspectiveInstance {
         let ok = match commit_result {
             Ok(Some(rev)) => {
                 if rev.trim().is_empty() {
-                    log::warn!("Committed but got no revision from LinkLanguage!\nStoring in pending diffs for later");
-                    false
+                    // Revision came back but was an empty string — a legacy
+                    // language bug; treat as success but flag it so the
+                    // operator sees the oddity. Previously we fell through
+                    // to pending-diffs here, which left flat-commit-only
+                    // languages permanently queued.
+                    log::warn!("LinkLanguage.commit returned an empty revision string; treating as success");
+                    true
                 } else {
                     log::info!("Committed to revision: {}", rev);
                     true
                 }
             }
             Ok(None) => {
-                log::warn!("Committed but got no revision from LinkLanguage!\nStoring in pending diffs for later");
-                false
+                // Spec v1.0 — `perspective-commit` returns nothing. A flat
+                // language that implements only perspective-commit (no
+                // perspective-sync) has no revision to hand back, and the
+                // commit-layer wrapper in language_bootstrap.js emits
+                // `null`. This is the normal success path, NOT a failure.
+                true
             }
             Err(e) => {
                 log::warn!(
