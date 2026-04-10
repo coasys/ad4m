@@ -2252,13 +2252,21 @@ impl LanguageController {
                 if (!put) {{
                     throw new Error("Language does not implement expression writes (no putAdapter)");
                 }}
+                let addr;
                 if (typeof put.createPublic === "function") {{
-                    return await put.createPublic({});
+                    addr = await put.createPublic({});
+                }} else if (typeof put.addressOf === "function") {{
+                    addr = await put.addressOf({});
+                }} else {{
+                    throw new Error("putAdapter has neither createPublic nor addressOf");
                 }}
-                if (typeof put.addressOf === "function") {{
-                    return await put.addressOf({});
+                if (addr === undefined || addr === null || typeof addr !== "string") {{
+                    throw new Error(
+                        "putAdapter returned a non-string address: " +
+                        (addr === undefined ? "undefined" : JSON.stringify(addr))
+                    );
                 }}
-                throw new Error("putAdapter has neither createPublic nor addressOf");
+                return addr;
             }})())"#,
             content_json, content_json
         );
@@ -2267,8 +2275,20 @@ impl LanguageController {
             .execute_on_language_with_context(&resolved_address, &script, agent_context)
             .await?;
 
-        // Strip surrounding quotes from the result (it's a JSON-encoded string)
-        let expression_address = result.trim().trim_matches('"').to_string();
+        // The dispatcher returns `JSON.stringify(<string>)`, which is the
+        // quoted string literal. Parse it as a JSON string so we get the
+        // unquoted value back — trim_matches('"') used to work for simple
+        // ASCII addresses but would mangle any address containing
+        // embedded quotes, backslashes, or non-ASCII, all of which the
+        // "did:…" scheme happily allows.
+        let expression_address: String = serde_json::from_str(result.trim()).map_err(|e| {
+            LanguageError::SerializationError {
+                message: format!(
+                    "expressionCreate dispatcher returned a non-string result: {} ({:?})",
+                    e, result
+                ),
+            }
+        })?;
 
         // Special case: for the "did" scheme, the expression address IS the full URL
         // (e.g. "did:key:z6Mk..."), so don't prefix with "did://"

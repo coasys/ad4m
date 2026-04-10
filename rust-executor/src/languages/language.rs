@@ -56,11 +56,21 @@ impl Language {
     pub async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<String>, AnyError> {
         let controller = LanguageController::global_instance();
         let diff_json = serde_json::to_string(&diff)?;
+        // Spec §5.2 perspective-commit returns nothing, so `await commit(...)`
+        // resolves to `undefined` for flat commit-only languages. Plain
+        // `JSON.stringify(undefined)` returns the JS value `undefined`
+        // rather than the string `"undefined"`, which v8
+        // to_rust_string_lossy then captures as the literal string
+        // "undefined" — which is NOT valid JSON, so parse_revision fails
+        // with a serde parse error and the caller treats a successful
+        // commit as an infrastructure failure. Coerce the awaited value
+        // to `null` before stringifying so we always round-trip valid
+        // JSON across the v8 → Rust boundary.
         let script = format!(
             r#"
             JSON.stringify(
                 (language.linksAdapter && typeof language.linksAdapter.commit === "function")
-                    ? await language.linksAdapter.commit({})
+                    ? ((await language.linksAdapter.commit({})) ?? null)
                     : null
             )
             "#,
@@ -76,10 +86,15 @@ impl Language {
 
     pub async fn current_revision(&mut self) -> Result<Option<String>, AnyError> {
         let controller = LanguageController::global_instance();
+        // See the comment on `commit` above — the same
+        // JSON.stringify(undefined) trap applies here. A language whose
+        // currentRevision callable is present but returns `undefined`
+        // (e.g. "never synced") would otherwise surface as a JSON parse
+        // error instead of Ok(None). Coerce to null before stringifying.
         let script = r#"
             JSON.stringify(
                 (language.linksAdapter && typeof language.linksAdapter.currentRevision === "function")
-                    ? await language.linksAdapter.currentRevision()
+                    ? ((await language.linksAdapter.currentRevision()) ?? null)
                     : null
             )
         "#;
@@ -93,10 +108,11 @@ impl Language {
 
     pub async fn render(&mut self) -> Result<Option<Perspective>, AnyError> {
         let controller = LanguageController::global_instance();
+        // Same undefined-trap fix as `commit` and `current_revision`.
         let script = r#"
             JSON.stringify(
                 (language.linksAdapter && typeof language.linksAdapter.render === "function")
-                    ? await language.linksAdapter.render()
+                    ? ((await language.linksAdapter.render()) ?? null)
                     : null
             )
         "#;
