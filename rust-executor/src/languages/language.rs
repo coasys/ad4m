@@ -90,8 +90,16 @@ impl Language {
 
     pub async fn others(&mut self) -> Result<Vec<String>, AnyError> {
         let controller = LanguageController::global_instance();
+        // A Language may expose a linksAdapter without implementing the
+        // peers capability (`peers-remote` in the new spec). Guard the
+        // method presence and coerce a missing/null return to an empty
+        // list so we never try to deserialize `null` into `Vec<String>`.
         let script = r#"
-            JSON.stringify(language.linksAdapter ? await language.linksAdapter.others() : null)
+            JSON.stringify(
+                (language.linksAdapter && typeof language.linksAdapter.others === "function")
+                    ? (await language.linksAdapter.others() ?? [])
+                    : []
+            )
         "#;
 
         let result = controller
