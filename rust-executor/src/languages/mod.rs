@@ -1973,11 +1973,18 @@ impl LanguageController {
             .await
         {
             Ok(result) => {
-                let trimmed = result.trim().trim_matches('"');
+                // The inner IIFE returns either the JS string "null"
+                // (literal, not the JSON value) or `JSON.stringify({code})`.
+                // `to_rust_string_lossy` captures JS string contents
+                // verbatim, with no enclosing quotes, so a direct trim +
+                // literal "null" compare is correct — the trim_matches
+                // used to live here was dead code operating on a value
+                // that never has outer quotes.
+                let trimmed = result.trim();
                 if trimmed == "null" {
                     None
                 } else {
-                    Some(result.trim().to_string())
+                    Some(trimmed.to_string())
                 }
             }
             Err(_) => None,
@@ -1998,11 +2005,18 @@ impl LanguageController {
             .await
         {
             Ok(result) => {
-                let trimmed = result.trim().trim_matches('"');
+                // The inner IIFE returns either the JS string "null"
+                // (literal, not the JSON value) or `JSON.stringify({code})`.
+                // `to_rust_string_lossy` captures JS string contents
+                // verbatim, with no enclosing quotes, so a direct trim +
+                // literal "null" compare is correct — the trim_matches
+                // used to live here was dead code operating on a value
+                // that never has outer quotes.
+                let trimmed = result.trim();
                 if trimmed == "null" {
                     None
                 } else {
-                    Some(result.trim().to_string())
+                    Some(trimmed.to_string())
                 }
             }
             Err(_) => None,
@@ -2023,11 +2037,18 @@ impl LanguageController {
             .await
         {
             Ok(result) => {
-                let trimmed = result.trim().trim_matches('"');
+                // The inner IIFE returns either the JS string "null"
+                // (literal, not the JSON value) or `JSON.stringify({code})`.
+                // `to_rust_string_lossy` captures JS string contents
+                // verbatim, with no enclosing quotes, so a direct trim +
+                // literal "null" compare is correct — the trim_matches
+                // used to live here was dead code operating on a value
+                // that never has outer quotes.
+                let trimmed = result.trim();
                 if trimmed == "null" {
                     None
                 } else {
-                    Some(result.trim().to_string())
+                    Some(trimmed.to_string())
                 }
             }
             Err(_) => None,
