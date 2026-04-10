@@ -292,7 +292,7 @@ export interface FlatInteractionLanguage {
 }
 
 // ----- Union type for all flat exports -----
-// Languages can extend FlatExpressionLanguage, FlatLinkLanguage, or both.
+// Union of all flat capability interfaces.
 
 export type FlatLanguageExports = FlatLanguageBase &
     Partial<FlatExpressionLanguage> &
