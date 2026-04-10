@@ -92,6 +92,22 @@ pub fn init_isolate_state(state: IsolateState) {
 }
 
 /// Read the current isolate state (for use in op functions).
+///
+/// Returns `None` if the isolate state has not been initialized yet so
+/// callers can convert the absence into an op-level error instead of a
+/// panic that would abort the entire v8 isolate. The previous
+/// `expect("IsolateState not set")` behavior meant any op call in a
+/// pre-init code path (e.g. a language's module-top-level `emitSignal`
+/// logging) crashed the whole Language worker instead of throwing a
+/// catchable error into JS.
+pub fn try_with_isolate_state<R>(f: impl FnOnce(&IsolateState) -> R) -> Option<R> {
+    ISOLATE_STATE.with(|cell| {
+        let borrowed = cell.borrow();
+        borrowed.as_ref().map(f)
+    })
+}
+
+/// Panicking variant kept for callers that are structurally past init.
 pub fn with_isolate_state<R>(f: impl FnOnce(&IsolateState) -> R) -> R {
     ISOLATE_STATE.with(|cell| {
         let borrowed = cell.borrow();
@@ -103,34 +119,25 @@ pub fn with_isolate_state<R>(f: impl FnOnce(&IsolateState) -> R) -> R {
 #[op2]
 #[string]
 fn language_storage_directory() -> Result<String, AnyhowWrapperError> {
-    with_isolate_state(|state| {
-        state
-            .language_storage_directory
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("languageStorageDirectory not set yet").into())
-    })
+    try_with_isolate_state(|state| state.language_storage_directory.clone())
+        .flatten()
+        .ok_or_else(|| anyhow::anyhow!("languageStorageDirectory not set yet").into())
 }
 
 #[op2]
 #[string]
 fn language_address() -> Result<String, AnyhowWrapperError> {
-    with_isolate_state(|state| {
-        state
-            .language_address
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("languageAddress not set yet").into())
-    })
+    try_with_isolate_state(|state| state.language_address.clone())
+        .flatten()
+        .ok_or_else(|| anyhow::anyhow!("languageAddress not set yet").into())
 }
 
 #[op2]
 #[string]
 fn language_settings() -> Result<String, AnyhowWrapperError> {
-    with_isolate_state(|state| {
-        state
-            .language_settings
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("languageSettings not set yet").into())
-    })
+    try_with_isolate_state(|state| state.language_settings.clone())
+        .flatten()
+        .ok_or_else(|| anyhow::anyhow!("languageSettings not set yet").into())
 }
 
 deno_core::extension!(
