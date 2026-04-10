@@ -12,7 +12,7 @@
 //! impl Language for MyLang {
 //!     fn name() -> &'static str { "@example/my-lang" }
 //!     fn version() -> &'static str { "0.1.0" }
-//!     fn init() -> LanguageResult<Self> { Ok(Self) }
+//!     async fn init() -> LanguageResult<Self> { Ok(Self) }
 //! }
 //! impl PerspectiveCommitCapability for MyLang {
 //!     fn perspective_commit(&mut self, _diff: PerspectiveDiff) -> LanguageResult<()> { Ok(()) }

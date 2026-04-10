@@ -81,6 +81,53 @@ test("defineLanguage: query capability", async () => {
     assert.deepEqual(r, { kind: "link", payload: "ok" });
 });
 
+test("defineLanguage: top-level hooks bind to spec (class-style authors)", async () => {
+    // Regression: init/teardown/interactions/handleHolochainSignal used to
+    // be copied raw from the spec, so method-shorthand authors whose hook
+    // bodies reference `this` would see `this === out` (the flat exports
+    // bag) instead of the spec object. Bound hooks keep `this` pointing
+    // at the spec object where the supporting state lives.
+    const state = {
+        initCalled: false,
+        torn: false,
+        interactionsCalled: false,
+        signalReceived: null as unknown,
+    };
+    const spec: any = {
+        name: "class-style",
+        state,
+        async init() { this.state.initCalled = true; },
+        teardown() { this.state.torn = true; },
+        interactions(_addr: string) {
+            this.state.interactionsCalled = true;
+            return [];
+        },
+        handleHolochainSignal(signal: unknown) {
+            this.state.signalReceived = signal;
+        },
+    };
+    const lang = defineLanguage(spec);
+    // Simulate the runtime calling these as free functions on the flat
+    // exports bag (i.e. via destructuring / wasm-bindgen) — the binds
+    // inside defineLanguage have to anchor `this` to the original spec
+    // object. Invoking via `const f = lang.init; f()` strips any
+    // receiver the dispatcher might have happened to set, matching how
+    // the bootstrap does `await mod.init()` where `mod` is the exports
+    // bag, not the spec.
+    const initFn = lang.init;
+    const teardownFn = lang.teardown!;
+    const interactionsFn = lang.interactions!;
+    const signalFn = lang.handleHolochainSignal!;
+    await initFn();
+    await teardownFn();
+    interactionsFn("expr://x");
+    signalFn({ cell_id: "x" });
+    assert.equal(state.initCalled, true);
+    assert.equal(state.torn, true);
+    assert.equal(state.interactionsCalled, true);
+    assert.deepEqual(state.signalReceived, { cell_id: "x" });
+});
+
 test("defineLanguage: telepresence + holochain signal handler", () => {
     const lang = defineLanguage({
         name: "t",
