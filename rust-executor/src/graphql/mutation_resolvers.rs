@@ -1519,6 +1519,7 @@ impl Mutation {
                 .map_err(|e| FieldError::new(e.to_string(), graphql_value!(null)))?;
 
             let input_name = input.meta.name.clone();
+            log::info!("applyTemplateAndPublish: input_name after template = {:?}", input_name);
 
             // Save the templated bundle locally so it can be loaded into a runtime
             if let Err(e) = controller.save_language_bundle(&input.bundle, None) {
@@ -1601,6 +1602,11 @@ impl Mutation {
                 }
             }
 
+            // Override the cached language name with the templated name.
+            // load_language() above caches the name from the source code's
+            // `export const name = ...`, but templating overrides the meta
+            // name without rewriting the source export.
+            controller.set_language_name(&address, &input_name).await;
             Ok(LanguageRef {
                 address,
                 name: input_name,

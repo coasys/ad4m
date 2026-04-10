@@ -1560,7 +1560,9 @@ impl LanguageController {
         };
 
         // Override name and description if present in template_data
+        info!("Template data keys: {:?}, meta.name before override: {}", template_data.keys().collect::<Vec<_>>(), meta.name);
         if let Some(JsonValue::String(name)) = template_data.get("name") {
+            info!("Overriding meta.name from template_data: {} -> {}", meta.name, name);
             meta.name = name.clone();
         }
         if let Some(JsonValue::String(desc)) = template_data.get("description") {
@@ -1798,6 +1800,14 @@ impl LanguageController {
                     message: format!("Failed to install language: {}", e),
                 })?;
 
+            // Override cached name with meta name (the source code export
+            // may differ from the templated/published meta name).
+            if let Some(meta_name) = language_meta_data.get("name").and_then(|n| n.as_str()) {
+                if !meta_name.is_empty() {
+                    self.set_language_name(&resolved_address, meta_name).await;
+                }
+            }
+
             Ok(Language::new(resolved_address))
         } else {
             // Untrusted author path: verify template params
@@ -1943,6 +1953,13 @@ impl LanguageController {
                     address: resolved_address.clone(),
                     message: format!("Failed to install language: {}", e),
                 })?;
+
+            // Override cached name with meta name from the template
+            if let Some(meta_name) = language_meta_data.get("name").and_then(|n| n.as_str()) {
+                if !meta_name.is_empty() {
+                    self.set_language_name(&resolved_address, meta_name).await;
+                }
+            }
 
             Ok(Language::new(resolved_address))
         }
@@ -2216,6 +2233,19 @@ impl LanguageController {
         };
         let names = self.language_names.lock().await;
         names.get(&resolved).cloned().unwrap_or_default()
+    }
+
+    /// Override the cached language name (e.g. after templating).
+    pub async fn set_language_name(&self, address: &str, name: &str) {
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(address)
+                .cloned()
+                .unwrap_or_else(|| address.to_string())
+        };
+        let mut names = self.language_names.lock().await;
+        names.insert(resolved, name.to_string());
     }
 
     /// Get icon code from a language's expressionUI/settingsUI interfaces.

@@ -204,9 +204,12 @@ export async function peersRemote(): Promise<string[]> {
     return Array.from(peers.keys());
 }
 
-/** Tell the DNA which agents we represent locally. */
+/** Tell the DNA which agents we represent locally.
+ *  The DNA registers agents automatically during sync() calls,
+ *  so this is a no-op. */
 export async function peersSetLocal(_agents: string[]): Promise<void> {
-    await hc.call(dnaRole, zomeName, "add_active_agent_link", null);
+    // No-op: agents are registered via create_did_pub_key_link in ensureDidLink()
+    // and via the sync() zome call which tracks active agents.
 }
 
 // -----------------------------------------------------------------------------
