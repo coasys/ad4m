@@ -139,9 +139,20 @@ impl LanguageController {
     ) -> Result<String, LanguageError> {
         info!("Loading language from bundle: {:?}", bundle_path);
 
-        // Read bundle to calculate IPFS hash
-        let bundle_content = fs::read_to_string(&bundle_path)?;
-        let language_address = self.calculate_language_hash(&bundle_content);
+        // Read bundle once and reuse both for the hash and for the
+        // module source we hand to the runtime. The previous code read
+        // the same file twice (once here, once again below before
+        // `load_module`), which doubled the syscall cost and — more
+        // importantly — opened a TOCTOU window where the on-disk bytes
+        // could change between the two reads and produce a
+        // hash/address mismatch against the loaded module content.
+        let bundle_source = fs::read_to_string(&bundle_path).map_err(|e| {
+            LanguageError::LoadError {
+                address: format!("{:?}", bundle_path),
+                message: format!("Failed to read language bundle {:?}: {}", bundle_path, e),
+            }
+        })?;
+        let language_address = self.calculate_language_hash(&bundle_source);
 
         info!("Language address: {}", language_address);
 
@@ -186,13 +197,6 @@ impl LanguageController {
             message: e,
         })?;
 
-        // Read the language bundle in Rust and pass source code to JS
-        // (the JS sandbox should NOT do file operations)
-        let bundle_source =
-            std::fs::read_to_string(&bundle_path).map_err(|e| LanguageError::LoadError {
-                address: language_address.clone(),
-                message: format!("Failed to read language bundle {:?}: {}", bundle_path, e),
-            })?;
         info!("Loading module for language {}", language_address);
         // Get JSON representation BEFORE moving language_context
         let language_context_json = language_context.to_json();
