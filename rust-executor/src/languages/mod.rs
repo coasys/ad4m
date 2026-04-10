@@ -908,38 +908,52 @@ impl LanguageController {
         let source = if bundle_path.exists() {
             Some(fs::read_to_string(&bundle_path)?)
         } else if let Some(ref ll_addr) = language_language_address {
+            // Match the meta fetch retry policy: up to 10 attempts with
+            // linear backoff. Previously the source fetch was one-shot,
+            // which meant that if the language language was still warming
+            // up the meta call could succeed on retry N while the source
+            // call failed instantly on the first attempt, aborting the
+            // whole install with a confusing "no source available" error
+            // even though a retry would have succeeded.
             let language_lit = serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
             let source_script = format!(
                 r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource({})"#,
                 language_lit
             );
 
-            match controller
-                .execute_on_language(ll_addr, &source_script)
-                .await
-            {
-                Ok(s) => {
-                    // Mirror install_language_from_address: a language-language
-                    // that returns null/undefined for an unknown address
-                    // stringifies to the literal "null" / "undefined" here.
-                    // Treat those as "source not available" rather than
-                    // writing four/nine bytes to disk and then failing the
-                    // hash check further down.
-                    let trimmed = s.trim();
-                    if trimmed.is_empty() || trimmed == "null" || trimmed == "undefined" {
-                        None
-                    } else {
-                        Some(s)
+            let mut source_result: Option<String> = None;
+            for retry in 0..10 {
+                match controller
+                    .execute_on_language(ll_addr, &source_script)
+                    .await
+                {
+                    Ok(s) => {
+                        // A language-language that returns null/undefined
+                        // for an unknown address stringifies to the literal
+                        // "null" / "undefined" here. Treat those as
+                        // "source not available" — but still retry in case
+                        // the LL is mid-warmup and hasn't yet materialized
+                        // the expression.
+                        let trimmed = s.trim();
+                        if !(trimmed.is_empty()
+                            || trimmed == "null"
+                            || trimmed == "undefined")
+                        {
+                            source_result = Some(s);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Error getting language source from language language: {}\nRetrying...",
+                            e
+                        );
                     }
                 }
-                Err(e) => {
-                    warn!(
-                        "Error getting language source from language language: {}",
-                        e
-                    );
-                    None
-                }
+                tokio::time::sleep(std::time::Duration::from_millis(5000 * (retry + 1))).await;
             }
+
+            source_result
         } else {
             None
         };
