@@ -205,7 +205,7 @@ if $LAUNCH; then
 
     "$CHROME_BIN" "${CHROME_FLAGS[@]}" "$FLUX_URL" &>/dev/null &
     CHROME_PID=$!
-    trap "kill $CHROME_PID 2>/dev/null" EXIT
+    trap 'kill $CHROME_PID 2>/dev/null' EXIT
     sleep 3
     ok "Chrome launched (PID $CHROME_PID)"
 else
@@ -222,7 +222,7 @@ sleep 3
 cdp_wait_for "document.querySelector('ad4m-connect') ? 'yes' : ''" "ad4m-connect component"
 
 # Step 2: Check if already authenticated
-ALREADY=$(cdp_eval "localStorage.getItem('ad4m-token') || localStorage.getItem('ad4m_token') ? 'yes' : ''")
+ALREADY=$(cdp_eval "Object.keys(localStorage).some(k => k.endsWith('/ad4m-token')) ? 'yes' : ''")
 if [[ "$ALREADY" == "yes" ]]; then
     ok "Already authenticated (token in localStorage)"
     exit 0

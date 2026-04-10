@@ -17,7 +17,7 @@ pnpm build-libs                     # Full build (from repo root)
 
 - Link storage in `src/perspectives/sparql_store.rs`
 - Named graphs: each link stored as 7 RDF triples in its own graph
-- Graph IRI: `link:<sha256(source+predicate+target+timestamp)[:32]>`
+- Graph IRI: `ad4m://link/<sha256_hex>` (full 64-char hex of `sha256(source+predicate+target+timestamp)`)
 
 ## Key Directories
 

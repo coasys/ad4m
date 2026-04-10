@@ -52,9 +52,9 @@ PROJECT_SLUG=$(curl -sL "https://circleci.com/api/v2/workflow/${WORKFLOW_ID}" -H
 # 3. Get jobs
 JOBS_JSON=$(curl -sL "https://circleci.com/api/v2/workflow/${WORKFLOW_ID}/job" -H "Accept: application/json")
 
-python3 -c "
+echo "$JOBS_JSON" | python3 -c "
 import sys, json
-data = json.loads('''${JOBS_JSON}''')
+data = json.load(sys.stdin)
 items = data.get('items', [])
 for j in items:
     name = j['name']
@@ -66,11 +66,11 @@ for j in items:
 echo ""
 
 # 4. Fetch logs for failing jobs using v1.1 API presigned URLs
-FAILING_JOBS=$(python3 -c "
-import json
-data = json.loads('''${JOBS_JSON}''')
-show_all = '${SHOW_ALL}' == 'true'
-target = '${TARGET_JOB}'
+FAILING_JOBS=$(echo "$JOBS_JSON" | SHOW_ALL="$SHOW_ALL" TARGET_JOB="$TARGET_JOB" python3 -c "
+import sys, json, os
+data = json.load(sys.stdin)
+show_all = os.environ.get('SHOW_ALL', '') == 'true'
+target = os.environ.get('TARGET_JOB', '')
 for j in data.get('items', []):
     if target and j['name'] != target:
         continue
@@ -139,9 +139,9 @@ try:
     # Strip ANSI codes
     text = re.sub(r'\x1b\[[0-9;]*m', '', text)
     print(text)
-except:
+except Exception:
     # Not JSON — treat as plain text
-    text = sys.stdin.read() if not data else str(data)
+    text = sys.stdin.read()
     text = re.sub(r'\x1b\[[0-9;]*m', '', text)
     print(text)
 " <<< "$LOG")

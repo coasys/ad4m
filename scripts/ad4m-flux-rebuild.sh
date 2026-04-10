@@ -43,9 +43,9 @@ SKIP_INSTALL=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --flux) FLUX_DIR="$2"; shift 2;;
+        --flux) [[ $# -ge 2 ]] || err "--flux requires a directory argument"; FLUX_DIR="$2"; shift 2;;
         --executor) BUILD_EXECUTOR=true; shift;;
-        --serve) SERVE_PORT="$2"; shift 2;;
+        --serve) [[ $# -ge 2 ]] || err "--serve requires a port argument"; SERVE_PORT="$2"; shift 2;;
         --skip-install) SKIP_INSTALL=true; shift;;
         -h|--help)
             sed -n '/^# /,/^$/p' "$0" | sed 's/^# //' | sed 's/^#//'
@@ -55,6 +55,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 log() { echo -e "\033[1;36m→ $1\033[0m"; }
+warn() { echo -e "\033[1;33m⚠ $1\033[0m" >&2; }
 err() { echo -e "\033[1;31m✗ $1\033[0m" >&2; exit 1; }
 ok()  { echo -e "\033[1;32m✓ $1\033[0m"; }
 
@@ -78,7 +79,7 @@ ok "AD4M connect built (core re-bundled)"
 for hook_dir in "$AD4M_DIR/ad4m-hooks/helpers" "$AD4M_DIR/ad4m-hooks/react" "$AD4M_DIR/ad4m-hooks/vue"; do
     if [[ -f "$hook_dir/tsconfig.json" ]]; then
         log "Building $(basename "$(dirname "$hook_dir")")/$(basename "$hook_dir")..."
-        cd "$hook_dir" && pnpm exec tsc 2>/dev/null || true
+        cd "$hook_dir" && pnpm exec tsc || warn "Hook build failed: $hook_dir (non-fatal)"
     fi
 done
 
@@ -106,8 +107,11 @@ log "Linking Flux → AD4M SDK..."
 cd "$FLUX_DIR"
 
 # Create/update symlink
-rm -f ad4m 2>/dev/null
-ln -sf "$AD4M_DIR" ad4m
+if [[ -e ad4m && ! -L ad4m ]]; then
+    err "'$FLUX_DIR/ad4m' exists and is not a symlink; remove or rename it first."
+fi
+rm -f ad4m
+ln -sfn "$AD4M_DIR" ad4m
 
 # Set pnpm overrides to use local AD4M builds
 node -e "
