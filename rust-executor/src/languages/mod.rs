@@ -2263,9 +2263,17 @@ impl LanguageController {
 
         let escaped_addr =
             serde_json::to_string(&expression_address).unwrap_or_else(|_| "\"\"".to_string());
+        // `interactions` is optional in the flat Language interface
+        // (spec §5.7) — both JS and Rust ALDK languages may omit it. The
+        // dispatcher must not crash when it is absent; return an empty
+        // list instead so GraphQL callers see "no interactions" rather
+        // than an opaque TypeError from deep inside the v8 isolate.
         let script = format!(
             r#"JSON.stringify(
-                language.interactions({}).map(ic => ({{
+                (typeof language.interactions === "function"
+                    ? language.interactions({})
+                    : []
+                ).map(ic => ({{
                     label: ic.label, name: ic.name, parameters: ic.parameters
                 }}))
             )"#,
@@ -2309,7 +2317,9 @@ impl LanguageController {
         let script = format!(
             r#"JSON.stringify(
                 await (async () => {{
-                    const list = language.interactions({});
+                    const list = typeof language.interactions === "function"
+                        ? language.interactions({})
+                        : [];
                     const interaction = list.find(i => i.name === {});
                     if (!interaction) throw new Error("No interaction named " + {});
                     if (typeof interaction.execute === "function") {{
