@@ -20,9 +20,12 @@ import { LinkQuery } from '../perspectives/LinkQuery';
  * export const name = "my-language";
  * export const version = "0.1.0";
  * 
- * export async function init(contextJson) {
- *     // contextJson: JSON string with { storageDirectory, customSettings, languageAddress }
- *     // Non-serializable delegates available via globalThis:
+ * export async function init() {
+ *     // No arguments — context is accessed via runtime imports:
+ *     //   globalThis.languageStorageDirectory() — storage directory path
+ *     //   globalThis.languageAddress()          — this language's address
+ *     //   globalThis.languageSettings()         — settings JSON string
+ *     // Delegates on globalThis:
  *     //   globalThis.__agentProxy__      — agent identity & signing
  *     //   globalThis.__holochainDelegate__ — Holochain DNA registration & zome calls
  *     //   globalThis.__ad4mSignal__      — signal emission
@@ -118,10 +121,12 @@ export interface FlatWasmImports extends AgentWasmImports, HolochainWasmImports 
 // The language_bootstrap.js adapter wrapper converts flat exports to the
 // internal Language interface.
 
-// ----- Context passed via init() -----
+// ----- Context (deprecated — v1.0 uses imports instead) -----
 
-/** Context passed to flat-export languages via init(contextJson: string).
- * This is the only serializable data that crosses the WASM/JS boundary.
+/** @deprecated v1.0 languages access context via runtime imports
+ * (languageStorageDirectory(), languageAddress(), languageSettings())
+ * rather than init(contextJson). This interface is retained for
+ * reference until the legacy create() path is deleted in Phase D.
  */
 export interface LanguageInitContext {
     /** Directory path for language-specific file storage */
@@ -194,7 +199,10 @@ export interface FlatLanguageBase {
     /** Static privacy hint (lifecycle-level). If true, callers may assume
      * the Language's content is public; otherwise treat as private. */
     isPublic?(): boolean;
-    init(contextJson: string): Promise<void>;
+    /** Initialise per-instance state. No arguments — context is accessed
+     * via runtime imports (languageStorageDirectory, languageAddress, etc.).
+     * The old `contextJson` parameter is gone in v1.0. */
+    init(): Promise<void>;
     teardown?(): void;
 }
 
