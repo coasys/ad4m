@@ -1580,16 +1580,15 @@ impl Mutation {
                 ));
             }
 
-            let address: String =
-                serde_json::from_str(trimmed_addr_raw).map_err(|e| {
-                    FieldError::new(
-                        format!(
-                            "Failed to parse published language address: {} ({:?})",
-                            e, address_raw
-                        ),
-                        graphql_value!(null),
-                    )
-                })?;
+            let address: String = serde_json::from_str(trimmed_addr_raw).map_err(|e| {
+                FieldError::new(
+                    format!(
+                        "Failed to parse published language address: {} ({:?})",
+                        e, address_raw
+                    ),
+                    graphql_value!(null),
+                )
+            })?;
 
             // Load the templated language into a per-language runtime
             let bundle_on_disk = crate::utils::languages_directory()

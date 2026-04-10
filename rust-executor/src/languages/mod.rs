@@ -146,12 +146,11 @@ impl LanguageController {
         // importantly — opened a TOCTOU window where the on-disk bytes
         // could change between the two reads and produce a
         // hash/address mismatch against the loaded module content.
-        let bundle_source = fs::read_to_string(&bundle_path).map_err(|e| {
-            LanguageError::LoadError {
+        let bundle_source =
+            fs::read_to_string(&bundle_path).map_err(|e| LanguageError::LoadError {
                 address: format!("{:?}", bundle_path),
                 message: format!("Failed to read language bundle {:?}: {}", bundle_path, e),
-            }
-        })?;
+            })?;
         let language_address = self.calculate_language_hash(&bundle_source);
 
         info!("Language address: {}", language_address);
@@ -604,10 +603,7 @@ impl LanguageController {
         // opaque hash mismatch. Reject the common nullish shapes up
         // front with a useful error.
         let trimmed_source = bundle_source.trim();
-        if trimmed_source.is_empty()
-            || trimmed_source == "null"
-            || trimmed_source == "undefined"
-        {
+        if trimmed_source.is_empty() || trimmed_source == "null" || trimmed_source == "undefined" {
             return Err(LanguageError::LoadError {
                 address: address.to_string(),
                 message: format!(
@@ -872,7 +868,8 @@ impl LanguageController {
             Some(serde_json::from_str(&content)?)
         } else if let Some(ref ll_addr) = language_language_address {
             // Fetch from language language with retry logic (up to 10 retries)
-            let language_lit = serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
+            let language_lit =
+                serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
             let meta_script = format!(
                 r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.get({})) ?? null)"#,
                 language_lit
@@ -915,7 +912,8 @@ impl LanguageController {
             // call failed instantly on the first attempt, aborting the
             // whole install with a confusing "no source available" error
             // even though a retry would have succeeded.
-            let language_lit = serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
+            let language_lit =
+                serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
             let source_script = format!(
                 r#"await globalThis.__ad4m_language_instance__.languageAdapter.getLanguageSource({})"#,
                 language_lit
@@ -935,10 +933,7 @@ impl LanguageController {
                         // the LL is mid-warmup and hasn't yet materialized
                         // the expression.
                         let trimmed = s.trim();
-                        if !(trimmed.is_empty()
-                            || trimmed == "null"
-                            || trimmed == "undefined")
-                        {
+                        if !(trimmed.is_empty() || trimmed == "null" || trimmed == "undefined") {
                             source_result = Some(s);
                             break;
                         }
@@ -1182,12 +1177,11 @@ impl LanguageController {
                         // with no link back to the template site. JSON is a
                         // strict subset of JS expressions, so any serde_json
                         // value round-trips safely.
-                        let literal = serde_json::to_string(value).unwrap_or_else(|_| {
-                            match value {
+                        let literal =
+                            serde_json::to_string(value).unwrap_or_else(|_| match value {
                                 JsonValue::String(s) => format!("\"{}\"", s),
                                 other => other.to_string(),
-                            }
-                        });
+                            });
                         source_lines[variable_index] =
                             format!("{} {} = {}", variable_type, variable_name, literal);
                     }
@@ -1212,8 +1206,8 @@ impl LanguageController {
                 // practice, but a bundle that ever ships non-base64 data
                 // here (or a crafted template input) would otherwise break
                 // JS parsing.
-                let literal = serde_json::to_string(happ_str)
-                    .unwrap_or_else(|_| format!("\"{}\"", happ_str));
+                let literal =
+                    serde_json::to_string(happ_str).unwrap_or_else(|_| format!("\"{}\"", happ_str));
                 source_lines[idx] = format!("var happ = {}", literal);
             }
         }
@@ -1440,7 +1434,8 @@ impl LanguageController {
         };
 
         // Get the language expression (meta)
-        let source_language_hash_lit = serde_json::to_string(&source_language_hash).unwrap_or_else(|_| "\"\"".to_string());
+        let source_language_hash_lit =
+            serde_json::to_string(&source_language_hash).unwrap_or_else(|_| "\"\"".to_string());
         let meta_script = format!(
             r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.get({})) ?? null)"#,
             source_language_hash_lit
@@ -1474,10 +1469,7 @@ impl LanguageController {
         // surfaces here as the literal "null" / "undefined" string and
         // would otherwise be spliced into the templated source.
         let trimmed_source = source_language.trim();
-        if trimmed_source.is_empty()
-            || trimmed_source == "null"
-            || trimmed_source == "undefined"
-        {
+        if trimmed_source.is_empty() || trimmed_source == "null" || trimmed_source == "undefined" {
             return Err(LanguageError::LoadError {
                 address: source_language_hash.to_string(),
                 message: format!(
@@ -1686,7 +1678,8 @@ impl LanguageController {
         };
 
         // Fetch language expression (meta) from language language
-        let resolved_address_lit = serde_json::to_string(&resolved_address).unwrap_or_else(|_| "\"\"".to_string());
+        let resolved_address_lit =
+            serde_json::to_string(&resolved_address).unwrap_or_else(|_| "\"\"".to_string());
         let meta_script = format!(
             r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.get({})) ?? null)"#,
             resolved_address_lit
@@ -1760,10 +1753,7 @@ impl LanguageController {
             if trimmed.is_empty() || trimmed == "null" || trimmed == "undefined" {
                 return Err(LanguageError::LoadError {
                     address: resolved_address,
-                    message: format!(
-                        "Could not get language source (got {:?})",
-                        trimmed
-                    ),
+                    message: format!("Could not get language source (got {:?})", trimmed),
                 });
             }
 
@@ -1855,7 +1845,9 @@ impl LanguageController {
             }
 
             // Get source language meta and verify its author is trusted
-            let template_source_language_address_lit = serde_json::to_string(&template_source_language_address).unwrap_or_else(|_| "\"\"".to_string());
+            let template_source_language_address_lit =
+                serde_json::to_string(&template_source_language_address)
+                    .unwrap_or_else(|_| "\"\"".to_string());
             let source_meta_script = format!(
                 r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.get({})) ?? null)"#,
                 template_source_language_address_lit
@@ -1926,10 +1918,7 @@ impl LanguageController {
             if trimmed.is_empty() || trimmed == "null" || trimmed == "undefined" {
                 return Err(LanguageError::LoadError {
                     address: resolved_address,
-                    message: format!(
-                        "Could not get language source (got {:?})",
-                        trimmed
-                    ),
+                    message: format!("Could not get language source (got {:?})", trimmed),
                 });
             }
 
@@ -2039,10 +2028,7 @@ impl LanguageController {
                         // than string-matching so any whitespace or v8
                         // lossy-conversion quirks still produce the right
                         // boolean.
-                        if !matches!(
-                            serde_json::from_str::<bool>(res.trim()),
-                            Ok(true)
-                        ) {
+                        if !matches!(serde_json::from_str::<bool>(res.trim()), Ok(true)) {
                             continue;
                         }
                     }
@@ -2643,14 +2629,13 @@ impl LanguageController {
         // ASCII addresses but would mangle any address containing
         // embedded quotes, backslashes, or non-ASCII, all of which the
         // "did:…" scheme happily allows.
-        let expression_address: String = serde_json::from_str(result.trim()).map_err(|e| {
-            LanguageError::SerializationError {
+        let expression_address: String =
+            serde_json::from_str(result.trim()).map_err(|e| LanguageError::SerializationError {
                 message: format!(
                     "expressionCreate dispatcher returned a non-string result: {} ({:?})",
                     e, result
                 ),
-            }
-        })?;
+            })?;
 
         // Special case: for the "did" scheme, the expression address IS the full URL
         // (e.g. "did:key:z6Mk..."), so don't prefix with "did://"
