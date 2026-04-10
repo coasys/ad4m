@@ -83,6 +83,14 @@ What already exists on the branch:
 
 ## Phase 0 — Naming alignment + scaffolding (small, fast)
 
+> **Execution status (2026-04-10):** Complete. All flat interfaces in
+> `core/src/language/Language.ts` use the new three-capability split names.
+> `flat_wasm_imports.ts` exposes both `__` legacy and camelCase canonical
+> names. `language_bootstrap.js` accepts both old `linkSync*` and new
+> `perspective*`/`peers*` export names. `p-diff-sync/index.flat.ts` uses
+> new export names. Dead `writable`/`public` fields removed from
+> linksAdapter construction.
+
 Goal: bring the existing flat infrastructure in line with the new spec
 names, **without** adding new capabilities yet. This is a pure rename +
 small-surface cleanup so that every subsequent phase builds on the right
@@ -173,6 +181,17 @@ packages — just new names. Safe intermediate PR if desired.
 
 ## Phase A — JS ALDK (`@coasys/ad4m-ldk`) + p-diff-sync migration
 
+> **Execution status (2026-04-10):** Complete. `ad4m-ldk/js/` created as
+> a pnpm workspace package with `imports.ts` (typed wrappers for all §7
+> runtime imports), `defineLanguage.ts` (grouped→flat transform), and
+> `types.ts`. `p-diff-sync/index.flat.ts` uses the new export names and
+> grouped default export mirroring `defineLanguage` shape. The ALDK
+> cannot be imported by bootstrap languages yet (Deno esbuild plugin
+> can't resolve pnpm workspace packages), so `p-diff-sync` uses
+> `globalThis` directly with the ALDK as a documentation reference.
+> Step A.4 (expanded flat-language test coverage for link-sync/peers)
+> deferred — requires live Holochain conductor.
+
 Goal: introduce the ergonomic authoring layer, and make p-diff-sync the
 reference Language built on it.
 
@@ -256,6 +275,25 @@ intermediate PR boundary.
 ---
 
 ## Phase B — Runtime wiring (event emission, signal routing, ambient signer, peers push)
+
+> **Execution status (2026-04-10):** Partially complete.
+> - B.1 (emit fan-out): `emitPerspectiveDiff`, `emitSyncStateChange`,
+>   `emitTelepresenceSignal`, `emitSignal` are wired from JS to Rust ops
+>   via `LANGUAGE_CONTROLLER` in `languages_extension.rs`. Legacy callback
+>   registration stubs retained for Phase 0 transitional compatibility.
+>   `emitSignal` has a limitation: only delivers PerspectiveExpression-shaped
+>   payloads (documented in spec §7.5).
+> - B.2 (ambient agent): Thread-local `CURRENT_AGENT_CONTEXT` per language
+>   runtime thread is set/reset around each execution in
+>   `language_runtime.rs`. `agentDid()` reads this context.
+> - B.3 (peers push): `peersSetLocal` export is dispatched by the runtime.
+>   Full login/logout lifecycle push not yet verified in multi-user tests.
+> - B.4 (signal routing): Holochain signal routing uses
+>   `HOLOCHAIN_SIGNAL_HANDLERS` global map, keyed by language address.
+>   Handler ordering fix shipped (cleanup before teardown). DnaHash→instance
+>   map not yet implemented — routing is by language address, not DNA hash.
+> - B.5 (storage KV): File-backed per-language-instance storage implemented
+>   in `flat_wasm_imports.ts` via Map with flush-on-write.
 
 Goal: make the runtime actually honor the spec's runtime-side contracts.
 This is the most impactful phase: it wires behaviors that the ALDK and
@@ -560,6 +598,20 @@ the target state.
 ---
 
 ## Phase F — Final reconciliation
+
+> **Execution status (2026-04-10):** In progress.
+> - TODO/FIXME audit: No migration-introduced TODOs found. All existing
+>   TODOs are pre-migration (SurrealDB migration, AI service, Prolog).
+> - Spec §8 (signal routing): Fixed handleHolochainSignal signature
+>   mismatch (was 3-arg in spec, 1-arg in impl). Added WIT divergence note.
+> - Spec §7.5 (emitSignal): Documented PerspectiveExpression-only limitation.
+> - Spec §7.2 (holochainCallAsync): Documented ALDK single-call convenience
+>   wrapper divergence from spec's batch form.
+> - Spec §9–10 authoring examples: §9.1 JS and §10.1 Rust examples fixed
+>   to match actual ALDK APIs shipped.
+> - Remaining: user-facing docs update (`docs-src/pages/languages.mdx`),
+>   DM runtime-divergence note, full `pnpm build && pnpm test && cargo test`
+>   verification, PR description draft.
 
 - Grep the codebase for any `TODO` / `XXX` / `FIXME` introduced during
   the migration. Resolve or document.

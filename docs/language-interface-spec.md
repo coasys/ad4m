@@ -362,6 +362,14 @@ through telepresence for instant delivery. **Offline delivery** falls
 through to `perspective-commit`, and the sender's node / friend relay
 / DHT holds it until the recipient's node runs sync.
 
+> **Runtime divergence:** The AD4M runtime retains a flat
+> `direct-message` capability (`dmSendMessage`, `dmInbox`, etc.) and
+> its `DirectMessageAdapter` dispatch path for backward compatibility
+> with `direct-message-language`. This is a pragmatic runtime-level
+> feature not reflected in the v1.0 spec or WIT. It will be removed
+> once the social-layer conventions (`ad4m-social-conventions.md`) are
+> implemented and deployed.
+
 See `docs/ad4m-social-conventions.md` for the full pattern: the
 well-known `ad4m://inbox` predicate for inbox discovery via the
 agent's public perspective, the `ad4m://friend-of` predicate for
@@ -497,6 +505,13 @@ users at once.
 | `holochainRegisterDnas(dnas)` | `AppInfo[]` | Register DNA bundles. The runtime records the resulting DnaHashes against this language instance so it can route incoming signals back via `handleHolochainSignal` (§8). No callback parameter. |
 | `holochainCall(dnaNick, zome, fnName, params)` | `unknown` | Single zome call. Underlying impl puts these into a sync FIFO queue. |
 | `holochainCallAsync(calls, timeoutMs?)` | `unknown[]` | **Batched** parallel zome calls; `calls` is `{dnaNick, zome, fnName, params}[]`. Read-only operations only — concurrent writes will race the source chain. |
+
+> **Runtime note:** The JS ALDK (`@coasys/ad4m-ldk`) and the runtime's
+> `flat_wasm_imports.ts` both expose `holochainCallAsync` as a **single-call
+> convenience wrapper** `(dnaNick, zome, fnName, params) → unknown` that
+> delegates to the batch API internally. Languages needing true batch
+> parallelism should call the underlying `__holochainDelegate__.callAsync`
+> directly until the ALDK exposes a batch variant.
 
 ### 7.3 Language context
 
