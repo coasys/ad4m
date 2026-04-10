@@ -540,6 +540,12 @@ doesn't track subscribers and doesn't hold callback references.
 All `emit*` functions are fire-and-forget; they return immediately after the
 runtime has enqueued the event for fan-out.
 
+> **Current limitation:** `emitSignal(data)` currently only delivers signals
+> whose payload can be deserialized as a `PerspectiveExpression`. Payloads
+> with other shapes are logged as warnings and dropped. A dedicated
+> `AD4M_SIGNAL_TOPIC` + GraphQL subscription is needed to support arbitrary
+> signal payloads (tracked as a follow-up).
+
 ---
 
 ## 8. Holochain signal routing (Holochain extension)
