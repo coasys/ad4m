@@ -46,6 +46,25 @@ fn telepresence_signal_received(
     );
 }
 
+/// Drop every `HOLOCHAIN_SIGNAL_HANDLERS` entry that routes to the given
+/// language address. Called from `LanguageController::language_remove`
+/// so signals arriving after a removal don't keep trying to execute on a
+/// teardown-ed runtime and spamming NotFound warnings in the log.
+pub fn drop_holochain_signal_handlers_for_language(language_address: &str) {
+    match HOLOCHAIN_SIGNAL_HANDLERS.write() {
+        Ok(mut map) => {
+            map.retain(|_cell_id, addr| addr != language_address);
+        }
+        Err(poisoned) => {
+            log::warn!(
+                "HOLOCHAIN_SIGNAL_HANDLERS lock was poisoned; recovering and retaining anyway"
+            );
+            let mut map = poisoned.into_inner();
+            map.retain(|_cell_id, addr| addr != language_address);
+        }
+    }
+}
+
 #[op2(fast)]
 fn register_holochain_signal_handler(
     #[string] cell_id_key: String,

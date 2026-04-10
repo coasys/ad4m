@@ -1641,6 +1641,14 @@ impl LanguageController {
             aliases.retain(|_alias, target| target != address);
         }
 
+        // Drop any Holochain cell-id → language_address entries that
+        // still route to this removed runtime. Without this, the
+        // central Holochain signal loop in lib.rs keeps trying to
+        // execute_on_language for a runtime that no longer exists,
+        // spamming NotFound warnings for every signal that arrives on
+        // the DNA cells this language had registered.
+        crate::js_core::languages_extension::drop_holochain_signal_handlers_for_language(address);
+
         Ok(())
     }
 
