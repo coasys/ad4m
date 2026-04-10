@@ -27,9 +27,9 @@
  *     ▼
  * flat_wasm_imports.js (this file — globalThis functions)
  *     │
- *     │ imports from ext:core/ops
+ *     │ accesses AGENT / LANGUAGE_CONTROLLER globals
  *     ▼
- * Deno extension ops (agent_extension.rs, languages_extension.rs, signature_extension.rs)
+ * Deno extension JS globals (agent_extension.js, languages_extension.js)
  * ```
  * 
  * ## Bootstrap integration
@@ -39,25 +39,19 @@
  */
 
 // ============================================================================
-// Import Deno extension ops
+// Access Deno extension ops via globalThis globals
 // ============================================================================
-// These come from ext:core/ops — the built-in Deno ops registered by the
-// deno_core extension system. They are plain functions when imported.
+// The ops are registered by the deno_core extension system and exposed on
+// globalThis via extension JS files (agent_extension.js, languages_extension.js).
+// This file is loaded as a user-space module (not an ext: module) so it CANNOT
+// import from 'ext:core/ops' directly. Instead, we access the ops through the
+// global objects that the extension JS files install.
 
-import {
-    agent_did,
-    agent_signing_key_id,
-    agent_sign,
-    agent_sign_string_hex,
-    agent_create_signed_expression,
-    agent_get_all_local_user_dids,
-    agent_create_signed_expression_for_user,
-    agent_did_for_user,
-} from 'ext:core/ops';
-
-import {
-    ad4m_signal_emitted,
-} from 'ext:core/ops';
+// Lazy accessors — the globals (AGENT, LANGUAGE_CONTROLLER) are installed by
+// extension modules before any language is loaded, but we defer access to call
+// time to avoid module-load-order issues.
+const agent = (): any => (globalThis as any).AGENT;
+const langCtrl = (): any => (globalThis as any).LANGUAGE_CONTROLLER;
 
 // Holochain imports are routed through the per-language JS delegate
 // (`globalThis.__holochainDelegate__`) that `language_bootstrap.js`
@@ -65,7 +59,7 @@ import {
 // the existing holochain_service_extension ops (install_app, call_zome_function)
 // and also maintains the cell_id → languageAddress mapping used by the
 // central signal router. There is no direct `holochain_register_dnas` op
-// to import from `ext:core/ops`.
+// so there is no corresponding global to delegate to — use __holochainDelegate__ directly.
 function holochainDelegate(): any {
     const d = (globalThis as any).__holochainDelegate__;
     if (!d) {
@@ -87,7 +81,7 @@ function holochainDelegate(): any {
  * Rust: `agent_extension::agent_did()`
  */
 export function __agent_did(): string {
-    return agent_did() as string;
+    return agent().did() as string;
 }
 
 /**
@@ -95,7 +89,7 @@ export function __agent_did(): string {
  * Rust: `agent_extension::agent_signing_key_id()`
  */
 export function __agent_signing_key_id(): string {
-    return agent_signing_key_id() as string;
+    return agent().signingKeyId() as string;
 }
 
 /**
@@ -103,7 +97,7 @@ export function __agent_signing_key_id(): string {
  * Rust: `agent_extension::agent_sign()`
  */
 export function __agent_sign(payload: Uint8Array): Uint8Array {
-    const result = agent_sign(payload) as Uint8Array;
+    const result = agent().sign(payload) as Uint8Array;
     return result;
 }
 
@@ -112,7 +106,7 @@ export function __agent_sign(payload: Uint8Array): Uint8Array {
  * Rust: `agent_extension::agent_sign_string_hex()`
  */
 export function __agent_sign_string_hex(payload: string): string {
-    return agent_sign_string_hex(payload) as string;
+    return agent().signStringHex(payload) as string;
 }
 
 /**
@@ -120,7 +114,7 @@ export function __agent_sign_string_hex(payload: string): string {
  * Rust: `agent_extension::agent_create_signed_expression()`
  */
 export function __agent_create_signed_expression(data: unknown): object {
-    return agent_create_signed_expression(data) as object;
+    return agent().createSignedExpression(data) as object;
 }
 
 /**
@@ -128,7 +122,7 @@ export function __agent_create_signed_expression(data: unknown): object {
  * Rust: `agent_extension::agent_get_all_local_user_dids()`
  */
 export function __agent_get_all_local_user_dids(): string[] {
-    return agent_get_all_local_user_dids() as string[];
+    return agent().getAllLocalUserDIDs() as string[];
 }
 
 /**
@@ -136,7 +130,7 @@ export function __agent_get_all_local_user_dids(): string[] {
  * Rust: `agent_extension::agent_create_signed_expression_for_user()`
  */
 export function __agent_create_signed_expression_for_user(userEmail: string, data: unknown): object {
-    return agent_create_signed_expression_for_user(userEmail, data) as object;
+    return agent().createSignedExpressionForUser(userEmail, data) as object;
 }
 
 /**
@@ -144,7 +138,7 @@ export function __agent_create_signed_expression_for_user(userEmail: string, dat
  * Rust: `agent_extension::agent_did_for_user()`
  */
 export function __agent_did_for_user(userEmail: string): string {
-    return agent_did_for_user(userEmail) as string;
+    return agent().didForUser(userEmail) as string;
 }
 
 // ============================================================================
@@ -213,26 +207,20 @@ export async function __holochain_call_async(
  */
 export function __signal_emit(data: unknown): void {
     let addr = "";
-    try { addr = language_address() as string; } catch (_) { addr = ""; }
-    ad4m_signal_emitted(data, addr);
+    try { addr = langCtrl().languageAddress() as string; } catch (_) { addr = ""; }
+    langCtrl().ad4mSignalEmitted(data, addr);
 }
 
 // ============================================================================
 // Language context imports — set by runtime before calling init()
 // ============================================================================
 
-import {
-    language_storage_directory,
-    language_address,
-    language_settings,
-} from 'ext:core/ops';
-
 /**
  * Returns the storage directory for this language instance.
- * Rust: `js_core/mod.rs op_language_storage_directory()`
+ * Rust: `languages_extension.rs::language_storage_directory()`
  */
 export function __language_storage_directory(): string {
-    return language_storage_directory() as string;
+    return langCtrl().languageStorageDirectory() as string;
 }
 
 /**
@@ -240,15 +228,15 @@ export function __language_storage_directory(): string {
  * Rust: `js_core/mod.rs op_language_address()`
  */
 export function __language_address(): string {
-    return language_address() as string;
+    return langCtrl().languageAddress() as string;
 }
 
 /**
  * Returns the settings JSON for this language instance.
- * Rust: `js_core/mod.rs op_language_settings()`
+ * Rust: `languages_extension.rs::language_settings()`
  */
 export function __language_settings(): string {
-    return language_settings() as string;
+    return langCtrl().languageSettings() as string;
 }
 
 // ============================================================================
@@ -257,15 +245,15 @@ export function __language_settings(): string {
 // ============================================================================
 
 export function languageStorageDirectory(): string {
-    return language_storage_directory() as string;
+    return langCtrl().languageStorageDirectory() as string;
 }
 
 export function languageAddress(): string {
-    return language_address() as string;
+    return langCtrl().languageAddress() as string;
 }
 
 export function languageSettings(): string {
-    return language_settings() as string;
+    return langCtrl().languageSettings() as string;
 }
 
 // ============================================================================
@@ -278,16 +266,16 @@ export function languageSettings(): string {
 // callers keep working alongside migrated languages.
 
 // ----- Agent -----
-export function agentDid(): string { return agent_did() as string; }
-export function agentSigningKeyId(): string { return agent_signing_key_id() as string; }
-export function agentSign(payload: Uint8Array): Uint8Array { return agent_sign(payload) as Uint8Array; }
-export function agentSignStringHex(payload: string): string { return agent_sign_string_hex(payload) as string; }
-export function agentCreateSignedExpression(data: unknown): object { return agent_create_signed_expression(data) as object; }
-export function agentGetAllLocalUserDids(): string[] { return agent_get_all_local_user_dids() as string[]; }
+export function agentDid(): string { return agent().did() as string; }
+export function agentSigningKeyId(): string { return agent().signingKeyId() as string; }
+export function agentSign(payload: Uint8Array): Uint8Array { return agent().sign(payload) as Uint8Array; }
+export function agentSignStringHex(payload: string): string { return agent().signStringHex(payload) as string; }
+export function agentCreateSignedExpression(data: unknown): object { return agent().createSignedExpression(data) as object; }
+export function agentGetAllLocalUserDids(): string[] { return agent().getAllLocalUserDIDs() as string[]; }
 export function agentCreateSignedExpressionForUser(userEmail: string, data: unknown): object {
-    return agent_create_signed_expression_for_user(userEmail, data) as object;
+    return agent().createSignedExpressionForUser(userEmail, data) as object;
 }
-export function agentDidForUser(userEmail: string): string { return agent_did_for_user(userEmail) as string; }
+export function agentDidForUser(userEmail: string): string { return agent().didForUser(userEmail) as string; }
 
 // ----- Holochain -----
 // Spec §7.2 — these forward to the per-language __holochainDelegate__
@@ -318,7 +306,7 @@ export async function holochainCallAsync(
 // languageAddress() of the calling Language is derived from the thread-local
 // IsolateState set up in setupFlatWasmImports().
 function currentLanguageAddress(): string {
-    try { return language_address() as string; } catch { return ""; }
+    try { return langCtrl().languageAddress() as string; } catch { return ""; }
 }
 function languageController(): any {
     return (globalThis as any).LANGUAGE_CONTROLLER;
@@ -338,10 +326,6 @@ export function emitTelepresenceSignal(payload: unknown, recipientDid?: string):
 export function emitSignal(data: unknown): void {
     const lc = languageController();
     if (lc) lc.ad4mSignalEmitted(data, currentLanguageAddress());
-    // Direct-op fallback when LANGUAGE_CONTROLLER hasn't been set up yet
-    // (e.g. in unit-test isolates). The op REQUIRES (signal, address) —
-    // calling it with one arg crashes the runtime.
-    else ad4m_signal_emitted(data, currentLanguageAddress());
 }
 
 // ----- Storage key/value (spec §7.4) -----
@@ -379,7 +363,7 @@ let __storagePersistOk = true;
 
 function kvFilePath(): string | null {
     try {
-        const dir = language_storage_directory() as string;
+        const dir = langCtrl().languageStorageDirectory() as string;
         if (!dir) return null;
         // Normalize a trailing slash so the join is platform-agnostic
         // without pulling in node:path (not guaranteed to be available
