@@ -31,10 +31,19 @@ impl Language {
         &self.address
     }
 
+    // Each of the four methods below guards the corresponding
+    // linksAdapter entry. The spec §5.2 split (perspective-commit /
+    // perspective-sync / peers) makes every sub-method optional, and
+    // the flat bootstrap shim can produce a linksAdapter with any
+    // combination of sync/commit/render/currentRevision present. The
+    // previous scripts assumed all four existed whenever linksAdapter
+    // did and crashed deep in v8 otherwise.
     pub async fn sync(&mut self) -> Result<(), AnyError> {
         let controller = LanguageController::global_instance();
         let script = r#"
-            language.linksAdapter ? await language.linksAdapter.sync() : null
+            (language.linksAdapter && typeof language.linksAdapter.sync === "function")
+                ? await language.linksAdapter.sync()
+                : null
         "#;
 
         controller
@@ -49,7 +58,11 @@ impl Language {
         let diff_json = serde_json::to_string(&diff)?;
         let script = format!(
             r#"
-            JSON.stringify(language.linksAdapter ? await language.linksAdapter.commit({}) : null)
+            JSON.stringify(
+                (language.linksAdapter && typeof language.linksAdapter.commit === "function")
+                    ? await language.linksAdapter.commit({})
+                    : null
+            )
             "#,
             diff_json
         );
@@ -64,7 +77,11 @@ impl Language {
     pub async fn current_revision(&mut self) -> Result<Option<String>, AnyError> {
         let controller = LanguageController::global_instance();
         let script = r#"
-            JSON.stringify(language.linksAdapter ? await language.linksAdapter.currentRevision() : null)
+            JSON.stringify(
+                (language.linksAdapter && typeof language.linksAdapter.currentRevision === "function")
+                    ? await language.linksAdapter.currentRevision()
+                    : null
+            )
         "#;
 
         let result = controller
@@ -77,7 +94,11 @@ impl Language {
     pub async fn render(&mut self) -> Result<Option<Perspective>, AnyError> {
         let controller = LanguageController::global_instance();
         let script = r#"
-            JSON.stringify(language.linksAdapter ? await language.linksAdapter.render() : null)
+            JSON.stringify(
+                (language.linksAdapter && typeof language.linksAdapter.render === "function")
+                    ? await language.linksAdapter.render()
+                    : null
+            )
         "#;
 
         let result = controller
