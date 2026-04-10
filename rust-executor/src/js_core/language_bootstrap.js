@@ -447,6 +447,19 @@ async function initLanguage(contextJson) {
         if (mod.interactions) {
             language.interactions = mod.interactions;
         }
+
+        // Holochain signal bridge — `rust-executor/src/lib.rs` dispatches
+        // signals by evaluating `await globalThis.__handleHolochainSignal__(args)`
+        // in the language's isolate scope. Install the bridge here so flat
+        // languages declaring a `handleHolochainSignal` export actually
+        // receive signals. The bridge accepts the runtime's
+        // `{ cell_id, zome_name, payload }` shape and forwards it.
+        if (typeof mod.handleHolochainSignal === "function") {
+            language.handleHolochainSignal = mod.handleHolochainSignal;
+            globalThis.__handleHolochainSignal__ = async (signal) => {
+                return await mod.handleHolochainSignal(signal);
+            };
+        }
         // Teardown — order matters: run the language's own teardown FIRST
         // (while host imports like agentDid/storagePut/emitSignal are still
         // installed on globalThis), THEN tear the imports down. The previous
