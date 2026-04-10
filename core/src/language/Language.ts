@@ -285,6 +285,12 @@ export interface FlatDirectMessageLanguage {
     directMessageAddMessageCallback?(callback: (msg: unknown) => void): void;
 }
 
+/** Language adapter capability — used by the language-language to serve
+ * language source bundles. */
+export interface FlatLanguageAdapter {
+    languageGetSource?(address: string): Promise<string>;
+}
+
 /** Interaction-capable flat language exports */
 export interface FlatInteractionLanguage {
     /** Language.interactions */
@@ -302,6 +308,7 @@ export type FlatLanguageExports = FlatLanguageBase &
     Partial<FlatPeers> &
     Partial<FlatTelepresence> &
     Partial<FlatDirectMessageLanguage> &
+    Partial<FlatLanguageAdapter> &
     Partial<FlatInteractionLanguage>;
 
 /** Interface of AD4M Languages
