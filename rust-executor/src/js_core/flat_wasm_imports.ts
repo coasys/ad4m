@@ -233,6 +233,82 @@ export function languageSettings(): string {
 }
 
 // ============================================================================
+// Canonical camelCase surface (spec §7)
+// ============================================================================
+// Per the new spec, languages call canonical camelCase imports — no `__`
+// prefix. The Deno op bindings keep their snake_case internals; only the
+// JS surface is renamed. Both `__foo_bar` and `fooBar` are installed on
+// globalThis during Phase 0 so existing code keeps working. The `__*`
+// aliases are deleted in Phase D.
+
+// ----- Agent -----
+export function agentDid(): string { return agent_did() as string; }
+export function agentSigningKeyId(): string { return agent_signing_key_id() as string; }
+export function agentSign(payload: Uint8Array): Uint8Array { return agent_sign(payload) as Uint8Array; }
+export function agentSignStringHex(payload: string): string { return agent_sign_string_hex(payload) as string; }
+export function agentCreateSignedExpression(data: unknown): object { return agent_create_signed_expression(data) as object; }
+export function agentGetAllLocalUserDids(): string[] { return agent_get_all_local_user_dids() as string[]; }
+export function agentCreateSignedExpressionForUser(userEmail: string, data: unknown): object {
+    return agent_create_signed_expression_for_user(userEmail, data) as object;
+}
+export function agentDidForUser(userEmail: string): string { return agent_did_for_user(userEmail) as string; }
+
+// ----- Holochain -----
+export function holochainRegisterDnas(dnas: object[]): object[] { return holochain_register_dnas(dnas) as object[]; }
+export function holochainCall(dnaNick: string, zome: string, fnName: string, params: unknown): unknown {
+    return holochain_call(dnaNick, zome, fnName, params) as unknown;
+}
+export function holochainCallAsync(dnaNick: string, zome: string, fnName: string, params: unknown): Promise<unknown> {
+    return holochain_call_async(dnaNick, zome, fnName, params) as Promise<unknown>;
+}
+
+// ----- Event emission (spec §7.4) -----
+// Phase 0: stubs that route to ad4m_signal_emitted (the existing signal bus).
+// Phase B wires these to dedicated subscriber streams.
+export function emitPerspectiveDiff(diff: unknown): void {
+    ad4m_signal_emitted({ kind: "perspective-diff", payload: diff });
+}
+export function emitSyncStateChange(state: unknown): void {
+    ad4m_signal_emitted({ kind: "sync-state-change", payload: state });
+}
+export function emitTelepresenceSignal(payload: unknown, recipientDid?: string): void {
+    ad4m_signal_emitted({ kind: "telepresence-signal", payload, recipientDid });
+}
+export function emitSignal(data: unknown): void {
+    ad4m_signal_emitted(data);
+}
+
+// ----- Storage key/value (spec §7) -----
+// Phase 0: in-memory map, scoped per language instance via languageAddress().
+// Phase B replaces with a real persistent backing store.
+const __storage = new Map<string, string>();
+function storageKey(key: string): string {
+    let addr = "";
+    try { addr = languageAddress(); } catch (_) { addr = "unknown"; }
+    return `${addr}::${key}`;
+}
+export function storageGet(key: string): string | null {
+    const v = __storage.get(storageKey(key));
+    return v === undefined ? null : v;
+}
+export function storagePut(key: string, value: string): void {
+    __storage.set(storageKey(key), value);
+}
+export function storageDelete(key: string): void {
+    __storage.delete(storageKey(key));
+}
+export function storageListKeys(prefix?: string): string[] {
+    const addr = (() => { try { return languageAddress(); } catch { return "unknown"; } })();
+    const scopePrefix = `${addr}::`;
+    const fullPrefix = prefix ? `${scopePrefix}${prefix}` : scopePrefix;
+    const out: string[] = [];
+    for (const k of __storage.keys()) {
+        if (k.startsWith(fullPrefix)) out.push(k.substring(scopePrefix.length));
+    }
+    return out;
+}
+
+// ============================================================================
 // Bootstrap helper — set up globals for WASM language
 // ============================================================================
 
@@ -269,6 +345,33 @@ export function setupFlatWasmImports(): void {
     (globalThis as any).languageStorageDirectory = languageStorageDirectory;
     (globalThis as any).languageAddress = languageAddress;
     (globalThis as any).languageSettings = languageSettings;
+
+    // Canonical camelCase surface (spec §7) — agent
+    (globalThis as any).agentDid = agentDid;
+    (globalThis as any).agentSigningKeyId = agentSigningKeyId;
+    (globalThis as any).agentSign = agentSign;
+    (globalThis as any).agentSignStringHex = agentSignStringHex;
+    (globalThis as any).agentCreateSignedExpression = agentCreateSignedExpression;
+    (globalThis as any).agentGetAllLocalUserDids = agentGetAllLocalUserDids;
+    (globalThis as any).agentCreateSignedExpressionForUser = agentCreateSignedExpressionForUser;
+    (globalThis as any).agentDidForUser = agentDidForUser;
+
+    // Canonical camelCase surface — holochain
+    (globalThis as any).holochainRegisterDnas = holochainRegisterDnas;
+    (globalThis as any).holochainCall = holochainCall;
+    (globalThis as any).holochainCallAsync = holochainCallAsync;
+
+    // Event emission (Phase 0 stubs; Phase B wires real fan-out)
+    (globalThis as any).emitPerspectiveDiff = emitPerspectiveDiff;
+    (globalThis as any).emitSyncStateChange = emitSyncStateChange;
+    (globalThis as any).emitTelepresenceSignal = emitTelepresenceSignal;
+    (globalThis as any).emitSignal = emitSignal;
+
+    // Storage KV (Phase 0 in-memory; Phase B persistent)
+    (globalThis as any).storageGet = storageGet;
+    (globalThis as any).storagePut = storagePut;
+    (globalThis as any).storageDelete = storageDelete;
+    (globalThis as any).storageListKeys = storageListKeys;
 }
 
 /**
@@ -295,4 +398,24 @@ export function teardownFlatWasmImports(): void {
     delete g.languageStorageDirectory;
     delete g.languageAddress;
     delete g.languageSettings;
+
+    delete g.agentDid;
+    delete g.agentSigningKeyId;
+    delete g.agentSign;
+    delete g.agentSignStringHex;
+    delete g.agentCreateSignedExpression;
+    delete g.agentGetAllLocalUserDids;
+    delete g.agentCreateSignedExpressionForUser;
+    delete g.agentDidForUser;
+    delete g.holochainRegisterDnas;
+    delete g.holochainCall;
+    delete g.holochainCallAsync;
+    delete g.emitPerspectiveDiff;
+    delete g.emitSyncStateChange;
+    delete g.emitTelepresenceSignal;
+    delete g.emitSignal;
+    delete g.storageGet;
+    delete g.storagePut;
+    delete g.storageDelete;
+    delete g.storageListKeys;
 }

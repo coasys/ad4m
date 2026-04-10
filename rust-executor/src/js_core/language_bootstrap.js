@@ -321,20 +321,51 @@ async function initLanguage(contextJson) {
             };
         }
 
-        // Map LinkSync functions
-        if (mod.linkSyncSync) {
+        // Map perspective-commit / perspective-sync / peers exports to the
+        // legacy linksAdapter slot. Spec §5.2 splits link-sync into three
+        // independent capabilities; the runtime still consumes them via the
+        // single linksAdapter shape until Phase B fan-out lands.
+        //
+        // Both new (perspective*) and old (linkSync*) export names are
+        // accepted during Phase 0; the old names are removed in Phase D.
+        const syncFn = mod.perspectiveSyncSync || mod.linkSyncSync;
+        const commitFn = mod.perspectiveCommit || mod.linkSyncCommit;
+        const renderFn = mod.perspectiveSyncRender || mod.linkSyncRender;
+        const currentRevisionFn = mod.perspectiveSyncCurrentRevision || mod.linkSyncCurrentRevision;
+        const peersRemoteFn = mod.peersRemote || mod.linkSyncOthers;
+        const peersSetLocalFn = mod.peersSetLocal || mod.linkSyncSetLocalAgents;
+
+        if (syncFn || commitFn) {
             language.linksAdapter = {
-                sync: mod.linkSyncSync,
-                commit: mod.linkSyncCommit,
-                render: mod.linkSyncRender,
-                currentRevision: mod.linkSyncCurrentRevision,
-                others: mod.linkSyncOthers,
+                sync: syncFn,
+                commit: commitFn,
+                render: renderFn,
+                currentRevision: currentRevisionFn,
+                others: peersRemoteFn,
+                // writable / public are legacy hints. `public` collapses into
+                // the lifecycle-level isPublic() (set below); `writable` is
+                // gone — runtime infers from export presence in Phase B.
                 writable: mod.linkSyncWritable,
-                public: mod.linkSyncPublic,
+                public: mod.linkSyncPublic || (mod.isPublic ? mod.isPublic : undefined),
                 addCallback: mod.linkSyncAddCallback,
                 removeCallback: mod.linkSyncRemoveCallback,
                 addSyncStateChangeCallback: mod.linkSyncAddSyncStateChangeCallback,
-                setLocalAgents: mod.linkSyncSetLocalAgents,
+                setLocalAgents: peersSetLocalFn,
+            };
+        }
+
+        // Lifecycle-level isPublic hint (spec §5; Phase 0 attaches it to
+        // the language object for runtime consumption).
+        if (typeof mod.isPublic === "function") {
+            language.isPublic = mod.isPublic;
+        }
+
+        // Perspective-query capability (spec §5.2). Phase 0 stores the raw
+        // exports so the runtime can grow a real query path in later phases.
+        if (typeof mod.perspectiveQueryRun === "function") {
+            language.perspectiveQueryAdapter = {
+                supportedKinds: mod.perspectiveQuerySupportedKinds,
+                run: mod.perspectiveQueryRun,
             };
         }
 

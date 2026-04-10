@@ -22,17 +22,20 @@
  * That's it. No adapter objects. No factory. Just functions.
  * 
  * ## Exports
- * 
- * Lifecycle:     name, version, init, teardown, interactions
- * Link sync:     linkSyncSync, linkSyncCommit, linkSyncRender,
- *                linkSyncCurrentRevision, linkSyncOthers,
- *                linkSyncWritable, linkSyncPublic,
- *                linkSyncAddCallback, linkSyncRemoveCallback,
- *                linkSyncAddSyncStateChangeCallback, linkSyncSetLocalAgents
- * Telepresence:  telepresenceSetOnlineStatus, telepresenceGetOnlineAgents,
- *                telepresenceSendSignal, telepresenceSendBroadcast,
- *                telepresenceRegisterSignalCallback
- * Signal:        handleHolochainSignal
+ *
+ * Lifecycle:        name, version, isPublic, init, teardown, interactions
+ * Perspective sync: perspectiveSyncSync, perspectiveSyncRender,
+ *                   perspectiveSyncCurrentRevision
+ * Perspective commit: perspectiveCommit
+ * Peers:            peersRemote, peersSetLocal
+ * Telepresence:     telepresenceSetOnlineStatus, telepresenceGetOnlineAgents,
+ *                   telepresenceSendSignal, telepresenceSendBroadcast,
+ *                   telepresenceRegisterSignalCallback
+ * Signal:           handleHolochainSignal
+ *
+ * NB: link callback registration is gone — diffs are emitted via the
+ * runtime's `emitPerspectiveDiff` import. Sync-state changes use
+ * `emitSyncStateChange`. Phase B wires the runtime side.
  */
 
 import { BUNDLE, DNA_ROLE, ZOME_NAME } from './build/happ.js';
@@ -126,14 +129,20 @@ export function interactions(): any[] {
 }
 
 // =============================================================================
-// LINK SYNC CAPABILITY
+// LIFECYCLE-LEVEL PRIVACY HINT
+// =============================================================================
+
+export function isPublic(): boolean { return false; }
+
+// =============================================================================
+// PERSPECTIVE-SYNC + PERSPECTIVE-COMMIT CAPABILITIES
 // =============================================================================
 
 /**
  * Sync with the network — fetches latest state from all peers
  * and returns the current diff (additions + removals).
  */
-export async function linkSyncSync(): Promise<PerspectiveDiff> {
+export async function perspectiveSyncSync(): Promise<PerspectiveDiff> {
     await ensureDidLink();
     await acquireRevision();
     await gossip();
@@ -144,7 +153,7 @@ export async function linkSyncSync(): Promise<PerspectiveDiff> {
  * Commit a diff (additions and removals) to the network.
  * Returns the new revision hash.
  */
-export async function linkSyncCommit(diff: PerspectiveDiff): Promise<string> {
+export async function perspectiveCommit(diff: PerspectiveDiff): Promise<string> {
     const prepDiff = {
         additions: diff.additions.map(prepareLink),
         removals: diff.removals.map(prepareLink),
@@ -171,25 +180,37 @@ export async function linkSyncCommit(diff: PerspectiveDiff): Promise<string> {
 /**
  * Return the current full state as a list of links (for snapshot/rendering).
  */
-export async function linkSyncRender(): Promise<{ links: any[] }> {
+export async function perspectiveSyncRender(): Promise<{ links: any[] }> {
     const res: any = await hc.call(dnaRole, zomeName, "render", null);
     return { links: res?.links || [] };
 }
 
 /** Current revision hash, or null if never synced. */
-export function linkSyncCurrentRevision(): string | null {
+export function perspectiveSyncCurrentRevision(): string | null {
     return myRevision;
 }
 
-/** List of other agents this agent is synced with. */
-export async function linkSyncOthers(): Promise<string[]> {
+// =============================================================================
+// PEERS CAPABILITY
+// =============================================================================
+
+/** List of other (non-local) agents this language sees in the network. */
+export async function peersRemote(): Promise<string[]> {
     return Array.from(peers.keys());
 }
 
-export function linkSyncWritable(): boolean { return true; }
-export function linkSyncPublic(): boolean { return false; }
+/** Tell the DNA which agents we represent locally. */
+export async function peersSetLocal(_agents: string[]): Promise<void> {
+    await hc.call(dnaRole, zomeName, "add_active_agent_link", null);
+}
 
-/** Register a callback for incoming link diffs (from other agents). */
+// -----------------------------------------------------------------------------
+// Phase 0 transitional: callback registration is still consumed by the Rust
+// runtime via the legacy linksAdapter.addCallback path. These stubs let the
+// runtime keep registering callbacks during Phase 0; Phase B replaces them
+// with `emitPerspectiveDiff` / `emitSyncStateChange` runtime imports.
+// -----------------------------------------------------------------------------
+
 export function linkSyncAddCallback(callback: (diff: PerspectiveDiff) => void): number {
     linkCallback = callback;
     return 1;
@@ -200,15 +221,9 @@ export function linkSyncRemoveCallback(callback: (diff: PerspectiveDiff) => void
     return 1;
 }
 
-/** Register a callback for sync state changes (e.g. "Synced", "NotSynced"). */
 export function linkSyncAddSyncStateChangeCallback(callback: (state: string) => void): number {
     syncStateChangeCallback = callback;
     return 1;
-}
-
-/** Tell the DNA which agent we are locally. */
-export async function linkSyncSetLocalAgents(): Promise<void> {
-    await hc.call(dnaRole, zomeName, "add_active_agent_link", null);
 }
 
 // =============================================================================
