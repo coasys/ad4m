@@ -111,40 +111,28 @@ impl Link {
     /// A valid URI must begin with a scheme: `[a-zA-Z][a-zA-Z0-9+\-._]*:`
     /// (underscore is included as a pragmatic extension for schemes like `smart_literal://`)
     /// Examples: `did:key:alice`, `expression://Qm...`, `smart_literal://content`
+    /// Validates that link fields are not empty.
+    ///
+    /// Note: URI scheme validation was removed to match the original GraphQL
+    /// behavior which accepted bare strings like `"root"` for source/target.
+    /// Existing apps (including Flux) rely on this permissive behavior.
     pub fn validate(&self) -> Result<(), AnyError> {
-        use std::sync::OnceLock;
-        static URI_SCHEME_RE: OnceLock<Regex> = OnceLock::new();
-        let re = URI_SCHEME_RE.get_or_init(|| Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-._]*:").unwrap());
-
         let link_desc = format!(
             "source='{}', target='{}', predicate='{:?}'",
             self.source, self.target, self.predicate
         );
 
-        let check = |field: &str, value: &str| -> Result<(), AnyError> {
-            if value.is_empty() {
-                return Err(anyhow!(
-                    "Link {} must not be empty. Link: {}",
-                    field,
-                    link_desc
-                ));
-            }
-            if !re.is_match(value) {
-                return Err(anyhow!(
-                    "Link {} is not a valid URI (must start with a scheme like 'did:', 'expression://', etc.): '{}'. Link: {}",
-                    field, value, link_desc
-                ));
-            }
-            Ok(())
-        };
-
-        check("source", &self.source)?;
-        check("target", &self.target)?;
-
-        if let Some(predicate) = &self.predicate {
-            if !predicate.is_empty() {
-                check("predicate", predicate)?;
-            }
+        if self.source.is_empty() {
+            return Err(anyhow!(
+                "Link source must not be empty. Link: {}",
+                link_desc
+            ));
+        }
+        if self.target.is_empty() {
+            return Err(anyhow!(
+                "Link target must not be empty. Link: {}",
+                link_desc
+            ));
         }
 
         Ok(())
