@@ -19,6 +19,11 @@
  *
  * Run after `bash tests/rust-languages/build.sh`:
  *   node tests/rust-languages/smoke-test.mjs
+ *   deno run --allow-read tests/rust-languages/smoke-test.mjs
+ *
+ * Both Node and Deno are validated — the AD4M runtime is Deno-based,
+ * so the Deno run is the production-relevant one; Node is supported for
+ * developer convenience.
  */
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
