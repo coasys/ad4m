@@ -50,7 +50,15 @@ pub fn rest_router(state: AppState) -> Router {
             "Cross-Origin-Embedder-Policy".parse().unwrap(),
             "Cross-Origin-Resource-Policy".parse().unwrap(),
             "Cross-Origin-Opener-Policy".parse().unwrap(),
-        ]);
+            // Chrome Private Network Access — required for cross-port localhost requests
+            "Access-Control-Allow-Private-Network".parse().unwrap(),
+        ])
+        .allow_private_network(true);
+
+    // Chrome Private Network Access (PNA) requires this header for
+    // preflight responses when a page fetches from a different local port.
+    // Without it, Chrome blocks requests from localhost:3030 → localhost:12000.
+    // We use axum middleware (runs after CORS layer) to ensure it appears on all responses.
 
     // Root info endpoint
     let root = Router::new()

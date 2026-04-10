@@ -284,8 +284,11 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private async connectLocalNode() {
-    // Update URL to local and persist
-    this.core.url = `http://localhost:${this.core.port}`;
+    // Update URL to local and persist.
+    // Use 127.0.0.1 instead of localhost — some browsers/environments
+    // can't resolve localhost (e.g. sandboxed browsers, some Docker setups).
+    const host = window.location.hostname === '127.0.0.1' ? '127.0.0.1' : 'localhost';
+    this.core.url = `http://${host}:${this.core.port}`;
     setLocal("ad4m-url", this.core.url);
     
     try {
