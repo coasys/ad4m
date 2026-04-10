@@ -486,7 +486,16 @@ impl PerspectiveInstance {
                 log::info!("Committing {} pending diffs...", pending_ids.len());
                 let commit_result = link_language.commit(pending_diffs).await;
                 match commit_result {
-                    Ok(Some(_)) => {
+                    // Spec §5.2 splits perspective-commit (write) from
+                    // perspective-sync (revision read), so a spec-compliant
+                    // flat language that implements only perspective-commit
+                    // returns Ok(None). Previously we treated Ok(None) as
+                    // an error and left the diffs pending forever, so any
+                    // language without a perspective-sync capability could
+                    // never drain its retry queue. The success signal for
+                    // the retry path is "commit didn't throw" — clear the
+                    // diffs regardless of whether a revision came back.
+                    Ok(_) => {
                         Ad4mDb::with_global_instance(|db| {
                             db.clear_pending_diffs(&uuid, pending_ids)
                         })?;
@@ -495,7 +504,6 @@ impl PerspectiveInstance {
                         log::info!("Successfully committed pending diffs");
                         Ok(())
                     }
-                    Ok(None) => Err(anyhow!("No diff returned from commit")),
                     Err(e) => Err(e),
                 }
             } else {
