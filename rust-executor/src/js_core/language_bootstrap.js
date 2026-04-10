@@ -421,8 +421,17 @@ async function initLanguage(contextJson) {
             language.isPublic = mod.isPublic;
         }
 
-        // Perspective-query capability (spec §5.2). Raw exports are stored
-        // on the language object; the Rust-side query path reads them here.
+        // Perspective-query capability (spec §5.2). The flat exports are
+        // captured on the language object so a future Rust consumer can
+        // dispatch reads to languages that advertise this capability.
+        //
+        // NOTE: no Rust consumer reads `language.perspectiveQueryAdapter`
+        // yet — the query dispatch path is deferred to Phase F of the
+        // language-interface migration (see docs/language-interface-
+        // migration-plan.md). This shim exists so flat languages built
+        // against the v1.0 spec keep their exports surfaced; removing it
+        // would force another touch-up once Phase F lands. If you are
+        // wiring the Rust consumer, this is where to read from.
         if (typeof mod.perspectiveQueryRun === "function") {
             language.perspectiveQueryAdapter = {
                 supportedKinds: mod.perspectiveQuerySupportedKinds,
