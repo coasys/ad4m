@@ -25,12 +25,25 @@ pub struct Expression<T = serde_json::Value> {
     pub proof: ExpressionProof,
 }
 
+/// Mirrors `rust-executor/src/types.rs::Link`. The executor models
+/// `source` and `target` as required `String`s — not `Option<String>` —
+/// and validates that they parse as URIs (`did:`, `expression://`, …)
+/// before accepting a diff. The LDK type used to expose them as
+/// `Option<String>`, which let authors construct a `LinkData` with
+/// missing endpoints that serialized to `{}`; the executor would then
+/// see empty strings (via `null_as_empty_string`) and reject the diff
+/// downstream with a confusing "must not be empty" error originating
+/// far from the call site.
+///
+/// Match the executor's contract: `source` and `target` are required;
+/// `predicate` stays optional. Authors get a compile error at the
+/// construction site if they forget either endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LinkData {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<String>,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicate: Option<String>,
 }
