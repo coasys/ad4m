@@ -191,6 +191,9 @@ export interface AppInfo {
 export interface FlatLanguageBase {
     name: string;
     version?: string;
+    /** Static privacy hint (lifecycle-level). If true, callers may assume
+     * the Language's content is public; otherwise treat as private. */
+    isPublic?(): boolean;
     init(contextJson: string): Promise<void>;
     teardown?(): void;
 }
@@ -211,30 +214,40 @@ export interface FlatExpressionLanguage extends FlatLanguageBase {
     expressionConstructorIcon?(): string;
 }
 
-/** Link/sync language flat exports (perspectiveSyncAdapter) */
-export interface FlatLinkLanguage extends FlatLanguageBase {
-    /** PerspectiveSyncAdapter.sync */
-    linkSyncSync?(): Promise<PerspectiveDiff>;
-    /** PerspectiveSyncAdapter.commit */
-    linkSyncCommit?(diff: PerspectiveDiff): Promise<string>;
-    /** PerspectiveSyncAdapter.render */
-    linkSyncRender?(address: string): Promise<string>;
-    /** PerspectiveSyncAdapter.currentRevision */
-    linkSyncCurrentRevision?(): Promise<string | null>;
-    /** PerspectiveSyncAdapter.others */
-    linkSyncOthers?(): Promise<Expression[]>;
-    /** PerspectiveSyncAdapter.writable */
-    linkSyncWritable?(): Promise<boolean>;
-    /** PerspectiveSyncAdapter.public */
-    linkSyncPublic?(): Promise<boolean>;
-    /** PerspectiveSyncAdapter.addCallback */
-    linkSyncAddCallback?(callback: PerspectiveDiffObserver): void;
-    /** PerspectiveSyncAdapter.removeCallback */
-    linkSyncRemoveCallback?(callback: PerspectiveDiffObserver): void;
-    /** PerspectiveSyncAdapter.addSyncStateChangeCallback */
-    linkSyncAddSyncStateChangeCallback?(callback: SyncStateChangeObserver): void;
-    /** PerspectiveSyncAdapter.setLocalAgents */
-    linkSyncSetLocalAgents?(agents: string[]): void;
+/** Perspective-commit capability (spec §5.2).
+ * Languages implementing this export `perspectiveCommit`: senders drop
+ * diffs into a Language instance they don't otherwise own.
+ */
+export interface FlatPerspectiveCommit {
+    perspectiveCommit(diff: PerspectiveDiff): Promise<void>;
+}
+
+/** Perspective-sync capability (spec §5.2).
+ * Languages implementing this replicate state across peers. The runtime
+ * drives periodic sync and consumes rendered snapshots.
+ */
+export interface FlatPerspectiveSync {
+    perspectiveSyncSync(): Promise<PerspectiveDiff>;
+    perspectiveSyncRender(): Promise<Perspective>;
+    perspectiveSyncCurrentRevision(): Promise<string | null>;
+}
+
+/** Perspective-query capability (spec §5.2).
+ * Coalesced query interface. The request/response `kind` discriminator
+ * is defined by the canonical `ad4m-lang.wit` variants.
+ */
+export interface FlatPerspectiveQuery {
+    perspectiveQuerySupportedKinds(): string[];
+    perspectiveQueryRun(request: unknown): Promise<unknown>;
+}
+
+/** Peers capability (spec §5.2, shared by sync + telepresence).
+ * `setLocal` is pushed by the runtime when the set of local agents
+ * changes. `remote` reports the non-local peer DIDs the Language sees.
+ */
+export interface FlatPeers {
+    peersSetLocal(agents: DID[]): void;
+    peersRemote(): Promise<DID[]>;
 }
 
 /** Interaction-capable flat language exports */
@@ -248,7 +261,10 @@ export interface FlatInteractionLanguage {
 
 export type FlatLanguageExports = FlatLanguageBase &
     Partial<FlatExpressionLanguage> &
-    Partial<FlatLinkLanguage> &
+    Partial<FlatPerspectiveCommit> &
+    Partial<FlatPerspectiveSync> &
+    Partial<FlatPerspectiveQuery> &
+    Partial<FlatPeers> &
     Partial<FlatInteractionLanguage>;
 
 /** Interface of AD4M Languages
