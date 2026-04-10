@@ -341,11 +341,15 @@ async function gossip(): Promise<void> {
 
         // Notify on sync state change
         if (syncStateChangeCallback) {
-            const state = sameRevisions.length > 0 || differentRevisions.length > 0
-                ? (sameRevisions.length <= differentRevisions.length
-                    ? "LinkLanguageInstalledButNotSynced"
-                    : "Synced")
-                : "LinkLanguageInstalledButNotSynced";
+            let state: string;
+            if (peers.size === 0) {
+                // Solo agent - no peers to sync with, so we're synced
+                state = "Synced";
+            } else if (differentRevisions.length > sameRevisions.length) {
+                state = "LinkLanguageInstalledButNotSynced";
+            } else {
+                state = "Synced";
+            }
             await syncStateChangeCallback(state);
         }
 

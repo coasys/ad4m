@@ -6,6 +6,9 @@
  * Flat-export migration of the legacy create()-factory version.
  */
 
+import Icon from './build/Icon.js'
+import ConstructorIcon from './build/ConstructorIcon.js'
+
 // =============================================================================
 // Required metadata
 // =============================================================================
@@ -27,6 +30,18 @@ export async function teardown(): Promise<void> {
 
 export function interactions(): any[] {
     return [];
+}
+
+// =============================================================================
+// Expression UI
+// =============================================================================
+
+export function expressionIcon(): string {
+    return Icon;
+}
+
+export function expressionConstructorIcon(): string {
+    return ConstructorIcon;
 }
 
 // =============================================================================
