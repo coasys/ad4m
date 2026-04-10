@@ -1,5 +1,6 @@
 import { TestContext } from './integration.test'
 import path from "path";
+import fs from "fs";
 import { Ad4mClient, LanguageMetaInput } from '@coasys/ad4m';
 import { expect } from "chai";
 import { fileURLToPath } from 'url';
@@ -94,6 +95,62 @@ export default function flatLanguageTests(testContext: TestContext) {
                     const unknownAddr = "did:ethr:0x0000000000000000000000000000000000000000";
                     const expr = await ad4mClient.expression.getRaw(`lang://${flatLangAddress}/expression/${unknownAddr}`);
                     // The language is read-only, so this should handle gracefully
+                    expect(expr).not.to.be.undefined;
+                });
+            });
+
+            // -----------------------------------------------------------------
+            // Rust-authored WASM Language end-to-end (spec §9 Rust ALDK).
+            //
+            // The bundle is produced by:
+            //   bash tests/rust-languages/build.sh
+            // which runs cargo wasm32 → wasm-bindgen --target deno → inline-wasm.
+            // The test is gated on bundle existence so CI without
+            // wasm-bindgen-cli doesn't break.
+            // -----------------------------------------------------------------
+            describe('test-wasm-language (Rust ALDK)', function () {
+                let wasmLangAddress = "";
+                const wasmBundlePath = path.join(
+                    __dirname,
+                    "../../rust-languages/test-wasm-language/build/bundle.js"
+                ).replace(/\\/g, "/");
+
+                before(function () {
+                    if (!fs.existsSync(wasmBundlePath)) {
+                        console.log(
+                            "[test-wasm-language] bundle not found at",
+                            wasmBundlePath,
+                            "— run `bash tests/rust-languages/build.sh` to build (requires wasm-bindgen-cli). Skipping."
+                        );
+                        this.skip();
+                    }
+                });
+
+                it('can publish the Rust WASM language', async () => {
+                    const meta = new LanguageMetaInput(
+                        "test-wasm-language",
+                        "Rust-authored flat WASM language built via ad4m-ldk"
+                    );
+                    const published = await ad4mClient.languages.publish(wasmBundlePath, meta);
+                    expect(published.address).not.to.be.undefined;
+                    expect(published.name).to.be.equal("test-wasm-language");
+                    wasmLangAddress = published.address;
+                });
+
+                it('can install the Rust WASM language', async () => {
+                    const installed = await ad4mClient.languages.byAddress(wasmLangAddress);
+                    expect(installed.address).to.be.equal(wasmLangAddress);
+                    expect(installed.name).to.be.equal("test-wasm-language");
+                });
+
+                it('expression capability round-trips through agent + storage imports', async () => {
+                    const content = "hello from rust wasm";
+                    const addr = await ad4mClient.expression.create(content, wasmLangAddress);
+                    expect(addr).not.to.be.undefined;
+                    expect(typeof addr).to.equal("string");
+                    expect(addr.length).to.be.greaterThan(0);
+
+                    const expr = await ad4mClient.expression.get(addr);
                     expect(expr).not.to.be.undefined;
                 });
             });
