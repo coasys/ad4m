@@ -257,9 +257,16 @@ impl Language {
         log::debug!("set_local_agents: agents: {:?}", agents);
         let controller = LanguageController::global_instance();
         let agents_json = serde_json::to_string(&agents)?;
+        // Tighten the guard to `typeof === "function"` to match the rest of
+        // the linksAdapter dispatchers. A language may legitimately expose
+        // `linksAdapter` without a `setLocalAgents` (spec §5.2 peers is
+        // optional); the old truthy check would still TypeError if some
+        // language assigned a non-function truthy value to the slot.
         let script = format!(
             r#"
-            (language.linksAdapter && language.linksAdapter.setLocalAgents) ? await language.linksAdapter.setLocalAgents({}) : null
+            (language.linksAdapter && typeof language.linksAdapter.setLocalAgents === "function")
+                ? await language.linksAdapter.setLocalAgents({})
+                : null
             "#,
             agents_json
         );
