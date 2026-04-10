@@ -156,6 +156,36 @@ impl LanguageController {
 
         info!("Language address: {}", language_address);
 
+        // If a runtime already exists for this address, tear it down first.
+        // Without this, a second load_language for the same address would
+        // spawn a new thread + isolate and silently replace the map entry,
+        // leaving the previous language instance's teardown() hook
+        // uninvoked — leaking holochain cells, timers, FS watchers and
+        // any other per-runtime resources the old instance held. The
+        // thread itself does eventually exit when all handle clones drop
+        // (the channel closes, `process_requests` breaks out of its loop),
+        // but the JS-side teardown never runs.
+        {
+            let existing = {
+                let runtimes = self.runtimes.lock().await;
+                runtimes.get(&language_address).cloned()
+            };
+            if let Some(old) = existing {
+                warn!(
+                    "Language {} already loaded — tearing down previous runtime before reload",
+                    language_address
+                );
+                if let Err(e) = old.teardown().await {
+                    warn!(
+                        "Failed to teardown previous runtime for {}: {} (continuing with reload)",
+                        language_address, e
+                    );
+                }
+                let mut runtimes = self.runtimes.lock().await;
+                runtimes.remove(&language_address);
+            }
+        }
+
         // Get language settings if they exist
         let custom_settings = self.get_settings(&language_address).ok();
 
