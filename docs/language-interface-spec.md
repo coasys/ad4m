@@ -189,7 +189,7 @@ independently exported. A Language exports whichever subset it supports:
 | Capability | Purpose | Exports |
 |---|---|---|
 | `perspective-commit` | Write diffs into the shared state | `perspectiveCommit(diff)` |
-| `perspective-query` | Answer reads without requiring a full local replica | `perspectiveQuery(request)`, `perspectiveQuerySupportedKinds()` |
+| `perspective-query` | Answer reads without requiring a full local replica | `perspectiveQueryRun(request)`, `perspectiveQuerySupportedKinds()` |
 | `perspective-sync` | Bidirectional full-replica CRDT convergence | `perspectiveSyncSync()`, `perspectiveSyncRender()`, `perspectiveSyncCurrentRevision()` |
 
 And one peer-fabric interface the first and third usually pair with:
@@ -252,7 +252,7 @@ See §7 for the full contract.
 | Export | Parameters | Returns |
 |---|---|---|
 | `perspectiveQuerySupportedKinds()` | — | `QueryKind[]` (statically advertises which kinds the Language serves) |
-| `perspectiveQuery(request)` | `QueryRequest` | `Promise<QueryResponse>` |
+| `perspectiveQueryRun(request)` | `QueryRequest` | `Promise<QueryResponse>` |
 
 `QueryRequest` is a tagged variant: `by-author` / `all` / `link-pattern` /
 `sparql` / `prolog`. `QueryResponse` is the matching variant. See
