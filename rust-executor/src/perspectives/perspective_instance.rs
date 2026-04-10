@@ -357,14 +357,38 @@ impl PerspectiveInstance {
                         break;
                     }
                     Ok(None) => {
+                        // Actively try to install the language on this tick.
+                        // `language_by_address` only CHECKS the loaded-runtimes
+                        // map; it does not trigger an install. Without the
+                        // retry call below, a perspective whose initial
+                        // install in `install_neighbourhood_with_context`
+                        // failed (e.g. the language language was still
+                        // warming up) would stay stuck in
+                        // LinkLanguageFailedToInstall forever, because
+                        // nothing in this loop ever re-attempted the install
+                        // — it just kept asking "is it loaded yet?" to a map
+                        // nothing was writing to.
                         log::debug!(
-                            "Link language {} not installed yet, retrying in 5 seconds",
-                            nh.data.link_language.clone()
+                            "Link language {} not installed yet, attempting install...",
+                            nh.data.link_language
                         );
-                        self.update_perspective_state_log_error(
-                            PerspectiveState::LinkLanguageFailedToInstall,
+                        if let Err(e) = LanguageController::install_language(
+                            nh.data.link_language.clone(),
                         )
-                        .await;
+                        .await
+                        {
+                            log::debug!(
+                                "ensure_link_language: install_language({}) failed, will retry in 5s: {}",
+                                nh.data.link_language, e
+                            );
+                            self.update_perspective_state_log_error(
+                                PerspectiveState::LinkLanguageFailedToInstall,
+                            )
+                            .await;
+                        }
+                        // Loop back around; the next tick will re-enter
+                        // language_by_address and either find the freshly
+                        // installed runtime or schedule another retry.
                     }
                     Err(e) => {
                         log::error!("Error when calling language_by_address: {:?}", e);
