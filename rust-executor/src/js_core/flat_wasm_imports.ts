@@ -339,14 +339,24 @@ export function storageListKeys(prefix?: string): string[] {
 // Bootstrap helper — set up globals for WASM language
 // ============================================================================
 
+// Refcount for setup/teardown. The flat imports are stateless wrappers
+// around Deno ops that read per-call context from a thread-local
+// IsolateState, so it is safe for multiple languages to share the same
+// globals. The count is here so that teardown of language A does NOT
+// delete globals that language B (still running) depends on.
+let __flatImportsRefcount = 0;
+
 /**
  * Sets up the globalThis import functions for a flat WASM language.
  * Call this in language_bootstrap.js for flat-pattern languages,
  * before calling the language's init() function.
- * 
- * After this, the WASM module can call the import functions directly.
+ *
+ * Refcounted — safe to call once per language load. The actual install
+ * only runs on the first call; subsequent calls just bump the refcount.
  */
 export function setupFlatWasmImports(): void {
+    __flatImportsRefcount += 1;
+    if (__flatImportsRefcount > 1) return;
     // Agent imports
     (globalThis as any).__agent_did = __agent_did;
     (globalThis as any).__agent_signing_key_id = __agent_signing_key_id;
@@ -406,8 +416,16 @@ export function setupFlatWasmImports(): void {
 /**
  * Cleans up the globalThis import functions.
  * Call this during language teardown() to avoid leaks.
+ *
+ * Refcounted to mirror setupFlatWasmImports — globals are only removed
+ * when the last live flat language is torn down. This prevents tearing
+ * down language A from breaking sibling languages B/C still running in
+ * the same isolate.
  */
 export function teardownFlatWasmImports(): void {
+    if (__flatImportsRefcount === 0) return;
+    __flatImportsRefcount -= 1;
+    if (__flatImportsRefcount > 0) return;
     const g = globalThis as any;
     delete g.__agent_did;
     delete g.__agent_signing_key_id;
