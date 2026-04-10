@@ -69,10 +69,7 @@ pub fn rest_router(state: AppState) -> Router {
                 }))
             }),
         )
-        .route(
-            "/health",
-            get(|| async { Json(json!({"status": "ok"})) }),
-        );
+        .route("/health", get(|| async { Json(json!({"status": "ok"})) }));
 
     root.nest(
         "/api/v1",
