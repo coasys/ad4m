@@ -564,8 +564,8 @@ export function setupFlatWasmImports(): void {
     (globalThis as any).emitTelepresenceSignal = emitTelepresenceSignal;
     (globalThis as any).emitSignal = emitSignal;
 
-    // Storage KV (spec §7.4) — in-memory map; see comment above for the
-    // durability caveat and persistence TODO.
+    // Storage KV (spec §7.4) — file-backed, flushed through Deno's
+    // sync FS ops into the per-language storage directory.
     (globalThis as any).storageGet = storageGet;
     (globalThis as any).storagePut = storagePut;
     (globalThis as any).storageDelete = storageDelete;
