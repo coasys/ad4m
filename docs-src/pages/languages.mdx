@@ -1,5 +1,17 @@
 # Languages: Communication Protocols for Agents
 
+> **⚠️ New Language Interface (v1.0):** AD4M is migrating from the
+> `create(context)` factory pattern described below to a **flat export
+> model** where each Language is a module of named exports (`init`,
+> `teardown`, `perspectiveCommit`, `expressionGet`, etc.) with no
+> factory function and no context parameter. The runtime provides
+> services via imports (`agentDid()`, `holochainCall()`, `storageGet()`,
+> etc.) rather than a context object. See
+> [`docs/language-interface-spec.md`](https://github.com/coasys/ad4m/blob/dev/docs/language-interface-spec.md)
+> for the full spec and the `@coasys/ad4m-ldk` package for the
+> authoring SDK. The legacy `create()` path continues to work during
+> the transition.
+
 ## Understanding Languages in AD4M
 
 In AD4M, Languages are the fundamental building blocks that define how agents communicate and share data. While we call them "Languages", they could just as well be called "Protocols" or "Data Storage Adapters" – they define the rules and mechanisms by which nodes in the network exchange information.
