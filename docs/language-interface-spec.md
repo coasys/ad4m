@@ -556,11 +556,10 @@ Per-DNA signal delivery is built without per-call callbacks.
 2. The runtime resolves each DNA bundle to a DnaHash, installs it in the
    conductor, and records: DnaHash → this language instance.
 3. Holochain emits a signal for some cell. The runtime receives it, looks
-   up the DnaHash → instance map, and calls handleHolochainSignal(dnaNick,
-   agentDid, signalData) on that instance. dnaNick is the same string the
-   language passed to holochainRegisterDnas; agentDid is the local agent the
-   cell belongs to.
-4. The language parses signalData and decides what to emit:
+   up the DnaHash → instance map, and calls handleHolochainSignal(signal)
+   on that instance. `signal` is an object:
+   `{ cell_id: [dnaHash, agentPubkey], zome_name: string, payload: any }`.
+4. The language parses signal.payload and decides what to emit:
        emitPerspectiveDiff(...)        if it's a link diff (including
                                        DM inbox commits — DMs are just
                                        diffs in v1.0)
@@ -569,8 +568,15 @@ Per-DNA signal delivery is built without per-call callbacks.
 ```
 
 A single language instance can register multiple DNAs and disambiguate them
-via `dnaNick` inside `handleHolochainSignal`. Multiple language instances on
+via `signal.zome_name` inside `handleHolochainSignal`. Multiple language instances on
 the same node never collide because each has its own DnaHash → instance entry.
+
+> **Runtime divergence note:** The WIT definition (`ad4m-lang.wit`) specifies
+> `handle-holochain-signal(dna-nick, agent-did, signal-data)` — three named
+> arguments. The current JS runtime passes a single signal object
+> `{ cell_id, zome_name, payload }` directly from the Holochain conductor.
+> A future runtime version may decompose the object into the WIT's three-arg
+> form for WASM languages; JS languages should accept either shape.
 
 ---
 
@@ -646,9 +652,10 @@ const lang = defineLanguage({
         async remote() { return []; },
     },
 
-    handleHolochainSignal(dnaNick, signalAgent, data) {
-        if (dnaNick === "store" && data.kind === "diff") {
-            emitPerspectiveDiff(data.diff);
+    handleHolochainSignal(signal) {
+        // signal: { cell_id: [dnaHash, agentPubkey], zome_name: string, payload: any }
+        if (signal.payload?.kind === "diff") {
+            emitPerspectiveDiff(signal.payload.diff);
             emitSyncStateChange("Synced");
         }
     },
@@ -731,9 +738,10 @@ impl Language for NoteStore {
         State::set(StateData { storage, my_did });
     }
 
-    fn handle_holochain_signal(dna_nick: &str, agent_did: &str, data: &serde_json::Value) {
-        if dna_nick == "store" && data["kind"] == "diff" {
-            emit_perspective_diff(&data["diff"]);
+    fn handle_holochain_signal(signal: &serde_json::Value) {
+        // signal: { cell_id: [dnaHash, agentPubkey], zome_name, payload }
+        if signal["payload"]["kind"] == "diff" {
+            emit_perspective_diff(&signal["payload"]["diff"]);
             emit_sync_state_change("Synced");
         }
     }
