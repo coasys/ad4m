@@ -146,6 +146,10 @@ impl Language {
         Ok(result.trim() == "true")
     }
 
+    // Spec §5 — every telepresence method is optional. The bootstrap
+    // shim attaches the telepresenceAdapter whenever ANY telepresence*
+    // export is present, so individual methods may legitimately be
+    // undefined. Each dispatcher below guards its method accordingly.
     pub async fn set_online_status(
         &mut self,
         status: PerspectiveExpression,
@@ -154,7 +158,9 @@ impl Language {
         let status_json = serde_json::to_string(&status)?;
         let script = format!(
             r#"
-            language.telepresenceAdapter ? await language.telepresenceAdapter.setOnlineStatus({}) : null
+            (language.telepresenceAdapter && typeof language.telepresenceAdapter.setOnlineStatus === "function")
+                ? await language.telepresenceAdapter.setOnlineStatus({})
+                : null
             "#,
             status_json
         );
@@ -169,7 +175,11 @@ impl Language {
     pub async fn get_online_agents(&mut self) -> Result<Vec<OnlineAgent>, AnyError> {
         let controller = LanguageController::global_instance();
         let script = r#"
-            JSON.stringify(language.telepresenceAdapter ? await language.telepresenceAdapter.getOnlineAgents() : null)
+            JSON.stringify(
+                (language.telepresenceAdapter && typeof language.telepresenceAdapter.getOnlineAgents === "function")
+                    ? (await language.telepresenceAdapter.getOnlineAgents() ?? [])
+                    : []
+            )
         "#;
 
         let result = controller
@@ -194,7 +204,9 @@ impl Language {
         let did_literal = serde_json::to_string(&remote_agent_did)?;
         let script = format!(
             r#"
-            language.telepresenceAdapter ? await language.telepresenceAdapter.sendSignal({}, {}) : null
+            (language.telepresenceAdapter && typeof language.telepresenceAdapter.sendSignal === "function")
+                ? await language.telepresenceAdapter.sendSignal({}, {})
+                : null
             "#,
             did_literal, payload_json
         );
@@ -211,7 +223,9 @@ impl Language {
         let payload_json = serde_json::to_string(&payload)?;
         let script = format!(
             r#"
-            language.telepresenceAdapter ? await language.telepresenceAdapter.sendBroadcast({}) : null
+            (language.telepresenceAdapter && typeof language.telepresenceAdapter.sendBroadcast === "function")
+                ? await language.telepresenceAdapter.sendBroadcast({})
+                : null
             "#,
             payload_json
         );
