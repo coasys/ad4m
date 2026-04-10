@@ -336,12 +336,15 @@ async function initLanguage(contextJson) {
         }
 
         // Map perspective-commit / perspective-sync / peers exports to the
-        // legacy linksAdapter slot. Spec §5.2 splits link-sync into three
-        // independent capabilities; the runtime still consumes them via the
-        // single linksAdapter shape until Phase B fan-out lands.
+        // linksAdapter slot the Rust-side LanguageController consumes. Spec
+        // §5.2 splits link-sync into three independent capabilities
+        // (commit / sync / peers); we collapse them back into the single
+        // linksAdapter shape here because the Rust consumer has not been
+        // restructured around the three-way split yet.
         //
-        // Both new (perspective*) and old (linkSync*) export names are
-        // accepted during Phase 0; the old names are removed in Phase D.
+        // Legacy linkSync* export names are still accepted as a fallback to
+        // ease bootstrap-language migration; new code should emit perspective*
+        // / peers* names via `defineLanguage`.
         const syncFn = mod.perspectiveSyncSync || mod.linkSyncSync;
         const commitFn = mod.perspectiveCommit || mod.linkSyncCommit;
         const renderFn = mod.perspectiveSyncRender || mod.linkSyncRender;
@@ -358,7 +361,8 @@ async function initLanguage(contextJson) {
                 others: peersRemoteFn,
                 // writable / public are legacy hints. `public` collapses into
                 // the lifecycle-level isPublic() (set below); `writable` is
-                // gone — runtime infers from export presence in Phase B.
+                // gone — the runtime infers writability from the presence of
+                // a perspectiveCommit export.
                 writable: mod.linkSyncWritable,
                 public: mod.linkSyncPublic || (mod.isPublic ? mod.isPublic : undefined),
                 addCallback: mod.linkSyncAddCallback,
@@ -368,14 +372,14 @@ async function initLanguage(contextJson) {
             };
         }
 
-        // Lifecycle-level isPublic hint (spec §5; Phase 0 attaches it to
-        // the language object for runtime consumption).
+        // Lifecycle-level isPublic hint (spec §5). Attached to the language
+        // object so the Rust-side LanguageController can consult it.
         if (typeof mod.isPublic === "function") {
             language.isPublic = mod.isPublic;
         }
 
-        // Perspective-query capability (spec §5.2). Phase 0 stores the raw
-        // exports so the runtime can grow a real query path in later phases.
+        // Perspective-query capability (spec §5.2). Raw exports are stored
+        // on the language object; the Rust-side query path reads them here.
         if (typeof mod.perspectiveQueryRun === "function") {
             language.perspectiveQueryAdapter = {
                 supportedKinds: mod.perspectiveQuerySupportedKinds,

@@ -237,9 +237,9 @@ export function languageSettings(): string {
 // ============================================================================
 // Per the new spec, languages call canonical camelCase imports — no `__`
 // prefix. The Deno op bindings keep their snake_case internals; only the
-// JS surface is renamed. Both `__foo_bar` and `fooBar` are installed on
-// globalThis during Phase 0 so existing code keeps working. The `__*`
-// aliases are deleted in Phase D.
+// JS surface is renamed. Both `__foo_bar` and `fooBar` wrappers are installed
+// on globalThis for the duration of a flat-language init so legacy in-tree
+// callers keep working alongside migrated languages.
 
 // ----- Agent -----
 export function agentDid(): string { return agent_did() as string; }
@@ -263,10 +263,10 @@ export function holochainCallAsync(dnaNick: string, zome: string, fnName: string
 }
 
 // ----- Event emission (spec §7.5) -----
-// Phase B: route emit* calls to the LANGUAGE_CONTROLLER global, which
-// dispatches to the runtime's existing perspective/sync/telepresence
-// fan-out paths. The languageAddress() of the calling Language is
-// derived from the thread-local IsolateState.
+// emit* calls are routed to the LANGUAGE_CONTROLLER global, which dispatches
+// to the runtime's perspective/sync/telepresence fan-out paths. The
+// languageAddress() of the calling Language is derived from the thread-local
+// IsolateState set up in setupFlatWasmImports().
 function currentLanguageAddress(): string {
     try { return language_address() as string; } catch { return ""; }
 }
