@@ -65,6 +65,7 @@ let myDid: string = "";
 // Link sync state
 let linkCallback: ((diff: any) => void) | null = null;
 let syncStateChangeCallback: ((state: string) => void) | null = null;
+const telepresenceSignalCallbacks: ((signal: any, recipientDid?: string) => void)[] = [];
 let myRevision: string | null = null;
 
 // Gossip peers: DID → { currentRevision, lastSeen }
@@ -119,6 +120,7 @@ export async function teardown(): Promise<void> {
     peers.clear();
     linkCallback = null;
     syncStateChangeCallback = null;
+    telepresenceSignalCallbacks.length = 0;
     myRevision = null;
     gossipRound = 0;
     hc = null;
@@ -265,7 +267,7 @@ export async function telepresenceSendBroadcast(payload: unknown): Promise<objec
 }
 
 export async function telepresenceRegisterSignalCallback(callback: any): Promise<void> {
-    // Signal registration is handled by the runtime via handleHolochainSignal
+    telepresenceSignalCallbacks.push(callback);
 }
 
 // =============================================================================
@@ -276,15 +278,43 @@ export async function telepresenceRegisterSignalCallback(callback: any): Promise
  * Called by the AD4M runtime when a Holochain signal arrives for this DNA.
  * Routes the signal to the link callback or updates peer state.
  */
-export function handleHolochainSignal(signal: any): void {
-    const { reference_hash, reference, broadcast_author } = signal.payload || {};
+export async function handleHolochainSignal(signal: any): Promise<void> {
+    const payload = signal.payload || {};
 
-    if (broadcast_author && reference_hash) {
-        // Signal from another agent with their current revision — update peer
-        peers.set(broadcast_author, { currentRevision: reference_hash, lastSeen: new Date() });
-    } else if (reference && linkCallback) {
-        // Signal contains link data (came from a pull response)
-        linkCallback(signal.payload);
+    // 1. HashBroadcast — link sync: another agent broadcasts their revision
+    if (payload.reference && payload.reference_hash && payload.broadcast_author) {
+        peers.set(payload.broadcast_author, { currentRevision: payload.reference_hash, lastSeen: new Date() });
+        return;
+    }
+
+    // 2. Link diff — additions/removals from handle_broadcast fast-forward or pull
+    if (payload.additions || payload.removals) {
+        if (linkCallback) {
+            linkCallback(payload);
+        }
+        return;
+    }
+
+    // 3. Routed telepresence signal (has recipient_did from RoutedSignalPayload)
+    if (payload.recipient_did) {
+        const perspectiveExpression = {
+            author: payload.author,
+            data: payload.data,
+            timestamp: payload.timestamp,
+            proof: payload.proof,
+        };
+        for (const cb of telepresenceSignalCallbacks) {
+            await cb(perspectiveExpression, payload.recipient_did);
+        }
+        return;
+    }
+
+    // 4. Regular broadcast telepresence signal (PerspectiveExpression)
+    if (payload.author && payload.data) {
+        for (const cb of telepresenceSignalCallbacks) {
+            await cb(payload);
+        }
+        return;
     }
 }
 
