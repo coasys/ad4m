@@ -158,11 +158,16 @@ impl Language {
     ) -> Result<(), AnyError> {
         let controller = LanguageController::global_instance();
         let payload_json = serde_json::to_string(&payload)?;
+        // JSON-encode the DID so it becomes a properly quoted and
+        // escaped JS string literal. The previous `"{}"` interpolation
+        // would break (or allow script injection) for any DID that
+        // contained a `"`, backslash, or newline.
+        let did_literal = serde_json::to_string(&remote_agent_did)?;
         let script = format!(
             r#"
-            language.telepresenceAdapter ? await language.telepresenceAdapter.sendSignal("{}", {}) : null
+            language.telepresenceAdapter ? await language.telepresenceAdapter.sendSignal({}, {}) : null
             "#,
-            remote_agent_did, payload_json
+            did_literal, payload_json
         );
 
         controller
