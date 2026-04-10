@@ -303,8 +303,22 @@ async function initLanguage(contextJson) {
         // to get its storage dir, address, and settings from the runtime.
         await mod.init();
 
-        // Build language instance from flat exports
-        language = { name: mod.name || "unknown", version: mod.version };
+        // Build language instance from flat exports.
+        //
+        // Languages may expose name/version either as plain string constants
+        // (the JS authoring style: `export const name = "..."`) or as
+        // zero-arg accessor functions (the Rust ALDK style: wasm-bindgen
+        // emits `export function name(): string` because WASM exports cannot
+        // be string constants). Normalize both shapes to a string here so
+        // the rest of the runtime sees a uniform `language.name` field.
+        const readMaybeFn = (v, fallback) => {
+            if (typeof v === "function") return v();
+            return v ?? fallback;
+        };
+        language = {
+            name: readMaybeFn(mod.name, "unknown"),
+            version: readMaybeFn(mod.version, undefined),
+        };
 
         // Map adapter exports to adapter slots
         if (mod.expressionCreate || mod.expressionGet) {
