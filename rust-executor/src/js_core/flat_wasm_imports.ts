@@ -56,11 +56,27 @@ import {
 } from 'ext:core/ops';
 
 import {
-    holochain_register_dnas,
-    holochain_call,
-    holochain_call_async,
     ad4m_signal_emitted,
 } from 'ext:core/ops';
+
+// Holochain imports are routed through the per-language JS delegate
+// (`globalThis.__holochainDelegate__`) that `language_bootstrap.js`
+// installs before invoking a flat language's init(). The delegate wraps
+// the existing holochain_service_extension ops (install_app, call_zome_function)
+// and also maintains the cell_id → languageAddress mapping used by the
+// central signal router. There is no direct `holochain_register_dnas` op
+// to import from `ext:core/ops`.
+function holochainDelegate(): any {
+    const d = (globalThis as any).__holochainDelegate__;
+    if (!d) {
+        throw new Error(
+            "[flat-imports] __holochainDelegate__ is not installed. " +
+            "Holochain imports are only usable after language_bootstrap.js " +
+            "has wired the per-language delegate (i.e. from within init()/post-init)."
+        );
+    }
+    return d;
+}
 
 // ============================================================================
 // Agent Imports — bridge to agent_extension.rs ops
@@ -132,41 +148,45 @@ export function __agent_did_for_user(userEmail: string): string {
 }
 
 // ============================================================================
-// Holochain Imports — bridge to languages_extension.rs ops
+// Holochain Imports — bridge to the per-language __holochainDelegate__
 // ============================================================================
+// The flat language calls these from init(); they forward to the JS
+// delegate installed by language_bootstrap.js, which in turn reaches
+// the Rust-side holochain_service_extension ops. Signals are routed
+// via the language's exported handleHolochainSignal (bridged into
+// globalThis.__handleHolochainSignal__ in language_bootstrap.js) —
+// there is no per-call signalCallback argument in the flat API.
 
 /**
- * Registers one or more DNAs with the Holochain conductor.
- * Rust: `languages_extension::holochain_register_dnas()`
+ * Registers one or more DNAs with the Holochain conductor. Returns the
+ * resulting AppInfo list. Side effect: registers cell_id → lang_addr
+ * in the central signal router so the language's handleHolochainSignal
+ * export can receive signals.
  */
-export function __holochain_register_dnas(dnas: object[]): object[] {
-    return holochain_register_dnas(dnas) as object[];
+export function __holochain_register_dnas(dnas: object[]): Promise<object[]> {
+    return holochainDelegate().registerDNAs(dnas, /*signalCallback*/ undefined);
 }
 
 /**
- * Synchronous call to a zome function.
- * Rust: `languages_extension::holochain_call()`
+ * Synchronous (awaitable) call to a zome function.
  */
 export function __holochain_call(
     dnaNick: string,
     zome: string,
     fnName: string,
     params: unknown
-): unknown {
-    return holochain_call(dnaNick, zome, fnName, params) as unknown;
+): Promise<unknown> {
+    return holochainDelegate().call(dnaNick, zome, fnName, params);
 }
 
 /**
- * Asynchronous call to a zome function.
- * Rust: `languages_extension::holochain_call_async()`
+ * Async batch call to zome functions (same shape as the delegate).
  */
 export function __holochain_call_async(
-    dnaNick: string,
-    zome: string,
-    fnName: string,
-    params: unknown
+    calls: unknown,
+    timeoutMs?: number
 ): Promise<unknown> {
-    return holochain_call_async(dnaNick, zome, fnName, params) as Promise<unknown>;
+    return holochainDelegate().callAsync(calls, timeoutMs);
 }
 
 // ============================================================================
@@ -254,12 +274,17 @@ export function agentCreateSignedExpressionForUser(userEmail: string, data: unkn
 export function agentDidForUser(userEmail: string): string { return agent_did_for_user(userEmail) as string; }
 
 // ----- Holochain -----
-export function holochainRegisterDnas(dnas: object[]): object[] { return holochain_register_dnas(dnas) as object[]; }
-export function holochainCall(dnaNick: string, zome: string, fnName: string, params: unknown): unknown {
-    return holochain_call(dnaNick, zome, fnName, params) as unknown;
+// Spec §7.2 — these forward to the per-language __holochainDelegate__
+// installed by language_bootstrap.js. The delegate is async; the wrappers
+// return Promises so flat languages should `await` them.
+export function holochainRegisterDnas(dnas: object[]): Promise<object[]> {
+    return holochainDelegate().registerDNAs(dnas, /*signalCallback*/ undefined);
 }
-export function holochainCallAsync(dnaNick: string, zome: string, fnName: string, params: unknown): Promise<unknown> {
-    return holochain_call_async(dnaNick, zome, fnName, params) as Promise<unknown>;
+export function holochainCall(dnaNick: string, zome: string, fnName: string, params: unknown): Promise<unknown> {
+    return holochainDelegate().call(dnaNick, zome, fnName, params);
+}
+export function holochainCallAsync(calls: unknown, timeoutMs?: number): Promise<unknown> {
+    return holochainDelegate().callAsync(calls, timeoutMs);
 }
 
 // ----- Event emission (spec §7.5) -----

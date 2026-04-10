@@ -83,8 +83,14 @@ function cellIdKey(cellId) {
  * Rust-side registry (so the central signal loop knows which language to target).
  */
 function registerSignalCallbacksForApp(appInfo, signalCallback, languageAddress) {
-    if (!signalCallback || !appInfo || !appInfo.cell_info) return;
+    if (!appInfo || !appInfo.cell_info) return;
 
+    // The Rust-side cell_id → languageAddress mapping is registered for
+    // EVERY app, regardless of whether the language passed a JS callback.
+    // Flat languages don't pass a callback (they expose handleHolochainSignal
+    // and rely on the globalThis.__handleHolochainSignal__ bridge installed
+    // by initLanguage); legacy factory languages pass a callback that goes
+    // into the JS-side dispatch map.
     for (const roleName of Object.keys(appInfo.cell_info)) {
         const cellInfos = appInfo.cell_info[roleName];
         for (const cellInfo of cellInfos) {
@@ -92,8 +98,10 @@ function registerSignalCallbacksForApp(appInfo, signalCallback, languageAddress)
             const inner = cellInfo.provisioned || cellInfo.cloned || cellInfo.stem || cellInfo.value;
             if (!inner || !inner.cell_id) continue;
             const key = cellIdKey(inner.cell_id);
-            globalThis.__holochainSignalCallbacks__.set(key, signalCallback);
-            // Also notify Rust so the central signal loop can route to this language
+            if (signalCallback) {
+                globalThis.__holochainSignalCallbacks__.set(key, signalCallback);
+            }
+            // Notify Rust so the central signal loop can route to this language
             LANGUAGE_CONTROLLER.registerHolochainSignalHandler(key, languageAddress);
         }
     }
