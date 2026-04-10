@@ -434,13 +434,24 @@ async function initLanguage(contextJson) {
         if (mod.interactions) {
             language.interactions = mod.interactions;
         }
-        // Teardown
+        // Teardown — order matters: run the language's own teardown FIRST
+        // (while host imports like agentDid/storagePut/emitSignal are still
+        // installed on globalThis), THEN tear the imports down. The previous
+        // order crashed any language whose teardown logged via emit_signal
+        // or persisted final state via storage_put, because those globals
+        // had already been deleted.
         if (mod.teardown) {
             const originalTeardown = mod.teardown;
             language.teardown = async () => {
-                teardownFlatWasmImports();
-                return originalTeardown();
+                try {
+                    await originalTeardown();
+                } finally {
+                    teardownFlatWasmImports();
+                }
             };
+        } else {
+            // No language-level teardown — still need to clean up imports.
+            language.teardown = async () => { teardownFlatWasmImports(); };
         }
 
     } else {
