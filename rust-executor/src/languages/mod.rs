@@ -333,6 +333,20 @@ impl LanguageController {
         language_address: &str,
         script: &str,
     ) -> Result<String, LanguageError> {
+        // Resolve system aliases ("did", "lang", "neighbourhood",
+        // "perspective") once at the bottom so every caller — including
+        // helpers like get_language_icons that were written to accept
+        // whatever the GraphQL resolver passed in — works with the real
+        // content hash that the runtimes map is keyed by.
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(language_address)
+                .cloned()
+                .unwrap_or_else(|| language_address.to_string())
+        };
+        let language_address = resolved.as_str();
+
         // Try Rust-side per-language runtime first
         let handle = {
             let runtimes = self.runtimes.lock().await;
@@ -362,6 +376,18 @@ impl LanguageController {
         script: &str,
         agent_context: &AgentContext,
     ) -> Result<String, LanguageError> {
+        // Mirror execute_on_language: resolve system aliases so callers
+        // can pass "did" / "lang" / "neighbourhood" / "perspective"
+        // interchangeably with the real content hash.
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(language_address)
+                .cloned()
+                .unwrap_or_else(|| language_address.to_string())
+        };
+        let language_address = resolved.as_str();
+
         let handle = {
             let runtimes = self.runtimes.lock().await;
             runtimes.get(language_address).cloned()
@@ -2063,15 +2089,32 @@ impl LanguageController {
     }
 
     /// Get settings for a language (public accessor)
-    pub fn get_settings_public(&self, language_address: &str) -> JsonValue {
-        self.get_settings(language_address)
-            .unwrap_or(JsonValue::Null)
+    pub async fn get_settings_public(&self, language_address: &str) -> JsonValue {
+        // Resolve system aliases so "did" reads from the real hash's
+        // settings.json, not a non-existent `languages/did/settings.json`.
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(language_address)
+                .cloned()
+                .unwrap_or_else(|| language_address.to_string())
+        };
+        self.get_settings(&resolved).unwrap_or(JsonValue::Null)
     }
 
     /// Get cached language name for an address
     pub async fn get_language_name(&self, address: &str) -> String {
+        // Resolve system aliases so GraphQL callers asking for "did"
+        // get the same result as callers asking for the real hash.
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(address)
+                .cloned()
+                .unwrap_or_else(|| address.to_string())
+        };
         let names = self.language_names.lock().await;
-        names.get(address).cloned().unwrap_or_default()
+        names.get(&resolved).cloned().unwrap_or_default()
     }
 
     /// Get icon code from a language's expressionUI/settingsUI interfaces.
@@ -2080,6 +2123,9 @@ impl LanguageController {
         &self,
         address: &str,
     ) -> (Option<String>, Option<String>, Option<String>) {
+        // execute_on_language resolves aliases internally now, but
+        // keep this note so future refactors don't "helpfully"
+        // pre-resolve and double-lock.
         let constructor_icon = match self
             .execute_on_language(
                 address,
