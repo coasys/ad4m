@@ -346,38 +346,144 @@ export function emitSignal(data: unknown): void {
 
 // ----- Storage key/value (spec §7.4) -----
 //
-// Current backing store: a process-local in-memory Map, scoped per
-// language instance via languageAddress(). Values do NOT persist
-// across executor restarts.
+// File-backed per-language KV. Each language isolate has its own
+// `language_storage_directory()` (see js_core/mod.rs
+// new_for_language) and Deno's FS permission list grants the isolate
+// read+write access to exactly that directory, so we can persist the
+// KV as a single JSON file there without leaking into any other
+// language's scope.
 //
-// This satisfies the §7.4 *interface* contract (read-your-writes
-// within an instance, address-scoped namespacing, returns null for
-// missing keys) but not its *durability* hint. Languages that require
-// persistence across restarts must either roll their own files in
-// language_storage_directory() or wait for the runtime to gain a real
-// persistent KV op.
+// Design:
+//   * Read-through cache: the on-disk file is loaded lazily into an
+//     in-memory Map on the first storage call and kept consistent on
+//     every mutation via a full rewrite. The cache is strictly local
+//     to the isolate, so there is exactly one writer.
+//   * Writes are flushed synchronously on every put/delete so that a
+//     process crash between mutation and the next call cannot lose
+//     already-observed data. Languages that need a high-write
+//     workload should batch externally.
+//   * Any FS failure (directory missing, permission denied, disk
+//     full) degrades to in-memory semantics and logs a warning. The
+//     KV still satisfies read-your-writes *within the process*, which
+//     is the spec §7.4 minimum. Tests that rely on the in-memory
+//     fallback (e.g. unit-test isolates with no real storage dir)
+//     keep working unchanged.
 //
-// TODO(persistent-storage): replace this Map with a Deno op that
-// writes under language_storage_directory(), once the executor has a
-// shared KV abstraction we can hook into. Tracked separately from the
-// language interface refactor.
+// The on-disk layout is deliberately flat: `{ key: value }` with
+// string keys and string values. No key-prefix namespacing is needed
+// because each language isolate has its own file.
+const KV_FILENAME = "ad4m-language-kv.json";
 const __storage = new Map<string, string>();
+let __storageLoaded = false;
+let __storagePersistOk = true;
+
+function kvFilePath(): string | null {
+    try {
+        const dir = language_storage_directory() as string;
+        if (!dir) return null;
+        // Normalize a trailing slash so the join is platform-agnostic
+        // without pulling in node:path (not guaranteed to be available
+        // inside the per-language Deno worker).
+        const sep = dir.endsWith("/") || dir.endsWith("\\") ? "" : "/";
+        return `${dir}${sep}${KV_FILENAME}`;
+    } catch (_) {
+        return null;
+    }
+}
+
+function ensureStorageLoaded(): void {
+    if (__storageLoaded) return;
+    __storageLoaded = true;
+    const path = kvFilePath();
+    if (!path) {
+        // No storage directory wired yet (e.g. unit-test isolate that
+        // never called set_language_context). Fall through to the
+        // in-memory Map; flag persistence as disabled so subsequent
+        // mutations don't keep trying and logging.
+        __storagePersistOk = false;
+        return;
+    }
+    try {
+        // @ts-ignore — Deno is provided by the per-language worker
+        const raw: string = (globalThis as any).Deno.readTextFileSync(path);
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+            for (const [k, v] of Object.entries(parsed)) {
+                if (typeof v === "string") __storage.set(k, v);
+            }
+        }
+    } catch (e: any) {
+        // Missing file is the normal first-run case; silently treat
+        // as empty. Any other error is worth surfacing once so an
+        // author or operator can diagnose permissions issues.
+        const msg = String(e && e.message ? e.message : e);
+        if (!msg.includes("NotFound") && !msg.includes("No such file")) {
+            try {
+                console.warn(
+                    `[ad4m-kv] Failed to load KV file '${path}': ${msg}. ` +
+                    `Falling back to in-memory storage for this isolate.`
+                );
+            } catch (_) { /* ignore */ }
+            __storagePersistOk = false;
+        }
+    }
+}
+
+function flushStorage(): void {
+    if (!__storagePersistOk) return;
+    const path = kvFilePath();
+    if (!path) {
+        __storagePersistOk = false;
+        return;
+    }
+    try {
+        // Serialize with sorted keys so the file is byte-stable across
+        // runs with the same data — useful for debugging and for any
+        // consumer that cares about content hashing of the KV file.
+        const obj: Record<string, string> = {};
+        const keys = Array.from(__storage.keys()).sort();
+        for (const k of keys) obj[k] = __storage.get(k) as string;
+        // @ts-ignore — Deno is provided by the per-language worker
+        (globalThis as any).Deno.writeTextFileSync(path, JSON.stringify(obj));
+    } catch (e: any) {
+        const msg = String(e && e.message ? e.message : e);
+        try {
+            console.warn(
+                `[ad4m-kv] Failed to persist KV file '${path}': ${msg}. ` +
+                `Subsequent writes will not be persisted in this isolate.`
+            );
+        } catch (_) { /* ignore */ }
+        __storagePersistOk = false;
+    }
+}
+
+// Namespace keys by language address so that a single isolate hosting
+// more than one language (hypothetical future refactor; today it's 1:1)
+// cannot cross-contaminate KV entries. The file-backed implementation
+// already scopes by language_storage_directory(), but the prefix keeps
+// the in-memory fallback safe too.
 function storageKey(key: string): string {
     let addr = "";
     try { addr = languageAddress(); } catch (_) { addr = "unknown"; }
     return `${addr}::${key}`;
 }
 export function storageGet(key: string): string | null {
+    ensureStorageLoaded();
     const v = __storage.get(storageKey(key));
     return v === undefined ? null : v;
 }
 export function storagePut(key: string, value: string): void {
+    ensureStorageLoaded();
     __storage.set(storageKey(key), value);
+    flushStorage();
 }
 export function storageDelete(key: string): void {
+    ensureStorageLoaded();
     __storage.delete(storageKey(key));
+    flushStorage();
 }
 export function storageListKeys(prefix?: string): string[] {
+    ensureStorageLoaded();
     const addr = (() => { try { return languageAddress(); } catch { return "unknown"; } })();
     const scopePrefix = `${addr}::`;
     const fullPrefix = prefix ? `${scopePrefix}${prefix}` : scopePrefix;
