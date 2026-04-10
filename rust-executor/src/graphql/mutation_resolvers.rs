@@ -1538,14 +1538,24 @@ impl Mutation {
             })?;
 
             // Wrap in JSON.stringify so we can round-trip a valid JSON
-            // string across the v8 → Rust boundary. Without the wrapper,
+            // string across the v8 -> Rust boundary. Without the wrapper,
             // `to_rust_string_lossy` returns the raw JS string contents,
             // and any address containing a `"`, `\`, or leading/trailing
             // whitespace (rare for content hashes, trivially legal for
             // DIDs) would either be silently corrupted by the old
             // `trim_matches('"')` strip or not decode at all.
+            //
+            // Coerce undefined/null to JSON null before stringifying, for
+            // the same reason we did in the expressionAdapter.get sweep:
+            // a bare `JSON.stringify(undefined)` yields the JS value
+            // `undefined` (not the string `"undefined"`), which
+            // to_rust_string_lossy then captures verbatim and
+            // from_str::<String> fails to parse. With `?? null` we always
+            // land on valid JSON and can raise a clear
+            // "createPublic returned no address" error instead of a
+            // confusing serde parse failure.
             let publish_script = format!(
-                r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.putAdapter.createPublic({}))"#,
+                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.putAdapter.createPublic({})) ?? null)"#,
                 input_json
             );
 
@@ -1559,8 +1569,19 @@ impl Mutation {
                     )
                 })?;
 
+            let trimmed_addr_raw = address_raw.trim();
+            if trimmed_addr_raw == "null" || trimmed_addr_raw.is_empty() {
+                return Err(FieldError::new(
+                    format!(
+                        "Language language returned no address from expressionAdapter.putAdapter.createPublic — got {:?}",
+                        trimmed_addr_raw
+                    ),
+                    graphql_value!(null),
+                ));
+            }
+
             let address: String =
-                serde_json::from_str(address_raw.trim()).map_err(|e| {
+                serde_json::from_str(trimmed_addr_raw).map_err(|e| {
                     FieldError::new(
                         format!(
                             "Failed to parse published language address: {} ({:?})",
