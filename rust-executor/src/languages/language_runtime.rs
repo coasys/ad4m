@@ -164,8 +164,16 @@ impl LanguageRuntime {
                     // Legacy: default export is create(context) function
                     globalThis.languageConstructor = mod;
                     globalThis.__language_pattern__ = "legacy";
+                }} else if (typeof m.init === "function") {{
+                    // New flat export pattern: use the full module namespace
+                    // so that named exports (perspectiveSyncSync, perspectiveCommit,
+                    // etc.) are directly accessible on languageModule. The default
+                    // export may be a grouped object (from defineLanguage), but
+                    // the bootstrap dispatcher expects flat named exports.
+                    globalThis.languageModule = m;
+                    globalThis.__language_pattern__ = "flat";
                 }} else if (mod && typeof mod.init === "function") {{
-                    // New flat export pattern
+                    // Flat pattern where init is only on the default export
                     globalThis.languageModule = mod;
                     globalThis.__language_pattern__ = "flat";
                 }} else {{

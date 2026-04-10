@@ -345,7 +345,7 @@ async function gossip(): Promise<void> {
                 ? (sameRevisions.length <= differentRevisions.length
                     ? "LinkLanguageInstalledButNotSynced"
                     : "Synced")
-                : "Installed";
+                : "LinkLanguageInstalledButNotSynced";
             await syncStateChangeCallback(state);
         }
 
