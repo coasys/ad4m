@@ -420,7 +420,20 @@ impl LanguageController {
         language_address: &str,
         settings: JsonValue,
     ) -> Result<(), LanguageError> {
-        let language_dir = languages_directory().join(language_address);
+        // Resolve system aliases ("did", "lang", "neighbourhood",
+        // "perspective") to their real content hash before touching
+        // the filesystem. Otherwise settings would get written to
+        // e.g. `languages/did/settings.json`, a directory that has
+        // no bundle.js and is never read by the runtime, so the
+        // write silently no-ops from the caller's perspective.
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(language_address)
+                .cloned()
+                .unwrap_or_else(|| language_address.to_string())
+        };
+        let language_dir = languages_directory().join(&resolved);
         fs::create_dir_all(&language_dir)?;
 
         let settings_path = language_dir.join("settings.json");
@@ -2634,13 +2647,25 @@ impl LanguageController {
 
     /// Reload a language: unload and re-load from disk.
     pub async fn reload_language(&self, address: &str) -> Result<(), LanguageError> {
+        // Resolve system aliases so reload works whether the caller
+        // passes the real hash or an alias like "did" / "perspective".
+        // unload_language / load_language both key by raw address,
+        // so an unresolved alias would silently no-op the unload and
+        // then fail to find bundle.js on the load side.
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(address)
+                .cloned()
+                .unwrap_or_else(|| address.to_string())
+        };
         let is_system = {
             let sys = self.system_addresses.lock().await;
-            sys.system_language_set.contains(address)
+            sys.system_language_set.contains(&resolved)
         };
-        self.unload_language(address).await?;
+        self.unload_language(&resolved).await?;
 
-        let bundle_path = languages_directory().join(address).join("bundle.js");
+        let bundle_path = languages_directory().join(&resolved).join("bundle.js");
         if bundle_path.exists() {
             self.load_language(bundle_path, is_system).await?;
         }
