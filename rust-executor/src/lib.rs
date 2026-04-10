@@ -77,7 +77,6 @@ async fn holochain_signal_receiver() {
         if let Some(holochain_service) = holochain_service::maybe_get_holochain_service().await {
             let mut stream_receiver = holochain_service.stream_receiver.lock().await;
             if let Some(signal) = stream_receiver.recv().await {
-                log::info!("Holochain signal received: {:?}", std::mem::discriminant(&signal));
                 match signal.clone() {
                     Signal::App {
                         cell_id,
@@ -140,7 +139,6 @@ async fn holochain_signal_receiver() {
                                 .unwrap_or_else(|p| p.into_inner());
                             handlers.get(&cell_id_key).cloned()
                         };
-                        log::info!("Signal routing: cell_id_key={}, found_handler={}", &cell_id_key[..16], maybe_lang_address.is_some());
                         if let Some(lang_address) = maybe_lang_address {
                             // Build the signal argument as a JSON value so no raw
                             // data is interpolated directly into executable JS.

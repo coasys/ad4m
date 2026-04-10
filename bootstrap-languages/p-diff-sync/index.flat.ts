@@ -290,8 +290,6 @@ export async function telepresenceRegisterSignalCallback(callback: any): Promise
  */
 export async function handleHolochainSignal(signal: any): Promise<void> {
     const payload = signal.payload || {};
-    console.log("[p-diff-sync] handleHolochainSignal: keys=", Object.keys(payload), "has_linkCallback=", !!linkCallback);
-
     // 1. HashBroadcast — link sync: another agent broadcasts their revision
     if (payload.reference && payload.reference_hash && payload.broadcast_author) {
         peers.set(payload.broadcast_author, { currentRevision: hashToHex(payload.reference_hash), originalHash: payload.reference_hash, lastSeen: new Date() });
@@ -367,7 +365,6 @@ async function gossip(): Promise<void> {
         // peer discovery and revision exchange.
         try {
             const syncResult: any = await hc.call(dnaRole, zomeName, "sync", myDid);
-            console.log("[p-diff-sync] gossip: sync returned:", typeof syncResult, JSON.stringify(syncResult)?.substring(0, 200));
             if (syncResult) {
                 myRevision = hashToHex(syncResult);
             }
@@ -449,7 +446,6 @@ async function gossip(): Promise<void> {
             }
         }
 
-        console.log("[p-diff-sync] gossip: peers=", peers.size, "revisions=", revisionHexes.size, "myRev=", myRev?.substring(0, 40));
         // Pull any revisions we don't have
         for (const hex of revisionHexes) {
             if (hex === myRev) continue;

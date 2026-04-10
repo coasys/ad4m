@@ -1560,9 +1560,7 @@ impl LanguageController {
         };
 
         // Override name and description if present in template_data
-        info!("Template data keys: {:?}, meta.name before override: {}", template_data.keys().collect::<Vec<_>>(), meta.name);
         if let Some(JsonValue::String(name)) = template_data.get("name") {
-            info!("Overriding meta.name from template_data: {} -> {}", meta.name, name);
             meta.name = name.clone();
         }
         if let Some(JsonValue::String(desc)) = template_data.get("description") {

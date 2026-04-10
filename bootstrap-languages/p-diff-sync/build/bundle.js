@@ -289,7 +289,6 @@ async function telepresenceRegisterSignalCallback(callback) {
 }
 async function handleHolochainSignal(signal) {
   const payload = signal.payload || {};
-  console.log("[p-diff-sync] handleHolochainSignal: keys=", Object.keys(payload), "has_linkCallback=", !!linkCallback);
   if (payload.reference && payload.reference_hash && payload.broadcast_author) {
     peers.set(payload.broadcast_author, { currentRevision: hashToHex(payload.reference_hash), originalHash: payload.reference_hash, lastSeen: /* @__PURE__ */ new Date() });
     return;
@@ -344,7 +343,6 @@ async function gossip() {
   try {
     try {
       const syncResult = await hc.call(dnaRole, zomeName, "sync", myDid);
-      console.log("[p-diff-sync] gossip: sync returned:", typeof syncResult, JSON.stringify(syncResult)?.substring(0, 200));
       if (syncResult) {
         myRevision = hashToHex(syncResult);
       }
@@ -409,7 +407,6 @@ async function gossip() {
         console.error("[p-diff-sync] latest_revision fallback error:", e);
       }
     }
-    console.log("[p-diff-sync] gossip: peers=", peers.size, "revisions=", revisionHexes.size, "myRev=", myRev?.substring(0, 40));
     for (const hex of revisionHexes) {
       if (hex === myRev)
         continue;
