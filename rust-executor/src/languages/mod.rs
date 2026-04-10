@@ -862,8 +862,20 @@ impl LanguageController {
                 .execute_on_language(ll_addr, &source_script)
                 .await
             {
-                Ok(s) if !s.is_empty() => Some(s),
-                Ok(_) => None,
+                Ok(s) => {
+                    // Mirror install_language_from_address: a language-language
+                    // that returns null/undefined for an unknown address
+                    // stringifies to the literal "null" / "undefined" here.
+                    // Treat those as "source not available" rather than
+                    // writing four/nine bytes to disk and then failing the
+                    // hash check further down.
+                    let trimmed = s.trim();
+                    if trimmed.is_empty() || trimmed == "null" || trimmed == "undefined" {
+                        None
+                    } else {
+                        Some(s)
+                    }
+                }
                 Err(e) => {
                     warn!(
                         "Error getting language source from language language: {}",
