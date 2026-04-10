@@ -203,10 +203,18 @@ export async function __holochain_call_async(
 
 /**
  * Emits a signal to the AD4M signal bus.
- * Rust: `languages_extension::ad4m_signal_emitted()`
+ * Rust: `languages_extension::ad4m_signal_emitted(signal, language_address)`.
+ *
+ * The op REQUIRES the language address as the second arg — without it the
+ * Deno op call fails with an arg-count mismatch and the calling Language
+ * crashes. Resolve the address from the per-isolate thread-local set up
+ * via `setupFlatWasmImports()`; fall back to "" if no isolate state has
+ * been initialized yet (early init logging).
  */
 export function __signal_emit(data: unknown): void {
-    ad4m_signal_emitted(data);
+    let addr = "";
+    try { addr = language_address() as string; } catch (_) { addr = ""; }
+    ad4m_signal_emitted(data, addr);
 }
 
 // ============================================================================
@@ -330,7 +338,10 @@ export function emitTelepresenceSignal(payload: unknown, recipientDid?: string):
 export function emitSignal(data: unknown): void {
     const lc = languageController();
     if (lc) lc.ad4mSignalEmitted(data, currentLanguageAddress());
-    else ad4m_signal_emitted(data);
+    // Direct-op fallback when LANGUAGE_CONTROLLER hasn't been set up yet
+    // (e.g. in unit-test isolates). The op REQUIRES (signal, address) —
+    // calling it with one arg crashes the runtime.
+    else ad4m_signal_emitted(data, currentLanguageAddress());
 }
 
 // ----- Storage key/value (spec §7.4) -----
