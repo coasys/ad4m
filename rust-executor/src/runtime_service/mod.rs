@@ -38,16 +38,28 @@ pub struct RuntimeService {
 impl RuntimeService {
     pub fn init_global_instance(mainnet_seed_file_path: String) {
         let mut instance = RUNTIME_INSTANCE.lock().unwrap();
-        *instance = Some(RuntimeService::new(mainnet_seed_file_path));
+        match RuntimeService::new(&mainnet_seed_file_path) {
+            Ok(service) => *instance = Some(service),
+            Err(e) => {
+                log::warn!(
+                    "Failed to load mainnet seed from '{}': {}. RuntimeService will not be available.",
+                    mainnet_seed_file_path, e
+                );
+            }
+        }
     }
 
-    fn new(mainnet_seed_file_path: String) -> RuntimeService {
-        let mut file = File::open(mainnet_seed_file_path).unwrap();
+    fn new(mainnet_seed_file_path: &str) -> Result<RuntimeService, deno_core::anyhow::Error> {
+        let mut file = File::open(mainnet_seed_file_path).map_err(|e| {
+            deno_core::anyhow::anyhow!("Cannot open seed file '{}': {}", mainnet_seed_file_path, e)
+        })?;
         let mut contents = String::new();
-        file.read_to_string(&mut contents).unwrap();
-        let seed: BootstrapSeed = serde_json::from_str(&contents).unwrap();
+        file.read_to_string(&mut contents)
+            .map_err(|e| deno_core::anyhow::anyhow!("Cannot read seed file: {}", e))?;
+        let seed: BootstrapSeed = serde_json::from_str(&contents)
+            .map_err(|e| deno_core::anyhow::anyhow!("Cannot parse seed file: {}", e))?;
 
-        RuntimeService { seed }
+        Ok(RuntimeService { seed })
     }
 
     pub fn global_instance() -> Arc<Mutex<Option<RuntimeService>>> {
