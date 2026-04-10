@@ -23,6 +23,25 @@ pub trait Language: 'static {
     /// that don't expose per-expression interactions can ignore the
     /// address argument and return a static list (or `Vec::new()`).
     fn interactions(&self, _address: Address) -> Vec<Interaction> { Vec::new() }
+
+    /// Execute a named interaction against an expression. Spec §5.7 —
+    /// Rust ALDK languages cannot return JS callables in `interactions()`
+    /// (the list crosses the wasm-bindgen boundary as plain JSON), so
+    /// the runtime calls this top-level method to actually invoke the
+    /// chosen interaction. JS-authored languages can keep the legacy
+    /// closure form on the interaction object; this method is the
+    /// Rust-friendly counterpart.
+    ///
+    /// Default implementation returns `Ok(None)` so languages without
+    /// interactions don't need to override it.
+    fn expression_interact(
+        &mut self,
+        _address: Address,
+        _name: String,
+        _parameters: serde_json::Value,
+    ) -> LanguageResult<Option<serde_json::Value>> {
+        Ok(None)
+    }
 }
 
 /// `expression` capability — authoring + retrieving expressions.

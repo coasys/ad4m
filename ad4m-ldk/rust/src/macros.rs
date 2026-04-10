@@ -89,6 +89,29 @@ macro_rules! ad4m_language {
             ::serde_wasm_bindgen::to_value(&v).unwrap_or(::wasm_bindgen::JsValue::NULL)
         }
 
+        /// Execute a named interaction. Spec §5.7 — the runtime calls
+        /// this when the JS object returned from `interactions()` has
+        /// no callable `execute` field (always the case for Rust
+        /// languages, since interaction lists cross the wasm-bindgen
+        /// boundary as plain JSON).
+        #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "expressionInteract")]
+        pub fn __ad4m_expression_interact(
+            address: String,
+            name: String,
+            parameters: ::wasm_bindgen::JsValue,
+        ) -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue> {
+            let params: ::serde_json::Value = ::serde_wasm_bindgen::from_value(parameters)
+                .map_err($crate::errors::LanguageError::from)?;
+            let result = __ad4m_with(|l| {
+                <$lang as $crate::traits::Language>::expression_interact(l, address, name, params)
+            })?;
+            Ok(match result {
+                Some(v) => ::serde_wasm_bindgen::to_value(&v)
+                    .map_err($crate::errors::LanguageError::from)?,
+                None => ::wasm_bindgen::JsValue::NULL,
+            })
+        }
+
         // -------- Capability shims --------
         $( $crate::__ad4m_cap!($cap, $lang); )*
 

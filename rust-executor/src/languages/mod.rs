@@ -2296,16 +2296,42 @@ impl LanguageController {
         let escaped_addr =
             serde_json::to_string(&expression_address).unwrap_or_else(|_| "\"\"".to_string());
         let escaped_name = serde_json::to_string(&call.name).unwrap_or_else(|_| "\"\"".to_string());
+        // Two execution paths, in priority order:
+        //   1. JS-authored languages may attach a callable `execute`
+        //      directly on the interaction object returned from
+        //      interactions() — invoke it.
+        //   2. Rust ALDK languages cannot do that (interactions cross
+        //      the wasm-bindgen boundary as plain JSON). They expose a
+        //      top-level `expressionInteract(addr, name, params)`
+        //      export instead — fall back to it.
+        // The runtime first verifies the interaction *name* exists in
+        // the descriptor list either way, so unknown names still error.
         let script = format!(
             r#"JSON.stringify(
                 await (async () => {{
-                    const interaction = language.interactions({})
-                        .find(i => i.name === {});
+                    const list = language.interactions({});
+                    const interaction = list.find(i => i.name === {});
                     if (!interaction) throw new Error("No interaction named " + {});
-                    return await interaction.execute({});
+                    if (typeof interaction.execute === "function") {{
+                        return await interaction.execute({});
+                    }}
+                    if (typeof language.expressionInteract === "function") {{
+                        return await language.expressionInteract({}, {}, {});
+                    }}
+                    throw new Error(
+                        "Interaction " + {} + " is not executable: " +
+                        "the language exposes neither interaction.execute() nor a top-level expressionInteract() export"
+                    );
                 }})()
             )"#,
-            escaped_addr, escaped_name, escaped_name, call.parameters_stringified
+            escaped_addr,
+            escaped_name,
+            escaped_name,
+            call.parameters_stringified,
+            escaped_addr,
+            escaped_name,
+            call.parameters_stringified,
+            escaped_name,
         );
 
         let result = self.execute_on_language(&lang_address, &script).await?;
