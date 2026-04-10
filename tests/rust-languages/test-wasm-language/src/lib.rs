@@ -26,7 +26,7 @@ impl Language for TestLang {
     fn version() -> &'static str { "0.1.0" }
     fn is_public() -> bool { true }
 
-    fn init() -> LanguageResult<Self> {
+    async fn init() -> LanguageResult<Self> {
         let storage_dir = rt::language_storage_directory();
         let address = rt::language_address();
 

@@ -13,7 +13,12 @@ pub trait Language: 'static {
     fn name() -> &'static str;
     fn version() -> &'static str;
     fn is_public() -> bool { false }
-    fn init() -> LanguageResult<Self>
+    /// Async so that languages can register Holochain DNAs, await zome
+    /// calls, or otherwise use any of the Promise-returning imports
+    /// during initialization. Languages whose init logic is sync can
+    /// simply write `async fn init() -> LanguageResult<Self> { Ok(...) }`
+    /// — there is no runtime cost for a future that never suspends.
+    fn init() -> impl std::future::Future<Output = LanguageResult<Self>>
     where
         Self: Sized;
     fn teardown(&mut self) -> LanguageResult<()> { Ok(()) }

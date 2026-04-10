@@ -66,8 +66,13 @@ macro_rules! ad4m_language {
         }
 
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "init")]
-        pub fn __ad4m_init() -> ::std::result::Result<(), ::wasm_bindgen::JsValue> {
-            let instance = <$lang as $crate::traits::Language>::init()?;
+        pub async fn __ad4m_init() -> ::std::result::Result<(), ::wasm_bindgen::JsValue> {
+            // Awaiting the async trait method lets languages call
+            // Promise-returning imports (holochain_register_dnas,
+            // holochain_call, etc.) during initialization. wasm-bindgen
+            // emits a JS `async function init()` so the bootstrap shim's
+            // `await mod.init()` transparently waits for completion.
+            let instance = <$lang as $crate::traits::Language>::init().await?;
             __AD4M_LANG_STATE.with(|c| *c.borrow_mut() = Some(instance));
             Ok(())
         }
