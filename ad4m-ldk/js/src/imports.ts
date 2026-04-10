@@ -78,7 +78,7 @@ export function storageDelete(key: string): void { need("storageDelete")(key); }
 export function storageListKeys(prefix?: string): string[] { return need("storageListKeys")(prefix); }
 
 // ============================================================================
-// Event emission (spec §7.4)
+// Event emission (spec §7.5)
 // ============================================================================
 // Languages no longer register callbacks. They emit perspective diffs,
 // sync state changes, telepresence signals, and arbitrary signals via

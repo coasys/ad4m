@@ -31,7 +31,7 @@ extern "C" {
     #[wasm_bindgen(js_name = "languageStorageDirectory")]
     pub fn language_storage_directory() -> String;
 
-    // ----- Storage KV (spec §7) -----
+    // ----- Storage KV (spec §7.4) -----
     #[wasm_bindgen(js_name = "storageGet")]
     pub fn storage_get(key: &str) -> JsValue;
     #[wasm_bindgen(js_name = "storagePut")]
@@ -41,7 +41,7 @@ extern "C" {
     #[wasm_bindgen(js_name = "storageListKeys")]
     pub fn storage_list_keys(prefix: Option<String>) -> Vec<JsValue>;
 
-    // ----- Event emission (spec §7.4) -----
+    // ----- Event emission (spec §7.5) -----
     #[wasm_bindgen(js_name = "emitPerspectiveDiff")]
     pub fn emit_perspective_diff(diff: JsValue);
     #[wasm_bindgen(js_name = "emitSyncStateChange")]

@@ -262,7 +262,7 @@ export function holochainCallAsync(dnaNick: string, zome: string, fnName: string
     return holochain_call_async(dnaNick, zome, fnName, params) as Promise<unknown>;
 }
 
-// ----- Event emission (spec §7.4) -----
+// ----- Event emission (spec §7.5) -----
 // Phase B: route emit* calls to the LANGUAGE_CONTROLLER global, which
 // dispatches to the runtime's existing perspective/sync/telepresence
 // fan-out paths. The languageAddress() of the calling Language is
@@ -291,7 +291,7 @@ export function emitSignal(data: unknown): void {
     else ad4m_signal_emitted(data);
 }
 
-// ----- Storage key/value (spec §7) -----
+// ----- Storage key/value (spec §7.4) -----
 // Phase 0: in-memory map, scoped per language instance via languageAddress().
 // Phase B replaces with a real persistent backing store.
 const __storage = new Map<string, string>();
