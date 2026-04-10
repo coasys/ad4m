@@ -61,18 +61,42 @@ fn register_holochain_signal_handler(
 
 #[op2]
 fn ad4m_signal_emitted(#[serde] signal: JsonValue, #[string] language_address: String) {
-    let signal_json = serde_json::to_string(&serde_json::json!({
-        "signal": signal,
-        "languageAddress": language_address,
-    }))
-    .unwrap_or_default();
-
-    tokio::spawn(async move {
-        crate::pubsub::get_global_pubsub()
-            .await
-            .publish(&crate::pubsub::NEIGHBOURHOOD_SIGNAL_TOPIC, &signal_json)
-            .await;
-    });
+    // Spec §7.5 `emitSignal` is defined as an arbitrary language→runtime
+    // signal — no perspective/recipient envelope, no specific shape.
+    //
+    // The legacy implementation published onto NEIGHBOURHOOD_SIGNAL_TOPIC
+    // wrapped in `{ signal, languageAddress }`, but every subscriber on
+    // that topic deserializes payloads as `NeighbourhoodSignalFilter`
+    // (`{ perspective, signal, recipient }`). The wrong-shape publish
+    // silently failed deserialization in each subscriber — so every
+    // `emitSignal` from a flat Language quietly disappeared, with no
+    // error surface for the author to notice.
+    //
+    // Until a dedicated `AD4M_SIGNAL_TOPIC` + GraphQL subscription is
+    // wired (tracked as a post-refactor follow-up — see Phase F of
+    // docs/language-interface-migration-plan.md), route through the
+    // telepresence path when the payload happens to be a
+    // PerspectiveExpression — that's the only shape a current subscriber
+    // can actually deliver. For everything else, warn loudly instead of
+    // publishing onto a topic whose consumers cannot deserialize us.
+    match serde_json::from_value::<PerspectiveExpression>(signal.clone()) {
+        Ok(perspective_signal) => {
+            crate::perspectives::handle_telepresence_signal_from_link_language(
+                perspective_signal,
+                language_address,
+                None,
+            );
+        }
+        Err(_) => {
+            log::warn!(
+                "emitSignal from language `{}` dropped: payload is not a \
+                 PerspectiveExpression and no generic ad4m-signal topic is \
+                 wired yet. Payload: {}",
+                language_address,
+                serde_json::to_string(&signal).unwrap_or_default()
+            );
+        }
+    }
 }
 
 // ============================================================================
