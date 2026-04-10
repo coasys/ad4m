@@ -280,10 +280,21 @@ impl LanguageRuntime {
     pub async fn teardown(&self) -> Result<(), String> {
         info!("Tearing down language runtime: {}", self.language_address);
 
+        // Call whichever teardown hook the language installed. Legacy
+        // factory languages historically exposed `cleanup()`; the flat
+        // bootstrap shim attaches `teardown()` (which also runs
+        // teardownFlatWasmImports). Invoking only `cleanup` meant flat
+        // languages never ran their own teardown AND never tore down the
+        // globalThis host imports, leaking per-runtime state if the
+        // language was ever reloaded.
         let cleanup_script = r#"
             (async function() {
                 const language = globalThis.__ad4m_language_instance__;
-                if (language && language.cleanup) {
+                if (!language) return;
+                if (typeof language.teardown === "function") {
+                    await language.teardown();
+                }
+                if (typeof language.cleanup === "function") {
                     await language.cleanup();
                 }
             })()
