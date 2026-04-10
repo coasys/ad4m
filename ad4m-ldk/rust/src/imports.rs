@@ -18,10 +18,25 @@ extern "C" {
     pub fn agent_create_signed_expression(data: JsValue) -> JsValue;
 
     // ----- Holochain (spec §7.2) -----
-    #[wasm_bindgen(js_name = "holochainRegisterDnas")]
-    pub fn holochain_register_dnas(dnas: JsValue) -> JsValue;
-    #[wasm_bindgen(js_name = "holochainCall")]
-    pub fn holochain_call(dna_nick: &str, zome: &str, fn_name: &str, params: JsValue) -> JsValue;
+    // These JS-side imports return Promises — `registerDNAs` installs an
+    // app via the HOLOCHAIN_SERVICE ops which are async, and `call`
+    // forwards to `callZomeFunction` which is likewise async. Declaring
+    // them as plain sync `-> JsValue` returns handed the raw Promise
+    // object through to Rust callers, who then could not await it
+    // without manual JsFuture::from(promise) gymnastics — and most
+    // language authors would silently receive a `Promise { <pending> }`
+    // payload instead of the actual result. Use `async fn` so
+    // wasm-bindgen emits the JsFuture conversion automatically and the
+    // Rust caller just writes `.await`.
+    #[wasm_bindgen(js_name = "holochainRegisterDnas", catch)]
+    pub async fn holochain_register_dnas(dnas: JsValue) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(js_name = "holochainCall", catch)]
+    pub async fn holochain_call(
+        dna_nick: &str,
+        zome: &str,
+        fn_name: &str,
+        params: JsValue,
+    ) -> Result<JsValue, JsValue>;
 
     // ----- Language context (spec §7.3) -----
     #[wasm_bindgen(js_name = "languageAddress")]
@@ -108,26 +123,26 @@ pub fn emit_signal_typed<T: Serialize + ?Sized>(data: &T) {
 /// Register DNAs with the Holochain delegate. Type-safe wrapper around
 /// `holochain_register_dnas`. Returns the resulting AppInfo list as a
 /// JsValue (callers typically deserialize it via `__serde::from_js`).
-pub fn holochain_register_dnas_typed<T: Serialize + ?Sized>(dnas: &T) -> JsValue {
-    match crate::__serde::to_js(dnas) {
-        Ok(v) => holochain_register_dnas(v),
-        Err(_) => JsValue::NULL,
-    }
+/// Async because the underlying JS import is a Promise.
+pub async fn holochain_register_dnas_typed<T: Serialize + ?Sized>(
+    dnas: &T,
+) -> Result<JsValue, JsValue> {
+    let v = crate::__serde::to_js(dnas).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    holochain_register_dnas(v).await
 }
 
 /// Call a zome function. Type-safe wrapper around `holochain_call` — only
 /// the params payload needs the maps-as-objects serializer; the three
-/// identifier strings go through unchanged.
-pub fn holochain_call_typed<T: Serialize + ?Sized>(
+/// identifier strings go through unchanged. Async because the underlying
+/// JS import is a Promise.
+pub async fn holochain_call_typed<T: Serialize + ?Sized>(
     dna_nick: &str,
     zome: &str,
     fn_name: &str,
     params: &T,
-) -> JsValue {
-    match crate::__serde::to_js(params) {
-        Ok(v) => holochain_call(dna_nick, zome, fn_name, v),
-        Err(_) => JsValue::NULL,
-    }
+) -> Result<JsValue, JsValue> {
+    let v = crate::__serde::to_js(params).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    holochain_call(dna_nick, zome, fn_name, v).await
 }
 
 /// Create a signed expression. Type-safe wrapper around
