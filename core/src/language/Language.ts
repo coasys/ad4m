@@ -263,6 +263,28 @@ export interface FlatPeers {
     peersRemote(): Promise<DID[]>;
 }
 
+/** Telepresence capability (spec §5.3). */
+export interface FlatTelepresence {
+    telepresenceSetOnlineStatus?(status: unknown): Promise<void>;
+    telepresenceGetOnlineAgents?(): Promise<unknown[]>;
+    telepresenceSendSignal?(remoteAgentDid: string, payload: unknown): Promise<object>;
+    telepresenceSendBroadcast?(payload: unknown): Promise<object>;
+    telepresenceRegisterSignalCallback?(callback: unknown): Promise<void>;
+}
+
+/** Direct message capability (runtime-retained, not in v1.0 spec).
+ * @deprecated Will be removed when social-layer conventions are implemented.
+ */
+export interface FlatDirectMessageLanguage {
+    directMessageRecipient(): string;
+    directMessageStatus?(): Promise<unknown>;
+    directMessageSendP2P?(message: unknown): Promise<unknown>;
+    directMessageSendInbox?(message: unknown): Promise<unknown>;
+    directMessageSetStatus?(status: unknown): Promise<void>;
+    directMessageInbox?(filter?: string): Promise<unknown[]>;
+    directMessageAddMessageCallback?(callback: (msg: unknown) => void): void;
+}
+
 /** Interaction-capable flat language exports */
 export interface FlatInteractionLanguage {
     /** Language.interactions */
@@ -278,6 +300,8 @@ export type FlatLanguageExports = FlatLanguageBase &
     Partial<FlatPerspectiveSync> &
     Partial<FlatPerspectiveQuery> &
     Partial<FlatPeers> &
+    Partial<FlatTelepresence> &
+    Partial<FlatDirectMessageLanguage> &
     Partial<FlatInteractionLanguage>;
 
 /** Interface of AD4M Languages
