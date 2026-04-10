@@ -89,13 +89,18 @@ let gossipRound = 0;
 // =============================================================================
 
 export async function init(): Promise<void> {
-    // NEW: Get language context via flat import functions
-    const storageDir = languageStorageDirectory();
-    const languageAddress = languageAddress();
-    const languageSettingsJson = languageSettings();
-    const languageSettings = languageSettingsJson ? JSON.parse(languageSettingsJson) : {};
+    // Pull language context via flat import functions installed by the
+    // executor on globalThis (spec §7.3). Pre-existing bug fixed: the
+    // local consts no longer shadow the import functions.
+    const storageDir = (globalThis as any).languageStorageDirectory();
+    const langAddress = (globalThis as any).languageAddress();
+    const settingsJson = (globalThis as any).languageSettings();
+    const settings = settingsJson ? JSON.parse(settingsJson) : {};
 
-    // Delegates are already on globalThis — grab them once here
+    // Delegates are already on globalThis — grab them once here.
+    // (Phase B will replace direct globalThis access with @coasys/ad4m-ldk
+    // typed wrappers once the bootstrap bundler can resolve workspace
+    // packages — currently the Deno esbuild plugin can't.)
     const agent: any = (globalThis as any).__agentProxy__;
     const holochain: any = (globalThis as any).__holochainDelegate__;
 
@@ -348,7 +353,7 @@ async function gossip(): Promise<void> {
         for (const hash of revisions) {
             if (hash === myRev) continue;
             try {
-                const result: any = await hc.call(dnaRole, zomeName, "pull", { hash, is_scribe });
+                const result: any = await hc.call(dnaRole, zomeName, "pull", { hash, is_scribe: isScribe });
                 if (result?.current_revision) {
                     myRevision = result.current_revision;
                 }
@@ -396,6 +401,45 @@ function prepareLink(link: any): object {
 function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
+
+// =============================================================================
+// Grouped default export — mirrors the @coasys/ad4m-ldk `defineLanguage`
+// shape (spec §9). Bootstrap bundlers cannot yet resolve workspace pkgs,
+// so the LDK is not imported directly; this object documents the
+// authoring style and is consumed by any caller that prefers the grouped
+// shape over the named flat exports above (the runtime dispatcher reads
+// the named exports).
+// =============================================================================
+
+const lang = {
+    name,
+    version,
+    isPublic,
+    init,
+    teardown,
+    interactions,
+
+    commit: { commit: perspectiveCommit },
+    sync: {
+        sync: perspectiveSyncSync,
+        render: perspectiveSyncRender,
+        currentRevision: perspectiveSyncCurrentRevision,
+    },
+    peers: {
+        setLocal: peersSetLocal,
+        remote: peersRemote,
+    },
+    telepresence: {
+        setOnlineStatus: telepresenceSetOnlineStatus,
+        getOnlineAgents: telepresenceGetOnlineAgents,
+        sendSignal: telepresenceSendSignal,
+        sendBroadcast: telepresenceSendBroadcast,
+        registerSignalCallback: telepresenceRegisterSignalCallback,
+    },
+    handleHolochainSignal,
+};
+
+export default lang;
 
 // =============================================================================
 // PerspectiveDiff — returned by linkSyncSync()
