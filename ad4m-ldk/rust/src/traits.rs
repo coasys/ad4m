@@ -25,19 +25,15 @@ pub trait Language: 'static {
     fn interactions(&self, _address: Address) -> Vec<Interaction> { Vec::new() }
 }
 
-/// `expression` capability — authoring, retrieving, signalling.
+/// `expression` capability — authoring + retrieving expressions.
+///
+/// Per-expression actions ("interactions") are described via the
+/// `Language::interactions(address)` lifecycle method and invoked
+/// through the `Interaction` object the runtime constructs from that
+/// description — there is no top-level `expressionInteract` export.
 pub trait ExpressionCapability: Language {
     fn expression_create(&mut self, content: serde_json::Value) -> LanguageResult<Address>;
     fn expression_get(&mut self, address: Address) -> LanguageResult<Option<Expression>>;
-    fn expression_interact(
-        &mut self,
-        address: Address,
-        interaction: String,
-        params: serde_json::Value,
-    ) -> LanguageResult<serde_json::Value> {
-        let _ = (address, interaction, params);
-        Ok(serde_json::Value::Null)
-    }
 }
 
 /// `perspective-commit` capability — writing diffs.

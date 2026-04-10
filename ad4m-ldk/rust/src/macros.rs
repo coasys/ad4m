@@ -117,17 +117,6 @@ macro_rules! __ad4m_cap {
             let exp = __ad4m_with(|l| <$lang as $crate::traits::ExpressionCapability>::expression_get(l, address))?;
             Ok(::serde_wasm_bindgen::to_value(&exp).map_err($crate::errors::LanguageError::from)?)
         }
-        #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "expressionInteract")]
-        pub fn __ad4m_expression_interact(
-            address: String,
-            interaction: String,
-            params: ::wasm_bindgen::JsValue,
-        ) -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue> {
-            let p: ::serde_json::Value = ::serde_wasm_bindgen::from_value(params)
-                .map_err($crate::errors::LanguageError::from)?;
-            let r = __ad4m_with(|l| <$lang as $crate::traits::ExpressionCapability>::expression_interact(l, address, interaction, p))?;
-            Ok(::serde_wasm_bindgen::to_value(&r).map_err($crate::errors::LanguageError::from)?)
-        }
     };
 
     (perspective_commit, $lang:ty) => {
