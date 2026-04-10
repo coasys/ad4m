@@ -65,7 +65,9 @@ export interface LanguageSpec {
     isPublic?: boolean;
     init(): Promise<void>;
     teardown?(): void | Promise<void>;
-    interactions?(address?: Address): unknown[];
+    /** Interactions available for the given expression. Spec §5.7 —
+     *  the runtime always passes a concrete address. */
+    interactions?(address: Address): unknown[];
 
     expression?: ExpressionCapability;
     commit?: PerspectiveCommitCapability;
@@ -89,7 +91,9 @@ export interface FlatLanguageExports {
     isPublic?(): boolean;
     init(): Promise<void>;
     teardown?(): void | Promise<void>;
-    interactions?(address?: Address): unknown[];
+    /** Interactions available for the given expression. Spec §5.7 —
+     *  the runtime always passes a concrete address. */
+    interactions?(address: Address): unknown[];
 
     // Expression capability
     expressionGet?(address: Address): Promise<Expression | null>;
