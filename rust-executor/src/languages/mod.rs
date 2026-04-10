@@ -1012,15 +1012,23 @@ impl LanguageController {
                     let variable_name = parts[1];
 
                     if let Some(value) = template_data.get(variable_name) {
-                        let replacement = match value {
-                            JsonValue::String(s) => {
-                                format!("{} {} = \"{}\"", variable_type, variable_name, s)
+                        // Always route through serde_json::to_string so the
+                        // templated value is a valid JS *expression*. Plain
+                        // string interpolation via `"{}"` broke the moment a
+                        // template value contained a quote, backslash, or
+                        // newline — the resulting bundle would no longer parse
+                        // and the failure surfaced deep in Deno's module loader
+                        // with no link back to the template site. JSON is a
+                        // strict subset of JS expressions, so any serde_json
+                        // value round-trips safely.
+                        let literal = serde_json::to_string(value).unwrap_or_else(|_| {
+                            match value {
+                                JsonValue::String(s) => format!("\"{}\"", s),
+                                other => other.to_string(),
                             }
-                            other => {
-                                format!("{} {} = {}", variable_type, variable_name, other)
-                            }
-                        };
-                        source_lines[variable_index] = replacement;
+                        });
+                        source_lines[variable_index] =
+                            format!("{} {} = {}", variable_type, variable_name, literal);
                     }
                 }
             }
@@ -1038,7 +1046,14 @@ impl LanguageController {
             }
             if let (Some(idx), JsonValue::String(happ_str)) = (happ_index, happ_value) {
                 info!("happIndex: {}", idx);
-                source_lines[idx] = format!("var happ = \"{}\"", happ_str);
+                // Same JS-literal escaping concern as the variable loop
+                // above — the happ blob is typically base64 and safe in
+                // practice, but a bundle that ever ships non-base64 data
+                // here (or a crafted template input) would otherwise break
+                // JS parsing.
+                let literal = serde_json::to_string(happ_str)
+                    .unwrap_or_else(|_| format!("\"{}\"", happ_str));
+                source_lines[idx] = format!("var happ = {}", literal);
             }
         }
     }
