@@ -384,6 +384,17 @@ async function gossip() {
       }
       await syncStateChangeCallback(state);
     }
+    if (peers.size > 0 && revisions.size === 0) {
+      try {
+        const latestRef = await hc.call(dnaRole, zomeName, "latest_revision", null);
+        if (latestRef && latestRef.hash && latestRef.hash !== myRev) {
+          console.log("[p-diff-sync] gossip: network latest_revision=", JSON.stringify(latestRef.hash)?.substring(0, 100));
+          revisions.add(latestRef.hash);
+        }
+      } catch (e) {
+        console.error("[p-diff-sync] latest_revision fallback error:", e);
+      }
+    }
     console.log("[p-diff-sync] gossip: peers=", peers.size, "revisions=", revisions.size, "myRev=", typeof myRev, JSON.stringify(myRev)?.substring(0, 100));
     for (const hash of revisions) {
       if (hash === myRev)

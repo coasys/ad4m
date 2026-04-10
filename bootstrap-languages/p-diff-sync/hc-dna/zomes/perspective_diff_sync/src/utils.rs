@@ -37,7 +37,7 @@ pub fn create_link_expression(source: &str, target: &str) -> LinkExpression {
             predicate: None,
             target: Some(String::from(target)),
         },
-        timestamp: DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(0, 0), Utc),
+        timestamp: String::from("1970-01-01T00:00:00.000Z"),
         proof: ExpressionProof {
             signature: String::from("sig"),
             key: String::from("key"),
