@@ -246,7 +246,12 @@ export interface FlatPerspectiveQuery {
  * changes. `remote` reports the non-local peer DIDs the Language sees.
  */
 export interface FlatPeers {
-    peersSetLocal(agents: DID[]): void;
+    // `peersSetLocal` is pushed by the runtime; languages may want to
+    // perform async work (persisting the new agent set, kicking a
+    // resync, etc.) so allow either sync or async returns. The JS ALDK
+    // `PeersCapability` interface already uses this shape — the core
+    // definition needs to match or migrated languages fail to compile.
+    peersSetLocal(agents: DID[]): void | Promise<void>;
     peersRemote(): Promise<DID[]>;
 }
 
