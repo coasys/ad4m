@@ -180,13 +180,21 @@ export function __holochain_call(
 }
 
 /**
- * Async batch call to zome functions (same shape as the delegate).
+ * Async call to a zome function. Single-call form matching the
+ * Rust/JS ALDK typings — internally wraps into the delegate's batch
+ * API and unwraps the single result.
  */
-export function __holochain_call_async(
-    calls: unknown,
-    timeoutMs?: number
+export async function __holochain_call_async(
+    dnaNick: string,
+    zome: string,
+    fnName: string,
+    params: unknown
 ): Promise<unknown> {
-    return holochainDelegate().callAsync(calls, timeoutMs);
+    const results = await holochainDelegate().callAsync(
+        [{ dnaNick, zomeName: zome, fnName, params }],
+        undefined
+    );
+    return Array.isArray(results) ? results[0] : results;
 }
 
 // ============================================================================
@@ -283,8 +291,17 @@ export function holochainRegisterDnas(dnas: object[]): Promise<object[]> {
 export function holochainCall(dnaNick: string, zome: string, fnName: string, params: unknown): Promise<unknown> {
     return holochainDelegate().call(dnaNick, zome, fnName, params);
 }
-export function holochainCallAsync(calls: unknown, timeoutMs?: number): Promise<unknown> {
-    return holochainDelegate().callAsync(calls, timeoutMs);
+export async function holochainCallAsync(
+    dnaNick: string,
+    zome: string,
+    fnName: string,
+    params: unknown
+): Promise<unknown> {
+    const results = await holochainDelegate().callAsync(
+        [{ dnaNick, zomeName: zome, fnName, params }],
+        undefined
+    );
+    return Array.isArray(results) ? results[0] : results;
 }
 
 // ----- Event emission (spec §7.5) -----
