@@ -1010,12 +1010,26 @@ impl LanguageController {
     pub async fn language_by_address(address: Address) -> Result<Option<Language>, AnyError> {
         let controller = Self::global_instance();
 
+        // Resolve system aliases ("did", "lang", "neighbourhood",
+        // "perspective") up front. Otherwise the Language we return
+        // carries the alias as its address, and every subsequent
+        // execute_on_language call (Language::sync, Language::commit,
+        // ...) misses the runtimes map — which is keyed by the real
+        // content hash — and fails with NotFound.
+        let resolved = {
+            let aliases = controller.language_aliases.lock().await;
+            aliases
+                .get(&address)
+                .cloned()
+                .unwrap_or_else(|| address.clone())
+        };
+
         // Only return a Language if the runtime is actually loaded and can execute.
         // On the old JS-executor branch, a single JsCore worker could load languages on-demand,
         // so checking for the bundle on disk was sufficient. With per-language isolated runtimes,
         // the runtime must be explicitly started before the language can be used.
-        if controller.is_language_loaded(&address).await {
-            return Ok(Some(Language::new(address)));
+        if controller.is_language_loaded(&resolved).await {
+            return Ok(Some(Language::new(resolved)));
         }
 
         Ok(None)
