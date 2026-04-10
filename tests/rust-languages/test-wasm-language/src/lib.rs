@@ -80,8 +80,11 @@ impl Language for TestLang {
 impl ExpressionCapability for TestLang {
     fn expression_create(&mut self, content: serde_json::Value) -> LanguageResult<Address> {
         // Sign via the host agent — this exercises the agent import.
-        let js_val = serde_wasm_bindgen::to_value(&content)?;
-        let signed = rt::agent_create_signed_expression(js_val);
+        // Use the typed wrapper so `content`'s maps serialize as JS
+        // objects; the raw import with serde_wasm_bindgen::to_value
+        // would serialize maps as JS Map instances, which the runtime's
+        // JSON.stringify path then loses silently.
+        let signed = rt::agent_create_signed_expression_typed(&content);
 
         // Derive a content address by hex-signing the serialized content.
         let serialized = serde_json::to_string(&content)?;
