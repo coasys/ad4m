@@ -263,19 +263,32 @@ export function holochainCallAsync(dnaNick: string, zome: string, fnName: string
 }
 
 // ----- Event emission (spec §7.4) -----
-// Phase 0: stubs that route to ad4m_signal_emitted (the existing signal bus).
-// Phase B wires these to dedicated subscriber streams.
+// Phase B: route emit* calls to the LANGUAGE_CONTROLLER global, which
+// dispatches to the runtime's existing perspective/sync/telepresence
+// fan-out paths. The languageAddress() of the calling Language is
+// derived from the thread-local IsolateState.
+function currentLanguageAddress(): string {
+    try { return language_address() as string; } catch { return ""; }
+}
+function languageController(): any {
+    return (globalThis as any).LANGUAGE_CONTROLLER;
+}
 export function emitPerspectiveDiff(diff: unknown): void {
-    ad4m_signal_emitted({ kind: "perspective-diff", payload: diff });
+    const lc = languageController();
+    if (lc) lc.perspectiveDiffReceived(diff, currentLanguageAddress());
 }
 export function emitSyncStateChange(state: unknown): void {
-    ad4m_signal_emitted({ kind: "sync-state-change", payload: state });
+    const lc = languageController();
+    if (lc) lc.syncStateChanged(state, currentLanguageAddress());
 }
 export function emitTelepresenceSignal(payload: unknown, recipientDid?: string): void {
-    ad4m_signal_emitted({ kind: "telepresence-signal", payload, recipientDid });
+    const lc = languageController();
+    if (lc) lc.telepresenceSignalReceived(payload, currentLanguageAddress(), recipientDid);
 }
 export function emitSignal(data: unknown): void {
-    ad4m_signal_emitted(data);
+    const lc = languageController();
+    if (lc) lc.ad4mSignalEmitted(data, currentLanguageAddress());
+    else ad4m_signal_emitted(data);
 }
 
 // ----- Storage key/value (spec §7) -----
