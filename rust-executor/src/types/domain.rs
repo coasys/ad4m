@@ -38,7 +38,7 @@ pub struct AgentSignature {
 #[serde(rename_all = "camelCase")]
 pub struct AgentStatus {
     pub did: Option<String>,
-    pub did_document: Option<String>,
+    pub did_document: Option<serde_json::Value>,
     pub error: Option<String>,
     pub is_initialized: bool,
     pub is_unlocked: bool,

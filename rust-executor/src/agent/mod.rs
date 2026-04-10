@@ -709,14 +709,14 @@ impl AgentService {
     }
 
     pub fn dump(&self) -> AgentStatus {
-        let did_document_str = self
+        let did_document_value = self
             .did_document
             .as_ref()
-            .map(|doc| serde_json::to_string(doc).unwrap_or_default());
+            .and_then(|doc| serde_json::from_str(doc).ok());
 
         AgentStatus {
             did: self.did.clone(),
-            did_document: did_document_str,
+            did_document: did_document_value,
             is_initialized: self.is_initialized(),
             is_unlocked: self.is_unlocked(),
             error: None,

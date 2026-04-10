@@ -76,7 +76,10 @@ pub async fn get_agent(
             .clone()
             .ok_or_else(|| ApiError::NotFound("Agent not found".into()))?;
         if agent.perspective.is_some() {
-            agent.perspective.as_mut().unwrap().verify_link_signatures();
+            agent
+                .perspective
+                .as_mut()
+                .map(|p| p.verify_link_signatures());
         }
         Ok::<Agent, ApiError>(agent)
     })?;
@@ -134,7 +137,7 @@ pub async fn get_agent_by_did(
                     .ok();
                     let agent = agent.map(|mut a| {
                         if a.perspective.is_some() {
-                            a.perspective.as_mut().unwrap().verify_link_signatures();
+                            a.perspective.as_mut().map(|p| p.verify_link_signatures());
                         }
                         a
                     });
@@ -268,7 +271,7 @@ pub async fn update_profile(
         .await
         .publish(
             &AGENT_UPDATED_TOPIC,
-            &serde_json::to_string(&agent).unwrap(),
+            &serde_json::to_string(&agent).unwrap_or_default(),
         )
         .await;
 
@@ -344,7 +347,7 @@ pub async fn generate_agent(
         .await
         .publish(
             &AGENT_STATUS_CHANGED_TOPIC,
-            &serde_json::to_string(&agent).unwrap(),
+            &serde_json::to_string(&agent).unwrap_or_default(),
         )
         .await;
 
@@ -368,7 +371,7 @@ pub async fn lock_agent(
         .await
         .publish(
             &AGENT_STATUS_CHANGED_TOPIC,
-            &serde_json::to_string(&agent).unwrap(),
+            &serde_json::to_string(&agent).unwrap_or_default(),
         )
         .await;
 
@@ -462,7 +465,7 @@ pub async fn unlock_agent(
         .await
         .publish(
             &AGENT_STATUS_CHANGED_TOPIC,
-            &serde_json::to_string(&agent).unwrap(),
+            &serde_json::to_string(&agent).unwrap_or_default(),
         )
         .await;
 
@@ -604,7 +607,7 @@ pub async fn get_agent_status(
 
         return Ok(Json(AgentStatus {
             did: Some(agent_data.did),
-            did_document: Some(serde_json::to_string(&did_document).map_err(|e| {
+            did_document: Some(serde_json::to_value(&did_document).map_err(|e| {
                 ApiError::Internal(format!("Failed to serialize DID document: {}", e))
             })?),
             error: None,
