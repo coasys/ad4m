@@ -168,8 +168,11 @@ impl Ad4mMcpHandler {
         let input_json = serde_json::to_string(&input)
             .map_err(|e| format!("Failed to serialize cloned language: {}", e))?;
 
+        // See the matching comment in mutation_resolvers.rs publish path:
+        // wrap in JSON.stringify and parse as JSON so addresses containing
+        // quotes / backslashes / whitespace don't get silently corrupted.
         let publish_script = format!(
-            r#"await globalThis.__ad4m_language_instance__.expressionAdapter.putAdapter.createPublic({})"#,
+            r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.putAdapter.createPublic({}))"#,
             input_json
         );
 
@@ -178,7 +181,12 @@ impl Ad4mMcpHandler {
             .await
             .map_err(|e| format!("Failed to publish cloned language: {}", e))?;
 
-        let address = address_raw.trim().trim_matches('"').to_string();
+        let address: String = serde_json::from_str(address_raw.trim()).map_err(|e| {
+            format!(
+                "Failed to parse published cloned language address: {} ({:?})",
+                e, address_raw
+            )
+        })?;
 
         // Load into runtime - use the saved bundle path
         // Verify the saved hash matches the published address

@@ -1537,8 +1537,15 @@ impl Mutation {
                 )
             })?;
 
+            // Wrap in JSON.stringify so we can round-trip a valid JSON
+            // string across the v8 → Rust boundary. Without the wrapper,
+            // `to_rust_string_lossy` returns the raw JS string contents,
+            // and any address containing a `"`, `\`, or leading/trailing
+            // whitespace (rare for content hashes, trivially legal for
+            // DIDs) would either be silently corrupted by the old
+            // `trim_matches('"')` strip or not decode at all.
             let publish_script = format!(
-                r#"await globalThis.__ad4m_language_instance__.expressionAdapter.putAdapter.createPublic({})"#,
+                r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.putAdapter.createPublic({}))"#,
                 input_json
             );
 
@@ -1552,8 +1559,16 @@ impl Mutation {
                     )
                 })?;
 
-            // Strip surrounding quotes from the address
-            let address = address_raw.trim().trim_matches('"').to_string();
+            let address: String =
+                serde_json::from_str(address_raw.trim()).map_err(|e| {
+                    FieldError::new(
+                        format!(
+                            "Failed to parse published language address: {} ({:?})",
+                            e, address_raw
+                        ),
+                        graphql_value!(null),
+                    )
+                })?;
 
             // Load the templated language into a per-language runtime
             let bundle_on_disk = crate::utils::languages_directory()
