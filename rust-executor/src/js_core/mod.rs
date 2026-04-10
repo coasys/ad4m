@@ -302,8 +302,20 @@ impl JsCore {
 
         let resolve_fut = {
             let mut worker = self.worker.lock().await;
-            let execute_async = worker.execute_script("js_core", wrapped_script.into());
-            worker.js_runtime.resolve(execute_async.unwrap())
+            // `execute_script` returns Err on a JS syntax error (e.g. a
+            // dispatcher format! call that produced unbalanced braces or
+            // an invalid identifier). The previous `.unwrap()` panicked
+            // the entire language runtime thread in that case, which
+            // aborted the per-isolate tokio runtime and left the
+            // LanguageRuntimeHandle channel dangling — every subsequent
+            // request to the language would stall on the oneshot
+            // response forever. Propagate the compile error as a normal
+            // AnyError so the caller gets `Err(String)` back and the
+            // thread keeps running.
+            let execute_async = worker
+                .execute_script("js_core", wrapped_script.into())
+                .map_err(|e| anyhow!("Failed to compile script: {}", e))?;
+            worker.js_runtime.resolve(execute_async)
         };
 
         Ok(SmartGlobalVariableFuture::new(
