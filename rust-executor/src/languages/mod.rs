@@ -2091,8 +2091,17 @@ impl LanguageController {
         // Fetch from the language runtime
         let escaped_addr =
             serde_json::to_string(expression_address).unwrap_or_else(|_| "\"\"".to_string());
+        // Guard the expressionAdapter existence — a pure link/telepresence
+        // language (no expressionGet / expressionCreate / addressOf exports)
+        // has no expressionAdapter attached by the flat bootstrap shim, and
+        // calling `.get(...)` unconditionally would TypeError. Return null
+        // so the caller treats it as "expression not available".
         let script = format!(
-            r#"JSON.stringify(await language.expressionAdapter.get({}))"#,
+            r#"JSON.stringify(
+                (language.expressionAdapter && typeof language.expressionAdapter.get === "function")
+                    ? await language.expressionAdapter.get({})
+                    : null
+            )"#,
             escaped_addr
         );
 
@@ -2230,12 +2239,27 @@ impl LanguageController {
                 message: format!("Failed to serialize content: {}", e),
             })?;
 
+        // Guard both layers of the expressionAdapter lookup. Spec §5 makes
+        // every expression sub-capability optional, so a language can
+        // legitimately expose `expressionAdapter.get` (read) without a
+        // `putAdapter` (write). Without the guard, any expression_create
+        // against a read-only language TypeErrors deep in v8 with
+        // "Cannot read properties of undefined (reading 'createPublic')"
+        // instead of surfacing a catchable "language is read-only" error.
         let script = format!(
-            r#"JSON.stringify(
-                language.expressionAdapter.putAdapter.createPublic
-                    ? await language.expressionAdapter.putAdapter.createPublic({})
-                    : await language.expressionAdapter.putAdapter.addressOf({})
-            )"#,
+            r#"JSON.stringify(await (async () => {{
+                const put = language.expressionAdapter && language.expressionAdapter.putAdapter;
+                if (!put) {{
+                    throw new Error("Language does not implement expression writes (no putAdapter)");
+                }}
+                if (typeof put.createPublic === "function") {{
+                    return await put.createPublic({});
+                }}
+                if (typeof put.addressOf === "function") {{
+                    return await put.addressOf({});
+                }}
+                throw new Error("putAdapter has neither createPublic nor addressOf");
+            }})())"#,
             content_json, content_json
         );
 
