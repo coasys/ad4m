@@ -292,8 +292,22 @@ export function emitSignal(data: unknown): void {
 }
 
 // ----- Storage key/value (spec §7.4) -----
-// Phase 0: in-memory map, scoped per language instance via languageAddress().
-// Phase B replaces with a real persistent backing store.
+//
+// Current backing store: a process-local in-memory Map, scoped per
+// language instance via languageAddress(). Values do NOT persist
+// across executor restarts.
+//
+// This satisfies the §7.4 *interface* contract (read-your-writes
+// within an instance, address-scoped namespacing, returns null for
+// missing keys) but not its *durability* hint. Languages that require
+// persistence across restarts must either roll their own files in
+// language_storage_directory() or wait for the runtime to gain a real
+// persistent KV op.
+//
+// TODO(persistent-storage): replace this Map with a Deno op that
+// writes under language_storage_directory(), once the executor has a
+// shared KV abstraction we can hook into. Tracked separately from the
+// language interface refactor.
 const __storage = new Map<string, string>();
 function storageKey(key: string): string {
     let addr = "";
@@ -374,13 +388,15 @@ export function setupFlatWasmImports(): void {
     (globalThis as any).holochainCall = holochainCall;
     (globalThis as any).holochainCallAsync = holochainCallAsync;
 
-    // Event emission (Phase 0 stubs; Phase B wires real fan-out)
+    // Event emission (spec §7.5) — fan out via LANGUAGE_CONTROLLER to
+    // the runtime's perspective/sync/telepresence/signal subscribers.
     (globalThis as any).emitPerspectiveDiff = emitPerspectiveDiff;
     (globalThis as any).emitSyncStateChange = emitSyncStateChange;
     (globalThis as any).emitTelepresenceSignal = emitTelepresenceSignal;
     (globalThis as any).emitSignal = emitSignal;
 
-    // Storage KV (Phase 0 in-memory; Phase B persistent)
+    // Storage KV (spec §7.4) — in-memory map; see comment above for the
+    // durability caveat and persistence TODO.
     (globalThis as any).storageGet = storageGet;
     (globalThis as any).storagePut = storagePut;
     (globalThis as any).storageDelete = storageDelete;
