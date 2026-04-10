@@ -11,8 +11,7 @@ export const version = "0.1.0";
 // Module-level state
 let agent: any = null;
 
-export async function init(contextJson: string): Promise<void> {
-    const context = JSON.parse(contextJson);
+export async function init(): Promise<void> {
     // Agent available via globalThis (set by bootstrap before init)
     agent = globalThis.__agentProxy__;
     console.log("[aes-flat] init() called");
