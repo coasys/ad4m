@@ -300,9 +300,15 @@ impl LanguageController {
         let label = self.language_label(language_address).await;
         info!("Unloading language: {}", label);
 
-        let mut runtimes = self.runtimes.lock().await;
-        if let Some(runtime) = runtimes.remove(language_address) {
-            // Teardown the runtime (cleanup language instance, drop thread)
+        // Remove from the runtimes map first and drop the guard before
+        // awaiting teardown — teardown tears down the worker thread and
+        // can take arbitrarily long, and holding the runtimes lock across
+        // that await would block every other languages operation.
+        let removed = {
+            let mut runtimes = self.runtimes.lock().await;
+            runtimes.remove(language_address)
+        };
+        if let Some(runtime) = removed {
             runtime
                 .teardown()
                 .await
@@ -311,7 +317,6 @@ impl LanguageController {
                     message: format!("Failed to teardown runtime: {}", e),
                 })?;
         }
-        drop(runtimes);
 
         // Remove cached name
         let mut names = self.language_names.lock().await;
