@@ -163,6 +163,14 @@ var dnaRole = DNA_ROLE;
 var zomeName = ZOME_NAME;
 var dnaBundle = Buffer.from(BUNDLE, "base64");
 var hc = null;
+function hashToHex(hash) {
+  if (!hash)
+    return null;
+  if (typeof hash === "string")
+    return hash;
+  const bytes = hash instanceof Uint8Array ? hash : hash.length != null ? Array.from(hash) : Object.values(hash);
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 var myDid = "";
 var linkCallback = null;
 var syncStateChangeCallback = null;
@@ -215,10 +223,11 @@ async function perspectiveCommit(diff) {
         diff: prepDiff,
         my_did: myDid
       });
-      if (!revision || revision.length === 0)
+      if (!revision)
         throw new Error("empty revision");
-      myRevision = revision;
-      return revision;
+      const hex = hashToHex(revision) || "";
+      myRevision = hex;
+      return hex;
     } catch (e) {
       if (attempt < 4)
         await sleep(100 * (attempt + 1));
@@ -282,7 +291,7 @@ async function handleHolochainSignal(signal) {
   const payload = signal.payload || {};
   console.log("[p-diff-sync] handleHolochainSignal: keys=", Object.keys(payload), "has_linkCallback=", !!linkCallback);
   if (payload.reference && payload.reference_hash && payload.broadcast_author) {
-    peers.set(payload.broadcast_author, { currentRevision: payload.reference_hash, lastSeen: /* @__PURE__ */ new Date() });
+    peers.set(payload.broadcast_author, { currentRevision: hashToHex(payload.reference_hash), originalHash: payload.reference_hash, lastSeen: /* @__PURE__ */ new Date() });
     return;
   }
   if (payload.additions || payload.removals) {
@@ -320,8 +329,8 @@ async function acquireRevision() {
   const release = await syncMutex.acquire();
   try {
     const rev = await hc.call(dnaRole, zomeName, "sync", myDid);
-    if (rev instanceof Uint8Array) {
-      myRevision = new TextDecoder().decode(rev);
+    if (rev) {
+      myRevision = hashToHex(rev);
     }
   } catch (e) {
     console.error("[p-diff-sync] sync error:", e);
@@ -337,7 +346,7 @@ async function gossip() {
       const syncResult = await hc.call(dnaRole, zomeName, "sync", myDid);
       console.log("[p-diff-sync] gossip: sync returned:", typeof syncResult, JSON.stringify(syncResult)?.substring(0, 200));
       if (syncResult) {
-        myRevision = syncResult;
+        myRevision = hashToHex(syncResult);
       }
     } catch (e) {
       console.error("[p-diff-sync] sync zome call error:", e);
@@ -351,6 +360,7 @@ async function gossip() {
             const existing = peers.get(did);
             peers.set(did, {
               currentRevision: existing?.currentRevision || null,
+              originalHash: existing?.originalHash || null,
               lastSeen: /* @__PURE__ */ new Date()
             });
           }
@@ -365,14 +375,15 @@ async function gossip() {
     }
     const allPeers = [...peers.keys(), myDid].sort();
     const isScribe = allPeers[0] === myDid;
-    const revisions = /* @__PURE__ */ new Set();
-    for (const { currentRevision } of peers.values()) {
+    const revisionMap = /* @__PURE__ */ new Map();
+    for (const { currentRevision, originalHash } of peers.values()) {
       if (currentRevision)
-        revisions.add(currentRevision);
+        revisionMap.set(currentRevision, originalHash);
     }
+    const revisionHexes = new Set(revisionMap.keys());
     const myRev = myRevision;
-    const sameRevisions = [...revisions].filter((r) => r === myRev);
-    const differentRevisions = [...revisions].filter((r) => r !== myRev);
+    const sameRevisions = [...revisionHexes].filter((r) => r === myRev);
+    const differentRevisions = [...revisionHexes].filter((r) => r !== myRev);
     if (syncStateChangeCallback) {
       let state;
       if (peers.size === 0) {
@@ -384,25 +395,28 @@ async function gossip() {
       }
       await syncStateChangeCallback(state);
     }
-    if (peers.size > 0 && revisions.size === 0) {
+    if (peers.size > 0 && revisionHexes.size === 0) {
       try {
         const latestRef = await hc.call(dnaRole, zomeName, "latest_revision", null);
-        if (latestRef && latestRef.hash && latestRef.hash !== myRev) {
-          console.log("[p-diff-sync] gossip: network latest_revision=", JSON.stringify(latestRef.hash)?.substring(0, 100));
-          revisions.add(latestRef.hash);
+        const latestHex = latestRef ? hashToHex(latestRef.hash) : null;
+        if (latestHex && latestHex !== myRev) {
+          console.log("[p-diff-sync] gossip: network latest_revision=", latestHex?.substring(0, 40));
+          revisionHexes.add(latestHex);
+          revisionMap.set(latestHex, latestRef.hash);
         }
       } catch (e) {
         console.error("[p-diff-sync] latest_revision fallback error:", e);
       }
     }
-    console.log("[p-diff-sync] gossip: peers=", peers.size, "revisions=", revisions.size, "myRev=", typeof myRev, JSON.stringify(myRev)?.substring(0, 100));
-    for (const hash of revisions) {
-      if (hash === myRev)
+    console.log("[p-diff-sync] gossip: peers=", peers.size, "revisions=", revisionHexes.size, "myRev=", myRev?.substring(0, 40));
+    for (const hex of revisionHexes) {
+      if (hex === myRev)
         continue;
+      const pullHash = revisionMap.get(hex) || hex;
       try {
-        const result = await hc.call(dnaRole, zomeName, "pull", { hash, is_scribe: isScribe });
+        const result = await hc.call(dnaRole, zomeName, "pull", { hash: pullHash, is_scribe: isScribe });
         if (result?.current_revision) {
-          myRevision = result.current_revision;
+          myRevision = hashToHex(result.current_revision);
         }
         if (result?.diff && linkCallback) {
           linkCallback(result.diff);
@@ -419,7 +433,7 @@ async function gossip() {
     release();
   }
 }
-function gossipSummary(peersList, isScribe, revisions) {
+function gossipSummary(peersList, isScribe, revisions2) {
   return `
 ==========
 GOSSIP
@@ -431,7 +445,7 @@ others: ${peersList.filter((p2) => p2 !== myDid).join(", ") || "(none)"}
 --
 ${[...peers.entries()].map(([did, { currentRevision, lastSeen }]) => `${did}: ${currentRevision} (${lastSeen.toISOString()})`).join("\n")}
 --
-revisions: ${[...revisions].join(", ") || "(none)"}
+revisions: ${[...revisions2].join(", ") || "(none)"}
 ==========`;
 }
 function prepareLink(link) {

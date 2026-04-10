@@ -59,6 +59,15 @@ const dnaBundle = Buffer.from(BUNDLE, "base64");
 // Holochain delegate (set in init)
 let hc: any = null;
 
+// Convert a hash (Uint8Array or object with indexed bytes) to hex string for comparison
+function hashToHex(hash: any): string | null {
+    if (!hash) return null;
+    if (typeof hash === 'string') return hash;
+    // Uint8Array or indexed-byte object from JSON
+    const bytes = hash instanceof Uint8Array ? hash : (hash.length != null ? Array.from(hash) : Object.values(hash));
+    return Array.from(bytes as number[]).map((b: number) => b.toString(16).padStart(2, '0')).join('');
+}
+
 // Agent DID (set in init)
 let myDid: string = "";
 
@@ -68,8 +77,8 @@ let syncStateChangeCallback: ((state: string) => void) | null = null;
 const telepresenceSignalCallbacks: ((signal: any, recipientDid?: string) => void)[] = [];
 let myRevision: string | null = null;
 
-// Gossip peers: DID → { currentRevision, lastSeen }
-const peers = new Map<string, { currentRevision: string | null; lastSeen: Date }>();
+// Gossip peers: DID → { currentRevision (hex), originalHash (binary for zome calls), lastSeen }
+const peers = new Map<string, { currentRevision: string | null; originalHash: any; lastSeen: Date }>();
 
 // Prevent concurrent sync/commit operations
 const syncMutex = new Mutex();
@@ -169,13 +178,14 @@ export async function perspectiveCommit(diff: PerspectiveDiff): Promise<string> 
     // Retry up to 5 times on transient failures
     for (let attempt = 0; attempt < 5; attempt++) {
         try {
-            const revision: string = await hc.call(dnaRole, zomeName, "commit", {
+            const revision: any = await hc.call(dnaRole, zomeName, "commit", {
                 diff: prepDiff,
                 my_did: myDid,
             });
-            if (!revision || revision.length === 0) throw new Error("empty revision");
-            myRevision = revision;
-            return revision;
+            if (!revision) throw new Error("empty revision");
+            const hex = hashToHex(revision) || "";
+            myRevision = hex;
+            return hex;
         } catch (e) {
             if (attempt < 4) await sleep(100 * (attempt + 1));
             else throw e;
@@ -284,7 +294,7 @@ export async function handleHolochainSignal(signal: any): Promise<void> {
 
     // 1. HashBroadcast — link sync: another agent broadcasts their revision
     if (payload.reference && payload.reference_hash && payload.broadcast_author) {
-        peers.set(payload.broadcast_author, { currentRevision: payload.reference_hash, lastSeen: new Date() });
+        peers.set(payload.broadcast_author, { currentRevision: hashToHex(payload.reference_hash), originalHash: payload.reference_hash, lastSeen: new Date() });
         return;
     }
 
@@ -336,9 +346,9 @@ async function ensureDidLink(): Promise<void> {
 async function acquireRevision(): Promise<void> {
     const release = await syncMutex.acquire();
     try {
-        const rev: Uint8Array = await hc.call(dnaRole, zomeName, "sync", myDid);
-        if (rev instanceof Uint8Array) {
-            myRevision = new TextDecoder().decode(rev);
+        const rev: any = await hc.call(dnaRole, zomeName, "sync", myDid);
+        if (rev) {
+            myRevision = hashToHex(rev);
         }
     } catch (e) {
         console.error("[p-diff-sync] sync error:", e);
@@ -359,7 +369,7 @@ async function gossip(): Promise<void> {
             const syncResult: any = await hc.call(dnaRole, zomeName, "sync", myDid);
             console.log("[p-diff-sync] gossip: sync returned:", typeof syncResult, JSON.stringify(syncResult)?.substring(0, 200));
             if (syncResult) {
-                myRevision = syncResult;
+                myRevision = hashToHex(syncResult);
             }
         } catch (e) {
             console.error("[p-diff-sync] sync zome call error:", e);
@@ -377,6 +387,7 @@ async function gossip(): Promise<void> {
                         const existing = peers.get(did);
                         peers.set(did, {
                             currentRevision: existing?.currentRevision || null,
+                            originalHash: existing?.originalHash || null,
                             lastSeen: new Date(),
                         });
                     }
@@ -397,21 +408,21 @@ async function gossip(): Promise<void> {
         const allPeers = [...peers.keys(), myDid].sort();
         const isScribe = allPeers[0] === myDid;
 
-        // Collect all peer revisions
-        const revisions = new Set<string>();
-        for (const { currentRevision } of peers.values()) {
-            if (currentRevision) revisions.add(currentRevision);
+        // Collect all peer revisions: hex → original binary hash (for pull calls)
+        const revisionMap = new Map<string, any>();
+        for (const { currentRevision, originalHash } of peers.values()) {
+            if (currentRevision) revisionMap.set(currentRevision, originalHash);
         }
+        const revisionHexes = new Set<string>(revisionMap.keys());
 
         const myRev = myRevision;
-        const sameRevisions = [...revisions].filter(r => r === myRev);
-        const differentRevisions = [...revisions].filter(r => r !== myRev);
+        const sameRevisions = [...revisionHexes].filter(r => r === myRev);
+        const differentRevisions = [...revisionHexes].filter(r => r !== myRev);
 
         // Notify on sync state change
         if (syncStateChangeCallback) {
             let state: string;
             if (peers.size === 0) {
-                // Solo agent - no peers to sync with, so we're synced
                 state = "Synced";
             } else if (differentRevisions.length > sameRevisions.length) {
                 state = "LinkLanguageInstalledButNotSynced";
@@ -423,28 +434,30 @@ async function gossip(): Promise<void> {
 
         // Fallback: if we have peers but no revisions from signals,
         // query the network for the latest revision (uses GetStrategy::Network)
-        if (peers.size > 0 && revisions.size === 0) {
+        if (peers.size > 0 && revisionHexes.size === 0) {
             try {
                 const latestRef: any = await hc.call(dnaRole, zomeName, "latest_revision", null);
-                if (latestRef && latestRef.hash && latestRef.hash !== myRev) {
-                    console.log("[p-diff-sync] gossip: network latest_revision=", JSON.stringify(latestRef.hash)?.substring(0, 100));
-                    revisions.add(latestRef.hash);
+                const latestHex = latestRef ? hashToHex(latestRef.hash) : null;
+                if (latestHex && latestHex !== myRev) {
+                    console.log("[p-diff-sync] gossip: network latest_revision=", latestHex?.substring(0, 40));
+                    revisionHexes.add(latestHex);
+                    revisionMap.set(latestHex, latestRef.hash);
                 }
             } catch (e) {
                 console.error("[p-diff-sync] latest_revision fallback error:", e);
             }
         }
 
-        console.log("[p-diff-sync] gossip: peers=", peers.size, "revisions=", revisions.size, "myRev=", typeof myRev, JSON.stringify(myRev)?.substring(0, 100));
+        console.log("[p-diff-sync] gossip: peers=", peers.size, "revisions=", revisionHexes.size, "myRev=", myRev?.substring(0, 40));
         // Pull any revisions we don't have
-        for (const hash of revisions) {
-            if (hash === myRev) continue;
+        for (const hex of revisionHexes) {
+            if (hex === myRev) continue;
+            const pullHash = revisionMap.get(hex) || hex;
             try {
-                const result: any = await hc.call(dnaRole, zomeName, "pull", { hash, is_scribe: isScribe });
+                const result: any = await hc.call(dnaRole, zomeName, "pull", { hash: pullHash, is_scribe: isScribe });
                 if (result?.current_revision) {
-                    myRevision = result.current_revision;
+                    myRevision = hashToHex(result.current_revision);
                 }
-                // After pulling, notify that we received new data
                 if (result?.diff && linkCallback) {
                     linkCallback(result.diff);
                 }
