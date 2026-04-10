@@ -134,10 +134,21 @@ export interface FlatLanguageExports {
  * Pure transform: grouped → flat.
  */
 export function defineLanguage(spec: LanguageSpec): FlatLanguageExports {
+    // `init`, `teardown`, `interactions`, and `handleHolochainSignal` must
+    // be bound to the spec object for the same reason every capability
+    // method below is: the runtime calls them as free functions
+    // (`mod.init()` inside the bootstrap, `language.interactions(addr)`
+    // inside the dispatcher, `globalThis.__handleHolochainSignal__(sig)`
+    // inside the Holochain signal bridge), and any `this` reference inside
+    // the author's implementation would otherwise bind to `mod` (the
+    // exports bag) rather than the author's class instance. The
+    // capability sub-objects below already .bind(parent) — the top-level
+    // hooks were missed, which broke class-style authors whose init
+    // called `this.something`.
     const out: FlatLanguageExports = {
         name: spec.name,
         version: spec.version,
-        init: spec.init,
+        init: spec.init.bind(spec),
     };
 
     if (typeof spec.isPublic === "boolean") {
@@ -145,8 +156,8 @@ export function defineLanguage(spec: LanguageSpec): FlatLanguageExports {
         out.isPublic = () => v;
     }
 
-    if (spec.teardown) out.teardown = spec.teardown;
-    if (spec.interactions) out.interactions = spec.interactions;
+    if (spec.teardown) out.teardown = spec.teardown.bind(spec);
+    if (spec.interactions) out.interactions = spec.interactions.bind(spec);
 
     // All capability methods below are bound to their parent capability
     // object. Authors frequently write method shorthand like
@@ -202,7 +213,9 @@ export function defineLanguage(spec: LanguageSpec): FlatLanguageExports {
         if (t.registerSignalCallback) out.telepresenceRegisterSignalCallback = t.registerSignalCallback.bind(t);
     }
 
-    if (spec.handleHolochainSignal) out.handleHolochainSignal = spec.handleHolochainSignal;
+    if (spec.handleHolochainSignal) {
+        out.handleHolochainSignal = spec.handleHolochainSignal.bind(spec);
+    }
 
     return out;
 }

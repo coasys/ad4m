@@ -307,8 +307,16 @@ impl LanguageRuntime {
             );
         }
 
+        // execute() wraps scripts in `return (expr)`, so a trailing
+        // semicolon on a statement-style expression produces a syntax
+        // error (`return (delete X;);`). Drop the semicolon and let the
+        // delete operator evaluate as the single expression inside the
+        // wrapper. The previous form silently failed at the JS layer
+        // (swallowed by `let _ =`), leaving the instance global dangling
+        // on the isolate — harmless today because the isolate tears
+        // down immediately after, but wrong on its face.
         let _ = self
-            .execute("delete globalThis.__ad4m_language_instance__;")
+            .execute("delete globalThis.__ad4m_language_instance__")
             .await;
 
         info!("Tore down language runtime: {}", self.language_address);
