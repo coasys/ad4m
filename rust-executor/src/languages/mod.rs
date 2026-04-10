@@ -2423,7 +2423,7 @@ impl LanguageController {
         let script = format!(
             r#"JSON.stringify(
                 (language.expressionAdapter && typeof language.expressionAdapter.get === "function")
-                    ? await language.expressionAdapter.get({})
+                    ? (await language.expressionAdapter.get({})) ?? null
                     : null
             )"#,
             escaped_addr
