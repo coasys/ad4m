@@ -2755,7 +2755,7 @@ impl LanguageController {
         // the descriptor list either way, so unknown names still error.
         let script = format!(
             r#"JSON.stringify(
-                await (async () => {{
+                (await (async () => {{
                     const raw = typeof language.interactions === "function"
                         ? language.interactions({})
                         : [];
@@ -2774,7 +2774,7 @@ impl LanguageController {
                         "Interaction " + {} + " is not executable: " +
                         "the language exposes neither interaction.execute() nor a top-level expressionInteract() export"
                     );
-                }})()
+                }})()) ?? null
             )"#,
             escaped_addr,
             escaped_name,
