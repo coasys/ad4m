@@ -365,9 +365,23 @@ async function initLanguage(contextJson) {
         const peersSetLocalFn = mod.peersSetLocal || mod.linkSyncSetLocalAgents;
 
         if (syncFn || commitFn) {
+            // Rust ALDK's `perspectiveCommit` returns `Result<(), JsValue>`
+            // which becomes JS `undefined` on success. The dispatcher in
+            // language.rs does `JSON.stringify(await linksAdapter.commit(...))`,
+            // and `JSON.stringify(undefined)` yields V8 `undefined`, which
+            // `to_rust_string_lossy` then renders as the literal string
+            // "undefined" — not valid JSON, so `parse_revision` explodes.
+            // Coerce undefined → null here so the dispatcher always sees
+            // a JSON-parseable result.
+            const wrappedCommit = commitFn
+                ? async (diff) => {
+                    const r = await commitFn(diff);
+                    return r === undefined ? null : r;
+                }
+                : undefined;
             language.linksAdapter = {
                 sync: syncFn,
-                commit: commitFn,
+                commit: wrappedCommit,
                 render: renderFn,
                 currentRevision: currentRevisionFn,
                 others: peersRemoteFn,
