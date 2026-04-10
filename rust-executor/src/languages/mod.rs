@@ -285,6 +285,18 @@ impl LanguageController {
 
     /// Unload a language and clean up
     pub async fn unload_language(&self, language_address: &str) -> Result<(), LanguageError> {
+        // Resolve system aliases up front — the runtimes map is keyed
+        // by the real content hash, so a caller passing "did" would
+        // otherwise silently no-op.
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(language_address)
+                .cloned()
+                .unwrap_or_else(|| language_address.to_string())
+        };
+        let language_address = resolved.as_str();
+
         let label = self.language_label(language_address).await;
         info!("Unloading language: {}", label);
 
