@@ -506,7 +506,26 @@ users at once.
 | `languageAddress()` | `string` |
 | `languageSettings()` | `string` (raw JSON; the JS ALDK re-parses to an object for JS-authored languages) |
 
-### 7.4 Event emission (the language pushes events to the runtime)
+### 7.4 Persistent key/value storage
+
+Per-Language scoped key/value persistence. The runtime namespaces every
+key by `languageAddress()`, so two Language instances cannot read each
+other's values even if they pick the same key. Values are arbitrary
+strings — Languages serialize structured data themselves.
+
+| Import | Parameters | Returns |
+|---|---|---|
+| `storageGet(key)` | `string` | `string \| null` |
+| `storagePut(key, value)` | `string, string` | `void` |
+| `storageDelete(key)` | `string` | `void` |
+| `storageListKeys(prefix?)` | `string?` | `string[]` (un-namespaced — the language address scope is stripped before return) |
+
+Storage operations are synchronous from the Language's perspective.
+The runtime is free to back them with any persistent store; Languages
+must not assume durability semantics beyond "writes are visible to
+subsequent reads from the same Language instance."
+
+### 7.5 Event emission (the language pushes events to the runtime)
 
 The runtime fans out internally to whoever is subscribed; the language
 doesn't track subscribers and doesn't hold callback references.
