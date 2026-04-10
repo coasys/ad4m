@@ -402,12 +402,8 @@ async function initLanguage(contextJson) {
                 render: renderFn,
                 currentRevision: currentRevisionFn,
                 others: peersRemoteFn,
-                // writable / public are legacy hints. `public` collapses into
-                // the lifecycle-level isPublic() (set below); `writable` is
-                // gone — the runtime infers writability from the presence of
-                // a perspectiveCommit export.
-                writable: mod.linkSyncWritable,
-                public: mod.linkSyncPublic || (mod.isPublic ? mod.isPublic : undefined),
+                // Phase B replaces callback registration with emit*
+                // imports. Until then, accept both old and new names.
                 addCallback: mod.linkSyncAddCallback,
                 removeCallback: mod.linkSyncRemoveCallback,
                 addSyncStateChangeCallback: mod.linkSyncAddSyncStateChangeCallback,
