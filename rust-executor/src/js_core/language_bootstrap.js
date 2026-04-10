@@ -332,14 +332,31 @@ async function initLanguage(contextJson) {
             version: readMaybeFn(mod.version, undefined),
         };
 
-        // Map adapter exports to adapter slots
-        if (mod.expressionCreate || mod.expressionGet) {
-            const putAdapter = mod.expressionCreate ? { createPublic: mod.expressionCreate } : undefined;
+        // Map adapter exports to adapter slots.
+        //
+        // ReadOnlyLanguage style: a language may expose only
+        // `expressionAddressOf` (no `expressionCreate`). The runtime's
+        // createExpression dispatcher inspects
+        // `putAdapter.createPublic` first and falls back to
+        // `putAdapter.addressOf` — BUT it reads `putAdapter.createPublic`
+        // unconditionally, so `putAdapter` MUST exist even in the
+        // addressOf-only case. The previous guard only built `putAdapter`
+        // when `expressionCreate` was present, leaving it undefined for
+        // read-only languages and crashing the dispatcher with
+        // "cannot read properties of undefined".
+        if (mod.expressionCreate || mod.expressionGet || mod.expressionAddressOf || mod.addressOf) {
             // Support both expressionAddressOf (design name) and addressOf (TypeScript name)
             const addressOf = mod.expressionAddressOf || mod.addressOf;
-            if (addressOf && putAdapter) {
-                // ReadOnlyLanguage style: putAdapter also has addressOf
-                putAdapter.addressOf = addressOf;
+            let putAdapter;
+            if (mod.expressionCreate) {
+                putAdapter = { createPublic: mod.expressionCreate };
+                if (addressOf) putAdapter.addressOf = addressOf;
+            } else if (addressOf) {
+                // ReadOnlyLanguage — only addressOf. The dispatcher's
+                // `createPublic ? ... : addressOf(...)` ternary needs
+                // `createPublic` to be a readable (falsy) value, so
+                // leave it undefined on an otherwise-populated object.
+                putAdapter = { addressOf };
             }
             language.expressionAdapter = {
                 putAdapter,
