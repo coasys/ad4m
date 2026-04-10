@@ -1598,6 +1598,18 @@ impl LanguageController {
         };
         let address = resolved.as_str();
 
+        // Drop Holochain signal handler entries BEFORE unloading the
+        // runtime. The central signal loop in lib.rs reads
+        // HOLOCHAIN_SIGNAL_HANDLERS to decide where to route, then spawns
+        // a task that calls `execute_on_language(lang_addr, …)`. If we
+        // unload the runtime first and drop the handler entries only at
+        // the end, every signal arriving in the gap gets routed onto the
+        // torn-down runtime and surfaces as a NotFound warning. Dropping
+        // the handlers up front means in-flight signals take the "no
+        // per-language runtime registered" debug branch instead — quieter
+        // and honest about the state of the system.
+        crate::js_core::languages_extension::drop_holochain_signal_handlers_for_language(address);
+
         // Teardown the per-language Rust runtime (if loaded there).
         // Errors here (e.g. runtime not loaded, teardown failure) must not abort
         // the rest of the removal – the JS version always continued to remove the
@@ -1640,14 +1652,6 @@ impl LanguageController {
             let mut aliases = self.language_aliases.lock().await;
             aliases.retain(|_alias, target| target != address);
         }
-
-        // Drop any Holochain cell-id → language_address entries that
-        // still route to this removed runtime. Without this, the
-        // central Holochain signal loop in lib.rs keeps trying to
-        // execute_on_language for a runtime that no longer exists,
-        // spamming NotFound warnings for every signal that arrives on
-        // the DNA cells this language had registered.
-        crate::js_core::languages_extension::drop_holochain_signal_handlers_for_language(address);
 
         Ok(())
     }
