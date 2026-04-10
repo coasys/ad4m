@@ -387,7 +387,7 @@ pub fn rest_router(state: AppState) -> Router {
             )
             // ── WebSocket (1 endpoint) ──
             .route("/ws/audio", get(audio_ws::audio_websocket))
-            // ── SSE Events (6 endpoints) ──
+            // ── SSE Events (7 endpoints) ──
             .route("/events/agent", get(events::agent_events))
             .route(
                 "/events/perspectives",
@@ -404,7 +404,7 @@ pub fn rest_router(state: AppState) -> Router {
             .route("/events/runtime", get(events::runtime_events))
             .route("/events/ai", get(events::ai_events))
             // ── Unified SSE (single connection for all events) ──
-            .route("/events", get(events::unified_events)),
+            .route("/events/unified", get(events::unified_events)),
     )
     // ── State + Middleware ──
     .with_state(state)

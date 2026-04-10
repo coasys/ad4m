@@ -78,7 +78,7 @@ export class RestClient {
 
     subscribe(path: string, callback: (data: any) => void): () => void {
         // Route all subscriptions through the unified /events endpoint
-        const unifiedPath = '/api/v1/events'
+        const unifiedPath = '/api/v1/events/unified'
         const url = `${this.baseUrl}${unifiedPath}`
         const tokenParam = this.token ? `token=${encodeURIComponent(this.token)}` : ''
         const separator = url.includes('?') ? '&' : '?'
