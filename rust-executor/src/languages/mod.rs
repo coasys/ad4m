@@ -2337,14 +2337,27 @@ impl LanguageController {
         // dispatcher must not crash when it is absent; return an empty
         // list instead so GraphQL callers see "no interactions" rather
         // than an opaque TypeError from deep inside the v8 isolate.
+        // Tolerate three degenerate but realistic interactions() shapes:
+        //   * absent (handled by the typeof guard)
+        //   * returns null/undefined — a buggy author ships a stub that
+        //     forgets to return [], and we'd crash the whole isolate on
+        //     `null.map`
+        //   * returns a Promise — the spec is sync, but JS authors who
+        //     reflexively mark everything `async` would produce a Promise
+        //     here; `Promise.prototype.map` is undefined → TypeError.
+        // Normalize all three into an empty array before mapping.
         let script = format!(
             r#"JSON.stringify(
-                (typeof language.interactions === "function"
-                    ? language.interactions({})
-                    : []
-                ).map(ic => ({{
-                    label: ic.label, name: ic.name, parameters: ic.parameters
-                }}))
+                await (async () => {{
+                    const raw = typeof language.interactions === "function"
+                        ? language.interactions({})
+                        : [];
+                    const list = await Promise.resolve(raw);
+                    if (!Array.isArray(list)) return [];
+                    return list.map(ic => ({{
+                        label: ic.label, name: ic.name, parameters: ic.parameters
+                    }}));
+                }})()
             )"#,
             escaped_addr
         );
@@ -2424,8 +2437,11 @@ impl LanguageController {
         let script = format!(
             r#"JSON.stringify(
                 await (async () => {{
-                    const list = typeof language.interactions === "function"
+                    const raw = typeof language.interactions === "function"
                         ? language.interactions({})
+                        : [];
+                    const list = Array.isArray(await Promise.resolve(raw))
+                        ? await Promise.resolve(raw)
                         : [];
                     const interaction = list.find(i => i.name === {});
                     if (!interaction) throw new Error("No interaction named " + {});
