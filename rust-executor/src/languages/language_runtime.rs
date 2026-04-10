@@ -212,7 +212,13 @@ impl LanguageRuntime {
 
     /// Register callbacks for links and telepresence adapters
     pub async fn register_callbacks(&self) -> Result<(bool, bool), String> {
-        let addr = &self.language_address;
+        // JSON-encode the language address so it embeds as a well-formed
+        // JS string literal. The previous `"{addr}"` interpolation would
+        // break (or inject JS) for any address containing a `"`, `\`, or
+        // newline — addresses are typically content hashes and safe in
+        // practice, but the defensive fix is trivial.
+        let addr_lit = serde_json::to_string(&self.language_address)
+            .map_err(|e| format!("failed to encode language address: {}", e))?;
 
         // Both scripts must tolerate two language shapes:
         //   * Legacy factory languages — register callbacks via
@@ -230,12 +236,12 @@ impl LanguageRuntime {
                 if (!(language && language.linksAdapter)) return false;
                 if (typeof language.linksAdapter.addCallback === "function") {{
                     language.linksAdapter.addCallback((diff) => {{
-                        LANGUAGE_CONTROLLER.perspectiveDiffReceived(diff, "{addr}");
+                        LANGUAGE_CONTROLLER.perspectiveDiffReceived(diff, {addr_lit});
                     }});
                 }}
                 if (typeof language.linksAdapter.addSyncStateChangeCallback === "function") {{
                     language.linksAdapter.addSyncStateChangeCallback((state) => {{
-                        LANGUAGE_CONTROLLER.syncStateChanged(state, "{addr}");
+                        LANGUAGE_CONTROLLER.syncStateChanged(state, {addr_lit});
                     }});
                 }}
                 return true;
@@ -252,7 +258,7 @@ impl LanguageRuntime {
                 if (!(language && language.telepresenceAdapter)) return false;
                 if (typeof language.telepresenceAdapter.registerSignalCallback === "function") {{
                     language.telepresenceAdapter.registerSignalCallback((signal, recipientDid) => {{
-                        LANGUAGE_CONTROLLER.telepresenceSignalReceived(signal, "{addr}", recipientDid);
+                        LANGUAGE_CONTROLLER.telepresenceSignalReceived(signal, {addr_lit}, recipientDid);
                     }});
                 }}
                 return true;
