@@ -214,22 +214,31 @@ impl LanguageRuntime {
     pub async fn register_callbacks(&self) -> Result<(bool, bool), String> {
         let addr = &self.language_address;
 
+        // Both scripts must tolerate two language shapes:
+        //   * Legacy factory languages — register callbacks via
+        //     addCallback / addSyncStateChangeCallback / registerSignalCallback.
+        //   * Flat languages (spec v1.0) — emit via the host imports
+        //     emitPerspectiveDiff / emitSyncStateChange / emitTelepresenceSignal,
+        //     which fan out through LANGUAGE_CONTROLLER directly. They
+        //     do NOT expose addCallback etc., so calling those methods
+        //     unconditionally TypeErrors and the whole register step fails.
+        // Guard each callback registration on `typeof === "function"`.
         let links_script = format!(
             r#"
             (function() {{
                 const language = globalThis.__ad4m_language_instance__;
-                if (language && language.linksAdapter) {{
+                if (!(language && language.linksAdapter)) return false;
+                if (typeof language.linksAdapter.addCallback === "function") {{
                     language.linksAdapter.addCallback((diff) => {{
                         LANGUAGE_CONTROLLER.perspectiveDiffReceived(diff, "{addr}");
                     }});
-                    if (language.linksAdapter.addSyncStateChangeCallback) {{
-                        language.linksAdapter.addSyncStateChangeCallback((state) => {{
-                            LANGUAGE_CONTROLLER.syncStateChanged(state, "{addr}");
-                        }});
-                    }}
-                    return true;
                 }}
-                return false;
+                if (typeof language.linksAdapter.addSyncStateChangeCallback === "function") {{
+                    language.linksAdapter.addSyncStateChangeCallback((state) => {{
+                        LANGUAGE_CONTROLLER.syncStateChanged(state, "{addr}");
+                    }});
+                }}
+                return true;
             }})()
             "#,
         );
@@ -240,13 +249,13 @@ impl LanguageRuntime {
             r#"
             (function() {{
                 const language = globalThis.__ad4m_language_instance__;
-                if (language && language.telepresenceAdapter) {{
+                if (!(language && language.telepresenceAdapter)) return false;
+                if (typeof language.telepresenceAdapter.registerSignalCallback === "function") {{
                     language.telepresenceAdapter.registerSignalCallback((signal, recipientDid) => {{
                         LANGUAGE_CONTROLLER.telepresenceSignalReceived(signal, "{addr}", recipientDid);
                     }});
-                    return true;
                 }}
-                return false;
+                return true;
             }})()
             "#,
         );
