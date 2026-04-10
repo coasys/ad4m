@@ -2086,14 +2086,33 @@ impl LanguageController {
 
         let escaped_addr =
             serde_json::to_string(expression_address).unwrap_or_else(|_| "\"\"".to_string());
+        // Three hardening fixes in one script:
+        //   1. `typeof === "function"` guard instead of a truthy check —
+        //      a language that exports `isImmutableExpression` as a
+        //      non-function truthy value (stub, object, constant) would
+        //      otherwise TypeError deep in v8 on the call site.
+        //   2. Wrap the awaited result in `JSON.stringify(...)` and parse
+        //      it Rust-side as a bool. A bare `true`/`false` does
+        //      round-trip through `to_rust_string_lossy`, but a language
+        //      that returns a truthy non-bool (e.g. the string "yes")
+        //      would silently be treated as false by a `== "true"`
+        //      compare — the JSON parse rejects it loudly instead.
+        //   3. Coerce any non-bool result to `false` in JS via `!!` so
+        //      `JSON.stringify` always yields a valid boolean literal.
         let script = format!(
-            r#"language.isImmutableExpression ? await language.isImmutableExpression({}) : false"#,
+            r#"JSON.stringify(
+                (typeof language.isImmutableExpression === "function")
+                    ? !!(await language.isImmutableExpression({}))
+                    : false
+            )"#,
             escaped_addr
         );
 
         let result = self.execute_on_language(lang_address, &script).await?;
-        let trimmed = result.trim();
-        Ok(trimmed == "true")
+        Ok(matches!(
+            serde_json::from_str::<bool>(result.trim()),
+            Ok(true)
+        ))
     }
 
     /// Get an expression from a language.
