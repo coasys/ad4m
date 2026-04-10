@@ -171,8 +171,14 @@ impl Ad4mMcpHandler {
         // See the matching comment in mutation_resolvers.rs publish path:
         // wrap in JSON.stringify and parse as JSON so addresses containing
         // quotes / backslashes / whitespace don't get silently corrupted.
+        // Coerce undefined/null to JSON null before stringifying for the
+        // same reason as the expressionAdapter.get sweep — a bare
+        // JSON.stringify(undefined) yields the JS value undefined, which
+        // to_rust_string_lossy then captures as the raw string
+        // "undefined" and from_str::<String> fails with a confusing
+        // type-mismatch instead of a clear "no address" error.
         let publish_script = format!(
-            r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.putAdapter.createPublic({}))"#,
+            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.putAdapter.createPublic({})) ?? null)"#,
             input_json
         );
 
@@ -181,7 +187,15 @@ impl Ad4mMcpHandler {
             .await
             .map_err(|e| format!("Failed to publish cloned language: {}", e))?;
 
-        let address: String = serde_json::from_str(address_raw.trim()).map_err(|e| {
+        let trimmed_addr_raw = address_raw.trim();
+        if trimmed_addr_raw == "null" || trimmed_addr_raw.is_empty() {
+            return Err(format!(
+                "Language language returned no address from expressionAdapter.putAdapter.createPublic when cloning template {} (got {:?})",
+                template_address, trimmed_addr_raw
+            ));
+        }
+
+        let address: String = serde_json::from_str(trimmed_addr_raw).map_err(|e| {
             format!(
                 "Failed to parse published cloned language address: {} ({:?})",
                 e, address_raw
