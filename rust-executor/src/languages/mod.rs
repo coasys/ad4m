@@ -1948,11 +1948,30 @@ impl LanguageController {
 
     /// Get installed languages, optionally filtered by a property name.
     pub async fn get_installed_languages(&self, filter: Option<&str>) -> Vec<LanguageRef> {
-        let runtimes = self.runtimes.lock().await;
-        let names = self.language_names.lock().await;
+        // Snapshot (address, handle) pairs and the name map under the
+        // respective locks, then DROP the locks before iterating.
+        // Previously both `runtimes` and `language_names` were held
+        // across `handle.execute(check_script).await` inside the loop,
+        // which serialized every other language operation in the
+        // process for the full duration of the filter pass and risked
+        // a self-deadlock if any filter path ever needed to re-enter
+        // the controller. Snapshot-then-iterate keeps the semantics
+        // identical without holding global locks across the channel
+        // round-trip.
+        let snapshot: Vec<(String, LanguageRuntimeHandle)> = {
+            let runtimes = self.runtimes.lock().await;
+            runtimes
+                .iter()
+                .map(|(addr, handle)| (addr.clone(), handle.clone()))
+                .collect()
+        };
+        let names: std::collections::HashMap<String, String> = {
+            let guard = self.language_names.lock().await;
+            guard.clone()
+        };
         let mut result = Vec::new();
 
-        for (address, handle) in runtimes.iter() {
+        for (address, handle) in snapshot.iter() {
             // Check filter if provided
             if let Some(prop) = filter {
                 // Escape the filter name as a proper JS string literal. A
