@@ -510,6 +510,21 @@ async function initLanguage(contextJson) {
         if (mod.interactions) {
             language.interactions = mod.interactions;
         }
+        // expression_interact fallback path (spec §5.7). Rust ALDK
+        // languages cannot attach callable `execute` functions onto
+        // interaction descriptors because the descriptor list crosses
+        // the wasm-bindgen boundary as plain JSON — callable members
+        // are lost on the way across. They therefore export a top-level
+        // `expressionInteract(address, name, parametersJson)` function
+        // that the dispatcher in languages/mod.rs falls back to when
+        // `interaction.execute` is absent. Without this mapping, the
+        // dispatcher reads `language.expressionInteract` as undefined
+        // and throws "Interaction X is not executable" for every Rust
+        // ALDK interaction, even when the language correctly implements
+        // the export.
+        if (typeof mod.expressionInteract === "function") {
+            language.expressionInteract = mod.expressionInteract;
+        }
 
         // Holochain signal bridge — `rust-executor/src/lib.rs` dispatches
         // signals by evaluating `await globalThis.__handleHolochainSignal__(args)`
