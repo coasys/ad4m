@@ -51,3 +51,48 @@ extern "C" {
     #[wasm_bindgen(js_name = "emitSignal")]
     pub fn emit_signal(data: JsValue);
 }
+
+// ---------------------------------------------------------------------------
+// Safe typed wrappers around the JsValue-shaped emit imports.
+//
+// `serde_wasm_bindgen::to_value` defaults to serializing Rust maps and
+// `serde_json::Value::Object` as JS `Map` objects. The runtime dispatcher
+// then runs `JSON.stringify(...)` on the result and gets `"{}"` because
+// `Map` is not enumerable as own properties — every structured payload is
+// silently lost.
+//
+// All cross-boundary serialization in this crate goes through `__serde::to_js`
+// which sets `serialize_maps_as_objects(true)`. Expose typed wrappers for
+// the emit imports so language authors don't have to know this detail and
+// can't accidentally pass a `serde_wasm_bindgen::to_value` JsValue.
+// ---------------------------------------------------------------------------
+
+use serde::Serialize;
+
+/// Emit a perspective diff. Type-safe wrapper around `emit_perspective_diff`.
+/// Serializes the diff via the maps-as-objects serializer so the runtime
+/// dispatcher actually receives the diff data instead of an empty object.
+pub fn emit_perspective_diff_typed<T: Serialize + ?Sized>(diff: &T) {
+    if let Ok(v) = crate::__serde::to_js(diff) {
+        emit_perspective_diff(v);
+    }
+}
+
+/// Emit a telepresence signal. Type-safe wrapper around
+/// `emit_telepresence_signal` — see `emit_perspective_diff_typed` for the
+/// reason this exists.
+pub fn emit_telepresence_signal_typed<T: Serialize + ?Sized>(
+    payload: &T,
+    recipient_did: Option<String>,
+) {
+    if let Ok(v) = crate::__serde::to_js(payload) {
+        emit_telepresence_signal(v, recipient_did);
+    }
+}
+
+/// Emit an arbitrary signal. Type-safe wrapper around `emit_signal`.
+pub fn emit_signal_typed<T: Serialize + ?Sized>(data: &T) {
+    if let Ok(v) = crate::__serde::to_js(data) {
+        emit_signal(v);
+    }
+}
