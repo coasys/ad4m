@@ -24,7 +24,7 @@ const result = await esbuild.build({
     },
     ...denoPlugins()
   ],
-  entryPoints: ['index.ts'],
+  entryPoints: ['index.flat.ts'],
   outfile: 'build/bundle.js',
   bundle: true,
   platform: 'node',
