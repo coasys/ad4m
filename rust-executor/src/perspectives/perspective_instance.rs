@@ -3361,15 +3361,56 @@ impl PerspectiveInstance {
             }
         };
 
+        // Single-pass substitution.
+        //
+        // The previous implementation did a sequential `String::replace`
+        // for each parameter in order, which cascaded: a replacement's
+        // output could contain another parameter's name and get
+        // re-substituted in the next iteration, silently corrupting data
+        // whenever a user-provided value happened to match a later
+        // parameter name. It was also order-dependent for parameters
+        // whose names were prefixes of each other.
+        //
+        // Instead, scan the input once left-to-right. At each position,
+        // try each parameter name (longest first, so that e.g. "foo_bar"
+        // wins over "foo" when both exist) and if one matches, emit its
+        // value and skip past the name without re-scanning the emitted
+        // text. Otherwise advance one UTF-8 character.
+        let mut sorted_params: Vec<&Parameter> = parameters.iter().collect();
+        sorted_params.sort_by_key(|p| std::cmp::Reverse(p.name.len()));
         let replace_parameters = |input: Option<String>| -> Option<String> {
-            if let Some(mut output) = input {
-                for parameter in &parameters {
-                    output = output.replace(&parameter.name, &jsvalue_to_string(&parameter.value));
-                }
-                Some(output)
-            } else {
-                input
+            let input = input?;
+            if sorted_params.is_empty() {
+                return Some(input);
             }
+            let mut output = String::with_capacity(input.len());
+            let bytes = input.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let mut matched = false;
+                for p in &sorted_params {
+                    if p.name.is_empty() {
+                        continue;
+                    }
+                    let name_bytes = p.name.as_bytes();
+                    if bytes[i..].starts_with(name_bytes) {
+                        output.push_str(&jsvalue_to_string(&p.value));
+                        i += name_bytes.len();
+                        matched = true;
+                        break;
+                    }
+                }
+                if !matched {
+                    let ch_len = input[i..]
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                    output.push_str(&input[i..i + ch_len]);
+                    i += ch_len;
+                }
+            }
+            Some(output)
         };
 
         for command in commands.iter() {
