@@ -53,21 +53,26 @@ pub fn rest_router(state: AppState) -> Router {
         ]);
 
     // Root info endpoint
-    let root = Router::new().route(
-        "/",
-        get(|| async {
-            Json(json!({
-                "name": "AD4M Executor",
-                "version": *crate::globals::AD4M_VERSION,
-                "api": "/api/v1",
-                "endpoints": [
-                    "/api/v1/agent", "/api/v1/languages", "/api/v1/perspectives",
-                    "/api/v1/neighbourhoods", "/api/v1/expressions", "/api/v1/runtime",
-                    "/api/v1/users", "/api/v1/hosting", "/api/v1/ai", "/api/v1/events"
-                ]
-            }))
-        }),
-    );
+    let root = Router::new()
+        .route(
+            "/",
+            get(|| async {
+                Json(json!({
+                    "name": "AD4M Executor",
+                    "version": *crate::globals::AD4M_VERSION,
+                    "api": "/api/v1",
+                    "endpoints": [
+                        "/api/v1/agent", "/api/v1/languages", "/api/v1/perspectives",
+                        "/api/v1/neighbourhoods", "/api/v1/expressions", "/api/v1/runtime",
+                        "/api/v1/users", "/api/v1/hosting", "/api/v1/ai", "/api/v1/events"
+                    ]
+                }))
+            }),
+        )
+        .route(
+            "/health",
+            get(|| async { Json(json!({"status": "ok"})) }),
+        );
 
     root.nest(
         "/api/v1",
