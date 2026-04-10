@@ -607,19 +607,20 @@ the target state.
 
 ## Phase F — Final reconciliation
 
-> **Execution status (2026-04-10):** In progress.
-> - TODO/FIXME audit: No migration-introduced TODOs found. All existing
->   TODOs are pre-migration (SurrealDB migration, AI service, Prolog).
-> - Spec §8 (signal routing): Fixed handleHolochainSignal signature
->   mismatch (was 3-arg in spec, 1-arg in impl). Added WIT divergence note.
-> - Spec §7.5 (emitSignal): Documented PerspectiveExpression-only limitation.
-> - Spec §7.2 (holochainCallAsync): Documented ALDK single-call convenience
->   wrapper divergence from spec's batch form.
-> - Spec §9–10 authoring examples: §9.1 JS and §10.1 Rust examples fixed
->   to match actual ALDK APIs shipped.
-> - Remaining: user-facing docs update (`docs-src/pages/languages.mdx`),
->   DM runtime-divergence note, full `pnpm build && pnpm test && cargo test`
->   verification, PR description draft.
+> **Execution status (2026-04-10):** Mostly complete.
+> - TODO/FIXME audit: No migration-introduced TODOs found.
+> - Spec reconciliation: §7.2 holochainCallAsync, §7.5 emitSignal,
+>   §8 handleHolochainSignal, §5.4 DM divergence — all documented.
+> - Spec §9–10 authoring examples fixed to match shipped ALDK APIs.
+> - User-facing docs: `docs-src/pages/languages.mdx` updated with
+>   v1.0 migration notice.
+> - Core types: `FlatLanguageBase.init()` fixed (no args),
+>   `FlatTelepresence` and `FlatDirectMessageLanguage` interfaces added,
+>   `LanguageInitContext` marked deprecated.
+> - Build verification: `core`, `ad4m-ldk/js`, `ad4m-ldk/rust`, and
+>   `ad4m-executor` (cargo check) all pass clean.
+> - Remaining: full `pnpm build && pnpm test && cargo test` end-to-end,
+>   PR description draft.
 
 - Grep the codebase for any `TODO` / `XXX` / `FIXME` introduced during
   the migration. Resolve or document.
