@@ -16,7 +16,7 @@
  *    - `globalThis.__agentProxy__` — agent identity & signing
  *    - `globalThis.__holochainDelegate__` — Holochain DNA registration & zome calls
  *    - `globalThis.__ad4mSignal__` — emit signals to the signal bus
- * 3. Export capability functions directly (expressionCreate, linkSyncSync, etc.)
+ * 3. Export capability functions directly (perspectiveCommit, perspectiveSyncSync, etc.)
  * 4. Export `teardown()` to clean up when the language is unloaded
  * 
  * That's it. No adapter objects. No factory. Just functions.
@@ -442,7 +442,7 @@ const lang = {
 export default lang;
 
 // =============================================================================
-// PerspectiveDiff — returned by linkSyncSync()
+// PerspectiveDiff — returned by perspectiveSyncSync()
 // =============================================================================
 
 class PerspectiveDiff {
