@@ -69,22 +69,46 @@ export class RestClient {
         return res.json() as Promise<T>
     }
 
+    // Shared EventSource instances keyed by full URL to avoid exhausting
+    // the browser's per-origin HTTP/1.1 connection limit (6 in Chrome).
+    private _eventSources = new Map<string, {
+        es: InstanceType<typeof EventSource>,
+        callbacks: Set<(data: any) => void>
+    }>()
+
     subscribe(path: string, callback: (data: any) => void): () => void {
         const url = `${this.baseUrl}${path}`
         const tokenParam = this.token ? `token=${encodeURIComponent(this.token)}` : ''
         const separator = url.includes('?') ? '&' : '?'
         const fullUrl = tokenParam ? `${url}${separator}${tokenParam}` : url
-        const eventSource = new EventSource(fullUrl)
-        eventSource.onmessage = (event) => {
-            try {
-                callback(JSON.parse(event.data))
-            } catch (e) {
-                console.error('Error parsing SSE data:', e)
+
+        let entry = this._eventSources.get(fullUrl)
+        if (!entry) {
+            const es = new EventSource(fullUrl)
+            entry = { es, callbacks: new Set() }
+            const ref = entry          // stable reference for closure
+            es.onmessage = (event) => {
+                let parsed: any
+                try { parsed = JSON.parse(event.data) } catch (e) {
+                    console.error('Error parsing SSE data:', e)
+                    return
+                }
+                for (const cb of ref.callbacks) cb(parsed)
+            }
+            es.onerror = (e) => { console.error('SSE error:', e) }
+            this._eventSources.set(fullUrl, entry)
+        }
+
+        entry.callbacks.add(callback)
+
+        return () => {
+            const e = this._eventSources.get(fullUrl)
+            if (!e) return
+            e.callbacks.delete(callback)
+            if (e.callbacks.size === 0) {
+                e.es.close()
+                this._eventSources.delete(fullUrl)
             }
         }
-        eventSource.onerror = (e) => {
-            console.error('SSE error:', e)
-        }
-        return () => eventSource.close()
     }
 }
