@@ -2338,6 +2338,44 @@ impl LanguageController {
         let escaped_addr =
             serde_json::to_string(&expression_address).unwrap_or_else(|_| "\"\"".to_string());
         let escaped_name = serde_json::to_string(&call.name).unwrap_or_else(|_| "\"\"".to_string());
+
+        // `parameters_stringified` crosses the GraphQL boundary as a raw
+        // string and is interpolated into a JS script below. Previously
+        // the field was trusted as "a JS argument expression" and spliced
+        // in unchecked, which was a script-injection vector: a caller
+        // could submit `"); await evil(); ("` to break out of the call
+        // context and run arbitrary JS inside the language isolate.
+        //
+        // Restrict the accepted shape to "valid JSON value" before
+        // interpolation. JSON is a strict subset of JS expressions, so
+        // any string that parses cleanly as JSON is safe to splice into
+        // a JS expression position, and a rejection error here gives the
+        // GraphQL caller a clear signal that the shape is wrong.
+        //
+        // The canonical shape is a single JSON object/array that the
+        // language's execute/expressionInteract receives as its sole
+        // argument — matching how JS/Rust ALDK authors already build
+        // the field today.
+        let validated_params: String = {
+            let trimmed = call.parameters_stringified.trim();
+            if trimmed.is_empty() {
+                // Empty string → pass `undefined` so the callee still
+                // receives an explicit single argument slot.
+                "undefined".to_string()
+            } else {
+                match serde_json::from_str::<JsonValue>(trimmed) {
+                    Ok(v) => serde_json::to_string(&v).unwrap_or_else(|_| "null".to_string()),
+                    Err(e) => {
+                        return Err(LanguageError::SerializationError {
+                            message: format!(
+                                "interaction parameters_stringified must be a JSON value: {}",
+                                e
+                            ),
+                        });
+                    }
+                }
+            }
+        };
         // Two execution paths, in priority order:
         //   1. JS-authored languages may attach a callable `execute`
         //      directly on the interaction object returned from
@@ -2371,10 +2409,10 @@ impl LanguageController {
             escaped_addr,
             escaped_name,
             escaped_name,
-            call.parameters_stringified,
+            validated_params,
             escaped_addr,
             escaped_name,
-            call.parameters_stringified,
+            validated_params,
             escaped_name,
         );
 
