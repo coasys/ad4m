@@ -560,7 +560,7 @@ impl LanguageController {
         // regardless of any quote/backslash/newline in the input.
         let addr_lit = serde_json::to_string(&address).unwrap_or_else(|_| "\"\"".to_string());
         let meta_script = format!(
-            r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get({}))"#,
+            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.get({})) ?? null)"#,
             addr_lit
         );
 
@@ -869,7 +869,7 @@ impl LanguageController {
             // Fetch from language language with retry logic (up to 10 retries)
             let language_lit = serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
             let meta_script = format!(
-                r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get({}))"#,
+                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.get({})) ?? null)"#,
                 language_lit
             );
 
@@ -1407,7 +1407,7 @@ impl LanguageController {
         // Get the language expression (meta)
         let source_language_hash_lit = serde_json::to_string(&source_language_hash).unwrap_or_else(|_| "\"\"".to_string());
         let meta_script = format!(
-            r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get({}))"#,
+            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.get({})) ?? null)"#,
             source_language_hash_lit
         );
         let meta_result = self
@@ -1641,7 +1641,7 @@ impl LanguageController {
         // Fetch language expression (meta) from language language
         let resolved_address_lit = serde_json::to_string(&resolved_address).unwrap_or_else(|_| "\"\"".to_string());
         let meta_script = format!(
-            r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get({}))"#,
+            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.get({})) ?? null)"#,
             resolved_address_lit
         );
         let meta_result = self
@@ -1802,7 +1802,7 @@ impl LanguageController {
             // Get source language meta and verify its author is trusted
             let template_source_language_address_lit = serde_json::to_string(&template_source_language_address).unwrap_or_else(|_| "\"\"".to_string());
             let source_meta_script = format!(
-                r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get({}))"#,
+                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.get({})) ?? null)"#,
                 template_source_language_address_lit
             );
             let source_meta_result = self
@@ -2003,7 +2003,7 @@ impl LanguageController {
 
         let addr_lit = serde_json::to_string(&address).unwrap_or_else(|_| "\"\"".to_string());
         let meta_script = format!(
-            r#"JSON.stringify(await globalThis.__ad4m_language_instance__.expressionAdapter.get({}))"#,
+            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionAdapter.get({})) ?? null)"#,
             addr_lit
         );
 
