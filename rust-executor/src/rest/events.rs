@@ -221,3 +221,99 @@ pub async fn ai_events(
     let merged = stream::select(s1, s2);
     Sse::new(merged).keep_alive(KeepAlive::default())
 }
+
+/// GET /events — Unified SSE endpoint that merges ALL event topics into a
+/// single HTTP connection.  This avoids exhausting the browser's per-origin
+/// connection limit (6 in Chrome) when multiple SSE streams are needed.
+///
+/// Each event is a JSON object with a `"type"` field identifying the topic.
+/// Perspective-specific events include `"perspectiveUuid"` for client-side filtering.
+pub async fn unified_events(
+    State(_state): State<AppState>,
+    _auth: AuthContext,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let pubsub = get_global_pubsub().await;
+
+    // Agent events
+    let status_rx = pubsub.subscribe(&AGENT_STATUS_CHANGED_TOPIC).await;
+    let apps_rx = pubsub.subscribe(&APPS_CHANGED).await;
+    let agent_updated_rx = pubsub.subscribe(&AGENT_UPDATED_TOPIC).await;
+    let hosting_rx = pubsub.subscribe(&HOSTING_USER_INFO_CHANGED_TOPIC).await;
+
+    // Perspective lifecycle events
+    let persp_added_rx = pubsub.subscribe(&PERSPECTIVE_ADDED_TOPIC).await;
+    let persp_removed_rx = pubsub.subscribe(&PERSPECTIVE_REMOVED_TOPIC).await;
+    let persp_updated_rx = pubsub.subscribe(&PERSPECTIVE_UPDATED_TOPIC).await;
+    let sync_rx = pubsub.subscribe(&PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC).await;
+
+    // Perspective link events (all perspectives, no filtering)
+    let link_added_rx = pubsub.subscribe(&PERSPECTIVE_LINK_ADDED_TOPIC).await;
+    let link_removed_rx = pubsub.subscribe(&PERSPECTIVE_LINK_REMOVED_TOPIC).await;
+    let link_updated_rx = pubsub.subscribe(&PERSPECTIVE_LINK_UPDATED_TOPIC).await;
+
+    // Neighbourhood signals (all neighbourhoods)
+    let signal_rx = pubsub.subscribe(&NEIGHBOURHOOD_SIGNAL_TOPIC).await;
+
+    // Runtime events
+    let msg_rx = pubsub.subscribe(&RUNTIME_MESSAGED_RECEIVED_TOPIC).await;
+    let notif_rx = pubsub
+        .subscribe(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC)
+        .await;
+    let exc_rx = pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await;
+
+    // AI events
+    let trans_rx = pubsub.subscribe(&AI_TRANSCRIPTION_TEXT_TOPIC).await;
+    let loading_rx = pubsub.subscribe(&AI_MODEL_LOADING_STATUS).await;
+
+    // Convert each receiver into a typed stream
+    macro_rules! typed_stream {
+        ($rx:expr, $ty:expr) => {
+            BroadcastStream::new($rx)
+                .filter_map(|r| async { r.ok() })
+                .map(move |msg| Ok(Event::default().data(wrap_event($ty, &msg))))
+        };
+    }
+
+    let s_status = typed_stream!(status_rx, "agent-status-changed");
+    let s_apps = typed_stream!(apps_rx, "apps-changed");
+    let s_agent_updated = typed_stream!(agent_updated_rx, "agent-updated");
+    let s_hosting = typed_stream!(hosting_rx, "hosting-user-info-changed");
+
+    let s_persp_added = typed_stream!(persp_added_rx, "perspective-added");
+    let s_persp_removed = typed_stream!(persp_removed_rx, "perspective-removed");
+    let s_persp_updated = typed_stream!(persp_updated_rx, "perspective-updated");
+    let s_sync = typed_stream!(sync_rx, "sync-state-change");
+
+    let s_link_added = typed_stream!(link_added_rx, "link-added");
+    let s_link_removed = typed_stream!(link_removed_rx, "link-removed");
+    let s_link_updated = typed_stream!(link_updated_rx, "link-updated");
+
+    let s_signal = typed_stream!(signal_rx, "signal");
+
+    let s_msg = typed_stream!(msg_rx, "message-received");
+    let s_notif = typed_stream!(notif_rx, "notification-triggered");
+    let s_exc = typed_stream!(exc_rx, "exception-occurred");
+
+    let s_trans = typed_stream!(trans_rx, "transcription-text");
+    let s_loading = typed_stream!(loading_rx, "model-loading-status");
+
+    // Merge all streams using a balanced binary tree of stream::select
+    let agent = stream::select(
+        stream::select(s_status, s_apps),
+        stream::select(s_agent_updated, s_hosting),
+    );
+    let persp = stream::select(
+        stream::select(s_persp_added, s_persp_removed),
+        stream::select(s_persp_updated, s_sync),
+    );
+    let links = stream::select(s_link_added, stream::select(s_link_removed, s_link_updated));
+    let runtime = stream::select(s_msg, stream::select(s_notif, s_exc));
+    let ai = stream::select(s_trans, s_loading);
+
+    let top = stream::select(
+        stream::select(agent, persp),
+        stream::select(stream::select(links, s_signal), stream::select(runtime, ai)),
+    );
+
+    Sse::new(top).keep_alive(KeepAlive::default())
+}

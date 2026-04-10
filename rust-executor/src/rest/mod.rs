@@ -402,7 +402,9 @@ pub fn rest_router(state: AppState) -> Router {
                 get(events::neighbourhood_signal_events),
             )
             .route("/events/runtime", get(events::runtime_events))
-            .route("/events/ai", get(events::ai_events)),
+            .route("/events/ai", get(events::ai_events))
+            // ── Unified SSE (single connection for all events) ──
+            .route("/events", get(events::unified_events)),
     )
     // ── State + Middleware ──
     .with_state(state)

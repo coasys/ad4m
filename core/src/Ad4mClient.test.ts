@@ -356,6 +356,36 @@ beforeAll(async () => {
     app.put('/api/v1/runtime/hosting/hot-wallet-address', (_req, res) => res.json(true));
     app.post('/api/v1/runtime/hosting/request-payment', (_req, res) => res.json({ paymentUrl: 'https://pay.test' }));
 
+    // ── Missing routes (client paths that differ from original stubs) ──
+    app.post('/api/v1/agent/generate', (_req, res) => res.json({
+        did: 'did:test:generated',
+        didDocument: 'doc',
+        isInitialized: true,
+        isUnlocked: true
+    }));
+    app.put('/api/v1/agent/trusted', (_req, res) => res.json(['did:trusted:1', 'did:trusted:2']));
+    app.post('/api/v1/perspectives/:uuid/query', (_req, res) => res.json(JSON.stringify([{X: 'test'}])));
+    app.get('/api/v1/neighbourhoods/:uuid/has-telepresence', (_req, res) => res.json(true));
+    app.post('/api/v1/expressions/many', (_req, res) => res.json([
+        { author: 'did:test:1', timestamp: '2023-01-01', data: { type: 'test' }, language: { address: 'lang://test' }, proof: { valid: true } }
+    ]));
+    app.get('/api/v1/expressions/:url', (req, res) => {
+        if (req.query.raw === 'true') return res.json('raw-expression-data');
+        res.json({ author: 'did:test:123', timestamp: '2024-01-01', data: '{"content":"hello"}', language: { address: 'lang://test' }, proof: { valid: true } });
+    });
+    app.get('/api/v1/expressions/:url/interactions', (_req, res) => res.json([
+        { label: 'interact1', name: 'doSomething', parameters: [] }
+    ]));
+    app.post('/api/v1/expressions/:url/interact', (_req, res) => res.json('interaction-result'));
+    app.put('/api/v1/runtime/friends', (_req, res) => res.json(['did:friend:1', 'did:friend:2', 'did:friend:3']));
+    app.get('/api/v1/runtime/friends/:did', (req, res) => res.json({
+        author: req.params.did, timestamp: '2023-01-01', data: JSON.stringify({ recipe_name: 'test' }), proof: { valid: true }
+    }));
+    app.get('/api/v1/users/multi-user-enabled', (_req, res) => res.json(false));
+    app.put('/api/v1/users/multi-user-enabled', (_req, res) => res.json(true));
+    app.put('/api/v1/ai/models/:modelId/default', (_req, res) => res.json(true));
+    app.get('/api/v1/hosting', (_req, res) => res.json({ email: 'test@test.com' }));
+
     // ===================== SSE EVENTS (stub - not testing SSE) =====================
     // SSE endpoints return 404 to avoid hanging; subscribe=false prevents client from connecting
     app.get('/api/v1/events/*', (_req, res) => res.status(404).end());

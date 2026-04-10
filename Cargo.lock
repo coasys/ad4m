@@ -148,6 +148,7 @@ dependencies = [
  "signal-hook",
  "sodoken 0.1.0",
  "sys_traits",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls 0.26.4",
