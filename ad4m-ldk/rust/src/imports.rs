@@ -96,3 +96,46 @@ pub fn emit_signal_typed<T: Serialize + ?Sized>(data: &T) {
         emit_signal(v);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Typed wrappers for the remaining JsValue-shaped imports.
+//
+// Same reason as above: language authors must route every cross-boundary
+// Serialize through `__serde::to_js` so maps serialize as objects. These
+// wrappers cover the rest of the §7 surface that still takes raw JsValue.
+// ---------------------------------------------------------------------------
+
+/// Register DNAs with the Holochain delegate. Type-safe wrapper around
+/// `holochain_register_dnas`. Returns the resulting AppInfo list as a
+/// JsValue (callers typically deserialize it via `__serde::from_js`).
+pub fn holochain_register_dnas_typed<T: Serialize + ?Sized>(dnas: &T) -> JsValue {
+    match crate::__serde::to_js(dnas) {
+        Ok(v) => holochain_register_dnas(v),
+        Err(_) => JsValue::NULL,
+    }
+}
+
+/// Call a zome function. Type-safe wrapper around `holochain_call` — only
+/// the params payload needs the maps-as-objects serializer; the three
+/// identifier strings go through unchanged.
+pub fn holochain_call_typed<T: Serialize + ?Sized>(
+    dna_nick: &str,
+    zome: &str,
+    fn_name: &str,
+    params: &T,
+) -> JsValue {
+    match crate::__serde::to_js(params) {
+        Ok(v) => holochain_call(dna_nick, zome, fn_name, v),
+        Err(_) => JsValue::NULL,
+    }
+}
+
+/// Create a signed expression. Type-safe wrapper around
+/// `agent_create_signed_expression` — ensures the wrapped data crosses
+/// the boundary as a plain object, not a Map.
+pub fn agent_create_signed_expression_typed<T: Serialize + ?Sized>(data: &T) -> JsValue {
+    match crate::__serde::to_js(data) {
+        Ok(v) => agent_create_signed_expression(v),
+        Err(_) => JsValue::NULL,
+    }
+}
