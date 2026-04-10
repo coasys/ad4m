@@ -450,7 +450,7 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
             axum_server::bind_rustls(SocketAddr::from(([0, 0, 0, 0], tls_port)), rustls_config)
                 .serve(tls_app.into_make_service())
                 .await
-                .unwrap();
+                .unwrap_or_else(|e| log::error!("TLS server error: {}", e));
         });
 
         let listener =

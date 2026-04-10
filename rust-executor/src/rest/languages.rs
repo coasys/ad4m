@@ -271,7 +271,9 @@ pub async fn apply_template_and_publish(
 
     let language_language_address = {
         let sys = controller.system_addresses.lock().await;
-        sys.language_language.clone().unwrap()
+        sys.language_language
+            .clone()
+            .ok_or_else(|| ApiError::Internal("Language language address not available".into()))?
     };
 
     let input_json = serde_json::to_string(&input)
