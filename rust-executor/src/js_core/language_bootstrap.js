@@ -520,6 +520,13 @@ async function initLanguage(contextJson) {
         if (typeof mod.handleHolochainSignal === "function") {
             language.handleHolochainSignal = mod.handleHolochainSignal;
             globalThis.__handleHolochainSignal__ = async (signal) => {
+                // Convert __binary markers to Uint8Array, same as the default
+                // signal handler does (line 143-144 above). Without this,
+                // flat languages receive raw {__binary:[...]} objects instead
+                // of Uint8Array for Holochain hashes and binary data.
+                if (signal && signal.payload) {
+                    signal.payload = convertBinaryMarkers(signal.payload);
+                }
                 return await mod.handleHolochainSignal(signal);
             };
         }
