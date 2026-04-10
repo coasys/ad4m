@@ -86,7 +86,7 @@ macro_rules! ad4m_language {
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "interactions")]
         pub fn __ad4m_interactions(address: String) -> ::wasm_bindgen::JsValue {
             let v = __ad4m_with(|l| <$lang as $crate::traits::Language>::interactions(l, address));
-            ::serde_wasm_bindgen::to_value(&v).unwrap_or(::wasm_bindgen::JsValue::NULL)
+            $crate::__serde::to_js(&v).unwrap_or(::wasm_bindgen::JsValue::NULL)
         }
 
         /// Execute a named interaction. Spec §5.7 — the runtime calls
@@ -106,7 +106,7 @@ macro_rules! ad4m_language {
                 <$lang as $crate::traits::Language>::expression_interact(l, address, name, params)
             })?;
             Ok(match result {
-                Some(v) => ::serde_wasm_bindgen::to_value(&v)
+                Some(v) => $crate::__serde::to_js(&v)
                     .map_err($crate::errors::LanguageError::from)?,
                 None => ::wasm_bindgen::JsValue::NULL,
             })
@@ -138,7 +138,7 @@ macro_rules! __ad4m_cap {
             address: String,
         ) -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue> {
             let exp = __ad4m_with(|l| <$lang as $crate::traits::ExpressionCapability>::expression_get(l, address))?;
-            Ok(::serde_wasm_bindgen::to_value(&exp).map_err($crate::errors::LanguageError::from)?)
+            Ok($crate::__serde::to_js(&exp).map_err($crate::errors::LanguageError::from)?)
         }
     };
 
@@ -160,14 +160,14 @@ macro_rules! __ad4m_cap {
             -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue>
         {
             let d = __ad4m_with(|l| <$lang as $crate::traits::PerspectiveSyncCapability>::perspective_sync_sync(l))?;
-            Ok(::serde_wasm_bindgen::to_value(&d).map_err($crate::errors::LanguageError::from)?)
+            Ok($crate::__serde::to_js(&d).map_err($crate::errors::LanguageError::from)?)
         }
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "perspectiveSyncRender")]
         pub fn __ad4m_perspective_sync_render()
             -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue>
         {
             let p = __ad4m_with(|l| <$lang as $crate::traits::PerspectiveSyncCapability>::perspective_sync_render(l))?;
-            Ok(::serde_wasm_bindgen::to_value(&p).map_err($crate::errors::LanguageError::from)?)
+            Ok($crate::__serde::to_js(&p).map_err($crate::errors::LanguageError::from)?)
         }
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "perspectiveSyncCurrentRevision")]
         pub fn __ad4m_perspective_sync_current_revision()
@@ -185,7 +185,7 @@ macro_rules! __ad4m_cap {
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "perspectiveQuerySupportedKinds")]
         pub fn __ad4m_perspective_query_supported_kinds() -> ::wasm_bindgen::JsValue {
             let v = __ad4m_with(|l| <$lang as $crate::traits::PerspectiveQueryCapability>::perspective_query_supported_kinds(l));
-            ::serde_wasm_bindgen::to_value(&v).unwrap_or(::wasm_bindgen::JsValue::NULL)
+            $crate::__serde::to_js(&v).unwrap_or(::wasm_bindgen::JsValue::NULL)
         }
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "perspectiveQueryRun")]
         pub fn __ad4m_perspective_query_run(
@@ -194,7 +194,7 @@ macro_rules! __ad4m_cap {
             let r: $crate::types::QueryRequest = ::serde_wasm_bindgen::from_value(request)
                 .map_err($crate::errors::LanguageError::from)?;
             let resp = __ad4m_with(|l| <$lang as $crate::traits::PerspectiveQueryCapability>::perspective_query_run(l, r))?;
-            Ok(::serde_wasm_bindgen::to_value(&resp).map_err($crate::errors::LanguageError::from)?)
+            Ok($crate::__serde::to_js(&resp).map_err($crate::errors::LanguageError::from)?)
         }
     };
 
@@ -213,7 +213,7 @@ macro_rules! __ad4m_cap {
             -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue>
         {
             let v = __ad4m_with(|l| <$lang as $crate::traits::PeersCapability>::peers_remote(l))?;
-            Ok(::serde_wasm_bindgen::to_value(&v).map_err($crate::errors::LanguageError::from)?)
+            Ok($crate::__serde::to_js(&v).map_err($crate::errors::LanguageError::from)?)
         }
     };
 
@@ -232,7 +232,7 @@ macro_rules! __ad4m_cap {
             -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue>
         {
             let v = __ad4m_with(|l| <$lang as $crate::traits::TelepresenceCapability>::telepresence_get_online_agents(l))?;
-            Ok(::serde_wasm_bindgen::to_value(&v).map_err($crate::errors::LanguageError::from)?)
+            Ok($crate::__serde::to_js(&v).map_err($crate::errors::LanguageError::from)?)
         }
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "telepresenceSendSignal")]
         pub fn __ad4m_telepresence_send_signal(
@@ -242,7 +242,7 @@ macro_rules! __ad4m_cap {
             let p: ::serde_json::Value = ::serde_wasm_bindgen::from_value(payload)
                 .map_err($crate::errors::LanguageError::from)?;
             let r = __ad4m_with(|l| <$lang as $crate::traits::TelepresenceCapability>::telepresence_send_signal(l, remote_did, p))?;
-            Ok(::serde_wasm_bindgen::to_value(&r).map_err($crate::errors::LanguageError::from)?)
+            Ok($crate::__serde::to_js(&r).map_err($crate::errors::LanguageError::from)?)
         }
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "telepresenceSendBroadcast")]
         pub fn __ad4m_telepresence_send_broadcast(
@@ -251,7 +251,7 @@ macro_rules! __ad4m_cap {
             let p: ::serde_json::Value = ::serde_wasm_bindgen::from_value(payload)
                 .map_err($crate::errors::LanguageError::from)?;
             let r = __ad4m_with(|l| <$lang as $crate::traits::TelepresenceCapability>::telepresence_send_broadcast(l, p))?;
-            Ok(::serde_wasm_bindgen::to_value(&r).map_err($crate::errors::LanguageError::from)?)
+            Ok($crate::__serde::to_js(&r).map_err($crate::errors::LanguageError::from)?)
         }
     };
 }

@@ -27,6 +27,27 @@ pub mod state;
 pub mod traits;
 pub mod types;
 
+#[doc(hidden)]
+pub mod __serde {
+    //! Internal — used by the `ad4m_language!` macro.
+    //!
+    //! `serde_wasm_bindgen::to_value` defaults to serializing maps as
+    //! JS `Map` objects. The runtime dispatcher (and most JS clients)
+    //! expect plain objects: `JSON.stringify(new Map([['a',1]]))`
+    //! returns `"{}"`, which silently loses all structured data. We
+    //! always serialize through this helper so every Rust ALDK shim
+    //! emits plain objects.
+    use serde::Serialize;
+    use wasm_bindgen::JsValue;
+
+    pub fn to_js<T: ?Sized + Serialize>(
+        value: &T,
+    ) -> Result<JsValue, serde_wasm_bindgen::Error> {
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        value.serialize(&serializer)
+    }
+}
+
 pub mod prelude {
     pub use crate::ad4m_language;
     pub use crate::errors::{ErrorCode, LanguageError, LanguageResult};

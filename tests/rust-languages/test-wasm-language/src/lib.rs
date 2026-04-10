@@ -44,6 +44,37 @@ impl Language for TestLang {
         self.address.clear();
         Ok(())
     }
+
+    /// Spec §5.7 — describe a single interaction so the smoke test can
+    /// exercise the descriptor + execute round-trip.
+    fn interactions(&self, _address: Address) -> Vec<Interaction> {
+        vec![Interaction {
+            label: "Echo".to_string(),
+            name: "echo".to_string(),
+            parameters: vec![InteractionParameter {
+                name: "message".to_string(),
+                param_type: "string".to_string(),
+            }],
+        }]
+    }
+
+    /// Spec §5.7 — runtime fall-back path when interactions() entries
+    /// don't carry a JS callable. Rust ALDK languages always go through
+    /// here.
+    fn expression_interact(
+        &mut self,
+        _address: Address,
+        name: String,
+        parameters: serde_json::Value,
+    ) -> LanguageResult<Option<serde_json::Value>> {
+        if name != "echo" {
+            return Err(LanguageError::invalid_input(format!(
+                "unknown interaction: {}",
+                name
+            )));
+        }
+        Ok(Some(parameters))
+    }
 }
 
 impl ExpressionCapability for TestLang {

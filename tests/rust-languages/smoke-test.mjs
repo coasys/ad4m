@@ -95,6 +95,28 @@ let threw = false;
 try { mod.perspectiveQueryRun({ kind: "bogus", params: {} }); } catch { threw = true; }
 assert.equal(threw, true, "unsupported kind throws");
 
+// Interaction capability — descriptors + expressionInteract fall-back path
+// (spec §5.7). Rust ALDK languages cannot return JS callables in
+// interactions(); the runtime must call the top-level expressionInteract
+// shim, which the macro emits unconditionally for every Rust language.
+assert.equal(typeof mod.interactions, "function", "interactions exported");
+assert.equal(typeof mod.expressionInteract, "function", "expressionInteract exported");
+const ixList = mod.interactions("test:dummy");
+assert.ok(Array.isArray(ixList) && ixList.length === 1, "one interaction described");
+assert.equal(ixList[0].name, "echo");
+assert.equal(ixList[0].label, "Echo");
+assert.ok(Array.isArray(ixList[0].parameters) && ixList[0].parameters.length === 1);
+const ixResult = mod.expressionInteract("test:dummy", "echo", { message: "hi" });
+// Must be a plain object — `serialize_maps_as_objects(true)` in
+// ad4m_ldk::__serde::to_js. If this regresses to a JS Map, every
+// Rust ALDK structured-data return will silently lose data when
+// the runtime dispatcher JSON.stringifies it.
+assert.equal(ixResult instanceof Map, false, "must NOT be a JS Map");
+assert.deepEqual(ixResult, { message: "hi" }, "echo round-trips as plain object");
+let ixThrew = false;
+try { mod.expressionInteract("test:dummy", "bogus", {}); } catch { ixThrew = true; }
+assert.equal(ixThrew, true, "unknown interaction name rejected");
+
 // Expression capability — round-trip via storage
 const addr = mod.expressionCreate({ note: "hello" });
 assert.ok(typeof addr === "string" && addr.startsWith("test:"));
