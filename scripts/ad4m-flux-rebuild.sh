@@ -66,6 +66,7 @@ ok()  { echo -e "\033[1;32m✓ $1\033[0m"; }
 log "Building AD4M core ($AD4M_DIR/core)..."
 cd "$AD4M_DIR/core"
 pnpm exec tsc
+pnpm run buildSchema 2>/dev/null || true  # generates schema artifacts; may fail if no graphql schema present
 pnpm run bundle
 ok "AD4M core built"
 

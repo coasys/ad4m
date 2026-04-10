@@ -63,16 +63,21 @@ HEADLESS=false
 LAUNCH=true
 PROFILE="/tmp/ad4m-chrome-profile"
 
+log() { echo -e "\033[1;36m→ $1\033[0m"; }
+err() { echo -e "\033[1;31m✗ $1\033[0m" >&2; exit 1; }
+ok()  { echo -e "\033[1;32m✓ $1\033[0m"; }
+warn() { echo -e "\033[1;33m⚠ $1\033[0m"; }
+
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --flux-url) FLUX_URL="$2"; shift 2;;
-        --executor-log) EXECUTOR_LOG="$2"; shift 2;;
-        --cdp-port) CDP_PORT="$2"; shift 2;;
-        --chrome) CHROME_BIN="$2"; shift 2;;
-        --timeout) TIMEOUT="$2"; shift 2;;
+        --flux-url) [[ $# -ge 2 ]] || err "--flux-url requires a URL"; FLUX_URL="$2"; shift 2;;
+        --executor-log) [[ $# -ge 2 ]] || err "--executor-log requires a file path"; EXECUTOR_LOG="$2"; shift 2;;
+        --cdp-port) [[ $# -ge 2 ]] || err "--cdp-port requires a port number"; CDP_PORT="$2"; shift 2;;
+        --chrome) [[ $# -ge 2 ]] || err "--chrome requires a path"; CHROME_BIN="$2"; shift 2;;
+        --timeout) [[ $# -ge 2 ]] || err "--timeout requires seconds"; TIMEOUT="$2"; shift 2;;
         --headless) HEADLESS=true; shift;;
         --no-launch) LAUNCH=false; shift;;
-        --profile) PROFILE="$2"; shift 2;;
+        --profile) [[ $# -ge 2 ]] || err "--profile requires a directory"; PROFILE="$2"; shift 2;;
         -h|--help)
             sed -n '/^# /,/^[^#]/p' "$0" | head -n -1 | sed 's/^# //' | sed 's/^#//'
             exit 0;;
@@ -80,18 +85,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-log() { echo -e "\033[1;36m→ $1\033[0m"; }
-err() { echo -e "\033[1;31m✗ $1\033[0m" >&2; exit 1; }
-ok()  { echo -e "\033[1;32m✓ $1\033[0m"; }
-warn() { echo -e "\033[1;33m⚠ $1\033[0m"; }
-
 # --- Dependency checks ---
 command -v python3 &>/dev/null || err "python3 is required"
 command -v curl &>/dev/null || err "curl is required"
 
 if ! command -v websocat &>/dev/null; then
     python3 -c "import websockets" 2>/dev/null || \
-        warn "Neither 'websocat' nor python3 'websockets' found. Install one: brew install websocat OR pip3 install websockets"
+        err "Neither 'websocat' nor python3 'websockets' found. Install one:\n  brew install websocat\n  pip3 install websockets"
 fi
 
 # --- Find Chrome/Chromium ---
@@ -171,7 +171,7 @@ extract_security_code() {
     log "Watching executor log for security code..."
     while [[ $elapsed -lt $TIMEOUT ]]; do
         local code
-        code=$(tail -n +"$start_line" "$EXECUTOR_LOG" 2>/dev/null | \
+        code=$(tail -n +"$((start_line + 1))" "$EXECUTOR_LOG" 2>/dev/null | \
             grep -oE 'random secret: [0-9]{6}|secret: [0-9]{6}' | \
             tail -1 | grep -oE '[0-9]{6}') || true
 
