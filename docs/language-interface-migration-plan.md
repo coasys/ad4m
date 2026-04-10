@@ -616,8 +616,11 @@ the target state.
 >   `LanguageInitContext` marked deprecated.
 > - Build verification: `core`, `ad4m-ldk/js`, `ad4m-ldk/rust`, and
 >   `ad4m-executor` (cargo check) all pass clean.
-> - Remaining: full `pnpm build && pnpm test && cargo test` end-to-end,
->   PR description draft.
+> - Integration tests: `pnpm run test-main` passes 316/317 (1 pre-existing
+>   failure in Ad4mModel subscriptions, unrelated to migration). All link
+>   sync, telepresence, and template tests pass including multi-conductor
+>   Alice+Bob neighbourhood tests.
+> - Remaining: PR description draft.
 
 - Grep the codebase for any `TODO` / `XXX` / `FIXME` introduced during
   the migration. Resolve or document.
