@@ -2252,12 +2252,22 @@ impl LanguageController {
                 expr.data = crate::js_core::utils::sort_json_value(&expr.data);
                 match crate::agent::signatures::verify(&expr) {
                     Ok(valid) => {
-                        log::warn!(
-                            "verify_expression_proof: author={}, valid={}, sig={}",
-                            expr.author,
-                            valid,
-                            &expr.proof.signature[..20.min(expr.proof.signature.len())]
-                        );
+                        // Happy-path verification runs on every get_expression
+                        // call, so logging at WARN flooded production logs with
+                        // one entry per expression read. Route success through
+                        // debug and only escalate on actual invalid signatures.
+                        if valid {
+                            log::debug!(
+                                "verify_expression_proof: author={}, valid=true",
+                                expr.author
+                            );
+                        } else {
+                            log::warn!(
+                                "verify_expression_proof: INVALID signature for author={}, sig={}",
+                                expr.author,
+                                &expr.proof.signature[..20.min(expr.proof.signature.len())]
+                            );
+                        }
                         if let Some(proof) = expr_json.get_mut("proof") {
                             proof["valid"] = JsonValue::Bool(valid);
                             proof["invalid"] = JsonValue::Bool(!valid);
