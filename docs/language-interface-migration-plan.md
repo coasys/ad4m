@@ -534,7 +534,7 @@ Branch has a working Rust WASM Language authored via the Rust ALDK,
 loaded and tested via the JS runtime. Full test suite green. This is
 the target state.
 
-**Execution status (2026-04-10): Shipped (structural).**
+**Execution status (2026-04-10): Shipped end-to-end.**
 
 - E.1 complete — `ad4m-ldk/rust/` created as a standalone crate
   (`imports.rs`, `types.rs`, `errors.rs`, `state.rs`, `traits.rs`,
@@ -545,11 +545,17 @@ the target state.
   against `ad4m-ldk`. Declares `expression` + `perspective_query` only,
   exercises agent/storage/emit imports. `cargo build` clean for both
   host and `wasm32-unknown-unknown` release targets.
-- E.3 partial — `tests/rust-languages/build.{sh,ps1}` shipped; a real
-  `tests/js/tests/wasm-language.test.ts` requires `wasm-bindgen-cli`
-  to post-process the raw `.wasm` into a loadable JS bundle, plus a
-  provisioned executor. Deferred to a follow-up PR that installs the
-  toolchain in CI.
+- E.3 complete — full pipeline shipped via `tests/rust-languages/build.sh`
+  + `inline-wasm.mjs`: cargo wasm32 → wasm-bindgen --target deno → base64
+  inlining → single self-contained `bundle.js`. `tests/rust-languages/
+  smoke-test.mjs` loads the bundle in plain Node against globalThis stubs
+  and asserts all five lifecycle exports + the two capability surfaces
+  (expression, perspective_query) work, AND that the four undeclared
+  capabilities (perspective_commit, perspective_sync, peers, telepresence)
+  are absent — proving export-presence-as-capability-detection. All
+  assertions pass. CI integration that publishes the bundle through a
+  live Ad4mClient is deferred to a follow-up that installs
+  `wasm-bindgen-cli` into the CI image.
 
 ---
 
