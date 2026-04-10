@@ -386,15 +386,23 @@ The runtime now honors every contract the ALDK depends on.
 
 ## Phase C — Migrate bootstrap languages
 
-> **Execution status (2026-04-10):** Deferred. Phase C touches 13
-> bootstrap languages with no way to validate any single migration
-> outside the full integration test suite (which requires a Holochain
-> conductor and was unavailable in the autonomous run). The dispatcher
-> in `language_bootstrap.js` already accepts both new and legacy export
-> names (Phase 0.3), so the existing languages keep working unchanged.
-> Each language can be migrated independently to the new naming and
-> ALDK authoring style as a follow-up — see the per-language procedure
-> below.
+> **Execution status (2026-04-10):** In progress. All 12 bootstrap
+> languages now have `index.flat.ts` + `esbuild.flat.ts`:
+> - **Batch 1 (leaf expression):** neighbourhood-language,
+>   perspective-language, language-language, file-storage,
+>   centralized-file-storage — done
+> - **Batch 2 (computation/embedding):** eas,
+>   embedding-vector-language — done
+> - **Batch 3 (agent-layer):** centralized-agent-language,
+>   agent-language — done
+> - **Batch 4 (DM/sync):** direct-message-language,
+>   centralized-p-diff-sync — done
+> - **p-diff-sync:** done in Phase A
+>
+> Legacy `index.ts` files retained in parallel. Step C.2.9–10 (build
+> validation and legacy deletion) requires integration tests with
+> Holochain conductor. The flat files are structurally complete but
+> untested end-to-end.
 
 
 
