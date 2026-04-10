@@ -1756,14 +1756,29 @@ impl LanguageController {
         for (address, handle) in runtimes.iter() {
             // Check filter if provided
             if let Some(prop) = filter {
+                // Escape the filter name as a proper JS string literal. A
+                // naked `"{}"` interpolation let any quote/backslash/newline
+                // in `prop` break out of the JS string — either syntax
+                // erroring the isolate or (worse) allowing injection from a
+                // GraphQL caller. `serde_json::to_string` produces a valid
+                // JS string literal for any Unicode input.
+                let prop_literal =
+                    serde_json::to_string(prop).unwrap_or_else(|_| "\"\"".to_string());
                 let check_script = format!(
-                    r#"JSON.stringify(Object.keys(language).includes("{}"))"#,
-                    prop
+                    r#"JSON.stringify(Object.keys(language).includes({}))"#,
+                    prop_literal
                 );
                 match handle.execute(check_script).await {
                     Ok(res) => {
-                        let trimmed = res.trim().trim_matches('"');
-                        if trimmed != "true" {
+                        // `JSON.stringify(bool)` yields "true" or "false"
+                        // with no surrounding quotes; parse as JSON rather
+                        // than string-matching so any whitespace or v8
+                        // lossy-conversion quirks still produce the right
+                        // boolean.
+                        if !matches!(
+                            serde_json::from_str::<bool>(res.trim()),
+                            Ok(true)
+                        ) {
                             continue;
                         }
                     }
