@@ -19,6 +19,10 @@ export interface PluginConfig {
   mcpEndpoint?: string;
   /** Auth token — JWT in external mode, admin credential in managed mode (internal). */
   token?: string;
+  /** Email for multi-user login (used with password to obtain JWT). */
+  email?: string;
+  /** Password for multi-user login (used with email to obtain JWT). */
+  password?: string;
   agentPassphrase?: string;
   ad4mBinaryPath?: string;
   toolRefreshIntervalMs?: number;

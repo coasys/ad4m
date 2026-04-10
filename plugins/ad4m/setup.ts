@@ -35,6 +35,8 @@ export async function runSetup(
   logger: any,
   endpoint: string = "http://localhost:3001/mcp",
   executorWsUrl: string = "ws://localhost:12000/graphql",
+  email?: string,
+  password?: string,
 ): Promise<void> {
   logger.info("[ad4m-setup] Starting first-run setup...");
 
@@ -75,9 +77,13 @@ export async function runSetup(
 
   if (running) {
     // Branch B: Executor already running
-    // If detected via GraphQL (MCP disabled), pass the GraphQL URL so
-    // external-mode can use Ad4mClient instead of MCP for auth.
-    await setupExternalMode(logger, endpoint, wakeToken, running, executorWsUrl);
+    if (email && password) {
+      // Email/password login — use when connecting to a remote multi-user executor
+      await setupExternalModeViaEmail(logger, endpoint, email, password, wakeToken);
+    } else {
+      // Default: capability request flow (6-digit code from launcher UI)
+      await setupExternalMode(logger, endpoint, wakeToken, running, executorWsUrl);
+    }
   } else if (binaryPath) {
     // Branch A: No running executor, binary found
     await setupManagedMode(logger, binaryPath, endpoint, executorWsUrl, wakeToken);
@@ -454,6 +460,116 @@ async function setupExternalModeViaGraphQL(
     }
   } finally {
     wsClient.dispose();
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+// Email/password login — for connecting to a remote multi-user executor
+// ---------------------------------------------------------------------------
+
+/**
+ * External-mode auth flow using email + password.
+ *
+ * Flow:
+ * 1. Initialize MCP session (no auth needed)
+ * 2. Try `login_email` with email + password
+ *    - If user doesn't exist, try `signup` first to create account
+ * 3. `login_email` returns a JWT directly
+ * 4. Use JWT for MCP authentication
+ *
+ * Requires the remote executor to have multi-user mode enabled.
+ */
+async function setupExternalModeViaEmail(
+  logger: any,
+  endpoint: string,
+  email: string,
+  password: string,
+  wakeToken?: string,
+): Promise<void> {
+  logger.info(`[ad4m-setup] Email/password login to ${endpoint}...`);
+  logger.info(`[ad4m-setup] User: ${email}`);
+
+  try {
+    // Initialize MCP session (no auth needed for login)
+    const initResp = await mcpInitialize(endpoint);
+    logger.info("[ad4m-setup] MCP session initialized");
+
+    // Step 1: Try login_email — returns JWT directly if successful
+    logger.info("[ad4m-setup] Attempting login with email + password...");
+    const loginResult = await mcpCallTool(
+      endpoint,
+      "login_email",
+      { email, password },
+      initResp.sessionId,
+    );
+    const loginData = extractMcpResultData(loginResult);
+
+    if (loginData?.token) {
+      // Login succeeded — we got a JWT
+      logger.info("[ad4m-setup] Login successful! JWT obtained.");
+      printConfigSnippet(logger, "external", {
+        mcpEndpoint: endpoint,
+        token: loginData.token,
+        wakeToken,
+      });
+      return;
+    }
+
+    if (loginData?.error?.includes("user not found") || loginData?.error?.includes("Invalid credentials")) {
+      // User doesn't exist — try signup first
+      logger.info("[ad4m-setup] User not found. Attempting signup...");
+
+      const signupResult = await mcpCallTool(
+        endpoint,
+        "signup",
+        { email, password },
+        initResp.sessionId,
+      );
+      const signupData = extractMcpResultData(signupResult);
+
+      if (signupData?.did) {
+        logger.info(`[ad4m-setup] Signup successful! DID: ${signupData.did}`);
+        // Now try login again
+        const retryLogin = await mcpCallTool(
+          endpoint,
+          "login_email",
+          { email, password },
+          initResp.sessionId,
+        );
+        const retryData = extractMcpResultData(retryLogin);
+
+        if (retryData?.token) {
+          logger.info("[ad4m-setup] Login after signup successful! JWT obtained.");
+          printConfigSnippet(logger, "external", {
+            mcpEndpoint: endpoint,
+            token: retryData.token,
+            wakeToken,
+          });
+          return;
+        }
+      }
+
+      logger.warn("[ad4m-setup] Signup succeeded but login failed. Check executor logs.");
+    }
+
+    // Fell through — login/signup failed
+    logger.warn(
+      `[ad4m-setup] Email login failed: ${JSON.stringify(loginData?.error ?? loginData)}`,
+    );
+    printConfigSnippet(logger, "external", {
+      mcpEndpoint: endpoint,
+      token: "<login-failed-check-executor-logs>",
+      wakeToken,
+    });
+
+  } catch (e: any) {
+    logger.error(`[ad4m-setup] Email login error: ${e.message}`);
+    printConfigSnippet(logger, "external", {
+      mcpEndpoint: endpoint,
+      token: "<error-check-logs>",
+      wakeToken,
+    });
   }
 }
 
