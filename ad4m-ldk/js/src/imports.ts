@@ -48,10 +48,15 @@ export function agentDidForUser(userEmail: string): DID { return need("agentDidF
 // Holochain (spec §7.2)
 // ============================================================================
 
-export function holochainRegisterDnas(dnas: DnaSpec[]): AppInfo[] {
+// NOTE: Both `holochainRegisterDnas` and `holochainCall` are async — the
+// runtime installs Promise-returning functions via `setupFlatWasmImports`
+// in rust-executor/src/js_core/flat_wasm_imports.ts. Authors MUST await
+// these; the prior `unknown`/`AppInfo[]` synchronous return types were
+// wrong and silently handed a Promise object to the caller.
+export function holochainRegisterDnas(dnas: DnaSpec[]): Promise<AppInfo[]> {
     return need("holochainRegisterDnas")(dnas);
 }
-export function holochainCall(dnaNick: string, zome: string, fnName: string, params: unknown): unknown {
+export function holochainCall(dnaNick: string, zome: string, fnName: string, params: unknown): Promise<unknown> {
     return need("holochainCall")(dnaNick, zome, fnName, params);
 }
 export function holochainCallAsync(
