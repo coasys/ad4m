@@ -17,7 +17,12 @@ pub trait Language: 'static {
     where
         Self: Sized;
     fn teardown(&mut self) -> LanguageResult<()> { Ok(()) }
-    fn interactions(&self) -> Vec<Interaction> { Vec::new() }
+    /// Returns the interactions available for the given expression
+    /// address. Spec §5.7 — the runtime calls this per expression to
+    /// discover what actions can be performed against it. Languages
+    /// that don't expose per-expression interactions can ignore the
+    /// address argument and return a static list (or `Vec::new()`).
+    fn interactions(&self, _address: Address) -> Vec<Interaction> { Vec::new() }
 }
 
 /// `expression` capability — authoring, retrieving, signalling.

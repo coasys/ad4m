@@ -84,8 +84,8 @@ macro_rules! ad4m_language {
         }
 
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "interactions")]
-        pub fn __ad4m_interactions() -> ::wasm_bindgen::JsValue {
-            let v = __ad4m_with(|l| <$lang as $crate::traits::Language>::interactions(l));
+        pub fn __ad4m_interactions(address: String) -> ::wasm_bindgen::JsValue {
+            let v = __ad4m_with(|l| <$lang as $crate::traits::Language>::interactions(l, address));
             ::serde_wasm_bindgen::to_value(&v).unwrap_or(::wasm_bindgen::JsValue::NULL)
         }
 
