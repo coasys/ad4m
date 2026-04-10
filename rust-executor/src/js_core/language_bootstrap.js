@@ -183,6 +183,10 @@ function createHolochainDelegate(languageAddress) {
                 } else if (dna.file) {
                     // Raw hApp bytes (e.g. perspective-diff-sync passes { file: Uint8Array })
                     source = { type: "bytes", value: new Uint8Array(dna.file) };
+                } else if (dna.bundle) {
+                    // Rust ALDK DnaSpec: { nick: string, bundle: Vec<u8> }
+                    // serializes to { nick, bundle: Uint8Array | number[] }
+                    source = { type: "bytes", value: new Uint8Array(dna.bundle) };
                 } else if (dna.path) {
                     source = { type: "path", value: dna.path };
                 } else {
