@@ -352,7 +352,7 @@ fn parse_embed_request() {
 
 #[test]
 fn parse_set_default_model_request() {
-    let json = json!({"modelType": "LLM"});
+    let json = json!({"modelType": "llm"});
     let req: SetDefaultModelRequest = serde_json::from_value(json).unwrap();
     assert_eq!(req.model_type.to_string(), "LLM");
 }

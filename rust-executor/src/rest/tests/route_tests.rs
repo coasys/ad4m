@@ -6,6 +6,7 @@
 
 use axum::http::{Method, Request, StatusCode};
 use tower::ServiceExt;
+use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::rest::auth::AppState;
 use crate::rest::rest_router;
@@ -18,12 +19,18 @@ fn test_state() -> AppState {
 }
 
 fn test_router() -> axum::Router {
+    // Wrap with CatchPanicLayer so handler panics (e.g. "Ad4mDb not initialized")
+    // become 500 responses instead of propagating to the test harness.
+    // Add a custom fallback that returns 418 so we can distinguish "no route matched"
+    // (418) from handler-returned 404s (resource not found).
     rest_router(test_state())
+        .fallback(|| async { StatusCode::IM_A_TEAPOT })
+        .layer(CatchPanicLayer::new())
 }
 
 /// Send a request to the router and return the status code.
 /// We expect handler failures (since no executor is running), but we should NOT
-/// get 404/405 for registered routes — those indicate missing route registration.
+/// get 418 (our custom "no route") or 405 for registered routes.
 async fn route_status(method: Method, uri: &str) -> StatusCode {
     let app = test_router();
     let body = if method == Method::POST || method == Method::PUT || method == Method::PATCH {
@@ -43,10 +50,56 @@ async fn route_status(method: Method, uri: &str) -> StatusCode {
     response.status()
 }
 
-/// A registered route should NOT return 404 (Not Found) or 405 (Method Not Allowed).
-/// It may return 500 (because the executor isn't running) or 400/401/403, which is fine.
+/// Check if a route is registered.
+/// Axum returns an empty-body 404 when no route matches.
+/// Handler-generated 404s (e.g. "perspective not found") have response bodies,
+/// so we distinguish them by checking the body content.
+async fn assert_route_registered(method: Method, uri: &str) {
+    let app = test_router();
+    let body = if method == Method::POST || method == Method::PUT || method == Method::PATCH {
+        axum::body::Body::from("{}")
+    } else {
+        axum::body::Body::empty()
+    };
+    let method_str = method.to_string();
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("authorization", "test-admin-token")
+        .body(body)
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    let status = response.status();
+
+    if status == StatusCode::METHOD_NOT_ALLOWED {
+        panic!(
+            "{} {} returned 405 Method Not Allowed — route not registered with this method",
+            method_str, uri
+        );
+    }
+
+    if status == StatusCode::NOT_FOUND {
+        // Distinguish axum's "no route matched" (empty body) from handler "resource not found"
+        let body_bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        if body_bytes.is_empty() {
+            panic!(
+                "{} {} returned 404 with empty body — route not registered",
+                method_str, uri
+            );
+        }
+        // Non-empty body means the handler ran and returned 404 (resource not found) — route IS registered
+    }
+}
+
+/// A registered route should NOT return 418 (our custom fallback) or 405 (Method Not Allowed).
+/// It may return 500, 404, 400, 401, 403, which is fine — those come from the handler.
 fn is_route_registered(status: StatusCode) -> bool {
-    status != StatusCode::NOT_FOUND && status != StatusCode::METHOD_NOT_ALLOWED
+    status != StatusCode::IM_A_TEAPOT && status != StatusCode::METHOD_NOT_ALLOWED
 }
 
 // ── Root ──
@@ -533,7 +586,12 @@ async fn route_get_many_expressions() {
 
 #[tokio::test]
 async fn route_get_expression() {
-    let s = route_status(Method::GET, "/api/v1/expressions/lang://Qm123%2F%2Fhash123").await;
+    // The expression URL must be fully percent-encoded since it contains slashes
+    let s = route_status(
+        Method::GET,
+        "/api/v1/expressions/lang%3A%2F%2FQm123%2F%2Fhash123",
+    )
+    .await;
     assert!(
         is_route_registered(s),
         "GET /expressions/:url returned {}",
@@ -543,7 +601,11 @@ async fn route_get_expression() {
 
 #[tokio::test]
 async fn route_get_interactions() {
-    let s = route_status(Method::GET, "/api/v1/expressions/lang://Qm123/interactions").await;
+    let s = route_status(
+        Method::GET,
+        "/api/v1/expressions/lang%3A%2F%2FQm123/interactions",
+    )
+    .await;
     assert!(
         is_route_registered(s),
         "GET /expressions/:url/interactions returned {}",
@@ -553,7 +615,11 @@ async fn route_get_interactions() {
 
 #[tokio::test]
 async fn route_interact_expression() {
-    let s = route_status(Method::POST, "/api/v1/expressions/lang://Qm123/interact").await;
+    let s = route_status(
+        Method::POST,
+        "/api/v1/expressions/lang%3A%2F%2FQm123/interact",
+    )
+    .await;
     assert!(
         is_route_registered(s),
         "POST /expressions/:url/interact returned {}",
@@ -1093,7 +1159,7 @@ async fn wrong_method_returns_405() {
 #[tokio::test]
 async fn nonexistent_route_returns_404() {
     let s = route_status(Method::GET, "/api/v1/nonexistent").await;
-    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(s, StatusCode::IM_A_TEAPOT);
 }
 
 // ── Root response format ──
