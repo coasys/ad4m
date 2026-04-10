@@ -148,53 +148,58 @@ export function defineLanguage(spec: LanguageSpec): FlatLanguageExports {
     if (spec.teardown) out.teardown = spec.teardown;
     if (spec.interactions) out.interactions = spec.interactions;
 
+    // All capability methods below are bound to their parent capability
+    // object. Authors frequently write method shorthand like
+    // `commit: { async commit(diff) { return this.foo(...); } }` and the
+    // runtime calls the flat export as a free function — without binding
+    // the method would lose its `this` and crash the dispatcher deep in
+    // rust-executor/src/languages/language.rs with an unrelated-looking
+    // TypeError. Bind once here so authors don't have to think about it.
+
     // Expression capability
     if (spec.expression) {
         const e = spec.expression;
-        if (e.get) out.expressionGet = e.get;
-        if (e.create) out.expressionCreate = e.create;
-        if (e.addressOf) out.expressionAddressOf = e.addressOf;
-        if (e.isImmutable) out.isImmutableExpression = e.isImmutable;
-        if (e.icon) out.expressionIcon = e.icon;
-        if (e.constructorIcon) out.expressionConstructorIcon = e.constructorIcon;
+        if (e.get) out.expressionGet = e.get.bind(e);
+        if (e.create) out.expressionCreate = e.create.bind(e);
+        if (e.addressOf) out.expressionAddressOf = e.addressOf.bind(e);
+        if (e.isImmutable) out.isImmutableExpression = e.isImmutable.bind(e);
+        if (e.icon) out.expressionIcon = e.icon.bind(e);
+        if (e.constructorIcon) out.expressionConstructorIcon = e.constructorIcon.bind(e);
     }
 
     // Perspective-commit
     if (spec.commit) {
-        out.perspectiveCommit = spec.commit.commit as any;
+        out.perspectiveCommit = spec.commit.commit.bind(spec.commit) as any;
     }
 
     // Perspective-sync
     if (spec.sync) {
         const s = spec.sync;
-        out.perspectiveSyncSync = s.sync;
-        out.perspectiveSyncRender = s.render;
-        out.perspectiveSyncCurrentRevision = (() => {
-            const v = s.currentRevision();
-            return v;
-        }) as any;
+        out.perspectiveSyncSync = s.sync.bind(s);
+        out.perspectiveSyncRender = s.render.bind(s);
+        out.perspectiveSyncCurrentRevision = s.currentRevision.bind(s) as any;
     }
 
     // Perspective-query
     if (spec.query) {
-        out.perspectiveQuerySupportedKinds = spec.query.supportedKinds;
-        out.perspectiveQueryRun = spec.query.run;
+        out.perspectiveQuerySupportedKinds = spec.query.supportedKinds.bind(spec.query);
+        out.perspectiveQueryRun = spec.query.run.bind(spec.query);
     }
 
     // Peers
     if (spec.peers) {
-        out.peersSetLocal = spec.peers.setLocal;
-        out.peersRemote = spec.peers.remote;
+        out.peersSetLocal = spec.peers.setLocal.bind(spec.peers);
+        out.peersRemote = spec.peers.remote.bind(spec.peers);
     }
 
     // Telepresence
     if (spec.telepresence) {
         const t = spec.telepresence;
-        if (t.setOnlineStatus) out.telepresenceSetOnlineStatus = t.setOnlineStatus;
-        if (t.getOnlineAgents) out.telepresenceGetOnlineAgents = t.getOnlineAgents;
-        if (t.sendSignal) out.telepresenceSendSignal = t.sendSignal;
-        if (t.sendBroadcast) out.telepresenceSendBroadcast = t.sendBroadcast;
-        if (t.registerSignalCallback) out.telepresenceRegisterSignalCallback = t.registerSignalCallback;
+        if (t.setOnlineStatus) out.telepresenceSetOnlineStatus = t.setOnlineStatus.bind(t);
+        if (t.getOnlineAgents) out.telepresenceGetOnlineAgents = t.getOnlineAgents.bind(t);
+        if (t.sendSignal) out.telepresenceSendSignal = t.sendSignal.bind(t);
+        if (t.sendBroadcast) out.telepresenceSendBroadcast = t.sendBroadcast.bind(t);
+        if (t.registerSignalCallback) out.telepresenceRegisterSignalCallback = t.registerSignalCallback.bind(t);
     }
 
     if (spec.handleHolochainSignal) out.handleHolochainSignal = spec.handleHolochainSignal;
