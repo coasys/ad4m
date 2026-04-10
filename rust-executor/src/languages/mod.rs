@@ -539,10 +539,25 @@ impl LanguageController {
                 message: format!("Failed to get language source: {}", e),
             })?;
 
-        if bundle_source.is_empty() {
+        // `execute_on_language` returns whatever v8 stringifies the
+        // expression result to. A language-language whose
+        // `getLanguageSource({addr})` returns null/undefined (e.g.
+        // address unknown to the language language) produces the literal
+        // strings "null" / "undefined" here, which would otherwise be
+        // written to disk as bundle.js and then fail much later with an
+        // opaque hash mismatch. Reject the common nullish shapes up
+        // front with a useful error.
+        let trimmed_source = bundle_source.trim();
+        if trimmed_source.is_empty()
+            || trimmed_source == "null"
+            || trimmed_source == "undefined"
+        {
             return Err(LanguageError::LoadError {
                 address: address.to_string(),
-                message: "Language source is empty".to_string(),
+                message: format!(
+                    "Language language returned no source for address {} (got {:?}) — the address may be unknown to the language language or the language-language bundle is stale",
+                    address, trimmed_source
+                ),
             });
         }
 
