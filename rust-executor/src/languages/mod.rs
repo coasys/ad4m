@@ -1369,10 +1369,21 @@ impl LanguageController {
             .execute_on_language(&language_language_address, &source_script)
             .await?;
 
-        if source_language.is_empty() {
+        // Same nullish-stringification guard as install_language_from_address:
+        // a language language returning null/undefined for an unknown hash
+        // surfaces here as the literal "null" / "undefined" string and
+        // would otherwise be spliced into the templated source.
+        let trimmed_source = source_language.trim();
+        if trimmed_source.is_empty()
+            || trimmed_source == "null"
+            || trimmed_source == "undefined"
+        {
             return Err(LanguageError::LoadError {
                 address: source_language_hash.to_string(),
-                message: "Could not get source language".to_string(),
+                message: format!(
+                    "Could not get source language for {} (got {:?})",
+                    source_language_hash, trimmed_source
+                ),
             });
         }
 
@@ -1610,10 +1621,14 @@ impl LanguageController {
                 .execute_on_language(&language_language_address, &source_script)
                 .await?;
 
-            if language_source.is_empty() {
+            let trimmed = language_source.trim();
+            if trimmed.is_empty() || trimmed == "null" || trimmed == "undefined" {
                 return Err(LanguageError::LoadError {
                     address: resolved_address,
-                    message: "Could not get language source".to_string(),
+                    message: format!(
+                        "Could not get language source (got {:?})",
+                        trimmed
+                    ),
                 });
             }
 
@@ -1764,10 +1779,14 @@ impl LanguageController {
                 .execute_on_language(&language_language_address, &source_script)
                 .await?;
 
-            if language_source.is_empty() {
+            let trimmed = language_source.trim();
+            if trimmed.is_empty() || trimmed == "null" || trimmed == "undefined" {
                 return Err(LanguageError::LoadError {
                     address: resolved_address,
-                    message: "Could not get language source".to_string(),
+                    message: format!(
+                        "Could not get language source (got {:?})",
+                        trimmed
+                    ),
                 });
             }
 
