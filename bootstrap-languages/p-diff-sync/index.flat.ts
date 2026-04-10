@@ -437,6 +437,7 @@ async function gossip(): Promise<void> {
         if (peers.size > 0 && revisionHexes.size === 0) {
             try {
                 const latestRef: any = await hc.call(dnaRole, zomeName, "latest_revision", null);
+                console.log("[p-diff-sync] gossip: latest_revision result:", latestRef ? "found" : "null", JSON.stringify(latestRef)?.substring(0, 200));
                 const latestHex = latestRef ? hashToHex(latestRef.hash) : null;
                 if (latestHex && latestHex !== myRev) {
                     console.log("[p-diff-sync] gossip: network latest_revision=", latestHex?.substring(0, 40));
