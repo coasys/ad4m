@@ -348,8 +348,9 @@ async function gossip() {
         for (const agent of activeAgents) {
           const did = agent.did || agent.agent;
           if (did && did !== myDid) {
+            const existing = peers.get(did);
             peers.set(did, {
-              currentRevision: agent.current_revision || agent.currentRevision || null,
+              currentRevision: existing?.currentRevision || null,
               lastSeen: /* @__PURE__ */ new Date()
             });
           }

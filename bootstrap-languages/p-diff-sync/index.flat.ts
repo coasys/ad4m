@@ -365,15 +365,18 @@ async function gossip(): Promise<void> {
             console.error("[p-diff-sync] sync zome call error:", e);
         }
 
-        // Get online agents from the DNA to discover peers
+        // Get online agents from the DNA to discover peers.
+        // Only update lastSeen; do NOT overwrite currentRevision from signals
+        // because OnlineAgent has no revision field.
         try {
             const activeAgents: any[] = await hc.call(dnaRole, zomeName, "get_online_agents", null);
             if (activeAgents && activeAgents.length > 0) {
                 for (const agent of activeAgents) {
                     const did = agent.did || agent.agent;
                     if (did && did !== myDid) {
+                        const existing = peers.get(did);
                         peers.set(did, {
-                            currentRevision: agent.current_revision || agent.currentRevision || null,
+                            currentRevision: existing?.currentRevision || null,
                             lastSeen: new Date(),
                         });
                     }
