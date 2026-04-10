@@ -1550,6 +1550,19 @@ impl LanguageController {
     /// Remove a language: unload runtime, remove Holochain app, delete files.
     /// Port of JS languageRemove method.
     pub async fn language_remove(&mut self, address: &str) -> Result<(), LanguageError> {
+        // Resolve system aliases so "did" / "perspective" / ... end up
+        // operating on the real content hash — otherwise the Holochain
+        // app removal and the on-disk cleanup would target bogus
+        // directories/app-ids while the real language stayed on disk.
+        let resolved = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(address)
+                .cloned()
+                .unwrap_or_else(|| address.to_string())
+        };
+        let address = resolved.as_str();
+
         // Teardown the per-language Rust runtime (if loaded there).
         // Errors here (e.g. runtime not loaded, teardown failure) must not abort
         // the rest of the removal – the JS version always continued to remove the
@@ -1581,6 +1594,16 @@ impl LanguageController {
                 language_path.display(),
                 e
             );
+        }
+
+        // Drop any alias entries that pointed at this hash. Leaving
+        // a stale "did" → <removed-hash> mapping behind would cause
+        // subsequent lookups through the alias to keep resolving to
+        // a removed language and fail with NotFound rather than
+        // letting a fresh install register a new alias target.
+        {
+            let mut aliases = self.language_aliases.lock().await;
+            aliases.retain(|_alias, target| target != address);
         }
 
         Ok(())
