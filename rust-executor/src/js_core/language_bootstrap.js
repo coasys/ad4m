@@ -387,8 +387,17 @@ async function initLanguage(contextJson) {
             };
         }
 
-        // Map Telepresence functions
-        if (mod.telepresenceSetOnlineStatus) {
+        // Map Telepresence functions. Spec §5 marks every telepresence
+        // method as optional, so detect on ANY telepresence* export rather
+        // than gating on setOnlineStatus alone — a language that only
+        // implements sendSignal/sendBroadcast still has telepresence.
+        if (
+            mod.telepresenceSetOnlineStatus ||
+            mod.telepresenceGetOnlineAgents ||
+            mod.telepresenceSendSignal ||
+            mod.telepresenceSendBroadcast ||
+            mod.telepresenceRegisterSignalCallback
+        ) {
             language.telepresenceAdapter = {
                 setOnlineStatus: mod.telepresenceSetOnlineStatus,
                 getOnlineAgents: mod.telepresenceGetOnlineAgents,
