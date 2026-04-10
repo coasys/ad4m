@@ -148,8 +148,17 @@ impl LanguageRuntime {
         // Capture the default export as globalThis.languageConstructor.
         // Note: execute() wraps scripts in `return (expr)`, so this must be
         // a single expression, not statements.
+        //
+        // JSON-encode the specifier so it embeds as a well-formed JS
+        // string literal. The specifier embeds `self.language_address`,
+        // which is technically attacker-controllable via language
+        // resolution paths; a bare `"{}"` splice would let any `"`,
+        // `\`, or newline in the address break the import expression
+        // or inject JS inside the language isolate.
+        let specifier_lit = serde_json::to_string(&specifier)
+            .map_err(|e| format!("failed to encode bundle specifier: {}", e))?;
         let capture_script = format!(
-            r#"import("{}").then(m => {{
+            r#"import({}).then(m => {{
                 const mod = m.default && m.default.default ? m.default.default : m.default || m;
                 if (typeof mod === "function") {{
                     // Legacy: default export is create(context) function
@@ -165,7 +174,7 @@ impl LanguageRuntime {
                     globalThis.__language_pattern__ = "legacy";
                 }}
             }})"#,
-            specifier
+            specifier_lit
         );
         self.js_core
             .execute(&capture_script)
