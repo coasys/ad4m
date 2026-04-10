@@ -544,7 +544,13 @@ async function initLanguage(contextJson) {
         }
 
     } else {
-        // Legacy: create() factory pattern
+        // Legacy: create() factory pattern — DEPRECATED
+        // All bootstrap languages have been migrated to flat exports (v1.0).
+        // This path is retained only for backward compatibility with
+        // user-installed languages that still use `export default function
+        // create(context)`. It will be removed in a future release.
+        console.warn("[AD4M] Language loaded via legacy create() factory pattern. " +
+            "This is deprecated — migrate to flat exports (see docs/language-interface-spec.md).");
         language = await globalThis.languageConstructor(fullContext);
     }
 
