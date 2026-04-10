@@ -1,156 +1,111 @@
-//! Test WASM Language — demonstrates the new flat import pattern.
+//! # Test WASM Language — authored against `ad4m-ldk`
 //!
-//! This language uses `extern "C"` imports from the AD4M host.
-//! No adapter wrappers, no JSON parsing — just direct function calls.
+//! Demonstrates the new spec v1.0 authoring style: implement the
+//! `Language` trait plus the capability traits you need, then invoke
+//! `ad4m_language!` to emit the flat-export shims.
 //!
-//! ## Interface
+//! This language implements:
+//!   - `expression` capability (create + get, backed by storage KV)
+//!   - `perspective-query` capability (single kind: "test.echo")
 //!
-//! - `init()` — NO arguments. Context is accessed via imports:
-//!   - `language_storage_directory()` — returns storage directory path
-//!   - `language_address()` — returns this language's address
-//!   - `language_settings()` — returns settings JSON string
-//! - `name`, `version` — metadata
-//! - `expressionCreate`, `expressionGet` — simple expression storage
-//! - `teardown()` — cleanup
+//! It deliberately does NOT implement perspective-commit / sync / peers
+//! / telepresence — the macro only emits exports for the listed
+//! capabilities, so export-presence-as-capability-detection should
+//! correctly classify this Language as expression + query only.
 
-use wasm_bindgen::prelude::*;
+use ad4m_ldk::imports as rt;
+use ad4m_ldk::prelude::*;
 
-// ============================================================================
-// Flat imports from the AD4M host
-// These MUST be provided by the runtime (both Rust and JS/Deno).
-// ============================================================================
-
-extern "C" {
-    // Language context — NEW interface (no JSON to init())
-    fn __language_storage_directory() -> String;
-    fn __language_address() -> String;
-    fn __language_settings() -> String;
-
-    // Agent imports
-    fn __agent_did() -> String;
-    fn __agent_signing_key_id() -> String;
-    fn __agent_create_signed_expression(data: JsValue) -> JsValue;
-
-    // Signal import
-    fn __signal_emit(data: JsValue);
+pub struct TestLang {
+    storage_dir: String,
+    address: String,
 }
 
-// Helper wrappers for nicer API
-fn language_storage_directory() -> String {
-    unsafe { __language_storage_directory() }
-}
+impl Language for TestLang {
+    fn name() -> &'static str { "test-wasm-language" }
+    fn version() -> &'static str { "0.1.0" }
+    fn is_public() -> bool { true }
 
-fn language_address() -> String {
-    unsafe { __language_address() }
-}
+    fn init() -> LanguageResult<Self> {
+        let storage_dir = rt::language_storage_directory();
+        let address = rt::language_address();
 
-fn language_settings() -> String {
-    unsafe { __language_settings() }
-}
+        // Emit a diagnostic so test harnesses can observe init ordering.
+        rt::emit_signal(::wasm_bindgen::JsValue::from_str(&format!(
+            "[test-wasm-language] init: storage={}, address={}",
+            storage_dir, address
+        )));
 
-fn agent_did() -> String {
-    unsafe { __agent_did() }
-}
-
-fn agent_signing_key_id() -> String {
-    unsafe { __agent_signing_key_id() }
-}
-
-fn agent_create_signed_expression(data: JsValue) -> JsValue {
-    unsafe { __agent_create_signed_expression(data) }
-}
-
-fn signal_emit(data: JsValue) {
-    unsafe { __signal_emit(data) }
-}
-
-// ============================================================================
-// Module-level state
-// ============================================================================
-
-static mut STORAGE_DIR: String = String::new();
-static mut LANGUAGE_ADDR: String = String::new();
-
-// ============================================================================
-// Required metadata
-// ============================================================================
-
-#[wasm_bindgen]
-pub fn name() -> String {
-    "test-wasm-language".to_string()
-}
-
-#[wasm_bindgen]
-pub fn version() -> String {
-    "0.1.0".to_string()
-}
-
-// ============================================================================
-// init — NEW: takes NO arguments
-// ============================================================================
-
-#[wasm_bindgen]
-pub fn init() {
-    // Get language context via flat imports
-    let storage_dir = language_storage_directory();
-    let lang_addr = language_address();
-    let settings_json = language_settings();
-
-    // Store in module state
-    unsafe {
-        STORAGE_DIR = storage_dir.clone();
-        LANGUAGE_ADDR = lang_addr.clone();
+        Ok(Self { storage_dir, address })
     }
 
-    // Log for debugging
-    signal_emit(JsValue::from_str(&format!(
-        "[test-wasm-language] init: storage={}, address={}, settings={}",
-        storage_dir, lang_addr, settings_json
-    )));
-}
-
-// ============================================================================
-// teardown
-// ============================================================================
-
-#[wasm_bindgen]
-pub fn teardown() {
-    unsafe {
-        STORAGE_DIR.clear();
-        LANGUAGE_ADDR.clear();
+    fn teardown(&mut self) -> LanguageResult<()> {
+        self.storage_dir.clear();
+        self.address.clear();
+        Ok(())
     }
 }
 
-// ============================================================================
-// Expression capability — simple key-value store
-// ============================================================================
+impl ExpressionCapability for TestLang {
+    fn expression_create(&mut self, content: serde_json::Value) -> LanguageResult<Address> {
+        // Sign via the host agent — this exercises the agent import.
+        let js_val = serde_wasm_bindgen::to_value(&content)?;
+        let signed = rt::agent_create_signed_expression(js_val);
 
-#[wasm_bindgen]
-pub fn expression_create(data: JsValue) -> String {
-    // Create signed expression
-    let signed = agent_create_signed_expression(data);
+        // Derive a content address by hex-signing the serialized content.
+        let serialized = serde_json::to_string(&content)?;
+        let addr = rt::agent_sign_string_hex(&serialized);
+        let addr = format!("test:{}", &addr[..addr.len().min(32)]);
 
-    // Hash the expression to get address (simplified)
-    // In a real language, this would be a proper content-address
-    let address = format!("test-wasm-{}", js_sys::Math::random());
+        // Persist via the storage KV import.
+        let stored: serde_json::Value = serde_wasm_bindgen::from_value(signed)
+            .unwrap_or(serde_json::Value::Null);
+        rt::storage_put(&addr, &serde_json::to_string(&stored)?);
 
-    // Emit signal to show it worked
-    signal_emit(JsValue::from_str(&format!(
-        "[test-wasm-language] created: {}",
-        address
-    )));
+        rt::emit_signal(::wasm_bindgen::JsValue::from_str(&format!(
+            "[test-wasm-language] created: {}",
+            addr
+        )));
 
-    address
+        Ok(addr)
+    }
+
+    fn expression_get(&mut self, address: Address) -> LanguageResult<Option<Expression>> {
+        let raw = rt::storage_get(&address);
+        if raw.is_null() || raw.is_undefined() {
+            return Ok(None);
+        }
+        // The KV stub returns a JS string; parse it as an Expression envelope.
+        let s: String = raw.as_string().unwrap_or_default();
+        if s.is_empty() { return Ok(None); }
+        let exp: Expression = serde_json::from_str(&s)
+            .unwrap_or_else(|_| Expression {
+                author: rt::agent_did(),
+                timestamp: String::new(),
+                data: serde_json::Value::String(s),
+                proof: ExpressionProof::default(),
+            });
+        Ok(Some(exp))
+    }
 }
 
-#[wasm_bindgen]
-pub fn expression_get(address: String) -> JsValue {
-    // Simplified: just return the address back as "data"
-    // In a real language, would read from storage
-    JsValue::from_str(&format!("data for {}", address))
+impl PerspectiveQueryCapability for TestLang {
+    fn perspective_query_supported_kinds(&self) -> Vec<String> {
+        vec!["test.echo".to_string()]
+    }
+
+    fn perspective_query_run(&mut self, request: QueryRequest) -> LanguageResult<QueryResponse> {
+        if request.kind != "test.echo" {
+            return Err(LanguageError::invalid_input(format!(
+                "unsupported query kind: {}",
+                request.kind
+            )));
+        }
+        Ok(QueryResponse { results: request.params })
+    }
 }
 
-#[wasm_bindgen]
-pub fn interactions(_address: String) -> JsValue {
-    JsValue::NULL
+ad4m_language! {
+    language: TestLang,
+    capabilities: [expression, perspective_query],
 }
