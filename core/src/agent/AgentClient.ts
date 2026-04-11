@@ -11,7 +11,7 @@ import {
 } from "./Agent";
 import { HostingUserInfo, PaymentRequestResult, ComputeLogEntry } from "../runtime/RuntimeTypes";
 import { AgentStatus } from "./AgentStatus";
-import { LinkMutations } from "../links/Links";
+import { LinkMutations, LinkExpression } from "../links/Links";
 import { PerspectiveClient } from "../perspectives/PerspectiveClient";
 import { VerificationRequestResult } from "../runtime/RuntimeTypes";
 import type {
@@ -67,37 +67,37 @@ export class AgentClient {
   }
 
   async me(): Promise<Agent> {
-    const agent = await this.#restClient.get<any>('/api/v1/agent');
+    const agent = await this.#restClient.get<Agent>('/api/v1/agent');
     let agentObject = new Agent(agent.did, agent.perspective);
     agentObject.directMessageLanguage = agent.directMessageLanguage;
     return agentObject;
   }
 
   async status(): Promise<AgentStatus> {
-    const agentStatus = await this.#restClient.get<any>('/api/v1/agent/status');
+    const agentStatus = await this.#restClient.get<AgentStatus>('/api/v1/agent/status');
     return new AgentStatus(agentStatus);
   }
 
   async generate(passphrase: string): Promise<AgentStatus> {
     const body: GenerateAgentRequest = { passphrase };
-    const result = await this.#restClient.post<any>('/api/v1/agent/generate', body);
+    const result = await this.#restClient.post<AgentStatus>('/api/v1/agent/generate', body);
     return new AgentStatus(result);
   }
 
   async import(args: InitializeArgs): Promise<AgentStatus> {
-    const result = await this.#restClient.post<any>('/api/v1/agent/import', args);
+    const result = await this.#restClient.post<AgentStatus>('/api/v1/agent/import', args);
     return new AgentStatus(result);
   }
 
   async lock(passphrase: string): Promise<AgentStatus> {
     const body: LockAgentRequest = { passphrase };
-    const result = await this.#restClient.post<any>('/api/v1/agent/lock', body);
+    const result = await this.#restClient.post<AgentStatus>('/api/v1/agent/lock', body);
     return new AgentStatus(result);
   }
 
   async unlock(passphrase: string, holochain = true): Promise<AgentStatus> {
     const body: UnlockAgentRequest = { passphrase, holochain };
-    const result = await this.#restClient.post<any>('/api/v1/agent/unlock', body);
+    const result = await this.#restClient.post<AgentStatus>('/api/v1/agent/unlock', body);
     return new AgentStatus(result);
   }
 
@@ -108,14 +108,14 @@ export class AgentClient {
   async updatePublicPerspective(perspective: PerspectiveInput): Promise<Agent> {
     const cleanedPerspective = JSON.parse(JSON.stringify(perspective));
     delete cleanedPerspective.__typename;
-    cleanedPerspective.links.forEach((link: any) => {
+    cleanedPerspective.links.forEach((link: LinkExpression) => {
       delete link.__typename;
       delete link.data.__typename;
       delete link.proof.__typename;
       delete link.status;
     });
 
-    const a = await this.#restClient.patch<any>('/api/v1/agent/profile', { publicPerspective: cleanedPerspective });
+    const a = await this.#restClient.patch<Agent>('/api/v1/agent/profile', { publicPerspective: cleanedPerspective });
     const agent = new Agent(a.did, a.perspective);
     agent.directMessageLanguage = a.directMessageLanguage;
     return agent;
@@ -146,7 +146,7 @@ export class AgentClient {
   }
 
   async updateDirectMessageLanguage(directMessageLanguage: string): Promise<Agent> {
-    const a = await this.#restClient.patch<any>('/api/v1/agent/profile', { dmLanguage: directMessageLanguage });
+    const a = await this.#restClient.patch<Agent>('/api/v1/agent/profile', { dmLanguage: directMessageLanguage });
     const agent = new Agent(a.did, a.perspective);
     agent.directMessageLanguage = a.directMessageLanguage;
     return agent;
@@ -179,7 +179,7 @@ export class AgentClient {
   subscribeAgentUpdated() {
     const unsub = this.#restClient.subscribe('/api/v1/events/agent', (data) => {
       if (data.type === 'agent-updated') {
-        this.#updatedCallbacks.forEach((cb) => cb(data.agent || data));
+        this.#updatedCallbacks.forEach((cb) => cb((data.agent || data) as Agent));
       }
     });
     this.#unsubscribers.push(unsub);
@@ -201,7 +201,7 @@ export class AgentClient {
   subscribeAgentStatusChanged() {
     const unsub = this.#restClient.subscribe('/api/v1/events/agent', (data) => {
       if (data.type === 'agent-status-changed') {
-        this.#agentStatusChangedCallbacks.forEach((cb) => cb(data.agent || data));
+        this.#agentStatusChangedCallbacks.forEach((cb) => cb((data.agent || data) as Agent));
       }
     });
     this.#unsubscribers.push(unsub);
@@ -214,7 +214,7 @@ export class AgentClient {
   subscribeHostingUserInfoChanged() {
     const unsub = this.#restClient.subscribe('/api/v1/events/agent', (data) => {
       if (data.type === 'hosting-user-info-changed') {
-        this.#hostingUserInfoChangedCallbacks.forEach((cb) => cb(data.info || data));
+        this.#hostingUserInfoChangedCallbacks.forEach((cb) => cb((data.info || data) as HostingUserInfo));
       }
     });
     this.#unsubscribers.push(unsub);
@@ -227,7 +227,7 @@ export class AgentClient {
   subscribeComputeLogUpdated() {
     const unsub = this.#restClient.subscribe('/api/v1/events/agent', (data) => {
       if (data.type === 'compute-log-updated') {
-        this.#computeLogUpdatedCallbacks.forEach((cb) => cb(data.entry || data));
+        this.#computeLogUpdatedCallbacks.forEach((cb) => cb((data.entry || data) as ComputeLogEntry));
       }
     });
     this.#unsubscribers.push(unsub);

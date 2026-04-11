@@ -112,17 +112,17 @@ export class PerspectiveClient {
         return this.#restClient.get<LinkExpression[]>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/links?${params.toString()}`)
     }
 
-    async queryProlog(uuid: string, query: string): Promise<any> {
+    async queryProlog(uuid: string, query: string): Promise<unknown> {
         const result = await this.#restClient.post<string>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/query`, { engine: 'prolog', query })
         return JSON.parse(result)
     }
 
-    async querySparql(uuid: string, query: string): Promise<any> {
+    async querySparql(uuid: string, query: string): Promise<unknown> {
         const result = await this.#restClient.post<string>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/query`, { engine: 'sparql', query })
         return JSON.parse(result)
     }
 
-    async querySurrealDB(uuid: string, query: string): Promise<any> {
+    async querySurrealDB(uuid: string, query: string): Promise<unknown> {
         const result = await this.#restClient.post<string>(`/api/v1/perspectives/${encodeURIComponent(uuid)}/query`, { engine: 'surreal', query })
         return JSON.parse(result)
     }
@@ -132,18 +132,18 @@ export class PerspectiveClient {
             `/api/v1/perspectives/${encodeURIComponent(uuid)}/subscribe-query`, { query }
         )
         const { subscriptionId, result } = response
-        let finalResult: any = result
+        let finalResult: unknown = result
         let isInit = false
         if (typeof finalResult === 'string' && finalResult.startsWith("#init#")) {
             finalResult = finalResult.substring(6)
             isInit = true
         }
         try {
-            finalResult = JSON.parse(finalResult)
+            finalResult = JSON.parse(finalResult as string)
         } catch (e) {
             console.error('Error parsing subscribeQuery result:', e)
         }
-        return { subscriptionId, result: finalResult, isInit }
+        return { subscriptionId, result: finalResult as AllInstancesResult, isInit }
     }
 
     async perspectiveSubscribeSurrealQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult, isInit?: boolean }> {
@@ -151,18 +151,18 @@ export class PerspectiveClient {
             `/api/v1/perspectives/${encodeURIComponent(uuid)}/subscribe-surreal-query`, { query }
         )
         const { subscriptionId, result } = response
-        let finalResult: any = result
+        let finalResult: unknown = result
         let isInit = false
         if (typeof finalResult === 'string' && finalResult.startsWith("#init#")) {
             finalResult = finalResult.substring(6)
             isInit = true
         }
         try {
-            finalResult = JSON.parse(finalResult)
+            finalResult = JSON.parse(finalResult as string)
         } catch (e) {
             console.error('Error parsing perspectiveSubscribeSurrealQuery result:', e)
         }
-        return { subscriptionId, result: finalResult, isInit }
+        return { subscriptionId, result: finalResult as AllInstancesResult, isInit }
     }
 
     async perspectiveKeepAliveSurrealQuery(uuid: string, subscriptionId: string): Promise<boolean> {
@@ -183,21 +183,21 @@ export class PerspectiveClient {
         const unsub = this.#restClient.subscribe(
             `/api/v1/events/query-subscription/${encodeURIComponent(subscriptionId)}`,
             (data) => {
-                let finalResult = data.result || data
+                let finalResult: unknown = data.result || data
                 let isInit = false
                 if (typeof finalResult === 'string' && finalResult.startsWith("#init#")) {
                     finalResult = finalResult.substring(6)
                     isInit = true
                 }
                 try {
-                    finalResult = JSON.parse(finalResult)
-                    if (isInit && typeof finalResult === 'object') {
-                        finalResult.isInit = true
+                    finalResult = JSON.parse(finalResult as string)
+                    if (isInit && typeof finalResult === 'object' && finalResult !== null) {
+                        (finalResult as Record<string, unknown>).isInit = true
                     }
                 } catch (e) {
                     console.error('Error parsing query subscription:', e)
                 }
-                onData(finalResult)
+                onData(finalResult as AllInstancesResult)
             }
         )
         this.#querySubscriptionUnsubscribers.set(subscriptionId, unsub)
@@ -328,7 +328,7 @@ export class PerspectiveClient {
         return await this.#expressionClient!.get(expressionURI)
     }
 
-    async createExpression(content: any, languageAddress: string): Promise<string> {
+    async createExpression(content: unknown, languageAddress: string): Promise<string> {
         return await this.#expressionClient!.create(content, languageAddress)
     }
 
@@ -340,7 +340,7 @@ export class PerspectiveClient {
     subscribePerspectiveAdded() {
         const unsub = this.#restClient.subscribe('/api/v1/events/perspectives', (data) => {
             if (data.type === 'perspective-added') {
-                this.#perspectiveAddedCallbacks.forEach(cb => cb(data.perspective))
+                this.#perspectiveAddedCallbacks.forEach(cb => cb(data.perspective as PerspectiveHandle))
             }
         })
         this.#unsubscribers.push(unsub)
@@ -353,7 +353,7 @@ export class PerspectiveClient {
     subscribePerspectiveUpdated() {
         const unsub = this.#restClient.subscribe('/api/v1/events/perspectives', (data) => {
             if (data.type === 'perspective-updated') {
-                this.#perspectiveUpdatedCallbacks.forEach(cb => cb(data.perspective))
+                this.#perspectiveUpdatedCallbacks.forEach(cb => cb(data.perspective as PerspectiveHandle))
             }
         })
         this.#unsubscribers.push(unsub)
@@ -368,7 +368,7 @@ export class PerspectiveClient {
             `/api/v1/events/perspectives`,
             (data) => {
                 if (data.type === 'sync-state-change' && data.uuid === uuid) {
-                    cb.forEach(c => c(data.state))
+                    cb.forEach(c => c(data.state as PerspectiveState))
                 }
             }
         )
@@ -383,7 +383,7 @@ export class PerspectiveClient {
     subscribePerspectiveRemoved() {
         const unsub = this.#restClient.subscribe('/api/v1/events/perspectives', (data) => {
             if (data.type === 'perspective-removed') {
-                this.#perspectiveRemovedCallbacks.forEach(cb => cb(data.uuid))
+                this.#perspectiveRemovedCallbacks.forEach(cb => cb(data.uuid as string))
             }
         })
         this.#unsubscribers.push(unsub)
@@ -394,7 +394,7 @@ export class PerspectiveClient {
             `/api/v1/events/perspectives/${encodeURIComponent(uuid as string)}/links`,
             (data) => {
                 if (data.type === 'link-added') {
-                    cb.forEach(c => c(data.link))
+                    cb.forEach(c => c(data.link as LinkExpression))
                 }
             }
         )
@@ -409,7 +409,7 @@ export class PerspectiveClient {
             `/api/v1/events/perspectives/${encodeURIComponent(uuid as string)}/links`,
             (data) => {
                 if (data.type === 'link-removed') {
-                    const link = data.link
+                    const link = data.link as LinkExpression & { status?: unknown }
                     if (!link.status) {
                         delete link.status
                     }
@@ -428,13 +428,15 @@ export class PerspectiveClient {
             `/api/v1/events/perspectives/${encodeURIComponent(uuid as string)}/links`,
             (data) => {
                 if (data.type === 'link-updated') {
-                    if (!data.newLink.status) {
-                        delete data.newLink.status
+                    const newLink = data.newLink as LinkExpression & { status?: unknown }
+                    const oldLink = data.oldLink as LinkExpression & { status?: unknown }
+                    if (!newLink.status) {
+                        delete newLink.status
                     }
-                    if (!data.oldLink.status) {
-                        delete data.oldLink.status
+                    if (!oldLink.status) {
+                        delete oldLink.status
                     }
-                    cb.forEach(c => c(data))
+                    cb.forEach(c => c(data as unknown as LinkExpression))
                 }
             }
         )

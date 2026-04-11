@@ -2,9 +2,15 @@
 declare var EventSource: {
     new(url: string): {
         onmessage: ((event: { data: string }) => void) | null
-        onerror: ((event: any) => void) | null
+        onerror: ((event: Event) => void) | null
         close(): void
     }
+}
+
+/** Shape of SSE event data parsed from JSON. Callers can narrow via generics. */
+export interface SseEvent {
+    type: string
+    [key: string]: unknown
 }
 
 export class RestClient {
@@ -29,7 +35,7 @@ export class RestClient {
         return res.json() as Promise<T>
     }
 
-    async post<T>(path: string, body?: any): Promise<T> {
+    async post<T>(path: string, body?: unknown): Promise<T> {
         const res = await fetch(`${this.baseUrl}${path}`, {
             method: 'POST',
             headers: this.headers(),
@@ -39,7 +45,7 @@ export class RestClient {
         return res.json() as Promise<T>
     }
 
-    async put<T>(path: string, body?: any): Promise<T> {
+    async put<T>(path: string, body?: unknown): Promise<T> {
         const res = await fetch(`${this.baseUrl}${path}`, {
             method: 'PUT',
             headers: this.headers(),
@@ -49,7 +55,7 @@ export class RestClient {
         return res.json() as Promise<T>
     }
 
-    async patch<T>(path: string, body?: any): Promise<T> {
+    async patch<T>(path: string, body?: unknown): Promise<T> {
         const res = await fetch(`${this.baseUrl}${path}`, {
             method: 'PATCH',
             headers: this.headers(),
@@ -59,7 +65,7 @@ export class RestClient {
         return res.json() as Promise<T>
     }
 
-    async delete<T>(path: string, body?: any): Promise<T> {
+    async delete<T>(path: string, body?: unknown): Promise<T> {
         const res = await fetch(`${this.baseUrl}${path}`, {
             method: 'DELETE',
             headers: this.headers(),
@@ -73,10 +79,10 @@ export class RestClient {
     // the browser's per-origin HTTP/1.1 connection limit (6 in Chrome).
     private _eventSources = new Map<string, {
         es: InstanceType<typeof EventSource>,
-        callbacks: Set<(data: any) => void>
+        callbacks: Set<(data: unknown) => void>
     }>()
 
-    subscribe(path: string, callback: (data: any) => void): () => void {
+    subscribe<T = SseEvent>(path: string, callback: (data: T) => void): () => void {
         // Route all subscriptions through the unified /events endpoint
         const unifiedPath = '/api/v1/events/unified'
         const url = `${this.baseUrl}${unifiedPath}`
@@ -90,7 +96,7 @@ export class RestClient {
             entry = { es, callbacks: new Set() }
             const ref = entry          // stable reference for closure
             es.onmessage = (event) => {
-                let parsed: any
+                let parsed: Record<string, unknown>
                 try { parsed = JSON.parse(event.data) } catch (e) {
                     console.error('Error parsing SSE data:', e)
                     return
@@ -101,12 +107,12 @@ export class RestClient {
             this._eventSources.set(fullUrl, entry)
         }
 
-        entry.callbacks.add(callback)
+        entry.callbacks.add(callback as (data: unknown) => void)
 
         return () => {
             const e = this._eventSources.get(fullUrl)
             if (!e) return
-            e.callbacks.delete(callback)
+            e.callbacks.delete(callback as (data: unknown) => void)
             if (e.callbacks.size === 0) {
                 e.es.close()
                 this._eventSources.delete(fullUrl)

@@ -35,9 +35,9 @@ export class ExpressionClient {
         return this.#restClient.get<string>(`/api/v1/expressions/${encodeURIComponent(url)}?raw=true`)
     }
 
-    async create(content: any, languageAddress: string): Promise<string> {
-        content = JSON.stringify(content)
-        const body: CreateExpressionRequest = { content, languageAddress }
+    async create(content: unknown, languageAddress: string): Promise<string> {
+        const serialized = JSON.stringify(content)
+        const body: CreateExpressionRequest = { content: serialized, languageAddress }
         return this.#restClient.post<string>('/api/v1/expressions', body)
     }
 

@@ -74,7 +74,7 @@ export class NeighbourhoodClient {
         })
     }
 
-    dispatchSignal(perspectiveUUID: string, signal: any) {
+    dispatchSignal(perspectiveUUID: string, signal: unknown) {
         const handlers = this.#signalHandlers.get(perspectiveUUID)
         if (handlers) {
             for (const handler of handlers) {

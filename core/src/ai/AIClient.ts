@@ -97,7 +97,7 @@ export class AIClient {
             `/api/v1/events/ai`,
             (data) => {
                 if (data.type === 'transcription-text' && data.streamId === streamId && data.text) {
-                    streamCallback(data.text);
+                    streamCallback(data.text as string);
                 }
             }
         );
