@@ -1,3 +1,4 @@
+use ts_rs::TS;
 use deno_core::{anyhow::anyhow, error::AnyError};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt::Display;
@@ -19,7 +20,8 @@ pub struct Expression<T: Serialize> {
     pub proof: ExpressionProof,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+#[ts(export)]
 pub struct ExpressionProof {
     pub key: String,
     pub signature: String,
@@ -33,8 +35,9 @@ pub struct VerifiedExpression<T: Serialize> {
     pub proof: DecoratedExpressionProof,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
 
+#[ts(export)]
 pub struct DecoratedExpressionProof {
     pub key: String,
     pub signature: String,
@@ -71,8 +74,9 @@ where
     Ok(opt.unwrap_or_default())
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct Link {
     pub predicate: Option<String>,
     #[serde(default, deserialize_with = "null_as_empty_string")]
@@ -139,7 +143,8 @@ impl Link {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+#[ts(export)]
 pub struct LinkExpression {
     pub author: String,
     pub timestamp: String,
@@ -211,8 +216,9 @@ impl From<Expression<Link>> for LinkExpression {
     }
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct DecoratedLinkExpression {
     pub author: String,
     pub timestamp: String,
@@ -544,8 +550,9 @@ pub struct TokenizerSource {
     pub file_name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(export)]
 pub enum ModelType {
     #[default]
     Llm,

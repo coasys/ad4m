@@ -1,3 +1,4 @@
+use ts_rs::TS;
 use super::core::{
     AIPromptExamples, AITask, DecoratedExpressionProof, DecoratedLinkExpression, Expression,
     ExpressionProof, Link, ModelType, Notification, TriggeredNotification,
@@ -53,8 +54,9 @@ pub struct Apps {
     pub token: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize)]
+#[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct AuthInfoInput {
     pub app_desc: String,
     pub app_domain: String,
@@ -65,8 +67,9 @@ pub struct AuthInfoInput {
     pub user_did: Option<String>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct CapabilityInput {
     pub can: Vec<String>,
     pub with: ResourceInput,
@@ -135,8 +138,9 @@ pub enum ExceptionType {
     InstallNotificationRequest = 4,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct ExpressionProofInput {
     pub invalid: Option<bool>,
     pub key: Option<String>,
@@ -215,8 +219,9 @@ pub struct LanguageMeta {
     pub templated: Option<bool>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct LanguageMetaInput {
     pub description: String,
     pub name: String,
@@ -243,7 +248,8 @@ pub struct Language {
     pub name: String,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq, Eq, Hash, TS)]
+#[ts(export)]
 pub enum LinkStatus {
     #[default]
     #[serde(rename = "shared")]
@@ -262,8 +268,9 @@ impl std::fmt::Display for LinkStatus {
     }
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct LinkExpressionInput {
     pub author: String,
     pub data: LinkInput,
@@ -279,8 +286,9 @@ pub struct LinkExpressionUpdated {
     pub old_link: DecoratedLinkExpression,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct LinkInput {
     pub predicate: Option<String>,
     pub source: String,
@@ -298,8 +306,9 @@ pub struct LinkQuery {
     pub until_date: Option<DateTime>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct LinkMutations {
     pub additions: Vec<LinkInput>,
     pub removals: Vec<LinkExpressionInput>,
@@ -594,8 +603,9 @@ pub struct Resource {
     pub pointers: Vec<String>,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct ResourceInput {
     pub domain: String,
     pub pointers: Vec<String>,
