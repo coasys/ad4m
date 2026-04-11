@@ -101,7 +101,7 @@ pub async fn publish_neighbourhood(
     let url = neighbourhoods::neighbourhood_publish_from_perspective_with_context(
         &body.perspective_uuid,
         body.link_language,
-        perspective_input_to_core(body.meta),
+        body.meta,
         &agent_context,
     )
     .await

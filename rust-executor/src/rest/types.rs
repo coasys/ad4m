@@ -166,7 +166,7 @@ pub struct JoinNeighbourhoodRequest {
 pub struct PublishNeighbourhoodRequest {
     pub perspective_uuid: String,
     pub link_language: String,
-    pub meta: PerspectiveInput,
+    pub meta: crate::types::Perspective,
 }
 
 #[derive(Deserialize, TS)]

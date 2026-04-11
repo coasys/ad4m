@@ -274,7 +274,8 @@ impl From<DecoratedLinkExpression> for LinkExpression {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, TS)]
+#[ts(export)]
 pub struct Perspective {
     pub links: Vec<LinkExpression>,
 }
