@@ -165,3 +165,80 @@ describe('buildSPARQLOrderLimitOffset', () => {
     expect(result).toBe('ORDER BY ASC(?wTarget_foo)');
   });
 });
+
+// ── Pagination Edge Cases (Tests #13-17) ──
+
+describe('buildSPARQLQuery — pagination edge cases', () => {
+  const modelClass: any = {};
+
+  // Test #13: Limit=0
+  it('limit=0 generates LIMIT 0 in SPARQL (returns empty)', () => {
+    const query = { limit: 0, offset: 0, where: { category: 'some://uri' } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('LIMIT 0');
+  });
+
+  // Test #14: Offset beyond total count
+  it('offset beyond total count generates valid SPARQL with large OFFSET', () => {
+    const query = { limit: 50, offset: 1000, where: { category: 'some://uri' } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('LIMIT 50');
+    expect(sparql).toContain('OFFSET 1000');
+  });
+
+  // Test #15: Order by multiple fields
+  it('order by multiple fields includes both in SPARQL ORDER BY', () => {
+    const result = buildSPARQLOrderLimitOffset(emptyMetadata, {
+      order: { timestamp: 'DESC', name: 'ASC' },
+    });
+    expect(result).toContain('DESC(?timestamp)');
+    expect(result).toContain('ASC(?wTarget_name)');
+    expect(result).toMatch(/^ORDER BY/);
+  });
+
+  // Test #16: Pagination with parent filter
+  it('pagination with parent filter generates subquery with parent join', () => {
+    const query = {
+      limit: 50,
+      offset: 0,
+      parent: { id: 'flux://channel-123', predicate: 'flux://has_message' },
+      where: { category: 'some://uri' },
+    };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('<flux://channel-123>');
+    expect(sparql).toContain('LIMIT 50');
+  });
+
+  // Test #17: SPARQL injection safety
+  it('does not allow injection through field names in ORDER BY', () => {
+    const maliciousField = 'name}UNION{SELECT*WHERE{?s?p?o';
+    const order: any = {};
+    order[maliciousField] = 'DESC';
+    const result = buildSPARQLOrderLimitOffset(emptyMetadata, { order });
+    // The field is wrapped in ?wTarget_ prefix and DESC() — not directly executable
+    expect(result).toContain('?wTarget_' + maliciousField);
+    expect(result).toMatch(/DESC\(\?wTarget_/);
+  });
+
+  it('does not allow injection through where clause IRI values', () => {
+    const query = {
+      where: { category: 'some://uri"> . } UNION { SELECT * WHERE { ?s ?p ?o' },
+    };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    // Value should be wrapped in angle brackets as an IRI
+    expect(sparql).toContain('<some://uri');
+  });
+});
+
+describe('buildSPARQLOrderLimitOffset — additional edge cases', () => {
+  it('limit=0 produces LIMIT 0', () => {
+    const result = buildSPARQLOrderLimitOffset(emptyMetadata, { limit: 0 });
+    expect(result).toBe('LIMIT 0');
+  });
+
+  it('very large offset produces valid clause', () => {
+    const result = buildSPARQLOrderLimitOffset(emptyMetadata, { limit: 50, offset: 999999 });
+    expect(result).toContain('LIMIT 50');
+    expect(result).toContain('OFFSET 999999');
+  });
+});

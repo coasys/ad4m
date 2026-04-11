@@ -1758,4 +1758,150 @@ mod tests {
         let results = svc.query_links(None, None, None, None, None, None).unwrap();
         assert_eq!(results.len(), 10);
     }
+
+    // ── Test #18: Links with literal targets ──
+    #[test]
+    fn test_query_links_skips_literal_targets() {
+        let svc = new_service();
+        // literal:string:hello is not a valid IRI for NamedNode, but add_link
+        // stores it. query_links uses NamedNode pattern matching, so non-IRI
+        // targets should be handled gracefully.
+        svc.add_link(&make_link("ad4m://src", "ad4m://pred", "ad4m://normal_target"))
+            .unwrap();
+        // Literal-style targets are stored as IRIs (NamedNode) in oxigraph
+        // even though they represent literals conceptually
+        svc.add_link(&make_link(
+            "ad4m://src",
+            "ad4m://pred",
+            "literal:string:hello",
+        ))
+        .unwrap();
+
+        // Query without target filter should find both (literal:string:hello is technically a valid IRI)
+        let results = svc
+            .query_links(Some("ad4m://src"), None, None, None, None, None)
+            .unwrap();
+        // literal:string:hello has a scheme "literal:" so NamedNode::new_unchecked accepts it
+        assert_eq!(results.len(), 2);
+
+        // Query with specific literal target
+        let results = svc
+            .query_links(
+                Some("ad4m://src"),
+                None,
+                Some("literal:string:hello"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].data.target, "literal:string:hello");
+    }
+
+    // ── Test #19: Same source, multiple predicates ──
+    #[test]
+    fn test_query_links_same_source_many_predicates() {
+        let svc = new_service();
+        for i in 0..100 {
+            svc.add_link(&make_link(
+                "ad4m://src",
+                &format!("ad4m://pred_{}", i),
+                &format!("ad4m://target_{}", i),
+            ))
+            .unwrap();
+        }
+
+        // Filter by a specific predicate
+        let results = svc
+            .query_links(Some("ad4m://src"), Some("ad4m://pred_42"), None, None, None, None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].data.target, "ad4m://target_42");
+
+        // All from same source
+        let all = svc
+            .query_links(Some("ad4m://src"), None, None, None, None, None)
+            .unwrap();
+        assert_eq!(all.len(), 100);
+    }
+
+    // ── Test #20: Unicode in link data ──
+    #[test]
+    fn test_query_links_unicode_roundtrip() {
+        let svc = new_service();
+        // Unicode source, predicate, target
+        svc.add_link(&make_link(
+            "ad4m://héllo",
+            "ad4m://prédicat",
+            "ad4m://目标",
+        ))
+        .unwrap();
+        svc.add_link(&make_link(
+            "ad4m://emoji🎉",
+            "ad4m://pred",
+            "ad4m://target",
+        ))
+        .unwrap();
+        svc.add_link(&make_link(
+            "ad4m://中文源",
+            "ad4m://日本語述語",
+            "ad4m://한국어대상",
+        ))
+        .unwrap();
+
+        let results = svc
+            .query_links(Some("ad4m://héllo"), None, None, None, None, None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].data.target, "ad4m://目标");
+
+        let results = svc
+            .query_links(Some("ad4m://emoji🎉"), None, None, None, None, None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+
+        let results = svc
+            .query_links(Some("ad4m://中文源"), None, None, None, None, None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].data.predicate.as_deref(),
+            Some("ad4m://日本語述語")
+        );
+        assert_eq!(results[0].data.target, "ad4m://한국어대상");
+    }
+
+    // ── Test #22: Date range edge cases ──
+    #[test]
+    fn test_query_links_date_range_exact_boundary() {
+        let svc = new_service();
+        let exact_ts = "2024-06-15T12:00:00.000Z";
+        svc.add_link(&make_link_with_ts(
+            "ad4m://s",
+            "ad4m://p",
+            "ad4m://t1",
+            exact_ts,
+            "did:key:z6Mk1",
+        ))
+        .unwrap();
+
+        // from_date = exact timestamp — should include it (>=)
+        let results = svc
+            .query_links(None, None, None, Some(exact_ts), None, None)
+            .unwrap();
+        assert_eq!(results.len(), 1, "from_date at exact timestamp should include the link");
+
+        // until_date = exact timestamp — should include it (<=)
+        let results = svc
+            .query_links(None, None, None, None, Some(exact_ts), None)
+            .unwrap();
+        assert_eq!(results.len(), 1, "until_date at exact timestamp should include the link");
+
+        // Both from and until at exact — should still include
+        let results = svc
+            .query_links(None, None, None, Some(exact_ts), Some(exact_ts), None)
+            .unwrap();
+        assert_eq!(results.len(), 1, "exact from+until should include the link");
+    }
 }

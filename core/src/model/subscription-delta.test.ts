@@ -117,4 +117,91 @@ describe('delta fast-path detection', () => {
     expect(result.useDelta).toBe(true);
     expect(result.addedRows).toHaveLength(2);
   });
+
+  // ── Test #8: Rapid successive additions ──
+  it('handles 10 items added in quick succession without duplicates', () => {
+    let current = [...prev];
+    for (let i = 0; i < 10; i++) {
+      const next = [...current, { source: `rapid-${i}`, predicate: 'p1', target: `t-rapid-${i}` }];
+      const result = detectDeltaPath(current, next);
+      // Each individual addition should be eligible for delta
+      expect(result.useDelta).toBe(true);
+      expect(result.addedRows).toHaveLength(1);
+      expect(result.addedRows[0].source).toBe(`rapid-${i}`);
+      current = next;
+    }
+  });
+
+  // ── Test #9: Addition + removal in same batch ──
+  it('falls back when one item added and another removed simultaneously', () => {
+    const next: Row[] = [
+      { source: 'a', predicate: 'p1', target: 't1' },
+      { source: 'a', predicate: 'p2', target: 't2' },
+      // source 'b' removed, source 'c' added
+      { source: 'c', predicate: 'p1', target: 't4' },
+      { source: 'd', predicate: 'p1', target: 't5' },
+    ];
+    const result = detectDeltaPath(prev, next);
+    expect(result.useDelta).toBe(false);
+    expect(result.reason).toBe('rows removed');
+  });
+
+  // ── Test #10: Delta with nested relations (detection only) ──
+  it('delta path detects new items correctly even when sources have complex URIs', () => {
+    const next: Row[] = [
+      ...prev,
+      { source: 'flux://post/123/comment/456', predicate: 'flux://belongs_to', target: 'flux://post/123' },
+    ];
+    const result = detectDeltaPath(prev, next);
+    expect(result.useDelta).toBe(true);
+    expect(result.addedRows).toHaveLength(1);
+    expect(result.addedRows[0].source).toBe('flux://post/123/comment/456');
+  });
+
+  // ── Test #11: Empty previous result + new items ──
+  it('handles empty previous array with new items arriving', () => {
+    const empty: Row[] = [];
+    const next: Row[] = [
+      { source: 'x', predicate: 'p1', target: 't1' },
+    ];
+    const result = detectDeltaPath(empty, next);
+    expect(result.useDelta).toBe(true);
+    expect(result.addedRows).toHaveLength(1);
+  });
+
+  it('handles empty previous with no new items', () => {
+    const result = detectDeltaPath([], []);
+    expect(result.useDelta).toBe(false);
+    expect(result.reason).toBe('no growth');
+  });
+
+  // ── Test #12: Source URI with special characters ──
+  it('handles URIs with encoded characters, fragments, and query params', () => {
+    const specialPrev: Row[] = [
+      { source: 'flux://item%20one', predicate: 'p1', target: 't1' },
+      { source: 'flux://item#section', predicate: 'p2', target: 't2' },
+      { source: 'flux://item?key=val&foo=bar', predicate: 'p3', target: 't3' },
+    ];
+    const specialNext: Row[] = [
+      ...specialPrev,
+      { source: 'flux://new%C3%A9item', predicate: 'p1', target: 't4' },
+    ];
+    const result = detectDeltaPath(specialPrev, specialNext);
+    expect(result.useDelta).toBe(true);
+    expect(result.addedRows).toHaveLength(1);
+    expect(result.addedRows[0].source).toBe('flux://new%C3%A9item');
+  });
+
+  it('correctly identifies existing source with special chars getting new links', () => {
+    const specialPrev: Row[] = [
+      { source: 'flux://item#section', predicate: 'p1', target: 't1' },
+    ];
+    const specialNext: Row[] = [
+      ...specialPrev,
+      { source: 'flux://item#section', predicate: 'p2', target: 't2' },
+    ];
+    const result = detectDeltaPath(specialPrev, specialNext);
+    expect(result.useDelta).toBe(false);
+    expect(result.reason).toBe('existing source got new links');
+  });
 });
