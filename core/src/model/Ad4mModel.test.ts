@@ -606,25 +606,26 @@ describe("Ad4mModel.queryToSPARQL()", () => {
 
   // ---- ORDER BY, LIMIT, OFFSET are JS post-processed ----
 
-  it("should not include ORDER BY in SPARQL (JS post-processed)", async () => {
+  it("should include ORDER BY in SPARQL for ordering", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { order: { name: "ASC" } });
     const norm = normalizeQuery(query);
     expect(norm).toContain("SELECT ?source");
-    expect(norm).not.toContain("ORDER BY");
+    expect(norm).toContain("ORDER BY");
+    expect(norm).toContain("ASC(?name)");
   });
 
-  it("should not include LIMIT in SPARQL (JS post-processed)", async () => {
+  it("should include LIMIT in SPARQL via subquery for pagination", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { limit: 10 });
     const norm = normalizeQuery(query);
     expect(norm).toContain("SELECT ?source");
-    expect(norm).not.toContain("LIMIT");
+    expect(norm).toContain("LIMIT 10");
   });
 
-  it("should not include OFFSET in SPARQL (JS post-processed)", async () => {
+  it("should include OFFSET in SPARQL via subquery for pagination", async () => {
     const query = await (Recipe as any).queryToSPARQL(mockPerspective, { offset: 5 });
     const norm = normalizeQuery(query);
     expect(norm).toContain("SELECT ?source");
-    expect(norm).not.toContain("OFFSET");
+    expect(norm).toContain("OFFSET 5");
   });
 });
 describe("Ad4mModel.instancesFromQueryResult() and SPARQL integration", () => {
