@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
 use super::types::*;
+use ad4m_rest_macros::rest_handler;
 
 fn check_compute_credits(auth_token: &str) -> Result<(), ApiError> {
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
@@ -51,6 +52,7 @@ fn is_billing_active(auth_token: &str) -> bool {
 // ── Models ──
 
 /// GET /ai/models
+#[rest_handler(GET, "/ai/models", response = "Model[]")]
 pub async fn list_models(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -70,6 +72,7 @@ pub async fn list_models(
 }
 
 /// POST /ai/models
+#[rest_handler(POST, "/ai/models", request = "Record<string, unknown>", response = "string")]
 pub async fn add_model(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -95,6 +98,7 @@ pub async fn add_model(
 }
 
 /// PUT /ai/models/:id
+#[rest_handler(PUT, "/ai/models/:id", request = "Record<string, unknown>", response = "boolean")]
 pub async fn update_model(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -121,6 +125,7 @@ pub async fn update_model(
 }
 
 /// DELETE /ai/models/:id
+#[rest_handler(DELETE, "/ai/models/:id", response = "boolean")]
 pub async fn remove_model(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -143,6 +148,7 @@ pub async fn remove_model(
 }
 
 /// PUT /ai/models/:id/default
+#[rest_handler(PUT, "/ai/models/:id/default", request = "SetDefaultModelRequest", response = "boolean")]
 pub async fn set_default_model(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -166,6 +172,7 @@ pub async fn set_default_model(
 }
 
 /// GET /ai/models/default?modelType=...
+#[rest_handler(GET, "/ai/models/default", response = "Model | null")]
 pub async fn get_default_model(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -196,6 +203,7 @@ pub async fn get_default_model(
 }
 
 /// GET /ai/model-loading-status?model=...
+#[rest_handler(GET, "/ai/model-loading-status", response = "unknown")]
 pub async fn get_model_loading_status(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -219,6 +227,7 @@ pub async fn get_model_loading_status(
 // ── Tasks ──
 
 /// GET /ai/tasks
+#[rest_handler(GET, "/ai/tasks", response = "AITask[]")]
 pub async fn list_tasks(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -232,6 +241,7 @@ pub async fn list_tasks(
 }
 
 /// POST /ai/tasks
+#[rest_handler(POST, "/ai/tasks", request = "Record<string, unknown>", response = "AITask")]
 pub async fn add_task(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -257,6 +267,7 @@ pub async fn add_task(
 }
 
 /// PUT /ai/tasks/:id
+#[rest_handler(PUT, "/ai/tasks/:id", request = "Record<string, unknown>", response = "AITask")]
 pub async fn update_task(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -283,6 +294,7 @@ pub async fn update_task(
 }
 
 /// DELETE /ai/tasks/:id
+#[rest_handler(DELETE, "/ai/tasks/:id", response = "boolean")]
 pub async fn remove_task(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -307,6 +319,7 @@ pub async fn remove_task(
 // ── Prompt & Embed ──
 
 /// POST /ai/prompt
+#[rest_handler(POST, "/ai/prompt", request = "PromptRequest", response = "string")]
 pub async fn ai_prompt(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -330,6 +343,7 @@ pub async fn ai_prompt(
 }
 
 /// POST /ai/embed
+#[rest_handler(POST, "/ai/embed", request = "EmbedRequest", response = "string")]
 pub async fn ai_embed(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -381,6 +395,7 @@ pub struct CloseTranscriptionRequest {
 }
 
 /// POST /ai/transcription/open
+#[rest_handler(POST, "/ai/transcription/open", request = "OpenTranscriptionRequest", response = "string")]
 pub async fn open_transcription_stream(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -408,6 +423,7 @@ pub async fn open_transcription_stream(
 }
 
 /// POST /ai/transcription/feed
+#[rest_handler(POST, "/ai/transcription/feed", request = "FeedTranscriptionRequest", response = "string")]
 pub async fn feed_transcription_stream(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -436,6 +452,7 @@ pub async fn feed_transcription_stream(
 }
 
 /// POST /ai/transcription/close
+#[rest_handler(POST, "/ai/transcription/close", request = "CloseTranscriptionRequest", response = "string")]
 pub async fn close_transcription_stream(
     State(_state): State<AppState>,
     auth: AuthContext,

@@ -1,103 +1,92 @@
-//! Generates `core/src/generated/rest/routes.ts` from the route registry.
+//! Generates `core/src/generated/rest/routes.ts` from inventory-collected route metadata.
 
-use crate::rest::route_registry::ROUTES;
+use crate::rest::route_meta::RouteMetadata;
 
 #[test]
 fn generate_route_map() {
+    let mut routes: Vec<&RouteMetadata> = inventory::iter::<RouteMetadata>.into_iter().collect();
+    routes.sort_by_key(|r| (r.path, r.method));
+
     let mut ts = String::new();
     ts.push_str("// AUTO-GENERATED — do not edit manually\n");
     ts.push_str("// Regenerate: cd rust-executor && cargo test generate_route_map\n\n");
 
-    // Import REST request/response types from generated index
-    ts.push_str("import type {\n");
-    ts.push_str("  AddAgentInfosRequest,\n");
-    ts.push_str("  AddLinkExpressionRequest,\n");
-    ts.push_str("  AddLinkRequest,\n");
-    ts.push_str("  AddLinksBulkRequest,\n");
-    ts.push_str("  AddSdnaRequest,\n");
-    ts.push_str("  ApplyTemplateRequest,\n");
-    ts.push_str("  BroadcastRequest,\n");
-    ts.push_str("  CommitBatchRequest,\n");
-    ts.push_str("  CreateExpressionRequest,\n");
-    ts.push_str("  CreatePerspectiveRequest,\n");
-    ts.push_str("  CreateSubjectRequest,\n");
-    ts.push_str("  CreateUserRequest,\n");
-    ts.push_str("  DecoratedLinkExpression,\n");
-    ts.push_str("  DisposeQueryRequest,\n");
-    ts.push_str("  EmailTestRequest,\n");
-    ts.push_str("  EmbedRequest,\n");
-    ts.push_str("  EntanglementProofPreflightRequest,\n");
-    ts.push_str("  ExecuteCommandsRequest,\n");
-    ts.push_str("  ExportRequest,\n");
-    ts.push_str("  ExpressionManyRequest,\n");
-    ts.push_str("  FriendSendMessageRequest,\n");
-    ts.push_str("  FriendsListRequest,\n");
-    ts.push_str("  GenerateAgentRequest,\n");
-    ts.push_str("  GenerateJwtRequest,\n");
-    ts.push_str("  GetSubjectDataRequest,\n");
-    ts.push_str("  HostingInfoResponse,\n");
-    ts.push_str("  HostingWalletResponse,\n");
-    ts.push_str("  ImportAgentRequest,\n");
-    ts.push_str("  ImportRequest,\n");
-    ts.push_str("  JoinNeighbourhoodRequest,\n");
-    ts.push_str("  KeepAliveQueryRequest,\n");
-    ts.push_str("  LinkLanguageTemplatesRequest,\n");
-    ts.push_str("  LinkMutationResponse,\n");
-    ts.push_str("  LinkMutationsRequest,\n");
-    ts.push_str("  LockAgentRequest,\n");
-    ts.push_str("  LoginUserRequest,\n");
-    ts.push_str("  OpenLinkRequest,\n");
-    ts.push_str("  PermitCapabilityRequest,\n");
-    ts.push_str("  PromptRequest,\n");
-    ts.push_str("  PublishLanguageRequest,\n");
-    ts.push_str("  PublishNeighbourhoodRequest,\n");
-    ts.push_str("  QueryRequest,\n");
-    ts.push_str("  RemoveLinkRequest,\n");
-    ts.push_str("  RemoveLinksBulkRequest,\n");
-    ts.push_str("  RequestCapabilityRequest,\n");
-    ts.push_str("  RequestPaymentRequest,\n");
-    ts.push_str("  RequestVerificationRequest,\n");
-    ts.push_str("  SetDefaultModelRequest,\n");
-    ts.push_str("  SetHotWalletAddressRequest,\n");
-    ts.push_str("  SetMultiUserRequest,\n");
-    ts.push_str("  SetOnlineStatusRequest,\n");
-    ts.push_str("  SetStatusRequest,\n");
-    ts.push_str("  SignMessageRequest,\n");
-    ts.push_str("  SignalRequest,\n");
-    ts.push_str("  SubscribeQueryRequest,\n");
-    ts.push_str("  SubscribeQueryResponse,\n");
-    ts.push_str("  UnlockAgentRequest,\n");
-    ts.push_str("  UpdateLinkRequest,\n");
-    ts.push_str("  UpdatePerspectiveRequest,\n");
-    ts.push_str("  UpdateProfileRequest,\n");
-    ts.push_str("  VerifyEmailRequest,\n");
-    ts.push_str("  VerifySignatureRequest,\n");
-    ts.push_str("} from './index';\n\n");
+    // Collect all unique request/response types to build import lists
+    let mut rest_types = std::collections::BTreeSet::new();
+    let mut domain_types = std::collections::BTreeSet::new();
+    let mut ai_types = std::collections::BTreeSet::new();
 
-    // Import domain types from the SDK (via wildcard re-exports in core/src/index.ts)
-    ts.push_str("import type {\n");
-    ts.push_str("  Agent,\n");
-    ts.push_str("  AgentSignature,\n");
-    ts.push_str("  AgentStatus,\n");
-    ts.push_str("  Apps,\n");
-    ts.push_str("  EntanglementProof,\n");
-    ts.push_str("  EntanglementProofInput,\n");
-    ts.push_str("  InteractionCall,\n");
-    ts.push_str("  InteractionMeta,\n");
-    ts.push_str("  LanguageHandle,\n");
-    ts.push_str("  LanguageMeta,\n");
-    ts.push_str("  LanguageRef,\n");
-    ts.push_str("  Notification,\n");
-    ts.push_str("  NotificationInput,\n");
-    ts.push_str("  OnlineAgent,\n");
-    ts.push_str("  Perspective,\n");
-    ts.push_str("  PerspectiveHandle,\n");
-    ts.push_str("  RuntimeInfo,\n");
-    ts.push_str("} from '../../index';\n\n");
+    // Known domain types (from core/src/index.ts re-exports)
+    let domain_set: std::collections::HashSet<&str> = [
+        "Agent", "AgentSignature", "AgentStatus", "Apps",
+        "EntanglementProof", "EntanglementProofInput",
+        "InteractionCall", "InteractionMeta",
+        "LanguageHandle", "LanguageMeta", "LanguageRef",
+        "Notification", "NotificationInput", "OnlineAgent",
+        "Perspective", "PerspectiveHandle", "RuntimeInfo",
+    ].iter().copied().collect();
 
-    // AI types not re-exported from core index
-    ts.push_str("import type { AITask } from '../../ai/Tasks';\n");
-    ts.push_str("import type { Model } from '../../ai/AITypes';\n\n");
+    let ai_set: std::collections::HashSet<&str> = [
+        "AITask", "Model",
+    ].iter().copied().collect();
+
+    // Primitives, built-ins, and locally-defined types to skip in imports
+    let skip_types: std::collections::HashSet<&str> = [
+        "never", "void", "unknown", "boolean", "string",
+        // TS built-ins
+        "Array", "Record",
+        // Locally defined in this file (transcription types)
+        "OpenTranscriptionRequest", "FeedTranscriptionRequest", "CloseTranscriptionRequest",
+    ].iter().copied().collect();
+
+    for route in &routes {
+        for type_str in &[route.request_type, route.response_type] {
+            // Extract base type names (strip [], | null, Array<>, etc.)
+            let base_types = extract_base_types(type_str);
+            for bt in base_types {
+                if skip_types.contains(bt.as_str()) || bt.starts_with("Record<") || bt.starts_with("Array<") {
+                    continue;
+                }
+                if domain_set.contains(bt.as_str()) {
+                    domain_types.insert(bt);
+                } else if ai_set.contains(bt.as_str()) {
+                    ai_types.insert(bt);
+                } else {
+                    rest_types.insert(bt);
+                }
+            }
+        }
+    }
+
+    // Import REST request/response types
+    if !rest_types.is_empty() {
+        ts.push_str("import type {\n");
+        for t in &rest_types {
+            ts.push_str(&format!("  {},\n", t));
+        }
+        ts.push_str("} from './index';\n\n");
+    }
+
+    // Import domain types
+    if !domain_types.is_empty() {
+        ts.push_str("import type {\n");
+        for t in &domain_types {
+            ts.push_str(&format!("  {},\n", t));
+        }
+        ts.push_str("} from '../../index';\n\n");
+    }
+
+    // Import AI types
+    for t in &ai_types {
+        if t == "AITask" {
+            ts.push_str("import type { AITask } from '../../ai/Tasks';\n");
+        } else if t == "Model" {
+            ts.push_str("import type { Model } from '../../ai/AITypes';\n");
+        }
+    }
+    if !ai_types.is_empty() {
+        ts.push_str("\n");
+    }
 
     // Transcription types (not yet exported via ts-rs)
     ts.push_str("// Transcription request types (not yet in ts-rs exports)\n");
@@ -121,7 +110,7 @@ fn generate_route_map() {
 
     // Generate the RouteMap
     ts.push_str("export interface RouteMap {\n");
-    for route in ROUTES {
+    for route in &routes {
         ts.push_str(&format!(
             "  '{} {}': {{ request: {}; response: {} }};\n",
             route.method, route.path, route.request_type, route.response_type
@@ -151,4 +140,18 @@ fn generate_route_map() {
         panic!("Failed to write {}: {}", out_path.display(), e);
     });
     println!("Generated {}", out_path.display());
+}
+
+/// Extract base type names from a TS type string like "Vec<Foo>[]" or "Foo | null"
+fn extract_base_types(s: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    // Split on |, [], <>, whitespace
+    let cleaned = s.replace("[]", " ").replace("|", " ").replace("null", " ");
+    for part in cleaned.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        let part = part.trim();
+        if !part.is_empty() && part.chars().next().unwrap().is_uppercase() {
+            result.push(part.to_string());
+        }
+    }
+    result
 }

@@ -26,6 +26,7 @@ use crate::pubsub::{
 };
 
 use super::auth::{AppState, AuthContext};
+use ad4m_rest_macros::rest_handler;
 
 /// Wrap a raw pubsub JSON string with a `"type"` field.
 ///
@@ -47,6 +48,7 @@ fn wrap_event(event_type: &str, raw_json: &str) -> String {
 }
 
 /// GET /events/agent — SSE: agent-status-changed, apps-changed, agent-updated, hosting-user-info-changed, compute-log-updated
+#[rest_handler(GET, "/events/agent", response = "void")]
 pub async fn agent_events(
     State(_state): State<AppState>,
     _auth: AuthContext,
@@ -83,6 +85,7 @@ pub async fn agent_events(
 }
 
 /// GET /events/perspectives — SSE: perspective-added, perspective-removed, perspective-updated, sync-state-change
+#[rest_handler(GET, "/events/perspectives", response = "void")]
 pub async fn perspective_lifecycle_events(
     State(_state): State<AppState>,
     _auth: AuthContext,
@@ -112,6 +115,7 @@ pub async fn perspective_lifecycle_events(
 }
 
 /// GET /events/perspectives/:uuid/links — SSE: link-added, link-removed, link-updated
+#[rest_handler(GET, "/events/perspectives/:uuid/links", response = "void")]
 pub async fn perspective_link_events(
     State(_state): State<AppState>,
     _auth: AuthContext,
@@ -155,6 +159,7 @@ pub async fn perspective_link_events(
 }
 
 /// GET /events/neighbourhoods/:uuid/signals — SSE: signal
+#[rest_handler(GET, "/events/neighbourhoods/:uuid/signals", response = "void")]
 pub async fn neighbourhood_signal_events(
     State(_state): State<AppState>,
     _auth: AuthContext,
@@ -175,6 +180,7 @@ pub async fn neighbourhood_signal_events(
 }
 
 /// GET /events/runtime — SSE: message-received, notification-triggered, exception-occurred
+#[rest_handler(GET, "/events/runtime", response = "void")]
 pub async fn runtime_events(
     State(_state): State<AppState>,
     _auth: AuthContext,
@@ -202,6 +208,7 @@ pub async fn runtime_events(
 }
 
 /// GET /events/ai — SSE: transcription-text, model-loading-status
+#[rest_handler(GET, "/events/ai", response = "void")]
 pub async fn ai_events(
     State(_state): State<AppState>,
     _auth: AuthContext,
@@ -228,6 +235,7 @@ pub async fn ai_events(
 ///
 /// Each event is a JSON object with a `"type"` field identifying the topic.
 /// Perspective-specific events include `"perspectiveUuid"` for client-side filtering.
+#[rest_handler(GET, "/events/unified", response = "void")]
 pub async fn unified_events(
     State(_state): State<AppState>,
     _auth: AuthContext,

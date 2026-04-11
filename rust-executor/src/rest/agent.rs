@@ -22,6 +22,7 @@ use crate::types::*;
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
 use super::types::*;
+use ad4m_rest_macros::rest_handler;
 
 fn link_expression_input_to_decorated(lei: &LinkExpressionInput) -> DecoratedLinkExpression {
     DecoratedLinkExpression {
@@ -62,6 +63,7 @@ fn link_input_to_decorated(link_input: &LinkInput) -> DecoratedLinkExpression {
 }
 
 /// GET /agent — current agent info + status + lock state
+#[rest_handler(GET, "/agent", response = "Agent")]
 pub async fn get_agent(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -107,6 +109,7 @@ pub async fn get_agent(
 }
 
 /// GET /agent/apps — list registered apps
+#[rest_handler(GET, "/agent/apps", response = "Apps[]")]
 pub async fn get_apps(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -119,6 +122,7 @@ pub async fn get_apps(
 }
 
 /// GET /agent/by-did/:did — get agent by DID
+#[rest_handler(GET, "/agent/by-did/:did", response = "Agent | null")]
 pub async fn get_agent_by_did(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -181,6 +185,7 @@ pub async fn get_agent_by_did(
 }
 
 /// PATCH /agent/profile — update DM language and/or public perspective
+#[rest_handler(PATCH, "/agent/profile", request = "UpdateProfileRequest", response = "Agent")]
 pub async fn update_profile(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -298,6 +303,7 @@ pub async fn update_profile(
 }
 
 /// POST /agent/generate — generate agent identity
+#[rest_handler(POST, "/agent/generate", request = "GenerateAgentRequest", response = "AgentStatus")]
 pub async fn generate_agent(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -375,6 +381,7 @@ pub async fn generate_agent(
 }
 
 /// POST /agent/lock — lock agent
+#[rest_handler(POST, "/agent/lock", request = "LockAgentRequest", response = "AgentStatus")]
 pub async fn lock_agent(
     State(_state): State<AppState>,
     _auth: AuthContext,
@@ -398,6 +405,7 @@ pub async fn lock_agent(
 }
 
 /// POST /agent/unlock — unlock agent
+#[rest_handler(POST, "/agent/unlock", request = "UnlockAgentRequest", response = "AgentStatus")]
 pub async fn unlock_agent(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -492,6 +500,7 @@ pub async fn unlock_agent(
 }
 
 /// POST /agent/sign — sign a message
+#[rest_handler(POST, "/agent/sign", request = "SignMessageRequest", response = "AgentSignature")]
 pub async fn sign_message(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -508,6 +517,7 @@ pub async fn sign_message(
 }
 
 /// DELETE /agent/apps/:id — remove app
+#[rest_handler(DELETE, "/agent/apps/:id", response = "Apps[]")]
 pub async fn remove_app(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -524,6 +534,7 @@ pub async fn remove_app(
 // ── Auth ──
 
 /// POST /agent/auth/request — request capability
+#[rest_handler(POST, "/agent/auth/request", request = "RequestCapabilityRequest", response = "string")]
 pub async fn request_capability(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -557,6 +568,7 @@ pub async fn request_capability(
 }
 
 /// POST /agent/auth/permit — permit capability
+#[rest_handler(POST, "/agent/auth/permit", request = "PermitCapabilityRequest", response = "string")]
 pub async fn permit_capability(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -574,6 +586,7 @@ pub async fn permit_capability(
 }
 
 /// POST /agent/auth/jwt — generate JWT
+#[rest_handler(POST, "/agent/auth/jwt", request = "GenerateJwtRequest", response = "string")]
 pub async fn generate_jwt(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -590,6 +603,7 @@ pub async fn generate_jwt(
 }
 
 /// DELETE /agent/auth/token/:token — revoke token
+#[rest_handler(DELETE, "/agent/auth/token/:token", response = "Apps[]")]
 pub async fn revoke_token(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -606,6 +620,7 @@ pub async fn revoke_token(
 // ── Status ──
 
 /// GET /agent/status — agent status
+#[rest_handler(GET, "/agent/status", response = "AgentStatus")]
 pub async fn get_agent_status(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -641,6 +656,7 @@ pub async fn get_agent_status(
 }
 
 /// GET /agent/is-locked — check if agent is locked
+#[rest_handler(GET, "/agent/is-locked", response = "boolean")]
 pub async fn is_locked(
     State(_state): State<AppState>,
     _auth: AuthContext,
@@ -658,6 +674,7 @@ pub async fn is_locked(
 // ── Trust ──
 
 /// GET /agent/trusted — list trusted agents
+#[rest_handler(GET, "/agent/trusted", response = "string[]")]
 pub async fn get_trusted_agents(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -676,6 +693,7 @@ pub async fn get_trusted_agents(
 }
 
 /// PUT /agent/trusted — add trusted agents
+#[rest_handler(PUT, "/agent/trusted", request = "string[]", response = "string[]")]
 pub async fn add_trusted_agents(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -699,6 +717,7 @@ pub async fn add_trusted_agents(
 }
 
 /// DELETE /agent/trusted — remove trusted agents
+#[rest_handler(DELETE, "/agent/trusted", request = "string[]", response = "string[]")]
 pub async fn delete_trusted_agents(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -724,6 +743,7 @@ pub async fn delete_trusted_agents(
 // ── Entanglement ──
 
 /// GET /agent/entanglement-proofs — list
+#[rest_handler(GET, "/agent/entanglement-proofs", response = "EntanglementProof[]")]
 pub async fn get_entanglement(
     State(_state): State<AppState>,
     _auth: AuthContext,
@@ -738,6 +758,7 @@ pub async fn get_entanglement(
 }
 
 /// POST /agent/entanglement-proofs — add (with ?preflight=true option)
+#[rest_handler(POST, "/agent/entanglement-proofs", request = "EntanglementProofInput[]", response = "EntanglementProof[]")]
 pub async fn add_entanglement(
     State(_state): State<AppState>,
     _auth: AuthContext,
@@ -788,6 +809,7 @@ pub async fn add_entanglement(
 }
 
 /// DELETE /agent/entanglement-proofs — delete
+#[rest_handler(DELETE, "/agent/entanglement-proofs", request = "EntanglementProofInput[]", response = "EntanglementProof[]")]
 pub async fn delete_entanglement(
     State(_state): State<AppState>,
     _auth: AuthContext,
@@ -818,6 +840,7 @@ pub async fn delete_entanglement(
 }
 
 /// POST /agent/import — import agent from keystore
+#[rest_handler(POST, "/agent/import", request = "ImportAgentRequest", response = "AgentStatus")]
 pub async fn import_agent(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -834,6 +857,7 @@ pub async fn import_agent(
 }
 
 /// POST /agent/entanglement-proof-preflight — pre-flight check
+#[rest_handler(POST, "/agent/entanglement-proof-preflight", request = "EntanglementProofPreflightRequest", response = "EntanglementProof")]
 pub async fn entanglement_proof_preflight(
     State(_state): State<AppState>,
     _auth: AuthContext,

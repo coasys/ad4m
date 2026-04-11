@@ -22,8 +22,10 @@ use super::errors::ApiError;
 use super::types::*;
 // Disambiguate: use REST's NotificationInput (has Option<String> for app_icon_path)
 use super::types::NotificationInput;
+use ad4m_rest_macros::rest_handler;
 
 /// GET /runtime/info — combined info + readiness + TLS domain
+#[rest_handler(GET, "/runtime/info", response = "RuntimeInfo")]
 pub async fn get_runtime_info(
     State(_state): State<AppState>,
     _auth: AuthContext,
@@ -44,6 +46,7 @@ pub async fn get_runtime_info(
 }
 
 /// POST /runtime/quit — quit runtime
+#[rest_handler(POST, "/runtime/quit", response = "boolean")]
 pub async fn quit_runtime(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -62,6 +65,7 @@ pub async fn quit_runtime(
 }
 
 /// PUT /runtime/status — set runtime status
+#[rest_handler(PUT, "/runtime/status", request = "SetStatusRequest", response = "boolean")]
 pub async fn set_status(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -79,6 +83,7 @@ pub async fn set_status(
 }
 
 /// POST /runtime/open-link — open URL in system browser
+#[rest_handler(POST, "/runtime/open-link", request = "OpenLinkRequest", response = "boolean")]
 pub async fn open_link(
     State(_state): State<AppState>,
     _auth: AuthContext,
@@ -103,6 +108,7 @@ pub async fn open_link(
 }
 
 /// POST /runtime/export — export db or perspective
+#[rest_handler(POST, "/runtime/export", request = "ExportRequest", response = "boolean")]
 pub async fn export_data(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -146,6 +152,7 @@ pub async fn export_data(
 }
 
 /// POST /runtime/holochain/restart — restart Holochain
+#[rest_handler(POST, "/runtime/holochain/restart", response = "boolean")]
 pub async fn restart_holochain(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -162,6 +169,7 @@ pub async fn restart_holochain(
 }
 
 /// GET /runtime/verify-signature — verify signed string
+#[rest_handler(POST, "/runtime/verify-signature", request = "VerifySignatureRequest", response = "boolean")]
 pub async fn verify_signature(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -183,6 +191,7 @@ pub async fn verify_signature(
 // ── Friends & Messages ──
 
 /// GET /friends — list friends
+#[rest_handler(GET, "/runtime/friends", response = "string[]")]
 pub async fn list_friends(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -198,6 +207,7 @@ pub async fn list_friends(
 }
 
 /// GET /friends/:did — friend status
+#[rest_handler(GET, "/runtime/friends/:did", response = "unknown")]
 pub async fn get_friend_status(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -216,6 +226,7 @@ pub async fn get_friend_status(
 }
 
 /// PUT /friends — add friends
+#[rest_handler(PUT, "/runtime/friends", request = "FriendsListRequest", response = "string[]")]
 pub async fn add_friends(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -233,6 +244,7 @@ pub async fn add_friends(
 }
 
 /// DELETE /friends — remove friends
+#[rest_handler(DELETE, "/runtime/friends", request = "FriendsListRequest", response = "string[]")]
 pub async fn remove_friends(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -250,6 +262,7 @@ pub async fn remove_friends(
 }
 
 /// POST /friends/:did/message — send message to friend
+#[rest_handler(POST, "/runtime/friends/:did/message", request = "FriendSendMessageRequest", response = "boolean")]
 pub async fn send_friend_message(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -273,6 +286,7 @@ pub async fn send_friend_message(
 }
 
 /// GET /messages/inbox
+#[rest_handler(GET, "/runtime/messages/inbox", response = "unknown")]
 pub async fn get_inbox(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -286,6 +300,7 @@ pub async fn get_inbox(
 }
 
 /// GET /messages/outbox
+#[rest_handler(GET, "/runtime/messages/outbox", response = "unknown")]
 pub async fn get_outbox(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -302,6 +317,7 @@ pub async fn get_outbox(
 // ── Notifications ──
 
 /// GET /notifications
+#[rest_handler(GET, "/runtime/notifications", response = "Notification[]")]
 pub async fn list_notifications(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -317,6 +333,7 @@ pub async fn list_notifications(
 }
 
 /// POST /notifications — request install notification
+#[rest_handler(POST, "/runtime/notifications", request = "NotificationInput", response = "boolean")]
 pub async fn create_notification(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -344,6 +361,7 @@ pub async fn create_notification(
 }
 
 /// PATCH /notifications/:id — update (including grant)
+#[rest_handler(PATCH, "/runtime/notifications/:id", request = "NotificationInput", response = "boolean")]
 pub async fn update_notification(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -375,6 +393,7 @@ pub async fn update_notification(
 }
 
 /// DELETE /notifications/:id — remove
+#[rest_handler(DELETE, "/runtime/notifications/:id", response = "boolean")]
 pub async fn delete_notification(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -393,6 +412,7 @@ pub async fn delete_notification(
 // ── Link Language Templates ──
 
 /// GET /runtime/link-language-templates
+#[rest_handler(GET, "/runtime/link-language-templates", response = "string[]")]
 pub async fn get_link_language_templates(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -411,6 +431,7 @@ pub async fn get_link_language_templates(
 }
 
 /// PUT /runtime/link-language-templates
+#[rest_handler(PUT, "/runtime/link-language-templates", request = "LinkLanguageTemplatesRequest", response = "string[]")]
 pub async fn add_link_language_templates(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -431,6 +452,7 @@ pub async fn add_link_language_templates(
 }
 
 /// DELETE /runtime/link-language-templates
+#[rest_handler(DELETE, "/runtime/link-language-templates", request = "LinkLanguageTemplatesRequest", response = "string[]")]
 pub async fn remove_link_language_templates(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -453,6 +475,7 @@ pub async fn remove_link_language_templates(
 // ── Holochain ──
 
 /// GET /runtime/hc/agent-infos
+#[rest_handler(GET, "/runtime/hc/agent-infos", response = "string[]")]
 pub async fn get_hc_agent_infos(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -475,6 +498,7 @@ pub async fn get_hc_agent_infos(
 }
 
 /// POST /runtime/hc/agent-infos
+#[rest_handler(POST, "/runtime/hc/agent-infos", request = "AddAgentInfosRequest", response = "boolean")]
 pub async fn add_hc_agent_infos(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -497,6 +521,7 @@ pub async fn add_hc_agent_infos(
 }
 
 /// GET /runtime/network-metrics
+#[rest_handler(GET, "/runtime/network-metrics", response = "string")]
 pub async fn get_network_metrics(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -518,6 +543,7 @@ pub async fn get_network_metrics(
     Ok(Json(metrics))
 }
 
+#[rest_handler(GET, "/runtime/free-hosting-enabled", response = "boolean")]
 pub async fn get_free_hosting_enabled(
     State(_state): State<AppState>,
     _auth: AuthContext,
@@ -527,6 +553,7 @@ pub async fn get_free_hosting_enabled(
     Ok(Json(enabled))
 }
 
+#[rest_handler(PUT, "/runtime/free-hosting-enabled", request = "Record<string, unknown>", response = "boolean")]
 pub async fn set_free_hosting_enabled(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -547,6 +574,7 @@ pub async fn set_free_hosting_enabled(
 }
 
 /// POST /runtime/import — import data
+#[rest_handler(POST, "/runtime/import", request = "ImportRequest", response = "unknown")]
 pub async fn import_data(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -584,6 +612,7 @@ pub async fn import_data(
 }
 
 /// GET /runtime/tls-domain
+#[rest_handler(GET, "/runtime/tls-domain", response = "string | null")]
 pub async fn get_tls_domain(
     State(_state): State<AppState>,
     _auth: AuthContext,
@@ -595,6 +624,7 @@ pub async fn get_tls_domain(
 }
 
 /// GET /runtime/compute-log
+#[rest_handler(GET, "/runtime/compute-log", response = "unknown")]
 pub async fn get_compute_log(
     State(_state): State<AppState>,
     auth: AuthContext,

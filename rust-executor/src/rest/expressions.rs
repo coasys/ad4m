@@ -15,8 +15,10 @@ use crate::types::*;
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
 use super::types::*;
+use ad4m_rest_macros::rest_handler;
 
 /// GET /expressions/:url — get expression
+#[rest_handler(GET, "/expressions/:url", response = "unknown | null")]
 pub async fn get_expression(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -60,6 +62,7 @@ pub async fn get_expression(
 }
 
 /// GET /expressions/:url/interactions — get interactions
+#[rest_handler(GET, "/expressions/:url/interactions", response = "InteractionMeta[]")]
 pub async fn get_interactions(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -93,6 +96,7 @@ pub async fn get_interactions(
 }
 
 /// POST /expressions — create expression
+#[rest_handler(POST, "/expressions", request = "CreateExpressionRequest", response = "string")]
 pub async fn create_expression(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -121,6 +125,7 @@ pub async fn create_expression(
 }
 
 /// POST /expressions/many — get multiple expressions
+#[rest_handler(POST, "/expressions/many", request = "ExpressionManyRequest", response = "Array<unknown | null>")]
 pub async fn get_many_expressions(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -158,6 +163,7 @@ pub async fn get_many_expressions(
 }
 
 /// POST /expressions/:url/interact — interact with expression
+#[rest_handler(POST, "/expressions/:url/interact", request = "InteractionCall", response = "string")]
 pub async fn interact_expression(
     State(_state): State<AppState>,
     auth: AuthContext,

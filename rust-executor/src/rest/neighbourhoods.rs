@@ -17,6 +17,7 @@ use crate::types::*;
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
 use super::types::*;
+use ad4m_rest_macros::rest_handler;
 
 /// Convert REST PerspectiveInput to core Perspective (for neighbourhood meta)
 fn perspective_input_to_core(input: super::types::PerspectiveInput) -> Perspective {
@@ -67,6 +68,7 @@ fn perspective_input_to_domain(input: super::types::PerspectiveInput) -> DomainP
 }
 
 /// POST /neighbourhoods/join — join a neighbourhood by URL
+#[rest_handler(POST, "/neighbourhoods/join", request = "JoinNeighbourhoodRequest", response = "PerspectiveHandle")]
 pub async fn join_neighbourhood(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -85,6 +87,7 @@ pub async fn join_neighbourhood(
 }
 
 /// POST /neighbourhoods/publish — publish perspective as neighbourhood
+#[rest_handler(POST, "/neighbourhoods/publish", request = "PublishNeighbourhoodRequest", response = "string")]
 pub async fn publish_neighbourhood(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -108,6 +111,7 @@ pub async fn publish_neighbourhood(
 }
 
 /// POST /neighbourhoods/:uuid/broadcast — send broadcast (signed or unsigned)
+#[rest_handler(POST, "/neighbourhoods/:uuid/broadcast", request = "BroadcastRequest", response = "boolean")]
 pub async fn send_broadcast(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -153,6 +157,7 @@ pub async fn send_broadcast(
 }
 
 /// POST /neighbourhoods/:uuid/signal — send signal to remote agent (signed or unsigned)
+#[rest_handler(POST, "/neighbourhoods/:uuid/signal", request = "SignalRequest", response = "boolean")]
 pub async fn send_signal(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -196,6 +201,7 @@ pub async fn send_signal(
 }
 
 /// PUT /neighbourhoods/:uuid/online-status — set online status (signed or unsigned)
+#[rest_handler(PUT, "/neighbourhoods/:uuid/online-status", request = "SetOnlineStatusRequest", response = "boolean")]
 pub async fn set_online_status(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -239,6 +245,7 @@ pub async fn set_online_status(
 }
 
 /// GET /neighbourhoods/:uuid/has-telepresence — check if neighbourhood has telepresence adapter
+#[rest_handler(GET, "/neighbourhoods/:uuid/has-telepresence", response = "boolean")]
 pub async fn has_telepresence(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -255,6 +262,7 @@ pub async fn has_telepresence(
 }
 
 /// GET /neighbourhoods/:uuid/online-agents — list online agents
+#[rest_handler(GET, "/neighbourhoods/:uuid/online-agents", response = "OnlineAgent[]")]
 pub async fn online_agents(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -276,6 +284,7 @@ pub async fn online_agents(
 }
 
 /// GET /neighbourhoods/:uuid/other-agents — list other agents (excluding current user)
+#[rest_handler(GET, "/neighbourhoods/:uuid/other-agents", response = "string[]")]
 pub async fn other_agents(
     State(_state): State<AppState>,
     auth: AuthContext,

@@ -36,6 +36,8 @@ generate_snapshot = []  # Feature flag for snapshot generation mode
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+ad4m-rest-macros = { path = "ad4m-rest-macros" }
+inventory = "0.3"
 deno_core = {version = "0.347.0", git = "https://github.com/coasys/deno_core.git", branch = "new-v8-dylib"  }
 deno_runtime = {version = "0.212.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-hickory-update", features=["transpile", "snapshot"] }
 deno_resolver = {version = "0.35.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-hickory-update" }

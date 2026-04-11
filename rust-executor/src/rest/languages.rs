@@ -15,8 +15,10 @@ use crate::types::*;
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
 use super::types::*;
+use ad4m_rest_macros::rest_handler;
 
 /// GET /languages — list (with ?filter= param)
+#[rest_handler(GET, "/languages", response = "LanguageHandle[]")]
 pub async fn list_languages(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -52,6 +54,7 @@ pub async fn list_languages(
 }
 
 /// GET /languages/:address — get language handle (includes icons)
+#[rest_handler(GET, "/languages/:address", response = "LanguageHandle")]
 pub async fn get_language(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -110,6 +113,7 @@ pub async fn get_language(
 }
 
 /// GET /languages/:address/meta — get language meta expression
+#[rest_handler(GET, "/languages/:address/meta", response = "LanguageMeta")]
 pub async fn get_language_meta(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -134,6 +138,7 @@ pub async fn get_language_meta(
 }
 
 /// GET /languages/:address/source — get language source code
+#[rest_handler(GET, "/languages/:address/source", response = "string")]
 pub async fn get_language_source(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -158,6 +163,7 @@ pub async fn get_language_source(
 }
 
 /// POST /languages/publish — publish a language
+#[rest_handler(POST, "/languages/publish", request = "PublishLanguageRequest", response = "LanguageMeta")]
 pub async fn publish_language(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -230,6 +236,7 @@ pub async fn publish_language(
 }
 
 /// POST /languages/apply-template — apply template and publish
+#[rest_handler(POST, "/languages/apply-template", request = "ApplyTemplateRequest", response = "LanguageRef")]
 pub async fn apply_template_and_publish(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -308,6 +315,7 @@ pub async fn apply_template_and_publish(
 }
 
 /// DELETE /languages/:address — remove a language
+#[rest_handler(DELETE, "/languages/:address", response = "boolean")]
 pub async fn remove_language(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -327,6 +335,7 @@ pub async fn remove_language(
 }
 
 /// PUT /languages/:address/settings — write settings
+#[rest_handler(PUT, "/languages/:address/settings", request = "Record<string, unknown>", response = "boolean")]
 pub async fn write_settings(
     State(_state): State<AppState>,
     auth: AuthContext,

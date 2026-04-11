@@ -10,8 +10,10 @@ use crate::db::Ad4mDb;
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
 use super::types::*;
+use ad4m_rest_macros::rest_handler;
 
 /// GET /hosting — combined user info + rates
+#[rest_handler(GET, "/hosting", response = "HostingInfoResponse")]
 pub async fn get_hosting_info(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -56,6 +58,7 @@ pub async fn get_hosting_info(
 }
 
 /// GET /hosting/wallet — balance from unyt ledger + agent pubkey
+#[rest_handler(GET, "/hosting/wallet", response = "HostingWalletResponse")]
 pub async fn get_hosting_wallet(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -78,6 +81,7 @@ pub async fn get_hosting_wallet(
 }
 
 /// GET /hosting/wallet/history — transaction history
+#[rest_handler(GET, "/hosting/wallet/history", response = "unknown")]
 pub async fn get_hosting_wallet_history(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -94,6 +98,7 @@ pub async fn get_hosting_wallet_history(
 }
 
 /// PUT /hosting/wallet/hot-wallet-address
+#[rest_handler(PUT, "/hosting/wallet/hot-wallet-address", request = "SetHotWalletAddressRequest", response = "boolean")]
 pub async fn set_hot_wallet_address(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -113,6 +118,7 @@ pub async fn set_hot_wallet_address(
 }
 
 /// POST /hosting/request-payment
+#[rest_handler(POST, "/hosting/request-payment", request = "RequestPaymentRequest", response = "unknown")]
 pub async fn request_payment(
     State(_state): State<AppState>,
     auth: AuthContext,
