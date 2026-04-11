@@ -91,14 +91,11 @@ done
 # --- Dependency checks ---
 command -v python3 &>/dev/null || err "python3 is required"
 command -v curl &>/dev/null || err "curl is required"
+python3 -c "import websockets" 2>/dev/null || \
+    err "python3 'websockets' package required. Install: pip3 install websockets"
 
 if [[ -n "$ADMIN_CREDENTIAL" ]]; then
     command -v jq &>/dev/null || err "jq is required for --admin-credential mode"
-fi
-
-if ! command -v websocat &>/dev/null; then
-    python3 -c "import websockets" 2>/dev/null || \
-        err "Neither 'websocat' nor python3 'websockets' found. Install one:\n  brew install websocat\n  pip3 install websockets"
 fi
 
 # --- Find Chrome/Chromium ---
@@ -141,25 +138,21 @@ for t in tabs:
         print(t['webSocketDebuggerUrl']); break
 " 2>/dev/null) || err "Could not get CDP WebSocket URL. Is Chrome running with --remote-debugging-port=$CDP_PORT?"
 
-    local escaped
-    escaped=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$expr")
-
-    if command -v websocat &>/dev/null; then
-        echo "{\"id\":1,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":$escaped,\"awaitPromise\":true,\"returnByValue\":true}}" | \
-            websocat -t --no-close -1 "$ws_url" 2>/dev/null | head -1 | \
-            python3 -c "import sys,json; r=json.load(sys.stdin); v=r.get('result',{}).get('result',{}).get('value',''); print(v)"
-    else
-        python3 << PYEOF
+    # Always use python3 websockets for reliable multiline JS evaluation.
+    # websocat breaks on multiline JSON payloads.
+    python3 -c "
 import json, asyncio, websockets, sys
 async def main():
-    async with websockets.connect("$ws_url") as ws:
-        await ws.send(json.dumps({"id":1,"method":"Runtime.evaluate","params":{"expression":$escaped,"awaitPromise":True,"returnByValue":True}}))
+    expr = sys.argv[1]
+    msg = json.dumps({'id':1,'method':'Runtime.evaluate','params':{'expression':expr,'awaitPromise':True,'returnByValue':True}})
+    async with websockets.connect(sys.argv[2]) as ws:
+        await ws.send(msg)
         resp = json.loads(await ws.recv())
-        v = resp.get("result",{}).get("result",{}).get("value","")
-        print(v)
+        v = resp.get('result',{}).get('result',{}).get('value','')
+        if v is not None:
+            print(v, end='')
 asyncio.run(main())
-PYEOF
-    fi
+" "$expr" "$ws_url" 2>/dev/null
 }
 
 # --- Wait for a condition (JS expression returning truthy) ---
@@ -326,7 +319,9 @@ if $LAUNCH; then
 
     "$CHROME_BIN" "${CHROME_FLAGS[@]}" "$FLUX_URL" &>/dev/null &
     CHROME_PID=$!
-    trap 'kill $CHROME_PID 2>/dev/null' EXIT
+    # Don't kill Chrome on script exit — leave it running for debugging
+    # and for subsequent auth script runs to reuse the session
+    echo "$CHROME_PID" > /tmp/ad4m-chrome.pid
     sleep 3
     ok "Chrome launched (PID $CHROME_PID)"
 else
