@@ -171,7 +171,7 @@ export default class Ad4mConnect extends EventTarget {
     });
 
     this.apolloClient = this.createApolloClient(this.wsClient);
-    this.ad4mClient = new Ad4mClient(this.apolloClient);
+    this.ad4mClient = new Ad4mClient(this.apolloClient as ApolloClient<any>);
     this.requestedRestart = false;
 
     return this.ad4mClient;
@@ -193,7 +193,7 @@ export default class Ad4mConnect extends EventTarget {
     // Create a temporary client for the duration of the callback
     const wsClient = createClient({ url, connectionParams: async () => ({ headers: { authorization: "" } }) });
     const apolloClient = this.createApolloClient(wsClient);
-    const client = new Ad4mClient(apolloClient);
+    const client = new Ad4mClient(apolloClient as ApolloClient<any>);
 
     try {
       return await callback(client);
