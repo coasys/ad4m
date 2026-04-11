@@ -293,6 +293,7 @@ impl From<PerspectiveInput> for Perspective {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct Neighbourhood {
     pub link_language: String,
     pub meta: Perspective,
@@ -581,7 +582,7 @@ pub struct Model {
     pub name: String,
     pub api: Option<ModelApi>,
     pub local: Option<LocalModel>,
-    #[serde(rename = "type")]
+    #[serde(rename = "modelType")]
     pub model_type: ModelType,
 }
 
