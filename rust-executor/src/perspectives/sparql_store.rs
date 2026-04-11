@@ -1766,8 +1766,12 @@ mod tests {
         // literal:string:hello is not a valid IRI for NamedNode, but add_link
         // stores it. query_links uses NamedNode pattern matching, so non-IRI
         // targets should be handled gracefully.
-        svc.add_link(&make_link("ad4m://src", "ad4m://pred", "ad4m://normal_target"))
-            .unwrap();
+        svc.add_link(&make_link(
+            "ad4m://src",
+            "ad4m://pred",
+            "ad4m://normal_target",
+        ))
+        .unwrap();
         // Literal-style targets are stored as IRIs (NamedNode) in oxigraph
         // even though they represent literals conceptually
         svc.add_link(&make_link(
@@ -1814,7 +1818,14 @@ mod tests {
 
         // Filter by a specific predicate
         let results = svc
-            .query_links(Some("ad4m://src"), Some("ad4m://pred_42"), None, None, None, None)
+            .query_links(
+                Some("ad4m://src"),
+                Some("ad4m://pred_42"),
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].data.target, "ad4m://target_42");
@@ -1831,18 +1842,10 @@ mod tests {
     fn test_query_links_unicode_roundtrip() {
         let svc = new_service();
         // Unicode source, predicate, target
-        svc.add_link(&make_link(
-            "ad4m://héllo",
-            "ad4m://prédicat",
-            "ad4m://目标",
-        ))
-        .unwrap();
-        svc.add_link(&make_link(
-            "ad4m://emoji🎉",
-            "ad4m://pred",
-            "ad4m://target",
-        ))
-        .unwrap();
+        svc.add_link(&make_link("ad4m://héllo", "ad4m://prédicat", "ad4m://目标"))
+            .unwrap();
+        svc.add_link(&make_link("ad4m://emoji🎉", "ad4m://pred", "ad4m://target"))
+            .unwrap();
         svc.add_link(&make_link(
             "ad4m://中文源",
             "ad4m://日本語述語",
@@ -1890,13 +1893,21 @@ mod tests {
         let results = svc
             .query_links(None, None, None, Some(exact_ts), None, None)
             .unwrap();
-        assert_eq!(results.len(), 1, "from_date at exact timestamp should include the link");
+        assert_eq!(
+            results.len(),
+            1,
+            "from_date at exact timestamp should include the link"
+        );
 
         // until_date = exact timestamp — should include it (<=)
         let results = svc
             .query_links(None, None, None, None, Some(exact_ts), None)
             .unwrap();
-        assert_eq!(results.len(), 1, "until_date at exact timestamp should include the link");
+        assert_eq!(
+            results.len(),
+            1,
+            "until_date at exact timestamp should include the link"
+        );
 
         // Both from and until at exact — should still include
         let results = svc
