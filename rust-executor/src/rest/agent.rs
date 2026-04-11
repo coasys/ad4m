@@ -23,6 +23,25 @@ use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
 use super::types::*;
 
+fn link_expression_input_to_decorated(lei: &LinkExpressionInput) -> DecoratedLinkExpression {
+    DecoratedLinkExpression {
+        author: lei.author.clone(),
+        timestamp: lei.timestamp.clone(),
+        data: Link {
+            source: lei.data.source.clone(),
+            target: lei.data.target.clone(),
+            predicate: lei.data.predicate.clone(),
+        },
+        proof: DecoratedExpressionProof {
+            key: lei.proof.key.clone().unwrap_or_default(),
+            signature: lei.proof.signature.clone().unwrap_or_default(),
+            valid: lei.proof.valid,
+            invalid: lei.proof.invalid,
+        },
+        status: lei.status.clone(),
+    }
+}
+
 fn link_input_to_decorated(link_input: &LinkInput) -> DecoratedLinkExpression {
     DecoratedLinkExpression {
         author: String::new(),
@@ -201,7 +220,7 @@ pub async fn update_profile(
             let decorated_links: Vec<DecoratedLinkExpression> = pub_persp
                 .links
                 .iter()
-                .map(|link_input| link_input_to_decorated(link_input))
+                .map(|lei| link_expression_input_to_decorated(lei))
                 .collect();
 
             let agent = Agent {
@@ -233,7 +252,7 @@ pub async fn update_profile(
             let decorated_links: Vec<DecoratedLinkExpression> = pub_persp
                 .links
                 .iter()
-                .map(|link_input| link_input_to_decorated(link_input))
+                .map(|lei| link_expression_input_to_decorated(lei))
                 .collect();
 
             AgentService::with_mutable_global_instance(|agent_service| {

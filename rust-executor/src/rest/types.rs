@@ -39,7 +39,13 @@ pub struct SignMessageRequest {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProfileRequest {
     pub dm_language: Option<String>,
-    pub public_perspective: Option<PerspectiveInput>,
+    pub public_perspective: Option<PublicPerspectiveInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicPerspectiveInput {
+    pub links: Vec<LinkExpressionInput>,
 }
 
 #[derive(Deserialize)]
