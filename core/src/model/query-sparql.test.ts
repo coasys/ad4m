@@ -26,7 +26,7 @@ describe('buildSPARQLOrderLimitOffset', () => {
 
   it('returns ORDER BY ASC for a property', () => {
     const result = buildSPARQLOrderLimitOffset(emptyMetadata, { order: { name: 'ASC' } });
-    expect(result).toBe('ORDER BY ASC(?name)');
+    expect(result).toBe('ORDER BY ASC(?wTarget_name)');
   });
 
   it('returns combined ORDER BY + LIMIT + OFFSET', () => {
@@ -45,7 +45,7 @@ describe('buildSPARQLOrderLimitOffset', () => {
       order: { timestamp: 'DESC', name: 'ASC' },
     });
     expect(result).toContain('DESC(?timestamp)');
-    expect(result).toContain('ASC(?name)');
+    expect(result).toContain('ASC(?wTarget_name)');
   });
 
   it('handles offset: 0', () => {

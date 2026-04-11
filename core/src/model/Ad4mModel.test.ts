@@ -611,7 +611,7 @@ describe("Ad4mModel.queryToSPARQL()", () => {
     const norm = normalizeQuery(query);
     expect(norm).toContain("SELECT ?source");
     expect(norm).toContain("ORDER BY");
-    expect(norm).toContain("ASC(?name)");
+    expect(norm).toContain("ASC(?cfTarget_name)");
   });
 
   it("should include LIMIT in SPARQL via subquery for pagination", async () => {

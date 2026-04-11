@@ -127,7 +127,14 @@ export async function pooledSubscribe(
                     const removedRows = prevArr.filter((r: any) => !newSources.has(`${r.source}|${r.predicate}|${r.target}`));
 
                     if (removedRows.length === 0 && addedRows.length > 0) {
-                        // Pure addition — hydrate only the new rows
+                        // Verify ALL added rows have sources not in previous results.
+                        // If any added row's source matches an existing source, it means
+                        // an existing instance got new links — we need full rehydration.
+                        const prevSourceIds = new Set(prevArr.map((r: any) => r.source));
+                        const allNewSources = addedRows.every((r: any) => !prevSourceIds.has(r.source));
+
+                        if (allNewSources) {
+                        // Pure addition of new instances — hydrate only the new rows
                         try {
                             const deltaHydrated = await firstSub.hydrate(addedRows);
                             if (Array.isArray(deltaHydrated)) {
@@ -141,6 +148,7 @@ export async function pooledSubscribe(
                         } catch {
                             // Delta hydration failed — fall through to full hydration
                         }
+                    }
                     }
                 }
 

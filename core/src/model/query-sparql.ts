@@ -15,6 +15,53 @@ import type { RelationMetadataEntry } from "./decorators";
 import type { Where, Query, ModelMetadata, PropertyMetadata } from "./types";
 
 /**
+ * Check whether a `where` clause contains filters that cannot be pushed down
+ * to SPARQL and must be evaluated in JS after hydration.
+ *
+ * JS-only filters include:
+ * - Literal-stored properties (equality, comparison, contains, etc.)
+ * - Reverse relations (belongsToOne / belongsToMany)
+ * - author / timestamp filters (skipped by buildSPARQLWhereFilters)
+ *
+ * When JS-only filters exist, SPARQL-level LIMIT/OFFSET must NOT be applied
+ * because the database would cap the candidate set before JS filters run,
+ * potentially discarding matches beyond the LIMIT.
+ */
+export function hasJsOnlyWhereFilters(
+  metadata: ModelMetadata,
+  allRelationsMetadata: Record<string, RelationMetadataEntry>,
+  where?: Where,
+): boolean {
+  if (!where) return false;
+
+  for (const [propertyName, condition] of Object.entries(where)) {
+    if (propertyName === "base" || propertyName === "id") continue;
+
+    // author/timestamp filters are handled in JS
+    if (propertyName === "author" || propertyName === "timestamp") return true;
+
+    const propMeta = metadata.properties[propertyName];
+    if (!propMeta) continue;
+
+    // Reverse relations are JS-only
+    const relMeta = allRelationsMetadata[propertyName];
+    if (relMeta && (relMeta.kind === 'belongsToOne' || relMeta.kind === 'belongsToMany')) {
+      return true;
+    }
+
+    // Literal-stored properties are JS-only (value filtering can't be pushed to SPARQL)
+    if (isLiteralStoredProperty(propMeta)) {
+      // Check if the condition actually filters on value (not just existence)
+      if (condition !== undefined && condition !== null) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
  * Check if a string value looks like a URI (has a scheme).
  */
 function looksLikeUri(value: string): boolean {
@@ -83,6 +130,31 @@ export function formatSPARQLValue(value: any): string {
  */
 function iri(value: string): string {
   return `<${value}>`;
+}
+
+/**
+ * Map a user-facing property name to the SPARQL variable alias used in the query.
+ *
+ * Properties appear in the query as:
+ * - Required properties: `?cfTarget_${name}`
+ * - Where-clause joins: `?wTarget_${name}`
+ * - Initial-value fallback: `?cfInitTarget_${name}`
+ *
+ * For ORDER BY, we prefer the conformance variable (always present for required props),
+ * then the where-target variable.
+ */
+function mapPropertyToSPARQLVar(propertyName: string, metadata: ModelMetadata): string {
+  const propMeta = metadata.properties[propertyName];
+  if (propMeta) {
+    if (propMeta.required && !propMeta.getter && !(propMeta.flag && propMeta.initial)) {
+      return `?cfTarget_${propertyName}`;
+    }
+    if (propMeta.initial && !propMeta.flag) {
+      return `?cfInitTarget_${propertyName}`;
+    }
+  }
+  // Fallback: where-clause variable or raw name
+  return `?wTarget_${propertyName}`;
 }
 
 /**
@@ -181,13 +253,14 @@ export function buildSPARQLQuery(
   // the database only materialises links for the requested page of instances.
   // Without this, ALL instances' links are fetched and pagination happens in JS.
   const hasPagination = query.limit !== undefined || query.offset !== undefined;
+  const hasJsFilters = hasJsOnlyWhereFilters(metadata, allRelationsMetadata, query.where);
 
-  if (hasPagination) {
+  if (hasPagination && !hasJsFilters) {
     // Build a subquery that selects DISTINCT sources with ordering + pagination.
     // We need a timestamp for ordering — get the earliest link timestamp per source.
     const orderByClause = query.order
       ? Object.entries(query.order).map(([prop, dir]) => {
-          const v = prop === 'timestamp' ? '?_srcTs' : `?${prop}`;
+          const v = prop === 'timestamp' ? '?_srcTs' : mapPropertyToSPARQLVar(prop, metadata);
           return dir === 'DESC' ? `DESC(${v})` : `ASC(${v})`;
         }).join(' ')
       : 'ASC(?_srcTs)';
@@ -248,7 +321,7 @@ export function buildSPARQLOrderLimitOffset(_metadata: ModelMetadata, query: Que
   if (query.order) {
     const orderTerms = Object.entries(query.order).map(([prop, dir]) => {
       // Map property names to SPARQL variables used in the query
-      const varName = prop === 'timestamp' ? '?timestamp' : `?${prop}`;
+      const varName = prop === 'timestamp' ? '?timestamp' : mapPropertyToSPARQLVar(prop, _metadata);
       return dir === 'DESC' ? `DESC(${varName})` : `ASC(${varName})`;
     });
     if (orderTerms.length > 0) {
