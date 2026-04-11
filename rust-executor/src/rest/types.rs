@@ -166,6 +166,7 @@ pub struct JoinNeighbourhoodRequest {
 pub struct PublishNeighbourhoodRequest {
     #[serde(alias = "perspectiveUUID")]
     pub perspective_uuid: String,
+    #[serde(alias = "linkLanguage")]
     pub link_language: String,
     pub meta: crate::types::Perspective,
 }

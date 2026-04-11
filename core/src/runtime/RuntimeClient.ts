@@ -138,7 +138,7 @@ export class RuntimeClient {
     }
 
     async requestInstallNotification(notification: NotificationInput) {
-        return this.#restClient.post('/api/v1/runtime/notifications', { notification })
+        return this.#restClient.post('/api/v1/runtime/notifications', notification)
     }
 
     async grantNotification(id: string): Promise<boolean> {
@@ -158,7 +158,7 @@ export class RuntimeClient {
     }
 
     async updateNotification(id: string, notification: NotificationInput): Promise<boolean> {
-        return this.#restClient.patch<boolean>(`/api/v1/runtime/notifications/${encodeURIComponent(id)}`, { notification })
+        return this.#restClient.patch<boolean>(`/api/v1/runtime/notifications/${encodeURIComponent(id)}`, notification)
     }
 
     async removeNotification(id: string): Promise<boolean> {

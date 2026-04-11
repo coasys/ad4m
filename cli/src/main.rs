@@ -271,7 +271,7 @@ async fn main() -> Result<()> {
                 mcp_port,
                 pid_file,
                 localhost: None,
-                auto_permit_cap_requests: None,
+                auto_permit_cap_requests: Some(true),
                 tls: None,
                 log_holochain_metrics: None,
                 hc_relay_url: None,
