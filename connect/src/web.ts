@@ -1,7 +1,7 @@
 import { css, html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import autoBind from "auto-bind";
-import { VerificationRequestResult } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
+import { VerificationRequestResult } from "@coasys/ad4m/lib/src/runtime/RuntimeTypes";
 import { checkConnection, setLocal, wsUrlToHttpBase } from "./utils";
 import Ad4mConnect from "./core";
 import { Ad4mLogo, ArrowLeftIcon, CreditIcon } from "./components/icons";
