@@ -411,6 +411,14 @@ pub struct NotificationInput {
     pub granted: Option<bool>,
 }
 
+/// Grant/revoke a notification (partial update for grant status only)
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NotificationGrantRequest {
+    pub granted: bool,
+}
+
 // ── SDNA / Commands / Subjects ──
 
 #[derive(Deserialize, TS)]

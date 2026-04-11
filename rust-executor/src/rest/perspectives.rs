@@ -954,14 +954,18 @@ pub async fn create_subject(
     // The JS client may send subjectClass as a JSON string like
     // '{"className":"Community","initialValues":{...}}' (legacy from GraphQL era).
     // Parse it to extract the actual class name.
-    let (resolved_class_name, parsed_initial_values) = match serde_json::from_str::<serde_json::Value>(&body.subject_class) {
-        Ok(obj) if obj.is_object() && obj.get("className").is_some() => {
-            let cn = obj["className"].as_str().unwrap_or(&body.subject_class).to_string();
-            let iv = obj.get("initialValues").cloned();
-            (cn, iv)
-        }
-        _ => (body.subject_class.clone(), None),
-    };
+    let (resolved_class_name, parsed_initial_values) =
+        match serde_json::from_str::<serde_json::Value>(&body.subject_class) {
+            Ok(obj) if obj.is_object() && obj.get("className").is_some() => {
+                let cn = obj["className"]
+                    .as_str()
+                    .unwrap_or(&body.subject_class)
+                    .to_string();
+                let iv = obj.get("initialValues").cloned();
+                (cn, iv)
+            }
+            _ => (body.subject_class.clone(), None),
+        };
 
     let subject_class = crate::perspectives::perspective_instance::SubjectClassOption {
         class_name: Some(resolved_class_name),

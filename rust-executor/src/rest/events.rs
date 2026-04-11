@@ -49,7 +49,8 @@ use crate::pubsub::{
     AI_TRANSCRIPTION_TEXT_TOPIC, APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC,
     HOSTING_USER_INFO_CHANGED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC,
     PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
-    PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
+    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_REMOVED_TOPIC,
+    PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
     RUNTIME_MESSAGED_RECEIVED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
 
@@ -309,6 +310,61 @@ pub async fn ai_events(
 
     let merged = stream::select(s1, s2);
     Ok(Sse::new(merged).keep_alive(KeepAlive::default()))
+}
+
+/// GET /events/query-subscription/:subscription_id — SSE: query subscription updates
+///
+/// Filters the global `PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC` to only emit
+/// events matching the given `subscription_id`.  The pubsub message is a JSON
+/// object `{ uuid, subscription_id, result }` — we forward the full object
+/// wrapped with `"type": "query-subscription-update"`.
+#[rest_handler(GET, "/events/query-subscription/:subscription_id", response = "void")]
+pub async fn query_subscription_events(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(subscription_id): Path<String>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    let pubsub = get_global_pubsub().await;
+    let rx = pubsub
+        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
+        .await;
+
+    let stream = BroadcastStream::new(rx)
+        .filter_map(|r| async { handle_broadcast_result(r) })
+        .filter_map(move |result| {
+            let sub_id = subscription_id.clone();
+            async move {
+                match result {
+                    Ok(msg) => {
+                        // Parse and check subscription_id field
+                        if let Ok(serde_json::Value::Object(ref map)) =
+                            serde_json::from_str::<serde_json::Value>(&msg)
+                        {
+                            if let Some(serde_json::Value::String(ref id)) = map
+                                .get("subscription_id")
+                                .or_else(|| map.get("subscriptionId"))
+                            {
+                                if id == &sub_id {
+                                    return Some(Ok(Event::default()
+                                        .data(wrap_event("query-subscription-update", &msg))));
+                                }
+                            }
+                        }
+                        None
+                    }
+                    Err(n) => Some(Ok(Event::default().data(format!(
+                        r#"{{"type":"lagged","missed":{},"stream":"query-subscription"}}"#,
+                        n
+                    )))),
+                }
+            }
+        });
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 /// GET /events — Unified SSE endpoint that merges ALL event topics into a

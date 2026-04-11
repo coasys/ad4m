@@ -95,8 +95,8 @@ export class RuntimeClient {
         return this.#restClient.get<string[]>('/api/v1/runtime/friends')
     }
 
-    async hcAgentInfos(): Promise<string> {
-        return this.#restClient.get<string>('/api/v1/runtime/hc/agent-infos')
+    async hcAgentInfos(): Promise<string[]> {
+        return this.#restClient.get<string[]>('/api/v1/runtime/hc/agent-infos')
     }
 
     async getNetworkMetrics(): Promise<string> {
@@ -142,7 +142,7 @@ export class RuntimeClient {
     }
 
     async grantNotification(id: string): Promise<boolean> {
-        return this.#restClient.patch<boolean>(`/api/v1/runtime/notifications/${encodeURIComponent(id)}`, { granted: true })
+        return this.#restClient.patch<boolean>(`/api/v1/runtime/notifications/${encodeURIComponent(id)}/grant`, { granted: true })
     }
 
     async exportDb(filePath: string): Promise<boolean> {

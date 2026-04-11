@@ -24,6 +24,7 @@ mod tests;
 use crate::Ad4mConfig;
 use auth::AppState;
 use axum::{
+    extract::DefaultBodyLimit,
     http::Method,
     response::Json,
     routing::{delete, get, patch, post, put},
@@ -32,6 +33,7 @@ use axum::{
 use deno_core::error::AnyError;
 use serde_json::json;
 use std::net::SocketAddr;
+use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 /// Build the full REST API router.
@@ -311,6 +313,10 @@ pub fn rest_router(state: AppState) -> Router {
                 patch(runtime::update_notification).delete(runtime::delete_notification),
             )
             .route(
+                "/runtime/notifications/{id}/grant",
+                patch(runtime::grant_notification),
+            )
+            .route(
                 "/runtime/link-language-templates",
                 get(runtime::get_link_language_templates)
                     .put(runtime::add_link_language_templates)
@@ -404,6 +410,10 @@ pub fn rest_router(state: AppState) -> Router {
             )
             .route("/events/runtime", get(events::runtime_events))
             .route("/events/ai", get(events::ai_events))
+            .route(
+                "/events/query-subscription/{subscription_id}",
+                get(events::query_subscription_events),
+            )
             // ── Unified SSE (single connection for all events) ──
             .route("/events/unified", get(events::unified_events))
             // ── Stub routes: SDK endpoints not yet implemented on server (501) ──
@@ -442,6 +452,8 @@ pub fn rest_router(state: AppState) -> Router {
     )
     // ── State + Middleware ──
     .with_state(state)
+    .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB default
+    .layer(CatchPanicLayer::new())
     .layer(cors)
 }
 

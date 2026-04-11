@@ -210,7 +210,7 @@ pub async fn restart_holochain(
     Ok(Json(true))
 }
 
-/// GET /runtime/verify-signature — verify signed string
+/// POST /runtime/verify-signature — verify signed string
 #[rest_handler(
     POST,
     "/runtime/verify-signature",
@@ -459,6 +459,41 @@ pub async fn update_notification(
     };
 
     Ad4mDb::with_global_instance(|db| db.update_notification(id, &notification))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(true))
+}
+
+/// PATCH /notifications/:id/grant — grant or revoke a notification
+#[rest_handler(
+    PATCH,
+    "/runtime/notifications/:id/grant",
+    request = "NotificationGrantRequest",
+    response = "boolean"
+)]
+pub async fn grant_notification(
+    State(_state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<String>,
+    Json(body): Json<super::types::NotificationGrantRequest>,
+) -> Result<Json<bool>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
+    // Fetch existing notification, update only the granted field
+    let notifications = Ad4mDb::with_global_instance(|db| db.get_notifications())
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let existing = notifications
+        .iter()
+        .find(|n| n.id == id)
+        .ok_or_else(|| ApiError::NotFound(format!("Notification {} not found", id)))?;
+
+    let mut updated = existing.clone();
+    updated.granted = body.granted;
+
+    Ad4mDb::with_global_instance(|db| db.update_notification(id, &updated))
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(true))
