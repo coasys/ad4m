@@ -21,7 +21,7 @@
 #   - Flux served on a local port
 #   - Chrome/Chromium installed
 #   - python3 available
-#   - Either 'websocat' (preferred) or python3 'websockets' package
+#   - python3 'websockets' package
 #   - curl (for admin API mode)
 #   - jq (for admin API mode)
 #
@@ -139,7 +139,6 @@ for t in tabs:
 " 2>/dev/null) || err "Could not get CDP WebSocket URL. Is Chrome running with --remote-debugging-port=$CDP_PORT?"
 
     # Always use python3 websockets for reliable multiline JS evaluation.
-    # websocat breaks on multiline JSON payloads.
     python3 -c "
 import json, asyncio, websockets, sys
 async def main():
@@ -254,29 +253,16 @@ get_code_via_admin() {
     auth_extended=$(jq -n --arg rid "$request_id" --argjson auth "$auth_json" \
         '{requestId: $rid, auth: $auth}')
 
-    # Call permit endpoint — supports both GraphQL (current dev) and REST (future)
+    # Call permit endpoint — uses REST API
     log "Calling permit endpoint..."
     local permit_body
     permit_body=$(jq -n --arg auth "$auth_extended" '{auth: $auth}')
 
     local response
-    # Try REST first, fall back to GraphQL
     response=$(curl -sf -X POST "${EXECUTOR_URL}/api/v1/agent/auth/permit" \
         -H "Content-Type: application/json" \
         -H "Authorization: ${ADMIN_CREDENTIAL}" \
-        -d "$permit_body" 2>/dev/null) || {
-        # REST not available — use GraphQL mutation
-        local escaped_auth
-        escaped_auth=$(echo "$auth_extended" | jq -Rs '.')
-        local gql_body
-        gql_body=$(jq -n --arg query "mutation { agentPermitCapability(auth: ${escaped_auth}) }" '{query: $query}')
-        response=$(curl -sf -X POST "${EXECUTOR_URL}/graphql" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: ${ADMIN_CREDENTIAL}" \
-            -d "$gql_body" 2>&1) || err "Both REST and GraphQL permit calls failed: $response"
-        # Extract from GraphQL response: {"data":{"agentPermitCapability":"123456"}}
-        response=$(echo "$response" | jq -r '.data.agentPermitCapability // empty' 2>/dev/null) || true
-    }
+        -d "$permit_body" 2>&1) || err "Permit API call failed: $response"
 
     # Response is a JSON string with the 6-digit code
     local code
