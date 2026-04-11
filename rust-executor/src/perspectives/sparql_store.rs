@@ -296,8 +296,9 @@ impl SparqlStore {
         }
     }
 
-    /// Query links matching optional filters using direct store pattern matching.
-    /// This is faster than SPARQL parsing and avoids IRI validation issues.
+    /// Query links matching optional filters using cross-graph pattern matching.
+    /// Instead of iterating every named graph, this searches across all graphs
+    /// at once using Oxigraph's GSPO/GOSP indexes — O(matches) instead of O(total_graphs).
     pub fn query_links(
         &self,
         source: Option<&str>,
@@ -323,115 +324,108 @@ impl SparqlStore {
         let ont_proof_valid = NamedNodeRef::new_unchecked(ONT_PROOF_VALID);
         let ont_status = NamedNodeRef::new_unchecked(ONT_STATUS);
 
-        // Iterate over all named graphs to find matching triples
-        for graph_name in self.store.named_graphs() {
-            let graph_name = graph_name?;
-            let graph_ref = match &graph_name {
-                NamedOrBlankNode::NamedNode(n) => GraphNameRef::NamedNode(n.as_ref()),
-                NamedOrBlankNode::BlankNode(b) => GraphNameRef::BlankNode(b.as_ref()),
+        // Search across ALL graphs at once — Oxigraph uses indexes to find matching
+        // quads efficiently without iterating every named graph.
+        // Pass None for graph_name to search all graphs.
+        for quad_result in self.store.quads_for_pattern(s_ref, p_ref, t_ref, None) {
+            let quad = quad_result?;
+
+            // Skip quads in the default graph (metadata triples live there)
+            let graph_name = match &quad.graph_name {
+                GraphName::NamedNode(n) => n.clone(),
+                _ => continue,
             };
 
-            // Each named graph contains exactly one direct triple
-            for quad_result in self
-                .store
-                .quads_for_pattern(s_ref, p_ref, t_ref, Some(graph_ref))
-            {
-                let quad = quad_result?;
+            let src = match &quad.subject {
+                Subject::NamedNode(n) => n.as_str().to_string(),
+                _ => continue,
+            };
+            let pred = quad.predicate.as_str().to_string();
+            let tgt = match &quad.object {
+                Term::NamedNode(n) => n.as_str().to_string(),
+                _ => continue,
+            };
 
-                let src = match &quad.subject {
-                    Subject::NamedNode(n) => n.as_str().to_string(),
-                    _ => continue,
-                };
-                let pred = quad.predicate.as_str().to_string();
-                let tgt = match &quad.object {
-                    Term::NamedNode(n) => n.as_str().to_string(),
-                    _ => continue,
-                };
+            // Skip annotation predicates (shouldn't be in named graphs, but safety check)
+            if pred.starts_with("ad4m://ontology/") {
+                continue;
+            }
 
-                // Skip annotation predicates (shouldn't be in named graphs, but safety check)
-                if pred.starts_with("ad4m://ontology/") {
+            // Get metadata from default graph using graph IRI as subject
+            let graph_subject: SubjectRef = graph_name.as_ref().into();
+
+            let get_annotation = |pred_node: NamedNodeRef| -> String {
+                self.store
+                    .quads_for_pattern(
+                        Some(graph_subject),
+                        Some(pred_node),
+                        None,
+                        Some(GraphNameRef::DefaultGraph),
+                    )
+                    .next()
+                    .and_then(|r| r.ok())
+                    .and_then(|q| match &q.object {
+                        Term::Literal(l) => Some(l.value().to_string()),
+                        _ => None,
+                    })
+                    .unwrap_or_default()
+            };
+
+            let author = get_annotation(ont_author);
+            let timestamp = get_annotation(ont_timestamp);
+
+            // Skip links without required metadata
+            if author.is_empty() || timestamp.is_empty() {
+                continue;
+            }
+
+            // Apply date filters
+            if let Some(from) = from_date {
+                if timestamp.as_str() < from {
                     continue;
                 }
-
-                // Get metadata from default graph using graph IRI as subject
-                let graph_subject: SubjectRef = match &graph_name {
-                    NamedOrBlankNode::NamedNode(n) => n.as_ref().into(),
-                    NamedOrBlankNode::BlankNode(b) => b.as_ref().into(),
-                };
-
-                let get_annotation = |pred_node: NamedNodeRef| -> String {
-                    self.store
-                        .quads_for_pattern(
-                            Some(graph_subject),
-                            Some(pred_node),
-                            None,
-                            Some(GraphNameRef::DefaultGraph),
-                        )
-                        .next()
-                        .and_then(|r| r.ok())
-                        .and_then(|q| match &q.object {
-                            Term::Literal(l) => Some(l.value().to_string()),
-                            _ => None,
-                        })
-                        .unwrap_or_default()
-                };
-
-                let author = get_annotation(ont_author);
-                let timestamp = get_annotation(ont_timestamp);
-
-                // Skip links without required metadata
-                if author.is_empty() || timestamp.is_empty() {
+            }
+            if let Some(until) = until_date {
+                if timestamp.as_str() > until {
                     continue;
                 }
+            }
 
-                // Apply date filters
-                if let Some(from) = from_date {
-                    if timestamp.as_str() < from {
-                        continue;
-                    }
-                }
-                if let Some(until) = until_date {
-                    if timestamp.as_str() > until {
-                        continue;
-                    }
-                }
+            let proof_key = get_annotation(ont_proof_key);
+            let proof_sig = get_annotation(ont_proof_sig);
+            let proof_valid_str = get_annotation(ont_proof_valid);
+            let proof_valid = if proof_valid_str.is_empty() {
+                None
+            } else {
+                Some(proof_valid_str == "true")
+            };
+            let status_val = get_annotation(ont_status);
+            let status = match status_val.as_str() {
+                "Local" => Some(LinkStatus::Local),
+                "Shared" => Some(LinkStatus::Shared),
+                _ => None,
+            };
 
-                let proof_key = get_annotation(ont_proof_key);
-                let proof_sig = get_annotation(ont_proof_sig);
-                let proof_valid_str = get_annotation(ont_proof_valid);
-                let proof_valid = if proof_valid_str.is_empty() {
-                    None
-                } else {
-                    Some(proof_valid_str == "true")
-                };
-                let status_val = get_annotation(ont_status);
-                let status = match status_val.as_str() {
-                    "Local" => Some(LinkStatus::Local),
-                    "Shared" => Some(LinkStatus::Shared),
-                    _ => None,
-                };
+            links.push(DecoratedLinkExpression {
+                author,
+                timestamp,
+                data: Link {
+                    source: src,
+                    predicate: if pred.is_empty() { None } else { Some(pred) },
+                    target: tgt,
+                },
+                proof: DecoratedExpressionProof {
+                    key: proof_key,
+                    signature: proof_sig,
+                    valid: proof_valid,
+                    invalid: proof_valid.map(|v| !v),
+                },
+                status,
+            });
 
-                links.push(DecoratedLinkExpression {
-                    author,
-                    timestamp,
-                    data: Link {
-                        source: src,
-                        predicate: if pred.is_empty() { None } else { Some(pred) },
-                        target: tgt,
-                    },
-                    proof: DecoratedExpressionProof {
-                        key: proof_key,
-                        signature: proof_sig,
-                        valid: proof_valid,
-                        invalid: proof_valid.map(|v| !v),
-                    },
-                    status,
-                });
-
-                if let Some(lim) = limit {
-                    if links.len() >= lim {
-                        return Ok(links);
-                    }
+            if let Some(lim) = limit {
+                if links.len() >= lim {
+                    return Ok(links);
                 }
             }
         }
@@ -1602,5 +1596,166 @@ mod tests {
                 "Persistent store should have data on second open — rebuild should be skipped"
             );
         }
+    }
+
+    // ── query_links optimization tests ──
+
+    #[test]
+    fn query_links_by_source() {
+        let svc = new_service();
+        // Add links with different sources
+        for i in 0..50 {
+            let src = format!("ad4m://source{}", i);
+            let link = make_link(&src, "ad4m://pred", "ad4m://target");
+            svc.add_link(&link).unwrap();
+        }
+        // Query for a specific source
+        let results = svc
+            .query_links(Some("ad4m://source7"), None, None, None, None, None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].data.source, "ad4m://source7");
+    }
+
+    #[test]
+    fn query_links_by_predicate() {
+        let svc = new_service();
+        for i in 0..20 {
+            let pred = format!("ad4m://pred{}", i % 4);
+            let src = format!("ad4m://src{}", i);
+            let link = make_link(&src, &pred, "ad4m://tgt");
+            svc.add_link(&link).unwrap();
+        }
+        let results = svc
+            .query_links(None, Some("ad4m://pred2"), None, None, None, None)
+            .unwrap();
+        assert_eq!(results.len(), 5);
+        for r in &results {
+            assert_eq!(r.data.predicate.as_deref(), Some("ad4m://pred2"));
+        }
+    }
+
+    #[test]
+    fn query_links_by_target() {
+        let svc = new_service();
+        for i in 0..10 {
+            let tgt = format!("ad4m://tgt{}", i % 3);
+            let src = format!("ad4m://src{}", i);
+            let link = make_link(&src, "ad4m://pred", &tgt);
+            svc.add_link(&link).unwrap();
+        }
+        let results = svc
+            .query_links(None, None, Some("ad4m://tgt1"), None, None, None)
+            .unwrap();
+        assert!(results.len() >= 3);
+        for r in &results {
+            assert_eq!(r.data.target, "ad4m://tgt1");
+        }
+    }
+
+    #[test]
+    fn query_links_date_range() {
+        let svc = new_service();
+        let timestamps = [
+            "2024-01-10T00:00:00.000Z",
+            "2024-01-15T00:00:00.000Z",
+            "2024-01-20T00:00:00.000Z",
+            "2024-01-25T00:00:00.000Z",
+        ];
+        for (i, ts) in timestamps.iter().enumerate() {
+            let src = format!("ad4m://src{}", i);
+            let link = make_link_with_ts(&src, "ad4m://pred", "ad4m://tgt", ts, "did:key:z6Mktest");
+            svc.add_link(&link).unwrap();
+        }
+        // Query from Jan 14 to Jan 21
+        let results = svc
+            .query_links(
+                None,
+                None,
+                None,
+                Some("2024-01-14T00:00:00.000Z"),
+                Some("2024-01-21T00:00:00.000Z"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn query_links_with_limit() {
+        let svc = new_service();
+        for i in 0..20 {
+            let src = format!("ad4m://src{}", i);
+            let link = make_link(&src, "ad4m://pred", "ad4m://tgt");
+            svc.add_link(&link).unwrap();
+        }
+        let results = svc
+            .query_links(None, None, None, None, None, Some(5))
+            .unwrap();
+        assert_eq!(results.len(), 5);
+    }
+
+    #[test]
+    fn query_links_combined_filters() {
+        let svc = new_service();
+        // Add links with various combinations
+        svc.add_link(&make_link("ad4m://a", "ad4m://likes", "ad4m://b"))
+            .unwrap();
+        svc.add_link(&make_link("ad4m://a", "ad4m://knows", "ad4m://c"))
+            .unwrap();
+        svc.add_link(&make_link("ad4m://b", "ad4m://likes", "ad4m://c"))
+            .unwrap();
+        svc.add_link(&make_link("ad4m://a", "ad4m://likes", "ad4m://c"))
+            .unwrap();
+
+        // source=a AND predicate=likes
+        let results = svc
+            .query_links(
+                Some("ad4m://a"),
+                Some("ad4m://likes"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        for r in &results {
+            assert_eq!(r.data.source, "ad4m://a");
+            assert_eq!(r.data.predicate.as_deref(), Some("ad4m://likes"));
+        }
+
+        // source=a AND predicate=likes AND target=b
+        let results = svc
+            .query_links(
+                Some("ad4m://a"),
+                Some("ad4m://likes"),
+                Some("ad4m://b"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].data.target, "ad4m://b");
+    }
+
+    #[test]
+    fn query_links_empty_store() {
+        let svc = new_service();
+        let results = svc.query_links(None, None, None, None, None, None).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn query_links_no_filters_returns_all() {
+        let svc = new_service();
+        for i in 0..10 {
+            let src = format!("ad4m://src{}", i);
+            svc.add_link(&make_link(&src, "ad4m://pred", "ad4m://tgt"))
+                .unwrap();
+        }
+        let results = svc.query_links(None, None, None, None, None, None).unwrap();
+        assert_eq!(results.len(), 10);
     }
 }
