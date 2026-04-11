@@ -14,6 +14,7 @@ pub mod languages;
 pub mod neighbourhoods;
 pub mod perspectives;
 pub mod runtime;
+pub mod route_registry;
 pub mod types;
 pub mod users;
 
