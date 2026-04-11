@@ -1603,4 +1603,118 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_shacl_constructor_lookup_via_sparql_store() {
+        // Simulate the full flow: parse SHACL → add links to store → look up constructor
+        use super::super::shacl_parser::parse_shacl_to_links;
+
+        let svc = new_service();
+
+        // SHACL JSON similar to what Community model generates
+        let shacl_json = r#"{
+            "target_class": "flux://Community",
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "flux://entry_type", "target": "community"}
+            ],
+            "destructor_actions": [],
+            "properties": [
+                {
+                    "path": "flux://entry_type",
+                    "name": "type",
+                    "has_value": "community",
+                    "min_count": 1,
+                    "max_count": 1
+                }
+            ]
+        }"#;
+
+        let links = parse_shacl_to_links(shacl_json, "Community").unwrap();
+        assert!(!links.is_empty(), "parse_shacl_to_links should produce links");
+
+        // Check that a constructor link exists in parsed output
+        let constructor_link = links.iter().find(|l|
+            l.predicate.as_deref() == Some("ad4m://constructor")
+        );
+        assert!(constructor_link.is_some(), "Should have a constructor link in parsed SHACL");
+        let constructor_link = constructor_link.unwrap();
+        assert!(constructor_link.source.ends_with("CommunityShape"),
+            "Constructor link source should end with CommunityShape, got: {}", constructor_link.source);
+
+        // Add all SHACL links to the store
+        for link in &links {
+            let decorated = make_link(
+                &link.source,
+                link.predicate.as_deref().unwrap_or(""),
+                &link.target,
+            );
+            svc.add_link(&decorated).unwrap();
+        }
+
+        // Now try to look up the constructor the same way get_shape_actions_from_shacl does
+        let result = svc.get_links_by_predicate_and_source_suffix("ad4m://constructor", "CommunityShape").unwrap();
+
+        assert!(!result.is_empty(),
+            "Should find constructor link for CommunityShape. \
+             All links in store: {:?}",
+            svc.get_all_links().unwrap().iter().map(|l| format!("{} -> {:?} -> {}", l.data.source, l.data.predicate, l.data.target)).collect::<Vec<_>>()
+        );
+
+        assert!(result[0].data.source.ends_with("CommunityShape"));
+        assert_eq!(result[0].data.predicate.as_deref(), Some("ad4m://constructor"));
+    }
+
+    #[test]
+    fn test_shacl_constructor_survives_disk_persistence() {
+        use super::super::shacl_parser::parse_shacl_to_links;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        let shacl_json = r#"{
+            "target_class": "flux://Community",
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "flux://entry_type", "target": "flux://has_community"}
+            ],
+            "destructor_actions": [],
+            "properties": [
+                {
+                    "path": "flux://entry_type",
+                    "name": "type",
+                    "min_count": 1,
+                    "max_count": 1
+                }
+            ]
+        }"#;
+
+        let links = parse_shacl_to_links(shacl_json, "Community").unwrap();
+
+        // Store links in persistent store
+        {
+            let svc = SparqlStore::new(Some(path)).unwrap();
+            for link in &links {
+                let decorated = make_link(
+                    &link.source,
+                    link.predicate.as_deref().unwrap_or(""),
+                    &link.target,
+                );
+                svc.add_link(&decorated).unwrap();
+            }
+            assert!(svc.has_data());
+            // svc dropped here
+        }
+
+        // Reopen and query
+        {
+            let svc = SparqlStore::new(Some(path)).unwrap();
+            assert!(svc.has_data(), "Persistent store should have data after reopen");
+
+            let result = svc.get_links_by_predicate_and_source_suffix("ad4m://constructor", "CommunityShape").unwrap();
+            assert!(!result.is_empty(),
+                "Constructor link should survive disk persistence. All links: {:?}",
+                svc.get_all_links().unwrap().iter().map(|l| format!("{} -> {:?} -> {}", l.data.source, l.data.predicate, l.data.target)).collect::<Vec<_>>()
+            );
+        }
+    }
 }

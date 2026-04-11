@@ -1706,8 +1706,19 @@ impl PerspectiveInstance {
         // Handle SHACL links if SHACL JSON provided explicitly
         if let Some(shacl) = shacl_json {
             let shacl_links = parse_shacl_to_links(&shacl, &name)?;
+            log::info!(
+                "🟢 add_sdna: Adding {} SHACL links for class '{}'. Constructor link present: {}",
+                shacl_links.len(),
+                name,
+                shacl_links.iter().any(|l| l.predicate.as_deref() == Some("ad4m://constructor"))
+            );
             self.add_links(shacl_links, LinkStatus::Shared, None, context)
                 .await?;
+        } else {
+            log::warn!(
+                "🟡 add_sdna: No SHACL JSON provided for class '{}' — constructor lookup will fail",
+                name
+            );
         }
 
         //added = true;
@@ -3386,11 +3397,31 @@ impl PerspectiveInstance {
     ) -> Result<Option<Vec<Command>>, AnyError> {
         // Query SPARQL store for links with the given predicate whose source ends with {ClassName}Shape
         let shape_suffix = format!("{}Shape", class_name);
-        let _uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.persisted.lock().await.uuid.clone();
 
         let links = self
             .sparql_store
             .get_links_by_predicate_and_source_suffix(predicate, &shape_suffix)?;
+
+        if links.is_empty() {
+            // Diagnostic: check if ANY links exist with this predicate
+            let all_pred_links = self.sparql_store.get_links_by_predicate(predicate)?;
+            let total_links = self.sparql_store.get_all_links().map(|l| l.len()).unwrap_or(0);
+            log::warn!(
+                "🔴 SHACL lookup miss: perspective={}, class={}, predicate={}, \
+                 shape_suffix={}, links_with_predicate={}, total_links_in_store={}",
+                uuid, class_name, predicate, shape_suffix,
+                all_pred_links.len(), total_links
+            );
+            if !all_pred_links.is_empty() {
+                for l in &all_pred_links {
+                    log::warn!(
+                        "🔴   Found link with predicate {}: source={} target={}",
+                        predicate, l.data.source, l.data.target
+                    );
+                }
+            }
+        }
 
         // Return the first match
         if let Some(link) = links.first() {
