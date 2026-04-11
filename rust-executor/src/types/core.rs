@@ -551,12 +551,15 @@ pub struct TokenizerSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, TS)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "UPPERCASE")]
 #[ts(export)]
 pub enum ModelType {
     #[default]
+    #[serde(alias = "llm", alias = "Llm")]
     Llm,
+    #[serde(alias = "embedding", alias = "Embedding")]
     Embedding,
+    #[serde(alias = "transcription", alias = "Transcription")]
     Transcription,
 }
 

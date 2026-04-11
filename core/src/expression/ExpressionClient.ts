@@ -7,8 +7,8 @@ import type { CreateExpressionRequest, ExpressionManyRequest } from "../generate
 export class ExpressionClient {
     #restClient: RestClient
 
-    constructor(baseUrl: string, token?: string) {
-        this.#restClient = new RestClient(baseUrl, token)
+    constructor(baseUrl: string, token?: string, sharedRestClient?: RestClient) {
+        this.#restClient = sharedRestClient || new RestClient(baseUrl, token)
     }
 
     async get(url: string, alwaysGet: boolean = false): Promise<ExpressionRendered> {

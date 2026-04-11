@@ -45,8 +45,8 @@ export class PerspectiveClient {
     #linkUnsubscribers: Map<string, (() => void)[]>
     #querySubscriptionUnsubscribers: Map<string, () => void>
 
-    constructor(baseUrl: string, token?: string, subscribe: boolean = true) {
-        this.#restClient = new RestClient(baseUrl, token)
+    constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedRestClient?: RestClient) {
+        this.#restClient = sharedRestClient || new RestClient(baseUrl, token)
         this.#perspectiveAddedCallbacks = []
         this.#perspectiveUpdatedCallbacks = []
         this.#perspectiveRemovedCallbacks = []

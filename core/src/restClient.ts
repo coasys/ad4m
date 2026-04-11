@@ -113,4 +113,13 @@ export class RestClient {
             }
         }
     }
+
+    /** Close all open EventSource connections */
+    closeAll(): void {
+        for (const [url, entry] of this._eventSources) {
+            entry.es.close()
+            entry.callbacks.clear()
+        }
+        this._eventSources.clear()
+    }
 }

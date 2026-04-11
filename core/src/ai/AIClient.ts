@@ -10,8 +10,8 @@ export class AIClient {
     #transcriptionUnsubscribers: Map<string, () => void> = new Map();
     #audioWs: WebSocket | null = null;
 
-    constructor(baseUrl: string, token?: string, subscribe: boolean = true) {
-        this.#restClient = new RestClient(baseUrl, token);
+    constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedRestClient?: RestClient) {
+        this.#restClient = sharedRestClient || new RestClient(baseUrl, token);
     }
 
     async getModels(): Promise<Model[]> {

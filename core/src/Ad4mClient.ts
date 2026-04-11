@@ -5,6 +5,7 @@ import { PerspectiveClient } from './perspectives/PerspectiveClient'
 import { RuntimeClient } from './runtime/RuntimeClient'
 import { ExpressionClient } from './expression/ExpressionClient'
 import { AIClient } from './ai/AIClient'
+import { RestClient } from './restClient'
 
 /**
  * Client for the Ad4m interface wrapping REST API calls
@@ -18,6 +19,7 @@ import { AIClient } from './ai/AIClient'
 export class Ad4mClient {
     #baseUrl: string
     #token?: string
+    #restClient: RestClient
     #agentClient: AgentClient
     #expressionClient: ExpressionClient
     #languageClient: LanguageClient
@@ -29,16 +31,17 @@ export class Ad4mClient {
     constructor(baseUrl: string, token?: string, subscribe: boolean = true) {
         this.#baseUrl = baseUrl
         this.#token = token
-        this.#agentClient = new AgentClient(baseUrl, token, subscribe)
-        this.#expressionClient = new ExpressionClient(baseUrl, token)
-        this.#languageClient = new LanguageClient(baseUrl, token)
-        this.#neighbourhoodClient = new NeighbourhoodClient(baseUrl, token)
-        this.#aiClient = new AIClient(baseUrl, token, subscribe)
-        this.#perspectiveClient = new PerspectiveClient(baseUrl, token, subscribe)
+        this.#restClient = new RestClient(baseUrl, token)
+        this.#agentClient = new AgentClient(baseUrl, token, subscribe, this.#restClient)
+        this.#expressionClient = new ExpressionClient(baseUrl, token, this.#restClient)
+        this.#languageClient = new LanguageClient(baseUrl, token, this.#restClient)
+        this.#neighbourhoodClient = new NeighbourhoodClient(baseUrl, token, this.#restClient)
+        this.#aiClient = new AIClient(baseUrl, token, subscribe, this.#restClient)
+        this.#perspectiveClient = new PerspectiveClient(baseUrl, token, subscribe, this.#restClient)
         this.#perspectiveClient.setExpressionClient(this.#expressionClient)
         this.#perspectiveClient.setNeighbourhoodClient(this.#neighbourhoodClient)
         this.#perspectiveClient.setAIClient(this.#aiClient)
-        this.#runtimeClient = new RuntimeClient(baseUrl, token, subscribe)
+        this.#runtimeClient = new RuntimeClient(baseUrl, token, subscribe, this.#restClient)
     }
 
     get agent(): AgentClient {
@@ -67,5 +70,10 @@ export class Ad4mClient {
 
     get ai(): AIClient {
         return this.#aiClient
+    }
+
+    /** Close all SSE connections */
+    close(): void {
+        this.#restClient.closeAll()
     }
 }

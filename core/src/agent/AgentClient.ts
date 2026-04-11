@@ -48,10 +48,10 @@ export class AgentClient {
   #computeLogUpdatedCallbacks: ComputeLogUpdatedCallback[];
   #unsubscribers: (() => void)[];
 
-  constructor(baseUrl: string, token?: string, subscribe: boolean = true) {
+  constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedRestClient?: RestClient) {
     this.#baseUrl = baseUrl;
     this.#token = token;
-    this.#restClient = new RestClient(baseUrl, token);
+    this.#restClient = sharedRestClient || new RestClient(baseUrl, token);
     this.#updatedCallbacks = [];
     this.#agentStatusChangedCallbacks = [];
     this.#appsChangedCallback = [];

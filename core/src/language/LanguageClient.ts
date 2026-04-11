@@ -7,8 +7,8 @@ import type { ApplyTemplateRequest, PublishLanguageRequest, WriteSettingsRequest
 export class LanguageClient {
     #restClient: RestClient
 
-    constructor(baseUrl: string, token?: string) {
-        this.#restClient = new RestClient(baseUrl, token)
+    constructor(baseUrl: string, token?: string, sharedRestClient?: RestClient) {
+        this.#restClient = sharedRestClient || new RestClient(baseUrl, token)
     }
 
     async byAddress(address: string): Promise<LanguageHandle> {

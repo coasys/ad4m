@@ -12,8 +12,8 @@ export class NeighbourhoodClient {
     #signalHandlers: Map<string, TelepresenceSignalCallback[]> = new Map()
     #signalUnsubscribers: Map<string, () => void> = new Map()
 
-    constructor(baseUrl: string, token?: string) {
-        this.#restClient = new RestClient(baseUrl, token)
+    constructor(baseUrl: string, token?: string, sharedRestClient?: RestClient) {
+        this.#restClient = sharedRestClient || new RestClient(baseUrl, token)
     }
 
     async publishFromPerspective(
