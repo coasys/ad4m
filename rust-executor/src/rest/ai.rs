@@ -72,7 +72,12 @@ pub async fn list_models(
 }
 
 /// POST /ai/models
-#[rest_handler(POST, "/ai/models", request = "Record<string, unknown>", response = "string")]
+#[rest_handler(
+    POST,
+    "/ai/models",
+    request = "Record<string, unknown>",
+    response = "string"
+)]
 pub async fn add_model(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -98,7 +103,12 @@ pub async fn add_model(
 }
 
 /// PUT /ai/models/:id
-#[rest_handler(PUT, "/ai/models/:id", request = "Record<string, unknown>", response = "boolean")]
+#[rest_handler(
+    PUT,
+    "/ai/models/:id",
+    request = "Record<string, unknown>",
+    response = "boolean"
+)]
 pub async fn update_model(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -148,7 +158,12 @@ pub async fn remove_model(
 }
 
 /// PUT /ai/models/:id/default
-#[rest_handler(PUT, "/ai/models/:id/default", request = "SetDefaultModelRequest", response = "boolean")]
+#[rest_handler(
+    PUT,
+    "/ai/models/:id/default",
+    request = "SetDefaultModelRequest",
+    response = "boolean"
+)]
 pub async fn set_default_model(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -241,7 +256,12 @@ pub async fn list_tasks(
 }
 
 /// POST /ai/tasks
-#[rest_handler(POST, "/ai/tasks", request = "Record<string, unknown>", response = "AITask")]
+#[rest_handler(
+    POST,
+    "/ai/tasks",
+    request = "Record<string, unknown>",
+    response = "AITask"
+)]
 pub async fn add_task(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -267,7 +287,12 @@ pub async fn add_task(
 }
 
 /// PUT /ai/tasks/:id
-#[rest_handler(PUT, "/ai/tasks/:id", request = "Record<string, unknown>", response = "AITask")]
+#[rest_handler(
+    PUT,
+    "/ai/tasks/:id",
+    request = "Record<string, unknown>",
+    response = "AITask"
+)]
 pub async fn update_task(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -395,7 +420,12 @@ pub struct CloseTranscriptionRequest {
 }
 
 /// POST /ai/transcription/open
-#[rest_handler(POST, "/ai/transcription/open", request = "OpenTranscriptionRequest", response = "string")]
+#[rest_handler(
+    POST,
+    "/ai/transcription/open",
+    request = "OpenTranscriptionRequest",
+    response = "string"
+)]
 pub async fn open_transcription_stream(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -423,7 +453,12 @@ pub async fn open_transcription_stream(
 }
 
 /// POST /ai/transcription/feed
-#[rest_handler(POST, "/ai/transcription/feed", request = "FeedTranscriptionRequest", response = "string")]
+#[rest_handler(
+    POST,
+    "/ai/transcription/feed",
+    request = "FeedTranscriptionRequest",
+    response = "string"
+)]
 pub async fn feed_transcription_stream(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -452,7 +487,12 @@ pub async fn feed_transcription_stream(
 }
 
 /// POST /ai/transcription/close
-#[rest_handler(POST, "/ai/transcription/close", request = "CloseTranscriptionRequest", response = "string")]
+#[rest_handler(
+    POST,
+    "/ai/transcription/close",
+    request = "CloseTranscriptionRequest",
+    response = "string"
+)]
 pub async fn close_transcription_stream(
     State(_state): State<AppState>,
     auth: AuthContext,

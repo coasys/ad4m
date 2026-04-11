@@ -68,7 +68,12 @@ fn perspective_input_to_domain(input: super::types::PerspectiveInput) -> DomainP
 }
 
 /// POST /neighbourhoods/join — join a neighbourhood by URL
-#[rest_handler(POST, "/neighbourhoods/join", request = "JoinNeighbourhoodRequest", response = "PerspectiveHandle")]
+#[rest_handler(
+    POST,
+    "/neighbourhoods/join",
+    request = "JoinNeighbourhoodRequest",
+    response = "PerspectiveHandle"
+)]
 pub async fn join_neighbourhood(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -87,7 +92,12 @@ pub async fn join_neighbourhood(
 }
 
 /// POST /neighbourhoods/publish — publish perspective as neighbourhood
-#[rest_handler(POST, "/neighbourhoods/publish", request = "PublishNeighbourhoodRequest", response = "string")]
+#[rest_handler(
+    POST,
+    "/neighbourhoods/publish",
+    request = "PublishNeighbourhoodRequest",
+    response = "string"
+)]
 pub async fn publish_neighbourhood(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -111,7 +121,12 @@ pub async fn publish_neighbourhood(
 }
 
 /// POST /neighbourhoods/:uuid/broadcast — send broadcast (signed or unsigned)
-#[rest_handler(POST, "/neighbourhoods/:uuid/broadcast", request = "BroadcastRequest", response = "boolean")]
+#[rest_handler(
+    POST,
+    "/neighbourhoods/:uuid/broadcast",
+    request = "BroadcastRequest",
+    response = "boolean"
+)]
 pub async fn send_broadcast(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -157,7 +172,12 @@ pub async fn send_broadcast(
 }
 
 /// POST /neighbourhoods/:uuid/signal — send signal to remote agent (signed or unsigned)
-#[rest_handler(POST, "/neighbourhoods/:uuid/signal", request = "SignalRequest", response = "boolean")]
+#[rest_handler(
+    POST,
+    "/neighbourhoods/:uuid/signal",
+    request = "SignalRequest",
+    response = "boolean"
+)]
 pub async fn send_signal(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -201,7 +221,12 @@ pub async fn send_signal(
 }
 
 /// PUT /neighbourhoods/:uuid/online-status — set online status (signed or unsigned)
-#[rest_handler(PUT, "/neighbourhoods/:uuid/online-status", request = "SetOnlineStatusRequest", response = "boolean")]
+#[rest_handler(
+    PUT,
+    "/neighbourhoods/:uuid/online-status",
+    request = "SetOnlineStatusRequest",
+    response = "boolean"
+)]
 pub async fn set_online_status(
     State(_state): State<AppState>,
     auth: AuthContext,

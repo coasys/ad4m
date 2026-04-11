@@ -65,7 +65,12 @@ pub async fn quit_runtime(
 }
 
 /// PUT /runtime/status — set runtime status
-#[rest_handler(PUT, "/runtime/status", request = "SetStatusRequest", response = "boolean")]
+#[rest_handler(
+    PUT,
+    "/runtime/status",
+    request = "SetStatusRequest",
+    response = "boolean"
+)]
 pub async fn set_status(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -83,12 +88,29 @@ pub async fn set_status(
 }
 
 /// POST /runtime/open-link — open URL in system browser
-#[rest_handler(POST, "/runtime/open-link", request = "OpenLinkRequest", response = "boolean")]
+#[rest_handler(
+    POST,
+    "/runtime/open-link",
+    request = "OpenLinkRequest",
+    response = "boolean"
+)]
 pub async fn open_link(
     State(_state): State<AppState>,
-    _auth: AuthContext,
+    auth: AuthContext,
     Json(body): Json<OpenLinkRequest>,
 ) -> Result<Json<bool>, ApiError> {
+    let context = auth.to_request_context();
+    if !context.is_admin_credential {
+        return Err(ApiError::Forbidden("Admin credential required".into()));
+    }
+
+    // Validate URL scheme to prevent command injection
+    if !body.url.starts_with("http://") && !body.url.starts_with("https://") {
+        return Err(ApiError::BadRequest(
+            "URL must start with http:// or https://".into(),
+        ));
+    }
+
     #[cfg(target_os = "macos")]
     std::process::Command::new("open")
         .arg(&body.url)
@@ -108,7 +130,12 @@ pub async fn open_link(
 }
 
 /// POST /runtime/export — export db or perspective
-#[rest_handler(POST, "/runtime/export", request = "ExportRequest", response = "boolean")]
+#[rest_handler(
+    POST,
+    "/runtime/export",
+    request = "ExportRequest",
+    response = "boolean"
+)]
 pub async fn export_data(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -120,29 +147,44 @@ pub async fn export_data(
 
     match body.export_type.as_str() {
         "db" => {
-            let _json_data = Ad4mDb::with_global_instance(|db| db.export_all_to_json())
+            let json_data = Ad4mDb::with_global_instance(|db| db.export_all_to_json())
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             // SECURITY TODO: constrain file paths to ad4m data directory.
             // This is pre-existing behaviour from the GraphQL mutation.
-            let data = std::fs::read_to_string(&body.file_path)
+            let json_string = serde_json::to_string_pretty(&json_data)
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-            let json_data: serde_json::Value =
-                serde_json::from_str(&data).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-            Ad4mDb::with_global_instance(|db| db.import_from_json(json_data))
+            std::fs::write(&body.file_path, json_string)
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
         }
         "perspective" => {
-            let data = std::fs::read_to_string(&body.file_path)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            let instance: crate::perspectives::SerializedPerspective =
-                serde_json::from_str(&data).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-            crate::perspectives::import_perspective(instance)
+            let uuid = body.perspective_uuid.as_deref().ok_or_else(|| {
+                ApiError::BadRequest("perspective_uuid required for perspective export".into())
+            })?;
+            let perspective = crate::rest::perspectives::get_perspective_with_access_control(
+                uuid,
+                &context.auth_token,
+            )
+            .await?;
+            let links = perspective
+                .get_links(&crate::types::LinkQuery {
+                    source: None,
+                    target: None,
+                    predicate: None,
+                    from_date: None,
+                    until_date: None,
+                    limit: None,
+                })
                 .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            let snapshot = crate::types::domain::Perspective { links };
+            let json_string = serde_json::to_string_pretty(&snapshot)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            std::fs::write(&body.file_path, json_string)
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
         }
         other => {
             return Err(ApiError::BadRequest(format!(
-                "Unknown import type: {}",
+                "Unknown export type: {}",
                 other
             )))
         }
@@ -169,7 +211,12 @@ pub async fn restart_holochain(
 }
 
 /// GET /runtime/verify-signature — verify signed string
-#[rest_handler(POST, "/runtime/verify-signature", request = "VerifySignatureRequest", response = "boolean")]
+#[rest_handler(
+    POST,
+    "/runtime/verify-signature",
+    request = "VerifySignatureRequest",
+    response = "boolean"
+)]
 pub async fn verify_signature(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -226,7 +273,12 @@ pub async fn get_friend_status(
 }
 
 /// PUT /friends — add friends
-#[rest_handler(PUT, "/runtime/friends", request = "FriendsListRequest", response = "string[]")]
+#[rest_handler(
+    PUT,
+    "/runtime/friends",
+    request = "FriendsListRequest",
+    response = "string[]"
+)]
 pub async fn add_friends(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -244,7 +296,12 @@ pub async fn add_friends(
 }
 
 /// DELETE /friends — remove friends
-#[rest_handler(DELETE, "/runtime/friends", request = "FriendsListRequest", response = "string[]")]
+#[rest_handler(
+    DELETE,
+    "/runtime/friends",
+    request = "FriendsListRequest",
+    response = "string[]"
+)]
 pub async fn remove_friends(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -262,7 +319,12 @@ pub async fn remove_friends(
 }
 
 /// POST /friends/:did/message — send message to friend
-#[rest_handler(POST, "/runtime/friends/:did/message", request = "FriendSendMessageRequest", response = "boolean")]
+#[rest_handler(
+    POST,
+    "/runtime/friends/:did/message",
+    request = "FriendSendMessageRequest",
+    response = "boolean"
+)]
 pub async fn send_friend_message(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -273,7 +335,7 @@ pub async fn send_friend_message(
     check_capability(&context.capabilities, &RUNTIME_MESSAGES_CREATE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let message_expr: PerspectiveExpression = serde_json::from_str(&body.message)
+    let message_expr: PerspectiveExpression = serde_json::from_value(body.message)
         .map_err(|e| ApiError::BadRequest(format!("Invalid message format: {}", e)))?;
     RuntimeService::with_global_instance(|runtime| {
         runtime.add_message_to_outbox(SentMessage {
@@ -333,7 +395,12 @@ pub async fn list_notifications(
 }
 
 /// POST /notifications — request install notification
-#[rest_handler(POST, "/runtime/notifications", request = "NotificationInput", response = "boolean")]
+#[rest_handler(
+    POST,
+    "/runtime/notifications",
+    request = "NotificationInput",
+    response = "boolean"
+)]
 pub async fn create_notification(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -361,7 +428,12 @@ pub async fn create_notification(
 }
 
 /// PATCH /notifications/:id — update (including grant)
-#[rest_handler(PATCH, "/runtime/notifications/:id", request = "NotificationInput", response = "boolean")]
+#[rest_handler(
+    PATCH,
+    "/runtime/notifications/:id",
+    request = "NotificationInput",
+    response = "boolean"
+)]
 pub async fn update_notification(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -382,7 +454,7 @@ pub async fn update_notification(
         perspective_ids: body.perspective_ids,
         webhook_url: body.webhook_url,
         webhook_auth: body.webhook_auth,
-        granted: false,
+        granted: body.granted.unwrap_or(false),
         user_email: None,
     };
 
@@ -431,7 +503,12 @@ pub async fn get_link_language_templates(
 }
 
 /// PUT /runtime/link-language-templates
-#[rest_handler(PUT, "/runtime/link-language-templates", request = "LinkLanguageTemplatesRequest", response = "string[]")]
+#[rest_handler(
+    PUT,
+    "/runtime/link-language-templates",
+    request = "LinkLanguageTemplatesRequest",
+    response = "string[]"
+)]
 pub async fn add_link_language_templates(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -452,7 +529,12 @@ pub async fn add_link_language_templates(
 }
 
 /// DELETE /runtime/link-language-templates
-#[rest_handler(DELETE, "/runtime/link-language-templates", request = "LinkLanguageTemplatesRequest", response = "string[]")]
+#[rest_handler(
+    DELETE,
+    "/runtime/link-language-templates",
+    request = "LinkLanguageTemplatesRequest",
+    response = "string[]"
+)]
 pub async fn remove_link_language_templates(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -498,7 +580,12 @@ pub async fn get_hc_agent_infos(
 }
 
 /// POST /runtime/hc/agent-infos
-#[rest_handler(POST, "/runtime/hc/agent-infos", request = "AddAgentInfosRequest", response = "boolean")]
+#[rest_handler(
+    POST,
+    "/runtime/hc/agent-infos",
+    request = "AddAgentInfosRequest",
+    response = "boolean"
+)]
 pub async fn add_hc_agent_infos(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -553,7 +640,12 @@ pub async fn get_free_hosting_enabled(
     Ok(Json(enabled))
 }
 
-#[rest_handler(PUT, "/runtime/free-hosting-enabled", request = "Record<string, unknown>", response = "boolean")]
+#[rest_handler(
+    PUT,
+    "/runtime/free-hosting-enabled",
+    request = "Record<string, unknown>",
+    response = "boolean"
+)]
 pub async fn set_free_hosting_enabled(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -574,7 +666,12 @@ pub async fn set_free_hosting_enabled(
 }
 
 /// POST /runtime/import — import data
-#[rest_handler(POST, "/runtime/import", request = "ImportRequest", response = "unknown")]
+#[rest_handler(
+    POST,
+    "/runtime/import",
+    request = "ImportRequest",
+    response = "unknown"
+)]
 pub async fn import_data(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -650,4 +747,56 @@ pub async fn get_compute_log(
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(serde_json::to_value(logs).unwrap_or_default()))
+}
+
+// ── Stub handlers for SDK endpoints not yet implemented on server ──
+
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+
+pub async fn stub_not_implemented(method: &str, path: &str) -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({
+            "error": format!("{} {} is not yet implemented on the server", method, path),
+            "status": 501
+        })),
+    )
+}
+
+pub async fn unyt_agent_key() -> impl IntoResponse {
+    stub_not_implemented("GET", "/runtime/unyt/agent-key").await
+}
+pub async fn unyt_hot_agent_pubkey() -> impl IntoResponse {
+    stub_not_implemented("GET", "/runtime/unyt/hot-agent-pubkey").await
+}
+pub async fn unyt_wallet_balance() -> impl IntoResponse {
+    stub_not_implemented("GET", "/runtime/unyt/wallet-balance").await
+}
+pub async fn unyt_wallet_history() -> impl IntoResponse {
+    stub_not_implemented("GET", "/runtime/unyt/wallet-history").await
+}
+pub async fn unyt_version_info() -> impl IntoResponse {
+    stub_not_implemented("GET", "/runtime/unyt/version-info").await
+}
+pub async fn unyt_membrane_proof() -> impl IntoResponse {
+    stub_not_implemented("POST", "/runtime/unyt/membrane-proof").await
+}
+pub async fn unyt_reinstall_dna() -> impl IntoResponse {
+    stub_not_implemented("POST", "/runtime/unyt/reinstall-dna").await
+}
+pub async fn unyt_send_hot() -> impl IntoResponse {
+    stub_not_implemented("POST", "/runtime/unyt/send-hot").await
+}
+pub async fn users_credits() -> impl IntoResponse {
+    stub_not_implemented("POST", "/users/credits").await
+}
+pub async fn users_free_access() -> impl IntoResponse {
+    stub_not_implemented("POST", "/users/free-access").await
+}
+pub async fn host_rates_get() -> impl IntoResponse {
+    stub_not_implemented("GET", "/runtime/host-rates").await
+}
+pub async fn host_rates_put() -> impl IntoResponse {
+    stub_not_implemented("PUT", "/runtime/host-rates").await
 }

@@ -163,7 +163,12 @@ pub async fn get_language_source(
 }
 
 /// POST /languages/publish — publish a language
-#[rest_handler(POST, "/languages/publish", request = "PublishLanguageRequest", response = "LanguageMeta")]
+#[rest_handler(
+    POST,
+    "/languages/publish",
+    request = "PublishLanguageRequest",
+    response = "LanguageMeta"
+)]
 pub async fn publish_language(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -236,7 +241,12 @@ pub async fn publish_language(
 }
 
 /// POST /languages/apply-template — apply template and publish
-#[rest_handler(POST, "/languages/apply-template", request = "ApplyTemplateRequest", response = "LanguageRef")]
+#[rest_handler(
+    POST,
+    "/languages/apply-template",
+    request = "ApplyTemplateRequest",
+    response = "LanguageRef"
+)]
 pub async fn apply_template_and_publish(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -335,12 +345,17 @@ pub async fn remove_language(
 }
 
 /// PUT /languages/:address/settings — write settings
-#[rest_handler(PUT, "/languages/:address/settings", request = "Record<string, unknown>", response = "boolean")]
+#[rest_handler(
+    PUT,
+    "/languages/:address/settings",
+    request = "Record<string, unknown>",
+    response = "boolean"
+)]
 pub async fn write_settings(
     State(_state): State<AppState>,
     auth: AuthContext,
     Path(address): Path<String>,
-    Json(body): Json<serde_json::Value>,
+    Json(body): Json<LanguageSettingsWrapper>,
 ) -> Result<Json<bool>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &LANGUAGE_UPDATE_CAPABILITY)
@@ -354,7 +369,7 @@ pub async fn write_settings(
         )));
     }
 
-    let settings_json: serde_json::Value = body;
+    let settings_json: serde_json::Value = body.settings;
     controller
         .write_settings(&address, settings_json)
         .await

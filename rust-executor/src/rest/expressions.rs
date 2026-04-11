@@ -96,7 +96,12 @@ pub async fn get_interactions(
 }
 
 /// POST /expressions — create expression
-#[rest_handler(POST, "/expressions", request = "CreateExpressionRequest", response = "string")]
+#[rest_handler(
+    POST,
+    "/expressions",
+    request = "CreateExpressionRequest",
+    response = "string"
+)]
 pub async fn create_expression(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -125,7 +130,12 @@ pub async fn create_expression(
 }
 
 /// POST /expressions/many — get multiple expressions
-#[rest_handler(POST, "/expressions/many", request = "ExpressionManyRequest", response = "Array<unknown | null>")]
+#[rest_handler(
+    POST,
+    "/expressions/many",
+    request = "ExpressionManyRequest",
+    response = "Array<unknown | null>"
+)]
 pub async fn get_many_expressions(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -163,12 +173,17 @@ pub async fn get_many_expressions(
 }
 
 /// POST /expressions/:url/interact — interact with expression
-#[rest_handler(POST, "/expressions/:url/interact", request = "InteractionCall", response = "string")]
+#[rest_handler(
+    POST,
+    "/expressions/:url/interact",
+    request = "InteractionCall",
+    response = "string"
+)]
 pub async fn interact_expression(
     State(_state): State<AppState>,
     auth: AuthContext,
     Path(url): Path<String>,
-    Json(body): Json<InteractionCall>,
+    Json(body): Json<InteractionCallWrapper>,
 ) -> Result<Json<String>, ApiError> {
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &EXPRESSION_UPDATE_CAPABILITY)
@@ -181,7 +196,10 @@ pub async fn interact_expression(
     let controller = LanguageController::global_instance();
     if let Ok((lang_address, _)) = LanguageController::parse_expr_url(&decoded_url) {
         if controller.is_language_loaded(&lang_address).await {
-            match controller.expression_interact(&decoded_url, &body).await {
+            match controller
+                .expression_interact(&decoded_url, &body.interaction_call)
+                .await
+            {
                 Ok(Some(result)) => return Ok(Json(result)),
                 Ok(None) => return Ok(Json("null".to_string())),
                 Err(e) => {

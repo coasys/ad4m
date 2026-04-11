@@ -185,7 +185,12 @@ pub async fn get_agent_by_did(
 }
 
 /// PATCH /agent/profile — update DM language and/or public perspective
-#[rest_handler(PATCH, "/agent/profile", request = "UpdateProfileRequest", response = "Agent")]
+#[rest_handler(
+    PATCH,
+    "/agent/profile",
+    request = "UpdateProfileRequest",
+    response = "Agent"
+)]
 pub async fn update_profile(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -303,7 +308,12 @@ pub async fn update_profile(
 }
 
 /// POST /agent/generate — generate agent identity
-#[rest_handler(POST, "/agent/generate", request = "GenerateAgentRequest", response = "AgentStatus")]
+#[rest_handler(
+    POST,
+    "/agent/generate",
+    request = "GenerateAgentRequest",
+    response = "AgentStatus"
+)]
 pub async fn generate_agent(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -381,13 +391,21 @@ pub async fn generate_agent(
 }
 
 /// POST /agent/lock — lock agent
-#[rest_handler(POST, "/agent/lock", request = "LockAgentRequest", response = "AgentStatus")]
+#[rest_handler(
+    POST,
+    "/agent/lock",
+    request = "LockAgentRequest",
+    response = "AgentStatus"
+)]
 pub async fn lock_agent(
     State(_state): State<AppState>,
-    _auth: AuthContext,
+    auth: AuthContext,
     Json(body): Json<LockAgentRequest>,
 ) -> Result<Json<AgentStatus>, ApiError> {
-    // No capability check for lock
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
     let agent = AgentService::with_mutable_global_instance(|agent_service| {
         agent_service.lock(body.passphrase.clone());
         agent_service.dump().clone()
@@ -405,7 +423,12 @@ pub async fn lock_agent(
 }
 
 /// POST /agent/unlock — unlock agent
-#[rest_handler(POST, "/agent/unlock", request = "UnlockAgentRequest", response = "AgentStatus")]
+#[rest_handler(
+    POST,
+    "/agent/unlock",
+    request = "UnlockAgentRequest",
+    response = "AgentStatus"
+)]
 pub async fn unlock_agent(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -500,7 +523,12 @@ pub async fn unlock_agent(
 }
 
 /// POST /agent/sign — sign a message
-#[rest_handler(POST, "/agent/sign", request = "SignMessageRequest", response = "AgentSignature")]
+#[rest_handler(
+    POST,
+    "/agent/sign",
+    request = "SignMessageRequest",
+    response = "AgentSignature"
+)]
 pub async fn sign_message(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -534,7 +562,12 @@ pub async fn remove_app(
 // ── Auth ──
 
 /// POST /agent/auth/request — request capability
-#[rest_handler(POST, "/agent/auth/request", request = "RequestCapabilityRequest", response = "string")]
+#[rest_handler(
+    POST,
+    "/agent/auth/request",
+    request = "RequestCapabilityRequest",
+    response = "string"
+)]
 pub async fn request_capability(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -568,7 +601,12 @@ pub async fn request_capability(
 }
 
 /// POST /agent/auth/permit — permit capability
-#[rest_handler(POST, "/agent/auth/permit", request = "PermitCapabilityRequest", response = "string")]
+#[rest_handler(
+    POST,
+    "/agent/auth/permit",
+    request = "PermitCapabilityRequest",
+    response = "string"
+)]
 pub async fn permit_capability(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -586,7 +624,12 @@ pub async fn permit_capability(
 }
 
 /// POST /agent/auth/jwt — generate JWT
-#[rest_handler(POST, "/agent/auth/jwt", request = "GenerateJwtRequest", response = "string")]
+#[rest_handler(
+    POST,
+    "/agent/auth/jwt",
+    request = "GenerateJwtRequest",
+    response = "string"
+)]
 pub async fn generate_jwt(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -697,7 +740,7 @@ pub async fn get_trusted_agents(
 pub async fn add_trusted_agents(
     State(_state): State<AppState>,
     auth: AuthContext,
-    Json(agents): Json<Vec<String>>,
+    Json(body): Json<TrustedAgentsWrapper>,
 ) -> Result<Json<Vec<String>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(
@@ -707,7 +750,7 @@ pub async fn add_trusted_agents(
     .map_err(|e| ApiError::Forbidden(e))?;
 
     crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
-        runtime.add_trusted_agent(agents);
+        runtime.add_trusted_agent(body.agents);
     });
 
     let result = crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
@@ -721,7 +764,7 @@ pub async fn add_trusted_agents(
 pub async fn delete_trusted_agents(
     State(_state): State<AppState>,
     auth: AuthContext,
-    Json(agents): Json<Vec<String>>,
+    Json(body): Json<TrustedAgentsWrapper>,
 ) -> Result<Json<Vec<String>>, ApiError> {
     let context = auth.to_request_context();
     check_capability(
@@ -731,7 +774,7 @@ pub async fn delete_trusted_agents(
     .map_err(|e| ApiError::Forbidden(e))?;
 
     crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
-        runtime.remove_trusted_agent(agents);
+        runtime.remove_trusted_agent(body.agents);
     });
 
     let result = crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
@@ -746,8 +789,12 @@ pub async fn delete_trusted_agents(
 #[rest_handler(GET, "/agent/entanglement-proofs", response = "EntanglementProof[]")]
 pub async fn get_entanglement(
     State(_state): State<AppState>,
-    _auth: AuthContext,
+    auth: AuthContext,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
     let proofs = get_entanglement_proofs();
     Ok(Json(
         proofs
@@ -758,13 +805,22 @@ pub async fn get_entanglement(
 }
 
 /// POST /agent/entanglement-proofs — add (with ?preflight=true option)
-#[rest_handler(POST, "/agent/entanglement-proofs", request = "EntanglementProofInput[]", response = "EntanglementProof[]")]
+#[rest_handler(
+    POST,
+    "/agent/entanglement-proofs",
+    request = "EntanglementProofInput[]",
+    response = "EntanglementProof[]"
+)]
 pub async fn add_entanglement(
     State(_state): State<AppState>,
-    _auth: AuthContext,
+    auth: AuthContext,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-    Json(body): Json<Vec<EntanglementProofInput>>,
+    Json(body): Json<EntanglementProofsWrapper>,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
     let preflight = params
         .get("preflight")
         .map(|v| v == "true")
@@ -773,10 +829,12 @@ pub async fn add_entanglement(
     if preflight {
         // Pre-flight: just validate
         let signed = sign_device_key(
-            body.first()
+            body.proofs
+                .first()
                 .map(|b| b.device_key.clone())
                 .unwrap_or_default(),
-            body.first()
+            body.proofs
+                .first()
                 .map(|b| b.device_key_type.clone())
                 .unwrap_or_default(),
         );
@@ -788,6 +846,7 @@ pub async fn add_entanglement(
     let agent_key_id =
         AgentService::with_global_instance(|a| a.signing_key_id.clone().unwrap_or_default());
     let domain_proofs: Vec<EntanglementProof> = body
+        .proofs
         .into_iter()
         .map(|p| EntanglementProof {
             device_key: p.device_key,
@@ -809,16 +868,26 @@ pub async fn add_entanglement(
 }
 
 /// DELETE /agent/entanglement-proofs — delete
-#[rest_handler(DELETE, "/agent/entanglement-proofs", request = "EntanglementProofInput[]", response = "EntanglementProof[]")]
+#[rest_handler(
+    DELETE,
+    "/agent/entanglement-proofs",
+    request = "EntanglementProofInput[]",
+    response = "EntanglementProof[]"
+)]
 pub async fn delete_entanglement(
     State(_state): State<AppState>,
-    _auth: AuthContext,
-    Json(body): Json<Vec<EntanglementProofInput>>,
+    auth: AuthContext,
+    Json(body): Json<EntanglementProofsWrapper>,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
     let agent_did = AgentService::with_global_instance(|a| a.did.clone().unwrap_or_default());
     let agent_key_id =
         AgentService::with_global_instance(|a| a.signing_key_id.clone().unwrap_or_default());
     let domain_proofs: Vec<EntanglementProof> = body
+        .proofs
         .into_iter()
         .map(|p| EntanglementProof {
             device_key: p.device_key,
@@ -840,7 +909,12 @@ pub async fn delete_entanglement(
 }
 
 /// POST /agent/import — import agent from keystore
-#[rest_handler(POST, "/agent/import", request = "ImportAgentRequest", response = "AgentStatus")]
+#[rest_handler(
+    POST,
+    "/agent/import",
+    request = "ImportAgentRequest",
+    response = "AgentStatus"
+)]
 pub async fn import_agent(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -857,12 +931,21 @@ pub async fn import_agent(
 }
 
 /// POST /agent/entanglement-proof-preflight — pre-flight check
-#[rest_handler(POST, "/agent/entanglement-proof-preflight", request = "EntanglementProofPreflightRequest", response = "EntanglementProof")]
+#[rest_handler(
+    POST,
+    "/agent/entanglement-proof-preflight",
+    request = "EntanglementProofPreflightRequest",
+    response = "EntanglementProof"
+)]
 pub async fn entanglement_proof_preflight(
     State(_state): State<AppState>,
-    _auth: AuthContext,
+    auth: AuthContext,
     Json(body): Json<EntanglementProofPreflightRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
     let signed = sign_device_key(body.device_key, body.device_key_type);
     Ok(Json(serde_json::to_value(signed).unwrap_or_default()))
 }

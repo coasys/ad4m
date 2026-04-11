@@ -18,33 +18,58 @@ fn generate_route_map() {
 
     // Known domain types (from core/src/index.ts re-exports)
     let domain_set: std::collections::HashSet<&str> = [
-        "Agent", "AgentSignature", "AgentStatus", "Apps",
-        "EntanglementProof", "EntanglementProofInput",
-        "InteractionCall", "InteractionMeta",
-        "LanguageHandle", "LanguageMeta", "LanguageRef",
-        "Notification", "NotificationInput", "OnlineAgent",
-        "Perspective", "PerspectiveHandle", "RuntimeInfo",
-    ].iter().copied().collect();
+        "Agent",
+        "AgentSignature",
+        "AgentStatus",
+        "Apps",
+        "EntanglementProof",
+        "EntanglementProofInput",
+        "InteractionCall",
+        "InteractionMeta",
+        "LanguageHandle",
+        "LanguageMeta",
+        "LanguageRef",
+        "Notification",
+        "NotificationInput",
+        "OnlineAgent",
+        "Perspective",
+        "PerspectiveHandle",
+        "RuntimeInfo",
+    ]
+    .iter()
+    .copied()
+    .collect();
 
-    let ai_set: std::collections::HashSet<&str> = [
-        "AITask", "Model",
-    ].iter().copied().collect();
+    let ai_set: std::collections::HashSet<&str> = ["AITask", "Model"].iter().copied().collect();
 
     // Primitives, built-ins, and locally-defined types to skip in imports
     let skip_types: std::collections::HashSet<&str> = [
-        "never", "void", "unknown", "boolean", "string",
+        "never",
+        "void",
+        "unknown",
+        "boolean",
+        "string",
         // TS built-ins
-        "Array", "Record",
+        "Array",
+        "Record",
         // Locally defined in this file (transcription types)
-        "OpenTranscriptionRequest", "FeedTranscriptionRequest", "CloseTranscriptionRequest",
-    ].iter().copied().collect();
+        "OpenTranscriptionRequest",
+        "FeedTranscriptionRequest",
+        "CloseTranscriptionRequest",
+    ]
+    .iter()
+    .copied()
+    .collect();
 
     for route in &routes {
         for type_str in &[route.request_type, route.response_type] {
             // Extract base type names (strip [], | null, Array<>, etc.)
             let base_types = extract_base_types(type_str);
             for bt in base_types {
-                if skip_types.contains(bt.as_str()) || bt.starts_with("Record<") || bt.starts_with("Array<") {
+                if skip_types.contains(bt.as_str())
+                    || bt.starts_with("Record<")
+                    || bt.starts_with("Array<")
+                {
                     continue;
                 }
                 if domain_set.contains(bt.as_str()) {

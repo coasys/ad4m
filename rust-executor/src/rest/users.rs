@@ -34,7 +34,12 @@ pub async fn get_multi_user_enabled(
 }
 
 /// PUT /users/multi-user-enabled
-#[rest_handler(PUT, "/users/multi-user-enabled", request = "SetMultiUserRequest", response = "boolean")]
+#[rest_handler(
+    PUT,
+    "/users/multi-user-enabled",
+    request = "SetMultiUserRequest",
+    response = "boolean"
+)]
 pub async fn set_multi_user_enabled(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -112,7 +117,12 @@ pub async fn create_user(
 }
 
 /// POST /users/login — login user
-#[rest_handler(POST, "/users/login", request = "LoginUserRequest", response = "unknown")]
+#[rest_handler(
+    POST,
+    "/users/login",
+    request = "LoginUserRequest",
+    response = "unknown"
+)]
 pub async fn login_user(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -133,7 +143,12 @@ pub async fn login_user(
 }
 
 /// POST /users/verify-email — verify email code
-#[rest_handler(POST, "/users/verify-email", request = "VerifyEmailRequest", response = "unknown")]
+#[rest_handler(
+    POST,
+    "/users/verify-email",
+    request = "VerifyEmailRequest",
+    response = "unknown"
+)]
 pub async fn verify_email(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -160,7 +175,12 @@ pub async fn verify_email(
 }
 
 /// POST /dev/email-test — all email test operations (dev-only)
-#[rest_handler(POST, "/dev/email-test", request = "EmailTestRequest", response = "unknown")]
+#[rest_handler(
+    POST,
+    "/dev/email-test",
+    request = "EmailTestRequest",
+    response = "unknown"
+)]
 pub async fn email_test(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -208,7 +228,12 @@ pub async fn email_test(
 }
 
 /// POST /users/request-verification
-#[rest_handler(POST, "/users/request-verification", request = "RequestVerificationRequest", response = "unknown")]
+#[rest_handler(
+    POST,
+    "/users/request-verification",
+    request = "RequestVerificationRequest",
+    response = "unknown"
+)]
 pub async fn request_verification(
     State(_state): State<AppState>,
     _auth: AuthContext,

@@ -30,7 +30,7 @@ fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, ApiError> {
         .ok_or_else(|| ApiError::NotFound(format!("Perspective {} not found", uuid)))
 }
 
-async fn get_perspective_with_access_control(
+pub async fn get_perspective_with_access_control(
     uuid: &str,
     auth_token: &str,
 ) -> Result<PerspectiveInstance, ApiError> {
@@ -176,7 +176,11 @@ pub async fn publish_snapshot(
 }
 
 /// GET /perspectives/:uuid/links
-#[rest_handler(GET, "/perspectives/:uuid/links", response = "DecoratedLinkExpression[]")]
+#[rest_handler(
+    GET,
+    "/perspectives/:uuid/links",
+    response = "DecoratedLinkExpression[]"
+)]
 pub async fn query_links(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -199,7 +203,12 @@ pub async fn query_links(
 }
 
 /// POST /perspectives — create
-#[rest_handler(POST, "/perspectives", request = "CreatePerspectiveRequest", response = "PerspectiveHandle")]
+#[rest_handler(
+    POST,
+    "/perspectives",
+    request = "CreatePerspectiveRequest",
+    response = "PerspectiveHandle"
+)]
 pub async fn create_perspective(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -234,7 +243,12 @@ pub async fn create_perspective(
 }
 
 /// PUT /perspectives/:uuid
-#[rest_handler(PUT, "/perspectives/:uuid", request = "UpdatePerspectiveRequest", response = "PerspectiveHandle")]
+#[rest_handler(
+    PUT,
+    "/perspectives/:uuid",
+    request = "UpdatePerspectiveRequest",
+    response = "PerspectiveHandle"
+)]
 pub async fn update_perspective_handler(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -278,7 +292,12 @@ pub async fn delete_perspective(
 }
 
 /// POST /perspectives/:uuid/links — add single link
-#[rest_handler(POST, "/perspectives/:uuid/links", request = "AddLinkRequest", response = "DecoratedLinkExpression")]
+#[rest_handler(
+    POST,
+    "/perspectives/:uuid/links",
+    request = "AddLinkRequest",
+    response = "DecoratedLinkExpression"
+)]
 pub async fn add_link(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -315,7 +334,12 @@ pub async fn add_link(
 }
 
 /// POST /perspectives/:uuid/links/bulk — add multiple links
-#[rest_handler(POST, "/perspectives/:uuid/links/bulk", request = "AddLinksBulkRequest", response = "DecoratedLinkExpression[]")]
+#[rest_handler(
+    POST,
+    "/perspectives/:uuid/links/bulk",
+    request = "AddLinksBulkRequest",
+    response = "DecoratedLinkExpression[]"
+)]
 pub async fn add_links_bulk(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -361,7 +385,12 @@ pub async fn add_links_bulk(
 }
 
 /// POST /perspectives/:uuid/links/remove-bulk — remove multiple links
-#[rest_handler(POST, "/perspectives/:uuid/links/remove-bulk", request = "RemoveLinksBulkRequest", response = "DecoratedLinkExpression[]")]
+#[rest_handler(
+    POST,
+    "/perspectives/:uuid/links/remove-bulk",
+    request = "RemoveLinksBulkRequest",
+    response = "DecoratedLinkExpression[]"
+)]
 pub async fn remove_links_bulk(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -392,7 +421,12 @@ pub async fn remove_links_bulk(
 }
 
 /// POST /perspectives/:uuid/links/mutations — combined add+remove mutations
-#[rest_handler(POST, "/perspectives/:uuid/links/mutations", request = "LinkMutationsRequest", response = "LinkMutationResponse")]
+#[rest_handler(
+    POST,
+    "/perspectives/:uuid/links/mutations",
+    request = "LinkMutationsRequest",
+    response = "LinkMutationResponse"
+)]
 pub async fn link_mutations(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -437,7 +471,12 @@ pub async fn link_mutations(
 }
 
 /// POST /perspectives/:uuid/links/expression — add pre-signed link expression
-#[rest_handler(POST, "/perspectives/:uuid/links/expression", request = "AddLinkExpressionRequest", response = "DecoratedLinkExpression")]
+#[rest_handler(
+    POST,
+    "/perspectives/:uuid/links/expression",
+    request = "AddLinkExpressionRequest",
+    response = "DecoratedLinkExpression"
+)]
 pub async fn add_link_expression(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -474,7 +513,12 @@ pub async fn add_link_expression(
 }
 
 /// PUT /perspectives/:uuid/links — update link
-#[rest_handler(PUT, "/perspectives/:uuid/links", request = "UpdateLinkRequest", response = "DecoratedLinkExpression")]
+#[rest_handler(
+    PUT,
+    "/perspectives/:uuid/links",
+    request = "UpdateLinkRequest",
+    response = "DecoratedLinkExpression"
+)]
 pub async fn update_link(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -505,7 +549,12 @@ pub async fn update_link(
 }
 
 /// DELETE /perspectives/:uuid/links — remove single link
-#[rest_handler(DELETE, "/perspectives/:uuid/links", request = "RemoveLinkRequest", response = "boolean")]
+#[rest_handler(
+    DELETE,
+    "/perspectives/:uuid/links",
+    request = "RemoveLinkRequest",
+    response = "boolean"
+)]
 pub async fn remove_link(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -532,7 +581,12 @@ pub async fn remove_link(
 }
 
 /// POST /perspectives/:uuid/query — unified query (prolog, surreal, sparql)
-#[rest_handler(POST, "/perspectives/:uuid/query", request = "QueryRequest", response = "unknown")]
+#[rest_handler(
+    POST,
+    "/perspectives/:uuid/query",
+    request = "QueryRequest",
+    response = "unknown"
+)]
 pub async fn query_perspective(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -581,7 +635,12 @@ pub async fn query_perspective(
 }
 
 /// POST /perspectives/:uuid/sdna
-#[rest_handler(POST, "/perspectives/:uuid/sdna", request = "AddSdnaRequest", response = "boolean")]
+#[rest_handler(
+    POST,
+    "/perspectives/:uuid/sdna",
+    request = "AddSdnaRequest",
+    response = "boolean"
+)]
 pub async fn add_sdna(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -616,7 +675,12 @@ pub async fn add_sdna(
 }
 
 /// POST /perspectives/:uuid/commands
-#[rest_handler(POST, "/perspectives/:uuid/commands", request = "ExecuteCommandsRequest", response = "unknown")]
+#[rest_handler(
+    POST,
+    "/perspectives/:uuid/commands",
+    request = "ExecuteCommandsRequest",
+    response = "unknown"
+)]
 pub async fn execute_commands(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -634,9 +698,9 @@ pub async fn execute_commands(
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
     let commands: Vec<crate::perspectives::perspective_instance::Command> =
-        serde_json::from_value(serde_json::Value::Array(body.commands))
-            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    let expression = serde_json::to_string(&body.expression).unwrap_or_default();
+        serde_json::from_str(&body.commands)
+            .map_err(|e| ApiError::BadRequest(format!("Invalid commands JSON: {}", e)))?;
+    let expression = body.expression.clone();
 
     let result = perspective
         .execute_commands(commands, expression, vec![], None, &agent_context)
@@ -667,7 +731,12 @@ pub async fn create_batch(
 }
 
 /// POST /perspectives/:uuid/batch/commit — commit batch
-#[rest_handler(POST, "/perspectives/:uuid/batch/commit", request = "CommitBatchRequest", response = "LinkMutationResponse")]
+#[rest_handler(
+    POST,
+    "/perspectives/:uuid/batch/commit",
+    request = "CommitBatchRequest",
+    response = "LinkMutationResponse"
+)]
 pub async fn commit_batch(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -697,7 +766,12 @@ pub async fn commit_batch(
 }
 
 /// POST /perspectives/:uuid/subscribe-query — subscribe to prolog query changes
-#[rest_handler(POST, "/perspectives/:uuid/subscribe-query", request = "SubscribeQueryRequest", response = "SubscribeQueryResponse")]
+#[rest_handler(
+    POST,
+    "/perspectives/:uuid/subscribe-query",
+    request = "SubscribeQueryRequest",
+    response = "SubscribeQueryResponse"
+)]
 pub async fn subscribe_query(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -728,7 +802,12 @@ pub async fn subscribe_query(
 }
 
 /// POST /perspectives/:uuid/subscribe-surreal-query
-#[rest_handler(POST, "/perspectives/:uuid/subscribe-surreal-query", request = "SubscribeQueryRequest", response = "SubscribeQueryResponse")]
+#[rest_handler(
+    POST,
+    "/perspectives/:uuid/subscribe-surreal-query",
+    request = "SubscribeQueryRequest",
+    response = "SubscribeQueryResponse"
+)]
 pub async fn subscribe_surreal_query(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -752,7 +831,12 @@ pub async fn subscribe_surreal_query(
 }
 
 /// POST /perspectives/:uuid/keep-alive-query
-#[rest_handler(POST, "/perspectives/:uuid/keep-alive-query", request = "KeepAliveQueryRequest", response = "boolean")]
+#[rest_handler(
+    POST,
+    "/perspectives/:uuid/keep-alive-query",
+    request = "KeepAliveQueryRequest",
+    response = "boolean"
+)]
 pub async fn keep_alive_query(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -771,7 +855,12 @@ pub async fn keep_alive_query(
 }
 
 /// POST /perspectives/:uuid/keep-alive-surreal-query
-#[rest_handler(POST, "/perspectives/:uuid/keep-alive-surreal-query", request = "KeepAliveQueryRequest", response = "boolean")]
+#[rest_handler(
+    POST,
+    "/perspectives/:uuid/keep-alive-surreal-query",
+    request = "KeepAliveQueryRequest",
+    response = "boolean"
+)]
 pub async fn keep_alive_surreal_query(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -791,7 +880,12 @@ pub async fn keep_alive_surreal_query(
 }
 
 /// POST /perspectives/:uuid/dispose-query-subscription
-#[rest_handler(POST, "/perspectives/:uuid/dispose-query-subscription", request = "DisposeQueryRequest", response = "boolean")]
+#[rest_handler(
+    POST,
+    "/perspectives/:uuid/dispose-query-subscription",
+    request = "DisposeQueryRequest",
+    response = "boolean"
+)]
 pub async fn dispose_query_subscription(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -810,7 +904,12 @@ pub async fn dispose_query_subscription(
 }
 
 /// POST /perspectives/:uuid/dispose-surreal-query-subscription
-#[rest_handler(POST, "/perspectives/:uuid/dispose-surreal-query-subscription", request = "DisposeQueryRequest", response = "boolean")]
+#[rest_handler(
+    POST,
+    "/perspectives/:uuid/dispose-surreal-query-subscription",
+    request = "DisposeQueryRequest",
+    response = "boolean"
+)]
 pub async fn dispose_surreal_query_subscription(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -830,7 +929,12 @@ pub async fn dispose_surreal_query_subscription(
 }
 
 /// POST /perspectives/:uuid/create-subject
-#[rest_handler(POST, "/perspectives/:uuid/create-subject", request = "CreateSubjectRequest", response = "boolean")]
+#[rest_handler(
+    POST,
+    "/perspectives/:uuid/create-subject",
+    request = "CreateSubjectRequest",
+    response = "boolean"
+)]
 pub async fn create_subject(
     State(_state): State<AppState>,
     auth: AuthContext,
@@ -870,7 +974,12 @@ pub async fn create_subject(
 }
 
 /// POST /perspectives/:uuid/get-subject-data
-#[rest_handler(POST, "/perspectives/:uuid/get-subject-data", request = "GetSubjectDataRequest", response = "string")]
+#[rest_handler(
+    POST,
+    "/perspectives/:uuid/get-subject-data",
+    request = "GetSubjectDataRequest",
+    response = "string"
+)]
 pub async fn get_subject_data(
     State(_state): State<AppState>,
     auth: AuthContext,

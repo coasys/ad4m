@@ -1,8 +1,8 @@
-use ts_rs::TS;
 use deno_core::{anyhow::anyhow, error::AnyError};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt::Display;
 use std::str::FromStr;
+use ts_rs::TS;
 use url::Url;
 
 use super::domain::{
@@ -36,7 +36,6 @@ pub struct VerifiedExpression<T: Serialize> {
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
-
 #[ts(export)]
 pub struct DecoratedExpressionProof {
     pub key: String,

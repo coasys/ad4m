@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::types::{
-    AuthInfoInput, DecoratedLinkExpression, LanguageMetaInput, LinkExpression, LinkExpressionInput,
-    LinkInput, LinkMutations, ModelType,
+    AuthInfoInput, DecoratedLinkExpression, InteractionCall, LanguageMetaInput, LinkExpression,
+    LinkExpressionInput, LinkInput, LinkMutations, ModelType,
 };
 
 // Re-export for use in handler files
@@ -87,6 +87,40 @@ pub struct EntanglementProofInput {
     pub device_key_type: String,
     pub device_key_signed_by_did: String,
     pub did_signed_by_device_key: Option<String>,
+}
+
+/// Wrapper: SDK sends `{ proofs: [...] }` for entanglement endpoints
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct EntanglementProofsWrapper {
+    pub proofs: Vec<EntanglementProofInput>,
+}
+
+/// Wrapper: SDK sends `{ agents: [...] }` for trusted agent endpoints
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TrustedAgentsWrapper {
+    pub agents: Vec<String>,
+}
+
+/// Wrapper: SDK sends `{ interactionCall: {...} }` for expression interact
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct InteractionCallWrapper {
+    #[ts(type = "any")]
+    pub interaction_call: InteractionCall,
+}
+
+/// Wrapper: SDK sends `{ settings: ... }` for language settings
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LanguageSettingsWrapper {
+    #[ts(type = "any")]
+    pub settings: serde_json::Value,
 }
 
 // ── Perspectives & Links ──
@@ -288,7 +322,8 @@ pub struct AddAgentInfosRequest {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct FriendSendMessageRequest {
-    pub message: String,
+    #[ts(type = "any")]
+    pub message: serde_json::Value,
 }
 
 #[derive(Deserialize, TS)]
@@ -373,6 +408,7 @@ pub struct NotificationInput {
     pub perspective_ids: Vec<String>,
     pub webhook_url: String,
     pub webhook_auth: String,
+    pub granted: Option<bool>,
 }
 
 // ── SDNA / Commands / Subjects ──
@@ -391,10 +427,10 @@ pub struct AddSdnaRequest {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct ExecuteCommandsRequest {
-    #[ts(type = "any[]")]
-    pub commands: Vec<serde_json::Value>,
-    #[ts(type = "any")]
-    pub expression: serde_json::Value,
+    pub commands: String,
+    pub expression: String,
+    pub parameters: Option<String>,
+    pub batch_id: Option<String>,
 }
 
 // ── Hosting ──
@@ -643,22 +679,34 @@ mod tests {
         // ts-rs auto-exports when #[ts(export)] is used and tests run.
         // Verify key types produce valid TypeScript declarations.
         let cfg = ts_rs::Config::default();
-        
+
         let decl = GenerateAgentRequest::decl(&cfg);
-        assert!(decl.contains("passphrase"), "GenerateAgentRequest: {}", decl);
-        
+        assert!(
+            decl.contains("passphrase"),
+            "GenerateAgentRequest: {}",
+            decl
+        );
+
         let decl = UpdateProfileRequest::decl(&cfg);
-        assert!(decl.contains("publicPerspective") || decl.contains("dmLanguage"), "UpdateProfileRequest: {}", decl);
-        
+        assert!(
+            decl.contains("publicPerspective") || decl.contains("dmLanguage"),
+            "UpdateProfileRequest: {}",
+            decl
+        );
+
         let decl = AddLinkRequest::decl(&cfg);
         assert!(decl.contains("link"), "AddLinkRequest: {}", decl);
-        
+
         let decl = LinkMutationRequest::decl(&cfg);
         assert!(decl.contains("additions"), "LinkMutationRequest: {}", decl);
-        
+
         let decl = CreateExpressionRequest::decl(&cfg);
-        assert!(decl.contains("content"), "CreateExpressionRequest: {}", decl);
-        
+        assert!(
+            decl.contains("content"),
+            "CreateExpressionRequest: {}",
+            decl
+        );
+
         // Print sample declarations for verification
         println!("\n=== Generated TypeScript Types ===");
         println!("{}", GenerateAgentRequest::decl(&cfg));

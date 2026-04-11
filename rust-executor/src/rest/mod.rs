@@ -13,8 +13,8 @@ pub mod hosting;
 pub mod languages;
 pub mod neighbourhoods;
 pub mod perspectives;
-pub mod runtime;
 pub mod route_meta;
+pub mod runtime;
 pub mod types;
 pub mod users;
 
@@ -405,7 +405,40 @@ pub fn rest_router(state: AppState) -> Router {
             .route("/events/runtime", get(events::runtime_events))
             .route("/events/ai", get(events::ai_events))
             // ── Unified SSE (single connection for all events) ──
-            .route("/events/unified", get(events::unified_events)),
+            .route("/events/unified", get(events::unified_events))
+            // ── Stub routes: SDK endpoints not yet implemented on server (501) ──
+            .route("/runtime/unyt/agent-key", get(runtime::unyt_agent_key))
+            .route(
+                "/runtime/unyt/hot-agent-pubkey",
+                get(runtime::unyt_hot_agent_pubkey),
+            )
+            .route(
+                "/runtime/unyt/wallet-balance",
+                get(runtime::unyt_wallet_balance),
+            )
+            .route(
+                "/runtime/unyt/wallet-history",
+                get(runtime::unyt_wallet_history),
+            )
+            .route(
+                "/runtime/unyt/version-info",
+                get(runtime::unyt_version_info),
+            )
+            .route(
+                "/runtime/unyt/membrane-proof",
+                post(runtime::unyt_membrane_proof),
+            )
+            .route(
+                "/runtime/unyt/reinstall-dna",
+                post(runtime::unyt_reinstall_dna),
+            )
+            .route("/runtime/unyt/send-hot", post(runtime::unyt_send_hot))
+            .route("/users/credits", post(runtime::users_credits))
+            .route("/users/free-access", post(runtime::users_free_access))
+            .route(
+                "/runtime/host-rates",
+                get(runtime::host_rates_get).put(runtime::host_rates_put),
+            ),
     )
     // ── State + Middleware ──
     .with_state(state)

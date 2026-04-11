@@ -1,4 +1,3 @@
-use ts_rs::TS;
 use super::core::{
     AIPromptExamples, AITask, DecoratedExpressionProof, DecoratedLinkExpression, Expression,
     ExpressionProof, Link, ModelType, Notification, TriggeredNotification,
@@ -8,6 +7,7 @@ use crate::agent::signatures::verify;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use ts_rs::TS;
 
 #[derive(Clone)]
 pub struct RequestContext {

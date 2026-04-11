@@ -14,8 +14,36 @@ use axum::{
     response::sse::{Event, KeepAlive, Sse},
 };
 use futures::stream::{self, Stream, StreamExt};
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 
+/// Convert a BroadcastStream result into an Option<String>, emitting a lagged event on overflow.
+fn handle_broadcast_result(
+    r: Result<String, BroadcastStreamRecvError>,
+) -> Option<Result<String, u64>> {
+    match r {
+        Ok(msg) => Some(Ok(msg)),
+        Err(BroadcastStreamRecvError::Lagged(n)) => Some(Err(n)),
+    }
+}
+
+/// Create an SSE stream from a broadcast receiver, with lagged event reporting.
+fn broadcast_to_sse_stream(
+    rx: tokio::sync::broadcast::Receiver<String>,
+    event_type: &'static str,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    BroadcastStream::new(rx)
+        .filter_map(|r| async { handle_broadcast_result(r) })
+        .map(move |result| match result {
+            Ok(msg) => Ok(Event::default().data(wrap_event(event_type, &msg))),
+            Err(n) => Ok(Event::default().data(format!(
+                r#"{{"type":"lagged","missed":{},"stream":"{}"}}"#,
+                n, event_type
+            ))),
+        })
+}
+
+use crate::agent::capabilities::*;
 use crate::pubsub::{
     get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC, AI_MODEL_LOADING_STATUS,
     AI_TRANSCRIPTION_TEXT_TOPIC, APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC,
@@ -26,7 +54,20 @@ use crate::pubsub::{
 };
 
 use super::auth::{AppState, AuthContext};
+use super::errors::ApiError;
 use ad4m_rest_macros::rest_handler;
+
+/// Check if a pubsub JSON message belongs to the given perspective UUID.
+/// Parses JSON and checks the `perspectiveUuid` field instead of string containment.
+fn matches_perspective_uuid(msg: &str, uuid: &str) -> bool {
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+        if let Some(serde_json::Value::String(ref id)) = map.get("perspectiveUuid") {
+            return id == uuid;
+        }
+    }
+    // Fallback: string containment for backwards compatibility
+    msg.contains(uuid)
+}
 
 /// Wrap a raw pubsub JSON string with a `"type"` field.
 ///
@@ -51,8 +92,12 @@ fn wrap_event(event_type: &str, raw_json: &str) -> String {
 #[rest_handler(GET, "/events/agent", response = "void")]
 pub async fn agent_events(
     State(_state): State<AppState>,
-    _auth: AuthContext,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    auth: AuthContext,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
     let pubsub = get_global_pubsub().await;
 
     let status_rx = pubsub.subscribe(&AGENT_STATUS_CHANGED_TOPIC).await;
@@ -60,36 +105,29 @@ pub async fn agent_events(
     let updated_rx = pubsub.subscribe(&AGENT_UPDATED_TOPIC).await;
     let hosting_rx = pubsub.subscribe(&HOSTING_USER_INFO_CHANGED_TOPIC).await;
 
-    let status_stream = BroadcastStream::new(status_rx)
-        .filter_map(|r| async { r.ok() })
-        .map(|msg| Ok(Event::default().data(wrap_event("agent-status-changed", &msg))));
-
-    let apps_stream = BroadcastStream::new(apps_rx)
-        .filter_map(|r| async { r.ok() })
-        .map(|msg| Ok(Event::default().data(wrap_event("apps-changed", &msg))));
-
-    let updated_stream = BroadcastStream::new(updated_rx)
-        .filter_map(|r| async { r.ok() })
-        .map(|msg| Ok(Event::default().data(wrap_event("agent-updated", &msg))));
-
-    let hosting_stream = BroadcastStream::new(hosting_rx)
-        .filter_map(|r| async { r.ok() })
-        .map(|msg| Ok(Event::default().data(wrap_event("hosting-user-info-changed", &msg))));
+    let status_stream = broadcast_to_sse_stream(status_rx, "agent-status-changed");
+    let apps_stream = broadcast_to_sse_stream(apps_rx, "apps-changed");
+    let updated_stream = broadcast_to_sse_stream(updated_rx, "agent-updated");
+    let hosting_stream = broadcast_to_sse_stream(hosting_rx, "hosting-user-info-changed");
 
     let merged = stream::select(
         stream::select(status_stream, apps_stream),
         stream::select(updated_stream, hosting_stream),
     );
 
-    Sse::new(merged).keep_alive(KeepAlive::default())
+    Ok(Sse::new(merged).keep_alive(KeepAlive::default()))
 }
 
 /// GET /events/perspectives — SSE: perspective-added, perspective-removed, perspective-updated, sync-state-change
 #[rest_handler(GET, "/events/perspectives", response = "void")]
 pub async fn perspective_lifecycle_events(
     State(_state): State<AppState>,
-    _auth: AuthContext,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    auth: AuthContext,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
     let pubsub = get_global_pubsub().await;
 
     let added_rx = pubsub.subscribe(&PERSPECTIVE_ADDED_TOPIC).await;
@@ -97,30 +135,26 @@ pub async fn perspective_lifecycle_events(
     let updated_rx = pubsub.subscribe(&PERSPECTIVE_UPDATED_TOPIC).await;
     let sync_rx = pubsub.subscribe(&PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC).await;
 
-    let s1 = BroadcastStream::new(added_rx)
-        .filter_map(|r| async { r.ok() })
-        .map(|msg| Ok(Event::default().data(wrap_event("perspective-added", &msg))));
-    let s2 = BroadcastStream::new(removed_rx)
-        .filter_map(|r| async { r.ok() })
-        .map(|msg| Ok(Event::default().data(wrap_event("perspective-removed", &msg))));
-    let s3 = BroadcastStream::new(updated_rx)
-        .filter_map(|r| async { r.ok() })
-        .map(|msg| Ok(Event::default().data(wrap_event("perspective-updated", &msg))));
-    let s4 = BroadcastStream::new(sync_rx)
-        .filter_map(|r| async { r.ok() })
-        .map(|msg| Ok(Event::default().data(wrap_event("sync-state-change", &msg))));
+    let s1 = broadcast_to_sse_stream(added_rx, "perspective-added");
+    let s2 = broadcast_to_sse_stream(removed_rx, "perspective-removed");
+    let s3 = broadcast_to_sse_stream(updated_rx, "perspective-updated");
+    let s4 = broadcast_to_sse_stream(sync_rx, "sync-state-change");
 
     let merged = stream::select(stream::select(s1, s2), stream::select(s3, s4));
-    Sse::new(merged).keep_alive(KeepAlive::default())
+    Ok(Sse::new(merged).keep_alive(KeepAlive::default()))
 }
 
 /// GET /events/perspectives/:uuid/links — SSE: link-added, link-removed, link-updated
 #[rest_handler(GET, "/events/perspectives/:uuid/links", response = "void")]
 pub async fn perspective_link_events(
     State(_state): State<AppState>,
-    _auth: AuthContext,
+    auth: AuthContext,
     Path(uuid): Path<String>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
     let pubsub = get_global_pubsub().await;
 
     let added_rx = pubsub.subscribe(&PERSPECTIVE_LINK_ADDED_TOPIC).await;
@@ -129,62 +163,113 @@ pub async fn perspective_link_events(
 
     let uuid_clone = uuid.clone();
     let s1 = BroadcastStream::new(added_rx)
-        .filter_map(|r| async { r.ok() })
-        .filter(move |msg| {
-            let matches = msg.contains(&uuid_clone);
-            futures::future::ready(matches)
-        })
-        .map(|msg| Ok(Event::default().data(wrap_event("link-added", &msg))));
+        .filter_map(|r| async { handle_broadcast_result(r) })
+        .filter_map(move |result| {
+            let uuid = uuid_clone.clone();
+            async move {
+                match result {
+                    Ok(msg) if matches_perspective_uuid(&msg, &uuid) => {
+                        Some(Ok(Event::default().data(wrap_event("link-added", &msg))))
+                    }
+                    Err(n) => Some(Ok(Event::default().data(format!(
+                        r#"{{"type":"lagged","missed":{},"stream":"link-added"}}"#,
+                        n
+                    )))),
+                    _ => None,
+                }
+            }
+        });
 
     let uuid_clone = uuid.clone();
     let s2 = BroadcastStream::new(removed_rx)
-        .filter_map(|r| async { r.ok() })
-        .filter(move |msg| {
-            let matches = msg.contains(&uuid_clone);
-            futures::future::ready(matches)
-        })
-        .map(|msg| Ok(Event::default().data(wrap_event("link-removed", &msg))));
+        .filter_map(|r| async { handle_broadcast_result(r) })
+        .filter_map(move |result| {
+            let uuid = uuid_clone.clone();
+            async move {
+                match result {
+                    Ok(msg) if matches_perspective_uuid(&msg, &uuid) => {
+                        Some(Ok(Event::default().data(wrap_event("link-removed", &msg))))
+                    }
+                    Err(n) => Some(Ok(Event::default().data(format!(
+                        r#"{{"type":"lagged","missed":{},"stream":"link-removed"}}"#,
+                        n
+                    )))),
+                    _ => None,
+                }
+            }
+        });
 
     let uuid_clone = uuid;
     let s3 = BroadcastStream::new(updated_rx)
-        .filter_map(|r| async { r.ok() })
-        .filter(move |msg| {
-            let matches = msg.contains(&uuid_clone);
-            futures::future::ready(matches)
-        })
-        .map(|msg| Ok(Event::default().data(wrap_event("link-updated", &msg))));
+        .filter_map(|r| async { handle_broadcast_result(r) })
+        .filter_map(move |result| {
+            let uuid = uuid_clone.clone();
+            async move {
+                match result {
+                    Ok(msg) if matches_perspective_uuid(&msg, &uuid) => {
+                        Some(Ok(Event::default().data(wrap_event("link-updated", &msg))))
+                    }
+                    Err(n) => Some(Ok(Event::default().data(format!(
+                        r#"{{"type":"lagged","missed":{},"stream":"link-updated"}}"#,
+                        n
+                    )))),
+                    _ => None,
+                }
+            }
+        });
 
     let merged = stream::select(s1, stream::select(s2, s3));
-    Sse::new(merged).keep_alive(KeepAlive::default())
+    Ok(Sse::new(merged).keep_alive(KeepAlive::default()))
 }
 
 /// GET /events/neighbourhoods/:uuid/signals — SSE: signal
 #[rest_handler(GET, "/events/neighbourhoods/:uuid/signals", response = "void")]
 pub async fn neighbourhood_signal_events(
     State(_state): State<AppState>,
-    _auth: AuthContext,
+    auth: AuthContext,
     Path(uuid): Path<String>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
     let pubsub = get_global_pubsub().await;
     let rx = pubsub.subscribe(&NEIGHBOURHOOD_SIGNAL_TOPIC).await;
 
     let stream = BroadcastStream::new(rx)
-        .filter_map(|r| async { r.ok() })
-        .filter(move |msg| {
-            let matches = msg.contains(&uuid);
-            futures::future::ready(matches)
-        })
-        .map(|msg| Ok(Event::default().data(wrap_event("signal", &msg))));
+        .filter_map(|r| async { handle_broadcast_result(r) })
+        .filter_map(move |result| {
+            let uuid = uuid.clone();
+            async move {
+                match result {
+                    Ok(msg) if matches_perspective_uuid(&msg, &uuid) => {
+                        Some(Ok(Event::default().data(wrap_event("signal", &msg))))
+                    }
+                    Err(n) => Some(Ok(Event::default().data(format!(
+                        r#"{{"type":"lagged","missed":{},"stream":"signal"}}"#,
+                        n
+                    )))),
+                    _ => None,
+                }
+            }
+        });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 /// GET /events/runtime — SSE: message-received, notification-triggered, exception-occurred
 #[rest_handler(GET, "/events/runtime", response = "void")]
 pub async fn runtime_events(
     State(_state): State<AppState>,
-    _auth: AuthContext,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    auth: AuthContext,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_MESSAGES_SUBSCRIBE_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e))?;
+
     let pubsub = get_global_pubsub().await;
 
     let msg_rx = pubsub.subscribe(&RUNTIME_MESSAGED_RECEIVED_TOPIC).await;
@@ -193,40 +278,37 @@ pub async fn runtime_events(
         .await;
     let exc_rx = pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await;
 
-    let s1 = BroadcastStream::new(msg_rx)
-        .filter_map(|r| async { r.ok() })
-        .map(|msg| Ok(Event::default().data(wrap_event("message-received", &msg))));
-    let s2 = BroadcastStream::new(notif_rx)
-        .filter_map(|r| async { r.ok() })
-        .map(|msg| Ok(Event::default().data(wrap_event("notification-triggered", &msg))));
-    let s3 = BroadcastStream::new(exc_rx)
-        .filter_map(|r| async { r.ok() })
-        .map(|msg| Ok(Event::default().data(wrap_event("exception-occurred", &msg))));
+    let s1 = broadcast_to_sse_stream(msg_rx, "message-received");
+    let s2 = broadcast_to_sse_stream(notif_rx, "notification-triggered");
+    let s3 = broadcast_to_sse_stream(exc_rx, "exception-occurred");
 
     let merged = stream::select(s1, stream::select(s2, s3));
-    Sse::new(merged).keep_alive(KeepAlive::default())
+    Ok(Sse::new(merged).keep_alive(KeepAlive::default()))
 }
 
 /// GET /events/ai — SSE: transcription-text, model-loading-status
 #[rest_handler(GET, "/events/ai", response = "void")]
 pub async fn ai_events(
     State(_state): State<AppState>,
-    _auth: AuthContext,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    auth: AuthContext,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(
+        &context.capabilities,
+        &RUNTIME_MESSAGES_SUBSCRIBE_CAPABILITY,
+    )
+    .map_err(|e| ApiError::Forbidden(e))?;
+
     let pubsub = get_global_pubsub().await;
 
     let trans_rx = pubsub.subscribe(&AI_TRANSCRIPTION_TEXT_TOPIC).await;
     let loading_rx = pubsub.subscribe(&AI_MODEL_LOADING_STATUS).await;
 
-    let s1 = BroadcastStream::new(trans_rx)
-        .filter_map(|r| async { r.ok() })
-        .map(|msg| Ok(Event::default().data(wrap_event("transcription-text", &msg))));
-    let s2 = BroadcastStream::new(loading_rx)
-        .filter_map(|r| async { r.ok() })
-        .map(|msg| Ok(Event::default().data(wrap_event("model-loading-status", &msg))));
+    let s1 = broadcast_to_sse_stream(trans_rx, "transcription-text");
+    let s2 = broadcast_to_sse_stream(loading_rx, "model-loading-status");
 
     let merged = stream::select(s1, s2);
-    Sse::new(merged).keep_alive(KeepAlive::default())
+    Ok(Sse::new(merged).keep_alive(KeepAlive::default()))
 }
 
 /// GET /events — Unified SSE endpoint that merges ALL event topics into a
@@ -238,8 +320,12 @@ pub async fn ai_events(
 #[rest_handler(GET, "/events/unified", response = "void")]
 pub async fn unified_events(
     State(_state): State<AppState>,
-    _auth: AuthContext,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    auth: AuthContext,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let context = auth.to_request_context();
+    check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
+        .map_err(|e| ApiError::Forbidden(e))?;
+
     let pubsub = get_global_pubsub().await;
 
     // Agent events
@@ -276,9 +362,7 @@ pub async fn unified_events(
     // Convert each receiver into a typed stream
     macro_rules! typed_stream {
         ($rx:expr, $ty:expr) => {
-            BroadcastStream::new($rx)
-                .filter_map(|r| async { r.ok() })
-                .map(move |msg| Ok(Event::default().data(wrap_event($ty, &msg))))
+            broadcast_to_sse_stream($rx, $ty)
         };
     }
 
@@ -323,5 +407,5 @@ pub async fn unified_events(
         stream::select(stream::select(links, s_signal), stream::select(runtime, ai)),
     );
 
-    Sse::new(top).keep_alive(KeepAlive::default())
+    Ok(Sse::new(top).keep_alive(KeepAlive::default()))
 }
