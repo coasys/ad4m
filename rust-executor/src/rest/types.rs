@@ -164,6 +164,7 @@ pub struct JoinNeighbourhoodRequest {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct PublishNeighbourhoodRequest {
+    #[serde(alias = "perspectiveUUID")]
     pub perspective_uuid: String,
     pub link_language: String,
     pub meta: crate::types::Perspective,
