@@ -591,12 +591,6 @@ importers:
       auto-bind:
         specifier: ^5.0.1
         version: 5.0.1
-      esbuild-plugin-copy:
-        specifier: ^2.1.1
-        version: 2.1.1(esbuild@0.15.18)
-      esbuild-plugin-replace:
-        specifier: ^1.4.0
-        version: 1.4.0
       lit:
         specifier: ^2.3.1
         version: 2.8.0
@@ -610,9 +604,15 @@ importers:
       esbuild:
         specifier: ^0.15.5
         version: 0.15.18
+      esbuild-plugin-copy:
+        specifier: ^2.1.1
+        version: 2.1.1(esbuild@0.15.18)
       esbuild-plugin-lit:
         specifier: ^0.0.10
         version: 0.0.10(esbuild@0.15.18)(lit@2.8.0)(svgo@2.8.0)
+      esbuild-plugin-replace:
+        specifier: ^1.4.0
+        version: 1.4.0
       np:
         specifier: ^7.6.2
         version: 7.7.0
@@ -634,22 +634,10 @@ importers:
       base64-js:
         specifier: '*'
         version: 1.5.1
-      class-validator:
-        specifier: ^0.13.1
-        version: 0.13.2
-      express:
-        specifier: 4.18.2
-        version: 4.18.2
       pako:
         specifier: '*'
         version: 2.1.0
-      reflect-metadata:
-        specifier: ^0.1.13
-        version: 0.1.14
     devDependencies:
-      '@rollup/plugin-alias':
-        specifier: ^3.1.5
-        version: 3.1.9(rollup@2.79.1)
       '@rollup/plugin-commonjs':
         specifier: ^20.0.0
         version: 20.0.0(rollup@2.79.1)
@@ -671,6 +659,9 @@ importers:
       cross-fetch:
         specifier: ^3.1.4
         version: 3.1.8
+      express:
+        specifier: 4.18.2
+        version: 4.18.2
       honkit:
         specifier: ^4.0.0
         version: 4.0.8
@@ -856,6 +847,9 @@ importers:
       chai-as-promised:
         specifier: '*'
         version: 7.1.1(chai@5.0.3)
+      eventsource:
+        specifier: ^3.0.2
+        version: 3.0.7
       express:
         specifier: 4.18.2
         version: 4.18.2
@@ -3294,12 +3288,6 @@ packages:
 
   '@rolldown/pluginutils@1.0.0-beta.57':
     resolution: {integrity: sha512-aQNelgx14tGA+n2tNSa9x6/jeoCL9fkDeCei7nOKnHx0fEFRRMu5ReiITo+zZD5TzWDGGRjbSYCs93IfRIyTuQ==}
-
-  '@rollup/plugin-alias@3.1.9':
-    resolution: {integrity: sha512-QI5fsEvm9bDzt32k39wpOwZhVzRcL5ydcffUHMyLVaVaLeC70I8TJZ17F1z1eMoLu4E/UOcH9BWVkKpIKdrfiw==}
-    engines: {node: '>=8.0.0'}
-    peerDependencies:
-      rollup: ^1.20.0||^2.0.0
 
   '@rollup/plugin-babel@5.3.1':
     resolution: {integrity: sha512-WFfdLWU/xVWKeRQnKmIAQULUI7Il0gZnBIH/ZFO069wYIfPu+8zrfp/KMW0atmELoRDq8FbiP3VCss9MhCut7Q==}
@@ -16706,11 +16694,6 @@ snapshots:
     optional: true
 
   '@rolldown/pluginutils@1.0.0-beta.57': {}
-
-  '@rollup/plugin-alias@3.1.9(rollup@2.79.1)':
-    dependencies:
-      rollup: 2.79.1
-      slash: 3.0.0
 
   '@rollup/plugin-babel@5.3.1(@babel/core@7.23.9)(@types/babel__core@7.20.5)(rollup@2.79.1)':
     dependencies:
