@@ -10,6 +10,22 @@ import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
+import type {
+  CreatePerspectiveRequest,
+  UpdatePerspectiveRequest,
+  AddLinkRequest,
+  AddLinksBulkRequest,
+  RemoveLinksBulkRequest,
+  AddLinkExpressionRequest,
+  UpdateLinkRequest,
+  RemoveLinkRequest,
+  AddSdnaRequest,
+  ExecuteCommandsRequest,
+  CreateSubjectRequest,
+  GetSubjectDataRequest,
+  CommitBatchRequest,
+  QueryRequest,
+} from "../generated/rest";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
@@ -208,13 +224,15 @@ export class PerspectiveClient {
     }
 
     async add(name: string): Promise<PerspectiveProxy> {
-        const handle = await this.#restClient.post<PerspectiveHandle>('/api/v1/perspectives', { name })
+        const body: CreatePerspectiveRequest = { name }
+        const handle = await this.#restClient.post<PerspectiveHandle>('/api/v1/perspectives', body)
         return new PerspectiveProxy(handle, this)
     }
 
     async update(uuid: string, name: string): Promise<PerspectiveProxy> {
+        const body: UpdatePerspectiveRequest = { name }
         const handle = await this.#restClient.put<PerspectiveHandle>(
-            `/api/v1/perspectives/${encodeURIComponent(uuid)}`, { name }
+            `/api/v1/perspectives/${encodeURIComponent(uuid)}`, body
         )
         return new PerspectiveProxy(handle, this)
     }

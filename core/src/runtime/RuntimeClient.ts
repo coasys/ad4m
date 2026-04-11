@@ -1,6 +1,19 @@
 import { RestClient } from "../restClient"
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult, UserStatistics } from "./RuntimeTypes"
+import type {
+    OpenLinkRequest,
+    TrustedAgentsRequest,
+    LinkLanguageTemplatesRequest,
+    FriendsListRequest,
+    VerifySignatureRequest,
+    SetStatusRequest,
+    FriendSendMessageRequest,
+    ExportRequest,
+    ImportRequest,
+    SetMultiUserRequest,
+    SetFreeHostingEnabledRequest,
+} from "../generated/rest"
 
 export type MessageCallback = (message: PerspectiveExpression) => null
 export type ExceptionCallback = (info: ExceptionInfo) => null

@@ -3,6 +3,7 @@ import base64js from 'base64-js';
 import pako from 'pako'
 import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
 import { ModelInput, Model, ModelType } from "./AITypes"
+import type { PromptRequest, EmbedRequest, SetDefaultModelRequest } from "../generated/rest";
 
 export class AIClient {
     #restClient: RestClient;

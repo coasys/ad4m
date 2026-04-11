@@ -5,6 +5,7 @@ import { OnlineAgent, TelepresenceSignalCallback } from "../language/Language"
 import { Perspective, PerspectiveUnsignedInput } from "../perspectives/Perspective"
 import { PerspectiveHandle } from "../perspectives/PerspectiveHandle"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
+import type { JoinNeighbourhoodRequest, PublishNeighbourhoodRequest } from "../generated/rest"
 
 export class NeighbourhoodClient {
     #restClient: RestClient

@@ -2,6 +2,7 @@ import { RestClient } from "../restClient";
 import { InteractionCall, InteractionMeta } from "../language/Language";
 import { ExpressionRendered } from "./Expression";
 import { Literal } from "../Literal";
+import type { CreateExpressionRequest, ExpressionManyRequest } from "../generated/rest";
 
 export class ExpressionClient {
     #restClient: RestClient
@@ -26,7 +27,8 @@ export class ExpressionClient {
     }
 
     async getMany(urls: string[]): Promise<ExpressionRendered[]> {
-        return this.#restClient.post<ExpressionRendered[]>('/api/v1/expressions/many', { urls })
+        const body: ExpressionManyRequest = { urls }
+        return this.#restClient.post<ExpressionRendered[]>('/api/v1/expressions/many', body)
     }
 
     async getRaw(url: string): Promise<string> {
@@ -35,7 +37,8 @@ export class ExpressionClient {
 
     async create(content: any, languageAddress: string): Promise<string> {
         content = JSON.stringify(content)
-        return this.#restClient.post<string>('/api/v1/expressions', { content, languageAddress })
+        const body: CreateExpressionRequest = { content, languageAddress }
+        return this.#restClient.post<string>('/api/v1/expressions', body)
     }
 
     async interactions(url: string): Promise<InteractionMeta[]> {

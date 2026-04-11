@@ -14,6 +14,15 @@ import { AgentStatus } from "./AgentStatus";
 import { LinkMutations } from "../links/Links";
 import { PerspectiveClient } from "../perspectives/PerspectiveClient";
 import { VerificationRequestResult } from "../runtime/RuntimeTypes";
+import type {
+  GenerateAgentRequest,
+  ImportAgentRequest,
+  LockAgentRequest,
+  UnlockAgentRequest,
+  SignMessageRequest,
+  PermitCapabilityRequest,
+  GenerateJwtRequest,
+} from "../generated/rest";
 
 export interface InitializeArgs {
   did: string;
@@ -70,7 +79,8 @@ export class AgentClient {
   }
 
   async generate(passphrase: string): Promise<AgentStatus> {
-    const result = await this.#restClient.post<any>('/api/v1/agent/generate', { passphrase });
+    const body: GenerateAgentRequest = { passphrase };
+    const result = await this.#restClient.post<any>('/api/v1/agent/generate', body);
     return new AgentStatus(result);
   }
 
@@ -80,12 +90,14 @@ export class AgentClient {
   }
 
   async lock(passphrase: string): Promise<AgentStatus> {
-    const result = await this.#restClient.post<any>('/api/v1/agent/lock', { passphrase });
+    const body: LockAgentRequest = { passphrase };
+    const result = await this.#restClient.post<any>('/api/v1/agent/lock', body);
     return new AgentStatus(result);
   }
 
   async unlock(passphrase: string, holochain = true): Promise<AgentStatus> {
-    const result = await this.#restClient.post<any>('/api/v1/agent/unlock', { passphrase, holochain });
+    const body: UnlockAgentRequest = { passphrase, holochain };
+    const result = await this.#restClient.post<any>('/api/v1/agent/unlock', body);
     return new AgentStatus(result);
   }
 
@@ -226,11 +238,13 @@ export class AgentClient {
   }
 
   async permitCapability(auth: string): Promise<string> {
-    return this.#restClient.post<string>('/api/v1/agent/auth/permit', { auth });
+    const body: PermitCapabilityRequest = { auth };
+    return this.#restClient.post<string>('/api/v1/agent/auth/permit', body);
   }
 
   async generateJwt(requestId: string, rand: string): Promise<string> {
-    return this.#restClient.post<string>('/api/v1/agent/auth/jwt', { requestId, rand });
+    const body: GenerateJwtRequest = { requestId, rand };
+    return this.#restClient.post<string>('/api/v1/agent/auth/jwt', body);
   }
 
   async getApps(): Promise<Apps[]> {
@@ -250,7 +264,8 @@ export class AgentClient {
   }
 
   async signMessage(message: string): Promise<string> {
-    return this.#restClient.post<string>('/api/v1/agent/sign', { message });
+    const body: SignMessageRequest = { message };
+    return this.#restClient.post<string>('/api/v1/agent/sign', body);
   }
 
   // Multi-user methods
