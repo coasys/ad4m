@@ -62,7 +62,9 @@ fn parse_attr(s: &str) -> (String, String, Option<String>, Option<String>) {
     let s = s.trim();
 
     // Find method (first ident)
-    let comma_pos = s.find(',').expect("rest_handler: missing comma after METHOD");
+    let comma_pos = s
+        .find(',')
+        .expect("rest_handler: missing comma after METHOD");
     let method = s[..comma_pos].trim().to_string();
 
     let rest = s[comma_pos + 1..].trim();
@@ -84,13 +86,15 @@ fn parse_attr(s: &str) -> (String, String, Option<String>, Option<String>) {
         if remaining.starts_with("request") {
             remaining = remaining["request".len()..].trim();
             remaining = remaining.trim_start_matches('=').trim();
-            let (val, r) = extract_string_literal(remaining).expect("rest_handler: bad request value");
+            let (val, r) =
+                extract_string_literal(remaining).expect("rest_handler: bad request value");
             req_override = Some(val);
             remaining = r.trim();
         } else if remaining.starts_with("response") {
             remaining = remaining["response".len()..].trim();
             remaining = remaining.trim_start_matches('=').trim();
-            let (val, r) = extract_string_literal(remaining).expect("rest_handler: bad response value");
+            let (val, r) =
+                extract_string_literal(remaining).expect("rest_handler: bad response value");
             resp_override = Some(val);
             remaining = r.trim();
         } else {
@@ -133,7 +137,7 @@ fn infer_response_type(func: &ItemFn) -> String {
         if ty_str.contains("Sse") {
             return "void".to_string();
         }
-        // Result<Json<T>, _> 
+        // Result<Json<T>, _>
         if let Some(result_inner) = extract_generic_inner(&ty_str, "Result") {
             if let Some(json_inner) = extract_generic_inner(&result_inner, "Json") {
                 return rust_type_to_ts(&json_inner);
