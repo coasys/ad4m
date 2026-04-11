@@ -951,14 +951,28 @@ pub async fn create_subject(
     let mut perspective = get_perspective_with_access_control(&uuid, &context.auth_token).await?;
     let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
+    // The JS client may send subjectClass as a JSON string like
+    // '{"className":"Community","initialValues":{...}}' (legacy from GraphQL era).
+    // Parse it to extract the actual class name.
+    let (resolved_class_name, parsed_initial_values) = match serde_json::from_str::<serde_json::Value>(&body.subject_class) {
+        Ok(obj) if obj.is_object() && obj.get("className").is_some() => {
+            let cn = obj["className"].as_str().unwrap_or(&body.subject_class).to_string();
+            let iv = obj.get("initialValues").cloned();
+            (cn, iv)
+        }
+        _ => (body.subject_class.clone(), None),
+    };
+
     let subject_class = crate::perspectives::perspective_instance::SubjectClassOption {
-        class_name: Some(body.subject_class.clone()),
+        class_name: Some(resolved_class_name),
         query: None,
     };
+    // Prefer explicit initialValues from the body, fall back to parsed ones from subjectClass JSON
     let initial_values: Option<serde_json::Value> = body
         .initial_values
         .as_ref()
-        .and_then(|s| serde_json::from_str(s).ok());
+        .and_then(|s| serde_json::from_str(s).ok())
+        .or(parsed_initial_values);
     perspective
         .create_subject(
             subject_class,
