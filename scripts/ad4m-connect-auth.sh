@@ -21,7 +21,7 @@
 #   - Flux served on a local port
 #   - Chrome/Chromium installed
 #   - python3 available
-#   - python3 'websockets' package
+#   - Either 'websocat' (preferred) or python3 'websockets' package
 #   - curl (for admin API mode)
 #   - jq (for admin API mode)
 #
@@ -139,6 +139,7 @@ for t in tabs:
 " 2>/dev/null) || err "Could not get CDP WebSocket URL. Is Chrome running with --remote-debugging-port=$CDP_PORT?"
 
     # Always use python3 websockets for reliable multiline JS evaluation.
+    # websocat breaks on multiline JSON payloads.
     python3 -c "
 import json, asyncio, websockets, sys
 async def main():
@@ -175,16 +176,15 @@ cdp_wait_for() {
 
 # --- Extract security code from executor log (fallback mode) ---
 extract_security_code() {
-    [[ -f "$EXECUTOR_LOG" ]] || err "Executor log not found: $EXECUTOR_LOG"
+    [[ -f "$EXECUTOR_LOG" ]] || return 1
 
-    local start_line elapsed=0
-    start_line=$(wc -l < "$EXECUTOR_LOG" 2>/dev/null)
-
-    log "Watching executor log for security code..."
-    while [[ $elapsed -lt $TIMEOUT ]]; do
+    local elapsed=0
+    log "Checking executor log for security code..."
+    while [[ $elapsed -lt 5 ]]; do
         local code
-        code=$(tail -n +"$((start_line + 1))" "$EXECUTOR_LOG" 2>/dev/null | \
-            grep -oE 'random secret: [0-9]{6}|secret: [0-9]{6}|Random number challenge: [0-9]{6}' | \
+        # Search the last 50 lines for the code pattern
+        code=$(tail -50 "$EXECUTOR_LOG" 2>/dev/null | \
+            grep -oE 'Random number challenge: [0-9]{6}|random secret: [0-9]{6}' | \
             tail -1 | grep -oE '[0-9]{6}') || true
 
         if [[ -n "$code" ]]; then
@@ -253,16 +253,29 @@ get_code_via_admin() {
     auth_extended=$(jq -n --arg rid "$request_id" --argjson auth "$auth_json" \
         '{requestId: $rid, auth: $auth}')
 
-    # Call permit endpoint — uses REST API
+    # Call permit endpoint — supports both GraphQL (current dev) and REST (future)
     log "Calling permit endpoint..."
     local permit_body
     permit_body=$(jq -n --arg auth "$auth_extended" '{auth: $auth}')
 
     local response
+    # Try REST first, fall back to GraphQL
     response=$(curl -sf -X POST "${EXECUTOR_URL}/api/v1/agent/auth/permit" \
         -H "Content-Type: application/json" \
         -H "Authorization: ${ADMIN_CREDENTIAL}" \
-        -d "$permit_body" 2>&1) || err "Permit API call failed: $response"
+        -d "$permit_body" 2>/dev/null) || {
+        # REST not available — use GraphQL mutation
+        local escaped_auth
+        escaped_auth=$(echo "$auth_extended" | jq -Rs '.')
+        local gql_body
+        gql_body=$(jq -n --arg query "mutation { agentPermitCapability(auth: ${escaped_auth}) }" '{query: $query}')
+        response=$(curl -sf -X POST "${EXECUTOR_URL}/graphql" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: ${ADMIN_CREDENTIAL}" \
+            -d "$gql_body" 2>&1) || err "Both REST and GraphQL permit calls failed: $response"
+        # Extract from GraphQL response: {"data":{"agentPermitCapability":"123456"}}
+        response=$(echo "$response" | jq -r '.data.agentPermitCapability // empty' 2>/dev/null) || true
+    }
 
     # Response is a JSON string with the 6-digit code
     local code
@@ -370,10 +383,16 @@ cdp_eval "
 sleep 2
 
 # Step 5: Get the security code
-if [[ -n "$ADMIN_CREDENTIAL" ]]; then
+# Try stdout first (works when executor has auto-permit, which the CLI always enables)
+# Fall back to admin API if stdout doesn't have it
+CODE=""
+if [[ -f "$EXECUTOR_LOG" ]]; then
+    CODE=$(extract_security_code 2>/dev/null) || true
+fi
+if [[ -z "$CODE" && -n "$ADMIN_CREDENTIAL" ]]; then
     CODE=$(get_code_via_admin)
-else
-    CODE=$(extract_security_code)
+elif [[ -z "$CODE" ]]; then
+    err "No security code found. Provide --executor-log or --admin-credential"
 fi
 
 # Step 6: Enter the code and verify
@@ -424,6 +443,9 @@ while [[ $local_elapsed -lt $TIMEOUT ]]; do
     " 2>/dev/null) || true
     if [[ -n "$TOKEN" && "$TOKEN" != "null" && "$TOKEN" != "undefined" && "$TOKEN" != "" ]]; then
         ok "Authentication complete — JWT token stored in localStorage"
+        # Reload page so Flux picks up the JWT and loads past ad4m-connect
+        cdp_eval "window.location.reload()" >/dev/null 2>&1
+        ok "Page reloaded — Flux should now load"
         exit 0
     fi
     sleep 1
