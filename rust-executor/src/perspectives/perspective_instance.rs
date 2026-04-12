@@ -198,8 +198,9 @@ fn extract_predicates_from_sparql(query: &str) -> HashSet<String> {
     // GRAPH ?var { ... ?var1 ?varPred ?var2 ... }
     // This is the pattern our model queries use for fetching all links.
     let graph_var_pred = regex::Regex::new(
-        r"GRAPH\s+\?\w+\s*\{[^}]*(?:\?\w+|<[^>]+>)\s+(\?\w+)\s+(?:\?\w+|<[^>]+>)[^}]*\}"
-    ).unwrap();
+        r"GRAPH\s+\?\w+\s*\{[^}]*(?:\?\w+|<[^>]+>)\s+(\?\w+)\s+(?:\?\w+|<[^>]+>)[^}]*\}",
+    )
+    .unwrap();
     if graph_var_pred.is_match(query) {
         return HashSet::new();
     }
