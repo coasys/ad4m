@@ -74,5 +74,6 @@ export type { UpdatePerspectiveRequest } from "./UpdatePerspectiveRequest";
 export type { UpdateProfileRequest } from "./UpdateProfileRequest";
 export type { VerifyEmailRequest } from "./VerifyEmailRequest";
 export type { VerifySignatureRequest } from "./VerifySignatureRequest";
+export type { NotificationGrantRequest } from "./NotificationGrantRequest";
 export type { WriteSettingsRequest } from "./WriteSettingsRequest";
 export type { RouteMap, RouteMethod, RoutePath, GetRoutes, PostRoutes, PutRoutes, PatchRoutes, DeleteRoutes, OpenTranscriptionRequest, FeedTranscriptionRequest, CloseTranscriptionRequest } from "./routes";
