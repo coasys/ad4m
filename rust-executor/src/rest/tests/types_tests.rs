@@ -408,11 +408,11 @@ fn parse_add_sdna_request() {
 #[test]
 fn parse_execute_commands_request() {
     let json = json!({
-        "commands": [{"type": "add", "data": {}}],
-        "expression": {"subject": "test"}
+        "commands": "[{\"type\":\"add\",\"data\":{}}]",
+        "expression": "{\"subject\":\"test\"}"
     });
     let req: ExecuteCommandsRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.commands.len(), 1);
+    assert_eq!(req.commands, "[{\"type\":\"add\",\"data\":{}}]");
 }
 
 // ── Hosting response types ──

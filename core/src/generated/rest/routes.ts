@@ -38,6 +38,7 @@ import type {
   LinkMutationsRequest,
   LockAgentRequest,
   LoginUserRequest,
+  NotificationGrantRequest,
   OpenLinkRequest,
   PermitCapabilityRequest,
   PromptRequest,
@@ -156,6 +157,7 @@ export interface RouteMap {
   'GET /events/neighbourhoods/:uuid/signals': { request: never; response: void };
   'GET /events/perspectives': { request: never; response: void };
   'GET /events/perspectives/:uuid/links': { request: never; response: void };
+  'GET /events/query-subscription/:subscription_id': { request: never; response: void };
   'GET /events/runtime': { request: never; response: void };
   'GET /events/unified': { request: never; response: void };
   'POST /expressions': { request: CreateExpressionRequest; response: string };
@@ -236,6 +238,7 @@ export interface RouteMap {
   'POST /runtime/notifications': { request: NotificationInput; response: boolean };
   'DELETE /runtime/notifications/:id': { request: never; response: boolean };
   'PATCH /runtime/notifications/:id': { request: NotificationInput; response: boolean };
+  'PATCH /runtime/notifications/:id/grant': { request: NotificationGrantRequest; response: boolean };
   'POST /runtime/open-link': { request: OpenLinkRequest; response: boolean };
   'POST /runtime/quit': { request: never; response: boolean };
   'PUT /runtime/status': { request: SetStatusRequest; response: boolean };
