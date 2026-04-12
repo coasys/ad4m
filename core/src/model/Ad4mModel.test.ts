@@ -1970,26 +1970,31 @@ describe("Push-down FILTER for literal equality", () => {
 
   const normalizeQuery = (q: string) => q.replace(/\s+/g, " ").trim();
 
-  it("SPARQL query for where: { name: 'Alice' } should add JOIN but NOT parse_literal FILTER", async () => {
+  it("SPARQL query for where: { name: 'Alice' } should push down parse_literal FILTER", async () => {
     const query = await (FilterTest as any).queryToSPARQL(mockPerspective, { where: { name: "Alice" } });
     const norm = normalizeQuery(query);
-    // JOIN pattern exists (ensures property is present for JS post-filter)
+    // JOIN pattern exists
     expect(norm).toContain("?wTarget_name");
-    // No parse_literal FILTER — custom fn:: functions aren't valid in parsed SPARQL
-    expect(norm).not.toContain("fn::parse_literal");
+    // Push-down FILTER with full IRI custom function
+    expect(norm).toContain("<ad4m://fn/parse_literal>");
+    expect(norm).toContain('"Alice"');
   });
 
-  it("SPARQL query for where: { name: ['Alice', 'Bob'] } should add JOIN but NOT parse_literal FILTER", async () => {
+  it("SPARQL query for where: { name: ['Alice', 'Bob'] } should push down parse_literal IN FILTER", async () => {
     const query = await (FilterTest as any).queryToSPARQL(mockPerspective, { where: { name: ["Alice", "Bob"] } });
     const norm = normalizeQuery(query);
     expect(norm).toContain("?wTarget_name");
-    expect(norm).not.toContain("fn::parse_literal");
+    // Push-down FILTER with IN clause
+    expect(norm).toContain("<ad4m://fn/parse_literal>");
+    expect(norm).toContain('"Alice"');
+    expect(norm).toContain('"Bob"');
   });
 
   it("SPARQL query for where: { rating: { gt: 5 } } should NOT include parse_literal FILTER", async () => {
     const query = await (FilterTest as any).queryToSPARQL(mockPerspective, { where: { rating: { gt: 5 } } });
     const norm = normalizeQuery(query);
-    expect(norm).not.toContain("fn::parse_literal");
+    // Comparison operators are NOT pushed down
+    expect(norm).not.toContain("parse_literal");
   });
 
   it("literal property where clause adds JOIN for JS post-filter", async () => {

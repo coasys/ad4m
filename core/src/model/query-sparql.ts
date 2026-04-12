@@ -299,7 +299,6 @@ function buildSPARQLWhereFilters(
     // (instancesFromQueryResult) after hydration resolves values to JS primitives.
     // We only add a JOIN pattern to ensure the property exists (conformance check).
     if (useParseLiteral) {
-      // Just ensure the property exists — no value filtering in SPARQL
       if (typeof condition === "object" && condition !== null && !Array.isArray(condition)) {
         const ops = condition as any;
         const hasCompOps = ops.gt !== undefined || ops.gte !== undefined ||
@@ -307,18 +306,25 @@ function buildSPARQLWhereFilters(
           ops.between !== undefined || ops.contains !== undefined ||
           ops.not !== undefined;
         if (hasCompOps) {
+          // Comparison operators: just add join, JS post-filter handles the rest.
+          // parse_literal can't reliably do numeric/date comparisons.
           joins.push(`
       ?source ${iri(propMeta.predicate)} ?wTarget_cmp_${propertyName} .`);
         }
         // NOT filters: no SPARQL-level filtering — handled in JS
-      } else {
-        // Simple equality or IN — add join for conformance.
-        // NOTE: push-down FILTER with fn::parse_literal was attempted but removed because
-        // Oxigraph's query parser rejects the fn:: custom function syntax at parse time
-        // (custom functions are only available at execution time). All literal property
-        // filtering is done in JS post-filter after hydration resolves values.
+      } else if (Array.isArray(condition)) {
+        // IN condition — push down FILTER with parse_literal for each value
+        const varName = `?wTarget_${propertyName}`;
         joins.push(`
-      ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
+      ?source ${iri(propMeta.predicate)} ${varName} .`);
+        const values = (condition as any[]).map(v => formatSPARQLValue(v)).join(", ");
+        filters.push(`<ad4m://fn/parse_literal>(${varName}) IN (${values})`);
+      } else {
+        // Simple equality — push down FILTER with parse_literal
+        const varName = `?wTarget_${propertyName}`;
+        joins.push(`
+      ?source ${iri(propMeta.predicate)} ${varName} .`);
+        filters.push(`<ad4m://fn/parse_literal>(${varName}) = ${formatSPARQLValue(condition)}`);
       }
     } else if (Array.isArray(condition)) {
       const formatted = (condition as any[]).map(v => iri(v)).join(", ");

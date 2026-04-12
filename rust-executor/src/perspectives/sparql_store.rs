@@ -1576,6 +1576,41 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_function_syntax_parses_and_executes() {
+        let svc = new_service();
+        svc.add_link(&make_link(
+            "ad4m://src",
+            "ad4m://pred",
+            "literal:string:Alice",
+        ))
+        .unwrap();
+        svc.add_link(&make_link(
+            "ad4m://src",
+            "ad4m://pred",
+            "literal:string:Bob",
+        ))
+        .unwrap();
+
+        // Full IRI custom function syntax should work
+        let result = svc
+            .query(
+                r#"SELECT ?target WHERE {
+                ?s <ad4m://pred> ?target .
+                FILTER(<ad4m://fn/parse_literal>(?target) = "Alice")
+            }"#,
+            )
+            .unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "Custom function FILTER should work. Got: {}",
+            result
+        );
+        assert_eq!(rows[0]["target"].as_str().unwrap(), "literal:string:Alice");
+    }
+
+    #[test]
     fn test_has_data_skips_rebuild_for_persistent_store() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();

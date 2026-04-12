@@ -654,16 +654,54 @@ export async function hydrateRelations<T>(
     // The link goes target→instance, so we query backwards:
     //   predicate = meta.predicate, target = inst.id  →  source is the related id
     if (meta.kind === 'belongsToOne' || meta.kind === 'belongsToMany') {
-      // Per-instance reverse lookup (can't batch easily across instances)
+      // Batch reverse lookup: use a single SPARQL query with VALUES clause
+      // to find all links where target is one of our instance IDs.
+      const instanceIds = instances.map(inst => (inst as any).id).filter(Boolean);
+      let allReverseLinks: Array<{ source: string; target: string }> = [];
+
+      if (instanceIds.length > 0) {
+        try {
+          const valuesClause = instanceIds.map(id => `<${id}>`).join(' ');
+          const sparqlResult = await perspective.querySparql(`
+            SELECT ?source ?target WHERE {
+              VALUES ?target { ${valuesClause} }
+              ?source <${meta.predicate}> ?target .
+            }
+          `);
+          const parsed = typeof sparqlResult === 'string' ? JSON.parse(sparqlResult) : sparqlResult;
+          if (Array.isArray(parsed)) {
+            allReverseLinks = parsed.map((row: any) => ({
+              source: row.source,
+              target: row.target,
+            }));
+          }
+        } catch {
+          // Fallback: per-instance queries if SPARQL batch fails
+          for (const inst of instances) {
+            const reverseLinks = await perspective.get(
+              new LinkQuery({ predicate: meta.predicate, target: (inst as any).id })
+            );
+            for (const l of reverseLinks) {
+              if (l.data.target === (inst as any).id) {
+                allReverseLinks.push({ source: l.data.source, target: l.data.target });
+              }
+            }
+          }
+        }
+      }
+
+      // Group by target (instance ID)
+      const reverseLinksByTarget = new Map<string, string[]>();
+      for (const rl of allReverseLinks) {
+        if (!reverseLinksByTarget.has(rl.target)) {
+          reverseLinksByTarget.set(rl.target, []);
+        }
+        reverseLinksByTarget.get(rl.target)!.push(rl.source);
+      }
+
+      // Assign results per instance
       for (const inst of instances) {
-        const reverseLinks = await perspective.get(
-          new LinkQuery({ predicate: meta.predicate, target: (inst as any).id })
-        );
-        // Defensive filter: perspective.get may return extra results; ensure
-        // we only use links that genuinely point to this instance.
-        const sourceIds = reverseLinks
-          .filter(l => l.data.target === (inst as any).id)
-          .map(l => l.data.source);
+        const sourceIds = reverseLinksByTarget.get((inst as any).id) ?? [];
 
         if (meta.kind === 'belongsToOne') {
           if (sourceIds.length === 0) {
@@ -679,10 +717,9 @@ export async function hydrateRelations<T>(
             (inst as any)[relName] = null;
           }
         } else {
-          // belongsToMany — return array of hydrated instances
+          // belongsToMany
           let hydrated: any[] = [];
 
-          // If there's a where/order sub-query, delegate to findAll for filtering
           if (subQuery && (subQuery.where || subQuery.order || subQuery.properties)) {
             const whereWithIds: Record<string, any> = {
               id: sourceIds,
@@ -705,7 +742,7 @@ export async function hydrateRelations<T>(
             }));
           }
 
-          // Apply order (client-side, if not already handled by findAll above)
+          // Apply order
           if (subQuery?.order && !(subQuery.where || subQuery.properties)) {
             const orderEntries = Object.entries(subQuery.order);
             hydrated = hydrated.sort((a: any, b: any) => {
@@ -728,7 +765,6 @@ export async function hydrateRelations<T>(
 
           (inst as any)[relName] = hydrated;
 
-          // Recurse for nested includes
           if (nestedInclude && hydrated.length > 0) {
             await hydrateRelations(TargetClass, hydrated, perspective, nestedInclude);
           }
