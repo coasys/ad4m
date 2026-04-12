@@ -249,45 +249,11 @@ export function buildSPARQLQuery(
     ? `FILTER(\n      ${filterExpressions.join(" &&\n      ")}\n    )`
     : "";
 
-  // When limit/offset are specified, wrap source-selection in a subquery so
-  // the database only materialises links for the requested page of instances.
-  // Without this, ALL instances' links are fetched and pagination happens in JS.
-  const hasPagination = query.limit !== undefined || query.offset !== undefined;
-  const hasJsFilters = hasJsOnlyWhereFilters(metadata, allRelationsMetadata, query.where);
-
-  if (hasPagination && !hasJsFilters) {
-    // Build a subquery that selects DISTINCT sources with ordering + pagination.
-    // We need a timestamp for ordering — get the earliest link timestamp per source.
-    const orderByClause = query.order
-      ? Object.entries(query.order).map(([prop, dir]) => {
-          const v = prop === 'timestamp' ? '?_srcTs' : mapPropertyToSPARQLVar(prop, metadata);
-          return dir === 'DESC' ? `DESC(${v})` : `ASC(${v})`;
-        }).join(' ')
-      : 'ASC(?_srcTs)';
-
-    const limitClause = query.limit !== undefined ? `LIMIT ${query.limit}` : '';
-    const offsetClause = query.offset !== undefined ? `OFFSET ${query.offset}` : '';
-
-    return `
-    SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
-      {
-        SELECT DISTINCT ?source (MIN(?_ts) AS ?_srcTs) WHERE {${joinClause}
-          GRAPH ?_tsg { ?source ?_p ?_t . }
-          ?_tsg <ad4m://ontology/timestamp> ?_ts .
-          ${filterClause}
-        }
-        GROUP BY ?source
-        ORDER BY ${orderByClause}
-        ${limitClause}
-        ${offsetClause}
-      }
-      GRAPH ?linkGraph { ?source ?predicate ?target . }
-      FILTER(isIRI(?source) && isIRI(?predicate))
-      ?linkGraph <ad4m://ontology/author> ?author .
-      ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
-    }
-  `.trim();
-  }
+  // NOTE: SPARQL-level LIMIT/OFFSET is intentionally NOT applied here.
+  // The outer SELECT returns multiple rows per instance (one per link),
+  // so SPARQL LIMIT/OFFSET would cut off links mid-instance and produce
+  // incorrect results. All pagination is handled in JS after grouping
+  // and hydration (instancesFromQueryResult).
 
   return `
     SELECT ?source ?predicate ?target ?author ?timestamp WHERE {${joinClause}
@@ -316,28 +282,13 @@ export function buildSPARQLQuery(
  * the raw clauses for simpler cases or as a fallback.
  */
 export function buildSPARQLOrderLimitOffset(_metadata: ModelMetadata, query: Query): string {
-  const parts: string[] = [];
-
-  if (query.order) {
-    const orderTerms = Object.entries(query.order).map(([prop, dir]) => {
-      // Map property names to SPARQL variables used in the query
-      const varName = prop === 'timestamp' ? '?timestamp' : mapPropertyToSPARQLVar(prop, _metadata);
-      return dir === 'DESC' ? `DESC(${varName})` : `ASC(${varName})`;
-    });
-    if (orderTerms.length > 0) {
-      parts.push(`ORDER BY ${orderTerms.join(' ')}`);
-    }
-  }
-
-  if (query.limit !== undefined) {
-    parts.push(`LIMIT ${query.limit}`);
-  }
-
-  if (query.offset !== undefined) {
-    parts.push(`OFFSET ${query.offset}`);
-  }
-
-  return parts.join('\n    ');
+  // NOTE: LIMIT/OFFSET are intentionally NOT emitted here.
+  // The outer SELECT returns multiple rows per instance (one per link),
+  // so applying LIMIT/OFFSET at the SPARQL level would cut off links
+  // mid-instance. All pagination is handled in JS (instancesFromQueryResult).
+  // ORDER BY is also omitted since row-level ordering of multi-row-per-instance
+  // results is not meaningful; JS sorts hydrated instances instead.
+  return "";
 }
 
 /**

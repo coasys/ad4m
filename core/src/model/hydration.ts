@@ -669,8 +669,10 @@ export async function hydrateRelations<T>(
 }`;
         try {
           const sparqlResult = await perspective.querySparql(sparqlQuery);
-          // Parse SPARQL JSON results
-          const bindings = sparqlResult?.results?.bindings ?? sparqlResult?.bindings ?? [];
+          // Parse SPARQL results — querySparql returns a flat array of row objects
+          // e.g. [{ source: "uri1", target: "uri2" }, ...]
+          const bindings = Array.isArray(sparqlResult) ? sparqlResult
+            : sparqlResult?.results?.bindings ?? sparqlResult?.bindings ?? [];
           for (const row of bindings) {
             const source = row.source?.value ?? row.source;
             const target = row.target?.value ?? row.target;

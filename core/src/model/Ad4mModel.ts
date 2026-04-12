@@ -930,7 +930,7 @@ export class Ad4mModel {
     // If limit/offset is used but no explicit order, default to ordering by timestamp (ASC)
     // This ensures consistent pagination behavior
     const effectiveOrder = query.order ||
-      (query.limit !== undefined || query.offset !== undefined ? { timestamp: 'ASC' as 'ASC' } : null);
+      (query.limit !== undefined || query.offset !== undefined ? { createdAt: 'ASC' as 'ASC' } : null);
 
     if (effectiveOrder) {
       const orderEntries = Object.entries(effectiveOrder);
