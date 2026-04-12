@@ -301,6 +301,7 @@ beforeAll(async () => {
     app.post('/api/v1/runtime/notifications', (_req, res) => res.json(true));
     app.get('/api/v1/runtime/notifications', (_req, res) => res.json([]));
     app.patch('/api/v1/runtime/notifications/:id', (_req, res) => res.json(true));
+    app.patch('/api/v1/runtime/notifications/:id/grant', (_req, res) => res.json(true));
     app.put('/api/v1/runtime/notifications/:id', (_req, res) => res.json(true));
     app.delete('/api/v1/runtime/notifications/:id', (_req, res) => res.json(true));
 
