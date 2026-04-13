@@ -1959,26 +1959,28 @@ describe("Push-down FILTER for literal equality", () => {
 
   const normalizeQuery = (q: string) => q.replace(/\s+/g, " ").trim();
 
-  it("SPARQL query for where: { name: 'Alice' } should add JOIN but NOT parse_literal FILTER", async () => {
+  it("SPARQL query for where: { name: 'Alice' } should use <ad4m://fn/parse_literal> FILTER", async () => {
     const query = await (FilterTest as any).queryToSPARQL(mockPerspective, { where: { name: "Alice" } });
     const norm = normalizeQuery(query);
-    // JOIN pattern exists (ensures property is present for JS post-filter)
+    // JOIN pattern exists
     expect(norm).toContain("?wTarget_name");
-    // No parse_literal FILTER — custom fn:: functions aren't valid in parsed SPARQL
+    // parse_literal push-down FILTER is present (using correct SPARQL IRI syntax)
+    expect(norm).toContain("ad4m://fn/parse_literal");
     expect(norm).not.toContain("fn::parse_literal");
   });
 
-  it("SPARQL query for where: { name: ['Alice', 'Bob'] } should add JOIN but NOT parse_literal FILTER", async () => {
+  it("SPARQL query for where: { name: ['Alice', 'Bob'] } should use <ad4m://fn/parse_literal> IN FILTER", async () => {
     const query = await (FilterTest as any).queryToSPARQL(mockPerspective, { where: { name: ["Alice", "Bob"] } });
     const norm = normalizeQuery(query);
     expect(norm).toContain("?wTarget_name");
+    expect(norm).toContain("ad4m://fn/parse_literal");
     expect(norm).not.toContain("fn::parse_literal");
   });
 
   it("SPARQL query for where: { rating: { gt: 5 } } should NOT include parse_literal FILTER", async () => {
     const query = await (FilterTest as any).queryToSPARQL(mockPerspective, { where: { rating: { gt: 5 } } });
     const norm = normalizeQuery(query);
-    expect(norm).not.toContain("fn::parse_literal");
+    expect(norm).not.toContain("parse_literal");
   });
 
   it("literal property where clause adds JOIN for JS post-filter", async () => {

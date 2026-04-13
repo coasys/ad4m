@@ -49,12 +49,19 @@ export function hasJsOnlyWhereFilters(
       return true;
     }
 
-    // Literal-stored properties are JS-only (value filtering can't be pushed to SPARQL)
+    // Literal-stored properties: equality/IN/NOT can be pushed to SPARQL via
+    // <ad4m://fn/parse_literal>(), but comparison operators (gt/lt/gte/lte/between/contains)
+    // must remain JS-only because parse_literal returns strings.
     if (isLiteralStoredProperty(propMeta)) {
-      // Check if the condition actually filters on value (not just existence)
-      if (condition !== undefined && condition !== null) {
-        return true;
+      if (typeof condition === 'object' && condition !== null && !Array.isArray(condition)) {
+        const ops = condition as any;
+        const hasCompOps = ops.gt !== undefined || ops.gte !== undefined ||
+          ops.lt !== undefined || ops.lte !== undefined ||
+          ops.between !== undefined || ops.contains !== undefined;
+        if (hasCompOps) return true;
+        // NOT with simple value can be pushed to SPARQL — not JS-only
       }
+      // Simple equality and IN filters can be pushed to SPARQL — not JS-only
     }
   }
 
@@ -388,32 +395,46 @@ function buildSPARQLWhereFilters(
     // Determine if this property stores values as literal: IRIs
     const useParseLiteral = isLiteralStoredProperty(propMeta);
 
-    // For literal-stored properties, skip SPARQL-level FILTER expressions entirely.
-    // The parse_literal custom function is unreliable across oxigraph versions and
-    // environments. All property-level where filtering is done in JS post-filter
-    // (instancesFromQueryResult) after hydration resolves values to JS primitives.
-    // We only add a JOIN pattern to ensure the property exists (conformance check).
+    // For literal-stored properties, push equality/IN/NOT filters to SPARQL using
+    // <ad4m://fn/parse_literal>() which extracts the raw value from literal: IRIs.
+    // The correct SPARQL syntax is <ad4m://fn/parse_literal>(?var) — NOT fn::parse_literal
+    // (which was SurrealDB syntax that Oxigraph rejects at parse time).
+    // Comparison operators (gt/lt/gte/lte/between/contains) remain JS-only because
+    // parse_literal returns strings and numeric/date comparisons would be unreliable.
+    // JS post-filter in instancesFromQueryResult remains as a safety net for all cases.
     if (useParseLiteral) {
-      // Just ensure the property exists — no value filtering in SPARQL
       if (typeof condition === "object" && condition !== null && !Array.isArray(condition)) {
         const ops = condition as any;
         const hasCompOps = ops.gt !== undefined || ops.gte !== undefined ||
           ops.lt !== undefined || ops.lte !== undefined ||
-          ops.between !== undefined || ops.contains !== undefined ||
-          ops.not !== undefined;
+          ops.between !== undefined || ops.contains !== undefined;
         if (hasCompOps) {
+          // Comparison operators: join only, filter in JS
           joins.push(`
       ?source ${iri(propMeta.predicate)} ?wTarget_cmp_${propertyName} .`);
         }
-        // NOT filters: no SPARQL-level filtering — handled in JS
-      } else {
-        // Simple equality or IN — add join for conformance.
-        // NOTE: push-down FILTER with fn::parse_literal was attempted but removed because
-        // Oxigraph's query parser rejects the fn:: custom function syntax at parse time
-        // (custom functions are only available at execution time). All literal property
-        // filtering is done in JS post-filter after hydration resolves values.
+        if (ops.not !== undefined) {
+          // NOT filter: push down to SPARQL
+          joins.push(`
+      ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
+          if (Array.isArray(ops.not)) {
+            const formatted = (ops.not as any[]).map((v: any) => formatSPARQLValue(v)).join(", ");
+            filters.push(`STR(<ad4m://fn/parse_literal>(?wTarget_${propertyName})) NOT IN (${formatted})`);
+          } else {
+            filters.push(`STR(<ad4m://fn/parse_literal>(?wTarget_${propertyName})) != ${formatSPARQLValue(ops.not)}`);
+          }
+        }
+      } else if (Array.isArray(condition)) {
+        // IN filter: push down to SPARQL
         joins.push(`
       ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
+        const formatted = (condition as any[]).map((v: any) => formatSPARQLValue(v)).join(", ");
+        filters.push(`STR(<ad4m://fn/parse_literal>(?wTarget_${propertyName})) IN (${formatted})`);
+      } else {
+        // Simple equality: push down to SPARQL
+        joins.push(`
+      ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
+        filters.push(`STR(<ad4m://fn/parse_literal>(?wTarget_${propertyName})) = ${formatSPARQLValue(condition)}`);
       }
     } else if (Array.isArray(condition)) {
       const formatted = (condition as any[]).map(v => iri(v)).join(", ");

@@ -35,8 +35,14 @@ describe('hasJsOnlyWhereFilters', () => {
     expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, undefined)).toBe(false);
   });
 
-  it('returns true when where has literal-stored property filter', () => {
-    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, { name: 'Pasta' })).toBe(true);
+  it('returns false when where has literal-stored property with equality filter (pushed to SPARQL)', () => {
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, { name: 'Pasta' })).toBe(false);
+  });
+
+  it('returns true when where has literal-stored property with comparison operator', () => {
+    // gt/lt/gte/lte/between/contains remain JS-only
+    const meta: any = { properties: { rating: { name: 'rating', predicate: 'flux://rating', required: true, resolveLanguage: 'literal' } }, relations: {} };
+    expect(hasJsOnlyWhereFilters(meta, emptyRelations, { rating: { gt: 5 } })).toBe(true);
   });
 
   it('returns false when where only has non-literal property filter', () => {
@@ -90,6 +96,49 @@ describe('buildSPARQLOrderLimitOffset', () => {
       limit: 50,
       offset: 100,
     })).toBe('');
+  });
+});
+
+describe('buildSPARQLQuery — parse_literal push-down filters', () => {
+  const modelClass: any = {};
+
+  it('generates parse_literal FILTER for equality on literal property', () => {
+    const query = { where: { name: 'Alice' } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('<ad4m://fn/parse_literal>');
+    expect(sparql).toContain('STR(<ad4m://fn/parse_literal>(?wTarget_name)) = "Alice"');
+  });
+
+  it('generates parse_literal IN FILTER for array on literal property', () => {
+    const query = { where: { name: ['Alice', 'Bob'] } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('STR(<ad4m://fn/parse_literal>(?wTarget_name)) IN ("Alice", "Bob")');
+  });
+
+  it('generates parse_literal NOT FILTER for not condition', () => {
+    const query = { where: { name: { not: 'deleted' } } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('STR(<ad4m://fn/parse_literal>(?wTarget_name)) != "deleted"');
+  });
+
+  it('does NOT use parse_literal for comparison operators (gt/lt)', () => {
+    const meta: any = {
+      properties: {
+        rating: { name: 'rating', predicate: 'flux://rating', required: true, resolveLanguage: 'literal' },
+      },
+      relations: {},
+    };
+    const query = { where: { rating: { gt: 5 } } };
+    const sparql = buildSPARQLQuery(meta, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('parse_literal');
+    expect(sparql).toContain('?wTarget_cmp_rating');
+  });
+
+  it('does NOT use parse_literal for non-literal properties', () => {
+    const query = { where: { category: 'some://uri' } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('parse_literal');
+    expect(sparql).toContain('<some://uri>');
   });
 });
 
