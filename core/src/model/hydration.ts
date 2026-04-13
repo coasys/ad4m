@@ -489,7 +489,8 @@ export async function evaluateCustomGettersForInstance(
             }
           }
         } else {
-          // Legacy SurrealDB-style getter — no longer supported
+          // Legacy SurrealDB-style getter — safety guard for getters that don't match
+          // SPARQL patterns (SELECT/ASK). Logs a warning but does not crash.
           console.warn(`Unsupported legacy getter syntax for property ${propName} — use native SPARQL (SELECT/ASK): ${rawGetter.slice(0, 100)}`);
         }
       } catch (error) {
@@ -576,7 +577,8 @@ export async function evaluateCustomGettersForInstance(
             instance[relName] = values;
           }
         } else {
-          // Legacy SurrealDB-style getter — no longer supported
+          // Legacy SurrealDB-style getter — safety guard for relation getters that don't
+          // match SPARQL patterns (SELECT/ASK). Logs a warning but does not crash.
           console.warn(`Unsupported legacy getter syntax for relation ${relName} — use native SPARQL (SELECT/ASK): ${getter.slice(0, 100)}`);
         }
       } catch (error) {

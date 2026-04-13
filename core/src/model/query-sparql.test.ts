@@ -167,3 +167,98 @@ describe('buildSPARQLQuery — structural correctness', () => {
     expect(sparql).toContain('<some://uri');
   });
 });
+
+describe('buildSPARQLQuery — NOT with array push-down', () => {
+  const modelClass: any = {};
+
+  it('generates NOT IN filter for NOT with array of values', () => {
+    const query = { where: { name: { not: ['deleted', 'archived'] } } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    // Should use NOT IN with parse_literal for literal properties
+    expect(sparql).toContain('NOT IN');
+    expect(sparql).toContain('"deleted"');
+    expect(sparql).toContain('"archived"');
+  });
+});
+
+describe('buildSPARQLQuery — mixed push-down + JS-only', () => {
+  const modelClass: any = {};
+  const mixedMeta: any = {
+    properties: {
+      name: { name: 'name', predicate: 'flux://name', required: true, resolveLanguage: 'literal' },
+      rating: { name: 'rating', predicate: 'flux://rating', required: true, resolveLanguage: 'literal' },
+    },
+    relations: {},
+  };
+
+  it('pushes equality to SPARQL but keeps gt as JS-only', () => {
+    const query = { where: { name: 'Alice', rating: { gt: 5 } } };
+    const sparql = buildSPARQLQuery(mixedMeta, emptyRelations, query, modelClass);
+    // name equality should be pushed to SPARQL
+    expect(sparql).toContain('parse_literal');
+    expect(sparql).toContain('Alice');
+    // hasJsOnlyWhereFilters should return true because of rating.gt
+    expect(hasJsOnlyWhereFilters(mixedMeta, emptyRelations, query.where)).toBe(true);
+  });
+});
+
+describe('buildSPARQLQuery — non-literal and flag properties', () => {
+  const modelClass: any = {};
+
+  it('does NOT use parse_literal for non-literal (resolveLanguage) properties', () => {
+    const meta: any = {
+      properties: {
+        avatar: { name: 'avatar', predicate: 'flux://avatar', required: true, resolveLanguage: 'did:lang:some-language' },
+      },
+      relations: {},
+    };
+    const query = { where: { avatar: 'https://example.com/pic.jpg' } };
+    const sparql = buildSPARQLQuery(meta, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('parse_literal');
+  });
+
+  it('does NOT use parse_literal for flag properties', () => {
+    const meta: any = {
+      properties: {
+        isPublic: { name: 'isPublic', predicate: 'flux://isPublic', flag: true, initial: 'flux://true' },
+      },
+      relations: {},
+    };
+    const query = { where: { isPublic: 'flux://true' } };
+    const sparql = buildSPARQLQuery(meta, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('parse_literal');
+  });
+});
+
+describe('buildSPARQLQuery — IRI correctness', () => {
+  const modelClass: any = {};
+
+  it('uses <ad4m://fn/parse_literal> IRI, not fn::parse_literal SurrealDB syntax', () => {
+    const query = { where: { name: 'test' } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('<ad4m://fn/parse_literal>');
+    expect(sparql).not.toContain('fn::parse_literal');
+  });
+});
+
+describe('buildSPARQLQuery — set-difference patterns', () => {
+  const modelClass: any = {};
+
+  // Subgroups are grandchildren of channels (channel → conversation → subgroup).
+  // Never assume direct child relationships in set-difference queries.
+  // A global EXISTS pattern (no parent scoping) should match items regardless of depth.
+  it('generates global EXISTS without parent scoping when no parent filter', () => {
+    const meta: any = {
+      properties: {
+        status: { name: 'status', predicate: 'flux://status', required: true, resolveLanguage: 'literal' },
+      },
+      relations: {},
+    };
+    const query = { where: { status: 'active' } };
+    const sparql = buildSPARQLQuery(meta, emptyRelations, query, modelClass);
+    // Without a parent filter, the query should not scope to any specific parent
+    // This ensures grandchildren (items at any depth) are matched
+    expect(sparql).not.toContain('flux://has_child');
+    expect(sparql).toContain('SELECT ?source ?predicate ?target');
+  });
+});
