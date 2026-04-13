@@ -465,7 +465,7 @@ async function gossip(): Promise<void> {
 
         // Log every 10th gossip round
         if (gossipRound === 10) {
-            console.log(gossipSummary(allPeers, isScribe, revisions));
+            console.log(gossipSummary(allPeers, isScribe, revisionHexes));
             gossipRound = 0;
         }
     } finally {

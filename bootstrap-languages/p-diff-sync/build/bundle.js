@@ -424,14 +424,14 @@ async function gossip() {
       }
     }
     if (gossipRound === 10) {
-      console.log(gossipSummary(allPeers, isScribe, revisions));
+      console.log(gossipSummary(allPeers, isScribe, revisionHexes));
       gossipRound = 0;
     }
   } finally {
     release();
   }
 }
-function gossipSummary(peersList, isScribe, revisions2) {
+function gossipSummary(peersList, isScribe, revisions) {
   return `
 ==========
 GOSSIP
@@ -443,7 +443,7 @@ others: ${peersList.filter((p2) => p2 !== myDid).join(", ") || "(none)"}
 --
 ${[...peers.entries()].map(([did, { currentRevision, lastSeen }]) => `${did}: ${currentRevision} (${lastSeen.toISOString()})`).join("\n")}
 --
-revisions: ${[...revisions2].join(", ") || "(none)"}
+revisions: ${[...revisions].join(", ") || "(none)"}
 ==========`;
 }
 function prepareLink(link) {
