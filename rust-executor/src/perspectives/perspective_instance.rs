@@ -372,10 +372,9 @@ impl PerspectiveInstance {
                             "Link language {} not installed yet, attempting install...",
                             nh.data.link_language
                         );
-                        if let Err(e) = LanguageController::install_language(
-                            nh.data.link_language.clone(),
-                        )
-                        .await
+                        if let Err(e) =
+                            LanguageController::install_language(nh.data.link_language.clone())
+                                .await
                         {
                             log::debug!(
                                 "ensure_link_language: install_language({}) failed, will retry in 5s: {}",
@@ -723,8 +722,7 @@ impl PerspectiveInstance {
                 // error path below queues the diff. Legacy languages that
                 // implement perspective-sync still behave correctly because
                 // they throw from commit() when not synced.
-                let mut immediate_commits_remaining =
-                    self.immediate_commits_remaining.lock().await;
+                let mut immediate_commits_remaining = self.immediate_commits_remaining.lock().await;
                 if *immediate_commits_remaining > 0 {
                     *immediate_commits_remaining -= 1;
                     link_language.commit(diff.clone()).await
@@ -3425,11 +3423,7 @@ impl PerspectiveInstance {
                     }
                 }
                 if !matched {
-                    let ch_len = input[i..]
-                        .chars()
-                        .next()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(1);
+                    let ch_len = input[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
                     output.push_str(&input[i..i + ch_len]);
                     i += ch_len;
                 }
