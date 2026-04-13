@@ -177,6 +177,8 @@ var syncStateChangeCallback = null;
 var telepresenceSignalCallbacks = [];
 var myRevision = null;
 var peers = /* @__PURE__ */ new Map();
+var localAgents = /* @__PURE__ */ new Set();
+var didLinksCreated = /* @__PURE__ */ new Set();
 var syncMutex = new f();
 var gossipRound = 0;
 async function init() {
@@ -245,9 +247,31 @@ function perspectiveSyncCurrentRevision() {
   return myRevision;
 }
 async function peersRemote() {
-  return Array.from(peers.keys());
+  try {
+    const all = await hc.call(dnaRole, zomeName, "get_others", null);
+    return (all || []).filter((did) => !localAgents.has(did) && did !== myDid);
+  } catch (e) {
+    console.error("[p-diff-sync] peersRemote error:", e);
+    return [];
+  }
 }
-async function peersSetLocal(_agents) {
+async function peersSetLocal(agents) {
+  for (const did of agents)
+    localAgents.add(did);
+  if (myDid)
+    localAgents.add(myDid);
+  if (!hc)
+    return;
+  for (const did of agents) {
+    if (didLinksCreated.has(did))
+      continue;
+    try {
+      await hc.call(dnaRole, zomeName, "create_did_pub_key_link", did);
+      didLinksCreated.add(did);
+    } catch (e) {
+      console.error(`[p-diff-sync] create_did_pub_key_link failed for ${did}:`, e);
+    }
+  }
 }
 function linkSyncAddCallback(callback) {
   linkCallback = callback;
@@ -319,9 +343,17 @@ async function handleHolochainSignal(signal) {
   }
 }
 async function ensureDidLink() {
-  try {
-    await hc.call(dnaRole, zomeName, "create_did_pub_key_link", myDid);
-  } catch (_) {
+  const dids = new Set(localAgents);
+  if (myDid)
+    dids.add(myDid);
+  for (const did of dids) {
+    if (didLinksCreated.has(did))
+      continue;
+    try {
+      await hc.call(dnaRole, zomeName, "create_did_pub_key_link", did);
+      didLinksCreated.add(did);
+    } catch (_) {
+    }
   }
 }
 async function acquireRevision() {

@@ -80,6 +80,13 @@ let myRevision: string | null = null;
 // Gossip peers: DID → { currentRevision (hex), originalHash (binary for zome calls), lastSeen }
 const peers = new Map<string, { currentRevision: string | null; originalHash: any; lastSeen: Date }>();
 
+// Local agent DIDs (multi-user: one HC agent can host multiple DIDs).
+// Populated by peersSetLocal(); each DID gets a DidLink registered in the DNA
+// so remote nodes can discover all DIDs hosted on this node via get_others.
+const localAgents = new Set<string>();
+// DIDs for which we've already created a DID pub-key link in the DNA.
+const didLinksCreated = new Set<string>();
+
 // Prevent concurrent sync/commit operations
 const syncMutex = new Mutex();
 
@@ -213,15 +220,31 @@ export function perspectiveSyncCurrentRevision(): string | null {
 
 /** List of other (non-local) agents this language sees in the network. */
 export async function peersRemote(): Promise<string[]> {
-    return Array.from(peers.keys());
+    try {
+        const all: string[] = await hc.call(dnaRole, zomeName, "get_others", null);
+        return (all || []).filter((did) => !localAgents.has(did) && did !== myDid);
+    } catch (e) {
+        console.error("[p-diff-sync] peersRemote error:", e);
+        return [];
+    }
 }
 
 /** Tell the DNA which agents we represent locally.
- *  The DNA registers agents automatically during sync() calls,
- *  so this is a no-op. */
-export async function peersSetLocal(_agents: string[]): Promise<void> {
-    // No-op: agents are registered via create_did_pub_key_link in ensureDidLink()
-    // and via the sync() zome call which tracks active agents.
+ *  In multi-user mode, one Holochain agent hosts multiple DIDs; we must
+ *  create a DidLink for every hosted DID so remote nodes can resolve them. */
+export async function peersSetLocal(agents: string[]): Promise<void> {
+    for (const did of agents) localAgents.add(did);
+    if (myDid) localAgents.add(myDid);
+    if (!hc) return;
+    for (const did of agents) {
+        if (didLinksCreated.has(did)) continue;
+        try {
+            await hc.call(dnaRole, zomeName, "create_did_pub_key_link", did);
+            didLinksCreated.add(did);
+        } catch (e) {
+            console.error(`[p-diff-sync] create_did_pub_key_link failed for ${did}:`, e);
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -331,12 +354,18 @@ export async function handleHolochainSignal(signal: any): Promise<void> {
 // Private helpers
 // =============================================================================
 
-/** Create a DID anchor link for this agent in the DNA (idempotent). */
+/** Create DID anchor links for this agent + all hosted local agents (idempotent). */
 async function ensureDidLink(): Promise<void> {
-    try {
-        await hc.call(dnaRole, zomeName, "create_did_pub_key_link", myDid);
-    } catch (_) {
-        // Already exists — ignore
+    const dids = new Set<string>(localAgents);
+    if (myDid) dids.add(myDid);
+    for (const did of dids) {
+        if (didLinksCreated.has(did)) continue;
+        try {
+            await hc.call(dnaRole, zomeName, "create_did_pub_key_link", did);
+            didLinksCreated.add(did);
+        } catch (_) {
+            // Already exists — ignore
+        }
     }
 }
 
