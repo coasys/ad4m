@@ -249,7 +249,7 @@ function perspectiveSyncCurrentRevision() {
 async function peersRemote() {
   try {
     const all = await hc.call(dnaRole, zomeName, "get_others", null);
-    return (all || []).filter((did) => !localAgents.has(did) && did !== myDid);
+    return all || [];
   } catch (e) {
     console.error("[p-diff-sync] peersRemote error:", e);
     return [];
@@ -258,8 +258,6 @@ async function peersRemote() {
 async function peersSetLocal(agents) {
   for (const did of agents)
     localAgents.add(did);
-  if (myDid)
-    localAgents.add(myDid);
   if (!hc)
     return;
   for (const did of agents) {
@@ -343,9 +341,7 @@ async function handleHolochainSignal(signal) {
   }
 }
 async function ensureDidLink() {
-  const dids = new Set(localAgents);
-  if (myDid)
-    dids.add(myDid);
+  const dids = localAgents.size > 0 ? Array.from(localAgents) : myDid ? [myDid] : [];
   for (const did of dids) {
     if (didLinksCreated.has(did))
       continue;

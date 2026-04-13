@@ -218,11 +218,12 @@ export function perspectiveSyncCurrentRevision(): string | null {
 // PEERS CAPABILITY
 // =============================================================================
 
-/** List of other (non-local) agents this language sees in the network. */
+/** List of agents this language sees in the network.
+ *  Returns ALL DIDs from the DNA; the Rust resolver filters the calling user. */
 export async function peersRemote(): Promise<string[]> {
     try {
         const all: string[] = await hc.call(dnaRole, zomeName, "get_others", null);
-        return (all || []).filter((did) => !localAgents.has(did) && did !== myDid);
+        return all || [];
     } catch (e) {
         console.error("[p-diff-sync] peersRemote error:", e);
         return [];
@@ -234,7 +235,6 @@ export async function peersRemote(): Promise<string[]> {
  *  create a DidLink for every hosted DID so remote nodes can resolve them. */
 export async function peersSetLocal(agents: string[]): Promise<void> {
     for (const did of agents) localAgents.add(did);
-    if (myDid) localAgents.add(myDid);
     if (!hc) return;
     for (const did of agents) {
         if (didLinksCreated.has(did)) continue;
@@ -354,10 +354,13 @@ export async function handleHolochainSignal(signal: any): Promise<void> {
 // Private helpers
 // =============================================================================
 
-/** Create DID anchor links for this agent + all hosted local agents (idempotent). */
+/** Create DID anchor links for the owning agents of this perspective (idempotent).
+ *  Only the perspective owners (localAgents from peersSetLocal) get DID links,
+ *  not the main HC agent DID, so that main agents who host managed users but
+ *  are NOT themselves owners don't show up in get_others. If localAgents is
+ *  empty (pre-peersSetLocal or single-agent mode) we fall back to myDid. */
 async function ensureDidLink(): Promise<void> {
-    const dids = new Set<string>(localAgents);
-    if (myDid) dids.add(myDid);
+    const dids = localAgents.size > 0 ? Array.from(localAgents) : (myDid ? [myDid] : []);
     for (const did of dids) {
         if (didLinksCreated.has(did)) continue;
         try {
