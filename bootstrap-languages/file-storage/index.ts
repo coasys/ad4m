@@ -1,57 +1,121 @@
 /**
- * # File Storage — Flat Export Language
+ * # File Storage
  *
  * Expression language that stores files via Holochain DNA with
  * chunked upload/download and pako compression.
- * Flat-export migration of the legacy create()-factory version.
  */
 
 import pako from "https://esm.sh/v135/pako@2.1.0";
+import {
+    defineLanguage,
+    agentCreateSignedExpression,
+    holochainRegisterDnas,
+    holochainCall,
+} from "@coasys/ad4m-ldk";
 import { FileStorage } from "./file-storage.ts";
 import { DNA, DNA_NICK } from "./build/dna.js";
 import type { FileExpression, FileMetadata } from "./types.ts";
 
-// =============================================================================
-// Required metadata
-// =============================================================================
+const language = defineLanguage({
+    name: "file-storage",
+    version: "0.1.0",
 
-export const name = "file-storage";
-export const version = "0.1.0";
+    async init() {
+        await holochainRegisterDnas([{ file: DNA, nick: DNA_NICK } as any]);
+    },
 
-// =============================================================================
-// Module-level state
-// =============================================================================
+    async teardown() {},
+    interactions() { return []; },
 
-let hc: any = null;
-let agent: any = null;
+    expression: {
+        isImmutable(_address: string): boolean {
+            return true;
+        },
 
-// =============================================================================
-// Lifecycle
-// =============================================================================
+        async create(fileData: any): Promise<string> {
+            console.log("createPublic fileData", fileData);
+            try {
+                if (typeof fileData === "string") {
+                    fileData = JSON.parse(fileData);
+                }
+            } catch (_e) {}
 
-export async function init(): Promise<void> {
-    agent = (globalThis as any).__agentProxy__;
-    hc = (globalThis as any).__holochainDelegate__;
+            const storage = new FileStorage((fn_name, payload) =>
+                holochainCall(DNA_NICK, "file_storage", fn_name, payload)
+            );
 
-    await hc.registerDNAs([{ file: DNA, nick: DNA_NICK }]);
-}
+            const data_uncompressed = Uint8Array.from(
+                Buffer.from(fileData.data_base64, "base64")
+            );
+            const data_compressed = pako.deflate(data_uncompressed);
+            const blob = new Blob([data_compressed]);
 
-export async function teardown(): Promise<void> {
-    hc = null;
-    agent = null;
-}
+            const hashes = await storage.upload(blob);
 
-export function interactions(): any[] {
-    return [];
-}
+            const fileMetadata = {
+                name: fileData.name,
+                size: data_uncompressed.length,
+                file_type: fileData.file_type,
+                checksum: "1234",
+                chunks_hashes: hashes,
+                data_base64: fileData.data_base64,
+            } as FileMetadata;
 
-export function isImmutableExpression(_address: string): boolean {
-    return true;
-}
+            const expression: FileExpression =
+                agentCreateSignedExpression(fileMetadata) as FileExpression;
+            delete expression.data.data_base64;
+            expression.data.chunks_hashes = expression.data.chunks_hashes.map(
+                (chunk: { [key: string]: number }) => {
+                    const byteArray = new Uint8Array(Object.keys(chunk).length);
+                    for (const key in chunk) {
+                        const index = parseInt(key, 10);
+                        byteArray[index] = chunk[key];
+                    }
+                    return byteArray;
+                }
+            );
 
-// =============================================================================
-// Expression capability
-// =============================================================================
+            let address = await storage.storeFileExpression(expression);
+            if (!Buffer.isBuffer(address)) {
+                address = Buffer.from(address);
+            }
+            //@ts-ignore
+            return address.toString("hex");
+        },
+
+        async get(address: string): Promise<any> {
+            const storage = new FileStorage((fn_name, payload) =>
+                holochainCall(DNA_NICK, "file_storage", fn_name, payload)
+            );
+
+            let addressBuffer = Buffer.from(address, "hex");
+            const expression = (await storage.getFileExpression(
+                addressBuffer
+            )) as FileExpression;
+            if (!expression) {
+                return null;
+            }
+            if (
+                expression.data.chunks_hashes === 0 ||
+                expression.data.chunks_hashes === undefined
+            ) {
+                expression.data.data_base64 = "";
+                return expression;
+            }
+            const data_compressed = await storage.download(
+                expression.data.chunks_hashes
+            );
+            let data_stream = await data_compressed.arrayBuffer();
+
+            const data_uncompressed = pako.inflate(data_stream);
+            const buffer = Buffer.from(data_uncompressed);
+
+            expression.data.data_base64 = buffer.toString("base64");
+
+            return expression;
+        },
+    },
+});
 
 export interface FileData {
     name: string;
@@ -59,75 +123,13 @@ export interface FileData {
     data_base64: string;
 }
 
-export async function expressionCreate(fileData: any): Promise<string> {
-    console.log("createPublic fileData", fileData);
-    try {
-        if (typeof fileData === "string") {
-            fileData = JSON.parse(fileData);
-        }
-    } catch (_e) {}
-
-    const storage = new FileStorage((fn_name, payload) =>
-        hc.call(DNA_NICK, "file_storage", fn_name, payload)
-    );
-
-    const data_uncompressed = Uint8Array.from(Buffer.from(fileData.data_base64, "base64"));
-    const data_compressed = pako.deflate(data_uncompressed);
-    const blob = new Blob([data_compressed]);
-
-    const hashes = await storage.upload(blob);
-
-    const fileMetadata = {
-        name: fileData.name,
-        size: data_uncompressed.length,
-        file_type: fileData.file_type,
-        checksum: "1234",
-        chunks_hashes: hashes,
-        data_base64: fileData.data_base64,
-    } as FileMetadata;
-
-    const expression: FileExpression = agent.createSignedExpression(fileMetadata);
-    delete expression.data.data_base64;
-    expression.data.chunks_hashes = expression.data.chunks_hashes.map(
-        (chunk: { [key: string]: number }) => {
-            const byteArray = new Uint8Array(Object.keys(chunk).length);
-            for (const key in chunk) {
-                const index = parseInt(key, 10);
-                byteArray[index] = chunk[key];
-            }
-            return byteArray;
-        }
-    );
-
-    let address = await storage.storeFileExpression(expression);
-    if (!Buffer.isBuffer(address)) {
-        address = Buffer.from(address);
-    }
-    //@ts-ignore
-    return address.toString("hex");
-}
-
-export async function expressionGet(address: string): Promise<any> {
-    const storage = new FileStorage((fn_name, payload) =>
-        hc.call(DNA_NICK, "file_storage", fn_name, payload)
-    );
-
-    let addressBuffer = Buffer.from(address, "hex");
-    const expression = (await storage.getFileExpression(addressBuffer)) as FileExpression;
-    if (!expression) {
-        return null;
-    }
-    if (expression.data.chunks_hashes === 0 || expression.data.chunks_hashes === undefined) {
-        expression.data.data_base64 = "";
-        return expression;
-    }
-    const data_compressed = await storage.download(expression.data.chunks_hashes);
-    let data_stream = await data_compressed.arrayBuffer();
-
-    const data_uncompressed = pako.inflate(data_stream);
-    const buffer = Buffer.from(data_uncompressed);
-
-    expression.data.data_base64 = buffer.toString("base64");
-
-    return expression;
-}
+export const {
+    name,
+    version,
+    init,
+    teardown,
+    interactions,
+    expressionGet,
+    expressionCreate,
+    isImmutableExpression,
+} = language;
