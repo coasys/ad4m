@@ -1,9 +1,8 @@
 /**
- * # Perspective Language — Flat Export Language
+ * # Perspective Language
  *
  * Expression language for storing/retrieving Perspective objects.
  * Currently a stub — get() and create() are not implemented.
- * Flat-export migration of the legacy create()-factory version.
  */
 
 import Icon from './build/Icon.js'

@@ -6,8 +6,28 @@ import * as esbuild from "https://deno.land/x/esbuild@v0.17.18/mod.js";
 import { denoPlugins } from "https://deno.land/x/esbuild_deno_loader@0.7.0/mod.ts";
 import { loadSource, resolveUrl } from "./customHttpDownloader.js";
 
+// Resolve `@coasys/ad4m-ldk` to its compiled lib in the workspace. The
+// Deno esbuild plugin does not consult the workspace's node_modules and
+// claims the resolve pass first, so we install a tiny upstream plugin
+// that short-circuits the workspace alias before denoPlugins sees it.
+const ad4mLdkEntry = new URL(
+  "../../ad4m-ldk/js/lib/index.js",
+  import.meta.url,
+).pathname;
+
+const ad4mLdkAliasPlugin = {
+  name: "ad4m-ldk-alias",
+  setup(build: any) {
+    build.onResolve({ filter: /^@coasys\/ad4m-ldk$/ }, () => ({
+      path: ad4mLdkEntry,
+      namespace: "file",
+    }));
+  },
+};
+
 const result = await esbuild.build({
   plugins: [
+    ad4mLdkAliasPlugin,
     {
         name: `buffer-alias`,
         setup(build) {
