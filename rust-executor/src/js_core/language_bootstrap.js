@@ -377,17 +377,16 @@ async function initLanguage(contextJson) {
         // Spec §5.2 splits the legacy single `commit()` (which returned
         // the new revision string) into two independent capabilities:
         // `perspective-commit` (write a diff, return nothing) and
-        // `perspective-sync` (read current revision). Rust ALDK and any
-        // new flat language therefore returns `undefined` from
-        // `perspectiveCommit`. The Rust-side `PerspectiveInstance::commit`
-        // path now treats `Ok(None)` as the normal success signal (no
-        // revision to report), so we pass the raw commit function
-        // through without the earlier "poll currentRevision after
-        // commit" bridge. Pre-fix, that bridge was the only thing
-        // keeping commit-only flat languages out of a perpetual
-        // pending-diff retry loop; post-fix, it was unnecessary glue
-        // that could hide real commit failures behind a stale
-        // revision read.
+        // `perspective-sync` (read current revision). Languages
+        // therefore return `undefined` from `perspectiveCommit`. The
+        // Rust-side `PerspectiveInstance::commit` path now treats
+        // `Ok(None)` as the normal success signal (no revision to
+        // report), so we pass the raw commit function through without
+        // the earlier "poll currentRevision after commit" bridge.
+        // Pre-fix, that bridge was the only thing keeping commit-only
+        // languages out of a perpetual pending-diff retry loop;
+        // post-fix, it was unnecessary glue that could hide real
+        // commit failures behind a stale revision read.
         language.linksAdapter = {
             sync: syncFn,
             commit: commitFn,

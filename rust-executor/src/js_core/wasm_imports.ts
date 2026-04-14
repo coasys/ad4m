@@ -67,7 +67,7 @@ const langCtrl = (): any => (globalThis as any).LANGUAGE_CONTROLLER;
 
 // Holochain imports are routed through the per-language JS delegate
 // (`globalThis.__holochainDelegate__`) that `language_bootstrap.js`
-// installs before invoking a flat language's init(). The delegate wraps
+// installs before invoking a language's init(). The delegate wraps
 // the existing holochain_service_extension ops (install_app, call_zome_function)
 // and also maintains the cell_id → languageAddress mapping used by the
 // central signal router. There is no direct `holochain_register_dnas` op
@@ -76,7 +76,7 @@ function holochainDelegate(): any {
     const d = (globalThis as any).__holochainDelegate__;
     if (!d) {
         throw new Error(
-            "[flat-imports] __holochainDelegate__ is not installed. " +
+            "[wasm_imports] __holochainDelegate__ is not installed. " +
             "Holochain imports are only usable after language_bootstrap.js " +
             "has wired the per-language delegate (i.e. from within init()/post-init)."
         );
@@ -156,12 +156,12 @@ export function __agent_did_for_user(userEmail: string): string {
 // ============================================================================
 // Holochain Imports — bridge to the per-language __holochainDelegate__
 // ============================================================================
-// The flat language calls these from init(); they forward to the JS
+// The language calls these from init(); they forward to the JS
 // delegate installed by language_bootstrap.js, which in turn reaches
 // the Rust-side holochain_service_extension ops. Signals are routed
 // via the language's exported handleHolochainSignal (bridged into
 // globalThis.__handleHolochainSignal__ in language_bootstrap.js) —
-// there is no per-call signalCallback argument in the flat API.
+// there is no per-call signalCallback argument.
 
 /**
  * Registers one or more DNAs with the Holochain conductor. Returns the
@@ -323,11 +323,11 @@ export function languageSettings(): string {
 // ============================================================================
 // Canonical camelCase surface (spec §7)
 // ============================================================================
-// Per the new spec, languages call canonical camelCase imports — no `__`
+// Per the spec, languages call canonical camelCase imports — no `__`
 // prefix. The Deno op bindings keep their snake_case internals; only the
 // JS surface is renamed. Both `__foo_bar` and `fooBar` wrappers are installed
-// on globalThis for the duration of a flat-language init so legacy in-tree
-// callers keep working alongside migrated languages.
+// on globalThis so both the snake_case wasm-bindgen extern surface and the
+// camelCase JS ALDK surface resolve to the same underlying ops.
 
 // ----- Agent -----
 export function agentDid(): string { return agent().did() as string; }
@@ -344,7 +344,7 @@ export function agentDidForUser(userEmail: string): string { return agent().didF
 // ----- Holochain -----
 // Spec §7.2 — these forward to the per-language __holochainDelegate__
 // installed by language_bootstrap.js. The delegate is async; the wrappers
-// return Promises so flat languages should `await` them.
+// return Promises so languages should `await` them.
 export function holochainRegisterDnas(dnas: object[]): Promise<object[]> {
     return holochainDelegate().registerDNAs(dnas, /*signalCallback*/ undefined);
 }
