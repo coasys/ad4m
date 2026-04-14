@@ -156,13 +156,107 @@ var f = class {
   }
 };
 
+// ../../ad4m-ldk/js/lib/imports.js
+var G = globalThis;
+function need(name2) {
+  const fn = G[name2];
+  if (typeof fn !== "function") {
+    throw new Error(`[ad4m-ldk] Missing runtime import \`${name2}\`. The AD4M executor must install this on globalThis before init().`);
+  }
+  return fn;
+}
+function agentDid() {
+  return need("agentDid")();
+}
+function holochainRegisterDnas(dnas) {
+  return need("holochainRegisterDnas")(dnas);
+}
+function holochainCall(dnaNick, zome, fnName, params) {
+  return need("holochainCall")(dnaNick, zome, fnName, params);
+}
+function holochainCallAsync(dnaNick, zome, fnName, params) {
+  return need("holochainCallAsync")(dnaNick, zome, fnName, params);
+}
+function languageAddress() {
+  return need("languageAddress")();
+}
+function languageSettings() {
+  return need("languageSettings")();
+}
+function languageStorageDirectory() {
+  return need("languageStorageDirectory")();
+}
+
+// ../../ad4m-ldk/js/lib/defineLanguage.js
+function defineLanguage(spec) {
+  const out = {
+    name: spec.name,
+    version: spec.version,
+    init: spec.init.bind(spec)
+  };
+  if (typeof spec.isPublic === "boolean") {
+    const v2 = spec.isPublic;
+    out.isPublic = () => v2;
+  }
+  if (spec.teardown)
+    out.teardown = spec.teardown.bind(spec);
+  if (spec.interactions)
+    out.interactions = spec.interactions.bind(spec);
+  if (spec.expression) {
+    const e = spec.expression;
+    if (e.get)
+      out.expressionGet = e.get.bind(e);
+    if (e.create)
+      out.expressionCreate = e.create.bind(e);
+    if (e.addressOf)
+      out.expressionAddressOf = e.addressOf.bind(e);
+    if (e.isImmutable)
+      out.isImmutableExpression = e.isImmutable.bind(e);
+    if (e.icon)
+      out.expressionIcon = e.icon.bind(e);
+    if (e.constructorIcon)
+      out.expressionConstructorIcon = e.constructorIcon.bind(e);
+  }
+  if (spec.commit) {
+    out.perspectiveCommit = spec.commit.commit.bind(spec.commit);
+  }
+  if (spec.sync) {
+    const s = spec.sync;
+    out.perspectiveSyncSync = s.sync.bind(s);
+    out.perspectiveSyncRender = s.render.bind(s);
+    out.perspectiveSyncCurrentRevision = s.currentRevision.bind(s);
+  }
+  if (spec.query) {
+    out.perspectiveQuerySupportedKinds = spec.query.supportedKinds.bind(spec.query);
+    out.perspectiveQueryRun = spec.query.run.bind(spec.query);
+  }
+  if (spec.peers) {
+    out.peersSetLocal = spec.peers.setLocal.bind(spec.peers);
+    out.peersRemote = spec.peers.remote.bind(spec.peers);
+  }
+  if (spec.telepresence) {
+    const t = spec.telepresence;
+    if (t.setOnlineStatus)
+      out.telepresenceSetOnlineStatus = t.setOnlineStatus.bind(t);
+    if (t.getOnlineAgents)
+      out.telepresenceGetOnlineAgents = t.getOnlineAgents.bind(t);
+    if (t.sendSignal)
+      out.telepresenceSendSignal = t.sendSignal.bind(t);
+    if (t.sendBroadcast)
+      out.telepresenceSendBroadcast = t.sendBroadcast.bind(t);
+    if (t.registerSignalCallback)
+      out.telepresenceRegisterSignalCallback = t.registerSignalCallback.bind(t);
+  }
+  if (spec.handleHolochainSignal) {
+    out.handleHolochainSignal = spec.handleHolochainSignal.bind(spec);
+  }
+  return out;
+}
+
 // index.ts
-var name = "@coasys/perspective-diff-sync";
-var version = "0.13.0-test-1";
 var dnaRole = DNA_ROLE;
 var zomeName = ZOME_NAME;
 var dnaBundle = Buffer.from(BUNDLE, "base64");
-var hc = null;
 function hashToHex(hash) {
   if (!hash)
     return null;
@@ -181,172 +275,13 @@ var localAgents = /* @__PURE__ */ new Set();
 var didLinksCreated = /* @__PURE__ */ new Set();
 var syncMutex = new f();
 var gossipRound = 0;
-async function init() {
-  const storageDir = globalThis.languageStorageDirectory();
-  const langAddress = globalThis.languageAddress();
-  const settingsJson = globalThis.languageSettings();
-  const settings = settingsJson ? JSON.parse(settingsJson) : {};
-  const agent = globalThis.__agentProxy__;
-  const holochain = globalThis.__holochainDelegate__;
-  myDid = agent.did;
-  hc = holochain;
-  await hc.registerDNAs([{ nick: dnaRole, bundle: dnaBundle }]);
-}
-async function teardown() {
-  peers.clear();
-  linkCallback = null;
-  syncStateChangeCallback = null;
-  telepresenceSignalCallbacks.length = 0;
-  myRevision = null;
-  gossipRound = 0;
-  hc = null;
-  myDid = "";
-}
-function interactions() {
-  return [];
-}
-function isPublic() {
-  return false;
-}
-async function perspectiveSyncSync() {
-  await ensureDidLink();
-  await acquireRevision();
-  await gossip();
-  return new PerspectiveDiff();
-}
-async function perspectiveCommit(diff) {
-  const prepDiff = {
-    additions: diff.additions.map(prepareLink),
-    removals: diff.removals.map(prepareLink)
-  };
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      const revision = await hc.call(dnaRole, zomeName, "commit", {
-        diff: prepDiff,
-        my_did: myDid
-      });
-      if (!revision)
-        throw new Error("empty revision");
-      const hex = hashToHex(revision) || "";
-      myRevision = hex;
-      return hex;
-    } catch (e) {
-      if (attempt < 4)
-        await sleep(100 * (attempt + 1));
-      else
-        throw e;
-    }
-  }
-  throw new Error("unreachable");
-}
-async function perspectiveSyncRender() {
-  const res = await hc.call(dnaRole, zomeName, "render", null);
-  return { links: res?.links || [] };
-}
-function perspectiveSyncCurrentRevision() {
-  return myRevision;
-}
-async function peersRemote() {
-  try {
-    const all = await hc.call(dnaRole, zomeName, "get_others", null);
-    return all || [];
-  } catch (e) {
-    console.error("[p-diff-sync] peersRemote error:", e);
-    return [];
-  }
-}
-async function peersSetLocal(agents) {
-  for (const did of agents)
-    localAgents.add(did);
-  if (!hc)
-    return;
-  for (const did of agents) {
-    if (didLinksCreated.has(did))
-      continue;
-    try {
-      await hc.call(dnaRole, zomeName, "create_did_pub_key_link", did);
-      didLinksCreated.add(did);
-    } catch (e) {
-      console.error(`[p-diff-sync] create_did_pub_key_link failed for ${did}:`, e);
-    }
-  }
-}
-function linkSyncAddCallback(callback) {
-  linkCallback = callback;
-  return 1;
-}
-function linkSyncRemoveCallback(callback) {
-  if (linkCallback === callback)
-    linkCallback = null;
-  return 1;
-}
-function linkSyncAddSyncStateChangeCallback(callback) {
-  syncStateChangeCallback = callback;
-  return 1;
-}
-async function telepresenceSetOnlineStatus(status) {
-  await hc.call(dnaRole, zomeName, "set_online_status", status);
-}
-async function telepresenceGetOnlineAgents() {
-  const active = await hc.call(dnaRole, zomeName, "get_active_agents", null);
-  const calls = active.map((agent) => ({
-    dnaNick: dnaRole,
-    zomeName,
-    fnName: "get_agents_status",
-    params: agent
-  }));
-  return await hc.callAsync(calls, 1e3);
-}
-async function telepresenceSendSignal(remoteDid, payload) {
-  return await hc.call(dnaRole, zomeName, "send_signal", {
-    remote_agent_did: remoteDid,
-    payload
-  });
-}
-async function telepresenceSendBroadcast(payload) {
-  return await hc.call(dnaRole, zomeName, "send_broadcast", payload);
-}
-async function telepresenceRegisterSignalCallback(callback) {
-  telepresenceSignalCallbacks.push(callback);
-}
-async function handleHolochainSignal(signal) {
-  const payload = signal.payload || {};
-  if (payload.reference && payload.reference_hash && payload.broadcast_author) {
-    peers.set(payload.broadcast_author, { currentRevision: hashToHex(payload.reference_hash), originalHash: payload.reference_hash, lastSeen: /* @__PURE__ */ new Date() });
-    return;
-  }
-  if (payload.additions || payload.removals) {
-    if (linkCallback) {
-      linkCallback(payload);
-    }
-    return;
-  }
-  if (payload.recipient_did) {
-    const perspectiveExpression = {
-      author: payload.author,
-      data: payload.data,
-      timestamp: payload.timestamp,
-      proof: payload.proof
-    };
-    for (const cb of telepresenceSignalCallbacks) {
-      await cb(perspectiveExpression, payload.recipient_did);
-    }
-    return;
-  }
-  if (payload.author && payload.data) {
-    for (const cb of telepresenceSignalCallbacks) {
-      await cb(payload);
-    }
-    return;
-  }
-}
 async function ensureDidLink() {
   const dids = localAgents.size > 0 ? Array.from(localAgents) : myDid ? [myDid] : [];
   for (const did of dids) {
     if (didLinksCreated.has(did))
       continue;
     try {
-      await hc.call(dnaRole, zomeName, "create_did_pub_key_link", did);
+      await holochainCall(dnaRole, zomeName, "create_did_pub_key_link", did);
       didLinksCreated.add(did);
     } catch (_) {
     }
@@ -355,7 +290,7 @@ async function ensureDidLink() {
 async function acquireRevision() {
   const release = await syncMutex.acquire();
   try {
-    const rev = await hc.call(dnaRole, zomeName, "sync", myDid);
+    const rev = await holochainCall(dnaRole, zomeName, "sync", myDid);
     if (rev) {
       myRevision = hashToHex(rev);
     }
@@ -370,7 +305,7 @@ async function gossip() {
   const release = await syncMutex.acquire();
   try {
     try {
-      const syncResult = await hc.call(dnaRole, zomeName, "sync", myDid);
+      const syncResult = await holochainCall(dnaRole, zomeName, "sync", myDid);
       if (syncResult) {
         myRevision = hashToHex(syncResult);
       }
@@ -378,7 +313,7 @@ async function gossip() {
       console.error("[p-diff-sync] sync zome call error:", e);
     }
     try {
-      const activeAgents = await hc.call(dnaRole, zomeName, "get_online_agents", null);
+      const activeAgents = await holochainCall(dnaRole, zomeName, "get_online_agents", null);
       if (activeAgents && activeAgents.length > 0) {
         for (const agent of activeAgents) {
           const did = agent.did || agent.agent;
@@ -392,7 +327,7 @@ async function gossip() {
           }
         }
       }
-    } catch (e) {
+    } catch (_e) {
     }
     for (const [did, info] of peers) {
       if (Date.now() - info.lastSeen.getTime() > 3e4) {
@@ -423,7 +358,7 @@ async function gossip() {
     }
     if (peers.size > 0 && revisionHexes.size === 0) {
       try {
-        const latestRef = await hc.call(dnaRole, zomeName, "latest_revision", null);
+        const latestRef = await holochainCall(dnaRole, zomeName, "latest_revision", null);
         console.log("[p-diff-sync] gossip: latest_revision result:", latestRef ? "found" : "null", JSON.stringify(latestRef)?.substring(0, 200));
         const latestHex = latestRef ? hashToHex(latestRef.hash) : null;
         if (latestHex && latestHex !== myRev) {
@@ -440,7 +375,7 @@ async function gossip() {
         continue;
       const pullHash = revisionMap.get(hex) || hex;
       try {
-        const result = await hc.call(dnaRole, zomeName, "pull", { hash: pullHash, is_scribe: isScribe });
+        const result = await holochainCall(dnaRole, zomeName, "pull", { hash: pullHash, is_scribe: isScribe });
         if (result?.current_revision) {
           myRevision = hashToHex(result.current_revision);
         }
@@ -485,33 +420,196 @@ function prepareLink(link) {
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-var lang = {
+var language = defineLanguage({
+  name: "@coasys/perspective-diff-sync",
+  version: "0.13.0-test-1",
+  isPublic: false,
+  async init() {
+    const _storageDir = languageStorageDirectory();
+    const _langAddress = languageAddress();
+    const _settingsJson = languageSettings();
+    myDid = agentDid();
+    await holochainRegisterDnas([{ nick: dnaRole, bundle: dnaBundle }]);
+  },
+  async teardown() {
+    peers.clear();
+    linkCallback = null;
+    syncStateChangeCallback = null;
+    telepresenceSignalCallbacks.length = 0;
+    myRevision = null;
+    gossipRound = 0;
+    myDid = "";
+  },
+  interactions() {
+    return [];
+  },
+  sync: {
+    async sync() {
+      await ensureDidLink();
+      await acquireRevision();
+      await gossip();
+      return new PerspectiveDiff();
+    },
+    async render() {
+      const res = await holochainCall(dnaRole, zomeName, "render", null);
+      return { links: res?.links || [] };
+    },
+    currentRevision() {
+      return myRevision;
+    }
+  },
+  commit: {
+    async commit(diff) {
+      const prepDiff = {
+        additions: diff.additions.map(prepareLink),
+        removals: diff.removals.map(prepareLink)
+      };
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          const revision = await holochainCall(dnaRole, zomeName, "commit", {
+            diff: prepDiff,
+            my_did: myDid
+          });
+          if (!revision)
+            throw new Error("empty revision");
+          const hex = hashToHex(revision) || "";
+          myRevision = hex;
+          return hex;
+        } catch (e) {
+          if (attempt < 4)
+            await sleep(100 * (attempt + 1));
+          else
+            throw e;
+        }
+      }
+      throw new Error("unreachable");
+    }
+  },
+  peers: {
+    async remote() {
+      try {
+        const all = await holochainCall(dnaRole, zomeName, "get_others", null);
+        return all || [];
+      } catch (e) {
+        console.error("[p-diff-sync] peersRemote error:", e);
+        return [];
+      }
+    },
+    async setLocal(agents) {
+      for (const did of agents)
+        localAgents.add(did);
+      for (const did of agents) {
+        if (didLinksCreated.has(did))
+          continue;
+        try {
+          await holochainCall(dnaRole, zomeName, "create_did_pub_key_link", did);
+          didLinksCreated.add(did);
+        } catch (e) {
+          console.error(`[p-diff-sync] create_did_pub_key_link failed for ${did}:`, e);
+        }
+      }
+    }
+  },
+  telepresence: {
+    async setOnlineStatus(status) {
+      await holochainCall(dnaRole, zomeName, "set_online_status", status);
+    },
+    async getOnlineAgents() {
+      const active = await holochainCall(dnaRole, zomeName, "get_active_agents", null);
+      const calls = active.map((agent) => ({
+        dnaNick: dnaRole,
+        zomeName,
+        fnName: "get_agents_status",
+        params: agent
+      }));
+      const results = [];
+      for (const call of calls) {
+        results.push(await holochainCallAsync(call.dnaNick, call.zomeName, call.fnName, call.params));
+      }
+      return results;
+    },
+    async sendSignal(remoteDid, payload) {
+      return await holochainCall(dnaRole, zomeName, "send_signal", {
+        remote_agent_did: remoteDid,
+        payload
+      });
+    },
+    async sendBroadcast(payload) {
+      return await holochainCall(dnaRole, zomeName, "send_broadcast", payload);
+    },
+    async registerSignalCallback(callback) {
+      telepresenceSignalCallbacks.push(callback);
+    }
+  },
+  async handleHolochainSignal(signal) {
+    const payload = signal.payload || {};
+    if (payload.reference && payload.reference_hash && payload.broadcast_author) {
+      peers.set(payload.broadcast_author, {
+        currentRevision: hashToHex(payload.reference_hash),
+        originalHash: payload.reference_hash,
+        lastSeen: /* @__PURE__ */ new Date()
+      });
+      return;
+    }
+    if (payload.additions || payload.removals) {
+      if (linkCallback) {
+        linkCallback(payload);
+      }
+      return;
+    }
+    if (payload.recipient_did) {
+      const perspectiveExpression = {
+        author: payload.author,
+        data: payload.data,
+        timestamp: payload.timestamp,
+        proof: payload.proof
+      };
+      for (const cb of telepresenceSignalCallbacks) {
+        await cb(perspectiveExpression, payload.recipient_did);
+      }
+      return;
+    }
+    if (payload.author && payload.data) {
+      for (const cb of telepresenceSignalCallbacks) {
+        await cb(payload);
+      }
+      return;
+    }
+  }
+});
+var {
   name,
   version,
-  isPublic,
   init,
   teardown,
   interactions,
-  commit: { commit: perspectiveCommit },
-  sync: {
-    sync: perspectiveSyncSync,
-    render: perspectiveSyncRender,
-    currentRevision: perspectiveSyncCurrentRevision
-  },
-  peers: {
-    setLocal: peersSetLocal,
-    remote: peersRemote
-  },
-  telepresence: {
-    setOnlineStatus: telepresenceSetOnlineStatus,
-    getOnlineAgents: telepresenceGetOnlineAgents,
-    sendSignal: telepresenceSendSignal,
-    sendBroadcast: telepresenceSendBroadcast,
-    registerSignalCallback: telepresenceRegisterSignalCallback
-  },
+  isPublic,
+  perspectiveSyncSync,
+  perspectiveSyncRender,
+  perspectiveSyncCurrentRevision,
+  perspectiveCommit,
+  peersRemote,
+  peersSetLocal,
+  telepresenceSetOnlineStatus,
+  telepresenceGetOnlineAgents,
+  telepresenceSendSignal,
+  telepresenceSendBroadcast,
+  telepresenceRegisterSignalCallback,
   handleHolochainSignal
-};
-var p_diff_sync_default = lang;
+} = language;
+function linkSyncAddCallback(callback) {
+  linkCallback = callback;
+  return 1;
+}
+function linkSyncRemoveCallback(callback) {
+  if (linkCallback === callback)
+    linkCallback = null;
+  return 1;
+}
+function linkSyncAddSyncStateChangeCallback(callback) {
+  syncStateChangeCallback = callback;
+  return 1;
+}
 var PerspectiveDiff = class {
   constructor() {
     this.additions = [];
@@ -519,7 +617,6 @@ var PerspectiveDiff = class {
   }
 };
 export {
-  p_diff_sync_default as default,
   handleHolochainSignal,
   init,
   interactions,
