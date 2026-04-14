@@ -1,0 +1,24 @@
+[package]
+name = "centralized-agent-language"
+version = "0.1.0"
+edition = "2021"
+description = "Centralized Agent Expression Store — bootstrap language authored against the Rust ALDK"
+
+# Standalone — not part of the main rust-executor workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ad4m-ldk = { path = "../../../ad4m-ldk/rust" }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde-wasm-bindgen = "0.6"
+js-sys = "0.3"
+
+[profile.release]
+opt-level = "s"
+lto = true

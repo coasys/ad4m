@@ -38,6 +38,21 @@ extern "C" {
         params: JsValue,
     ) -> Result<JsValue, JsValue>;
 
+    // ----- HTTP fetch (spec §7.2b) -----
+    // Thin wrapper around Deno's native fetch(). `headers_json` is a JSON
+    // string of `{ "Header": "Value", ... }` (empty string for no
+    // headers), `body` is a raw request body string (empty for GET/HEAD).
+    // Returns the response body as a string and rejects with a non-2xx
+    // message on error. Callers JSON-encode/decode on either side as
+    // needed.
+    #[wasm_bindgen(js_name = "httpFetch", catch)]
+    pub async fn http_fetch(
+        url: &str,
+        method: &str,
+        headers_json: &str,
+        body: &str,
+    ) -> Result<JsValue, JsValue>;
+
     // ----- Language context (spec §7.3) -----
     #[wasm_bindgen(js_name = "languageAddress")]
     pub fn language_address() -> String;
@@ -153,4 +168,24 @@ pub fn agent_create_signed_expression_typed<T: Serialize + ?Sized>(data: &T) -> 
         Ok(v) => agent_create_signed_expression(v),
         Err(_) => JsValue::NULL,
     }
+}
+
+/// POST a JSON-serializable body to `url` and return the response body as
+/// a String. Sets `Content-Type: application/json` automatically.
+pub async fn http_post_json<T: Serialize + ?Sized>(
+    url: &str,
+    body: &T,
+) -> Result<String, JsValue> {
+    let body_s = serde_json::to_string(body)
+        .map_err(|e| JsValue::from_str(&format!("http_post_json serialize: {}", e)))?;
+    let headers = "{\"Content-Type\":\"application/json\"}";
+    let v = http_fetch(url, "POST", headers, &body_s).await?;
+    Ok(v.as_string().unwrap_or_default())
+}
+
+/// GET `url` with an optional query string (appended as `?k=v&...` if
+/// non-empty) and return the response body as a String.
+pub async fn http_get(url: &str) -> Result<String, JsValue> {
+    let v = http_fetch(url, "GET", "", "").await?;
+    Ok(v.as_string().unwrap_or_default())
 }

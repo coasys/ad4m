@@ -204,6 +204,58 @@ export async function __holochain_call_async(
 }
 
 // ============================================================================
+// HTTP fetch — wraps Deno's native fetch() so WASM languages can call
+// HTTP APIs without linking against web_sys. Returns the response body
+// as a string; headers are passed as a JSON object, body as a string
+// (the caller is responsible for JSON.stringify/parse on either side).
+// ============================================================================
+
+async function httpFetchImpl(
+    url: string,
+    method: string,
+    headersJson: string,
+    body: string,
+): Promise<string> {
+    let headers: Record<string, string> = {};
+    if (headersJson && headersJson.length > 0) {
+        try {
+            const parsed = JSON.parse(headersJson);
+            if (parsed && typeof parsed === "object") {
+                headers = parsed as Record<string, string>;
+            }
+        } catch (_) { /* fall through — empty headers */ }
+    }
+    const init: RequestInit = { method: method || "GET", headers };
+    if (body && body.length > 0 && init.method !== "GET" && init.method !== "HEAD") {
+        init.body = body;
+    }
+    const res = await (globalThis as any).fetch(url, init);
+    const text = await res.text();
+    if (!res.ok) {
+        throw new Error(`http_fetch ${init.method} ${url} -> ${res.status}: ${text}`);
+    }
+    return text;
+}
+
+export function __http_fetch(
+    url: string,
+    method: string,
+    headersJson: string,
+    body: string,
+): Promise<string> {
+    return httpFetchImpl(url, method, headersJson, body);
+}
+
+export function httpFetch(
+    url: string,
+    method: string,
+    headersJson: string,
+    body: string,
+): Promise<string> {
+    return httpFetchImpl(url, method, headersJson, body);
+}
+
+// ============================================================================
 // Signal Imports — emits to the AD4M signal bus
 // ============================================================================
 
@@ -526,6 +578,10 @@ export function setupWasmImports(): void {
     (globalThis as any).__holochain_call = __holochain_call;
     (globalThis as any).__holochain_call_async = __holochain_call_async;
 
+    // HTTP fetch
+    (globalThis as any).__http_fetch = __http_fetch;
+    (globalThis as any).httpFetch = httpFetch;
+
     // Signal imports
     (globalThis as any).__signal_emit = __signal_emit;
 
@@ -592,6 +648,8 @@ export function teardownWasmImports(): void {
     delete g.__holochain_register_dnas;
     delete g.__holochain_call;
     delete g.__holochain_call_async;
+    delete g.__http_fetch;
+    delete g.httpFetch;
     delete g.__signal_emit;
     delete g.__language_storage_directory;
     delete g.__language_address;
