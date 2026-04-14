@@ -134,7 +134,7 @@ const language = defineLanguage({
 
     interactions() { return []; },
 
-    perspectiveSync: {
+    sync: {
         async sync() {
             if (!hasCalledSync) {
                 try {
@@ -210,7 +210,7 @@ const language = defineLanguage({
         },
     },
 
-    perspectiveCommit: {
+    commit: {
         async commit(diff: any) {
             try {
                 const preppedDiff = {
