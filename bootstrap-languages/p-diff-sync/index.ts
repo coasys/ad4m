@@ -1,370 +1,64 @@
 /**
- * # Perspective Diff Sync — Flat Export Language
- * 
+ * # Perspective Diff Sync
+ *
  * AD4M link language that syncs Perspectives via Holochain DNA.
- * This is a **flat export language** — no factory, no wrapper object.
- * Each exported function is called directly by the AD4M runtime.
- * 
- * ## How to write a flat export language
- * 
- * 1. Export `name` and `version` — required metadata
- * 2. Export `init()` — NEW: takes NO arguments. Context is accessed via:
- *    - globalThis.languageStorageDirectory() — returns storage directory path
- *    - globalThis.languageAddress() — returns this language's address
- *    - globalThis.languageSettings() — returns settings JSON string
- *    Delegates are on globalThis before init is called:
- *    - `globalThis.__agentProxy__` — agent identity & signing
- *    - `globalThis.__holochainDelegate__` — Holochain DNA registration & zome calls
- *    - `globalThis.__ad4mSignal__` — emit signals to the signal bus
- * 3. Export capability functions directly (perspectiveCommit, perspectiveSyncSync, etc.)
- * 4. Export `teardown()` to clean up when the language is unloaded
- * 
- * That's it. No adapter objects. No factory. Just functions.
- * 
- * ## Exports
- *
- * Lifecycle:        name, version, isPublic, init, teardown, interactions
- * Perspective sync: perspectiveSyncSync, perspectiveSyncRender,
- *                   perspectiveSyncCurrentRevision
- * Perspective commit: perspectiveCommit
- * Peers:            peersRemote, peersSetLocal
- * Telepresence:     telepresenceSetOnlineStatus, telepresenceGetOnlineAgents,
- *                   telepresenceSendSignal, telepresenceSendBroadcast,
- *                   telepresenceRegisterSignalCallback
- * Signal:           handleHolochainSignal
- *
- * NB: link callback registration is gone — diffs are emitted via the
- * runtime's `emitPerspectiveDiff` import. Sync-state changes use
- * `emitSyncStateChange`. Phase B wires the runtime side.
+ * Authored against the @coasys/ad4m-ldk `defineLanguage` shape
+ * (spec §9). The capability groups nest under `perspectiveSync`,
+ * `perspectiveCommit`, `peers`, `telepresence`; the flat named
+ * exports the runtime dispatcher reads are projected at the bottom.
  */
 
 import { BUNDLE, DNA_ROLE, ZOME_NAME } from './build/happ.js';
 import { Mutex } from "https://esm.sh/v135/async-mutex@0.4.0";
+import {
+    defineLanguage,
+    agentDid,
+    holochainRegisterDnas,
+    holochainCall,
+    holochainCallAsync,
+    languageStorageDirectory,
+    languageAddress,
+    languageSettings,
+} from "@coasys/ad4m-ldk";
 
 // =============================================================================
-// Required metadata
-// =============================================================================
-
-export const name = "@coasys/perspective-diff-sync";
-export const version = "0.13.0-test-1";
-
-// =============================================================================
-// Module-level state (no class — just module vars)
+// Module-level state
 // =============================================================================
 
 const dnaRole = DNA_ROLE;
 const zomeName = ZOME_NAME;
 const dnaBundle = Buffer.from(BUNDLE, "base64");
 
-// Holochain delegate (set in init)
-let hc: any = null;
-
-// Convert a hash (Uint8Array or object with indexed bytes) to hex string for comparison
 function hashToHex(hash: any): string | null {
     if (!hash) return null;
     if (typeof hash === 'string') return hash;
-    // Uint8Array or indexed-byte object from JSON
     const bytes = hash instanceof Uint8Array ? hash : (hash.length != null ? Array.from(hash) : Object.values(hash));
     return Array.from(bytes as number[]).map((b: number) => b.toString(16).padStart(2, '0')).join('');
 }
 
-// Agent DID (set in init)
 let myDid: string = "";
-
-// Link sync state
 let linkCallback: ((diff: any) => void) | null = null;
 let syncStateChangeCallback: ((state: string) => void) | null = null;
 const telepresenceSignalCallbacks: ((signal: any, recipientDid?: string) => void)[] = [];
 let myRevision: string | null = null;
 
-// Gossip peers: DID → { currentRevision (hex), originalHash (binary for zome calls), lastSeen }
 const peers = new Map<string, { currentRevision: string | null; originalHash: any; lastSeen: Date }>();
-
-// Local agent DIDs (multi-user: one HC agent can host multiple DIDs).
-// Populated by peersSetLocal(); each DID gets a DidLink registered in the DNA
-// so remote nodes can discover all DIDs hosted on this node via get_others.
 const localAgents = new Set<string>();
-// DIDs for which we've already created a DID pub-key link in the DNA.
 const didLinksCreated = new Set<string>();
 
-// Prevent concurrent sync/commit operations
 const syncMutex = new Mutex();
-
-// Count gossip rounds (log every 10th)
 let gossipRound = 0;
-
-// =============================================================================
-// init — required lifecycle function
-// NEW INTERFACE: init() takes NO arguments.
-// Context is accessed via flat import functions:
-// - languageStorageDirectory() — returns storage directory path
-// - languageAddress() — returns this language's address (DID)
-// - languageSettings() — returns settings JSON string
-// Agent & Holochain are available on globalThis:
-// - __agentProxy__ — agent identity & signing (legacy, still works)
-// - __holochainDelegate__ — Holochain DNA registration & calls (legacy)
-// =============================================================================
-
-export async function init(): Promise<void> {
-    // Pull language context via flat import functions installed by the
-    // executor on globalThis (spec §7.3). Pre-existing bug fixed: the
-    // local consts no longer shadow the import functions.
-    const storageDir = (globalThis as any).languageStorageDirectory();
-    const langAddress = (globalThis as any).languageAddress();
-    const settingsJson = (globalThis as any).languageSettings();
-    const settings = settingsJson ? JSON.parse(settingsJson) : {};
-
-    // Delegates are already on globalThis — grab them once here.
-    // (Phase B will replace direct globalThis access with @coasys/ad4m-ldk
-    // typed wrappers once the bootstrap bundler can resolve workspace
-    // packages — currently the Deno esbuild plugin can't.)
-    const agent: any = (globalThis as any).__agentProxy__;
-    const holochain: any = (globalThis as any).__holochainDelegate__;
-
-    myDid = agent.did;
-    hc = holochain;
-
-    // Register the DNA with the Holochain conductor
-    await hc.registerDNAs([{ nick: dnaRole, bundle: dnaBundle }]);
-}
-
-// =============================================================================
-// teardown — required lifecycle function
-// =============================================================================
-
-export async function teardown(): Promise<void> {
-    peers.clear();
-    linkCallback = null;
-    syncStateChangeCallback = null;
-    telepresenceSignalCallbacks.length = 0;
-    myRevision = null;
-    gossipRound = 0;
-    hc = null;
-    myDid = "";
-}
-
-// =============================================================================
-// interactions — what actions this language can perform
-// =============================================================================
-
-export function interactions(): any[] {
-    return [];
-}
-
-// =============================================================================
-// LIFECYCLE-LEVEL PRIVACY HINT
-// =============================================================================
-
-export function isPublic(): boolean { return false; }
-
-// =============================================================================
-// PERSPECTIVE-SYNC + PERSPECTIVE-COMMIT CAPABILITIES
-// =============================================================================
-
-/**
- * Sync with the network — fetches latest state from all peers
- * and returns the current diff (additions + removals).
- */
-export async function perspectiveSyncSync(): Promise<PerspectiveDiff> {
-    await ensureDidLink();
-    await acquireRevision();
-    await gossip();
-    return new PerspectiveDiff();
-}
-
-/**
- * Commit a diff (additions and removals) to the network.
- * Returns the new revision hash.
- */
-export async function perspectiveCommit(diff: PerspectiveDiff): Promise<string> {
-    const prepDiff = {
-        additions: diff.additions.map(prepareLink),
-        removals: diff.removals.map(prepareLink),
-    };
-
-    // Retry up to 5 times on transient failures
-    for (let attempt = 0; attempt < 5; attempt++) {
-        try {
-            const revision: any = await hc.call(dnaRole, zomeName, "commit", {
-                diff: prepDiff,
-                my_did: myDid,
-            });
-            if (!revision) throw new Error("empty revision");
-            const hex = hashToHex(revision) || "";
-            myRevision = hex;
-            return hex;
-        } catch (e) {
-            if (attempt < 4) await sleep(100 * (attempt + 1));
-            else throw e;
-        }
-    }
-    throw new Error("unreachable");
-}
-
-/**
- * Return the current full state as a list of links (for snapshot/rendering).
- */
-export async function perspectiveSyncRender(): Promise<{ links: any[] }> {
-    const res: any = await hc.call(dnaRole, zomeName, "render", null);
-    return { links: res?.links || [] };
-}
-
-/** Current revision hash, or null if never synced. */
-export function perspectiveSyncCurrentRevision(): string | null {
-    return myRevision;
-}
-
-// =============================================================================
-// PEERS CAPABILITY
-// =============================================================================
-
-/** List of agents this language sees in the network.
- *  Returns ALL DIDs from the DNA; the Rust resolver filters the calling user. */
-export async function peersRemote(): Promise<string[]> {
-    try {
-        const all: string[] = await hc.call(dnaRole, zomeName, "get_others", null);
-        return all || [];
-    } catch (e) {
-        console.error("[p-diff-sync] peersRemote error:", e);
-        return [];
-    }
-}
-
-/** Tell the DNA which agents we represent locally.
- *  In multi-user mode, one Holochain agent hosts multiple DIDs; we must
- *  create a DidLink for every hosted DID so remote nodes can resolve them. */
-export async function peersSetLocal(agents: string[]): Promise<void> {
-    for (const did of agents) localAgents.add(did);
-    if (!hc) return;
-    for (const did of agents) {
-        if (didLinksCreated.has(did)) continue;
-        try {
-            await hc.call(dnaRole, zomeName, "create_did_pub_key_link", did);
-            didLinksCreated.add(did);
-        } catch (e) {
-            console.error(`[p-diff-sync] create_did_pub_key_link failed for ${did}:`, e);
-        }
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Phase 0 transitional: callback registration is still consumed by the Rust
-// runtime via the legacy linksAdapter.addCallback path. These stubs let the
-// runtime keep registering callbacks during Phase 0; Phase B replaces them
-// with `emitPerspectiveDiff` / `emitSyncStateChange` runtime imports.
-// -----------------------------------------------------------------------------
-
-export function linkSyncAddCallback(callback: (diff: PerspectiveDiff) => void): number {
-    linkCallback = callback;
-    return 1;
-}
-
-export function linkSyncRemoveCallback(callback: (diff: PerspectiveDiff) => void): number {
-    if (linkCallback === callback) linkCallback = null;
-    return 1;
-}
-
-export function linkSyncAddSyncStateChangeCallback(callback: (state: string) => void): number {
-    syncStateChangeCallback = callback;
-    return 1;
-}
-
-// =============================================================================
-// TELEPRESENCE CAPABILITY
-// =============================================================================
-
-export async function telepresenceSetOnlineStatus(status: unknown): Promise<void> {
-    await hc.call(dnaRole, zomeName, "set_online_status", status);
-}
-
-export async function telepresenceGetOnlineAgents(): Promise<any[]> {
-    const active: any[] = await hc.call(dnaRole, zomeName, "get_active_agents", null);
-    const calls = active.map((agent: any) => ({
-        dnaNick: dnaRole,
-        zomeName,
-        fnName: "get_agents_status",
-        params: agent,
-    }));
-    return await hc.callAsync(calls, 1000);
-}
-
-export async function telepresenceSendSignal(remoteDid: string, payload: unknown): Promise<object> {
-    return await hc.call(dnaRole, zomeName, "send_signal", {
-        remote_agent_did: remoteDid,
-        payload,
-    });
-}
-
-export async function telepresenceSendBroadcast(payload: unknown): Promise<object> {
-    return await hc.call(dnaRole, zomeName, "send_broadcast", payload);
-}
-
-export async function telepresenceRegisterSignalCallback(callback: any): Promise<void> {
-    telepresenceSignalCallbacks.push(callback);
-}
-
-// =============================================================================
-// SIGNAL HANDLING
-// =============================================================================
-
-/**
- * Called by the AD4M runtime when a Holochain signal arrives for this DNA.
- * Routes the signal to the link callback or updates peer state.
- */
-export async function handleHolochainSignal(signal: any): Promise<void> {
-    const payload = signal.payload || {};
-    // 1. HashBroadcast — link sync: another agent broadcasts their revision
-    if (payload.reference && payload.reference_hash && payload.broadcast_author) {
-        peers.set(payload.broadcast_author, { currentRevision: hashToHex(payload.reference_hash), originalHash: payload.reference_hash, lastSeen: new Date() });
-        return;
-    }
-
-    // 2. Link diff — additions/removals from handle_broadcast fast-forward or pull
-    if (payload.additions || payload.removals) {
-        if (linkCallback) {
-            linkCallback(payload);
-        }
-        return;
-    }
-
-    // 3. Routed telepresence signal (has recipient_did from RoutedSignalPayload)
-    if (payload.recipient_did) {
-        const perspectiveExpression = {
-            author: payload.author,
-            data: payload.data,
-            timestamp: payload.timestamp,
-            proof: payload.proof,
-        };
-        for (const cb of telepresenceSignalCallbacks) {
-            await cb(perspectiveExpression, payload.recipient_did);
-        }
-        return;
-    }
-
-    // 4. Regular broadcast telepresence signal (PerspectiveExpression)
-    if (payload.author && payload.data) {
-        for (const cb of telepresenceSignalCallbacks) {
-            await cb(payload);
-        }
-        return;
-    }
-}
 
 // =============================================================================
 // Private helpers
 // =============================================================================
 
-/** Create DID anchor links for the owning agents of this perspective (idempotent).
- *  Only the perspective owners (localAgents from peersSetLocal) get DID links,
- *  not the main HC agent DID, so that main agents who host managed users but
- *  are NOT themselves owners don't show up in get_others. If localAgents is
- *  empty (pre-peersSetLocal or single-agent mode) we fall back to myDid. */
 async function ensureDidLink(): Promise<void> {
     const dids = localAgents.size > 0 ? Array.from(localAgents) : (myDid ? [myDid] : []);
     for (const did of dids) {
         if (didLinksCreated.has(did)) continue;
         try {
-            await hc.call(dnaRole, zomeName, "create_did_pub_key_link", did);
+            await holochainCall(dnaRole, zomeName, "create_did_pub_key_link", did);
             didLinksCreated.add(did);
         } catch (_) {
             // Already exists — ignore
@@ -372,11 +66,10 @@ async function ensureDidLink(): Promise<void> {
     }
 }
 
-/** Fetch current revision from the DNA and update local state. */
 async function acquireRevision(): Promise<void> {
     const release = await syncMutex.acquire();
     try {
-        const rev: any = await hc.call(dnaRole, zomeName, "sync", myDid);
+        const rev: any = await holochainCall(dnaRole, zomeName, "sync", myDid);
         if (rev) {
             myRevision = hashToHex(rev);
         }
@@ -387,16 +80,12 @@ async function acquireRevision(): Promise<void> {
     }
 }
 
-/** Exchange revisions with peers and pull any missing state. */
 async function gossip(): Promise<void> {
     gossipRound++;
     const release = await syncMutex.acquire();
     try {
-        // Call the DNA's sync function which broadcasts our presence and
-        // returns our current revision. This is the primary mechanism for
-        // peer discovery and revision exchange.
         try {
-            const syncResult: any = await hc.call(dnaRole, zomeName, "sync", myDid);
+            const syncResult: any = await holochainCall(dnaRole, zomeName, "sync", myDid);
             if (syncResult) {
                 myRevision = hashToHex(syncResult);
             }
@@ -404,11 +93,8 @@ async function gossip(): Promise<void> {
             console.error("[p-diff-sync] sync zome call error:", e);
         }
 
-        // Get online agents from the DNA to discover peers.
-        // Only update lastSeen; do NOT overwrite currentRevision from signals
-        // because OnlineAgent has no revision field.
         try {
-            const activeAgents: any[] = await hc.call(dnaRole, zomeName, "get_online_agents", null);
+            const activeAgents: any[] = (await holochainCall(dnaRole, zomeName, "get_online_agents", null)) as any[];
             if (activeAgents && activeAgents.length > 0) {
                 for (const agent of activeAgents) {
                     const did = agent.did || agent.agent;
@@ -422,22 +108,19 @@ async function gossip(): Promise<void> {
                     }
                 }
             }
-        } catch (e) {
+        } catch (_e) {
             // get_online_agents may not be available
         }
 
-        // Mark stale peers as lost (no heartbeat in 30s)
         for (const [did, info] of peers) {
             if (Date.now() - info.lastSeen.getTime() > 30_000) {
                 peers.delete(did);
             }
         }
 
-        // Determine if we're the scribe (lexically first peer)
         const allPeers = [...peers.keys(), myDid].sort();
         const isScribe = allPeers[0] === myDid;
 
-        // Collect all peer revisions: hex → original binary hash (for pull calls)
         const revisionMap = new Map<string, any>();
         for (const { currentRevision, originalHash } of peers.values()) {
             if (currentRevision) revisionMap.set(currentRevision, originalHash);
@@ -448,7 +131,6 @@ async function gossip(): Promise<void> {
         const sameRevisions = [...revisionHexes].filter(r => r === myRev);
         const differentRevisions = [...revisionHexes].filter(r => r !== myRev);
 
-        // Notify on sync state change
         if (syncStateChangeCallback) {
             let state: string;
             if (peers.size === 0) {
@@ -461,11 +143,9 @@ async function gossip(): Promise<void> {
             await syncStateChangeCallback(state);
         }
 
-        // Fallback: if we have peers but no revisions from signals,
-        // query the network for the latest revision (uses GetStrategy::Network)
         if (peers.size > 0 && revisionHexes.size === 0) {
             try {
-                const latestRef: any = await hc.call(dnaRole, zomeName, "latest_revision", null);
+                const latestRef: any = await holochainCall(dnaRole, zomeName, "latest_revision", null);
                 console.log("[p-diff-sync] gossip: latest_revision result:", latestRef ? "found" : "null", JSON.stringify(latestRef)?.substring(0, 200));
                 const latestHex = latestRef ? hashToHex(latestRef.hash) : null;
                 if (latestHex && latestHex !== myRev) {
@@ -478,12 +158,11 @@ async function gossip(): Promise<void> {
             }
         }
 
-        // Pull any revisions we don't have
         for (const hex of revisionHexes) {
             if (hex === myRev) continue;
             const pullHash = revisionMap.get(hex) || hex;
             try {
-                const result: any = await hc.call(dnaRole, zomeName, "pull", { hash: pullHash, is_scribe: isScribe });
+                const result: any = await holochainCall(dnaRole, zomeName, "pull", { hash: pullHash, is_scribe: isScribe });
                 if (result?.current_revision) {
                     myRevision = hashToHex(result.current_revision);
                 }
@@ -495,7 +174,6 @@ async function gossip(): Promise<void> {
             }
         }
 
-        // Log every 10th gossip round
         if (gossipRound === 10) {
             console.log(gossipSummary(allPeers, isScribe, revisionHexes));
             gossipRound = 0;
@@ -522,7 +200,6 @@ revisions: ${[...revisions].join(', ') || '(none)'}
 ==========`;
 }
 
-/** Normalize a link expression for commit (null string → null). */
 function prepareLink(link: any): object {
     const data = { ...link.data };
     for (const key of ['source', 'target', 'predicate'] as const) {
@@ -536,46 +213,229 @@ function sleep(ms: number): Promise<void> {
 }
 
 // =============================================================================
-// Grouped default export — mirrors the @coasys/ad4m-ldk `defineLanguage`
-// shape (spec §9). Bootstrap bundlers cannot yet resolve workspace pkgs,
-// so the LDK is not imported directly; this object documents the
-// authoring style and is consumed by any caller that prefers the grouped
-// shape over the named flat exports above (the runtime dispatcher reads
-// the named exports).
+// Language spec
 // =============================================================================
 
-const lang = {
+const language = defineLanguage({
+    name: "@coasys/perspective-diff-sync",
+    version: "0.13.0-test-1",
+
+    isPublic: false,
+
+    async init() {
+        // Touch the language-context imports so the runtime surfaces them
+        // on load, even though p-diff-sync does not consume their values.
+        const _storageDir = languageStorageDirectory();
+        const _langAddress = languageAddress();
+        const _settingsJson = languageSettings();
+
+        myDid = agentDid();
+
+        await holochainRegisterDnas([{ nick: dnaRole, bundle: dnaBundle } as any]);
+    },
+
+    async teardown() {
+        peers.clear();
+        linkCallback = null;
+        syncStateChangeCallback = null;
+        telepresenceSignalCallbacks.length = 0;
+        myRevision = null;
+        gossipRound = 0;
+        myDid = "";
+    },
+
+    interactions() { return []; },
+
+    sync: {
+        async sync() {
+            await ensureDidLink();
+            await acquireRevision();
+            await gossip();
+            return new PerspectiveDiff();
+        },
+
+        async render() {
+            const res: any = await holochainCall(dnaRole, zomeName, "render", null);
+            return { links: res?.links || [] };
+        },
+
+        currentRevision() {
+            return myRevision;
+        },
+    },
+
+    commit: {
+        async commit(diff: any) {
+            const prepDiff = {
+                additions: diff.additions.map(prepareLink),
+                removals: diff.removals.map(prepareLink),
+            };
+
+            for (let attempt = 0; attempt < 5; attempt++) {
+                try {
+                    const revision: any = await holochainCall(dnaRole, zomeName, "commit", {
+                        diff: prepDiff,
+                        my_did: myDid,
+                    });
+                    if (!revision) throw new Error("empty revision");
+                    const hex = hashToHex(revision) || "";
+                    myRevision = hex;
+                    return hex;
+                } catch (e) {
+                    if (attempt < 4) await sleep(100 * (attempt + 1));
+                    else throw e;
+                }
+            }
+            throw new Error("unreachable");
+        },
+    },
+
+    peers: {
+        async remote() {
+            try {
+                const all: string[] = (await holochainCall(dnaRole, zomeName, "get_others", null)) as string[];
+                return all || [];
+            } catch (e) {
+                console.error("[p-diff-sync] peersRemote error:", e);
+                return [];
+            }
+        },
+
+        async setLocal(agents: string[]) {
+            for (const did of agents) localAgents.add(did);
+            for (const did of agents) {
+                if (didLinksCreated.has(did)) continue;
+                try {
+                    await holochainCall(dnaRole, zomeName, "create_did_pub_key_link", did);
+                    didLinksCreated.add(did);
+                } catch (e) {
+                    console.error(`[p-diff-sync] create_did_pub_key_link failed for ${did}:`, e);
+                }
+            }
+        },
+    },
+
+    telepresence: {
+        async setOnlineStatus(status: unknown) {
+            await holochainCall(dnaRole, zomeName, "set_online_status", status);
+        },
+
+        async getOnlineAgents() {
+            const active: any[] = (await holochainCall(dnaRole, zomeName, "get_active_agents", null)) as any[];
+            const calls = active.map((agent: any) => ({
+                dnaNick: dnaRole,
+                zomeName,
+                fnName: "get_agents_status",
+                params: agent,
+            }));
+            // holochainCallAsync exposes a single-call wrapper; loop one-at-a-time to preserve semantics.
+            const results: any[] = [];
+            for (const call of calls) {
+                results.push(await holochainCallAsync(call.dnaNick, call.zomeName, call.fnName, call.params));
+            }
+            return results;
+        },
+
+        async sendSignal(remoteDid: string, payload: unknown) {
+            return (await holochainCall(dnaRole, zomeName, "send_signal", {
+                remote_agent_did: remoteDid,
+                payload,
+            })) as object;
+        },
+
+        async sendBroadcast(payload: unknown) {
+            return (await holochainCall(dnaRole, zomeName, "send_broadcast", payload)) as object;
+        },
+
+        async registerSignalCallback(callback: any) {
+            telepresenceSignalCallbacks.push(callback);
+        },
+    },
+
+    async handleHolochainSignal(signal: any) {
+        const payload = signal.payload || {};
+
+        if (payload.reference && payload.reference_hash && payload.broadcast_author) {
+            peers.set(payload.broadcast_author, {
+                currentRevision: hashToHex(payload.reference_hash),
+                originalHash: payload.reference_hash,
+                lastSeen: new Date(),
+            });
+            return;
+        }
+
+        if (payload.additions || payload.removals) {
+            if (linkCallback) {
+                linkCallback(payload);
+            }
+            return;
+        }
+
+        if (payload.recipient_did) {
+            const perspectiveExpression = {
+                author: payload.author,
+                data: payload.data,
+                timestamp: payload.timestamp,
+                proof: payload.proof,
+            };
+            for (const cb of telepresenceSignalCallbacks) {
+                await cb(perspectiveExpression, payload.recipient_did);
+            }
+            return;
+        }
+
+        if (payload.author && payload.data) {
+            for (const cb of telepresenceSignalCallbacks) {
+                await cb(payload);
+            }
+            return;
+        }
+    },
+});
+
+export const {
     name,
     version,
-    isPublic,
     init,
     teardown,
     interactions,
-
-    commit: { commit: perspectiveCommit },
-    sync: {
-        sync: perspectiveSyncSync,
-        render: perspectiveSyncRender,
-        currentRevision: perspectiveSyncCurrentRevision,
-    },
-    peers: {
-        setLocal: peersSetLocal,
-        remote: peersRemote,
-    },
-    telepresence: {
-        setOnlineStatus: telepresenceSetOnlineStatus,
-        getOnlineAgents: telepresenceGetOnlineAgents,
-        sendSignal: telepresenceSendSignal,
-        sendBroadcast: telepresenceSendBroadcast,
-        registerSignalCallback: telepresenceRegisterSignalCallback,
-    },
+    isPublic,
+    perspectiveSyncSync,
+    perspectiveSyncRender,
+    perspectiveSyncCurrentRevision,
+    perspectiveCommit,
+    peersRemote,
+    peersSetLocal,
+    telepresenceSetOnlineStatus,
+    telepresenceGetOnlineAgents,
+    telepresenceSendSignal,
+    telepresenceSendBroadcast,
+    telepresenceRegisterSignalCallback,
     handleHolochainSignal,
-};
-
-export default lang;
+} = language;
 
 // =============================================================================
-// PerspectiveDiff — returned by perspectiveSyncSync()
+// Phase 0 transitional: callback registration — not in v1 capability spec,
+// read directly by the runtime.
+// =============================================================================
+
+export function linkSyncAddCallback(callback: (diff: PerspectiveDiff) => void): number {
+    linkCallback = callback;
+    return 1;
+}
+
+export function linkSyncRemoveCallback(callback: (diff: PerspectiveDiff) => void): number {
+    if (linkCallback === callback) linkCallback = null;
+    return 1;
+}
+
+export function linkSyncAddSyncStateChangeCallback(callback: (state: string) => void): number {
+    syncStateChangeCallback = callback;
+    return 1;
+}
+
+// =============================================================================
+// PerspectiveDiff — returned by perspectiveSync.sync()
 // =============================================================================
 
 class PerspectiveDiff {
