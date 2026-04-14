@@ -420,6 +420,16 @@ impl PerspectiveInstance {
             };
 
             if let Some(mut link_language) = link_language_clone {
+                // If the loaded link language does not export a
+                // perspective-sync capability, the sync loop has nothing
+                // to do — mark the perspective synced and stop polling
+                // so we don't burn a task slot on a no-op tick forever.
+                if !link_language.has(crate::languages::capability::Capability::PerspectiveSync) {
+                    let _ = self
+                        .update_perspective_state(PerspectiveState::Synced)
+                        .await;
+                    return;
+                }
                 match link_language.sync().await {
                     Ok(_) => {
                         current_interval = BASE_INTERVAL;

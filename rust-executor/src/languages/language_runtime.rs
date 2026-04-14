@@ -1,9 +1,11 @@
 use crate::agent::AgentContext;
 use crate::js_core::JsCore;
+use crate::languages::capability::{parse_capability_list, Capability};
 use crate::languages::LanguageContext;
 use log::{debug, error, info, warn};
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 
@@ -223,70 +225,107 @@ impl LanguageRuntime {
         self.js_core.execute(script).await
     }
 
-    /// Register callbacks for links and telepresence adapters
-    pub async fn register_callbacks(&self) -> Result<(bool, bool), String> {
+    /// Register callbacks for links and telepresence adapters and detect
+    /// the language's capability set.
+    ///
+    /// Returns the set of capabilities the language actually exports. The
+    /// caller stores the set in the global capability registry so
+    /// `Language::new(address)` can later answer `has(Capability::…)` without
+    /// another v8 round-trip.
+    pub async fn register_callbacks(&self) -> Result<HashSet<Capability>, String> {
         // JSON-encode the language address so it embeds as a well-formed
-        // JS string literal. The previous `"{addr}"` interpolation would
-        // break (or inject JS) for any address containing a `"`, `\`, or
-        // newline — addresses are typically content hashes and safe in
-        // practice, but the defensive fix is trivial.
+        // JS string literal. Addresses are typically content hashes and
+        // safe in practice, but the defensive fix is trivial.
         let addr_lit = serde_json::to_string(&self.language_address)
             .map_err(|e| format!("failed to encode language address: {}", e))?;
 
-        // Both scripts must tolerate two language shapes:
-        //   * Legacy factory languages — register callbacks via
-        //     addCallback / addSyncStateChangeCallback / registerSignalCallback.
-        //   * Flat languages (spec v1.0) — emit via the host imports
-        //     emitPerspectiveDiff / emitSyncStateChange / emitTelepresenceSignal,
-        //     which fan out through LANGUAGE_CONTROLLER directly. They
-        //     do NOT expose addCallback etc., so calling those methods
-        //     unconditionally TypeErrors and the whole register step fails.
-        // Guard each callback registration on `typeof === "function"`.
-        let links_script = format!(
+        // Register link-sync + telepresence callbacks for languages that
+        // use the callback-registration style (legacy addCallback /
+        // addSyncStateChangeCallback / registerSignalCallback). Language v1
+        // modules emit via the host imports emitPerspectiveDiff /
+        // emitSyncStateChange / emitTelepresenceSignal directly, so they do
+        // not expose those methods; we guard each registration so either
+        // shape loads cleanly.
+        let callback_script = format!(
             r#"
             (function() {{
                 const language = globalThis.__ad4m_language_instance__;
-                if (!(language && language.linksAdapter)) return false;
-                if (typeof language.linksAdapter.addCallback === "function") {{
-                    language.linksAdapter.addCallback((diff) => {{
-                        LANGUAGE_CONTROLLER.perspectiveDiffReceived(diff, {addr_lit});
-                    }});
+                if (language && language.linksAdapter) {{
+                    if (typeof language.linksAdapter.addCallback === "function") {{
+                        language.linksAdapter.addCallback((diff) => {{
+                            LANGUAGE_CONTROLLER.perspectiveDiffReceived(diff, {addr_lit});
+                        }});
+                    }}
+                    if (typeof language.linksAdapter.addSyncStateChangeCallback === "function") {{
+                        language.linksAdapter.addSyncStateChangeCallback((state) => {{
+                            LANGUAGE_CONTROLLER.syncStateChanged(state, {addr_lit});
+                        }});
+                    }}
                 }}
-                if (typeof language.linksAdapter.addSyncStateChangeCallback === "function") {{
-                    language.linksAdapter.addSyncStateChangeCallback((state) => {{
-                        LANGUAGE_CONTROLLER.syncStateChanged(state, {addr_lit});
-                    }});
+                if (language && language.telepresenceAdapter) {{
+                    if (typeof language.telepresenceAdapter.registerSignalCallback === "function") {{
+                        language.telepresenceAdapter.registerSignalCallback((signal, recipientDid) => {{
+                            LANGUAGE_CONTROLLER.telepresenceSignalReceived(signal, {addr_lit}, recipientDid);
+                        }});
+                    }}
                 }}
-                return true;
+                return "ok";
             }})()
             "#,
         );
 
-        let has_links = self.execute(&links_script).await?.trim() == "true";
+        let _ = self.execute(&callback_script).await?;
 
-        let telepresence_script = format!(
-            r#"
-            (function() {{
+        // Detect which capabilities the language actually exports. Returns
+        // a JSON array of kebab-case capability names that parse_capability_list
+        // converts to the typed enum set. Kept as one v8 round-trip per
+        // language load, not per call.
+        let detect_script = r#"
+            (function() {
                 const language = globalThis.__ad4m_language_instance__;
-                if (!(language && language.telepresenceAdapter)) return false;
-                if (typeof language.telepresenceAdapter.registerSignalCallback === "function") {{
-                    language.telepresenceAdapter.registerSignalCallback((signal, recipientDid) => {{
-                        LANGUAGE_CONTROLLER.telepresenceSignalReceived(signal, {addr_lit}, recipientDid);
-                    }});
-                }}
-                return true;
-            }})()
-            "#,
-        );
+                const caps = [];
+                if (!language) return JSON.stringify(caps);
+                if (language.expressionAdapter) {
+                    if (language.expressionAdapter.putAdapter && typeof language.expressionAdapter.putAdapter.createPublic === "function") {
+                        caps.push("expression-create");
+                    }
+                    if (typeof language.expressionAdapter.get === "function") {
+                        caps.push("expression-get");
+                    }
+                }
+                if (language.linksAdapter) {
+                    const la = language.linksAdapter;
+                    if (typeof la.commit === "function") caps.push("perspective-commit");
+                    if (typeof la.sync === "function") caps.push("perspective-sync");
+                    if (typeof la.render === "function") caps.push("perspective-render");
+                    if (typeof la.currentRevision === "function") caps.push("perspective-current-revision");
+                    if (typeof la.setLocalAgents === "function") caps.push("peers-local");
+                    if (typeof la.others === "function") caps.push("peers-remote");
+                }
+                if (language.perspectiveQueryAdapter && typeof language.perspectiveQueryAdapter.run === "function") {
+                    caps.push("perspective-query");
+                }
+                if (language.telepresenceAdapter) {
+                    const ta = language.telepresenceAdapter;
+                    if (typeof ta.setOnlineStatus === "function") caps.push("telepresence-set-status");
+                    if (typeof ta.getOnlineAgents === "function") caps.push("telepresence-get-agents");
+                    if (typeof ta.sendSignal === "function") caps.push("telepresence-send-signal");
+                    if (typeof ta.sendBroadcast === "function") caps.push("telepresence-send-broadcast");
+                }
+                if (typeof language.handleHolochainSignal === "function") caps.push("holochain-signal");
+                return JSON.stringify(caps);
+            })()
+        "#;
 
-        let has_telepresence = self.execute(&telepresence_script).await?.trim() == "true";
+        let raw = self.execute(detect_script).await?;
+        let caps = parse_capability_list(raw.trim());
 
         info!(
-            "Registered callbacks for language {}: links={}, telepresence={}",
-            self.language_address, has_links, has_telepresence
+            "Registered callbacks for language {}: capabilities={:?}",
+            self.language_address, caps
         );
 
-        Ok((has_links, has_telepresence))
+        Ok(caps)
     }
 
     /// Teardown and cleanup this language runtime
@@ -367,8 +406,27 @@ impl LanguageRuntime {
                                         self.load_language(context).await.map(|_| String::new())
                                     }
                                     LanguageOperation::RegisterCallbacks => {
-                                        self.register_callbacks().await.map(|(links, tp)| {
-                                            format!("{{\"links\":{},\"telepresence\":{}}}", links, tp)
+                                        self.register_callbacks().await.and_then(|caps| {
+                                            // Serialize the capability set as a JSON array of
+                                            // kebab-case wire names so the handle side can
+                                            // parse it back into the same enum.
+                                            let names: Vec<&'static str> = caps.iter().map(|c| match c {
+                                                Capability::ExpressionCreate => "expression-create",
+                                                Capability::ExpressionGet => "expression-get",
+                                                Capability::PerspectiveCommit => "perspective-commit",
+                                                Capability::PerspectiveSync => "perspective-sync",
+                                                Capability::PerspectiveRender => "perspective-render",
+                                                Capability::PerspectiveCurrentRevision => "perspective-current-revision",
+                                                Capability::PerspectiveQuery => "perspective-query",
+                                                Capability::PeersLocal => "peers-local",
+                                                Capability::PeersRemote => "peers-remote",
+                                                Capability::TelepresenceSetStatus => "telepresence-set-status",
+                                                Capability::TelepresenceGetAgents => "telepresence-get-agents",
+                                                Capability::TelepresenceSendSignal => "telepresence-send-signal",
+                                                Capability::TelepresenceSendBroadcast => "telepresence-send-broadcast",
+                                                Capability::HolochainSignal => "holochain-signal",
+                                            }).collect();
+                                            serde_json::to_string(&names).map_err(|e| e.to_string())
                                         })
                                     }
                                     LanguageOperation::Teardown => {

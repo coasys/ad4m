@@ -1,5 +1,6 @@
 use log::{debug, error, info};
 use serde_json::Value as JsonValue;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use tokio::runtime::Builder;
 use tokio::sync::{
@@ -8,6 +9,7 @@ use tokio::sync::{
 };
 
 use crate::agent::AgentContext;
+use crate::languages::capability::{parse_capability_list, Capability};
 use crate::languages::LanguageContext;
 
 use super::language_runtime::{LanguageOperation, LanguageRuntime, LanguageRuntimeRequest};
@@ -130,14 +132,9 @@ impl LanguageRuntimeHandle {
             .map(|_| ())
     }
 
-    pub async fn register_callbacks(&self) -> Result<(bool, bool), String> {
+    pub async fn register_callbacks(&self) -> Result<HashSet<Capability>, String> {
         let result_str = self.send(LanguageOperation::RegisterCallbacks).await?;
-        let v: serde_json::Value = serde_json::from_str(&result_str)
-            .map_err(|e| format!("Failed to parse callback result: {}", e))?;
-        Ok((
-            v["links"].as_bool().unwrap_or(false),
-            v["telepresence"].as_bool().unwrap_or(false),
-        ))
+        Ok(parse_capability_list(result_str.trim()))
     }
 
     pub async fn teardown(&self) -> Result<(), String> {

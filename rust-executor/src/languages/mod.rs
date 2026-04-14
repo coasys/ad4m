@@ -1,4 +1,5 @@
 mod byte_array;
+pub mod capability;
 pub mod error;
 pub mod language;
 pub mod language_context;
@@ -256,15 +257,16 @@ impl LanguageController {
 
         info!("Language initialized: {}", label);
 
-        // Register callbacks for adapters
+        // Register callbacks for adapters and cache the language's capability set.
         info!("Registering callbacks for {}", label);
-        runtime_handle
+        let capabilities = runtime_handle
             .register_callbacks()
             .await
             .map_err(|e| LanguageError::LoadError {
                 address: language_address.clone(),
                 message: format!("Failed to register callbacks: {}", e),
             })?;
+        capability::register_capabilities(&language_address, capabilities);
         info!("Callbacks registered for {}", label);
 
         // Cache the language name for use by other log sites
@@ -320,6 +322,9 @@ impl LanguageController {
         // Remove cached name
         let mut names = self.language_names.lock().await;
         names.remove(language_address);
+
+        // Drop the cached capability set so a later reload re-detects it.
+        capability::remove_capabilities(language_address);
 
         info!("Successfully unloaded language: {}", label);
         Ok(())

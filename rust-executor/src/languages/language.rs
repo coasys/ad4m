@@ -1,4 +1,5 @@
 use super::byte_array::ByteArray;
+use super::capability::{get_capabilities, Capability};
 use super::LanguageController;
 use crate::{
     graphql::graphql_types::{OnlineAgent, PerspectiveExpression},
@@ -6,10 +7,20 @@ use crate::{
 };
 use base64::prelude::*;
 use deno_core::error::AnyError;
+use std::collections::HashSet;
+use std::sync::Arc;
 
+// The executor-side Language type is intentionally kept as a single struct
+// carrying a cached capability set — the capability carving follows the
+// authoritative split in `ad4m-ldk/rust/src/traits.rs` (Language +
+// ExpressionCapability + Perspective{Commit,Sync,Query}Capability +
+// PeersCapability + TelepresenceCapability + HolochainSignalHandler). Each
+// method here checks the capability once on the Rust side and the JS
+// dispatcher scripts are free to call the underlying function unguarded.
 #[derive(Clone)]
 pub struct Language {
     address: String,
+    capabilities: Arc<HashSet<Capability>>,
 }
 
 fn parse_revision(js_result: String) -> Result<Option<String>, AnyError> {
@@ -24,27 +35,33 @@ fn parse_revision(js_result: String) -> Result<Option<String>, AnyError> {
 }
 impl Language {
     pub fn new(address: String) -> Self {
-        Self { address }
+        let capabilities = get_capabilities(&address);
+        Self {
+            address,
+            capabilities,
+        }
     }
 
     pub fn address(&self) -> &str {
         &self.address
     }
 
-    // Each of the four methods below guards the corresponding
-    // linksAdapter entry. The spec §5.2 split (perspective-commit /
-    // perspective-sync / peers) makes every sub-method optional, and
-    // the flat bootstrap shim can produce a linksAdapter with any
-    // combination of sync/commit/render/currentRevision present. The
-    // previous scripts assumed all four existed whenever linksAdapter
-    // did and crashed deep in v8 otherwise.
+    /// Returns true iff the language's detected capability set contains `cap`.
+    ///
+    /// The set is populated once in `LanguageRuntime::register_callbacks` and
+    /// stored in the global capability registry; `Language::new` reads from
+    /// that registry, so a language whose `register_callbacks` has not yet
+    /// run (e.g. an in-flight load) will report an empty capability set.
+    pub fn has(&self, cap: Capability) -> bool {
+        self.capabilities.contains(&cap)
+    }
+
     pub async fn sync(&mut self) -> Result<(), AnyError> {
+        if !self.has(Capability::PerspectiveSync) {
+            return Ok(());
+        }
         let controller = LanguageController::global_instance();
-        let script = r#"
-            (language.linksAdapter && typeof language.linksAdapter.sync === "function")
-                ? await language.linksAdapter.sync()
-                : null
-        "#;
+        let script = r#"await language.linksAdapter.sync()"#;
 
         controller
             .execute_on_language(&self.address, script)
@@ -54,26 +71,16 @@ impl Language {
     }
 
     pub async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<String>, AnyError> {
+        if !self.has(Capability::PerspectiveCommit) {
+            return Ok(None);
+        }
         let controller = LanguageController::global_instance();
         let diff_json = serde_json::to_string(&diff)?;
         // Spec §5.2 perspective-commit returns nothing, so `await commit(...)`
-        // resolves to `undefined` for flat commit-only languages. Plain
-        // `JSON.stringify(undefined)` returns the JS value `undefined`
-        // rather than the string `"undefined"`, which v8
-        // to_rust_string_lossy then captures as the literal string
-        // "undefined" — which is NOT valid JSON, so parse_revision fails
-        // with a serde parse error and the caller treats a successful
-        // commit as an infrastructure failure. Coerce the awaited value
-        // to `null` before stringifying so we always round-trip valid
-        // JSON across the v8 → Rust boundary.
+        // resolves to `undefined` for commit-only languages. Coerce to `null`
+        // before stringifying so the v8 → Rust boundary round-trips valid JSON.
         let script = format!(
-            r#"
-            JSON.stringify(
-                (language.linksAdapter && typeof language.linksAdapter.commit === "function")
-                    ? ((await language.linksAdapter.commit({})) ?? null)
-                    : null
-            )
-            "#,
+            r#"JSON.stringify((await language.linksAdapter.commit({})) ?? null)"#,
             diff_json
         );
 
@@ -85,19 +92,12 @@ impl Language {
     }
 
     pub async fn current_revision(&mut self) -> Result<Option<String>, AnyError> {
+        if !self.has(Capability::PerspectiveCurrentRevision) {
+            return Ok(None);
+        }
         let controller = LanguageController::global_instance();
-        // See the comment on `commit` above — the same
-        // JSON.stringify(undefined) trap applies here. A language whose
-        // currentRevision callable is present but returns `undefined`
-        // (e.g. "never synced") would otherwise surface as a JSON parse
-        // error instead of Ok(None). Coerce to null before stringifying.
-        let script = r#"
-            JSON.stringify(
-                (language.linksAdapter && typeof language.linksAdapter.currentRevision === "function")
-                    ? ((await language.linksAdapter.currentRevision()) ?? null)
-                    : null
-            )
-        "#;
+        // Same undefined → null coercion as `commit`.
+        let script = r#"JSON.stringify((await language.linksAdapter.currentRevision()) ?? null)"#;
 
         let result = controller
             .execute_on_language(&self.address, script)
@@ -107,15 +107,11 @@ impl Language {
     }
 
     pub async fn render(&mut self) -> Result<Option<Perspective>, AnyError> {
+        if !self.has(Capability::PerspectiveRender) {
+            return Ok(None);
+        }
         let controller = LanguageController::global_instance();
-        // Same undefined-trap fix as `commit` and `current_revision`.
-        let script = r#"
-            JSON.stringify(
-                (language.linksAdapter && typeof language.linksAdapter.render === "function")
-                    ? ((await language.linksAdapter.render()) ?? null)
-                    : null
-            )
-        "#;
+        let script = r#"JSON.stringify((await language.linksAdapter.render()) ?? null)"#;
 
         let result = controller
             .execute_on_language(&self.address, script)
@@ -126,18 +122,12 @@ impl Language {
     }
 
     pub async fn others(&mut self) -> Result<Vec<String>, AnyError> {
+        if !self.has(Capability::PeersRemote) {
+            return Ok(Vec::new());
+        }
         let controller = LanguageController::global_instance();
-        // A Language may expose a linksAdapter without implementing the
-        // peers capability (`peers-remote` in the new spec). Guard the
-        // method presence and coerce a missing/null return to an empty
-        // list so we never try to deserialize `null` into `Vec<String>`.
-        let script = r#"
-            JSON.stringify(
-                (language.linksAdapter && typeof language.linksAdapter.others === "function")
-                    ? (await language.linksAdapter.others() ?? [])
-                    : []
-            )
-        "#;
+        let script =
+            r#"JSON.stringify((await language.linksAdapter.others()) ?? [])"#;
 
         let result = controller
             .execute_on_language(&self.address, script)
@@ -148,36 +138,26 @@ impl Language {
     }
 
     pub async fn has_telepresence_adapter(&mut self) -> Result<bool, AnyError> {
-        let controller = LanguageController::global_instance();
-        let script = r#"
-            language.telepresenceAdapter ? true : false
-        "#;
-
-        let result = controller
-            .execute_on_language(&self.address, script)
-            .await
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-        // The result should be "true" or "false" as a string
-        Ok(result.trim() == "true")
+        // A language has a "telepresence adapter" iff it advertises any
+        // telepresence-* capability. Consult the cached set rather than
+        // round-tripping through v8 on every call.
+        Ok(self.has(Capability::TelepresenceSetStatus)
+            || self.has(Capability::TelepresenceGetAgents)
+            || self.has(Capability::TelepresenceSendSignal)
+            || self.has(Capability::TelepresenceSendBroadcast))
     }
 
-    // Spec §5 — every telepresence method is optional. The bootstrap
-    // shim attaches the telepresenceAdapter whenever ANY telepresence*
-    // export is present, so individual methods may legitimately be
-    // undefined. Each dispatcher below guards its method accordingly.
     pub async fn set_online_status(
         &mut self,
         status: PerspectiveExpression,
     ) -> Result<(), AnyError> {
+        if !self.has(Capability::TelepresenceSetStatus) {
+            return Ok(());
+        }
         let controller = LanguageController::global_instance();
         let status_json = serde_json::to_string(&status)?;
         let script = format!(
-            r#"
-            (language.telepresenceAdapter && typeof language.telepresenceAdapter.setOnlineStatus === "function")
-                ? await language.telepresenceAdapter.setOnlineStatus({})
-                : null
-            "#,
+            r#"await language.telepresenceAdapter.setOnlineStatus({})"#,
             status_json
         );
 
@@ -189,14 +169,11 @@ impl Language {
     }
 
     pub async fn get_online_agents(&mut self) -> Result<Vec<OnlineAgent>, AnyError> {
+        if !self.has(Capability::TelepresenceGetAgents) {
+            return Ok(Vec::new());
+        }
         let controller = LanguageController::global_instance();
-        let script = r#"
-            JSON.stringify(
-                (language.telepresenceAdapter && typeof language.telepresenceAdapter.getOnlineAgents === "function")
-                    ? (await language.telepresenceAdapter.getOnlineAgents() ?? [])
-                    : []
-            )
-        "#;
+        let script = r#"JSON.stringify((await language.telepresenceAdapter.getOnlineAgents()) ?? [])"#;
 
         let result = controller
             .execute_on_language(&self.address, script)
@@ -211,19 +188,18 @@ impl Language {
         remote_agent_did: String,
         payload: PerspectiveExpression,
     ) -> Result<(), AnyError> {
+        if !self.has(Capability::TelepresenceSendSignal) {
+            return Ok(());
+        }
         let controller = LanguageController::global_instance();
         let payload_json = serde_json::to_string(&payload)?;
-        // JSON-encode the DID so it becomes a properly quoted and
-        // escaped JS string literal. The previous `"{}"` interpolation
-        // would break (or allow script injection) for any DID that
-        // contained a `"`, backslash, or newline.
+        // JSON-encode the DID so it becomes a properly quoted JS string
+        // literal. A bare `"{}"` interpolation would break for any DID
+        // containing a `"`, `\`, or newline (unlikely in practice, trivial
+        // to fix correctly).
         let did_literal = serde_json::to_string(&remote_agent_did)?;
         let script = format!(
-            r#"
-            (language.telepresenceAdapter && typeof language.telepresenceAdapter.sendSignal === "function")
-                ? await language.telepresenceAdapter.sendSignal({}, {})
-                : null
-            "#,
+            r#"await language.telepresenceAdapter.sendSignal({}, {})"#,
             did_literal, payload_json
         );
 
@@ -235,14 +211,13 @@ impl Language {
     }
 
     pub async fn send_broadcast(&mut self, payload: PerspectiveExpression) -> Result<(), AnyError> {
+        if !self.has(Capability::TelepresenceSendBroadcast) {
+            return Ok(());
+        }
         let controller = LanguageController::global_instance();
         let payload_json = serde_json::to_string(&payload)?;
         let script = format!(
-            r#"
-            (language.telepresenceAdapter && typeof language.telepresenceAdapter.sendBroadcast === "function")
-                ? await language.telepresenceAdapter.sendBroadcast({})
-                : null
-            "#,
+            r#"await language.telepresenceAdapter.sendBroadcast({})"#,
             payload_json
         );
 
@@ -254,20 +229,14 @@ impl Language {
     }
 
     pub async fn set_local_agents(&mut self, agents: Vec<String>) -> Result<(), AnyError> {
+        if !self.has(Capability::PeersLocal) {
+            return Ok(());
+        }
         log::debug!("set_local_agents: agents: {:?}", agents);
         let controller = LanguageController::global_instance();
         let agents_json = serde_json::to_string(&agents)?;
-        // Tighten the guard to `typeof === "function"` to match the rest of
-        // the linksAdapter dispatchers. A language may legitimately expose
-        // `linksAdapter` without a `setLocalAgents` (spec §5.2 peers is
-        // optional); the old truthy check would still TypeError if some
-        // language assigned a non-function truthy value to the slot.
         let script = format!(
-            r#"
-            (language.linksAdapter && typeof language.linksAdapter.setLocalAgents === "function")
-                ? await language.linksAdapter.setLocalAgents({})
-                : null
-            "#,
+            r#"await language.linksAdapter.setLocalAgents({})"#,
             agents_json
         );
 
