@@ -5,7 +5,7 @@
 
 // Polyfill Node.js Buffer on globalThis – many language bundles depend on it.
 import { Buffer } from "node:buffer";
-import { setupFlatWasmImports, teardownFlatWasmImports } from "./flat_wasm_imports.ts";
+import { setupWasmImports, teardownWasmImports } from "./wasm_imports.ts";
 globalThis.Buffer = Buffer;
 
 // Minimal DOM stubs – language bundles that include Svelte Icon components
@@ -287,278 +287,261 @@ async function initLanguage(contextJson) {
         didForUser: (userEmail) => AGENT.didForUser(userEmail),
     };
 
-    const fullContext = {
-        agent: agentProxy,
-        customSettings: context.customSettings,
-        storageDirectory: context.storageDirectory,
-        Holochain: holochainDelegate,
-        ad4mSignal: ad4mSignal,
+    const mod = globalThis.languageModule;
+
+    // Set globals for non-serializable delegates (WASM languages access these via globalThis)
+    globalThis.__holochainDelegate__ = holochainDelegate;
+    globalThis.__ad4mSignal__ = ad4mSignal;
+    globalThis.__agentProxy__ = agentProxy;
+
+    // Install host imports on globalThis (needed before init()).
+    // These provide: languageStorageDirectory(), languageAddress(),
+    // languageSettings(), plus agentDid(), agentSign(), holochainCall(),
+    // signalEmit(), etc. Rust/WASM languages link against these via
+    // wasm-bindgen `extern "C"` imports; JS languages read the same
+    // functions directly off globalThis (or through the JS ALDK wrappers).
+    setupWasmImports();
+
+    // init() takes NO arguments — context is accessed via the host
+    // import functions installed above. The language calls
+    // languageStorageDirectory(), languageAddress(), languageSettings()
+    // to get its storage dir, address, and settings from the runtime.
+    await mod.init();
+
+    // Build language instance from the module's named exports.
+    //
+    // Languages may expose name/version either as plain string constants
+    // (the JS authoring style: `export const name = "..."`) or as
+    // zero-arg accessor functions (the Rust ALDK style: wasm-bindgen
+    // emits `export function name(): string` because WASM exports cannot
+    // be string constants). Normalize both shapes to a string here so
+    // the rest of the runtime sees a uniform `language.name` field.
+    const readMaybeFn = (v, fallback) => {
+        if (typeof v === "function") return v();
+        return v ?? fallback;
+    };
+    const language = {
+        name: readMaybeFn(mod.name, "unknown"),
+        version: readMaybeFn(mod.version, undefined),
     };
 
-    let language;
-
-    if (globalThis.__language_pattern__ === "flat") {
-        const mod = globalThis.languageModule;
-
-        // Set globals for non-serializable delegates (WASM languages access these via globalThis)
-        globalThis.__holochainDelegate__ = holochainDelegate;
-        globalThis.__ad4mSignal__ = ad4mSignal;
-        globalThis.__agentProxy__ = agentProxy;
-
-        // Set up flat WASM import functions on globalThis (needed before init())
-        // These provide: languageStorageDirectory(), languageAddress(), languageSettings(),
-        // plus agentDid(), agentSign(), holochainCall(), signalEmit(), etc.
-        setupFlatWasmImports();
-
-        // NEW INTERFACE: init() takes NO arguments — context is accessed via flat import functions
-        // The language calls languageStorageDirectory(), languageAddress(), languageSettings()
-        // to get its storage dir, address, and settings from the runtime.
-        await mod.init();
-
-        // Build language instance from flat exports.
-        //
-        // Languages may expose name/version either as plain string constants
-        // (the JS authoring style: `export const name = "..."`) or as
-        // zero-arg accessor functions (the Rust ALDK style: wasm-bindgen
-        // emits `export function name(): string` because WASM exports cannot
-        // be string constants). Normalize both shapes to a string here so
-        // the rest of the runtime sees a uniform `language.name` field.
-        const readMaybeFn = (v, fallback) => {
-            if (typeof v === "function") return v();
-            return v ?? fallback;
+    // Map adapter exports to adapter slots.
+    //
+    // ReadOnlyLanguage style: a language may expose only
+    // `expressionAddressOf` (no `expressionCreate`). The runtime's
+    // createExpression dispatcher inspects `putAdapter.createPublic`
+    // first and falls back to `putAdapter.addressOf` — BUT it reads
+    // `putAdapter.createPublic` unconditionally, so `putAdapter` MUST
+    // exist even in the addressOf-only case. The previous guard only
+    // built `putAdapter` when `expressionCreate` was present, leaving
+    // it undefined for read-only languages and crashing the dispatcher
+    // with "cannot read properties of undefined".
+    if (mod.expressionCreate || mod.expressionGet || mod.expressionAddressOf || mod.addressOf) {
+        // Support both expressionAddressOf (design name) and addressOf (TypeScript name)
+        const addressOf = mod.expressionAddressOf || mod.addressOf;
+        let putAdapter;
+        if (mod.expressionCreate) {
+            putAdapter = { createPublic: mod.expressionCreate };
+            if (addressOf) putAdapter.addressOf = addressOf;
+        } else if (addressOf) {
+            // ReadOnlyLanguage — only addressOf. The dispatcher's
+            // `createPublic ? ... : addressOf(...)` ternary needs
+            // `createPublic` to be a readable (falsy) value, so
+            // leave it undefined on an otherwise-populated object.
+            putAdapter = { addressOf };
+        }
+        language.expressionAdapter = {
+            putAdapter,
+            get: mod.expressionGet,
         };
-        language = {
-            name: readMaybeFn(mod.name, "unknown"),
-            version: readMaybeFn(mod.version, undefined),
-        };
+    }
 
-        // Map adapter exports to adapter slots.
-        //
-        // ReadOnlyLanguage style: a language may expose only
-        // `expressionAddressOf` (no `expressionCreate`). The runtime's
-        // createExpression dispatcher inspects
-        // `putAdapter.createPublic` first and falls back to
-        // `putAdapter.addressOf` — BUT it reads `putAdapter.createPublic`
-        // unconditionally, so `putAdapter` MUST exist even in the
-        // addressOf-only case. The previous guard only built `putAdapter`
-        // when `expressionCreate` was present, leaving it undefined for
-        // read-only languages and crashing the dispatcher with
-        // "cannot read properties of undefined".
-        if (mod.expressionCreate || mod.expressionGet || mod.expressionAddressOf || mod.addressOf) {
-            // Support both expressionAddressOf (design name) and addressOf (TypeScript name)
-            const addressOf = mod.expressionAddressOf || mod.addressOf;
-            let putAdapter;
-            if (mod.expressionCreate) {
-                putAdapter = { createPublic: mod.expressionCreate };
-                if (addressOf) putAdapter.addressOf = addressOf;
-            } else if (addressOf) {
-                // ReadOnlyLanguage — only addressOf. The dispatcher's
-                // `createPublic ? ... : addressOf(...)` ternary needs
-                // `createPublic` to be a readable (falsy) value, so
-                // leave it undefined on an otherwise-populated object.
-                putAdapter = { addressOf };
+    // Map perspective-commit / perspective-sync / peers exports to the
+    // linksAdapter slot the Rust-side LanguageController consumes. Spec
+    // §5.2 splits link-sync into three independent capabilities
+    // (commit / sync / peers); we collapse them back into the single
+    // linksAdapter shape here because the Rust consumer has not been
+    // restructured around the three-way split yet.
+    //
+    // Legacy linkSync* export names are still accepted as a fallback to
+    // ease bootstrap-language migration; new code should emit perspective*
+    // / peers* names via `defineLanguage`.
+    const syncFn = mod.perspectiveSyncSync || mod.linkSyncSync;
+    const commitFn = mod.perspectiveCommit || mod.linkSyncCommit;
+    const renderFn = mod.perspectiveSyncRender || mod.linkSyncRender;
+    const currentRevisionFn = mod.perspectiveSyncCurrentRevision || mod.linkSyncCurrentRevision;
+    const peersRemoteFn = mod.peersRemote || mod.linkSyncOthers;
+    const peersSetLocalFn = mod.peersSetLocal || mod.linkSyncSetLocalAgents;
+
+    if (syncFn || commitFn) {
+        // Spec §5.2 splits the legacy single `commit()` (which returned
+        // the new revision string) into two independent capabilities:
+        // `perspective-commit` (write a diff, return nothing) and
+        // `perspective-sync` (read current revision). Rust ALDK and any
+        // new flat language therefore returns `undefined` from
+        // `perspectiveCommit`. The Rust-side `PerspectiveInstance::commit`
+        // path now treats `Ok(None)` as the normal success signal (no
+        // revision to report), so we pass the raw commit function
+        // through without the earlier "poll currentRevision after
+        // commit" bridge. Pre-fix, that bridge was the only thing
+        // keeping commit-only flat languages out of a perpetual
+        // pending-diff retry loop; post-fix, it was unnecessary glue
+        // that could hide real commit failures behind a stale
+        // revision read.
+        language.linksAdapter = {
+            sync: syncFn,
+            commit: commitFn,
+            render: renderFn,
+            currentRevision: currentRevisionFn,
+            others: peersRemoteFn,
+            // Phase B replaces callback registration with emit*
+            // imports. Until then, accept both old and new names.
+            addCallback: mod.linkSyncAddCallback,
+            removeCallback: mod.linkSyncRemoveCallback,
+            addSyncStateChangeCallback: mod.linkSyncAddSyncStateChangeCallback,
+            setLocalAgents: peersSetLocalFn,
+        };
+    }
+
+    // Lifecycle-level isPublic hint (spec §5). Attached to the language
+    // object so the Rust-side LanguageController can consult it.
+    if (typeof mod.isPublic === "function") {
+        language.isPublic = mod.isPublic;
+    }
+
+    // Perspective-query capability (spec §5.2). The flat exports are
+    // captured on the language object so a future Rust consumer can
+    // dispatch reads to languages that advertise this capability.
+    //
+    // NOTE: no Rust consumer reads `language.perspectiveQueryAdapter`
+    // yet — the query dispatch path is deferred to a later phase of
+    // the language-interface migration (see
+    // docs/language-interface-migration-plan.md). This shim exists so
+    // languages built against the v1.0 spec keep their exports
+    // surfaced; removing it would force another touch-up once the
+    // Rust consumer lands. If you are wiring the Rust consumer, this
+    // is where to read from.
+    if (typeof mod.perspectiveQueryRun === "function") {
+        language.perspectiveQueryAdapter = {
+            supportedKinds: mod.perspectiveQuerySupportedKinds,
+            run: mod.perspectiveQueryRun,
+        };
+    }
+
+    // Map Telepresence functions. Spec §5 marks every telepresence
+    // method as optional, so detect on ANY telepresence* export rather
+    // than gating on setOnlineStatus alone — a language that only
+    // implements sendSignal/sendBroadcast still has telepresence.
+    if (
+        mod.telepresenceSetOnlineStatus ||
+        mod.telepresenceGetOnlineAgents ||
+        mod.telepresenceSendSignal ||
+        mod.telepresenceSendBroadcast ||
+        mod.telepresenceRegisterSignalCallback
+    ) {
+        language.telepresenceAdapter = {
+            setOnlineStatus: mod.telepresenceSetOnlineStatus,
+            getOnlineAgents: mod.telepresenceGetOnlineAgents,
+            sendSignal: mod.telepresenceSendSignal,
+            sendBroadcast: mod.telepresenceSendBroadcast,
+            registerSignalCallback: mod.telepresenceRegisterSignalCallback,
+        };
+    }
+
+    // Map DirectMessage functions
+    if (mod.directMessageRecipient) {
+        language.directMessageAdapter = {
+            recipient: mod.directMessageRecipient,
+            status: mod.directMessageStatus,
+            sendP2P: mod.directMessageSendP2P,
+            sendInbox: mod.directMessageSendInbox,
+            setStatus: mod.directMessageSetStatus,
+            inbox: mod.directMessageInbox,
+            addMessageCallback: mod.directMessageAddMessageCallback,
+        };
+    }
+
+    // Other optional adapters
+    if (mod.languageGetSource) {
+        language.languageAdapter = { getLanguageSource: mod.languageGetSource };
+    }
+    if (mod.getByAuthor) {
+        language.getByAuthorAdapter = { getByAuthor: mod.getByAuthor };
+    }
+    if (mod.getAll) {
+        language.getAllAdapter = { getAll: mod.getAll };
+    }
+    if (mod.expressionIcon) {
+        language.expressionUI = {
+            icon: mod.expressionIcon,
+            constructorIcon: mod.expressionConstructorIcon,
+        };
+    }
+    if (mod.settingsIcon) {
+        language.settingsUI = { settingsIcon: mod.settingsIcon };
+    }
+    if (mod.isImmutableExpression) {
+        language.isImmutableExpression = mod.isImmutableExpression;
+    }
+
+    // Interactions
+    if (mod.interactions) {
+        language.interactions = mod.interactions;
+    }
+    // expression_interact fallback path (spec §5.7). Rust ALDK
+    // languages cannot attach callable `execute` functions onto
+    // interaction descriptors because the descriptor list crosses
+    // the wasm-bindgen boundary as plain JSON — callable members
+    // are lost on the way across. They therefore export a top-level
+    // `expressionInteract(address, name, parametersJson)` function
+    // that the dispatcher in languages/mod.rs falls back to when
+    // `interaction.execute` is absent. Without this mapping, the
+    // dispatcher reads `language.expressionInteract` as undefined
+    // and throws "Interaction X is not executable" for every Rust
+    // ALDK interaction, even when the language correctly implements
+    // the export.
+    if (typeof mod.expressionInteract === "function") {
+        language.expressionInteract = mod.expressionInteract;
+    }
+
+    // Holochain signal bridge — `rust-executor/src/lib.rs` dispatches
+    // signals by evaluating `await globalThis.__handleHolochainSignal__(args)`
+    // in the language's isolate scope. Install the bridge here so
+    // languages declaring a `handleHolochainSignal` export actually
+    // receive signals. The bridge accepts the runtime's
+    // `{ cell_id, zome_name, payload }` shape and forwards it.
+    if (typeof mod.handleHolochainSignal === "function") {
+        language.handleHolochainSignal = mod.handleHolochainSignal;
+        globalThis.__handleHolochainSignal__ = async (signal) => {
+            // Convert __binary markers to Uint8Array, same as the default
+            // signal handler does above. Without this, languages receive
+            // raw {__binary:[...]} objects instead of Uint8Array for
+            // Holochain hashes and binary data.
+            if (signal && signal.payload) {
+                signal.payload = convertBinaryMarkers(signal.payload);
             }
-            language.expressionAdapter = {
-                putAdapter,
-                get: mod.expressionGet,
-            };
-        }
+            return await mod.handleHolochainSignal(signal);
+        };
+    }
 
-        // Map perspective-commit / perspective-sync / peers exports to the
-        // linksAdapter slot the Rust-side LanguageController consumes. Spec
-        // §5.2 splits link-sync into three independent capabilities
-        // (commit / sync / peers); we collapse them back into the single
-        // linksAdapter shape here because the Rust consumer has not been
-        // restructured around the three-way split yet.
-        //
-        // Legacy linkSync* export names are still accepted as a fallback to
-        // ease bootstrap-language migration; new code should emit perspective*
-        // / peers* names via `defineLanguage`.
-        const syncFn = mod.perspectiveSyncSync || mod.linkSyncSync;
-        const commitFn = mod.perspectiveCommit || mod.linkSyncCommit;
-        const renderFn = mod.perspectiveSyncRender || mod.linkSyncRender;
-        const currentRevisionFn = mod.perspectiveSyncCurrentRevision || mod.linkSyncCurrentRevision;
-        const peersRemoteFn = mod.peersRemote || mod.linkSyncOthers;
-        const peersSetLocalFn = mod.peersSetLocal || mod.linkSyncSetLocalAgents;
-
-        if (syncFn || commitFn) {
-            // Spec §5.2 splits the legacy single `commit()` (which returned
-            // the new revision string) into two independent capabilities:
-            // `perspective-commit` (write a diff, return nothing) and
-            // `perspective-sync` (read current revision). Rust ALDK and any
-            // new flat language therefore returns `undefined` from
-            // `perspectiveCommit`. The Rust-side `PerspectiveInstance::commit`
-            // path now treats `Ok(None)` as the normal success signal (no
-            // revision to report), so we pass the raw commit function
-            // through without the earlier "poll currentRevision after
-            // commit" bridge. Pre-fix, that bridge was the only thing
-            // keeping commit-only flat languages out of a perpetual
-            // pending-diff retry loop; post-fix, it was unnecessary glue
-            // that could hide real commit failures behind a stale
-            // revision read.
-            language.linksAdapter = {
-                sync: syncFn,
-                commit: commitFn,
-                render: renderFn,
-                currentRevision: currentRevisionFn,
-                others: peersRemoteFn,
-                // Phase B replaces callback registration with emit*
-                // imports. Until then, accept both old and new names.
-                addCallback: mod.linkSyncAddCallback,
-                removeCallback: mod.linkSyncRemoveCallback,
-                addSyncStateChangeCallback: mod.linkSyncAddSyncStateChangeCallback,
-                setLocalAgents: peersSetLocalFn,
-            };
-        }
-
-        // Lifecycle-level isPublic hint (spec §5). Attached to the language
-        // object so the Rust-side LanguageController can consult it.
-        if (typeof mod.isPublic === "function") {
-            language.isPublic = mod.isPublic;
-        }
-
-        // Perspective-query capability (spec §5.2). The flat exports are
-        // captured on the language object so a future Rust consumer can
-        // dispatch reads to languages that advertise this capability.
-        //
-        // NOTE: no Rust consumer reads `language.perspectiveQueryAdapter`
-        // yet — the query dispatch path is deferred to Phase F of the
-        // language-interface migration (see docs/language-interface-
-        // migration-plan.md). This shim exists so flat languages built
-        // against the v1.0 spec keep their exports surfaced; removing it
-        // would force another touch-up once Phase F lands. If you are
-        // wiring the Rust consumer, this is where to read from.
-        if (typeof mod.perspectiveQueryRun === "function") {
-            language.perspectiveQueryAdapter = {
-                supportedKinds: mod.perspectiveQuerySupportedKinds,
-                run: mod.perspectiveQueryRun,
-            };
-        }
-
-        // Map Telepresence functions. Spec §5 marks every telepresence
-        // method as optional, so detect on ANY telepresence* export rather
-        // than gating on setOnlineStatus alone — a language that only
-        // implements sendSignal/sendBroadcast still has telepresence.
-        if (
-            mod.telepresenceSetOnlineStatus ||
-            mod.telepresenceGetOnlineAgents ||
-            mod.telepresenceSendSignal ||
-            mod.telepresenceSendBroadcast ||
-            mod.telepresenceRegisterSignalCallback
-        ) {
-            language.telepresenceAdapter = {
-                setOnlineStatus: mod.telepresenceSetOnlineStatus,
-                getOnlineAgents: mod.telepresenceGetOnlineAgents,
-                sendSignal: mod.telepresenceSendSignal,
-                sendBroadcast: mod.telepresenceSendBroadcast,
-                registerSignalCallback: mod.telepresenceRegisterSignalCallback,
-            };
-        }
-
-        // Map DirectMessage functions
-        if (mod.directMessageRecipient) {
-            language.directMessageAdapter = {
-                recipient: mod.directMessageRecipient,
-                status: mod.directMessageStatus,
-                sendP2P: mod.directMessageSendP2P,
-                sendInbox: mod.directMessageSendInbox,
-                setStatus: mod.directMessageSetStatus,
-                inbox: mod.directMessageInbox,
-                addMessageCallback: mod.directMessageAddMessageCallback,
-            };
-        }
-
-        // Other optional adapters
-        if (mod.languageGetSource) {
-            language.languageAdapter = { getLanguageSource: mod.languageGetSource };
-        }
-        if (mod.getByAuthor) {
-            language.getByAuthorAdapter = { getByAuthor: mod.getByAuthor };
-        }
-        if (mod.getAll) {
-            language.getAllAdapter = { getAll: mod.getAll };
-        }
-        if (mod.expressionIcon) {
-            language.expressionUI = {
-                icon: mod.expressionIcon,
-                constructorIcon: mod.expressionConstructorIcon,
-            };
-        }
-        if (mod.settingsIcon) {
-            language.settingsUI = { settingsIcon: mod.settingsIcon };
-        }
-        if (mod.isImmutableExpression) {
-            language.isImmutableExpression = mod.isImmutableExpression;
-        }
-
-        // Interactions
-        if (mod.interactions) {
-            language.interactions = mod.interactions;
-        }
-        // expression_interact fallback path (spec §5.7). Rust ALDK
-        // languages cannot attach callable `execute` functions onto
-        // interaction descriptors because the descriptor list crosses
-        // the wasm-bindgen boundary as plain JSON — callable members
-        // are lost on the way across. They therefore export a top-level
-        // `expressionInteract(address, name, parametersJson)` function
-        // that the dispatcher in languages/mod.rs falls back to when
-        // `interaction.execute` is absent. Without this mapping, the
-        // dispatcher reads `language.expressionInteract` as undefined
-        // and throws "Interaction X is not executable" for every Rust
-        // ALDK interaction, even when the language correctly implements
-        // the export.
-        if (typeof mod.expressionInteract === "function") {
-            language.expressionInteract = mod.expressionInteract;
-        }
-
-        // Holochain signal bridge — `rust-executor/src/lib.rs` dispatches
-        // signals by evaluating `await globalThis.__handleHolochainSignal__(args)`
-        // in the language's isolate scope. Install the bridge here so flat
-        // languages declaring a `handleHolochainSignal` export actually
-        // receive signals. The bridge accepts the runtime's
-        // `{ cell_id, zome_name, payload }` shape and forwards it.
-        if (typeof mod.handleHolochainSignal === "function") {
-            language.handleHolochainSignal = mod.handleHolochainSignal;
-            globalThis.__handleHolochainSignal__ = async (signal) => {
-                // Convert __binary markers to Uint8Array, same as the default
-                // signal handler does (line 143-144 above). Without this,
-                // flat languages receive raw {__binary:[...]} objects instead
-                // of Uint8Array for Holochain hashes and binary data.
-                if (signal && signal.payload) {
-                    signal.payload = convertBinaryMarkers(signal.payload);
-                }
-                return await mod.handleHolochainSignal(signal);
-            };
-        }
-        // Teardown — order matters: run the language's own teardown FIRST
-        // (while host imports like agentDid/storagePut/emitSignal are still
-        // installed on globalThis), THEN tear the imports down. The previous
-        // order crashed any language whose teardown logged via emit_signal
-        // or persisted final state via storage_put, because those globals
-        // had already been deleted.
-        if (mod.teardown) {
-            const originalTeardown = mod.teardown;
-            language.teardown = async () => {
-                try {
-                    await originalTeardown();
-                } finally {
-                    teardownFlatWasmImports();
-                }
-            };
-        } else {
-            // No language-level teardown — still need to clean up imports.
-            language.teardown = async () => { teardownFlatWasmImports(); };
-        }
-
+    // Teardown — order matters: run the language's own teardown FIRST
+    // (while host imports like agentDid/storagePut/emitSignal are still
+    // installed on globalThis), THEN tear the imports down. The previous
+    // order crashed any language whose teardown logged via emit_signal
+    // or persisted final state via storage_put, because those globals
+    // had already been deleted.
+    if (mod.teardown) {
+        const originalTeardown = mod.teardown;
+        language.teardown = async () => {
+            try {
+                await originalTeardown();
+            } finally {
+                teardownWasmImports();
+            }
+        };
     } else {
-        // Legacy: create() factory pattern — DEPRECATED
-        // All bootstrap languages have been migrated to flat exports (v1.0).
-        // This path is retained only for backward compatibility with
-        // user-installed languages that still use `export default function
-        // create(context)`. It will be removed in a future release.
-        console.warn("[AD4M] Language loaded via legacy create() factory pattern. " +
-            "This is deprecated — migrate to flat exports (see docs/language-interface-spec.md).");
-        language = await globalThis.languageConstructor(fullContext);
+        // No language-level teardown — still need to clean up imports.
+        language.teardown = async () => { teardownWasmImports(); };
     }
 
     globalThis.__ad4m_language_instance__ = language;

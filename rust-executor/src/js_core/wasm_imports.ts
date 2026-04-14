@@ -1,13 +1,23 @@
 /**
- * # Flat WASM Import Wrapper (JS/Deno side)
- * 
- * Provides JavaScript/Deno implementations of the flat WASM import functions.
- * A WASM-compiled language links against these — the same signatures exist on the Rust side.
- * 
- * ## Usage
- * 
- * A WASM language (compiled via wasm-bindgen) declares these as imports:
- * 
+ * # WASM Host Imports (JS/Deno side)
+ *
+ * This file defines the host imports that Rust-compiled Language WASM
+ * modules link against. Rust languages built with `ad4m-ldk` use
+ * `#[wasm_bindgen] extern "C"` to declare imports such as `__agent_did`,
+ * `__holochain_call`, `__signal_emit`, etc. — wasm-bindgen then expects
+ * those symbols to exist on the JS host at instantiation time. We
+ * install them on `globalThis` here, wrapping the matching Deno ops
+ * (AGENT, LANGUAGE_CONTROLLER, __holochainDelegate__).
+ *
+ * JS-authored languages do NOT link against any of this. They reach the
+ * same underlying ops through the JS ALDK wrappers in
+ * `ad4m-ldk/js/src/imports.ts` (or directly via the `AGENT` /
+ * `LANGUAGE_CONTROLLER` / `__holochainDelegate__` globals if they're
+ * hand-rolled) — but the resulting function calls all end up on the
+ * same Deno ops.
+ *
+ * ## Rust-side declaration example
+ *
  * ```rust
  * #[wasm_bindgen]
  * extern "C" {
@@ -17,25 +27,27 @@
  *     fn __signal_emit(data: JsValue);
  * }
  * ```
- * 
+ *
  * ## Architecture
- * 
+ *
  * ```
- * WASM Language (compiled from Rust)
+ * WASM Language (compiled from Rust via ad4m-ldk)
  *     │
  *     │ calls __agent_did(), __signal_emit(), etc.
  *     ▼
- * flat_wasm_imports.js (this file — globalThis functions)
+ * wasm_imports.ts (this file — globalThis functions)
  *     │
- *     │ accesses AGENT / LANGUAGE_CONTROLLER globals
+ *     │ accesses AGENT / LANGUAGE_CONTROLLER / __holochainDelegate__
  *     ▼
  * Deno extension JS globals (agent_extension.js, languages_extension.js)
  * ```
- * 
+ *
  * ## Bootstrap integration
- * 
- * In language_bootstrap.js, for flat-pattern languages, setupFlatWasmImports()
- * is called before init() to make the import functions available on globalThis.
+ *
+ * `language_bootstrap.js` calls `setupWasmImports()` before each
+ * language's `init()` and `teardownWasmImports()` after teardown.
+ * Both are refcounted so multiple languages sharing an isolate install
+ * the globals only once.
  */
 
 // ============================================================================
@@ -202,7 +214,7 @@ export async function __holochain_call_async(
  * The op REQUIRES the language address as the second arg — without it the
  * Deno op call fails with an arg-count mismatch and the calling Language
  * crashes. Resolve the address from the per-isolate thread-local set up
- * via `setupFlatWasmImports()`; fall back to "" if no isolate state has
+ * via `setupWasmImports()`; fall back to "" if no isolate state has
  * been initialized yet (early init logging).
  */
 export function __signal_emit(data: unknown): void {
@@ -304,7 +316,7 @@ export async function holochainCallAsync(
 // emit* calls are routed to the LANGUAGE_CONTROLLER global, which dispatches
 // to the runtime's perspective/sync/telepresence fan-out paths. The
 // languageAddress() of the calling Language is derived from the thread-local
-// IsolateState set up in setupFlatWasmImports().
+// IsolateState set up in setupWasmImports().
 function currentLanguageAddress(): string {
     try { return langCtrl().languageAddress() as string; } catch { return ""; }
 }
@@ -479,27 +491,26 @@ export function storageListKeys(prefix?: string): string[] {
 }
 
 // ============================================================================
-// Bootstrap helper — set up globals for WASM language
+// Bootstrap helper — set up globals for a Language instance
 // ============================================================================
 
-// Refcount for setup/teardown. The flat imports are stateless wrappers
+// Refcount for setup/teardown. These imports are stateless wrappers
 // around Deno ops that read per-call context from a thread-local
 // IsolateState, so it is safe for multiple languages to share the same
 // globals. The count is here so that teardown of language A does NOT
 // delete globals that language B (still running) depends on.
-let __flatImportsRefcount = 0;
+let __wasmImportsRefcount = 0;
 
 /**
- * Sets up the globalThis import functions for a flat WASM language.
- * Call this in language_bootstrap.js for flat-pattern languages,
- * before calling the language's init() function.
+ * Installs the host import functions on globalThis for a Language.
+ * `language_bootstrap.js` calls this before every language's init().
  *
  * Refcounted — safe to call once per language load. The actual install
  * only runs on the first call; subsequent calls just bump the refcount.
  */
-export function setupFlatWasmImports(): void {
-    __flatImportsRefcount += 1;
-    if (__flatImportsRefcount > 1) return;
+export function setupWasmImports(): void {
+    __wasmImportsRefcount += 1;
+    if (__wasmImportsRefcount > 1) return;
     // Agent imports
     (globalThis as any).__agent_did = __agent_did;
     (globalThis as any).__agent_signing_key_id = __agent_signing_key_id;
@@ -557,18 +568,18 @@ export function setupFlatWasmImports(): void {
 }
 
 /**
- * Cleans up the globalThis import functions.
- * Call this during language teardown() to avoid leaks.
+ * Removes the globalThis import functions installed by setupWasmImports.
+ * Called during language teardown() to avoid leaks across isolate re-use.
  *
- * Refcounted to mirror setupFlatWasmImports — globals are only removed
- * when the last live flat language is torn down. This prevents tearing
- * down language A from breaking sibling languages B/C still running in
- * the same isolate.
+ * Refcounted to mirror setupWasmImports — globals are only removed when
+ * the last live language is torn down. This prevents tearing down
+ * language A from breaking sibling languages B/C still running in the
+ * same isolate.
  */
-export function teardownFlatWasmImports(): void {
-    if (__flatImportsRefcount === 0) return;
-    __flatImportsRefcount -= 1;
-    if (__flatImportsRefcount > 0) return;
+export function teardownWasmImports(): void {
+    if (__wasmImportsRefcount === 0) return;
+    __wasmImportsRefcount -= 1;
+    if (__wasmImportsRefcount > 0) return;
     const g = globalThis as any;
     delete g.__agent_did;
     delete g.__agent_signing_key_id;

@@ -22,15 +22,15 @@ pub fn language_module_loader() -> Rc<StringModuleLoader> {
         "https://ad4m.language/bootstrap",
         include_str!("language_bootstrap.js"),
     );
-    // language_bootstrap.js does `import ... from "./flat_wasm_imports.ts"`,
+    // language_bootstrap.js does `import ... from "./wasm_imports.ts"`,
     // which deno_core resolves relative to the bootstrap URL above. Without
     // this registration the lookup falls through to `to_file_path()` (fails
     // for https scheme) and then to the modules map (absent) → NotFound,
-    // which would abort loading the bootstrap module and break every flat
+    // which would abort loading the bootstrap module and break every
     // language before init() ever runs.
     loader.add_module(
-        "https://ad4m.language/flat_wasm_imports.ts",
-        include_str!("flat_wasm_imports.ts"),
+        "https://ad4m.language/wasm_imports.ts",
+        include_str!("wasm_imports.ts"),
     );
     Rc::new(loader)
 }

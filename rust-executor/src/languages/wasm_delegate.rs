@@ -109,6 +109,3 @@ pub struct AppInfo {
 // ## Signal imports
 //
 // `fn __signal_emit(data: JsValue)` — emits a signal to the AD4M signal bus
-
-/// Flat export language interface version marker
-pub const FLAT_EXPORT_VERSION: &str = "1.0";

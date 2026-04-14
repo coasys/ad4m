@@ -6,7 +6,7 @@
  * import surface. This file is the JS-side counterpart of the WIT
  * imports in `docs/ad4m-lang.wit`.
  *
- * In production, the executor's `setupFlatWasmImports()` puts every
+ * In production, the executor's `setupWasmImports()` puts every
  * function on `globalThis` before init runs. In tests, you can stub
  * the same names on `globalThis` and these wrappers will pick them up.
  */
@@ -49,8 +49,8 @@ export function agentDidForUser(userEmail: string): DID { return need("agentDidF
 // ============================================================================
 
 // NOTE: Both `holochainRegisterDnas` and `holochainCall` are async — the
-// runtime installs Promise-returning functions via `setupFlatWasmImports`
-// in rust-executor/src/js_core/flat_wasm_imports.ts. Authors MUST await
+// runtime installs Promise-returning functions via `setupWasmImports`
+// in rust-executor/src/js_core/wasm_imports.ts. Authors MUST await
 // these; the prior `unknown`/`AppInfo[]` synchronous return types were
 // wrong and silently handed a Promise object to the caller.
 export function holochainRegisterDnas(dnas: DnaSpec[]): Promise<AppInfo[]> {

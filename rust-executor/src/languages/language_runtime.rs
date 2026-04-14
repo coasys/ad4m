@@ -115,7 +115,7 @@ impl LanguageRuntime {
 
     /// Load a language bundle from source code directly (no file I/O in JS).
     /// The bundle is loaded as an ES module via Deno's runtime API and its
-    /// default export is captured as `globalThis.languageConstructor`.
+    /// full module namespace is captured as `globalThis.languageModule`.
     pub async fn load_module(
         &self,
         source: &str,
@@ -145,7 +145,15 @@ impl LanguageRuntime {
             .await
             .map_err(|e| format!("Failed to load language bundle: {}", e))?;
 
-        // Capture the default export as globalThis.languageConstructor.
+        // Capture the module namespace as globalThis.languageModule. The
+        // Language v1 module format exports `init()` plus a flat set of
+        // named capability functions (perspectiveSyncSync, perspectiveCommit,
+        // etc.) which the bootstrap dispatcher reads off the namespace.
+        // `init` may live on the namespace itself or on the default export
+        // (depending on whether the language uses `export function init`
+        // vs `export default { init }`); both shapes are normalized to a
+        // single namespace object here.
+        //
         // Note: execute() wraps scripts in `return (expr)`, so this must be
         // a single expression, not statements.
         //
@@ -159,27 +167,15 @@ impl LanguageRuntime {
             .map_err(|e| format!("failed to encode bundle specifier: {}", e))?;
         let capture_script = format!(
             r#"import({}).then(m => {{
-                const mod = m.default && m.default.default ? m.default.default : m.default || m;
-                if (typeof mod === "function") {{
-                    // Legacy: default export is create(context) function
-                    globalThis.languageConstructor = mod;
-                    globalThis.__language_pattern__ = "legacy";
-                }} else if (typeof m.init === "function") {{
-                    // New flat export pattern: use the full module namespace
-                    // so that named exports (perspectiveSyncSync, perspectiveCommit,
-                    // etc.) are directly accessible on languageModule. The default
-                    // export may be a grouped object (from defineLanguage), but
-                    // the bootstrap dispatcher expects flat named exports.
+                if (typeof m.init === "function") {{
                     globalThis.languageModule = m;
-                    globalThis.__language_pattern__ = "flat";
-                }} else if (mod && typeof mod.init === "function") {{
-                    // Flat pattern where init is only on the default export
-                    globalThis.languageModule = mod;
-                    globalThis.__language_pattern__ = "flat";
+                }} else if (m.default && typeof m.default.init === "function") {{
+                    globalThis.languageModule = m.default;
                 }} else {{
-                    // Fallback: assume legacy (object with callable default)
-                    globalThis.languageConstructor = mod;
-                    globalThis.__language_pattern__ = "legacy";
+                    throw new Error(
+                        "Language bundle does not export init() — expected a " +
+                        "Language v1 module with a top-level init function."
+                    );
                 }}
             }})"#,
             specifier_lit
@@ -297,22 +293,16 @@ impl LanguageRuntime {
     pub async fn teardown(&self) -> Result<(), String> {
         info!("Tearing down language runtime: {}", self.language_address);
 
-        // Call whichever teardown hook the language installed. Legacy
-        // factory languages historically exposed `cleanup()`; the flat
-        // bootstrap shim attaches `teardown()` (which also runs
-        // teardownFlatWasmImports). Invoking only `cleanup` meant flat
-        // languages never ran their own teardown AND never tore down the
-        // globalThis host imports, leaking per-runtime state if the
-        // language was ever reloaded.
+        // Run the language's teardown hook. The bootstrap shim attaches
+        // `teardown()` which also runs `teardownWasmImports()`, so invoking
+        // it ensures both the language's own cleanup runs and the globalThis
+        // host imports are removed.
         let cleanup_script = r#"
             (async function() {
                 const language = globalThis.__ad4m_language_instance__;
                 if (!language) return;
                 if (typeof language.teardown === "function") {
                     await language.teardown();
-                }
-                if (typeof language.cleanup === "function") {
-                    await language.cleanup();
                 }
             })()
         "#;

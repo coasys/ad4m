@@ -1,42 +1,47 @@
-import type { Address, Interaction, Expression, Language, LanguageContext } from "https://esm.sh/v135/@coasys/ad4m@0.5.0";
+/**
+ * Flat-export note-store test language for AD4M-executor integration tests.
+ *
+ * Persists expressions to individual files in the language's storage
+ * directory, keyed by their content hash.
+ */
 import { exists } from "https://deno.land/std@0.184.0/fs/mod.ts";
 import { join } from "https://deno.land/std@0.184.0/path/mod.ts";
+import type { Address, Interaction, Expression } from "https://esm.sh/v135/@coasys/ad4m@0.5.0";
 
-export default function create(context: LanguageContext): Language {
-    const expressions = new Array<Expression>()
+export const name = "note-store";
+export const version = "0.0.1";
 
-    const storagePath = context.storageDirectory;
+let storagePath = "";
+let agent: any = null;
 
-    function interactions(expressionAddress: Address): Interaction[] {
-        return []
-    }
-
-    return {
-        name: "note-store",
-        interactions,
-        expressionAdapter: {
-            get: async (address: Address) => {
-                let path = join(storagePath, `${address}.txt`)
-                console.log("note-store language trying to get at path:", path);
-                try {
-                    await exists(path)
-                    return JSON.parse(Deno.readTextFileSync(path));
-                } catch (e) {
-                    console.error("caught error", e);
-                    return null;
-                }
-            },
-            putAdapter: {
-                createPublic: async (content: object): Promise<Address> => {
-                    const expr = context.agent.createSignedExpression(content)
-                    const exprString = JSON.stringify(expr)
-                    // @ts-ignore
-                    const hash = UTILS.hash(exprString);
-                    Deno.writeTextFileSync(join(storagePath, `${hash}.txt`), exprString);
-                    return hash
-                }
-            }
-        }
-    } as Language
+export async function init(): Promise<void> {
+    storagePath = (globalThis as any).languageStorageDirectory();
+    agent = (globalThis as any).__agentProxy__;
 }
 
+export function interactions(_expressionAddress: Address): Interaction[] {
+    return [];
+}
+
+export async function expressionGet(address: Address): Promise<Expression | null> {
+    const path = join(storagePath, `${address}.txt`);
+    console.log("note-store language trying to get at path:", path);
+    try {
+        await exists(path);
+        return JSON.parse(Deno.readTextFileSync(path));
+    } catch (e) {
+        console.error("caught error", e);
+        return null;
+    }
+}
+
+export async function expressionCreate(content: object): Promise<Address> {
+    const expr = agent.createSignedExpression(content);
+    const exprString = JSON.stringify(expr);
+    // @ts-ignore
+    const hash = UTILS.hash(exprString);
+    Deno.writeTextFileSync(join(storagePath, `${hash}.txt`), exprString);
+    return hash;
+}
+
+export async function teardown(): Promise<void> {}
